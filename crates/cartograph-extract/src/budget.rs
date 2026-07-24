@@ -7,6 +7,8 @@ use crate::{
 
 const PARSER_RESERVATION_MULTIPLIER: u64 = 32;
 const MINIMUM_PARSER_RESERVATION_BYTES: u64 = 1024 * 1024;
+const READ_RESERVATION_MULTIPLIER: u64 = 2;
+const MINIMUM_READ_RESERVATION_BYTES: u64 = 128 * 1024;
 const OUTPUT_LIMIT_MULTIPLIER: u64 = 8;
 const MINIMUM_OUTPUT_LIMIT_BYTES: u64 = 256 * 1024;
 const MINIMUM_FACT_LIMIT: u64 = 1024;
@@ -21,6 +23,14 @@ pub fn native_extraction_reservation(source_bytes: u64) -> Option<u64> {
     source_bytes
         .checked_mul(PARSER_RESERVATION_MULTIPLIER)
         .and_then(|bytes| bytes.checked_add(MINIMUM_PARSER_RESERVATION_BYTES))
+}
+
+/// Conservative in-flight reservation for streamed UTF-8 validation and hashing.
+#[must_use]
+pub fn native_read_reservation(source_bytes: u64) -> Option<u64> {
+    source_bytes
+        .checked_mul(READ_RESERVATION_MULTIPLIER)
+        .and_then(|bytes| bytes.checked_add(MINIMUM_READ_RESERVATION_BYTES))
 }
 
 /// Hard per-file limit for modeled Rust-owned extraction output.

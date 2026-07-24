@@ -255,6 +255,48 @@ impl GenerationState {
     }
 }
 
+/// Versioned contract used to interpret a persisted logical-generation digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i16)]
+pub enum GenerationDigestVersion {
+    /// Original structural/search digest before reference-evidence persistence.
+    V1 = 1,
+    /// Complete digest including owner, unresolved-name, and resolver provenance evidence.
+    V2 = 2,
+}
+
+impl GenerationDigestVersion {
+    /// Current digest contract emitted by this Cartograph v2 binary.
+    pub const CURRENT: Self = Self::V2;
+
+    /// Stable PostgreSQL `smallint` representation.
+    #[must_use]
+    pub const fn database_value(self) -> i16 {
+        self as i16
+    }
+
+    /// Validate a PostgreSQL value before it enters generation type-state.
+    pub const fn from_database_value(value: i16) -> Result<Self, InvalidGenerationDigestVersion> {
+        match value {
+            1 => Ok(Self::V1),
+            2 => Ok(Self::V2),
+            _ => Err(InvalidGenerationDigestVersion),
+        }
+    }
+}
+
+/// A stored logical-generation digest used an unknown contract version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidGenerationDigestVersion;
+
+impl fmt::Display for InvalidGenerationDigestVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("generation digest version is not recognized")
+    }
+}
+
+impl std::error::Error for InvalidGenerationDigestVersion {}
+
 /// Search-document category used for intent routing and field boosts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -288,6 +330,7 @@ impl DocumentKind {
 /// Structural graph relationship between two symbols.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum EdgeKind {
     /// The source invokes the target.
     Calls,
@@ -301,23 +344,49 @@ pub enum EdgeKind {
     Extends,
     /// The source test exercises the target.
     Tests,
+    /// The source has or consumes the target type.
+    TypeOf,
+    /// The source returns the target type.
+    Returns,
+    /// The source constructs the target.
+    Instantiates,
+    /// The source overrides the target declaration.
+    Overrides,
+    /// The source is decorated by the target.
+    Decorates,
+    /// The source accesses a target field.
+    FieldAccess,
+    /// The source defines and subsequently uses the target binding.
+    DefUse,
+    /// The source exports the target.
+    Exports,
     /// The source lexical scope contains the target.
     Contains,
 }
+
+const EDGE_KIND_VALUES: [&str; EdgeKind::Contains as usize + 1] = [
+    "calls",
+    "imports",
+    "references",
+    "implements",
+    "extends",
+    "tests",
+    "type_of",
+    "returns",
+    "instantiates",
+    "overrides",
+    "decorates",
+    "field_access",
+    "def_use",
+    "exports",
+    "contains",
+];
 
 impl EdgeKind {
     /// Stable PostgreSQL representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Calls => "calls",
-            Self::Imports => "imports",
-            Self::References => "references",
-            Self::Implements => "implements",
-            Self::Extends => "extends",
-            Self::Tests => "tests",
-            Self::Contains => "contains",
-        }
+        EDGE_KIND_VALUES[self as usize]
     }
 }
 
@@ -358,9 +427,9 @@ fn normalize_uuid(raw: &str) -> Result<String, InvalidId> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLAKE3_BYTE_LENGTH, BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, FileId,
-        FileParseStatus, GenerationId, GenerationState, LeaseId, ProjectId, ProjectOperation,
-        SymbolId, UUID_BYTE_LENGTH,
+        BLAKE3_BYTE_LENGTH, BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, EdgeKind, FileId,
+        FileParseStatus, GenerationDigestVersion, GenerationId, GenerationState, LeaseId,
+        ProjectId, ProjectOperation, SymbolId, UUID_BYTE_LENGTH,
     };
 
     const UPPERCASE_UUID: &str = "4EACCC79-2ED5-4E22-8D77-A8E66D13C345";
@@ -390,10 +459,15 @@ mod tests {
     fn lifecycle_and_document_kinds_have_stable_database_values() {
         assert_eq!(GenerationState::Staging.as_str(), "staging");
         assert_eq!(GenerationState::Current.as_str(), "current");
+        assert_eq!(GenerationDigestVersion::V1.database_value(), 1);
+        assert_eq!(GenerationDigestVersion::CURRENT.database_value(), 2);
+        assert!(GenerationDigestVersion::from_database_value(3).is_err());
         assert_eq!(DocumentKind::Symbol.as_str(), "symbol");
         assert_eq!(DocumentKind::Documentation.as_str(), "documentation");
         assert_eq!(FileParseStatus::Parsed.as_str(), "parsed");
         assert_eq!(FileParseStatus::Skipped.as_str(), "skipped");
+        assert_eq!(EdgeKind::Instantiates.as_str(), "instantiates");
+        assert_eq!(EdgeKind::DefUse.as_str(), "def_use");
     }
 
     #[test]

@@ -1436,7 +1436,7 @@ mod tests {
     use std::{
         future::pending,
         sync::{
-            Arc,
+            Arc, Barrier,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
@@ -2192,23 +2192,30 @@ mod tests {
     async fn sibling_failure_signals_cooperative_cpu_work_before_abort_reaping() {
         let (runner, tasks, cancellation) = runner(2, TEST_SCOPE_BYTES).await;
         let deadline = Instant::now() + TEST_TIMEOUT;
+        let workers_started = Arc::new(Barrier::new(2));
         let saw_stage_cancellation = Arc::new(AtomicBool::new(false));
         let inputs = (0..2).map(move |sequence| StageEnvelope::new(meta(sequence, deadline), ()));
+        let started = workers_started.clone();
         let observed = saw_stage_cancellation.clone();
         let execution = StageExecution::new(
             config(2, 0, deadline),
             StageWorkload::new(inputs, move |item: StageWorkItem<usize, ()>| {
+                let started = started.clone();
                 let observed = observed.clone();
                 async move {
-                    if item.sequence() == StageSequence::new(0) {
-                        return Err::<(), _>(StageItemFailure);
-                    }
+                    let sequence = item.sequence();
                     let cancellation = item.cancellation();
-                    while !cancellation.is_cancelled() {
-                        std::hint::spin_loop();
-                    }
-                    observed.store(true, Ordering::Release);
-                    Err(StageItemFailure)
+                    tokio::task::block_in_place(move || {
+                        started.wait();
+                        if sequence == StageSequence::new(0) {
+                            return Err::<(), _>(StageItemFailure);
+                        }
+                        while !cancellation.is_cancelled() {
+                            std::hint::spin_loop();
+                        }
+                        observed.store(true, Ordering::Release);
+                        Err(StageItemFailure)
+                    })
                 }
             }),
             StageFold::new((), |_: &mut (), _| Ok(())),

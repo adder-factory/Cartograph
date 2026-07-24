@@ -22,7 +22,10 @@ pub use generation::{
     TerminalGenerationMutation,
 };
 pub use ingest::{
-    EdgeInput, FileInput, GenerationFacts, ReferenceInput, SearchDocumentInput, SymbolInput,
+    CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, GenerationFacts,
+    GenerationMemoryMeasurement, GenerationMemoryModelError, GenerationValidationError,
+    GenerationValidationLimits, GenerationValidationReport, ReferenceInput, SearchDocumentInput,
+    SymbolInput, validate_generation_facts,
 };
 pub use leases::{
     LeaseAcquisitionAttempt, LeaseAcquisitionProbe, LeaseError, LeaseFence, LeaseOwner,

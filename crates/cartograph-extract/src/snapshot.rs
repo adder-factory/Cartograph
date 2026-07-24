@@ -203,13 +203,73 @@ pub enum SnapshotError {
     ResourceLimit,
 }
 
+/// True when a supported source path uses a test directory or test/spec filename marker.
+#[must_use]
+pub fn is_test_source_path(path: &str) -> bool {
+    if classify_extension(path).is_none() {
+        return false;
+    }
+    let mut components = path.split('/').peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_some()
+            && matches_ignore_ascii_case(component, &["test", "tests", "__tests__"])
+        {
+            return true;
+        }
+        if components.peek().is_none() {
+            let stem = component
+                .rsplit_once('.')
+                .map_or(component, |(stem, _)| stem);
+            let lower = stem.to_ascii_lowercase();
+            return lower.ends_with(".test") || lower.ends_with(".spec");
+        }
+    }
+    false
+}
+
+fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+}
+
 fn classify_path(path: &NormalizedPath) -> Option<SourceLanguage> {
-    let extension = path.as_str().rsplit_once('.')?.1.to_ascii_lowercase();
+    classify_extension(path.as_str())
+}
+
+fn classify_extension(path: &str) -> Option<SourceLanguage> {
+    let extension = path.rsplit_once('.')?.1.to_ascii_lowercase();
     match extension.as_str() {
         "ts" | "mts" | "cts" => Some(SourceLanguage::TypeScript),
         "tsx" => Some(SourceLanguage::Tsx),
         "js" | "mjs" | "cjs" | "xsjs" | "xsjslib" => Some(SourceLanguage::JavaScript),
         "jsx" => Some(SourceLanguage::Jsx),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_routing_covers_supported_extensions_directories_and_case() {
+        for value in [
+            "tests/root.ts",
+            "test/root.mts",
+            "src/__tests__/nested.cts",
+            "src/component.test.tsx",
+            "src/module.spec.js",
+            "src/module.test.mjs",
+            "src/module.spec.cjs",
+            "src/module.test.jsx",
+            "src/module.spec.xsjs",
+            "src/module.test.xsjslib",
+            "SRC/TESTS/Mixed.SPEC.TS",
+        ] {
+            assert!(is_test_source_path(value), "{value}");
+        }
+        assert!(!is_test_source_path("src/contest.ts"));
+        assert!(!is_test_source_path("src/unit.test.md"));
     }
 }

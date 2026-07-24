@@ -616,29 +616,34 @@ logical digest, literal row counts, and ordered BM25 IDs; the first run cannot
 silently adopt drift as a new baseline. A preflight intentionally fails project
 registration after migration and proves setup cleanup leaves no schema.
 
-The committed fixture metadata and raw report are in
-`docs/v2/benchmarks/INDEX-SCALING.md` and
-`docs/v2/benchmarks/index-scaling-aarch64-2026-07-22.json`. The measured host
+The committed fixture metadata and reports are in
+`docs/v2/benchmarks/INDEX-SCALING.md`, the immutable original
+`docs/v2/benchmarks/index-scaling-aarch64-2026-07-22.json`, and the separately
+captured digest-v2 report
+`docs/v2/benchmarks/index-scaling-aarch64-2026-07-22-digest-v2.json`. The measured host
 was Apple arm64 with 14 logical CPUs, Rust 1.96.1, PostgreSQL 18.4,
 `pg_search` 0.23.5, and pgvector 0.8.1. The fixture contains 256
 TypeScript-shaped items, 6,145,536 source bytes, and 32 deterministic BLAKE3
 analysis rounds per item.
 
-All 30 warmup/measured runs produced logical digest
-`647c61f7eb0a697a31774f9d025ea896e35fb6cb54ade6477b47dadaaac04cbf`,
+All 30 current warmup/measured runs produced logical digest version 2
+`3fcf25b6aef136419808799cc59b4b95ceb3f5014acef35192645242b4dd5d25`,
 row counts 256 files / 256 symbols / 255 edges / 255 references / 256 search
 documents, and BM25 first hit
 `30000000-0000-4000-8000-000000000001`. Every successful run had zero retained
 stage reservations, zero active tasks before publication, no lease afterward,
 and no residual benchmark schema.
 
-Median stage throughput increased from 1,969 items/s at one worker to 9,015 at
-16 workers. Median end-to-end time fell from 220.24 ms to 108.98 ms; COPY stayed
-near 55-67 ms and became the dominant floor. Eight workers reached 120.60 ms,
-so 16 workers added a final 9.6% end-to-end improvement while doubling the
+Median supervised Parse-plus-Reduce throughput increased from 1,696 items/s at
+one worker to 6,754 at 16 workers. Median end-to-end time fell from 240.11 ms to
+116.38 ms; COPY p50 stayed near 57-67 ms and became the dominant floor. Eight workers
+reached 130.72 ms, so 16 workers added a final 11.0% end-to-end improvement while doubling the
 bounded window from 16 to 32 items. The initial policy is therefore up to 16
 parse/extract workers, capped by available parallelism, one queued envelope per
 active worker, and the independent byte budget as the hard memory authority.
+The benchmark now runs canonical Reduce as a one-item supervised stage with the
+full 256 MiB working reservation, so all worker rows honestly report
+268,435,456 peak reserved bytes rather than only the smaller Parse window.
 COPY remains one retained database task. Re-measure this choice on the real
 TypeScript/JavaScript extractor corpus before locking production defaults.
 
@@ -647,7 +652,8 @@ as its baseline and incomplete schema ownership after post-migration setup
 failure. The final implementation pins committed fixture and logical-output
 oracles, injects that failure before timing, proves the schema is absent through
 a new connection, preserves primary plus cleanup errors, and always closes the
-pool. The fresh re-review returned `APPROVE` with no remaining or new findings.
+pool. The exact final staged candidate requires a fresh reviewer verdict after
+all benchmark code and evidence are staged together.
 
 Final local proof on the exact code commit includes Rust format, strict Clippy,
 all workspace unit and compile-fail doc tests, all live PostgreSQL/ParadeDB
@@ -702,14 +708,71 @@ calling the v1 TypeScript runtime:
 
 The exact contract and limitation ledger is
 [`docs/v2/EXTRACTION.md`](docs/v2/EXTRACTION.md). This slice deliberately stops
-before claiming end-to-end M3/M4 completion: project discovery and ignore
-policy, supervised read/hash admission, project-wide resolution, canonical
-`GenerationFacts`, PostgreSQL COPY wiring, and the real-corpus 1/2/4/8/16
-benchmark are not implemented yet. In particular, the current stage accepts a
-lazy iterator of prebuilt snapshots; callers must not retain an entire corpus
-behind that iterator. The 32x parse reservation is conservative accounting,
-not an OS-level Tree-sitter RSS cap; owned output transfer and a real-corpus
-memory gate are required before M3/M4 completion.
+before claiming end-to-end M3/M4 completion: the real-corpus 1/2/4/8/16
+benchmark, module/import resolution, body-bearing search documents, remaining
+language families, and measured RSS policy are not implemented yet. The 32x
+parse reservation remains conservative accounting, not an OS-level
+Tree-sitter RSS cap.
+
+### Native discovery-to-COPY pipeline slice
+
+The branch now connects the first native language family to the existing
+PostgreSQL engine without invoking TypeScript in production:
+
+- Rust `ignore` discovery applies standard Git-compatible ignore files,
+  includes hidden source, hard-excludes `.git/` and `.cartograph/`, honors
+  `.cartographignore` directory markers, skips symlinks, sorts deterministically,
+  and fails closed on unreadable/non-UTF-8 trees or configured file/path-memory
+  limits.
+- A supervised read/hash stage reserves `2 * source bytes + 128 KiB`, streams
+  UTF-8 and BLAKE3 with cancellation, and drops source into a compact manifest.
+  Parse reopens under the exact observed size and rejects content hash,
+  language, or stable-ID drift before native Tree-sitter executes.
+- Ordered `ExtractedFile` ownership is converted immediately into separately
+  budgeted project facts before its parse reservation is released. No corpus
+  vector of snapshots or raw extractor outputs exists. The retained canonical
+  generation has its own hard cap. Resolve charges candidates, capacities, and
+  output clones within a 3x task envelope; storage validation measures actual
+  outer-vector and JSON-array capacities with type-correct roots inside its
+  supervised blocking stage. Modeling, map conversion, relation-map construction,
+  and relation validation are cancellation-polled under a 4x working envelope.
+  The input/output measurements travel in the validation report, so Tokio workers
+  do not rescan the corpus.
+- Resolution first selects one exact same-file symbol, then one unique project
+  symbol. Qualified members stay unresolved until receiver/type/import evidence
+  exists; ambiguous/missing targets retain name, lexical owner, span,
+  confidence, and provenance. This is intentionally not yet import-alias,
+  module-path, lexical-shadowing, or overload resolution.
+- Deterministic reduction produces an opaque five-table
+  `CanonicalGenerationFacts` capability after field/relation validation,
+  deduplication, canonical JSON, and a complete digest. Async prepare/COPY no
+  longer runs a synchronous cloning reducer. Search documents carry paths,
+  qualified names, safe callable declaration signatures, and JSDoc; non-callable
+  initializer RHS values, callable signatures containing default/literal
+  expressions, and complete implementation bodies are excluded.
+- Append-only migration 3 expands the `edges` constraint for all native
+  relationship kinds, including `type_of`, `returns`, `instantiates`,
+  `overrides`, `decorates`, `field_access`, `def_use`, and `exports`.
+- Append-only migration 4 persists bounded reference names, owner symbols, and
+  resolution provenance and adds an owner index.
+- Append-only migration 5 persists the logical digest contract version. A
+  populated v1 reference-generation upgrade proves its historical digest is
+  unchanged and marked v1; newly prepared complete-reference facts are v2.
+- The new live supervisor case proves native discovery -> read/hash ->
+  parse/extract -> resolve -> reduce -> PostgreSQL COPY -> publish -> ParadeDB
+  BM25, including unresolved reference evidence. Unit coverage proves
+  `.gitignore`/marker behavior, test-path routing, cancellation/limits,
+  complete-digest one-vs-four-worker identity, long-path/many-symbol and spare
+  edge/JSON/vector capacity charging, cancellation during model/map/relation
+  passes, storage-cap rejection, qualified-member false-positive prevention,
+  non-callable plus scalar/destructured/arrow/method/component secret initializer
+  exclusion, and read-to-parse drift rejection.
+
+Known limits are deliberate and test-visible: the first walker applies ignore
+rules uniformly and therefore does not yet restore already-tracked files later
+covered by an ignore rule; embedded repository/submodule parity needs a locked
+corpus; canonical facts remain in bounded memory until COPY; and Tree-sitter
+RSS still needs a real-corpus measurement.
 
 ### Native extraction verification and exact continuation state
 
@@ -742,12 +805,12 @@ the secret file. A continuation that restarts/recreates the service should
 reconcile the private env through the managed lifecycle rather than copying a
 credential into source or logs.
 
-The next code slice should make the current validation-only observer obsolete:
-discover files under ignore policy, create snapshots inside supervised read/hash
-admission, and transfer each owned `ExtractedFile` with bounded backpressure and
-reservation lifetime into resolution/reduction/PostgreSQL COPY. Do not turn the
-observer into a corpus accumulator or claim the 32x accounting reservation is
-an allocator-enforced RSS limit.
+The next code slice should freeze a Rust-owned real extractor corpus and run the
+complete pipeline at 1/2/4/8/16 workers with identical database digest, rows,
+edge kinds, BM25 hits, task cleanup, and lease release while recording peak
+modeled bytes plus process RSS. Then add module/import resolution and bounded
+symbol-body search documents. Do not claim the 32x accounting reservation is an
+allocator-enforced RSS limit.
 
 ## Execution plan
 
@@ -810,9 +873,11 @@ Each port uses v1.1.33 fixture output as an oracle, then adopts a Rust-owned
 golden contract. Do not call TypeScript from production Rust.
 
 The first TypeScript/JavaScript/TSX/JSX parser and normalized-fact slice is now
-implemented and matches its locked v1.1.33 projection. M3 remains open until
-discovery, richer Rust-owned golden coverage, resolution, remaining language
-families, and framework/cross-language hooks meet their exit gates.
+implemented and matches its locked v1.1.33 projection. Its bounded discovery,
+read/hash, exact-resolution, canonical-fact, COPY, publication, and BM25 path is
+also implemented. M3 remains open until the Rust-owned real corpus, richer
+module/import resolution, remaining language families, and framework/
+cross-language hooks meet their exit gates.
 
 ### M4 — bounded parallel indexer
 
@@ -821,10 +886,11 @@ task/byte admission, progress/status contract, retained COPY task, and exact
 terminal cleanup are implemented at `bcafdc6`. The reusable typed bounded
 stage executor is implemented at `8e06435`. The frozen synthetic benchmark now
 passes at 1/2/4/8/16 workers with one identical logical digest, row-count set,
-and ParadeDB BM25 result. Next connect TypeScript/JavaScript discovery,
-read/hash, parse/extract, resolve, and reduce through that executor, then replace
-the synthetic timing baseline with a Rust-owned real extractor corpus while
-preserving the same determinism gate.
+and ParadeDB BM25 result. TypeScript/JavaScript discovery, read/hash,
+parse/extract, exact resolve, reduce, COPY, publication, and BM25 are now wired
+through that executor at one and four workers. Next replace the synthetic timing
+baseline with a Rust-owned real extractor corpus and extend the frozen matrix to
+the complete pipeline while preserving the same determinism gate.
 
 Required fault injection:
 
@@ -893,17 +959,15 @@ Only then:
 
 ## Immediate next actions
 
-1. Add Gitignore-aware discovery and feed paths through supervised bounded
-   read/hash -> native parse/extract -> project-wide resolve -> deterministic
-   reduce stages. Produce one canonical `GenerationFacts` value for the
-   existing supervised `prepare_generation`; workers never publish, clean up,
-   or hold a lease fence. Keep extraction out of `cartograph-db`.
-2. Freeze a Rust-owned real extractor corpus, then re-run the committed
+1. Freeze a Rust-owned real extractor corpus, then re-run the committed
    1/2/4/8/16 matrix on it.
    Preserve the current digest/row/BM25/task/lease gates, compare throughput and
-   memory against the synthetic baseline, and confirm or revise the initial
-   `min(available_parallelism, 16)` parse/extract cap.
-3. Add stage-level cancellation/deadline/failure/backpressure injection for
+   modeled memory plus process RSS against the synthetic baseline, and confirm
+   or revise the initial `min(available_parallelism, 16)` parse/extract cap.
+2. Add module/import alias resolution, lexical shadowing and overload rules,
+   tracked-ignored-file plus embedded-repository parity, and bounded
+   implementation-body search documents.
+3. Add stage-level cancellation/deadline/failure/cap injection for
    discovery, read/hash, parse/extract, resolution, reduction, and COPY.
 4. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.

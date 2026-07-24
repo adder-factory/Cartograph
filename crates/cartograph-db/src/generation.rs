@@ -6,17 +6,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cartograph_domain::{ContentDigest, GenerationId, GenerationState, ProjectId};
+use cartograph_domain::{
+    ContentDigest, GenerationDigestVersion, GenerationId, GenerationState, ProjectId,
+};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::{PgConnection, PgRow};
 use thiserror::Error;
 
 use crate::{
     CartographDatabase, LeaseFence, StorageError,
-    ingest::{
-        CopyGenerationContext, GenerationFacts, ValidatedGenerationFacts, copy_generation_facts,
-        validate_and_reduce,
-    },
+    ingest::{CanonicalGenerationFacts, CopyGenerationContext, copy_generation_facts},
     leases::operation_lock_key,
 };
 
@@ -26,10 +25,11 @@ const MAX_WORKERS: u16 = 256;
 const RECONCILE_STATE_COLUMN: usize = 0;
 const RECONCILE_SEQUENCE_COLUMN: usize = 1;
 const RECONCILE_DIGEST_COLUMN: usize = 2;
-const RECONCILE_CURRENT_COLUMN: usize = 3;
-const RECONCILE_LEASE_ID_COLUMN: usize = 4;
-const RECONCILE_LEASE_UNEXPIRED_COLUMN: usize = 5;
-const RECONCILE_LEASE_GENERATION_COLUMN: usize = 6;
+const RECONCILE_DIGEST_VERSION_COLUMN: usize = 3;
+const RECONCILE_CURRENT_COLUMN: usize = 4;
+const RECONCILE_LEASE_ID_COLUMN: usize = 5;
+const RECONCILE_LEASE_UNEXPIRED_COLUMN: usize = 6;
+const RECONCILE_LEASE_GENERATION_COLUMN: usize = 7;
 const GENERATION_LOCK_NAMESPACE: &str = "cartograph-v2-generation";
 
 /// Validated-at-write project registration input.
@@ -108,6 +108,7 @@ pub struct ReadyGeneration {
     generation_id: GenerationId,
     sequence: i64,
     content_digest: ContentDigest,
+    digest_version: GenerationDigestVersion,
 }
 
 impl ReadyGeneration {
@@ -134,6 +135,12 @@ impl ReadyGeneration {
     pub const fn content_digest(&self) -> &ContentDigest {
         &self.content_digest
     }
+
+    /// Persisted contract used to interpret the logical digest.
+    #[must_use]
+    pub const fn digest_version(&self) -> GenerationDigestVersion {
+        self.digest_version
+    }
 }
 
 /// Opaque token proving the atomic publication transaction committed.
@@ -143,6 +150,7 @@ pub struct CurrentGeneration {
     generation_id: GenerationId,
     sequence: i64,
     content_digest: ContentDigest,
+    digest_version: GenerationDigestVersion,
 }
 
 /// Durable generation state observed while reconciling a timed-out mutation.
@@ -267,6 +275,12 @@ impl CurrentGeneration {
     pub const fn content_digest(&self) -> &ContentDigest {
         &self.content_digest
     }
+
+    /// Persisted contract used to interpret the logical digest.
+    #[must_use]
+    pub const fn digest_version(&self) -> GenerationDigestVersion {
+        self.digest_version
+    }
 }
 
 /// Opaque token proving a staging or ready generation was deliberately failed.
@@ -376,17 +390,17 @@ impl FailGenerationError {
     }
 }
 
-/// Complete unordered worker output required before a generation can become ready.
+/// Complete storage-validated output required before a generation can become ready.
 pub struct GenerationContents {
     generation: StagedGeneration,
-    facts: GenerationFacts,
+    facts: CanonicalGenerationFacts,
     metrics: Option<PrepareGenerationMetrics>,
 }
 
 struct PrepareTransactionInput<'a> {
     schema: &'a cartograph_config::DatabaseSchema,
     generation: &'a StagedGeneration,
-    facts: ValidatedGenerationFacts,
+    facts: CanonicalGenerationFacts,
     fence: &'a LeaseFence,
     metrics: Option<&'a PrepareGenerationMetrics>,
 }
@@ -489,9 +503,9 @@ struct FenceValidation<'a> {
 }
 
 impl GenerationContents {
-    /// Consume a staging token and attach complete unordered worker facts.
+    /// Consume a staging token and attach a prevalidated canonical payload.
     #[must_use]
-    pub const fn new(generation: StagedGeneration, facts: GenerationFacts) -> Self {
+    pub const fn new(generation: StagedGeneration, facts: CanonicalGenerationFacts) -> Self {
         Self {
             generation,
             facts,
@@ -620,13 +634,8 @@ impl CartographDatabase {
                 error: StorageError::LeaseFenceLost,
             });
         }
-        let facts = match validate_and_reduce(facts) {
-            Ok(facts) => facts,
-            Err(error) => {
-                return Err(PrepareGenerationError { generation, error });
-            }
-        };
         let content_digest = facts.digest.clone();
+        let digest_version = facts.digest_version;
         let mut transaction = match self.pool.begin().await {
             Ok(transaction) => transaction,
             Err(_) => {
@@ -676,6 +685,7 @@ impl CartographDatabase {
             generation_id: generation.generation_id,
             sequence: generation.sequence,
             content_digest,
+            digest_version,
         })
     }
 
@@ -752,6 +762,7 @@ impl CartographDatabase {
             generation_id: generation.generation_id,
             sequence: generation.sequence,
             content_digest: generation.content_digest,
+            digest_version: generation.digest_version,
         })
     }
 
@@ -765,7 +776,7 @@ impl CartographDatabase {
     ) -> Result<Option<RecoverableGeneration>, StorageError> {
         let schema = crate::database::quoted_schema(&self.schema);
         let sql = format!(
-            r#"SELECT state, generation_sequence, content_digest
+            r#"SELECT state, generation_sequence, content_digest, content_digest_version
                 FROM {schema}."index_generations"
                 WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)"#
         );
@@ -785,8 +796,16 @@ impl CartographDatabase {
                 .map_err(|_| StorageError::CorruptStoredValue {
                     field: "content_digest",
                 })?;
+        let digest_version = row
+            .try_get::<Option<i16>, _>(3)
+            .map_err(|_| corrupt("content_digest_version"))?
+            .map(|value| {
+                GenerationDigestVersion::from_database_value(value)
+                    .map_err(|_| corrupt("content_digest_version"))
+            })
+            .transpose()?;
         Ok(match state {
-            GenerationState::Staging if content_digest.is_none() => {
+            GenerationState::Staging if content_digest.is_none() && digest_version.is_none() => {
                 Some(RecoverableGeneration::Staged(StagedGeneration {
                     project_id: project_id.clone(),
                     generation_id: generation_id.clone(),
@@ -805,17 +824,28 @@ impl CartographDatabase {
                             }
                         })
                     })?;
+                let digest_version =
+                    digest_version.ok_or_else(|| corrupt("content_digest_version"))?;
                 Some(RecoverableGeneration::Ready(ReadyGeneration {
                     project_id: project_id.clone(),
                     generation_id: generation_id.clone(),
                     sequence,
                     content_digest,
+                    digest_version,
                 }))
             }
             GenerationState::Staging => {
                 return Err(StorageError::CorruptStoredValue {
-                    field: "content_digest",
+                    field: "content_digest_version",
                 });
+            }
+            GenerationState::Current | GenerationState::Superseded
+                if content_digest.is_none() || digest_version.is_none() =>
+            {
+                return Err(corrupt("content_digest_version"));
+            }
+            GenerationState::Failed if content_digest.is_some() != digest_version.is_some() => {
+                return Err(corrupt("content_digest_version"));
             }
             GenerationState::Current | GenerationState::Superseded | GenerationState::Failed => {
                 None
@@ -1025,6 +1055,7 @@ async fn reconcile_operation_query(
                 SELECT generations.state,
                        generations.generation_sequence,
                        generations.content_digest,
+                       generations.content_digest_version,
                        projects.current_generation_id::text,
                        leases.lease_id::text,
                        leases.expires_at > database_clock.now,
@@ -1148,6 +1179,7 @@ async fn prepare_transaction(
 ) -> Result<(), StorageError> {
     let quoted_schema = crate::database::quoted_schema(input.schema);
     let content_digest = input.facts.digest.clone();
+    let digest_version = input.facts.digest_version;
     validate_generation_state(
         connection,
         GenerationStateRequirement {
@@ -1211,7 +1243,8 @@ async fn prepare_transaction(
     .await?;
     let ready_sql = format!(
         r#"UPDATE {quoted_schema}."index_generations"
-            SET state = 'ready', content_digest = $3, ready_at = clock_timestamp()
+            SET state = 'ready', content_digest = $3, content_digest_version = $4,
+                ready_at = clock_timestamp()
             WHERE project_id = CAST($1 AS uuid)
               AND generation_id = CAST($2 AS uuid)
               AND state = 'staging'"#
@@ -1220,6 +1253,7 @@ async fn prepare_transaction(
         .bind(input.generation.project_id().as_str())
         .bind(input.generation.generation_id().as_str())
         .bind(content_digest.as_str())
+        .bind(digest_version.database_value())
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("mark-generation-ready"))?;
@@ -1466,6 +1500,15 @@ fn decode_reconciliation(
     row: &PgRow,
     fence: &LeaseFence,
 ) -> Result<OperationReconciliation, StorageError> {
+    let (generation, expected_generation_id) = decode_reconciled_generation(row, fence)?;
+    let lease = decode_reconciled_lease(row, fence, &expected_generation_id)?;
+    Ok(OperationReconciliation { generation, lease })
+}
+
+fn decode_reconciled_generation(
+    row: &PgRow,
+    fence: &LeaseFence,
+) -> Result<(ObservedGeneration, String), StorageError> {
     let project_id = fence.target().project_id().clone();
     let generation_id = fence
         .target()
@@ -1475,16 +1518,11 @@ fn decode_reconciliation(
     let expected_generation_id = generation_id.as_str().to_owned();
     let state = parse_generation_state(row, RECONCILE_STATE_COLUMN)?;
     let sequence = parse_generation_sequence(row, RECONCILE_SEQUENCE_COLUMN)?;
-    let raw_digest = row
-        .try_get::<Option<String>, _>(RECONCILE_DIGEST_COLUMN)
-        .map_err(|_| corrupt("content_digest"))?;
-    let content_digest = raw_digest
-        .map(|raw| ContentDigest::parse(&raw).map_err(|_| corrupt("content_digest")))
-        .transpose()?;
+    let (content_digest, digest_version) = parse_reconciled_digest(row)?;
     let generation = match state {
         GenerationState::Staging => {
-            if content_digest.is_some() {
-                return Err(corrupt("content_digest"));
+            if content_digest.is_some() || digest_version.is_some() {
+                return Err(corrupt("content_digest_version"));
             }
             ObservedGeneration::Staged(StagedGeneration {
                 project_id,
@@ -1497,6 +1535,7 @@ fn decode_reconciliation(
             generation_id,
             sequence,
             content_digest: content_digest.ok_or_else(|| corrupt("content_digest"))?,
+            digest_version: digest_version.ok_or_else(|| corrupt("content_digest_version"))?,
         }),
         GenerationState::Current => {
             let current = row
@@ -1510,11 +1549,50 @@ fn decode_reconciliation(
                 generation_id,
                 sequence,
                 content_digest: content_digest.ok_or_else(|| corrupt("content_digest"))?,
+                digest_version: digest_version.ok_or_else(|| corrupt("content_digest_version"))?,
             })
         }
-        GenerationState::Failed => ObservedGeneration::Failed,
-        GenerationState::Superseded => ObservedGeneration::Superseded,
+        GenerationState::Failed => {
+            if content_digest.is_some() != digest_version.is_some() {
+                return Err(corrupt("content_digest_version"));
+            }
+            ObservedGeneration::Failed
+        }
+        GenerationState::Superseded => {
+            if content_digest.is_none() || digest_version.is_none() {
+                return Err(corrupt("content_digest_version"));
+            }
+            ObservedGeneration::Superseded
+        }
     };
+    Ok((generation, expected_generation_id))
+}
+
+fn parse_reconciled_digest(
+    row: &PgRow,
+) -> Result<(Option<ContentDigest>, Option<GenerationDigestVersion>), StorageError> {
+    let raw_digest = row
+        .try_get::<Option<String>, _>(RECONCILE_DIGEST_COLUMN)
+        .map_err(|_| corrupt("content_digest"))?;
+    let content_digest = raw_digest
+        .map(|raw| ContentDigest::parse(&raw).map_err(|_| corrupt("content_digest")))
+        .transpose()?;
+    let digest_version = row
+        .try_get::<Option<i16>, _>(RECONCILE_DIGEST_VERSION_COLUMN)
+        .map_err(|_| corrupt("content_digest_version"))?
+        .map(|value| {
+            GenerationDigestVersion::from_database_value(value)
+                .map_err(|_| corrupt("content_digest_version"))
+        })
+        .transpose()?;
+    Ok((content_digest, digest_version))
+}
+
+fn decode_reconciled_lease(
+    row: &PgRow,
+    fence: &LeaseFence,
+    expected_generation_id: &str,
+) -> Result<ObservedLease, StorageError> {
     let raw_lease_id = row
         .try_get::<Option<String>, _>(RECONCILE_LEASE_ID_COLUMN)
         .map_err(|_| corrupt("lease_id"))?;
@@ -1532,7 +1610,7 @@ fn decode_reconciliation(
                 .map_err(|_| corrupt("lease_generation_id"))?;
             if lease_id == *fence.lease_id()
                 && unexpired
-                && lease_generation.as_deref() == Some(expected_generation_id.as_str())
+                && lease_generation.as_deref() == Some(expected_generation_id)
             {
                 ObservedLease::Owned
             } else {
@@ -1540,7 +1618,7 @@ fn decode_reconciliation(
             }
         }
     };
-    Ok(OperationReconciliation { generation, lease })
+    Ok(lease)
 }
 
 async fn lock_current_generation_sequence(

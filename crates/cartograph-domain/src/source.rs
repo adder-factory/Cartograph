@@ -377,6 +377,7 @@ impl Visibility {
 /// Unresolved structural relationship emitted before project-wide resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum ReferenceKind {
     /// The owner invokes the target.
     Calls,

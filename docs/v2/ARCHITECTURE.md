@@ -100,11 +100,11 @@ Core relations:
 | Relation | Key data |
 | --- | --- |
 | `projects` | stable UUID, canonical root identity, repository fingerprint |
-| `index_generations` | generation UUID, project, source revision, state, timestamps, worker settings, content digest |
+| `index_generations` | generation UUID, project, source revision, state, timestamps, worker settings, content digest and digest-contract version |
 | `files` | project, normalized path, language, content hash, size, parse status, generation |
 | `symbols` | stable symbol UUID, file/span, kind, qualified name, signature, structural digest |
 | `edges` | project, source symbol, target symbol, typed edge, confidence, provenance, generation |
-| `references` | project, source span, resolved target, reference kind, confidence |
+| `references` | project, source span, lexical owner, normalized name, optional resolved target, kind, confidence, resolution provenance |
 | `search_documents` | unique bigint key, project/file/symbol, code fields, prose fields, indexed metadata |
 | `project_operation_leases` | project/operation key, owner PID/process-start marker, generation, token, heartbeat, expiry |
 | `embedding_models` | provider/model fingerprint, dimension, normalization, active/retired state |
@@ -130,14 +130,15 @@ canonicalized, and still double-quoted wherever SQL must interpolate them.
 
 The Rust write API returns opaque `StagedGeneration`, `ReadyGeneration`, and
 `CurrentGeneration` tokens. The only way to obtain `ReadyGeneration` is to
-validate, deterministically reduce, digest, and commit the complete file,
-symbol, edge, reference, and search-document fact set in one transaction; the
-only way to obtain `CurrentGeneration` is to consume that ready token in the
-atomic publication transaction. Ready/current tokens carry the computed
-logical digest. Database constraints remain the second line of defense against
+first construct an opaque validated/deterministically reduced/digested fact
+capability, then commit its complete file, symbol, edge, reference, and
+search-document set in one transaction. The only way to obtain
+`CurrentGeneration` is to consume that ready token in the atomic publication
+transaction. Ready/current tokens carry the computed logical digest and its
+validated contract version. Database constraints remain the second line of defense against
 forged or stale process state. Failed operations return the consumed token,
 and checked recovery can rehydrate durable `staging`/`ready` state plus its
-digest after process loss or mark it terminally failed.
+digest/version pair after process loss or mark it terminally failed.
 
 Migration 2 adds one observable lease row per project and mutating operation.
 Each acquisition records a non-nil token, owner PID, boot/session-qualified
@@ -150,6 +151,15 @@ Durations are bounded to 1 second through 5 minutes and status exposes expired
 rows for diagnosis without granting a mutation token. The append-only runner
 applies migration 2 to an existing version-1 schema, rejects ledger gaps, and
 still verifies every previously recorded name and checksum.
+
+Migration 3 completes the structural `edge_kind` constraint for all native
+relationships. Migration 4 retains unresolved-reference names, lexical owner,
+and resolution provenance with an owner index. Migration 5 adds the persisted
+logical-digest contract version: historical non-null digests are explicitly v1,
+while newly prepared complete-reference generations are v2. The
+version-1-to-current live upgrade fixture carries a populated ready generation,
+symbol, and reference through versions 2 through 5, proves its digest remains
+unchanged and marked v1, then verifies a second migration run is empty.
 
 ### BM25 document index
 
@@ -321,14 +331,46 @@ containment, and unresolved references are deterministic; a complete canonical
 digest of every output field is identical at one and four workers. The adapter
 uses a trusted fixed-state validation observer and drops each output before its
 in-flight reservation is released, so it does not hide a corpus-sized result
-vector. This observer is not the persistence handoff: discovery/read admission,
-owned output plus transferable reservation/backpressure, project-wide
-resolution, canonical `GenerationFacts`, and PostgreSQL COPY wiring remain the
-next gate. The iterator contract forbids retaining the full corpus outside the
-stage window until those producer/consumer stages are connected. Declared
-reservations and modeled Rust-output caps are enforced; a real-corpus RSS gate
-must still measure Tree-sitter's allocator before claiming a process memory
-hard limit.
+vector.
+
+The first end-to-end native fact builder now runs discovery, read/hash,
+parse/extract, exact project resolution, and canonical reduction as five
+strictly ordered supervisor stages. Discovery is Git-ignore-aware,
+`.cartographignore`-aware, deterministic, symlink-nonfollowing, and bounded by
+file count plus retained path bytes. Read/hash owns source buffers only inside
+admitted workers and reduces them to a compact manifest. Parse reopens each file
+under its exact manifest size and rejects hash/language/identity drift before
+Tree-sitter runs. Ordered extraction output is converted into separately
+budgeted project facts before the parse reservation is acknowledged; neither
+snapshots nor raw extracted files are retained for the corpus.
+
+The initial resolver chooses only unambiguous exact evidence: a unique
+same-file target or a unique project target. Qualified members remain
+unresolved until receiver/type/import evidence exists, so `console.log` cannot
+silently bind to an unrelated local `log`. Every reference row retains its
+name, lexical owner, span, confidence, and resolution provenance. The canonical
+payload contains file and symbol rows, containment plus every current
+structural edge kind, resolved/unresolved references, and initial BM25
+documents built from paths, names, safe callable declaration signatures, and JSDoc.
+Non-callable initializer values and callable signatures containing default or
+literal expressions are removed before persistence. A live test
+executes this path through supervised five-table COPY, publication, and
+ParadeDB search.
+
+This is a bounded in-memory generation, not streaming resolution: a separate
+hard cap accounts retained project facts and anticipated documents. Resolve
+charges candidate/index/output allocation against a three-times envelope;
+canonical validation iteratively and cooperatively measures actual outer-vector
+and JSON-array capacities, then polls each fact, map conversion, and relation
+build under a four-times working-set envelope. Input/output byte measurements
+are carried in the stage report so Tokio workers never rescan the corpus.
+Exceeding either fails the generation. A measured
+real-corpus gate must decide whether v2 needs
+partitioned/spilled resolution or streaming database reduction. Tree-sitter's
+C allocator is still not constrained by Rust accounting, so process RSS remains
+a release measurement. Git tracked files newly covered by ignore rules,
+module/import aliases, symbol-body search text, and embedded-repository parity
+also remain explicit follow-ups.
 
 `GenerationContents` can independently attach `PrepareGenerationMetrics`. That
 observer measures only the five-table PostgreSQL COPY stream, including bounded
@@ -343,9 +385,13 @@ must produce the same logical database digest and retrieval fixture results.
 
 The first committed [1/2/4/8/16-worker baseline](benchmarks/INDEX-SCALING.md)
 proves that invariant through real COPY, publication, and ParadeDB BM25 on 30
-runs. On the measured 14-logical-CPU arm64 host, parse-stage throughput rose
-from 1,969 to 9,015 items/s while end-to-end median time fell from 220.24 ms to
-108.98 ms. COPY remained near 55-67 ms and became the dominant floor. Until the
+runs. On the measured 14-logical-CPU arm64 host, supervised Parse-plus-Reduce
+throughput rose from 1,696 to 6,754 items/s while end-to-end median time fell
+from 240.11 ms to 116.38 ms. COPY p50 remained near 57-67 ms and became the
+dominant floor. The
+reported stage and reservation high-water include both supervised Parse and
+one-item canonical Reduce; its explicit 256 MiB ceiling is the peak reservation
+at every worker count. Until the
 real extractor corpus supersedes this synthetic baseline, parse/extract uses an
 initial cap of `min(available_parallelism, 16)`, one queued envelope per worker,
 and the independent supervisor byte budget as the final admission authority.
@@ -356,20 +402,24 @@ independent destructive maintenance. Advisory locks are scoped by project and
 operation, carry observable owner metadata, and have supervisor-enforced
 deadlines.
 
-The first COPY implementation accepts typed file, symbol, edge, reference, and
-search-document facts. Before opening a transaction it validates database
-bounds, normalized project paths, finite confidence values, branded
-relationships, and document-to-symbol/file consistency. A deterministic
-reducer sorts by stable logical keys, removes canonically equivalent facts, and
-rejects conflicting facts that reuse an identity. JSON metadata is encoded
-with recursively sorted object keys.
+The first COPY implementation accepts an opaque `CanonicalGenerationFacts`
+capability, never unordered raw facts. A supervised blocking reduce stage first
+validates database bounds, normalized project paths, finite confidence values,
+branded relationships, and document-to-symbol/file consistency. Its
+cancellation-polled deterministic reducer orders by stable logical keys,
+removes canonically equivalent facts, rejects conflicting identities, and
+encodes JSON metadata with recursively sorted object keys. The async database
+prepare task therefore reaches its first PostgreSQL await without performing a
+synchronous cloning reduction on a Tokio worker.
 
-The reducer computes a versioned BLAKE3 logical-generation digest from typed,
+The reducer computes a domain-separated v2 BLAKE3 logical-generation digest from typed,
 length-delimited canonical fields. The digest deliberately excludes project
 ID, generation UUID/sequence, worker count, PostgreSQL identity keys, and input
 order; those are execution/deployment details rather than source facts. It
 includes normalized source/file hashes, structural spans and digests, graph and
-reference confidence/provenance, search text, and canonical metadata.
+complete reference owner/name/confidence/provenance evidence, search text, and
+canonical metadata. PostgreSQL stores version 2 beside new digests and preserves
+version 1 beside historical rows rather than reinterpreting or recomputing them.
 
 Persistence then streams PostgreSQL text COPY in bounded chunks, with explicit
 escaping for tabs, newlines, carriage returns, backslashes, control bytes, and

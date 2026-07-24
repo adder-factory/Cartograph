@@ -6,14 +6,15 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, EdgeInput, FileInput, GenerationContents, GenerationFacts, LeaseOwner,
-    LeaseRequest, LeaseTarget, NewGeneration, NewProject, PrepareGenerationMetrics, ProjectLease,
-    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError,
-    SymbolInput,
+    CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationContents,
+    GenerationFacts, GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget,
+    NewGeneration, NewProject, PrepareGenerationMetrics, ProjectLease, ReadyGeneration,
+    RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError, SymbolInput,
+    validate_generation_facts,
 };
 use cartograph_domain::{
-    ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
-    ProjectId, ProjectOperation, SymbolId,
+    ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
+    GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation, SymbolId,
 };
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -41,8 +42,10 @@ const STRUCTURAL_HASH_ONE: &str =
 const STRUCTURAL_HASH_TWO: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "738fa1e15bf7a5efc124e38cdde3ac5875c896a096946ee1812c2fe1785594cd";
+    "efe38a8a1252eb72910f6829ee683ce5ad99a69c5f352b1e724fca519bc54931";
 const SINGLE_WORKER: u16 = 1;
+const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
 const PARALLEL_WORKERS: u16 = 16;
 const SYMBOL_TWO_START_BYTE: u64 = 8;
 const SYMBOL_TWO_END_BYTE: u64 = 80;
@@ -68,10 +71,13 @@ async fn copy_ingestion_is_atomic_and_logically_deterministic() {
     let first = prepare_generation(&fixture, SINGLE_WORKER, generation_facts(false)).await;
     let second = prepare_generation(&fixture, PARALLEL_WORKERS, generation_facts(true)).await;
     assert_eq!(first.content_digest(), second.content_digest());
+    assert_eq!(first.digest_version(), GenerationDigestVersion::V2);
+    assert_eq!(second.digest_version(), GenerationDigestVersion::V2);
     assert_eq!(first.content_digest().as_str(), EXPECTED_LOGICAL_DIGEST);
     assert_persisted_generation(&fixture, &first).await;
     assert_persisted_generation(&fixture, &second).await;
     assert_copy_text_round_trip(&fixture, &second).await;
+    assert_reference_evidence_round_trip(&fixture, &second).await;
     assert_ready_digest_recovery(&fixture, &first).await;
     assert_copy_chunk_and_null_boundaries(&fixture).await;
 
@@ -81,6 +87,39 @@ async fn copy_ingestion_is_atomic_and_logically_deterministic() {
     drop(fixture.database);
     drop_schema(&fixture.pool, &fixture.schema).await;
     fixture.pool.close().await;
+}
+
+async fn assert_reference_evidence_round_trip(fixture: &DatabaseFixture, ready: &ReadyGeneration) {
+    let statement = format!(
+        r#"SELECT owner_symbol_id::text, target_symbol_id::text, reference_name,
+                  resolution_provenance
+            FROM "{}"."references"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)"#,
+        fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(ready.generation_id().as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not inspect reference evidence: {error}"));
+    assert!(matches!(
+        row.try_get::<String, _>(0),
+        Ok(value) if value == SYMBOL_TWO
+    ));
+    assert!(matches!(
+        row.try_get::<String, _>(1),
+        Ok(value) if value == SYMBOL_ONE
+    ));
+    assert!(matches!(
+        row.try_get::<String, _>(2),
+        Ok(value) if value == "fixture_call"
+    ));
+    assert!(matches!(
+        row.try_get::<String, _>(3),
+        Ok(value) if value == "test-exact"
+    ));
 }
 
 async fn assert_copy_chunk_and_null_boundaries(fixture: &DatabaseFixture) {
@@ -261,7 +300,7 @@ async fn prepare_generation(
     let result = fixture
         .database
         .prepare_generation(
-            GenerationContents::new(staged, facts).with_metrics(metrics.clone()),
+            GenerationContents::new(staged, canonical(facts)).with_metrics(metrics.clone()),
             &lease.fence(),
         )
         .await;
@@ -364,12 +403,26 @@ fn edge() -> EdgeInput {
 fn reference() -> ReferenceInput {
     ReferenceInput {
         file_id: file_id(FILE_TWO),
+        owner_symbol_id: Some(symbol_id(SYMBOL_TWO)),
         target_symbol_id: Some(symbol_id(SYMBOL_ONE)),
+        reference_name: "fixture_call".to_owned(),
         reference_kind: "call".to_owned(),
         start_byte: REFERENCE_START_BYTE,
         end_byte: REFERENCE_END_BYTE,
         confidence: REFERENCE_CONFIDENCE,
+        resolution_provenance: "test-exact".to_owned(),
     }
+}
+
+fn canonical(facts: GenerationFacts) -> CanonicalGenerationFacts {
+    let limits = GenerationValidationLimits::new(
+        TEST_VALIDATION_OUTPUT_BYTES,
+        TEST_VALIDATION_WORKING_BYTES,
+    )
+    .unwrap_or_else(|error| panic!("ingest validation limits were invalid: {error}"));
+    validate_generation_facts(facts, limits, || false)
+        .map(|(facts, _)| facts)
+        .unwrap_or_else(|error| panic!("ingest fixture was invalid: {error}"))
 }
 
 fn document_one(reordered_metadata: bool) -> SearchDocumentInput {
@@ -429,7 +482,9 @@ async fn assert_persisted_generation(fixture: &DatabaseFixture, ready: &ReadyGen
                 (SELECT count(*) FROM "{schema}"."search_documents"
                     WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS documents,
                 (SELECT content_digest FROM "{schema}"."index_generations"
-                    WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS digest"#,
+                    WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS digest,
+                (SELECT content_digest_version FROM "{schema}"."index_generations"
+                    WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS digest_version"#,
         schema = fixture.schema,
     );
     let row = query(AssertSqlSafe(statement))
@@ -450,6 +505,10 @@ async fn assert_persisted_generation(fixture: &DatabaseFixture, ready: &ReadyGen
         row.try_get::<String, _>("digest").ok().as_deref(),
         Some(ready.content_digest().as_str())
     );
+    assert!(matches!(
+        row.try_get::<i16, _>("digest_version"),
+        Ok(value) if value == GenerationDigestVersion::V2.database_value()
+    ));
 }
 
 async fn assert_copy_text_round_trip(fixture: &DatabaseFixture, ready: &ReadyGeneration) {
@@ -543,7 +602,10 @@ async fn assert_copy_failure_rolls_back(fixture: &DatabaseFixture) {
     let fence = lease.fence();
     let failed = fixture
         .database
-        .prepare_generation(GenerationContents::new(staged, rejected_facts()), &fence)
+        .prepare_generation(
+            GenerationContents::new(staged, canonical(rejected_facts())),
+            &fence,
+        )
         .await;
     let staged = match failed {
         Err(error) => {

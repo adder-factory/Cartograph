@@ -8,8 +8,8 @@ use sqlx_postgres::{PgConnection, PgCopyIn};
 use crate::{StorageError, database::quoted_schema};
 
 use super::model::{
-    EdgeInput, FileInput, ReferenceInput, SymbolInput, ValidatedFactTables,
-    ValidatedGenerationFacts, ValidatedSearchDocument,
+    CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, ReferenceInput,
+    SymbolInput, ValidatedFactTables,
 };
 
 const COPY_CHUNK_BYTES: usize = 1024 * 1024;
@@ -56,7 +56,7 @@ const EDGES_LAYOUT: CopyTableLayout = CopyTableLayout {
 };
 const REFERENCES_LAYOUT: CopyTableLayout = CopyTableLayout {
     table: "references",
-    columns: "project_id, generation_id, file_id, target_symbol_id, reference_kind, start_byte, end_byte, confidence",
+    columns: "project_id, generation_id, file_id, owner_symbol_id, target_symbol_id, reference_name, reference_kind, start_byte, end_byte, confidence, resolution_provenance",
     operation: "copy-references",
 };
 const DOCUMENTS_LAYOUT: CopyTableLayout = CopyTableLayout {
@@ -79,7 +79,7 @@ struct CopyTablePlan<T, Encode> {
 pub(crate) async fn copy_generation_facts(
     connection: &mut PgConnection,
     context: CopyGenerationContext,
-    facts: ValidatedGenerationFacts,
+    facts: CanonicalGenerationFacts,
 ) -> Result<(), StorageError> {
     let ValidatedFactTables {
         files,
@@ -291,18 +291,26 @@ fn encode_reference(context: &CopyGenerationContext, reference: &ReferenceInput)
     row.text(reference.file_id.as_str());
     row.optional_text(
         reference
+            .owner_symbol_id
+            .as_ref()
+            .map(|symbol| symbol.as_str()),
+    );
+    row.optional_text(
+        reference
             .target_symbol_id
             .as_ref()
             .map(|symbol| symbol.as_str()),
     );
+    row.text(&reference.reference_name);
     row.text(&reference.reference_kind);
     row.number(reference.start_byte);
     row.number(reference.end_byte);
     row.number(reference.confidence);
+    row.text(&reference.resolution_provenance);
     row.finish()
 }
 
-fn encode_document(context: &CopyGenerationContext, document: &ValidatedSearchDocument) -> Vec<u8> {
+fn encode_document(context: &CopyGenerationContext, document: &CanonicalSearchDocument) -> Vec<u8> {
     let mut row = TextRow::new();
     row.text(context.project_id.as_str());
     row.text(context.generation_id.as_str());

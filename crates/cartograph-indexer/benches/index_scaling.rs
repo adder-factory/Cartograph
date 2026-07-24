@@ -9,14 +9,15 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, CurrentGeneration, EdgeInput, FileInput, GenerationContents,
-    GenerationFacts, LeaseOwner, LeaseTarget, MANAGED_DATABASE_IMAGE, NewGeneration, NewProject,
-    PrepareGenerationMetrics, ReadyGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
-    StagedGeneration, SymbolInput, probe_capabilities,
+    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, EdgeInput, FileInput,
+    GenerationContents, GenerationFacts, GenerationValidationLimits, LeaseOwner, LeaseTarget,
+    MANAGED_DATABASE_IMAGE, NewGeneration, NewProject, PrepareGenerationMetrics, ReadyGeneration,
+    ReferenceInput, SearchDocumentInput, SearchQuery, StagedGeneration, SymbolInput,
+    probe_capabilities, validate_generation_facts,
 };
 use cartograph_domain::{
-    ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
-    ProjectId, ProjectOperation, SymbolId,
+    ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
+    GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation, SymbolId,
 };
 use cartograph_indexer::{
     IndexerSupervisor, PipelineFailure, PipelineStage, StageCapacity, StageDeadlinePolicy,
@@ -38,14 +39,23 @@ const SOURCE_REPETITIONS: usize = 192;
 const HASH_ROUNDS: usize = 32;
 const WARMUP_SAMPLES: usize = 1;
 const MEASURED_SAMPLES: usize = 5;
+const VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+const VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
+const REDUCE_STAGE_ITEMS: usize = 1;
+const REDUCE_STAGE_WORKERS: usize = 1;
+const REDUCE_STAGE_QUEUE_ITEMS: usize = 0;
+const REDUCE_STAGE_SEQUENCE: u64 = 0;
+const REDUCE_STAGE_KEY: u8 = 0;
+const REDUCE_STAGE_PROGRESS_BYTES: u64 = 0;
+const SUPERVISED_ITEM_COUNT: usize = ITEM_COUNT + REDUCE_STAGE_ITEMS;
 const MEDIAN_PERCENTILE: usize = 50;
 const TAIL_PERCENTILE: usize = 95;
 const EXPECTED_SOURCE_DIGEST: &str =
     "b23964be1dfad94c41d158358db1f60187729c399ed623d107c6b4cc0f46d6d1";
 const EXPECTED_FIXTURE_FINGERPRINT: &str =
-    "8a15ec2d169886dfe10671dd3d794ad92760cafdbe3478fcb9acc2d4deee52a3";
+    "2c02e8357bee04c11d89f383c316077b8eb2228bd4262d2404cb1535885083d9";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "647c61f7eb0a697a31774f9d025ea896e35fb6cb54ade6477b47dadaaac04cbf";
+    "3fcf25b6aef136419808799cc59b4b95ceb3f5014acef35192645242b4dd5d25";
 const EXPECTED_BM25_DOCUMENT_ID: &str = "30000000-0000-4000-8000-000000000001";
 const EXPECTED_FILES: i64 = 256;
 const EXPECTED_SYMBOLS: i64 = 256;
@@ -73,6 +83,10 @@ enum BenchmarkError {
     Operation { operation: &'static str },
     #[error("index scaling benchmark invariant failed: {name}")]
     Invariant { name: &'static str },
+    #[error("index scaling benchmark logical digest changed to {actual}")]
+    LogicalDigestChanged { actual: String },
+    #[error("index scaling benchmark fixture fingerprint changed to {actual}")]
+    FixtureFingerprintChanged { actual: String },
     #[error(
         "index scaling benchmark failed during {primary}; cleanup also failed during {cleanup}"
     )]
@@ -127,6 +141,7 @@ struct RowCounts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InvariantFingerprint {
     logical_digest: String,
+    logical_digest_version: i16,
     rows: RowCounts,
     bm25_document_ids: Vec<String>,
 }
@@ -237,6 +252,7 @@ struct FixtureReport {
 #[derive(Serialize)]
 struct InvariantReport {
     logical_digest: String,
+    logical_digest_version: i16,
     row_counts: RowCounts,
     bm25_document_ids: Vec<String>,
     identical_at_workers: Vec<u16>,
@@ -309,10 +325,11 @@ impl FrozenFixture {
             source_digest == EXPECTED_SOURCE_DIGEST,
             "committed-source-digest",
         )?;
-        require(
-            fixture_fingerprint == EXPECTED_FIXTURE_FINGERPRINT,
-            "committed-fixture-fingerprint",
-        )?;
+        if fixture_fingerprint != EXPECTED_FIXTURE_FINGERPRINT {
+            return Err(BenchmarkError::FixtureFingerprintChanged {
+                actual: fixture_fingerprint,
+            });
+        }
         Ok(Self {
             inputs,
             source_bytes,
@@ -399,6 +416,7 @@ async fn run_matrix(
         },
         invariant: InvariantReport {
             logical_digest: baseline.logical_digest,
+            logical_digest_version: baseline.logical_digest_version,
             row_counts: baseline.rows,
             bm25_document_ids: baseline.bm25_document_ids,
             identical_at_workers: WORKER_MATRIX.to_vec(),
@@ -498,11 +516,7 @@ impl SamplePlan {
         let window = worker_count
             .checked_add(queue_items)
             .ok_or_else(|| invariant("bounded-window"))?;
-        let window_u64 = u64::try_from(window).map_err(|_| invariant("bounded-window"))?;
-        let maximum_reserved_bytes = fixture
-            .maximum_item_bytes
-            .checked_mul(window_u64)
-            .ok_or_else(|| invariant("scope-byte-cap"))?;
+        let maximum_reserved_bytes = maximum_stage_reserved_bytes(fixture, window)?;
         let now = tokio::time::Instant::now();
         Ok(Self {
             worker_count,
@@ -513,6 +527,15 @@ impl SamplePlan {
             inputs: fixture.envelopes(now + ITEM_TIMEOUT)?,
         })
     }
+}
+
+fn maximum_stage_reserved_bytes(fixture: &FrozenFixture, window: usize) -> BenchmarkResult<u64> {
+    let window_u64 = u64::try_from(window).map_err(|_| invariant("bounded-window"))?;
+    let parse_window_bytes = fixture
+        .maximum_item_bytes
+        .checked_mul(window_u64)
+        .ok_or_else(|| invariant("scope-byte-cap"))?;
+    Ok(parse_window_bytes.max(VALIDATION_WORKING_BYTES))
 }
 
 async fn run_supervised_pipeline(
@@ -611,10 +634,23 @@ async fn run_pipeline_work(
                     ),
                     StageFold::new(GenerationFacts::default(), reduce_fact_bundle),
                 )
-                .with_metrics(work.stage_metrics),
+                .with_metrics(work.stage_metrics.clone()),
             )
             .await
             .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+    let validation_limits =
+        GenerationValidationLimits::new(VALIDATION_OUTPUT_BYTES, VALIDATION_WORKING_BYTES)
+            .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+    let facts = run_supervised_reduce(
+        &context,
+        ReduceStageRequest {
+            facts,
+            stage_deadline: work.stage_deadline,
+            validation_limits,
+            metrics: work.stage_metrics,
+        },
+    )
+    .await?;
     work.stage_elapsed
         .store(duration_nanos(stage_started.elapsed()), Ordering::Relaxed);
     context
@@ -628,6 +664,71 @@ async fn run_pipeline_work(
         )
         .await
         .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+}
+
+struct ReduceStageRequest {
+    facts: GenerationFacts,
+    stage_deadline: tokio::time::Instant,
+    validation_limits: GenerationValidationLimits,
+    metrics: StageMetrics,
+}
+
+async fn run_supervised_reduce(
+    context: &SupervisorContext,
+    request: ReduceStageRequest,
+) -> Result<CanonicalGenerationFacts, PipelineFailure> {
+    let item_deadline = (tokio::time::Instant::now() + ITEM_TIMEOUT).min(request.stage_deadline);
+    let inputs = [StageEnvelope::new(
+        StageItemMeta::new(
+            StageSequence::new(REDUCE_STAGE_SEQUENCE),
+            REDUCE_STAGE_KEY,
+            StageItemBudget::new(
+                VALIDATION_WORKING_BYTES,
+                REDUCE_STAGE_PROGRESS_BYTES,
+                item_deadline,
+            ),
+        ),
+        request.facts,
+    )];
+    let validation_limits = request.validation_limits;
+    context
+        .stages()
+        .execute(
+            StageExecution::new(
+                StageRunConfig::new(
+                    PipelineStage::Reduce,
+                    StageCapacity::new(REDUCE_STAGE_WORKERS, REDUCE_STAGE_QUEUE_ITEMS),
+                    StageDeadlinePolicy::new(request.stage_deadline, CLEANUP_GRACE),
+                ),
+                StageWorkload::new(
+                    inputs,
+                    move |item: StageWorkItem<u8, GenerationFacts>| async move {
+                        let cancellation = item.cancellation();
+                        let (_, _, facts) = item.into_parts();
+                        tokio::task::block_in_place(move || {
+                            validate_generation_facts(facts, validation_limits, || {
+                                cancellation.is_cancelled()
+                            })
+                            .map(|(facts, _)| facts)
+                            .map_err(|_| StageItemFailure)
+                        })
+                    },
+                ),
+                StageFold::new(
+                    None,
+                    |reduced: &mut Option<CanonicalGenerationFacts>,
+                     output: StageOutput<u8, CanonicalGenerationFacts>| {
+                        let (_, facts) = output.into_parts();
+                        *reduced = Some(facts);
+                        Ok(())
+                    },
+                ),
+            )
+            .with_metrics(request.metrics),
+        )
+        .await
+        .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?
+        .ok_or_else(|| PipelineFailure::new(PipelineStage::Reduce))
 }
 
 async fn verify_completed_sample(
@@ -672,6 +773,7 @@ async fn verify_completed_sample(
         sample: request.coordinates.sample,
         fingerprint: InvariantFingerprint {
             logical_digest: completed.current.content_digest().as_str().to_owned(),
+            logical_digest_version: completed.current.digest_version().database_value(),
             rows,
             bm25_document_ids,
         },
@@ -693,7 +795,7 @@ fn validate_supervisor_status(
     )?;
     require(
         status.completed_items()
-            == u64::try_from(ITEM_COUNT).map_err(|_| invariant("completed-items"))?,
+            == u64::try_from(SUPERVISED_ITEM_COUNT).map_err(|_| invariant("completed-items"))?,
         "supervisor-completed-items",
     )?;
     require(
@@ -709,7 +811,7 @@ fn validate_stage_snapshot(
 ) -> BenchmarkResult<()> {
     require(
         stage_snapshot.admitted_items()
-            == u64::try_from(ITEM_COUNT).map_err(|_| invariant("admitted-items"))?,
+            == u64::try_from(SUPERVISED_ITEM_COUNT).map_err(|_| invariant("admitted-items"))?,
         "all-items-admitted",
     )?;
     require(
@@ -929,11 +1031,14 @@ fn build_fact_bundle(
         }),
         reference: previous_symbol.map(|target_symbol_id| ReferenceInput {
             file_id: file.clone(),
+            owner_symbol_id: Some(symbol.clone()),
             target_symbol_id: Some(target_symbol_id),
+            reference_name: "previous_benchmark_symbol".to_owned(),
             reference_kind: "call".to_owned(),
             start_byte: 0,
             end_byte: u64::try_from(signature.len()).unwrap_or(u64::MAX),
             confidence: 1.0,
+            resolution_provenance: "rust-scaling-fixture".to_owned(),
         }),
         document: SearchDocumentInput {
             document_id: document_id(index).map_err(|_| StageItemFailure)?,
@@ -993,15 +1098,11 @@ fn summarize_workers(
     let window = worker_count
         .checked_mul(2)
         .ok_or_else(|| invariant("report-window"))?;
-    let window_u64 = u64::try_from(window).map_err(|_| invariant("report-window"))?;
     Ok(WorkerReport {
         workers,
         queue_items: worker_count,
         bounded_window_items: window,
-        maximum_reserved_bytes: fixture
-            .maximum_item_bytes
-            .checked_mul(window_u64)
-            .ok_or_else(|| invariant("report-byte-cap"))?,
+        maximum_reserved_bytes: maximum_stage_reserved_bytes(fixture, window)?,
         stage_p50_ms: nanos_to_millis(stage_p50),
         stage_p95_ms: nanos_to_millis(percentile(&stage, TAIL_PERCENTILE)?),
         copy_p50_ms: nanos_to_millis(percentile(&copy, MEDIAN_PERCENTILE)?),
@@ -1035,6 +1136,15 @@ fn summarize_workers(
 }
 
 fn validate_fingerprint(actual: &InvariantFingerprint) -> BenchmarkResult<()> {
+    if actual.logical_digest != EXPECTED_LOGICAL_DIGEST {
+        return Err(BenchmarkError::LogicalDigestChanged {
+            actual: actual.logical_digest.clone(),
+        });
+    }
+    require(
+        actual.logical_digest_version == GenerationDigestVersion::V2.database_value(),
+        "logical-digest-version",
+    )?;
     require(
         actual == &committed_invariant_fingerprint(),
         "committed-logical-output",
@@ -1044,6 +1154,7 @@ fn validate_fingerprint(actual: &InvariantFingerprint) -> BenchmarkResult<()> {
 fn committed_invariant_fingerprint() -> InvariantFingerprint {
     InvariantFingerprint {
         logical_digest: EXPECTED_LOGICAL_DIGEST.to_owned(),
+        logical_digest_version: GenerationDigestVersion::V2.database_value(),
         rows: committed_row_counts(),
         bm25_document_ids: vec![EXPECTED_BM25_DOCUMENT_ID.to_owned()],
     }
@@ -1088,7 +1199,7 @@ fn supervisor_config(max_tasks: usize, max_bytes: u64) -> SupervisorConfig {
 
 fn fixture_fingerprint(inputs: &[FixtureInput]) -> BenchmarkResult<String> {
     let mut hasher = blake3::Hasher::new();
-    fingerprint_field(&mut hasher, b"cartograph-v2-index-scaling-fixture-v1")?;
+    fingerprint_field(&mut hasher, b"cartograph-v2-index-scaling-fixture-v2")?;
     for text in [FIXTURE_NAME, SOURCE_REVISION, NEEDLE_QUERY] {
         fingerprint_field(&mut hasher, text.as_bytes())?;
     }
@@ -1115,6 +1226,9 @@ fn fixture_fingerprint(inputs: &[FixtureInput]) -> BenchmarkResult<String> {
         let nanos = u64::try_from(duration.as_nanos())
             .map_err(|_| invariant("fixture-duration-fingerprint"))?;
         fingerprint_field(&mut hasher, &nanos.to_le_bytes())?;
+    }
+    for bytes in [VALIDATION_OUTPUT_BYTES, VALIDATION_WORKING_BYTES] {
+        fingerprint_field(&mut hasher, &bytes.to_le_bytes())?;
     }
     for workers in WORKER_MATRIX {
         fingerprint_field(&mut hasher, &workers.to_le_bytes())?;
@@ -1222,6 +1336,8 @@ impl BenchmarkError {
             Self::MissingDatabase => "database-url",
             Self::Operation { operation } => operation,
             Self::Invariant { name } => name,
+            Self::LogicalDigestChanged { .. } => "logical-digest-changed",
+            Self::FixtureFingerprintChanged { .. } => "fixture-fingerprint-changed",
             Self::Combined { .. } => "combined-failure",
         }
     }

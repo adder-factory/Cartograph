@@ -771,6 +771,7 @@ fn container_state(inspection: &ContainerInspection) -> ManagedContainerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migrations::expected_migration_versions;
 
     const IDENTITY_TEST_PORT: u16 = 55_432;
     const TEST_DATABASE_PORT: u16 = 55_433;
@@ -1130,7 +1131,10 @@ mod tests {
         assert!(first.credentials_created);
         assert!(first.container_created);
         assert!(first.capabilities.ready);
-        assert_eq!(first.migrations.applied_versions, vec![1, 2]);
+        assert_eq!(
+            first.migrations.applied_versions,
+            expected_migration_versions()
+        );
         assert_eq!(first.schema, TEST_DATABASE_SCHEMA);
 
         let status = match database.status().await {

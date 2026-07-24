@@ -21,6 +21,7 @@ repository = "https://github.com/adder-factory/cartograph"
 blake3 = "1.8.5"
 clap = { version = "4.6.4", features = ["derive"] }
 getrandom = "0.4.3"
+ignore = "0.4.31"
 libc = "0.2.183"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }

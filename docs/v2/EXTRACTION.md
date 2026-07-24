@@ -81,10 +81,12 @@ and formatting whitespace while retaining semantic tokens. This supports
 incremental decisions without pretending that a reformatted file has a new
 logical declaration.
 
-References remain unresolved names plus source provenance. They are not
-prematurely coerced into the smaller PostgreSQL `EdgeKind` set. Project-wide
-resolution decides whether a candidate becomes a resolved edge/reference,
-remains an explicit unresolved fact, or is discarded with a reason.
+References remain named source evidence through persistence. Every row keeps
+its file, closest lexical owner, normalized reference name, kind, span,
+resolution provenance, confidence, and optional exact target. Project-wide
+resolution decides whether exact evidence creates an edge, but missing,
+ambiguous, and qualified-member references remain explicit rows; they are not
+discarded and are not guessed from a final member name.
 
 ## Cancellation, bounds, and parallel execution
 
@@ -125,15 +127,65 @@ peak reservation stays under the supervisor scope.
 The 32x reservation is conservative accounting, not an OS allocator/RSS hard
 limit for Tree-sitter's C heap. The current observer is deliberately limited to
 fixed-size validation/digest state; it cannot serve as the production
-resolve/COPY handoff. That later pipeline must transfer owned outputs together
-with reservation/backpressure or process them in bounded owned chunks. A real
-corpus RSS benchmark and, if required, process isolation remain release gates.
+resolve/COPY handoff. A real corpus RSS benchmark and, if required, process
+isolation remain release gates.
 
-The stage API intentionally accepts a lazy iterator of already validated
-`SourceSnapshot` values. That iterator must not retain the corpus. This is not
-yet the final end-to-end memory proof: discovery and read/hash still need their
-own supervised stages so snapshots are created only inside the admitted
-window.
+The production continuation is now `build_native_generation`. It runs five
+strictly ordered supervisor stages:
+
+1. Discovery uses Rust's `ignore` walker with Git-compatible standard ignore
+   files, includes hidden source files, never follows symlinks, hard-excludes
+   `.git/` and `.cartograph/`, honors per-directory `.cartographignore`
+   markers, sorts paths deterministically, and enforces file-count plus modeled
+   path-manifest byte limits. An unreadable or non-UTF-8 entry fails closed
+   instead of silently publishing a partial project.
+2. Read/hash admits only discovered path/size records. Each worker reserves
+   `source_bytes * 2 + 128 KiB`, streams bounded UTF-8 plus BLAKE3 under
+   cancellation, and reduces to a compact path/language/file-ID/hash/size
+   manifest. Source buffers are dropped at ordered reduction.
+3. Parse/extract reopens each manifest path under the exact previously observed
+   size, requires identical hash, language, and file identity, then runs native
+   Tree-sitter under the existing 32x reservation. Concurrent source drift is a
+   fatal parse-stage result, never a mixed-generation snapshot.
+4. Ordered parse outputs are immediately moved into storage-independent
+   `NativeFileFacts`. Before the parse reservation is acknowledged, a separate
+   retained-generation budget accounts file/symbol/reference strings, vector
+   capacities, every per-symbol path/language/ID clone, metadata allowance, and
+   anticipated search documents. The pipeline never accumulates
+   `SourceSnapshot` or raw `ExtractedFile` values for the corpus.
+5. Resolve performs deterministic exact-name selection: one same-file target
+   wins first, otherwise one unique project target wins. Qualified members such
+   as `console.log` remain unresolved until receiver/container/import evidence
+   exists. A cancellation-polled ordered map avoids a monolithic candidate
+   sort. Reduce first performs a cancellation-polled, capacity-aware retained
+   model inside the supervised blocking stage. It counts actual outer-vector and
+   JSON-array capacities with type-correct raw/canonical roots, validates storage
+   field caps and relations, deduplicates every table, canonicalizes JSON and
+   ordering, and computes the complete logical digest under an explicit
+   four-times working-set reservation. Measured input/output bytes travel in the
+   validation report; Tokio workers do not rescan either payload.
+   PostgreSQL receives only the opaque `CanonicalGenerationFacts` capability;
+   the async prepare/COPY task cannot run a second synchronous reducer.
+
+The retained generation is hard-capped but intentionally stays in memory until
+the five COPY streams consume it. Resolve charges candidates, vector
+capacities, and output clones before allocation against its three-times task
+reservation. Canonical validation polls during memory modeling, every fact,
+map-to-vector conversion, relation-map build, and relation check. It reports a
+conservative cumulative high-water charge under its four-times task
+reservation. This is bounded fail-closed ownership, not an unbounded observer
+and not yet spill-to-disk or streaming database reduction.
+
+Migration 3 expands PostgreSQL graph-edge validation so every current native
+relationship kind (`type_of`, `returns`, `instantiates`, `overrides`,
+`decorates`, `field_access`, `def_use`, and `exports`, in addition to the
+original kinds) can persist as a first-class edge. The live supervisor fixture
+now proves discovery through publication and a ParadeDB BM25 hit from the
+native generation. Migration 4 adds bounded reference name, owner, and
+resolution-provenance columns plus an owner index, so unresolved evidence
+survives COPY and later resolver improvements. Migration 5 versions logical
+digests without rewriting history: populated pre-v4 rows keep their original
+digest with version 1, while new complete-reference facts use digest version 2.
 
 ## Oracle and ownership transition
 
@@ -150,8 +202,15 @@ ordinals, cross-scope identity stability, validated serialized spans/languages,
 enum-member isolation from comments/initializer expressions, bare and nested
 type-alias references, typed component references, semantic template/JSX
 whitespace, bounded adversarial names, FIFO rejection, split UTF-8, and redacted
-debug output. Component type references are an explicit additive v2 improvement
-and are filtered only from the v1-compatibility projection before equality.
+debug output. The owned pipeline additionally covers all supported test-path
+extensions/directories, full-payload one-versus-four-worker digests, long-path
+many-symbol accounting, spare-capacity admission, cancellation during retained
+modeling/map conversion/relation-map construction, storage-cap rejection, false
+qualified-member resolution, unresolved evidence round trips, and
+credential-shaped non-callable plus scalar/destructured/arrow/method/component
+default initializer exclusion from search. Component type
+references are an explicit additive v2 improvement and are filtered only from
+the v1-compatibility projection before equality.
 
 The v1 oracle is not the permanent v2 product contract. Before broadening the
 extractor, freeze a Rust-owned corpus and evaluate any intentional improvement
@@ -162,24 +221,34 @@ TypeScript to extract a file.
 
 The following work remains outside this slice:
 
-1. Gitignore-aware project discovery and a supervised read/hash stage.
-2. Import/export alias modelling and project-wide module/symbol resolution.
+1. Git tracked-file reconciliation for the unusual case where an already
+   tracked source is later covered by an ignore rule; the first Rust walker
+   applies ignore rules uniformly. Embedded-repository/submodule parity also
+   needs a locked corpus.
+2. Import/export alias modelling, module-path and qualified-member resolution,
+   receiver/type evidence, lexical shadowing, overload policy, and richer
+   confidence calibration beyond exact unique-name resolution.
 3. Separate exact reference-target spans from v1-compatible expression/site
    spans; imports and constructions currently retain the v1.1.33 site range.
 4. Richer TypeScript declarations such as interface method signatures,
    properties, fields, parameters, decorators, overrides, and explicit exports.
-5. Owned, backpressured extraction output transfer, deterministic reduction
-   into one canonical `GenerationFacts` value, and the existing supervised
-   PostgreSQL COPY/publication path. The fixed-state observer in this slice is
-   validation-only.
-6. A frozen real-corpus 1/2/4/8/16-worker benchmark with peak memory, digest,
+5. Search documents containing bounded implementation-body code. The first
+   native payload indexes paths, symbol qualified names, safe callable
+   declaration-only signatures, and JSDoc. Non-callable initializer RHS text is
+   cleared before storage; callable signatures containing defaults or string
+   literals fall back to the qualified name, and complete source bodies are not
+   duplicated.
+6. Spill/partitioned resolution and streaming database reduction if measured
+   real projects exceed the configured retained-generation cap.
+7. A frozen real-corpus 1/2/4/8/16-worker benchmark with peak memory, digest,
    row, BM25, task, generation, and lease assertions.
-7. Framework resolvers and cross-language bridges, followed by the remaining
+8. Framework resolvers and cross-language bridges, followed by the remaining
    language families in the v2 plan.
-8. Per-worker parser reuse and a real-corpus pass to decide whether repeated
+9. Per-worker parser reuse and a real-corpus pass to decide whether repeated
    component/digest/type traversals need fused language-specific walks.
 
-The next implementation slice is discovery -> bounded read/hash -> native
-parse/extract -> project-wide resolve -> deterministic `GenerationFacts`. Only
-after that path passes the existing PostgreSQL/ParadeDB publication gate should
-the synthetic scaling baseline be replaced.
+The next implementation slice is a Rust-owned real extractor corpus and frozen
+1/2/4/8/16-worker pipeline benchmark, followed by module/import resolution and
+bounded symbol-body search documents. Preserve the current PostgreSQL digest,
+row, edge-kind, BM25, task, generation, and lease gates while replacing the
+synthetic baseline.

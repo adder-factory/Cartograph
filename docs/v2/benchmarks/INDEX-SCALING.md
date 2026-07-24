@@ -1,8 +1,12 @@
 # V2 bounded-index scaling benchmark
 
-Status: first synthetic-stage baseline
+Status: synthetic-stage baseline plus digest-v2 validation refresh
 Measured: 2026-07-22
-Raw report: [`index-scaling-aarch64-2026-07-22.json`](./index-scaling-aarch64-2026-07-22.json)
+Original raw baseline: [`index-scaling-aarch64-2026-07-22.json`](./index-scaling-aarch64-2026-07-22.json).
+Current digest-v2 raw report: [`index-scaling-aarch64-2026-07-22-digest-v2.json`](./index-scaling-aarch64-2026-07-22-digest-v2.json).
+The original artifact remains byte-for-byte historical evidence. Every digest,
+timing, and table value below comes only from the separately committed digest-v2
+report after migration 5 and capacity-aware canonical validation.
 
 ## What this proves
 
@@ -16,7 +20,7 @@ The frozen `synthetic-typescript-stage-v1` fixture contains 256 TypeScript-shape
 items and 6,145,536 source bytes. Its source digest is
 `b23964be1dfad94c41d158358db1f60187729c399ed623d107c6b4cc0f46d6d1`.
 Its length-delimited fixture/config fingerprint is
-`8a15ec2d169886dfe10671dd3d794ad92760cafdbe3478fcb9acc2d4deee52a3`.
+`2c02e8357bee04c11d89f383c316077b8eb2228bd4262d2404cb1535885083d9`.
 Each item performs 32 deterministic BLAKE3 analysis rounds before producing
 typed file, symbol, relationship, reference, and search-document facts.
 
@@ -26,10 +30,10 @@ The first run cannot adopt a changed workload as a new baseline. A corpus,
 configuration, reducer, schema, or retrieval change must deliberately update
 the constants and raw evidence together.
 
-All 30 warmup/measured runs at 1, 2, 4, 8, and 16 workers produced:
+All 30 digest-v2 warmup/measured runs at 1, 2, 4, 8, and 16 workers produced:
 
-- logical generation digest
-  `647c61f7eb0a697a31774f9d025ea896e35fb6cb54ade6477b47dadaaac04cbf`;
+- logical generation digest version 2,
+  `3fcf25b6aef136419808799cc59b4b95ceb3f5014acef35192645242b4dd5d25`;
 - 256 files, 256 symbols, 255 edges, 255 references, and 256 search documents;
 - BM25 first hit `30000000-0000-4000-8000-000000000001` for
   `needle cartograph benchmark`;
@@ -56,29 +60,35 @@ This exercises cleanup before `run_clean_sample` can own a normal fixture.
 ## Results
 
 Durations are wall-clock milliseconds. Throughput is based on the median
-stage or end-to-end duration. COPY measures exactly the five table streams,
-including their bounded row encoding, but excludes validation, fencing, the
-ready transition, publication, and the verification queries.
+stage or end-to-end duration. Stage time covers the bounded parallel Parse
+stage plus the one-item supervised canonical Reduce stage. Their reservations
+are sequential, so peak bytes are the larger live reservation, not their sum.
+COPY measures exactly the five table streams, including their bounded row
+encoding, but excludes validation, fencing, the ready transition, publication,
+and the verification queries.
 
 | Workers | Window | Stage p50 / p95 | COPY p50 / p95 | End-to-end p50 / p95 | Stage items/s | End-to-end items/s | Peak items | Peak reserved bytes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 2 | 130.00 / 145.17 | 67.01 / 71.30 | 220.24 / 238.57 | 1,969 | 1,162 | 2 | 49,536 |
-| 2 | 4 | 92.60 / 93.10 | 59.09 / 60.17 | 174.53 / 175.24 | 2,764 | 1,467 | 4 | 97,536 |
-| 4 | 8 | 61.13 / 63.38 | 56.71 / 66.18 | 143.87 / 152.31 | 4,188 | 1,779 | 8 | 193,536 |
-| 8 | 16 | 39.34 / 45.48 | 54.37 / 56.17 | 120.60 / 124.78 | 6,507 | 2,123 | 16 | 385,536 |
-| 16 | 32 | 28.40 / 32.56 | 54.70 / 65.80 | 108.98 / 115.62 | 9,015 | 2,349 | 32 | 769,536 |
+| 1 | 2 | 150.98 / 152.60 | 66.90 / 77.91 | 240.11 / 251.22 | 1,696 | 1,066 | 2 | 268,435,456 |
+| 2 | 4 | 99.14 / 100.14 | 62.53 / 69.96 | 182.56 / 191.73 | 2,582 | 1,402 | 4 | 268,435,456 |
+| 4 | 8 | 68.85 / 70.26 | 59.74 / 66.80 | 149.26 / 156.19 | 3,718 | 1,715 | 8 | 268,435,456 |
+| 8 | 16 | 52.01 / 54.58 | 57.33 / 57.66 | 130.72 / 131.34 | 4,922 | 1,958 | 16 | 268,435,456 |
+| 16 | 32 | 37.91 / 39.59 | 58.05 / 62.26 | 116.38 / 125.13 | 6,754 | 2,200 | 32 | 268,435,456 |
 
-The CPU stage scaled by 4.58 times from 1 to 16 workers. End-to-end throughput
-scaled by 2.02 times because COPY and publication become the fixed floor. The
-16-worker row improved median end-to-end time by 9.6% over 8 workers while
-doubling the bounded reservation window.
+The supervised Parse-plus-Reduce stage scaled by 3.98 times from 1 to 16 workers. End-to-end throughput
+scaled by 2.06 times because canonical validation, COPY, and publication become
+the fixed floor. The 16-worker row improved median end-to-end time by 11.0% over
+8 workers while doubling the bounded reservation window. The real-corpus run
+still determines the production default.
 
 ## Initial scheduler decision
 
 Use up to 16 parse/extract workers, capped by available parallelism, with one
 queued envelope per active worker. Keep the supervisor's byte budget as the
-hard admission authority, so larger real AST/fact payloads backpressure before
-the item window fills. COPY remains one retained database task; independently
+hard admission authority. The synthetic harness reserves the full 256 MiB
+canonical-validation working ceiling during its supervised Reduce item, while
+larger real AST/fact payloads backpressure in Parse before the item window fills.
+COPY remains one retained database task; independently
 streaming destructive/terminal work from workers is still forbidden.
 
 This is an initial scheduler cap, not a universal performance promise. The

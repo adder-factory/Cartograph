@@ -10,7 +10,10 @@ use crate::{CartographDatabase, CheckStatus, probe_capabilities};
 
 const INITIAL_SCHEMA_VERSION: i64 = 1;
 const OPERATION_LEASES_SCHEMA_VERSION: i64 = 2;
-const LATEST_SCHEMA_VERSION: i64 = OPERATION_LEASES_SCHEMA_VERSION;
+const COMPLETE_EDGE_KINDS_SCHEMA_VERSION: i64 = 3;
+const REFERENCE_EVIDENCE_SCHEMA_VERSION: i64 = 4;
+const DIGEST_VERSION_SCHEMA_VERSION: i64 = 5;
+const LATEST_SCHEMA_VERSION: i64 = DIGEST_VERSION_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 struct Migration {
@@ -228,7 +231,74 @@ const OPERATION_LEASES_SCHEMA: Migration = Migration {
     ],
 };
 
-const MIGRATIONS: [&Migration; 2] = [&INITIAL_SCHEMA, &OPERATION_LEASES_SCHEMA];
+const COMPLETE_EDGE_KINDS_SCHEMA: Migration = Migration {
+    version: COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
+    name: "complete_structural_edge_kinds",
+    statements: &[r#"ALTER TABLE {schema}."edges"
+            DROP CONSTRAINT "edges_edge_kind_check",
+            ADD CONSTRAINT "edges_edge_kind_check"
+            CHECK (edge_kind IN (
+                'calls', 'imports', 'references', 'implements', 'extends', 'tests',
+                'type_of', 'returns', 'instantiates', 'overrides', 'decorates',
+                'field_access', 'def_use', 'exports', 'contains'
+            ))"#],
+};
+
+const REFERENCE_EVIDENCE_SCHEMA: Migration = Migration {
+    version: REFERENCE_EVIDENCE_SCHEMA_VERSION,
+    name: "persist_unresolved_reference_evidence",
+    statements: &[
+        r#"ALTER TABLE {schema}."references"
+            ADD COLUMN owner_symbol_id uuid,
+            ADD COLUMN reference_name text NOT NULL DEFAULT '<legacy-unavailable>'
+                CHECK (length(reference_name) BETWEEN 1 AND 4096),
+            ADD COLUMN resolution_provenance text NOT NULL DEFAULT 'legacy-unavailable'
+                CHECK (length(resolution_provenance) BETWEEN 1 AND 256),
+            ADD CONSTRAINT references_owner_symbol_fk
+                FOREIGN KEY (project_id, generation_id, owner_symbol_id)
+                REFERENCES {schema}."symbols"(project_id, generation_id, symbol_id)
+                ON DELETE CASCADE"#,
+        r#"ALTER TABLE {schema}."references"
+            ALTER COLUMN reference_name DROP DEFAULT,
+            ALTER COLUMN resolution_provenance DROP DEFAULT"#,
+        r#"CREATE INDEX references_owner_idx
+            ON {schema}."references" (project_id, generation_id, owner_symbol_id)
+            WHERE owner_symbol_id IS NOT NULL"#,
+    ],
+};
+
+const DIGEST_VERSION_SCHEMA: Migration = Migration {
+    version: DIGEST_VERSION_SCHEMA_VERSION,
+    name: "version_logical_generation_digests",
+    statements: &[
+        r#"ALTER TABLE {schema}."index_generations"
+            ADD COLUMN content_digest_version smallint"#,
+        r#"UPDATE {schema}."index_generations"
+            SET content_digest_version = 1
+            WHERE content_digest IS NOT NULL"#,
+        r#"ALTER TABLE {schema}."index_generations"
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2)),
+            ADD CONSTRAINT index_generations_digest_pair_check
+                CHECK ((content_digest IS NULL) = (content_digest_version IS NULL))"#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 5] = [
+    &INITIAL_SCHEMA,
+    &OPERATION_LEASES_SCHEMA,
+    &COMPLETE_EDGE_KINDS_SCHEMA,
+    &REFERENCE_EVIDENCE_SCHEMA,
+    &DIGEST_VERSION_SCHEMA,
+];
+
+#[cfg(test)]
+pub(crate) fn expected_migration_versions() -> Vec<i64> {
+    MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect()
+}
 
 /// Result of applying the append-only schema migration ledger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -502,7 +572,17 @@ fn migration_checksum(migration: &Migration) -> String {
 mod tests {
     use super::*;
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 2] = [
+    const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
+    const CHECKSUM_COMPARISON_WINDOW: usize = 2;
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 5] = [
+        INITIAL_SCHEMA_VERSION,
+        OPERATION_LEASES_SCHEMA_VERSION,
+        COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
+        REFERENCE_EVIDENCE_SCHEMA_VERSION,
+        DIGEST_VERSION_SCHEMA_VERSION,
+    ];
+
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 5] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -510,6 +590,18 @@ mod tests {
         (
             2,
             "083e31b8263939c8c1c63a9d5898a51a1ff09f28a849d9b77cb09963e89ea7ef",
+        ),
+        (
+            3,
+            "ffc733927236a877a389a03da4c784d27d09898e657b7558d6da39f3eba01d5d",
+        ),
+        (
+            4,
+            "862554bdb310e3d7465fd4b54e2163e43279711f6eab21b46f2f6c7fc05cd532",
+        ),
+        (
+            5,
+            "30c3544a771e12864cc4cc12d9ab4600237b1262f3cd3f50e499e8aac9084ae2",
         ),
     ];
 
@@ -525,7 +617,10 @@ mod tests {
             migration_checksum(&INITIAL_SCHEMA),
             migration_checksum(&changed)
         );
-        assert_eq!(migration_checksum(&INITIAL_SCHEMA).len(), 64);
+        assert_eq!(
+            migration_checksum(&INITIAL_SCHEMA).len(),
+            MIGRATION_CHECKSUM_HEX_LENGTH
+        );
     }
 
     #[test]
@@ -539,11 +634,19 @@ mod tests {
             .map(|migration| migration_checksum(migration))
             .collect::<Vec<_>>();
 
-        assert_eq!(versions, vec![1, 2]);
-        assert_eq!(checksums.len(), 2);
-        assert!(checksums.iter().all(|checksum| checksum.len() == 64));
-        assert_ne!(checksums[0], checksums[1]);
-        assert_eq!(LATEST_SCHEMA_VERSION, 2);
+        assert_eq!(versions, EXPECTED_MIGRATION_VERSIONS);
+        assert_eq!(checksums.len(), MIGRATIONS.len());
+        assert!(
+            checksums
+                .iter()
+                .all(|checksum| checksum.len() == MIGRATION_CHECKSUM_HEX_LENGTH)
+        );
+        assert!(
+            checksums
+                .windows(CHECKSUM_COMPARISON_WINDOW)
+                .all(|pair| pair[0] != pair[1])
+        );
+        assert_eq!(LATEST_SCHEMA_VERSION, DIGEST_VERSION_SCHEMA_VERSION);
     }
 
     #[test]

@@ -3,12 +3,21 @@ use cartograph_domain::ContentDigest;
 
 use super::model::ValidatedFactTables;
 
-const DIGEST_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v1";
+const DIGEST_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v2";
 
-pub(super) fn logical_digest(facts: &ValidatedFactTables) -> ContentDigest {
+pub(super) fn logical_digest<Cancel>(
+    facts: &ValidatedFactTables,
+    mut cancelled: Cancel,
+) -> Result<ContentDigest, ()>
+where
+    Cancel: FnMut() -> bool,
+{
     let mut digest = CanonicalDigest::new();
     digest.section("files", facts.files.len());
     for file in &facts.files {
+        if cancelled() {
+            return Err(());
+        }
         digest.text(file.file_id.as_str());
         digest.text(&file.normalized_path);
         digest.text(&file.language);
@@ -18,6 +27,9 @@ pub(super) fn logical_digest(facts: &ValidatedFactTables) -> ContentDigest {
     }
     digest.section("symbols", facts.symbols.len());
     for symbol in &facts.symbols {
+        if cancelled() {
+            return Err(());
+        }
         digest.text(symbol.symbol_id.as_str());
         digest.text(symbol.file_id.as_str());
         digest.text(&symbol.symbol_kind);
@@ -31,6 +43,9 @@ pub(super) fn logical_digest(facts: &ValidatedFactTables) -> ContentDigest {
     }
     digest.section("edges", facts.edges.len());
     for edge in &facts.edges {
+        if cancelled() {
+            return Err(());
+        }
         digest.text(edge.source_symbol_id.as_str());
         digest.text(edge.target_symbol_id.as_str());
         digest.text(edge.kind.as_str());
@@ -39,15 +54,24 @@ pub(super) fn logical_digest(facts: &ValidatedFactTables) -> ContentDigest {
     }
     digest.section("references", facts.references.len());
     for reference in &facts.references {
+        if cancelled() {
+            return Err(());
+        }
         digest.text(reference.file_id.as_str());
+        digest.optional_text(reference.owner_symbol_id.as_ref().map(|id| id.as_str()));
         digest.optional_text(reference.target_symbol_id.as_ref().map(|id| id.as_str()));
+        digest.text(&reference.reference_name);
         digest.text(&reference.reference_kind);
         digest.u64(reference.start_byte);
         digest.u64(reference.end_byte);
         digest.u32(reference.confidence.to_bits());
+        digest.text(&reference.resolution_provenance);
     }
     digest.section("search_documents", facts.documents.len());
     for document in &facts.documents {
+        if cancelled() {
+            return Err(());
+        }
         digest.text(document.document_id.as_str());
         digest.optional_text(document.file_id.as_ref().map(|id| id.as_str()));
         digest.optional_text(document.symbol_id.as_ref().map(|id| id.as_str()));
@@ -59,7 +83,11 @@ pub(super) fn logical_digest(facts: &ValidatedFactTables) -> ContentDigest {
         digest.text(&document.natural_text);
         digest.text(&document.metadata_json);
     }
-    digest.finish()
+    if cancelled() {
+        Err(())
+    } else {
+        Ok(digest.finish())
+    }
 }
 
 struct CanonicalDigest {

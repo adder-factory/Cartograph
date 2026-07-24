@@ -7,9 +7,11 @@ use std::{
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CartographDatabase, LeaseError, LeaseOwner, LeaseRequest, LeaseTarget, MigrationError,
-    NewProject,
+    NewProject, RecoverableGeneration,
 };
-use cartograph_domain::{ContentDigest, ProjectId, ProjectOperation};
+use cartograph_domain::{
+    ContentDigest, GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation,
+};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -19,7 +21,31 @@ const OWNER_ONE_START: &str = "boot-a:process-start-100";
 const OWNER_TWO_START: &str = "boot-a:process-start-200";
 const LEASE_DURATION: Duration = Duration::from_secs(30);
 const LEASE_DURATION_MILLIS: i64 = 30_000;
-const EXPECTED_MIGRATIONS: [i64; 2] = [1, 2];
+const V1_PROJECT_ID: &str = "11111111-1111-4111-8111-111111111111";
+const V1_GENERATION_ID: &str = "22222222-2222-4222-8222-222222222222";
+const V1_FILE_ID: &str = "33333333-3333-4333-8333-333333333333";
+const V1_SYMBOL_ID: &str = "44444444-4444-4444-8444-444444444444";
+const V1_HISTORICAL_DIGEST: &str =
+    "5555555555555555555555555555555555555555555555555555555555555555";
+const INITIAL_MIGRATION_VERSION: i64 = 1;
+const OPERATION_LEASES_MIGRATION_VERSION: i64 = 2;
+const COMPLETE_EDGE_KINDS_MIGRATION_VERSION: i64 = 3;
+const REFERENCE_EVIDENCE_MIGRATION_VERSION: i64 = 4;
+const LATEST_MIGRATION_VERSION: i64 = 5;
+const LATER_MIGRATION_COUNT: u64 = 4;
+const EXPECTED_MIGRATIONS: [i64; 5] = [
+    INITIAL_MIGRATION_VERSION,
+    OPERATION_LEASES_MIGRATION_VERSION,
+    COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
+    REFERENCE_EVIDENCE_MIGRATION_VERSION,
+    LATEST_MIGRATION_VERSION,
+];
+const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 4] = [
+    OPERATION_LEASES_MIGRATION_VERSION,
+    COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
+    REFERENCE_EVIDENCE_MIGRATION_VERSION,
+    LATEST_MIGRATION_VERSION,
+];
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -32,7 +58,7 @@ async fn leases_are_exclusive_observable_recoverable_and_database_clock_driven()
         Err(error) => panic!("lease schema migration failed: {error}"),
     };
     assert_eq!(report.applied_versions, EXPECTED_MIGRATIONS);
-    assert_v1_to_v2_upgrade(&database, &pool, &schema).await;
+    assert_v1_to_latest_upgrade(&database, &pool, &schema).await;
     let project = register_project(&database).await;
     let fixture = LeaseFixture {
         database: &database,
@@ -149,7 +175,7 @@ async fn assert_heartbeat_renewed(
     assert!(matches!(renewed, Ok(true)));
 }
 
-async fn assert_v1_to_v2_upgrade(
+async fn assert_v1_to_latest_upgrade(
     database: &CartographDatabase,
     pool: &sqlx_postgres::PgPool,
     schema: &str,
@@ -158,20 +184,150 @@ async fn assert_v1_to_v2_upgrade(
     if let Err(error) = query(AssertSqlSafe(drop_leases)).execute(pool).await {
         panic!("could not create the v1 upgrade fixture: {error}");
     }
-    let delete_v2 = format!(r#"DELETE FROM "{schema}"."schema_migrations" WHERE version = $1"#);
-    let deleted = query(AssertSqlSafe(delete_v2))
-        .bind(2_i64)
+    let drop_digest_version = format!(
+        r#"ALTER TABLE "{schema}"."index_generations"
+            DROP COLUMN content_digest_version"#
+    );
+    if let Err(error) = query(AssertSqlSafe(drop_digest_version))
+        .execute(pool)
+        .await
+    {
+        panic!("could not remove the digest-version column: {error}");
+    }
+    let drop_reference_evidence = format!(
+        r#"ALTER TABLE "{schema}"."references"
+            DROP COLUMN owner_symbol_id,
+            DROP COLUMN reference_name,
+            DROP COLUMN resolution_provenance"#
+    );
+    if let Err(error) = query(AssertSqlSafe(drop_reference_evidence))
+        .execute(pool)
+        .await
+    {
+        panic!("could not remove later reference evidence columns: {error}");
+    }
+    let delete_later = format!(r#"DELETE FROM "{schema}"."schema_migrations" WHERE version >= $1"#);
+    let deleted = query(AssertSqlSafe(delete_later))
+        .bind(OPERATION_LEASES_MIGRATION_VERSION)
         .execute(pool)
         .await;
-    assert!(matches!(deleted, Ok(result) if result.rows_affected() == 1));
+    assert!(matches!(deleted, Ok(result) if result.rows_affected() == LATER_MIGRATION_COUNT));
+    insert_v1_reference_fixture(pool, schema).await;
 
     assert!(matches!(
         database.migrate().await,
-        Ok(report) if report.applied_versions == [2] && report.current_version == 2
+        Ok(report)
+            if report.applied_versions == EXPECTED_V1_UPGRADE_MIGRATIONS
+                && report.current_version == LATEST_MIGRATION_VERSION
     ));
+    assert_upgraded_v1_reference_fixture(database, pool, schema).await;
     assert!(matches!(
         database.migrate().await,
-        Ok(report) if report.applied_versions.is_empty() && report.current_version == 2
+        Ok(report)
+            if report.applied_versions.is_empty()
+                && report.current_version == LATEST_MIGRATION_VERSION
+    ));
+}
+
+async fn insert_v1_reference_fixture(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(
+            r#"INSERT INTO "{schema}"."projects"
+                (project_id, root_identity, repository_fingerprint, next_generation_sequence)
+                VALUES (CAST('{V1_PROJECT_ID}' AS uuid), 'v1-reference-fixture',
+                    '{PROJECT_FINGERPRINT}', 2)"#
+        ),
+        format!(
+            r#"INSERT INTO "{schema}"."index_generations"
+                (project_id, generation_id, generation_sequence, source_revision, state,
+                 worker_count, content_digest, ready_at)
+                VALUES (CAST('{V1_PROJECT_ID}' AS uuid), CAST('{V1_GENERATION_ID}' AS uuid), 1,
+                    'v1-reference-revision', 'ready', 1, '{V1_HISTORICAL_DIGEST}',
+                    clock_timestamp())"#
+        ),
+        format!(
+            r#"INSERT INTO "{schema}"."files"
+                (project_id, generation_id, file_id, normalized_path, language, content_hash,
+                 byte_size, parse_status)
+                VALUES (CAST('{V1_PROJECT_ID}' AS uuid), CAST('{V1_GENERATION_ID}' AS uuid),
+                    CAST('{V1_FILE_ID}' AS uuid), 'src/v1.ts', 'typescript',
+                    '{PROJECT_FINGERPRINT}', 10, 'parsed')"#
+        ),
+        format!(
+            r#"INSERT INTO "{schema}"."symbols"
+                (project_id, generation_id, symbol_id, file_id, symbol_kind, qualified_name,
+                 signature, start_byte, end_byte, start_line, end_line, structural_digest)
+                VALUES (CAST('{V1_PROJECT_ID}' AS uuid), CAST('{V1_GENERATION_ID}' AS uuid),
+                    CAST('{V1_SYMBOL_ID}' AS uuid), CAST('{V1_FILE_ID}' AS uuid), 'function',
+                    'legacy', 'function legacy()', 0, 10, 1, 1, '{PROJECT_FINGERPRINT}')"#
+        ),
+        format!(
+            r#"INSERT INTO "{schema}"."references"
+                (project_id, generation_id, file_id, target_symbol_id, reference_kind,
+                 start_byte, end_byte, confidence)
+                VALUES (CAST('{V1_PROJECT_ID}' AS uuid), CAST('{V1_GENERATION_ID}' AS uuid),
+                    CAST('{V1_FILE_ID}' AS uuid), CAST('{V1_SYMBOL_ID}' AS uuid), 'calls',
+                    0, 6, 1.0)"#
+        ),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not populate the v1 reference fixture: {error}");
+        }
+    }
+}
+
+async fn assert_upgraded_v1_reference_fixture(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+) {
+    let statement = format!(
+        r#"SELECT generations.content_digest, generations.content_digest_version,
+                   reference_rows.reference_name, reference_rows.resolution_provenance
+            FROM "{schema}"."index_generations" AS generations
+            JOIN "{schema}"."references" AS reference_rows
+              ON reference_rows.project_id = generations.project_id
+             AND reference_rows.generation_id = generations.generation_id
+            WHERE generations.generation_id = CAST($1 AS uuid)"#
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(V1_GENERATION_ID)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not inspect the upgraded v1 fixture: {error}"));
+    assert_eq!(
+        row.try_get::<String, _>("content_digest").ok().as_deref(),
+        Some(V1_HISTORICAL_DIGEST)
+    );
+    assert!(matches!(
+        row.try_get::<i16, _>("content_digest_version"),
+        Ok(1)
+    ));
+    assert_eq!(
+        row.try_get::<String, _>("reference_name").ok().as_deref(),
+        Some("<legacy-unavailable>")
+    );
+    assert_eq!(
+        row.try_get::<String, _>("resolution_provenance")
+            .ok()
+            .as_deref(),
+        Some("legacy-unavailable")
+    );
+
+    let project = ProjectId::parse(V1_PROJECT_ID)
+        .unwrap_or_else(|error| panic!("v1 project ID was invalid: {error}"));
+    let generation = GenerationId::parse(V1_GENERATION_ID)
+        .unwrap_or_else(|error| panic!("v1 generation ID was invalid: {error}"));
+    let recovered = database
+        .recover_generation(&project, &generation)
+        .await
+        .unwrap_or_else(|error| panic!("v1 ready generation recovery failed: {error}"));
+    assert!(matches!(
+        recovered,
+        Some(RecoverableGeneration::Ready(ready))
+            if ready.content_digest().as_str() == V1_HISTORICAL_DIGEST
+                && ready.digest_version() == GenerationDigestVersion::V1
     ));
 }
 
@@ -182,15 +338,15 @@ async fn assert_ledger_gap_is_refused(
 ) {
     let delete_v1 = format!(r#"DELETE FROM "{schema}"."schema_migrations" WHERE version = $1"#);
     let deleted = query(AssertSqlSafe(delete_v1))
-        .bind(1_i64)
+        .bind(INITIAL_MIGRATION_VERSION)
         .execute(pool)
         .await;
     assert!(matches!(deleted, Ok(result) if result.rows_affected() == 1));
     assert!(matches!(
         database.migrate().await,
         Err(MigrationError::LedgerGap {
-            missing_version: 1,
-            recorded_version: 2
+            missing_version: INITIAL_MIGRATION_VERSION,
+            recorded_version: LATEST_MIGRATION_VERSION,
         })
     ));
 }

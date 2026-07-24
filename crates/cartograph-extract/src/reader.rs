@@ -142,6 +142,10 @@ impl SourceRoot {
         }
         Ok(target)
     }
+
+    pub(crate) fn canonical_path(&self) -> &Path {
+        self.canonical.as_path()
+    }
 }
 
 impl fmt::Debug for SourceRoot {

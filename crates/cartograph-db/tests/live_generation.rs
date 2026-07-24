@@ -6,10 +6,12 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, CurrentGeneration, FailGenerationError, FailedGeneration,
-    GenerationContents, GenerationFacts, LeaseOwner, LeaseRequest, LeaseTarget, MigrationError,
+    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, FailGenerationError,
+    FailedGeneration, GenerationContents, GenerationFacts, GenerationValidationError,
+    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, MigrationError,
     NewGeneration, NewProject, PrepareGenerationError, ProjectLease, PublishGenerationError,
     ReadyGeneration, RecoverableGeneration, SearchDocumentInput, SearchQuery, StorageError,
+    validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, GenerationId, GenerationState, ProjectId,
@@ -29,8 +31,17 @@ const DOCUMENT_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const DOCUMENT_THREE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const DOCUMENT_FOUR: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const INITIAL_MIGRATION_VERSION: i64 = 1;
-const LATEST_MIGRATION_VERSION: i64 = 2;
-const EXPECTED_MIGRATIONS: [i64; 2] = [INITIAL_MIGRATION_VERSION, LATEST_MIGRATION_VERSION];
+const OPERATION_LEASES_MIGRATION_VERSION: i64 = 2;
+const COMPLETE_EDGE_KINDS_MIGRATION_VERSION: i64 = 3;
+const REFERENCE_EVIDENCE_MIGRATION_VERSION: i64 = 4;
+const LATEST_MIGRATION_VERSION: i64 = 5;
+const EXPECTED_MIGRATIONS: [i64; 5] = [
+    INITIAL_MIGRATION_VERSION,
+    OPERATION_LEASES_MIGRATION_VERSION,
+    COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
+    REFERENCE_EVIDENCE_MIGRATION_VERSION,
+    LATEST_MIGRATION_VERSION,
+];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
 const RECOVERY_WORKERS: u16 = 2;
@@ -38,6 +49,8 @@ const SEARCH_LIMIT: u16 = 10;
 const TEST_LEASE_DURATION: Duration = Duration::from_secs(30);
 const LOCK_ORDER_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCK_OBSERVATION_ATTEMPTS: usize = 100;
+const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
 const LOCK_OBSERVATION_INTERVAL: Duration = Duration::from_millis(20);
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -126,7 +139,7 @@ async fn stale_fences_cannot_prepare_or_publish_after_exact_token_takeover() {
         .prepare_generation(
             GenerationContents::new(
                 staged,
-                GenerationFacts {
+                canonical(GenerationFacts {
                     documents: vec![document(DocumentFixture {
                         id: DOCUMENT_ONE,
                         path: "src/stale_copy.rs",
@@ -134,7 +147,7 @@ async fn stale_fences_cannot_prepare_or_publish_after_exact_token_takeover() {
                         code: "fn stale_copy_probe() {}",
                     })],
                     ..GenerationFacts::default()
-                },
+                }),
             ),
             &stale_prepare_lease.fence(),
         )
@@ -147,7 +160,7 @@ async fn stale_fences_cannot_prepare_or_publish_after_exact_token_takeover() {
     };
     let ready = match database
         .prepare_generation(
-            GenerationContents::new(staged, GenerationFacts::default()),
+            GenerationContents::new(staged, canonical(GenerationFacts::default())),
             &prepare_lease.fence(),
         )
         .await
@@ -222,7 +235,7 @@ async fn concurrent_prepare_and_cleanup_share_one_pre_copy_lock_order() {
     let prepare = prepare_database.prepare_generation(
         GenerationContents::new(
             staged,
-            GenerationFacts {
+            canonical(GenerationFacts {
                 documents: vec![document(DocumentFixture {
                     id: DOCUMENT_ONE,
                     path: "src/lock_order.rs",
@@ -230,7 +243,7 @@ async fn concurrent_prepare_and_cleanup_share_one_pre_copy_lock_order() {
                     code: "fn lock_order_probe() {}",
                 })],
                 ..GenerationFacts::default()
-            },
+            }),
         ),
         &prepare_fence,
     );
@@ -527,27 +540,18 @@ async fn prepare_rollback_retry(
     });
     let mut conflicting = duplicate.clone();
     conflicting.code = "fn decode_json_payload() { unreachable!() }".to_owned();
-    let failed = prepare_fenced(
-        database,
-        staged,
-        GenerationFacts {
-            documents: vec![duplicate.clone(), conflicting],
-            ..GenerationFacts::default()
-        },
-    )
-    .await;
-    let staged = match failed {
-        Err(error) => {
-            assert!(matches!(
-                error.error(),
-                StorageError::InvalidInput {
-                    field: "duplicate_document_id"
-                }
-            ));
-            error.into_parts().0
-        }
-        Ok(_) => panic!("duplicate search-document IDs unexpectedly committed"),
-    };
+    let invalid = validate_for_test(GenerationFacts {
+        documents: vec![duplicate.clone(), conflicting],
+        ..GenerationFacts::default()
+    });
+    assert!(matches!(
+        invalid,
+        Err(GenerationValidationError::Storage(
+            StorageError::InvalidInput {
+                field: "duplicate_document_id"
+            }
+        ))
+    ));
     assert_state(
         database,
         StateExpectation::new(project, &generation_id, GenerationState::Staging),
@@ -673,27 +677,18 @@ async fn assert_validation_token_return(database: &CartographDatabase, project: 
         code: "",
     });
     invalid.natural_text.clear();
-    let staged = match prepare_fenced(
-        database,
-        staged,
-        GenerationFacts {
-            documents: vec![invalid],
-            ..GenerationFacts::default()
-        },
-    )
-    .await
-    {
-        Err(error) => {
-            assert!(matches!(
-                error.error(),
-                StorageError::InvalidInput {
-                    field: "searchable_text"
-                }
-            ));
-            error.into_parts().0
-        }
-        Ok(_) => panic!("empty search document unexpectedly became ready"),
-    };
+    let invalid = validate_for_test(GenerationFacts {
+        documents: vec![invalid],
+        ..GenerationFacts::default()
+    });
+    assert!(matches!(
+        invalid,
+        Err(GenerationValidationError::Storage(
+            StorageError::InvalidInput {
+                field: "searchable_text"
+            }
+        ))
+    ));
     assert!(
         fail_fenced(database, RecoverableGeneration::Staged(staged))
             .await
@@ -774,10 +769,25 @@ async fn prepare_fenced(
         acquire_generation_lease(database, staged.project_id(), staged.generation_id()).await;
     let fence = lease.fence();
     let result = database
-        .prepare_generation(GenerationContents::new(staged, facts), &fence)
+        .prepare_generation(GenerationContents::new(staged, canonical(facts)), &fence)
         .await;
     assert!(database.release_lease(&lease).await.is_ok());
     result
+}
+
+fn canonical(facts: GenerationFacts) -> CanonicalGenerationFacts {
+    validate_for_test(facts)
+        .unwrap_or_else(|error| panic!("generation fixture was invalid: {error}"))
+}
+
+fn validate_for_test(
+    facts: GenerationFacts,
+) -> Result<CanonicalGenerationFacts, GenerationValidationError> {
+    let limits = GenerationValidationLimits::new(
+        TEST_VALIDATION_OUTPUT_BYTES,
+        TEST_VALIDATION_WORKING_BYTES,
+    )?;
+    validate_generation_facts(facts, limits, || false).map(|(facts, _)| facts)
 }
 
 async fn publish_fenced(

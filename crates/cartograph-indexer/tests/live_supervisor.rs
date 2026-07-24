@@ -12,18 +12,22 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, GenerationContents, GenerationFacts, LeaseOwner, LeaseRequest, LeaseTarget,
-    NewGeneration, NewProject, ReadyGeneration, SearchDocumentInput,
+    CanonicalGenerationFacts, CartographDatabase, GenerationContents, GenerationFacts,
+    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, NewGeneration, NewProject,
+    ReadyGeneration, SearchDocumentInput, SearchQuery, validate_generation_facts,
 };
 use cartograph_domain::{
-    ContentDigest, DocumentId, DocumentKind, GenerationId, GenerationState, ProjectId,
+    ContentDigest, DocumentId, DocumentKind, EdgeKind, GenerationId, GenerationState, ProjectId,
     ProjectOperation,
 };
+use cartograph_extract::{DiscoveryLimits, SourceLimits, SourceRoot};
 use cartograph_indexer::{
-    CancellationReason, IndexerSupervisor, PipelineFailure, PipelineStage, StageCapacity,
-    StageDeadlinePolicy, StageEnvelope, StageExecution, StageFold, StageItemBudget,
-    StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageSequence, StageWorkItem,
-    StageWorkload, SupervisorConfig, SupervisorError, SupervisorRequest, SupervisorState,
+    CancellationReason, IndexerSupervisor, NativePipelineConfig, NativePipelineDeadlines,
+    NativePipelineLimits, NativePipelineParallelism, NativeRetainedLimits, PipelineFailure,
+    PipelineStage, StageCapacity, StageDeadlinePolicy, StageEnvelope, StageExecution, StageFold,
+    StageItemBudget, StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageSequence,
+    StageWorkItem, StageWorkload, SupervisorConfig, SupervisorError, SupervisorRequest,
+    SupervisorState, build_native_generation,
 };
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use tokio::sync::oneshot;
@@ -96,6 +100,16 @@ const LONG_COPY_CODE_BYTES: usize = 2 * 1_024 * 1_024;
 const ORDERED_STAGE_ITEMS: u64 = 8;
 const ORDERED_STAGE_WORKERS: usize = 4;
 const ORDERED_STAGE_ITEM_BYTES: u64 = 16;
+const NATIVE_MAX_FILES: usize = 64;
+const NATIVE_MAX_PATH_BYTES: u64 = 1024 * 1024;
+const NATIVE_MAX_SOURCE_BYTES: usize = 1024 * 1024;
+const NATIVE_MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+const NATIVE_MAX_GENERATION_BYTES: u64 = 32 * 1024 * 1024;
+const NATIVE_STAGE_TIMEOUT: Duration = Duration::from_secs(3);
+const NATIVE_EXPECTED_FILES: u64 = 2;
+const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 4;
+const NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES: u64 = 3;
+const NATIVE_SEARCH_LIMIT: u16 = 10;
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -133,7 +147,10 @@ async fn successful_supervision_renews_releases_and_requires_publication() {
                     .is_ok()
             );
             context
-                .prepare_generation(GenerationContents::new(staged, GenerationFacts::default()))
+                .prepare_generation(GenerationContents::new(
+                    staged,
+                    canonical(GenerationFacts::default()),
+                ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
         })
@@ -217,7 +234,10 @@ async fn bounded_parallel_stage_reduces_before_supervised_publication() {
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
             context
-                .prepare_generation(GenerationContents::new(staged, GenerationFacts::default()))
+                .prepare_generation(GenerationContents::new(
+                    staged,
+                    canonical(GenerationFacts::default()),
+                ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
         })
@@ -242,6 +262,183 @@ async fn bounded_parallel_stage_reduces_before_supervised_publication() {
     fixture.close().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
+    let directory = match tempfile::tempdir() {
+        Ok(directory) => directory,
+        Err(error) => panic!("could not create native pipeline fixture: {error}"),
+    };
+    assert!(std::fs::create_dir(directory.path().join(".git")).is_ok());
+    assert!(std::fs::create_dir_all(directory.path().join("src")).is_ok());
+    assert!(
+        std::fs::write(
+            directory.path().join("src/service.ts"),
+            "export interface Greeter {}\nexport class Service implements Greeter {\n  greet(): string { return format(); }\n}\n",
+        )
+        .is_ok()
+    );
+    assert!(
+        std::fs::write(
+            directory.path().join("src/build.ts"),
+            "export function build(): Service { return new Service(); }\n",
+        )
+        .is_ok()
+    );
+    let source_root = match SourceRoot::open(directory.path()) {
+        Ok(source_root) => source_root,
+        Err(error) => panic!("could not open native pipeline fixture: {error}"),
+    };
+    let pipeline = native_pipeline_config();
+    let fixture = open_fixture().await;
+    let staged = begin_generation(&fixture).await;
+    let generation_id = staged.generation_id().clone();
+    let target = target(&fixture.project, &generation_id);
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), boundary_config());
+    let current = supervisor
+        .run(
+            request_with_duration(target.clone(), BOUNDARY_LEASE_DURATION),
+            move |context| async move {
+                let native = build_native_generation(&context.stages(), source_root, pipeline)
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+                assert_eq!(native.report().discovered_files(), NATIVE_EXPECTED_FILES);
+                assert!(native.report().symbols() >= NATIVE_EXPECTED_MINIMUM_SYMBOLS);
+                assert!(
+                    native.report().resolved_references()
+                        >= NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES
+                );
+                let (facts, _) = native.into_parts();
+                context
+                    .progress()
+                    .begin_stage(PipelineStage::Copy)
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                context
+                    .prepare_generation(GenerationContents::new(staged, facts))
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+            },
+        )
+        .await;
+    let current = match current {
+        Ok(current) => current,
+        Err(error) => panic!("native pipeline failed before publication: {error}"),
+    };
+    assert_eq!(current.generation_id(), &generation_id);
+    assert_native_edge_kind(&fixture, &generation_id, EdgeKind::Instantiates).await;
+    assert_native_unresolved_reference(&fixture, &generation_id, "format").await;
+    let hits = match fixture
+        .database
+        .search_current_code(SearchQuery::new(
+            fixture.project.clone(),
+            "Service",
+            NATIVE_SEARCH_LIMIT,
+        ))
+        .await
+    {
+        Ok(hits) => hits,
+        Err(error) => panic!("native generation BM25 search failed: {error}"),
+    };
+    assert!(hits.iter().any(|hit| {
+        hit.generation_id() == &generation_id && hit.qualified_name().contains("Service")
+    }));
+    assert_eq!(
+        supervisor.status().await.state(),
+        SupervisorState::Completed
+    );
+    assert!(matches!(
+        fixture.database.lease_status(&target).await,
+        Ok(None)
+    ));
+
+    fixture.close().await;
+}
+
+async fn assert_native_unresolved_reference(
+    fixture: &DatabaseFixture,
+    generation_id: &GenerationId,
+    reference_name: &str,
+) {
+    let statement = format!(
+        r#"SELECT owner_symbol_id IS NOT NULL AS has_owner,
+                  target_symbol_id IS NULL AS unresolved,
+                  resolution_provenance
+            FROM "{schema}"."references"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND reference_name = $3"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(generation_id.as_str())
+        .bind(reference_name)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not inspect unresolved reference: {error}"));
+    assert!(row.try_get::<bool, _>("has_owner").unwrap_or(false));
+    assert!(row.try_get::<bool, _>("unresolved").unwrap_or(false));
+    assert!(matches!(
+        row.try_get::<String, _>("resolution_provenance"),
+        Ok(value) if value == "native-unresolved"
+    ));
+}
+
+async fn assert_native_edge_kind(
+    fixture: &DatabaseFixture,
+    generation_id: &GenerationId,
+    kind: EdgeKind,
+) {
+    let statement = format!(
+        r#"SELECT EXISTS (
+                SELECT 1 FROM "{schema}"."edges"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                  AND edge_kind = $3
+            ) AS present"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(generation_id.as_str())
+        .bind(kind.as_str())
+        .fetch_one(&fixture.pool)
+        .await;
+    assert!(matches!(row, Ok(row) if row.try_get::<bool, _>("present").unwrap_or(false)));
+}
+
+fn native_pipeline_config() -> NativePipelineConfig {
+    let discovery = match DiscoveryLimits::new(NATIVE_MAX_FILES, NATIVE_MAX_PATH_BYTES) {
+        Ok(discovery) => discovery,
+        Err(error) => panic!("native test discovery limits were invalid: {error}"),
+    };
+    let source = match SourceLimits::new(NATIVE_MAX_SOURCE_BYTES) {
+        Ok(source) => source,
+        Err(error) => panic!("native test source limits were invalid: {error}"),
+    };
+    let retained =
+        match NativeRetainedLimits::new(NATIVE_MAX_MANIFEST_BYTES, NATIVE_MAX_GENERATION_BYTES) {
+            Ok(retained) => retained,
+            Err(error) => panic!("native test retained limits were invalid: {error}"),
+        };
+    let limits = NativePipelineLimits::new(discovery, source, retained);
+    let capacity = StageCapacity::new(WORKER_COUNT.into(), WORKER_COUNT.into());
+    let parallelism = match NativePipelineParallelism::new(capacity, capacity) {
+        Ok(parallelism) => parallelism,
+        Err(error) => panic!("native test pipeline parallelism was invalid: {error}"),
+    };
+    let deadlines = match NativePipelineDeadlines::new(
+        NATIVE_STAGE_TIMEOUT,
+        NATIVE_STAGE_TIMEOUT,
+        STANDARD_CANCELLATION_GRACE,
+    ) {
+        Ok(deadlines) => deadlines,
+        Err(error) => panic!("native test pipeline deadlines were invalid: {error}"),
+    };
+    NativePipelineConfig::new(limits, parallelism, deadlines)
+}
+
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
 async fn large_payload_copy_uses_its_own_stage_deadline() {
@@ -261,10 +458,10 @@ async fn large_payload_copy_uses_its_own_stage_deadline() {
             context
                 .prepare_generation(GenerationContents::new(
                     staged,
-                    GenerationFacts {
+                    canonical(GenerationFacts {
                         documents: vec![large_copy_probe_document()],
                         ..GenerationFacts::default()
-                    },
+                    }),
                 ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
@@ -309,7 +506,7 @@ async fn recovered_ready_generation_still_publishes_through_supervisor_gate() {
     let ready = match fixture
         .database
         .prepare_generation(
-            GenerationContents::new(staged, GenerationFacts::default()),
+            GenerationContents::new(staged, canonical(GenerationFacts::default())),
             &staging_lease.fence(),
         )
         .await
@@ -372,7 +569,10 @@ async fn dropped_failed_child_blocks_publication_and_cleans_owned_generation() {
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
             context
-                .prepare_generation(GenerationContents::new(staged, GenerationFacts::default()))
+                .prepare_generation(GenerationContents::new(
+                    staged,
+                    canonical(GenerationFacts::default()),
+                ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
         })
@@ -416,10 +616,10 @@ async fn blocked_supervised_copy_rolls_back_backend_query_and_advisory_locks() {
             context
                 .prepare_generation(GenerationContents::new(
                     staged,
-                    GenerationFacts {
+                    canonical(GenerationFacts {
                         documents: vec![copy_probe_document()],
                         ..GenerationFacts::default()
-                    },
+                    }),
                 ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
@@ -486,10 +686,10 @@ async fn requested_cancellation_reaps_inflight_copy_before_external_unlock() {
                 context
                     .prepare_generation(GenerationContents::new(
                         staged,
-                        GenerationFacts {
+                        canonical(GenerationFacts {
                             documents: vec![copy_probe_document()],
                             ..GenerationFacts::default()
-                        },
+                        }),
                     ))
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
@@ -559,10 +759,10 @@ async fn aborting_public_run_reaps_inflight_copy_before_external_unlock() {
                 context
                     .prepare_generation(GenerationContents::new(
                         staged,
-                        GenerationFacts {
+                        canonical(GenerationFacts {
                             documents: vec![copy_probe_document()],
                             ..GenerationFacts::default()
-                        },
+                        }),
                     ))
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
@@ -620,10 +820,10 @@ async fn dropping_polled_run_outside_runtime_reaps_inflight_copy() {
                 context
                     .prepare_generation(GenerationContents::new(
                         staged,
-                        GenerationFacts {
+                        canonical(GenerationFacts {
                             documents: vec![copy_probe_document()],
                             ..GenerationFacts::default()
-                        },
+                        }),
                     ))
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
@@ -1053,7 +1253,10 @@ async fn publication_gate_rejects_late_cancellation_and_commits_once() {
         request_with_duration(request_target, BOUNDARY_LEASE_DURATION),
         move |context| async move {
             context
-                .prepare_generation(GenerationContents::new(staged, GenerationFacts::default()))
+                .prepare_generation(GenerationContents::new(
+                    staged,
+                    canonical(GenerationFacts::default()),
+                ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
         },
@@ -1100,7 +1303,10 @@ async fn timed_out_publication_reconciles_ready_state_retries_and_releases_atomi
     let current = supervisor
         .run(request(target.clone()), move |context| async move {
             context
-                .prepare_generation(GenerationContents::new(staged, GenerationFacts::default()))
+                .prepare_generation(GenerationContents::new(
+                    staged,
+                    canonical(GenerationFacts::default()),
+                ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
         })
@@ -1189,7 +1395,10 @@ async fn blocked_publication_is_aborted_reaped_and_leaves_no_active_query() {
         ABORT_RESULT_BOUND,
         supervisor.run(request(target.clone()), move |context| async move {
             context
-                .prepare_generation(GenerationContents::new(staged, GenerationFacts::default()))
+                .prepare_generation(GenerationContents::new(
+                    staged,
+                    canonical(GenerationFacts::default()),
+                ))
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
         }),
@@ -1419,10 +1628,10 @@ async fn heartbeat_uncertainty_reaps_concurrent_copy_before_returning() {
                 context
                     .prepare_generation(GenerationContents::new(
                         staged,
-                        GenerationFacts {
+                        canonical(GenerationFacts {
                             documents: vec![copy_probe_document()],
                             ..GenerationFacts::default()
-                        },
+                        }),
                     ))
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
@@ -2021,6 +2230,17 @@ fn copy_probe_document() -> SearchDocumentInput {
         natural_text: "supervised COPY cancellation probe".to_owned(),
         metadata: serde_json::json!({}),
     }
+}
+
+fn canonical(facts: GenerationFacts) -> CanonicalGenerationFacts {
+    let limits = GenerationValidationLimits::new(
+        NATIVE_MAX_GENERATION_BYTES,
+        NATIVE_MAX_GENERATION_BYTES.saturating_mul(4),
+    )
+    .unwrap_or_else(|error| panic!("supervisor validation limits were invalid: {error}"));
+    validate_generation_facts(facts, limits, || false)
+        .map(|(facts, _)| facts)
+        .unwrap_or_else(|error| panic!("supervisor fixture was invalid: {error}"))
 }
 
 fn large_copy_probe_document() -> SearchDocumentInput {

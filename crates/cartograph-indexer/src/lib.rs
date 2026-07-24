@@ -2,6 +2,7 @@
 
 mod config;
 mod native_extraction;
+mod native_pipeline;
 mod prepare_scope;
 mod progress;
 mod stage;
@@ -13,6 +14,11 @@ pub use native_extraction::{
     NativeExtractionConfigError, NativeExtractionObserver, NativeExtractionObserverError,
     NativeExtractionReport, NativeExtractionRequest, NativeExtractionResult,
     NativeExtractionStageConfig, NativeExtractionStageError, run_native_extraction_stage,
+};
+pub use native_pipeline::{
+    NativeGeneration, NativePipelineConfig, NativePipelineConfigError, NativePipelineDeadlines,
+    NativePipelineError, NativePipelineLimits, NativePipelineParallelism, NativePipelineReport,
+    NativeRetainedLimits, build_native_generation,
 };
 pub use prepare_scope::SupervisedPrepareError;
 pub use progress::{
