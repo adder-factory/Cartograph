@@ -1,0 +1,482 @@
+use std::{sync::Arc, time::Duration};
+
+use cartograph_db::{GenerationContents, ReadyGeneration};
+use serde::Serialize;
+use thiserror::Error;
+use tokio::{
+    sync::{Notify, RwLock, watch},
+    time::Instant,
+};
+
+use crate::{
+    ScopedTask, ScopedTaskError, SupervisedPrepareError, prepare_scope::PrepareScope,
+    task_scope::TaskScope,
+};
+
+/// Ordered stages in the v2 indexing and publication pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineStage {
+    /// Discover normalized project paths.
+    Discover,
+    /// Read and hash bounded source bytes.
+    Read,
+    /// Parse and extract file-local structural facts.
+    Parse,
+    /// Resolve cross-file symbols and references.
+    Resolve,
+    /// Canonically reduce unordered worker facts.
+    Reduce,
+    /// COPY the validated logical generation.
+    Copy,
+    /// Build relational/derived graph state.
+    RelationalMerge,
+    /// Maintain the ParadeDB BM25 index.
+    Bm25,
+    /// Generate and persist model-scoped vectors.
+    Vector,
+    /// Atomically publish the completed generation.
+    Publish,
+}
+
+/// Observable lifecycle for one one-shot supervisor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorState {
+    /// Constructed but not yet holding a lease.
+    Queued,
+    /// Lease-owned work is running and making bounded progress.
+    Active,
+    /// Cancellation was signalled and the grace period is active.
+    Cancelling,
+    /// Progress stalled or cooperative cancellation exceeded its grace period.
+    Wedged,
+    /// Work published successfully and released its exact lease token.
+    Completed,
+    /// Acquisition, work, durable cleanup, or release failed.
+    Failed,
+    /// Work cancelled cooperatively and owned cleanup completed.
+    Cancelled,
+}
+
+/// Stable reason the supervisor asked work to stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationReason {
+    /// A local caller explicitly requested cancellation.
+    Requested,
+    /// The whole-operation deadline elapsed.
+    OperationDeadline,
+    /// No stage or counter progress arrived before its deadline.
+    ProgressStalled,
+    /// PostgreSQL rejected the exact lease token after takeover/expiry.
+    LeaseLost,
+    /// A heartbeat request failed or exceeded its database deadline.
+    LeaseHeartbeatFailed,
+}
+
+/// Immutable status packet suitable for future CLI/MCP diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SupervisorStatus {
+    state: SupervisorState,
+    stage: Option<PipelineStage>,
+    completed_items: u64,
+    completed_bytes: u64,
+    heartbeat_count: u64,
+    progress_idle_millis: u64,
+    cancellation_reason: Option<CancellationReason>,
+    grace_exceeded: bool,
+}
+
+impl SupervisorStatus {
+    /// Current lifecycle state.
+    #[must_use]
+    pub const fn state(&self) -> SupervisorState {
+        self.state
+    }
+
+    /// Current or most recently entered pipeline stage.
+    #[must_use]
+    pub const fn stage(&self) -> Option<PipelineStage> {
+        self.stage
+    }
+
+    /// Monotonic completed-item counter.
+    #[must_use]
+    pub const fn completed_items(&self) -> u64 {
+        self.completed_items
+    }
+
+    /// Monotonic completed-byte counter.
+    #[must_use]
+    pub const fn completed_bytes(&self) -> u64 {
+        self.completed_bytes
+    }
+
+    /// Successful database-side ownership renewals.
+    #[must_use]
+    pub const fn heartbeat_count(&self) -> u64 {
+        self.heartbeat_count
+    }
+
+    /// Milliseconds since the latest stage/counter progress update.
+    #[must_use]
+    pub const fn progress_idle_millis(&self) -> u64 {
+        self.progress_idle_millis
+    }
+
+    /// Cancellation cause when cancellation has started or completed.
+    #[must_use]
+    pub const fn cancellation_reason(&self) -> Option<CancellationReason> {
+        self.cancellation_reason
+    }
+
+    /// Whether work ignored cancellation beyond the configured grace period.
+    #[must_use]
+    pub const fn grace_exceeded(&self) -> bool {
+        self.grace_exceeded
+    }
+}
+
+struct ProgressRecord {
+    status: SupervisorStatus,
+    last_progress: Instant,
+    started: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct SharedProgress {
+    record: Arc<RwLock<ProgressRecord>>,
+    notification: Arc<Notify>,
+}
+
+impl SharedProgress {
+    pub(crate) fn new() -> Self {
+        Self {
+            record: Arc::new(RwLock::new(ProgressRecord {
+                status: SupervisorStatus {
+                    state: SupervisorState::Queued,
+                    stage: None,
+                    completed_items: 0,
+                    completed_bytes: 0,
+                    heartbeat_count: 0,
+                    progress_idle_millis: 0,
+                    cancellation_reason: None,
+                    grace_exceeded: false,
+                },
+                last_progress: Instant::now(),
+                started: false,
+            })),
+            notification: Arc::new(Notify::new()),
+        }
+    }
+
+    pub(crate) async fn reserve(&self) -> bool {
+        let mut record = self.record.write().await;
+        if record.started {
+            false
+        } else {
+            record.started = true;
+            true
+        }
+    }
+
+    pub(crate) async fn status(&self) -> SupervisorStatus {
+        let record = self.record.read().await;
+        let mut status = record.status.clone();
+        status.progress_idle_millis = millis(record.last_progress.elapsed());
+        status
+    }
+
+    pub(crate) async fn mark_active(&self) {
+        let mut record = self.record.write().await;
+        record.status.state = SupervisorState::Active;
+        record.last_progress = Instant::now();
+        drop(record);
+        self.notification.notify_one();
+    }
+
+    pub(crate) async fn mark_heartbeat(&self) {
+        let mut record = self.record.write().await;
+        record.status.heartbeat_count = record.status.heartbeat_count.saturating_add(1);
+    }
+
+    pub(crate) async fn mark_cancelling(&self, reason: CancellationReason) {
+        let mut record = self.record.write().await;
+        record.status.state = if reason == CancellationReason::ProgressStalled {
+            SupervisorState::Wedged
+        } else {
+            SupervisorState::Cancelling
+        };
+        record.status.cancellation_reason = Some(reason);
+    }
+
+    pub(crate) async fn mark_completed(&self) {
+        let mut record = self.record.write().await;
+        record.status.state = SupervisorState::Completed;
+        record.status.cancellation_reason = None;
+        record.status.grace_exceeded = false;
+    }
+
+    pub(crate) async fn mark_failed(&self) {
+        let mut record = self.record.write().await;
+        record.status.state = SupervisorState::Failed;
+    }
+
+    pub(crate) async fn mark_cancelled(&self, reason: CancellationReason, grace_exceeded: bool) {
+        let mut record = self.record.write().await;
+        record.status.state = if reason == CancellationReason::ProgressStalled || grace_exceeded {
+            SupervisorState::Wedged
+        } else {
+            SupervisorState::Cancelled
+        };
+        record.status.cancellation_reason = Some(reason);
+        record.status.grace_exceeded = grace_exceeded;
+    }
+
+    pub(crate) async fn notified(&self) {
+        self.notification.notified().await;
+    }
+
+    pub(crate) async fn last_progress(&self) -> Instant {
+        self.record.read().await.last_progress
+    }
+
+    pub(crate) async fn begin_stage(&self, stage: PipelineStage) -> Result<(), ProgressError> {
+        let mut record = self.record.write().await;
+        if record.status.state != SupervisorState::Active {
+            return Err(ProgressError::NotActive);
+        }
+        if record.status.stage.is_some_and(|current| stage <= current) {
+            return Err(ProgressError::StageRegression);
+        }
+        record.status.stage = Some(stage);
+        record.last_progress = Instant::now();
+        drop(record);
+        self.notification.notify_one();
+        Ok(())
+    }
+
+    pub(crate) async fn advance(&self, items: u64, bytes: u64) -> Result<(), ProgressError> {
+        if items == 0 && bytes == 0 {
+            return Err(ProgressError::EmptyIncrement);
+        }
+        let mut record = self.record.write().await;
+        if record.status.state != SupervisorState::Active {
+            return Err(ProgressError::NotActive);
+        }
+        record.status.completed_items = record
+            .status
+            .completed_items
+            .checked_add(items)
+            .ok_or(ProgressError::CounterOverflow)?;
+        record.status.completed_bytes = record
+            .status
+            .completed_bytes
+            .checked_add(bytes)
+            .ok_or(ProgressError::CounterOverflow)?;
+        record.last_progress = Instant::now();
+        drop(record);
+        self.notification.notify_one();
+        Ok(())
+    }
+}
+
+/// Controlled progress reporting surface passed to pipeline work.
+#[derive(Clone)]
+pub struct ProgressReporter {
+    shared: SharedProgress,
+}
+
+impl ProgressReporter {
+    /// Enter the next strictly ordered stage and reset the progress watchdog.
+    pub async fn begin_stage(&self, stage: PipelineStage) -> Result<(), ProgressError> {
+        if stage == PipelineStage::Publish {
+            return Err(ProgressError::SupervisorOwnedStage);
+        }
+        self.shared.begin_stage(stage).await
+    }
+
+    /// Add nonzero monotonic item/byte progress and reset the watchdog.
+    pub async fn advance(&self, items: u64, bytes: u64) -> Result<(), ProgressError> {
+        self.shared.advance(items, bytes).await
+    }
+}
+
+/// Cooperative cancellation receiver inherited by every pipeline stage.
+#[derive(Clone)]
+pub struct CancellationSignal {
+    receiver: watch::Receiver<bool>,
+}
+
+impl CancellationSignal {
+    /// Whether cancellation has already been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.receiver.borrow()
+    }
+
+    /// Wait until cancellation is requested or the supervisor is dropped.
+    pub async fn cancelled(&mut self) {
+        while !*self.receiver.borrow_and_update() {
+            if self.receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Context inherited by the supervised indexing future.
+#[derive(Clone)]
+pub struct SupervisorContext {
+    progress: ProgressReporter,
+    cancellation: CancellationSignal,
+    tasks: TaskScope,
+    prepares: PrepareScope,
+}
+
+pub(crate) struct SupervisorContextParts {
+    pub(crate) shared: SharedProgress,
+    pub(crate) receiver: watch::Receiver<bool>,
+    pub(crate) tasks: TaskScope,
+    pub(crate) prepares: PrepareScope,
+}
+
+impl SupervisorContext {
+    pub(crate) fn new(parts: SupervisorContextParts) -> Self {
+        Self {
+            progress: ProgressReporter {
+                shared: parts.shared,
+            },
+            cancellation: CancellationSignal {
+                receiver: parts.receiver,
+            },
+            tasks: parts.tasks,
+            prepares: parts.prepares,
+        }
+    }
+
+    /// Clone the controlled progress reporter.
+    #[must_use]
+    pub fn progress(&self) -> ProgressReporter {
+        self.progress.clone()
+    }
+
+    /// Clone the cooperative cancellation receiver.
+    #[must_use]
+    pub fn cancellation(&self) -> CancellationSignal {
+        self.cancellation.clone()
+    }
+
+    /// Build a bounded deterministic stage runner bound to this supervisor.
+    #[must_use]
+    pub fn stages(&self) -> crate::StageRunner {
+        crate::StageRunner::new(
+            self.progress.shared.clone(),
+            self.cancellation.receiver.clone(),
+            self.tasks.clone(),
+        )
+    }
+
+    /// Run the operation's one retained, server-bounded prepare/COPY task.
+    ///
+    /// Publication and cleanup authority are deliberately absent from this
+    /// context; only the supervisor lifecycle gate can perform terminal
+    /// generation transitions.
+    pub async fn prepare_generation(
+        &self,
+        contents: GenerationContents,
+    ) -> Result<ReadyGeneration, SupervisedPrepareError> {
+        self.prepares.prepare(contents).await
+    }
+
+    /// Spawn an admitted supervisor-owned worker with an explicit byte reservation.
+    ///
+    /// The future must return a stage-scoped [`crate::PipelineFailure`]. The
+    /// supervisor records that outcome independently of this result handle, so
+    /// dropping a failed child cannot permit publication.
+    pub fn spawn<T, Work>(
+        &self,
+        reserved_bytes: u64,
+        work: Work,
+    ) -> Result<ScopedTask<T>, ScopedTaskError>
+    where
+        T: Send + 'static,
+        Work: std::future::Future<Output = Result<T, crate::PipelineFailure>> + Send + 'static,
+    {
+        self.tasks.spawn(reserved_bytes, work)
+    }
+}
+
+/// Invalid or non-monotonic pipeline progress.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum ProgressError {
+    /// Work tried to report outside the active state.
+    #[error("Cartograph indexing progress is not active")]
+    NotActive,
+    /// Work re-entered the same or an earlier ordered stage.
+    #[error("Cartograph indexing stage progress must be strictly monotonic")]
+    StageRegression,
+    /// A zero/zero update cannot prove useful work.
+    #[error("Cartograph indexing progress increment must be nonzero")]
+    EmptyIncrement,
+    /// Monotonic counters exceeded their durable representation.
+    #[error("Cartograph indexing progress counter overflowed")]
+    CounterOverflow,
+    /// Publication is an exact-token database transition owned only by the supervisor.
+    #[error("Cartograph publication progress is owned by the indexer supervisor")]
+    SupervisorOwnedStage,
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+pub(crate) async fn hold_progress_write_for_test(
+    shared: SharedProgress,
+    entered: tokio::sync::oneshot::Sender<()>,
+    mut release: watch::Receiver<bool>,
+) {
+    let _guard = shared.record.write().await;
+    let _ = entered.send(());
+    while !*release.borrow_and_update() {
+        if release.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn progress_is_one_shot_ordered_and_monotonic() {
+        let shared = SharedProgress::new();
+        assert!(shared.reserve().await);
+        assert!(!shared.reserve().await);
+        shared.mark_active().await;
+        let reporter = ProgressReporter {
+            shared: shared.clone(),
+        };
+        assert!(reporter.begin_stage(PipelineStage::Read).await.is_ok());
+        assert_eq!(
+            reporter.begin_stage(PipelineStage::Publish).await,
+            Err(ProgressError::SupervisorOwnedStage)
+        );
+        assert_eq!(
+            reporter.begin_stage(PipelineStage::Discover).await,
+            Err(ProgressError::StageRegression)
+        );
+        assert_eq!(
+            reporter.advance(0, 0).await,
+            Err(ProgressError::EmptyIncrement)
+        );
+        assert!(reporter.advance(2, 128).await.is_ok());
+        let status = shared.status().await;
+        assert_eq!(status.stage(), Some(PipelineStage::Read));
+        assert_eq!(status.completed_items(), 2);
+        assert_eq!(status.completed_bytes(), 128);
+    }
+}

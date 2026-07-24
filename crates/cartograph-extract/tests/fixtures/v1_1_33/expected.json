@@ -1,0 +1,220 @@
+{
+  "baseline": "v1.1.33",
+  "cases": [
+    {
+      "path": "src/greeter.ts",
+      "language": "typescript",
+      "symbols": [
+        {
+          "kind": "interface",
+          "name": "Greeter",
+          "qualified_name": "Greeter",
+          "start_line": 2,
+          "end_line": 4,
+          "start_column": 7,
+          "end_column": 1,
+          "signature": null,
+          "docstring": "Service contract.",
+          "exported": true,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        },
+        {
+          "kind": "class",
+          "name": "Service",
+          "qualified_name": "Service",
+          "start_line": 7,
+          "end_line": 11,
+          "start_column": 7,
+          "end_column": 1,
+          "signature": null,
+          "docstring": "Greets users.",
+          "exported": true,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        },
+        {
+          "kind": "method",
+          "name": "greet",
+          "qualified_name": "Service::greet",
+          "start_line": 8,
+          "end_line": 10,
+          "start_column": 2,
+          "end_column": 3,
+          "signature": "(name: string): Promise<string>",
+          "docstring": null,
+          "exported": false,
+          "default_export": false,
+          "async_symbol": true,
+          "static_member": false,
+          "visibility": null
+        },
+        {
+          "kind": "function",
+          "name": "build",
+          "qualified_name": "build",
+          "start_line": 13,
+          "end_line": 13,
+          "start_column": 21,
+          "end_column": 63,
+          "signature": "(service: Service)",
+          "docstring": null,
+          "exported": true,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        }
+      ],
+      "containments": [
+        { "parent": "Service", "child": "greet" }
+      ],
+      "references": [
+        { "owner": "Greeter", "name": "Base", "kind": "extends", "line": 2, "column": 33 },
+        { "owner": "Service", "name": "Greeter", "kind": "implements", "line": 7, "column": 32 },
+        { "owner": "greet", "name": "Promise", "kind": "returns", "line": 8, "column": 29 },
+        { "owner": "greet", "name": "Promise", "kind": "type_of", "line": 8, "column": 29 },
+        { "owner": "greet", "name": "format", "kind": "calls", "line": 9, "column": 11 },
+        { "owner": "build", "name": "Service", "kind": "type_of", "line": 13, "column": 31 },
+        { "owner": "build", "name": "service.greet", "kind": "calls", "line": 13, "column": 43 }
+      ]
+    },
+    {
+      "path": "src/worker.js",
+      "language": "javascript",
+      "symbols": [
+        {
+          "kind": "import",
+          "name": "./transport.js",
+          "qualified_name": "./transport.js",
+          "start_line": 1,
+          "end_line": 1,
+          "start_column": 0,
+          "end_column": 38,
+          "signature": "import { send } from \"./transport.js\";",
+          "docstring": null,
+          "exported": false,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        },
+        {
+          "kind": "class",
+          "name": "Worker",
+          "qualified_name": "Worker",
+          "start_line": 2,
+          "end_line": 4,
+          "start_column": 7,
+          "end_column": 1,
+          "signature": null,
+          "docstring": null,
+          "exported": true,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        },
+        {
+          "kind": "method",
+          "name": "run",
+          "qualified_name": "Worker::run",
+          "start_line": 3,
+          "end_line": 3,
+          "start_column": 2,
+          "end_column": 34,
+          "signature": "(task)",
+          "docstring": null,
+          "exported": false,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        },
+        {
+          "kind": "function",
+          "name": "createWorker",
+          "qualified_name": "createWorker",
+          "start_line": 5,
+          "end_line": 5,
+          "start_column": 28,
+          "end_column": 46,
+          "signature": "()",
+          "docstring": null,
+          "exported": true,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        }
+      ],
+      "containments": [
+        { "parent": "Worker", "child": "run" }
+      ],
+      "references": [
+        { "owner": null, "name": "./transport.js", "kind": "imports", "line": 1, "column": 0 },
+        { "owner": null, "name": "send", "kind": "references", "line": 1, "column": 9 },
+        { "owner": "run", "name": "send", "kind": "calls", "line": 3, "column": 21 },
+        { "owner": "createWorker", "name": "Worker", "kind": "instantiates", "line": 5, "column": 34 }
+      ]
+    },
+    {
+      "path": "src/view.tsx",
+      "language": "tsx",
+      "symbols": [
+        {
+          "kind": "component",
+          "name": "Dashboard",
+          "qualified_name": "Dashboard",
+          "start_line": 1,
+          "end_line": 3,
+          "start_column": 7,
+          "end_column": 1,
+          "signature": "(props: Props)",
+          "docstring": null,
+          "exported": true,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        }
+      ],
+      "containments": [],
+      "references": [
+        { "owner": "Dashboard", "name": "Panel", "kind": "references", "line": 2, "column": 10 },
+        { "owner": "Dashboard", "name": "title", "kind": "field_access", "line": 2, "column": 29 },
+        { "owner": "Dashboard", "name": "Widget", "kind": "references", "line": 2, "column": 37 }
+      ]
+    },
+    {
+      "path": "src/card.jsx",
+      "language": "jsx",
+      "symbols": [
+        {
+          "kind": "component",
+          "name": "Card",
+          "qualified_name": "Card",
+          "start_line": 1,
+          "end_line": 1,
+          "start_column": 20,
+          "end_column": 77,
+          "signature": "({ title })",
+          "docstring": null,
+          "exported": true,
+          "default_export": false,
+          "async_symbol": false,
+          "static_member": false,
+          "visibility": null
+        }
+      ],
+      "containments": [],
+      "references": [
+        { "owner": "Card", "name": "Title", "kind": "references", "line": 1, "column": 45 }
+      ]
+    }
+  ]
+}

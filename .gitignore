@@ -10,6 +10,11 @@ node_modules/
 # generation for library consumers; dist/ stays local.
 dist/
 
+# Rust workspace output. Cartograph v2 is built from the root Cargo
+# workspace; Cargo.lock is intentionally tracked because the CLI/server are
+# applications rather than a reusable library distribution.
+/target/
+
 # Standalone bundle staging and archives produced by
 # `bun run build:standalone`.
 release/
@@ -45,6 +50,10 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# Local v2 database credentials written by future `cartograph db start`
+# lifecycle commands. The checked-in `.env.example` remains public.
+/deploy/paradedb/.env
 
 # Logs
 *.log
