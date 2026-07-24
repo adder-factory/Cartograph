@@ -123,11 +123,15 @@ This is the durable continuation point for the v2 rewrite. Read
   PostgreSQL 18 + pinned ParadeDB + pgvector job in 3m41s. The live job passed
   doctor, capability, generation/BM25, COPY/digest, lease, all 23 supervisor
   cases, the frozen 1/2/4/8/16-worker benchmark, and managed lifecycle.
+- Generation-scoped bulk relation validation: `98a67d7f1baa295062735d95c96453f54337244b`;
+  [run 30075609291](https://github.com/adder-factory/cartograph/actions/runs/30075609291)
+  passed the Rust quality/no-SQLite job in 1m39s and the full live PostgreSQL 18
+  + ParadeDB + pgvector job in 4m42s.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin are checkpointed through the native extraction
-implementation at `00fbfe9`, with both v2 GitHub jobs green. Do not reopen the
-PostgreSQL-only, no-SQLite, or Rust-first decisions.
+The branch and origin are checkpointed through bulk relation validation at
+`98a67d7`, with both v2 GitHub jobs green. Do not reopen the PostgreSQL-only,
+no-SQLite, or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -959,6 +963,111 @@ Resolver/body-search closeout on 2026-07-23:
   live integration, supervisor, frozen matrix, managed-lifecycle, and cleanup
   step in 8m08s.
 
+## Generation-scoped bulk relation and COPY optimization checkpoint
+
+Code checkpoint: `98a67d7f1baa295062735d95c96453f54337244b`
+
+The prior frozen resolver-v2 report showed that four-worker COPY consumed
+4,809.56 ms of the 5,525.37 ms supervised median. Per-table instrumentation
+then disproved the initial hypothesis that ParadeDB BM25 maintenance was the
+entire floor: reference and edge relation foreign-key checks dominated the
+write. Temporary `work_mem=64MB` and
+`paradedb.global_mutable_segment_rows=8192` trials were flat or slower and were
+fully reverted. The accepted change is relational, not a hidden server-tuning
+dependency.
+
+Migration 6, `generation_scoped_bulk_relation_integrity`, makes these changes:
+
+- `edges` drops its source/target symbol foreign keys and adds one
+  `(project_id, generation_id)` cascade to `index_generations`;
+- `references` drops its file, target-symbol, and owner-symbol foreign keys and
+  adds one generation cascade;
+- `search_documents` drops its optional file/symbol foreign keys and retains
+  its existing generation cascade; and
+- all richer file/span/owner/path/language relations remain validated by the
+  canonical Rust boundary before database I/O.
+
+After all five COPY streams, the same prepare transaction runs one
+set-difference query over required versus present file/symbol IDs. A missing
+relation returns the credential-safe `verify-copied-relations` operation,
+rolls back every copied fact, returns the recoverable staging token, and never
+reaches `ready`. A live PostgreSQL trigger deliberately injects an invalid edge
+after valid canonical input and proves that exact rollback path. The first SQL
+prototype used anti-joins and measured about 5.75 seconds because fresh COPY
+targets had no useful planner statistics; it was rejected. The accepted
+set-difference check measures 8.07 ms p50 at four workers.
+
+Generation facts remain append-only. A failed prepare rolls back fact rows but
+retains its generation row for terminal marking. If a previously committed
+ready generation is later failed, its facts remain. Current cleanup marks
+failed and removes the exact lease; it does not delete a generation. The three
+generation foreign keys define cascade behavior for a future explicit deletion
+path, which is not implemented or claimed tested yet. Any future incremental or
+post-ready write API must restore an equivalent checked relation boundary.
+
+`PrepareGenerationMetrics` now exposes total COPY, per-table COPY, and separate
+relation-validation durations. A failed table still records its duration,
+completed tables retain theirs, unattempted tables reset to zero, and reuse of
+an observer cannot retain a stale relation-validation value. The final
+search-document rejection regression reuses an observer from a successful
+generation to prove this failure behavior rather than only checking a fresh
+zero value.
+
+The frozen report is
+`docs/v2/benchmarks/native-corpus-scaling-aarch64-2026-07-24-bulk-relations-v2.json`.
+All 20 fresh-schema warmup/measured runs at 1/2/4/8/16 workers retain the exact
+resolver-v2 digest
+`dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3`,
+28 files / 3,843 symbols / 3,699 edges / 12,660 references / 3,871 documents,
+the same eight edge kinds, 1,852 resolved plus 10,808 unresolved references,
+zero diagnostics, and the same ordered BM25 Top-5. At the four-worker knee:
+
+- COPY falls 94.1%, from 4,809.56 ms to 285.68 ms;
+- supervised pipeline falls 81.8%, from 5,525.37 ms to 1,007.45 ms;
+- relation validation is 8.07 ms;
+- table COPY p50 is 3.42 ms files, 90.74 ms symbols, 26.99 ms edges,
+  83.01 ms references, and 81.63 ms ParadeDB search documents; and
+- COPY is now 28.4% of the supervised median instead of 87.0%.
+
+Local closeout evidence on the exact committed tree:
+
+- strict Rust format/Clippy and all workspace unit/integration/doc tests pass;
+- PostgreSQL 18.4 / `pg_search` 0.23.5 / pgvector 0.8.1 pass capability,
+  migration/fencing, version-1-to-6 upgrade, lease takeover, hostile COPY
+  rollback, both managed lifecycle cases, and all 26 supervisor fault cases;
+- the final database audit reports zero leftover test schemas, active non-idle
+  sessions, idle transactions, or advisory locks in both v1 and v2 databases;
+- the complete v1 TypeScript harness passes 7,140 / 0 / 41, with one supported
+  whole-shard retry after a Bun native trap;
+- TypeScript strict typecheck, architecture/Biome, actionlint, the SQLite-free
+  Cargo graph/lockfile, and `compare-to-ref` all pass with zero introduced
+  per-file findings;
+- the forced biomarker rebuild is 0 error / 0 warning / 0 info with zero
+  cross-file findings;
+- Sonar is `OK`: 91.5% new coverage, 86.0% overall coverage, 0.0% new
+  duplication, 0.9% overall duplication, zero bugs/new violations/
+  vulnerabilities, and 100% reviewed hotspots; and
+- independent read-only review is `APPROVE` after findings about partial
+  failure metrics, lifecycle wording, and gate-driven maintainability
+  refactors were addressed.
+
+One v1 lifecycle incident is intentionally recorded. During repeated forced
+self-indexing for the biomarker gate, one Bun/TypeScript `admin index --force`
+attempt finished its hooks but remained idle in the same PostgreSQL transaction
+for more than ten minutes. The gate-owned process was terminated, PostgreSQL
+rolled the transaction back, and audits proved the backend session and locks
+were gone; subsequent targeted and forced runs completed at 0/0/0. This is not
+a v2 supervisor failure. It is the exact long-lived v1 process class that the
+Rust cancellation, deadline, task reaping, lease fencing, and 26 live fault
+cases are intended to remove. V2 still cannot and should not terminate unrelated
+host-level SSH shells.
+
+GitHub run 30075609291 is `success`. Its 1m39s quality job passed format,
+strict Clippy, unit tests, and the no-SQLite proof. Its 4m42s live job passed
+doctor/capabilities, migration 6 plus BM25 generation flow, hostile COPY/digest,
+leases, all supervisor cases, the complete frozen worker matrix, managed
+lifecycle, and service cleanup on Linux amd64.
+
 ## Execution plan
 
 ### M0 — final v1 release and v2 foundation
@@ -999,7 +1108,8 @@ publish through the type/API design.
 Implement:
 
 - core relations from the architecture doc;
-- project-scoped foreign keys and ordinary indexes;
+- generation-scoped cascade foreign keys, transactional relation validation,
+  and ordinary indexes;
 - staged generation writes and atomic current-generation swap;
 - advisory lock ownership metadata and stale-owner rules;
 - COPY-based bulk loaders;
@@ -1032,13 +1142,13 @@ framework/cross-language hooks.
 The one-shot lease-owned supervisor, cancellation/reaping model, hard worker
 task/byte admission, progress/status contract, retained COPY task, and exact
 terminal cleanup are implemented at `bcafdc6`. The reusable typed bounded
-stage executor is implemented at `8e06435`. The frozen synthetic benchmark now
-passes at 1/2/4/8/16 workers with one identical logical digest, row-count set,
-and ParadeDB BM25 result. TypeScript/JavaScript discovery, read/hash,
-parse/extract, exact resolve, reduce, COPY, publication, and BM25 are now wired
-through that executor at one and four workers. Next replace the synthetic timing
-baseline with a Rust-owned real extractor corpus and extend the frozen matrix to
-the complete pipeline while preserving the same determinism gate.
+stage executor is implemented at `8e06435`. Both the synthetic benchmark and
+Rust-owned real extractor corpus now pass at 1/2/4/8/16 workers with identical
+logical output and ParadeDB BM25 results. TypeScript/JavaScript discovery,
+read/hash, parse/extract, exact resolve, reduce, COPY, relation validation,
+publication, and BM25 are wired through that executor. The next scheduling task
+is the deterministic corpus-aware worker selector: four is the small real-corpus
+knee, while 16 remains the measured synthetic upper bound.
 
 Required fault injection:
 
@@ -1107,18 +1217,19 @@ Only then:
 
 ## Immediate next actions
 
-1. Measure and optimize the 3,871-document COPY/ParadeDB indexing floor while
-   preserving atomic publication and current-generation-only BM25 semantics.
-2. Implement and test a deterministic corpus-aware worker selector, using at
+1. Implement and test a deterministic corpus-aware worker selector, using at
    most four workers for small queues while retaining 16 as the measured upper
    cap for sufficiently large queues; re-run both committed matrices.
-3. Add tracked-ignored-file and embedded-repository parity, then explicit
+2. Add tracked-ignored-file and embedded-repository parity, then explicit
    export/re-export lists, TypeScript path aliases, package/CommonJS resolution,
    and receiver/type-directed qualified members under locked fixtures.
-4. Add stage-level cancellation/deadline/failure/cap injection for
+3. Add stage-level cancellation/deadline/failure/cap injection for
    discovery, read/hash, parse/extract, resolution, reduction, and COPY.
-5. Add `db remove`, backup/restore, and explicit image/extension upgrade with
+4. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
+5. Start M5 with measured BM25 exact/name/path/reference queries, graph impact
+   and affected-test retrieval, and agent-focused evidence packets before
+   enabling vector or generative escalation.
 6. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
    there; never weaken credential privacy to make the platform pass.
 
