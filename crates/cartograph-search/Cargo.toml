@@ -1,5 +1,6 @@
 [package]
 name = "cartograph-search"
+publish = false
 description = "Deterministic PostgreSQL retrieval and evidence assembly for Cartograph v2"
 version.workspace = true
 edition.workspace = true

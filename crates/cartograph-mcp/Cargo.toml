@@ -1,5 +1,6 @@
 [package]
 name = "cartograph-mcp"
+publish = false
 description = "Bounded JSON-RPC and MCP transport contracts for Cartograph v2"
 version.workspace = true
 edition.workspace = true

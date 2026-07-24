@@ -1,5 +1,6 @@
 [package]
 name = "cartograph-agent"
+publish = false
 description = "Project runtime and coding-agent service surface for Cartograph v2"
 version.workspace = true
 edition.workspace = true
@@ -15,6 +16,7 @@ cartograph-db = { path = "../cartograph-db" }
 cartograph-domain = { path = "../cartograph-domain" }
 cartograph-extract = { path = "../cartograph-extract" }
 cartograph-indexer = { path = "../cartograph-indexer" }
+cartograph-search = { path = "../cartograph-search" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

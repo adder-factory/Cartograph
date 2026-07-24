@@ -29,6 +29,7 @@ libc = "0.2.183"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "=0.11.0"
 sqlx-core = { version = "=0.9.0", default-features = false, features = [
   "_rt-tokio",
   "_tls-rustls-ring-native-roots",
@@ -45,8 +46,12 @@ tokio = { version = "1.53.1", features = [
   "sync",
   "time",
 ] }
+toml_edit = "=0.25.13"
 tree-sitter = "=0.26.11"
+tree-sitter-go = "=0.25.0"
 tree-sitter-javascript = "=0.25.0"
+tree-sitter-python = "=0.25.0"
+tree-sitter-rust = "=0.24.2"
 tree-sitter-typescript = "=0.23.2"
 url = "2.5.8"
 

@@ -1,5 +1,6 @@
 [package]
 name = "cartograph-domain"
+publish = false
 description = "Typed domain contracts for Cartograph v2"
 version.workspace = true
 edition.workspace = true

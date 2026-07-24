@@ -1,5 +1,6 @@
 [package]
 name = "cartograph-indexer"
+publish = false
 description = "Bounded, lease-owned indexing supervision for Cartograph v2"
 version.workspace = true
 edition.workspace = true

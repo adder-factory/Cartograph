@@ -1,5 +1,6 @@
 [package]
 name = "cartograph-config"
+publish = false
 description = "Validated, secret-safe configuration for Cartograph v2"
 version.workspace = true
 edition.workspace = true
@@ -15,4 +16,3 @@ url.workspace = true
 
 [lints]
 workspace = true
-
