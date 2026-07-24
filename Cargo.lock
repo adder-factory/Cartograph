@@ -152,12 +152,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cartograph-agent"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "blake3",
+ "cartograph-config",
+ "cartograph-db",
+ "cartograph-domain",
+ "cartograph-extract",
+ "cartograph-indexer",
+ "serde",
+ "sqlx-core",
+ "sqlx-postgres",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "cartograph-cli"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "cartograph-agent",
  "cartograph-config",
  "cartograph-db",
+ "cartograph-domain",
+ "cartograph-mcp",
+ "cartograph-search",
  "clap",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -229,6 +252,27 @@ dependencies = [
  "sqlx-core",
  "sqlx-postgres",
  "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "cartograph-mcp"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "cartograph-search"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "cartograph-db",
+ "cartograph-domain",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

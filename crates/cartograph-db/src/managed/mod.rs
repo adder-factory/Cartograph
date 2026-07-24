@@ -246,6 +246,17 @@ impl ManagedDatabase {
         self
     }
 
+    /// Load secret-safe connection settings for this project's existing managed database.
+    ///
+    /// This never creates credentials or starts Docker; callers use [`Self::start`] first.
+    pub fn connection_settings(&self) -> Result<DatabaseSettings, ManagedDatabaseError> {
+        let credentials = self.credentials.load()?;
+        let url = credentials.database_url(self.port)?;
+        DatabaseSettings::parse(url.expose_secret(), Some("8"), Some("10000"))
+            .and_then(|settings| settings.with_schema(self.schema.as_str()))
+            .map_err(|_| ManagedDatabaseError::CredentialFormat)
+    }
+
     /// Mint a single-use destructive capability only for the exact acknowledgement.
     pub fn confirm_destructive_operation(
         &self,
@@ -1095,6 +1106,24 @@ mod tests {
             ManagedDatabase::new(directory.path(), 0),
             Err(ManagedDatabaseError::InvalidPort)
         ));
+    }
+
+    #[test]
+    fn connection_settings_are_read_only_when_managed_credentials_do_not_exist() {
+        let directory = match tempfile::tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("could not create test project: {error}"),
+        };
+        let database = match ManagedDatabase::new(directory.path(), TEST_DATABASE_PORT) {
+            Ok(database) => database,
+            Err(error) => panic!("could not build managed database: {error}"),
+        };
+
+        assert!(matches!(
+            database.connection_settings(),
+            Err(ManagedDatabaseError::CredentialRead)
+        ));
+        assert!(!database.credentials.path().exists());
     }
 
     #[test]

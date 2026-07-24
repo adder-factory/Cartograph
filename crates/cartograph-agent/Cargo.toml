@@ -1,6 +1,6 @@
 [package]
-name = "cartograph-cli"
-description = "Rust CLI and MCP entry point for Cartograph v2"
+name = "cartograph-agent"
+description = "Project runtime and coding-agent service surface for Cartograph v2"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,21 +8,21 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "cartograph"
-path = "src/main.rs"
-
 [dependencies]
-cartograph-agent = { path = "../cartograph-agent" }
+blake3.workspace = true
 cartograph-config = { path = "../cartograph-config" }
 cartograph-db = { path = "../cartograph-db" }
 cartograph-domain = { path = "../cartograph-domain" }
-cartograph-mcp = { path = "../cartograph-mcp" }
-cartograph-search = { path = "../cartograph-search" }
-clap.workspace = true
+cartograph-extract = { path = "../cartograph-extract" }
+cartograph-indexer = { path = "../cartograph-indexer" }
 serde.workspace = true
-serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+sqlx-core.workspace = true
+sqlx-postgres.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

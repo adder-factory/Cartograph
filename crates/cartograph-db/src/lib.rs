@@ -7,6 +7,7 @@ mod ingest;
 mod leases;
 mod managed;
 mod migrations;
+mod project;
 mod retrieval;
 mod search;
 
@@ -39,6 +40,7 @@ pub use managed::{
     ManagedRemoveReport, ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
 };
 pub use migrations::{MigrationError, MigrationReport};
+pub use project::{GenerationCounts, ProjectCurrentGeneration, ProjectSnapshot};
 pub use retrieval::{
     CurrentFileRecord, CurrentGenerationRecord, CurrentGraphEdge, CurrentReferenceRecord,
     CurrentSymbolRecord, GraphDirection,

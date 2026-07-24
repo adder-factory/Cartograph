@@ -24,6 +24,11 @@ impl CartographDatabase {
     pub const fn schema(&self) -> &DatabaseSchema {
         &self.schema
     }
+
+    /// Close every pooled PostgreSQL connection owned by this service.
+    pub async fn close(self) {
+        self.pool.close().await;
+    }
 }
 
 /// Expected persistence failures with credential-safe public messages.
