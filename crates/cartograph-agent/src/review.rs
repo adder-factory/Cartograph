@@ -1,0 +1,553 @@
+use std::{collections::BTreeMap, fmt, path::Path, process::Stdio, time::Duration};
+
+use cartograph_domain::NormalizedPath;
+use cartograph_search::{
+    DeterministicRetriever, IndexFreshness, ReviewBudget, ReviewPacket, ReviewRequest,
+};
+use serde::Serialize;
+use thiserror::Error;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::{Child, Command},
+    time::{Instant, timeout_at},
+};
+
+const DEFAULT_MAX_CHANGED_FILES: u16 = 200;
+const MAX_CHANGED_FILES: u16 = 512;
+const MAX_REF_BYTES: usize = 256;
+const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1_048_576;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bounded deterministic options for comparison against one Git revision.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReviewOptions {
+    base_ref: String,
+    max_changed_files: u16,
+    evidence_budget: ReviewBudget,
+}
+
+impl ReviewOptions {
+    /// Validate a revision expression before it reaches Git.
+    pub fn new(base_ref: impl Into<String>) -> Result<Self, ReviewError> {
+        let base_ref = base_ref.into();
+        if !valid_git_ref(&base_ref) {
+            return Err(ReviewError::InvalidRef);
+        }
+        Ok(Self {
+            base_ref,
+            max_changed_files: DEFAULT_MAX_CHANGED_FILES,
+            evidence_budget: ReviewBudget::default(),
+        })
+    }
+
+    /// Bound the number of changed files retained in the response.
+    pub fn with_max_changed_files(mut self, limit: u16) -> Result<Self, ReviewError> {
+        if limit == 0 || limit > MAX_CHANGED_FILES {
+            return Err(ReviewError::InvalidOptions);
+        }
+        self.max_changed_files = limit;
+        Ok(self)
+    }
+
+    /// Validated Git revision expression.
+    #[must_use]
+    pub fn base_ref(&self) -> &str {
+        &self.base_ref
+    }
+
+    /// Maximum changed-file records retained after deterministic ordering.
+    #[must_use]
+    pub const fn max_changed_files(&self) -> u16 {
+        self.max_changed_files
+    }
+
+    /// Override the validated deterministic evidence budget.
+    #[must_use]
+    pub fn with_evidence_budget(mut self, budget: ReviewBudget) -> Self {
+        self.evidence_budget = budget;
+        self
+    }
+
+    /// Active graph/evidence limits.
+    #[must_use]
+    pub const fn evidence_budget(&self) -> ReviewBudget {
+        self.evidence_budget
+    }
+}
+
+impl fmt::Debug for ReviewOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReviewOptions")
+            .field("base_ref", &"<redacted>")
+            .field("max_changed_files", &self.max_changed_files)
+            .field("evidence_budget", &self.evidence_budget)
+            .finish()
+    }
+}
+
+/// Git-level classification for one changed project-relative path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    TypeChanged,
+    Unmerged,
+    Untracked,
+}
+
+impl GitChangeKind {
+    /// Stable human/wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+            Self::TypeChanged => "type_changed",
+            Self::Unmerged => "unmerged",
+            Self::Untracked => "untracked",
+        }
+    }
+}
+
+/// One deterministically ordered changed path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GitChangedFile {
+    path: NormalizedPath,
+    kind: GitChangeKind,
+}
+
+impl GitChangedFile {
+    const fn new(path: NormalizedPath, kind: GitChangeKind) -> Self {
+        Self { path, kind }
+    }
+
+    /// Canonical path relative to the reviewed project root.
+    #[must_use]
+    pub const fn path(&self) -> &NormalizedPath {
+        &self.path
+    }
+
+    /// Git-level change classification.
+    #[must_use]
+    pub const fn kind(&self) -> GitChangeKind {
+        self.kind
+    }
+}
+
+/// Bounded Git comparison used as input to deterministic graph review.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GitComparison {
+    base_ref: String,
+    base_commit: String,
+    files: Vec<GitChangedFile>,
+    worktree_dirty: bool,
+    truncated: bool,
+}
+
+/// Complete compare-to-ref report for CLI and MCP adapters.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ReviewReport {
+    comparison: GitComparison,
+    packet: ReviewPacket,
+}
+
+impl ReviewReport {
+    /// Bounded Git provenance and changed paths.
+    #[must_use]
+    pub const fn comparison(&self) -> &GitComparison {
+        &self.comparison
+    }
+
+    /// Current-generation context, impact, tests, freshness, and abstention.
+    #[must_use]
+    pub const fn packet(&self) -> &ReviewPacket {
+        &self.packet
+    }
+}
+
+impl GitComparison {
+    /// Validated user-facing base revision expression.
+    #[must_use]
+    pub fn base_ref(&self) -> &str {
+        &self.base_ref
+    }
+
+    /// Resolved immutable SHA-1 or SHA-256 commit identity.
+    #[must_use]
+    pub fn base_commit(&self) -> &str {
+        &self.base_commit
+    }
+
+    /// Changed files ordered by canonical path and status.
+    #[must_use]
+    pub fn files(&self) -> &[GitChangedFile] {
+        &self.files
+    }
+
+    /// Whether staged, unstaged, or untracked work differs from `HEAD`.
+    #[must_use]
+    pub const fn worktree_dirty(&self) -> bool {
+        self.worktree_dirty
+    }
+
+    /// Whether the changed-file response bound omitted a stable suffix.
+    #[must_use]
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+/// Credential-, path-, and revision-safe review failure.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum ReviewError {
+    /// The revision is empty, option-shaped, contains whitespace/control bytes, or is too long.
+    #[error("Git comparison ref is invalid")]
+    InvalidRef,
+    /// A configured result bound is zero or exceeds the hard ceiling.
+    #[error("Git comparison options are invalid")]
+    InvalidOptions,
+    /// The selected project is not inside a Git worktree.
+    #[error("Cartograph review requires a Git worktree")]
+    NotGitRepository,
+    /// Git could not resolve the validated revision to a commit.
+    #[error("Git comparison ref was not found")]
+    GitRefNotFound,
+    /// Git could not be started in the current runtime environment.
+    #[error("Git is unavailable for Cartograph review")]
+    GitUnavailable,
+    /// Git exceeded the hard execution deadline.
+    #[error("Git comparison exceeded its deadline")]
+    GitDeadlineExceeded,
+    /// Git emitted more bytes than the hard transport bound.
+    #[error("Git comparison output exceeded its byte limit")]
+    GitOutputLimitExceeded,
+    /// Git returned malformed, non-UTF-8, or unsafe project paths.
+    #[error("Git comparison output is invalid")]
+    GitOutputInvalid,
+    /// A bounded Git operation failed without exposing command output or paths.
+    #[error("Git comparison failed")]
+    GitCommandFailed,
+    /// The project root is missing, inaccessible, or not a directory.
+    #[error("Cartograph review project root is unavailable")]
+    ProjectRootUnavailable,
+    /// Current project/generation state could not be read.
+    #[error("Cartograph review project state is unavailable")]
+    ProjectStateUnavailable,
+    /// Deterministic index or graph retrieval failed.
+    #[error("Cartograph review evidence is unavailable")]
+    RetrievalUnavailable,
+}
+
+impl super::ProjectRuntime {
+    /// Compare the live checkout to a Git ref and attach deterministic current-generation
+    /// exact-path, reverse-impact, and affected-test evidence.
+    pub async fn review(&self, options: &ReviewOptions) -> Result<ReviewReport, ReviewError> {
+        let comparison = discover_git_comparison(&self.root, options).await?;
+        let status = self
+            .status()
+            .await
+            .map_err(|_| ReviewError::ProjectStateUnavailable)?;
+        let (project_id, freshness) = match status.snapshot {
+            Some(snapshot) if snapshot.current.is_some() => (
+                Some(snapshot.project_id),
+                if status.fresh {
+                    IndexFreshness::Current
+                } else {
+                    IndexFreshness::Stale
+                },
+            ),
+            _ => (None, IndexFreshness::Unknown),
+        };
+        let request = ReviewRequest::new(
+            project_id,
+            comparison.files.iter().map(|file| file.path.clone()),
+            freshness,
+            options.evidence_budget,
+            comparison.truncated,
+        )
+        .map_err(|_| ReviewError::RetrievalUnavailable)?;
+        let packet = DeterministicRetriever::new(self.database.clone())
+            .review_packet(&request)
+            .await
+            .map_err(|_| ReviewError::RetrievalUnavailable)?;
+        Ok(ReviewReport { comparison, packet })
+    }
+}
+
+/// Discover committed, staged, unstaged, and untracked changes without a shell.
+pub async fn discover_git_comparison(
+    project_root: impl AsRef<Path>,
+    options: &ReviewOptions,
+) -> Result<GitComparison, ReviewError> {
+    let root = std::fs::canonicalize(project_root.as_ref())
+        .map_err(|_| ReviewError::ProjectRootUnavailable)?;
+    if !root.is_dir() {
+        return Err(ReviewError::ProjectRootUnavailable);
+    }
+
+    let repository = run_git(&root, &["rev-parse", "--is-inside-work-tree"]).await?;
+    if !repository.success || trim_ascii(&repository.stdout) != b"true" {
+        return Err(ReviewError::NotGitRepository);
+    }
+
+    let commit_expression = format!("{}^{{commit}}", options.base_ref);
+    let resolved = run_git(
+        &root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &commit_expression,
+        ],
+    )
+    .await?;
+    if !resolved.success {
+        return Err(ReviewError::GitRefNotFound);
+    }
+    let base_commit = parse_commit(&resolved.stdout)?;
+
+    let tracked = run_git(
+        &root,
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--relative",
+            &base_commit,
+            "--",
+            ".",
+        ],
+    )
+    .await?;
+    if !tracked.success {
+        return Err(ReviewError::GitCommandFailed);
+    }
+    let untracked = run_git(
+        &root,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ],
+    )
+    .await?;
+    if !untracked.success {
+        return Err(ReviewError::GitCommandFailed);
+    }
+    let status = run_git(
+        &root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+            "--",
+            ".",
+        ],
+    )
+    .await?;
+    if !status.success {
+        return Err(ReviewError::GitCommandFailed);
+    }
+
+    let mut changed = parse_name_status(&tracked.stdout)?;
+    for path in parse_paths(&untracked.stdout)? {
+        changed.entry(path).or_insert(GitChangeKind::Untracked);
+    }
+    let truncated = changed.len() > usize::from(options.max_changed_files);
+    let files = changed
+        .into_iter()
+        .take(usize::from(options.max_changed_files))
+        .map(|(path, kind)| GitChangedFile::new(path, kind))
+        .collect();
+    Ok(GitComparison {
+        base_ref: options.base_ref.clone(),
+        base_commit,
+        files,
+        worktree_dirty: !status.stdout.is_empty(),
+        truncated,
+    })
+}
+
+struct GitOutput {
+    success: bool,
+    stdout: Vec<u8>,
+}
+
+async fn run_git(root: &Path, arguments: &[&str]) -> Result<GitOutput, ReviewError> {
+    let mut child = Command::new("git")
+        .arg("--no-pager")
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "diff.external="])
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .env("LC_ALL", "C")
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| ReviewError::GitUnavailable)?;
+    let stdout = child.stdout.take().ok_or(ReviewError::GitUnavailable)?;
+    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+    let stdout = match timeout_at(deadline, read_bounded(stdout, MAX_GIT_OUTPUT_BYTES)).await {
+        Ok(Ok(stdout)) => stdout,
+        Ok(Err(error)) => {
+            terminate(&mut child).await;
+            return Err(error);
+        }
+        Err(_) => {
+            terminate(&mut child).await;
+            return Err(ReviewError::GitDeadlineExceeded);
+        }
+    };
+    let status = match timeout_at(deadline, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => return Err(ReviewError::GitCommandFailed),
+        Err(_) => {
+            terminate(&mut child).await;
+            return Err(ReviewError::GitDeadlineExceeded);
+        }
+    };
+    Ok(GitOutput {
+        success: status.success(),
+        stdout,
+    })
+}
+
+async fn read_bounded(
+    mut stdout: impl AsyncRead + Unpin,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, ReviewError> {
+    let mut output = Vec::with_capacity(maximum_bytes.min(8_192));
+    let mut chunk = [0_u8; 8_192];
+    loop {
+        let count = stdout
+            .read(&mut chunk)
+            .await
+            .map_err(|_| ReviewError::GitCommandFailed)?;
+        if count == 0 {
+            return Ok(output);
+        }
+        let next = output
+            .len()
+            .checked_add(count)
+            .ok_or(ReviewError::GitOutputLimitExceeded)?;
+        if next > maximum_bytes {
+            return Err(ReviewError::GitOutputLimitExceeded);
+        }
+        output.extend_from_slice(&chunk[..count]);
+    }
+}
+
+async fn terminate(child: &mut Child) {
+    let _kill_result = child.kill().await;
+    let _wait_result = child.wait().await;
+}
+
+fn parse_commit(output: &[u8]) -> Result<String, ReviewError> {
+    let text =
+        std::str::from_utf8(trim_ascii(output)).map_err(|_| ReviewError::GitOutputInvalid)?;
+    let valid = matches!(text.len(), 40 | 64) && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if valid {
+        Ok(text.to_ascii_lowercase())
+    } else {
+        Err(ReviewError::GitOutputInvalid)
+    }
+}
+
+fn parse_name_status(
+    output: &[u8],
+) -> Result<BTreeMap<NormalizedPath, GitChangeKind>, ReviewError> {
+    let tokens = split_nul(output)?;
+    let mut changed = BTreeMap::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        let (status, path) = if let Some(separator) = token.iter().position(|byte| *byte == b'\t') {
+            (&token[..separator], &token[separator + 1..])
+        } else {
+            let path = tokens
+                .get(index + 1)
+                .copied()
+                .ok_or(ReviewError::GitOutputInvalid)?;
+            index += 1;
+            (token, path)
+        };
+        let kind = parse_change_kind(status)?;
+        changed.insert(parse_path(path)?, kind);
+        index += 1;
+    }
+    Ok(changed)
+}
+
+fn parse_paths(output: &[u8]) -> Result<Vec<NormalizedPath>, ReviewError> {
+    split_nul(output)?.into_iter().map(parse_path).collect()
+}
+
+fn split_nul(output: &[u8]) -> Result<Vec<&[u8]>, ReviewError> {
+    if output.is_empty() {
+        return Ok(Vec::new());
+    }
+    if output.last() != Some(&0) {
+        return Err(ReviewError::GitOutputInvalid);
+    }
+    Ok(output[..output.len() - 1]
+        .split(|byte| *byte == 0)
+        .collect())
+}
+
+fn parse_change_kind(status: &[u8]) -> Result<GitChangeKind, ReviewError> {
+    match status.first().copied() {
+        Some(b'A') => Ok(GitChangeKind::Added),
+        Some(b'M') => Ok(GitChangeKind::Modified),
+        Some(b'D') => Ok(GitChangeKind::Deleted),
+        Some(b'T') => Ok(GitChangeKind::TypeChanged),
+        Some(b'U') => Ok(GitChangeKind::Unmerged),
+        _ => Err(ReviewError::GitOutputInvalid),
+    }
+}
+
+fn parse_path(raw: &[u8]) -> Result<NormalizedPath, ReviewError> {
+    let path = std::str::from_utf8(raw).map_err(|_| ReviewError::GitOutputInvalid)?;
+    if path.chars().any(char::is_control) {
+        return Err(ReviewError::GitOutputInvalid);
+    }
+    NormalizedPath::parse(path).map_err(|_| ReviewError::GitOutputInvalid)
+}
+
+fn trim_ascii(output: &[u8]) -> &[u8] {
+    let start = output
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(output.len());
+    let end = output
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    &output[start..end]
+}
+
+fn valid_git_ref(reference: &str) -> bool {
+    !reference.is_empty()
+        && reference.len() <= MAX_REF_BYTES
+        && !reference.starts_with('-')
+        && !reference
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+}

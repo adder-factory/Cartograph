@@ -280,6 +280,31 @@ No-LLM mode uses BM25, exact lookup, graph expansion, and deterministic
 packaging. Hybrid mode adds embeddings only after a real probe proves matching
 model fingerprint, dimension, row coverage, and query success.
 
+### Deterministic compare-to-ref review
+
+The first agent workflow is a no-LLM review packet exposed as `cartograph
+review --ref <revision>` and `cartograph_review`. The project runtime resolves
+the requested revision to an immutable commit, then discovers the union of
+committed, staged, unstaged, and untracked project-relative paths. Git is
+invoked directly as a child process, never through a shell; option parsing is
+terminated before the user revision, stdout is byte-bounded, execution has a
+hard deadline, and timed-out or over-limit children are killed and reaped.
+Malformed option-shaped/control-containing revisions fail before process
+launch, while a syntactically valid missing revision has a separate redacted
+error.
+
+Changed paths are deduplicated and sorted before the configured stable prefix
+is retained. The search service resolves those paths against only the current
+immutable generation, uses their declarations as bounded reverse-impact roots,
+and returns exact changed-file evidence, graph neighbors, and affected tests.
+The result separately reports Git worktree dirtiness, live index freshness,
+confidence, an explicit abstention reason (`no_current_generation`,
+`no_changed_files`, `no_indexed_changed_files`, `stale_index`, or
+`unknown_freshness`), and truncation at the changed-file, symbol-root, graph,
+affected-test, and compact-evidence stages. A dirty worktree is therefore
+visible rather than silently treated as committed or fresh, and no semantic or
+LLM backend is consulted.
+
 ## Parallel indexing and determinism
 
 Parallelism is bounded at every stage; there is no unbounded task spawn or

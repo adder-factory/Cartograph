@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cartograph_agent::{IndexOptions, ProjectRuntime};
+use cartograph_agent::{IndexOptions, ProjectRuntime, ReviewError, ReviewOptions};
 use cartograph_domain::{NormalizedPath, ProjectId, SymbolId};
 use cartograph_mcp::{
     BoxToolFuture, ToolAnnotations, ToolCall, ToolCallContext, ToolContractError, ToolDefinition,
@@ -18,6 +18,7 @@ const CONTEXT_TOOL: &str = "cartograph_context";
 const FIND_TOOL: &str = "cartograph_find";
 const GRAPH_TOOL: &str = "cartograph_graph";
 const AFFECTED_TOOL: &str = "cartograph_affected";
+const REVIEW_TOOL: &str = "cartograph_review";
 const ADMIN_TOOL: &str = "cartograph_admin";
 
 /// Product adapter joining the bounded MCP transport to public v2 services.
@@ -54,6 +55,7 @@ impl CartographMcpHandler {
             FIND_TOOL => self.find(call.arguments).await,
             GRAPH_TOOL => self.graph(call.arguments).await,
             AFFECTED_TOOL => self.affected(call.arguments).await,
+            REVIEW_TOOL => self.review(call.arguments).await,
             ADMIN_TOOL => self.admin(call.arguments).await,
             _ => Err(safe_error(
                 ToolErrorCode::NotFound,
@@ -202,6 +204,17 @@ impl CartographMcpHandler {
         )
     }
 
+    async fn review(&self, arguments: Map<String, Value>) -> Result<ToolResult, ToolError> {
+        reject_unknown(&arguments, &["baseRef", "maxChangedFiles"])?;
+        let base_ref = optional_text(&arguments, "baseRef")?.unwrap_or("HEAD");
+        let max_changed_files = optional_u16(&arguments, "maxChangedFiles", 200, 512)?;
+        let options = ReviewOptions::new(base_ref)
+            .and_then(|options| options.with_max_changed_files(max_changed_files))
+            .map_err(review_error)?;
+        let report = self.runtime.review(&options).await.map_err(review_error)?;
+        json_result(&report)
+    }
+
     async fn admin(&self, arguments: Map<String, Value>) -> Result<ToolResult, ToolError> {
         reject_unknown(&arguments, &["action", "force", "workers"])?;
         let action = required_text(&arguments, "action")?;
@@ -328,6 +341,19 @@ fn tool_definitions() -> Result<Vec<ToolDefinition>, ToolContractError> {
         )?
         .with_annotations(read_only),
         ToolDefinition::new(
+            REVIEW_TOOL,
+            "Compare the live Git checkout to a ref and return deterministic changed-file, freshness, graph-impact, affected-test, truncation, and abstention evidence.",
+            object_schema(
+                json!({
+                    "baseRef": {"type": "string", "minLength": 1, "maxLength": 256, "default": "HEAD"},
+                    "maxChangedFiles": {"type": "integer", "minimum": 1, "maximum": 512}
+                }),
+                &[],
+            ),
+            ToolProfiles::ALL,
+        )?
+        .with_annotations(read_only),
+        ToolDefinition::new(
             ADMIN_TOOL,
             "Atomically index or synchronize the project through the bounded Rust pipeline.",
             object_schema(
@@ -438,6 +464,29 @@ fn internal_error<T>(_error: T) -> ToolError {
     ToolError::internal()
 }
 
+fn review_error(error: ReviewError) -> ToolError {
+    match error {
+        ReviewError::InvalidRef | ReviewError::InvalidOptions => invalid_arguments(),
+        ReviewError::GitRefNotFound => {
+            safe_error(ToolErrorCode::NotFound, "Git comparison ref was not found")
+        }
+        ReviewError::NotGitRepository => safe_error(
+            ToolErrorCode::NotReady,
+            "Cartograph review requires a Git worktree",
+        ),
+        ReviewError::GitUnavailable | ReviewError::GitDeadlineExceeded => safe_error(
+            ToolErrorCode::Unavailable,
+            "Git is unavailable for Cartograph review",
+        ),
+        ReviewError::GitOutputLimitExceeded
+        | ReviewError::GitOutputInvalid
+        | ReviewError::GitCommandFailed
+        | ReviewError::ProjectRootUnavailable
+        | ReviewError::ProjectStateUnavailable
+        | ReviewError::RetrievalUnavailable => ToolError::internal(),
+    }
+}
+
 fn safe_error(code: ToolErrorCode, message: &'static str) -> ToolError {
     match ToolError::safe(code, message) {
         Ok(error) => error,
@@ -465,6 +514,7 @@ mod tests {
                 FIND_TOOL,
                 GRAPH_TOOL,
                 AFFECTED_TOOL,
+                REVIEW_TOOL,
                 ADMIN_TOOL
             ]
         );

@@ -1,0 +1,177 @@
+use std::{path::Path, process::Command};
+
+use cartograph_agent::{GitChangeKind, ReviewError, ReviewOptions, discover_git_comparison};
+
+#[tokio::test]
+async fn compare_to_head_discovers_dirty_tracked_and_untracked_files_deterministically() {
+    let repository = repository_fixture();
+    write(
+        repository.path().join("src/z.rs"),
+        "pub fn z() { println!(\"dirty\"); }\n",
+    );
+    write(repository.path().join("src/a.rs"), "pub fn a() {}\n");
+
+    let options =
+        ReviewOptions::new("HEAD").unwrap_or_else(|error| panic!("review options failed: {error}"));
+    let comparison = discover_git_comparison(repository.path(), &options)
+        .await
+        .unwrap_or_else(|error| panic!("git comparison failed: {error}"));
+
+    assert!(comparison.worktree_dirty());
+    assert!(!comparison.truncated());
+    assert_eq!(
+        comparison
+            .files()
+            .iter()
+            .map(|file| (file.path().as_str(), file.kind()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("src/a.rs", GitChangeKind::Untracked),
+            ("src/z.rs", GitChangeKind::Modified),
+        ]
+    );
+    assert_eq!(comparison.base_commit().len(), 40);
+}
+
+#[tokio::test]
+async fn compare_to_ancestor_includes_committed_changes_without_marking_worktree_dirty() {
+    let repository = repository_fixture();
+    write(
+        repository.path().join("src/z.rs"),
+        "pub fn z() { println!(\"committed\"); }\n",
+    );
+    git(repository.path(), &["add", "src/z.rs"]);
+    git(repository.path(), &["commit", "-m", "change z"]);
+
+    let options = ReviewOptions::new("HEAD~1")
+        .unwrap_or_else(|error| panic!("review options failed: {error}"));
+    let comparison = discover_git_comparison(repository.path(), &options)
+        .await
+        .unwrap_or_else(|error| panic!("git comparison failed: {error}"));
+
+    assert!(!comparison.worktree_dirty());
+    assert_eq!(comparison.files().len(), 1);
+    assert_eq!(comparison.files()[0].path().as_str(), "src/z.rs");
+    assert_eq!(comparison.files()[0].kind(), GitChangeKind::Modified);
+}
+
+#[tokio::test]
+async fn malformed_and_missing_refs_fail_with_distinct_redacted_errors() {
+    let repository = repository_fixture();
+    assert_eq!(
+        ReviewOptions::new("--upload-pack=/tmp/evil"),
+        Err(ReviewError::InvalidRef)
+    );
+    assert_eq!(ReviewOptions::new("bad ref"), Err(ReviewError::InvalidRef));
+
+    let options = ReviewOptions::new("refs/heads/does-not-exist")
+        .unwrap_or_else(|error| panic!("missing-ref options failed: {error}"));
+    let error = match discover_git_comparison(repository.path(), &options).await {
+        Ok(_) => panic!("missing Git ref unexpectedly resolved"),
+        Err(error) => error,
+    };
+    assert_eq!(error, ReviewError::GitRefNotFound);
+    let rendered = error.to_string();
+    assert!(!rendered.contains("does-not-exist"));
+
+    let shell_shaped = ReviewOptions::new("HEAD;touch-owned")
+        .unwrap_or_else(|error| panic!("shell-shaped options failed: {error}"));
+    assert_eq!(
+        discover_git_comparison(repository.path(), &shell_shaped).await,
+        Err(ReviewError::GitRefNotFound)
+    );
+    assert!(!repository.path().join("touch-owned").exists());
+}
+
+#[tokio::test]
+async fn changed_file_limit_is_explicit_and_keeps_the_stable_prefix() {
+    let repository = repository_fixture();
+    write(repository.path().join("src/a.rs"), "pub fn a() {}\n");
+    write(repository.path().join("src/b.rs"), "pub fn b() {}\n");
+    let options = ReviewOptions::new("HEAD")
+        .and_then(|options| options.with_max_changed_files(1))
+        .unwrap_or_else(|error| panic!("review options failed: {error}"));
+    let comparison = discover_git_comparison(repository.path(), &options)
+        .await
+        .unwrap_or_else(|error| panic!("git comparison failed: {error}"));
+
+    assert!(comparison.truncated());
+    assert_eq!(comparison.files().len(), 1);
+    assert_eq!(comparison.files()[0].path().as_str(), "src/a.rs");
+}
+
+#[tokio::test]
+async fn nested_project_review_excludes_changes_outside_its_root() {
+    let repository = repository_fixture();
+    std::fs::create_dir_all(repository.path().join("workspace"))
+        .unwrap_or_else(|error| panic!("nested workspace failed: {error}"));
+    write(
+        repository.path().join("workspace/app.rs"),
+        "pub fn app() {}\n",
+    );
+    write(
+        repository.path().join("outside.rs"),
+        "pub fn outside() {}\n",
+    );
+    git(
+        repository.path(),
+        &["add", "workspace/app.rs", "outside.rs"],
+    );
+    git(repository.path(), &["commit", "-m", "nested baseline"]);
+    write(
+        repository.path().join("workspace/app.rs"),
+        "pub fn app() { println!(\"dirty\"); }\n",
+    );
+    write(
+        repository.path().join("outside.rs"),
+        "pub fn outside() { println!(\"dirty\"); }\n",
+    );
+
+    let options =
+        ReviewOptions::new("HEAD").unwrap_or_else(|error| panic!("review options failed: {error}"));
+    let comparison = discover_git_comparison(repository.path().join("workspace"), &options)
+        .await
+        .unwrap_or_else(|error| panic!("nested comparison failed: {error}"));
+    assert!(comparison.worktree_dirty());
+    assert_eq!(comparison.files().len(), 1);
+    assert_eq!(comparison.files()[0].path().as_str(), "app.rs");
+}
+
+fn repository_fixture() -> tempfile::TempDir {
+    let repository = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    git(repository.path(), &["init", "--initial-branch=main"]);
+    git(
+        repository.path(),
+        &["config", "user.email", "review@example.invalid"],
+    );
+    git(
+        repository.path(),
+        &["config", "user.name", "Review Fixture"],
+    );
+    std::fs::create_dir_all(repository.path().join("src"))
+        .unwrap_or_else(|error| panic!("fixture src directory failed: {error}"));
+    write(
+        repository.path().join("src/z.rs"),
+        "pub fn z() { println!(\"base\"); }\n",
+    );
+    git(repository.path(), &["add", "src/z.rs"]);
+    git(repository.path(), &["commit", "-m", "base"]);
+    repository
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|error| panic!("git fixture command failed: {error}"));
+    assert!(status.success(), "git fixture command returned {status}");
+}
+
+fn write(path: impl AsRef<Path>, content: &str) {
+    std::fs::write(path, content)
+        .unwrap_or_else(|error| panic!("fixture source write failed: {error}"));
+}

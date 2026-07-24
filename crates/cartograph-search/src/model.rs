@@ -17,6 +17,8 @@ const MAX_CANDIDATES: u16 = 100;
 const MAX_EXACT_RESULTS: u16 = 500;
 const MAX_PACKET_EVIDENCE: u16 = 100;
 const MAX_AFFECTED_TESTS: u16 = 100;
+const MAX_REVIEW_CHANGED_PATHS: usize = 512;
+const MAX_REVIEW_ROOTS: u16 = 32;
 
 /// Credential- and query-safe deterministic retrieval failure.
 #[derive(Debug, Error)]
@@ -866,6 +868,320 @@ pub struct ContextPacket {
     evidence: Vec<EvidenceItem>,
     affected_tests: Vec<AffectedTest>,
     truncated: bool,
+}
+
+/// Hard bounds for one compare-to-ref evidence packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ReviewBudget {
+    symbols_per_file: u16,
+    root_limit: u16,
+    traversal: TraversalBudget,
+    evidence_limit: u16,
+    affected_test_limit: u16,
+}
+
+impl ReviewBudget {
+    /// Build a fully bounded review budget.
+    pub const fn new(
+        symbols_per_file: u16,
+        root_limit: u16,
+        traversal: TraversalBudget,
+        evidence_limit: u16,
+        affected_test_limit: u16,
+    ) -> Result<Self, RetrievalError> {
+        if symbols_per_file == 0 || symbols_per_file > MAX_EXACT_RESULTS {
+            return Err(invalid("symbols_per_file"));
+        }
+        if root_limit == 0 || root_limit > MAX_REVIEW_ROOTS {
+            return Err(invalid("root_limit"));
+        }
+        if evidence_limit == 0 || evidence_limit > MAX_PACKET_EVIDENCE {
+            return Err(invalid("evidence_limit"));
+        }
+        if affected_test_limit == 0 || affected_test_limit > MAX_AFFECTED_TESTS {
+            return Err(invalid("affected_test_limit"));
+        }
+        Ok(Self {
+            symbols_per_file,
+            root_limit,
+            traversal,
+            evidence_limit,
+            affected_test_limit,
+        })
+    }
+
+    pub(crate) const fn symbols_per_file(self) -> u16 {
+        self.symbols_per_file
+    }
+
+    pub(crate) const fn root_limit(self) -> u16 {
+        self.root_limit
+    }
+
+    pub(crate) const fn traversal(self) -> TraversalBudget {
+        self.traversal
+    }
+
+    pub(crate) const fn evidence_limit(self) -> u16 {
+        self.evidence_limit
+    }
+
+    pub(crate) const fn affected_test_limit(self) -> u16 {
+        self.affected_test_limit
+    }
+}
+
+impl Default for ReviewBudget {
+    fn default() -> Self {
+        Self {
+            symbols_per_file: 100,
+            root_limit: 32,
+            traversal: TraversalBudget {
+                max_depth: 3,
+                max_nodes: 200,
+            },
+            evidence_limit: 50,
+            affected_test_limit: 50,
+        }
+    }
+}
+
+/// Bounded review request built from deterministic Git change discovery.
+pub struct ReviewRequest {
+    project_id: Option<ProjectId>,
+    changed_paths: Vec<NormalizedPath>,
+    freshness: IndexFreshness,
+    budget: ReviewBudget,
+    changed_files_truncated: bool,
+}
+
+impl ReviewRequest {
+    /// Validate, deduplicate, and sort changed paths before database work.
+    pub fn new(
+        project_id: Option<ProjectId>,
+        changed_paths: impl IntoIterator<Item = NormalizedPath>,
+        freshness: IndexFreshness,
+        budget: ReviewBudget,
+        changed_files_truncated: bool,
+    ) -> Result<Self, RetrievalError> {
+        let changed_paths = changed_paths.into_iter().collect::<BTreeSet<_>>();
+        if changed_paths.len() > MAX_REVIEW_CHANGED_PATHS {
+            return Err(invalid("changed_paths"));
+        }
+        Ok(Self {
+            project_id,
+            changed_paths: changed_paths.into_iter().collect(),
+            freshness,
+            budget,
+            changed_files_truncated,
+        })
+    }
+
+    pub(crate) const fn project_id(&self) -> Option<&ProjectId> {
+        self.project_id.as_ref()
+    }
+
+    pub(crate) fn changed_paths(&self) -> &[NormalizedPath] {
+        &self.changed_paths
+    }
+
+    pub(crate) const fn freshness(&self) -> IndexFreshness {
+        self.freshness
+    }
+
+    pub(crate) const fn budget(&self) -> ReviewBudget {
+        self.budget
+    }
+
+    pub(crate) const fn changed_files_truncated(&self) -> bool {
+        self.changed_files_truncated
+    }
+}
+
+impl fmt::Debug for ReviewRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReviewRequest")
+            .field("project_id", &self.project_id)
+            .field("changed_paths", &RedactedCount(self.changed_paths.len()))
+            .field("freshness", &self.freshness)
+            .field("budget", &self.budget)
+            .field("changed_files_truncated", &self.changed_files_truncated)
+            .finish()
+    }
+}
+
+/// Why a compare-to-ref packet should not be treated as a complete review.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewAbstention {
+    /// No current immutable generation exists for graph lookup.
+    NoCurrentGeneration,
+    /// Git found no differences from the requested base commit.
+    NoChangedFiles,
+    /// Changed paths had no records in the current generation.
+    NoIndexedChangedFiles,
+    /// The published generation differs from the live supported-source manifest.
+    StaleIndex,
+    /// The caller could not establish source freshness.
+    UnknownFreshness,
+}
+
+/// Per-stage review bounds that omitted candidates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ReviewTruncation {
+    changed_files: bool,
+    symbol_roots: bool,
+    graph: bool,
+    affected_tests: bool,
+    evidence: bool,
+}
+
+impl ReviewTruncation {
+    pub(crate) const fn new(
+        changed_files: bool,
+        symbol_roots: bool,
+        graph: bool,
+        affected_tests: bool,
+    ) -> Self {
+        Self {
+            changed_files,
+            symbol_roots,
+            graph,
+            affected_tests,
+            evidence: false,
+        }
+    }
+
+    pub(crate) const fn with_evidence(mut self, evidence: bool) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
+    /// Whether the changed-file bound omitted paths.
+    #[must_use]
+    pub const fn changed_files(self) -> bool {
+        self.changed_files
+    }
+
+    /// Whether per-file or total graph-root bounds omitted symbols.
+    #[must_use]
+    pub const fn symbol_roots(self) -> bool {
+        self.symbol_roots
+    }
+
+    /// Whether graph breadth/depth bounds omitted impact nodes.
+    #[must_use]
+    pub const fn graph(self) -> bool {
+        self.graph
+    }
+
+    /// Whether the affected-test limit omitted candidates.
+    #[must_use]
+    pub const fn affected_tests(self) -> bool {
+        self.affected_tests
+    }
+
+    /// Whether the compact evidence limit omitted candidates.
+    #[must_use]
+    pub const fn evidence(self) -> bool {
+        self.evidence
+    }
+
+    /// Whether any stage reported explicit truncation.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.changed_files
+            || self.symbol_roots
+            || self.graph
+            || self.affected_tests
+            || self.evidence
+    }
+}
+
+/// Deterministic index, graph-impact, and affected-test evidence for a Git comparison.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ReviewPacket {
+    generation: Option<GenerationEvidence>,
+    freshness: IndexFreshness,
+    confidence: RetrievalConfidence,
+    abstention: Option<ReviewAbstention>,
+    indexed_changed_files: Vec<NormalizedPath>,
+    evidence: Vec<EvidenceItem>,
+    affected_tests: Vec<AffectedTest>,
+    truncation: ReviewTruncation,
+}
+
+impl ReviewPacket {
+    pub(crate) const fn new(
+        generation: Option<GenerationEvidence>,
+        freshness: IndexFreshness,
+        decision: (RetrievalConfidence, Option<ReviewAbstention>),
+        indexed_changed_files: Vec<NormalizedPath>,
+        evidence: Vec<EvidenceItem>,
+        affected_tests: Vec<AffectedTest>,
+        truncation: ReviewTruncation,
+    ) -> Self {
+        let (confidence, abstention) = decision;
+        Self {
+            generation,
+            freshness,
+            confidence,
+            abstention,
+            indexed_changed_files,
+            evidence,
+            affected_tests,
+            truncation,
+        }
+    }
+
+    /// Published generation provenance, absent before the first index.
+    #[must_use]
+    pub const fn generation(&self) -> Option<&GenerationEvidence> {
+        self.generation.as_ref()
+    }
+
+    /// Live-source relationship supplied by the project runtime.
+    #[must_use]
+    pub const fn freshness(&self) -> IndexFreshness {
+        self.freshness
+    }
+
+    /// Explainable review confidence.
+    #[must_use]
+    pub const fn confidence(&self) -> RetrievalConfidence {
+        self.confidence
+    }
+
+    /// Explicit insufficiency reason.
+    #[must_use]
+    pub const fn abstention(&self) -> Option<ReviewAbstention> {
+        self.abstention
+    }
+
+    /// Changed paths found in the current immutable generation.
+    #[must_use]
+    pub fn indexed_changed_files(&self) -> &[NormalizedPath] {
+        &self.indexed_changed_files
+    }
+
+    /// Exact changed-file and bounded graph-impact evidence.
+    #[must_use]
+    pub fn evidence(&self) -> &[EvidenceItem] {
+        &self.evidence
+    }
+
+    /// Bounded reverse-impact test candidates.
+    #[must_use]
+    pub fn affected_tests(&self) -> &[AffectedTest] {
+        &self.affected_tests
+    }
+
+    /// Explicit per-stage truncation flags.
+    #[must_use]
+    pub const fn truncation(&self) -> ReviewTruncation {
+        self.truncation
+    }
 }
 
 impl ContextPacket {

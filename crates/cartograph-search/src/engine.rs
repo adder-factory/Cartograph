@@ -8,9 +8,11 @@ use cartograph_domain::{NormalizedPath, ProjectId, SymbolId};
 
 use crate::{
     AffectedTestsResult, ContextAnchor, ContextPacket, ContextRequest, EvidenceItem,
-    EvidenceReason, ExactPathResult, GenerationEvidence, RetrievalError, TraversalDirection,
-    TraversalHop, TraversalNode, TraversalRequest, TraversalResult,
+    EvidenceReason, ExactPathResult, GenerationEvidence, RetrievalError, ReviewPacket,
+    ReviewRequest, ReviewTruncation, TraversalDirection, TraversalHop, TraversalNode,
+    TraversalRequest, TraversalResult,
     packet::{PacketAssembly, assemble_packet},
+    review::{ReviewAssembly, assemble_review_packet},
     traversal::{GraphArc, affected_tests_from_traversal, expand_frontier},
 };
 
@@ -259,6 +261,113 @@ impl DeterministicRetriever {
             affected_tests,
             evidence_limit: budget.evidence_limit(),
             truncated: roots_were_truncated || graph_was_truncated,
+        }))
+    }
+
+    /// Assemble exact changed-file, reverse-impact, and affected-test evidence
+    /// for a deterministic compare-to-ref workflow.
+    pub async fn review_packet(
+        &self,
+        request: &ReviewRequest,
+    ) -> Result<ReviewPacket, RetrievalError> {
+        let Some(project_id) = request.project_id() else {
+            return Ok(assemble_review_packet(ReviewAssembly {
+                generation: None,
+                freshness: request.freshness(),
+                changed_file_count: request.changed_paths().len(),
+                indexed_changed_files: Vec::new(),
+                evidence: Vec::new(),
+                affected_tests: Vec::new(),
+                evidence_limit: request.budget().evidence_limit(),
+                truncation: ReviewTruncation::new(
+                    request.changed_files_truncated(),
+                    false,
+                    false,
+                    false,
+                ),
+            }));
+        };
+        let generation = self.database.current_generation_record(project_id).await?;
+        let Some(generation) = generation else {
+            return Ok(assemble_review_packet(ReviewAssembly {
+                generation: None,
+                freshness: request.freshness(),
+                changed_file_count: request.changed_paths().len(),
+                indexed_changed_files: Vec::new(),
+                evidence: Vec::new(),
+                affected_tests: Vec::new(),
+                evidence_limit: request.budget().evidence_limit(),
+                truncation: ReviewTruncation::new(
+                    request.changed_files_truncated(),
+                    false,
+                    false,
+                    false,
+                ),
+            }));
+        };
+
+        let budget = request.budget();
+        let mut indexed_changed_files = Vec::new();
+        let mut evidence = Vec::new();
+        let mut roots = BTreeSet::new();
+        let mut symbol_roots_were_truncated = false;
+        for path in request.changed_paths() {
+            let Some(result) = self
+                .exact_path(project_id, path, budget.symbols_per_file())
+                .await?
+            else {
+                continue;
+            };
+            indexed_changed_files.push(path.clone());
+            evidence.push(EvidenceItem::from_file(result.file()));
+            if result.symbols().len() == usize::from(budget.symbols_per_file()) {
+                symbol_roots_were_truncated = true;
+            }
+            for symbol in result.symbols() {
+                if roots.contains(symbol.symbol_id()) {
+                    continue;
+                }
+                if roots.len() >= usize::from(budget.root_limit()) {
+                    symbol_roots_were_truncated = true;
+                    continue;
+                }
+                roots.insert(symbol.symbol_id().clone());
+                evidence.push(EvidenceItem::from_symbol(symbol, EvidenceReason::ExactPath));
+            }
+        }
+
+        let roots = roots.into_iter().collect::<Vec<_>>();
+        let (affected_tests, graph_was_truncated, tests_were_truncated) = if roots.is_empty() {
+            (Vec::new(), false, false)
+        } else {
+            let traversal_request =
+                TraversalRequest::new(project_id.clone(), roots, budget.traversal())?;
+            let impact = self.impact(&traversal_request).await?;
+            for node in impact.nodes() {
+                evidence.push(EvidenceItem::from_traversal_node(node));
+            }
+            let (tests, tests_were_truncated) =
+                affected_tests_from_traversal(&impact, budget.affected_test_limit());
+            (tests, impact.truncated(), tests_were_truncated)
+        };
+
+        Ok(assemble_review_packet(ReviewAssembly {
+            generation: Some(GenerationEvidence::new(
+                generation.generation_id().clone(),
+                generation.sequence(),
+            )),
+            freshness: request.freshness(),
+            changed_file_count: request.changed_paths().len(),
+            indexed_changed_files,
+            evidence,
+            affected_tests,
+            evidence_limit: budget.evidence_limit(),
+            truncation: ReviewTruncation::new(
+                request.changed_files_truncated(),
+                symbol_roots_were_truncated,
+                graph_was_truncated,
+                tests_were_truncated,
+            ),
         }))
     }
 

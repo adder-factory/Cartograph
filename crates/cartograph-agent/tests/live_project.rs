@@ -1,8 +1,9 @@
-use std::{env, process, time::SystemTime};
+use std::{env, path::Path, process, time::SystemTime};
 
-use cartograph_agent::{IndexOptions, ProjectRuntime};
+use cartograph_agent::{IndexOptions, ProjectRuntime, ReviewOptions};
 use cartograph_config::DatabaseSettings;
 use cartograph_db::SearchQuery;
+use cartograph_search::{IndexFreshness, RetrievalConfidence, ReviewAbstention};
 use sqlx_core::{query::query, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -24,6 +25,14 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
         "export function verifyJwtSignature(token: string): boolean { return token.length > 0; }\n",
     )
     .unwrap_or_else(|error| panic!("fixture write failed: {error}"));
+    git(project.path(), &["init", "--initial-branch=main"]);
+    git(
+        project.path(),
+        &["config", "user.email", "review@example.invalid"],
+    );
+    git(project.path(), &["config", "user.name", "Review Fixture"]);
+    git(project.path(), &["add", "auth.ts"]);
+    git(project.path(), &["commit", "-m", "base"]);
 
     let result = async {
         let runtime = ProjectRuntime::connect(project.path(), &settings)
@@ -79,6 +88,19 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
             .await
             .unwrap_or_else(|error| panic!("stale status failed: {error}"));
         assert!(!stale.fresh);
+        let review_options = ReviewOptions::new("HEAD")
+            .unwrap_or_else(|error| panic!("review options failed: {error}"));
+        let stale_review = runtime
+            .review(&review_options)
+            .await
+            .unwrap_or_else(|error| panic!("stale review failed: {error}"));
+        assert!(stale_review.comparison().worktree_dirty());
+        assert_eq!(stale_review.comparison().files().len(), 1);
+        assert_eq!(stale_review.packet().freshness(), IndexFreshness::Stale);
+        assert_eq!(
+            stale_review.packet().abstention(),
+            Some(ReviewAbstention::StaleIndex)
+        );
         let refreshed = runtime
             .index(IndexOptions::default())
             .await
@@ -91,12 +113,37 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
             .await
             .unwrap_or_else(|error| panic!("fresh status failed: {error}"));
         assert!(fresh.fresh);
+        let current_review = runtime
+            .review(&review_options)
+            .await
+            .unwrap_or_else(|error| panic!("current review failed: {error}"));
+        assert_eq!(
+            current_review.packet().freshness(),
+            IndexFreshness::Current
+        );
+        assert_eq!(
+            current_review.packet().confidence(),
+            RetrievalConfidence::High
+        );
+        assert_eq!(current_review.packet().abstention(), None);
         runtime.close().await;
     }
     .await;
 
     drop_schema(&settings, &schema).await;
     result
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|error| panic!("git fixture command failed: {error}"));
+    assert!(status.success(), "git fixture command returned {status}");
 }
 
 fn unique_schema() -> String {

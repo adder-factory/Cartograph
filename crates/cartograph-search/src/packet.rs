@@ -15,20 +15,7 @@ pub(crate) struct PacketAssembly {
 }
 
 pub(crate) fn assemble_packet(input: PacketAssembly) -> ContextPacket {
-    let mut merged = BTreeMap::<String, EvidenceItem>::new();
-    for item in input.evidence {
-        let key = item.key();
-        if let Some(existing) = merged.get_mut(&key) {
-            existing.merge(item);
-        } else {
-            merged.insert(key, item);
-        }
-    }
-    let mut evidence = merged.into_values().collect::<Vec<_>>();
-    evidence.sort_by(evidence_order);
-    let evidence_was_truncated = evidence.len() > usize::from(input.evidence_limit);
-    evidence.truncate(usize::from(input.evidence_limit));
-
+    let (evidence, evidence_was_truncated) = bound_evidence(input.evidence, input.evidence_limit);
     let (confidence, abstention) = classify_packet(
         input.generation.as_ref(),
         input.freshness,
@@ -43,6 +30,26 @@ pub(crate) fn assemble_packet(input: PacketAssembly) -> ContextPacket {
         input.affected_tests,
         input.truncated || evidence_was_truncated,
     )
+}
+
+pub(crate) fn bound_evidence(
+    evidence: Vec<EvidenceItem>,
+    evidence_limit: u16,
+) -> (Vec<EvidenceItem>, bool) {
+    let mut merged = BTreeMap::<String, EvidenceItem>::new();
+    for item in evidence {
+        let key = item.key();
+        if let Some(existing) = merged.get_mut(&key) {
+            existing.merge(item);
+        } else {
+            merged.insert(key, item);
+        }
+    }
+    let mut evidence = merged.into_values().collect::<Vec<_>>();
+    evidence.sort_by(evidence_order);
+    let evidence_was_truncated = evidence.len() > usize::from(evidence_limit);
+    evidence.truncate(usize::from(evidence_limit));
+    (evidence, evidence_was_truncated)
 }
 
 fn evidence_order(left: &EvidenceItem, right: &EvidenceItem) -> std::cmp::Ordering {

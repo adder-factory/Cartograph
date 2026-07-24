@@ -3,19 +3,23 @@
 mod engine;
 mod model;
 mod packet;
+mod review;
 mod traversal;
 
 pub use engine::DeterministicRetriever;
 pub use model::{
     AffectedTest, AffectedTestsResult, ContextAbstention, ContextAnchor, ContextBudget,
     ContextPacket, ContextRequest, EvidenceItem, EvidenceReason, ExactPathResult,
-    GenerationEvidence, IndexFreshness, RetrievalConfidence, RetrievalError, TraversalBudget,
+    GenerationEvidence, IndexFreshness, RetrievalConfidence, RetrievalError, ReviewAbstention,
+    ReviewBudget, ReviewPacket, ReviewRequest, ReviewTruncation, TraversalBudget,
     TraversalDirection, TraversalHop, TraversalNode, TraversalRequest, TraversalResult,
 };
 pub use traversal::is_test_path;
 
 #[cfg(test)]
 use packet::{PacketAssembly, assemble_packet};
+#[cfg(test)]
+use review::{ReviewAssembly, assemble_review_packet};
 #[cfg(test)]
 use traversal::{GraphArc, expand_frontier};
 
@@ -31,7 +35,7 @@ fn fixture_generation() -> GenerationEvidence {
 
 #[cfg(test)]
 mod contract_tests {
-    use cartograph_domain::{ProjectId, SymbolId};
+    use cartograph_domain::{NormalizedPath, ProjectId, SymbolId};
 
     use super::*;
 
@@ -149,5 +153,61 @@ mod contract_tests {
         assert_eq!(paths, vec!["src/a.ts", "src/b.ts", "src/z.ts"]);
         assert_eq!(packet.confidence(), RetrievalConfidence::High);
         assert_eq!(packet.abstention(), None);
+    }
+
+    #[test]
+    fn review_packet_exposes_freshness_abstention_and_per_stage_truncation() {
+        let path = NormalizedPath::parse("src/service.rs")
+            .unwrap_or_else(|error| panic!("review path fixture failed: {error}"));
+        let no_generation = assemble_review_packet(ReviewAssembly {
+            generation: None,
+            freshness: IndexFreshness::Unknown,
+            changed_file_count: 1,
+            indexed_changed_files: Vec::new(),
+            evidence: Vec::new(),
+            affected_tests: Vec::new(),
+            evidence_limit: 10,
+            truncation: ReviewTruncation::default(),
+        });
+        assert_eq!(
+            no_generation.abstention(),
+            Some(ReviewAbstention::NoCurrentGeneration)
+        );
+        assert_eq!(no_generation.confidence(), RetrievalConfidence::None);
+
+        let no_changes = assemble_review_packet(ReviewAssembly {
+            generation: Some(fixture_generation()),
+            freshness: IndexFreshness::Current,
+            changed_file_count: 0,
+            indexed_changed_files: Vec::new(),
+            evidence: Vec::new(),
+            affected_tests: Vec::new(),
+            evidence_limit: 10,
+            truncation: ReviewTruncation::default(),
+        });
+        assert_eq!(
+            no_changes.abstention(),
+            Some(ReviewAbstention::NoChangedFiles)
+        );
+
+        let stale = assemble_review_packet(ReviewAssembly {
+            generation: Some(fixture_generation()),
+            freshness: IndexFreshness::Stale,
+            changed_file_count: 1,
+            indexed_changed_files: vec![path],
+            evidence: vec![EvidenceItem::fixture(
+                "src/service.rs",
+                "service",
+                EvidenceReason::ExactPath,
+            )],
+            affected_tests: Vec::new(),
+            evidence_limit: 10,
+            truncation: ReviewTruncation::new(true, true, false, false),
+        });
+        assert_eq!(stale.abstention(), Some(ReviewAbstention::StaleIndex));
+        assert_eq!(stale.confidence(), RetrievalConfidence::Low);
+        assert!(stale.truncation().changed_files());
+        assert!(stale.truncation().symbol_roots());
+        assert!(stale.truncation().any());
     }
 }

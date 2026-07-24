@@ -26,6 +26,13 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+mod review;
+
+pub use review::{
+    GitChangeKind, GitChangedFile, GitComparison, ReviewError, ReviewOptions, ReviewReport,
+    discover_git_comparison,
+};
+
 const PROJECT_IDENTITY_DOMAIN: &[u8] = b"cartograph-v2-project-root-v1";
 const SOURCE_REVISION_DOMAIN: &[u8] = b"cartograph-v2-source-revision-v1";
 const PROCESS_OWNER_DOMAIN: &[u8] = b"cartograph-v2-process-owner-v1";
