@@ -65,7 +65,10 @@ pub(super) fn callable_signature(
         .len()
         .checked_add(prefix_bytes.saturating_mul(2))
         .ok_or(ExtractError::OutputLimit)?;
-    let return_text = if let Some(return_type) = node.child_by_field_name("return_type") {
+    let return_text = if let Some(return_type) = node
+        .child_by_field_name("return_type")
+        .or_else(|| node.child_by_field_name("result"))
+    {
         let length = return_type
             .end_byte()
             .saturating_sub(return_type.start_byte());
@@ -219,7 +222,9 @@ fn is_search_identifier(kind: &str) -> bool {
     matches!(
         kind,
         "identifier"
+            | "field_identifier"
             | "jsx_identifier"
+            | "package_identifier"
             | "private_property_identifier"
             | "property_identifier"
             | "shorthand_property_identifier"
@@ -275,7 +280,7 @@ pub(super) fn is_call_or_construction_target(node: Node<'_>) -> bool {
         return false;
     };
     let target = match parent.kind() {
-        "call_expression" => parent.child_by_field_name("function"),
+        "call_expression" | "call" => parent.child_by_field_name("function"),
         "new_expression" => parent.child_by_field_name("constructor"),
         _ => None,
     };

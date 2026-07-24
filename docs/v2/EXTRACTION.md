@@ -1,6 +1,7 @@
 # Cartograph v2 native extraction
 
-Status: TypeScript/JavaScript structural extraction, project-wide discovery,
+Status: TypeScript/JavaScript structural extraction plus bounded native Rust,
+Python, and Go declaration/reference slices, project-wide discovery,
 module-aware bounded resolution, safe implementation search text, PostgreSQL
 persistence, and real-corpus scaling implemented.
 
@@ -14,7 +15,7 @@ The normative product direction remains `docs/v2/ARCHITECTURE.md`.
 and error support. It does not depend on PostgreSQL, the index supervisor, MCP,
 the v1 TypeScript runtime, or an LLM.
 
-The first native grammar family owns these case-insensitive extensions:
+The native grammar families own these case-insensitive extensions:
 
 | Language | Extensions | Grammar |
 | --- | --- | --- |
@@ -22,10 +23,14 @@ The first native grammar family owns these case-insensitive extensions:
 | TSX | `.tsx` | Tree-sitter TSX |
 | JavaScript | `.js`, `.mjs`, `.cjs`, `.xsjs`, `.xsjslib` | Tree-sitter JavaScript |
 | JSX | `.jsx` | Tree-sitter JavaScript |
+| Rust | `.rs` | Tree-sitter Rust |
+| Python | `.py`, `.pyi` | Tree-sitter Python |
+| Go | `.go` | Tree-sitter Go |
 
 The workspace pins Tree-sitter 0.26.11, the JavaScript grammar 0.25.0, and the
-TypeScript/TSX grammar 0.23.2. A version change is a behavior change and must
-re-run the locked oracle and native corpus gates.
+TypeScript/TSX grammar 0.23.2, Rust grammar 0.24.2, and Python and Go grammars
+0.25.0. A version change is a behavior change and must re-run the locked oracle,
+polyglot canary, and native corpus gates.
 
 ## Input and identity contract
 
@@ -77,6 +82,42 @@ The TypeScript/JavaScript walker currently emits:
 - calls, construction, PascalCase JSX references, and non-call field access;
 - bounded syntax diagnostics while retaining useful declarations from a
   recoverably damaged parse.
+
+The additional native language slices are deliberately narrower:
+
+| Language | Implemented structural evidence | Resolution boundary |
+| --- | --- | --- |
+| Rust | inline modules, structs, enums/variants, traits, type aliases, constants/statics, functions, impl/trait methods, explicit visibility, same-file containment when the top-level owning type is already declared, calls, macro calls, field access, type/return references, and external `mod`/`use` evidence | ordinary lexical lookup and qualified calls through an exact top-level external `mod` binding in conventional `lib.rs`, `main.rs`, or `mod.rs` layouts resolve; bare cross-file names do not. Only unrestricted `pub` is public, `pub(crate)`/`pub(super)` are internal, and other restricted forms are not treated as exported. Imported nested/member/module symbols are not callable top-level bindings. Cargo/custom-root topology, `#[path]`, nested external modules, `use` trees/aliases, associated-type dispatch, and receiver typing remain explicit unresolved evidence |
+| Python | classes, functions, class methods, inheritance, parameter/return annotations, calls, attribute access, imports, and top-level non-underscore export state | exact relative `from .module import name` bindings and package-relative module bindings such as `from . import helpers` resolve; absolute environment/package imports, `__all__`, namespace packages/`__init__.py`, assignments, decorator edges, and dynamic imports are not inferred |
+| Go | package clauses, named structs/interfaces/type aliases, functions, receiver/interface methods, same-file receiver containment when the top-level type is already declared, calls, selectors, imports, and Go's uppercase export convention | lexical names and a unique exported name in another Go file resolve only when normalized directory and declared package both match; methods and other member kinds are excluded from bare fallback. Import paths are retained with aliases, but `go.mod` re-anchoring, embedded fields, and implicit interface implementation are not inferred |
+
+Representative Rust, Python, and Go sources are locked in
+`crates/cartograph-extract/tests/polyglot.rs`. The production pipeline test
+`polyglot_and_module_forms_produce_resolved_nonempty_graphs` additionally
+requires every fixture file to produce symbols and proves a Rust external-module
+call, a Go same-directory/same-package call, Python named and namespace
+relative-import calls, and an identifier-backed default export. Negative
+canaries reject Rust nested/member/module targets through external `mod`, Go
+module/method/foreign-directory/mismatched-package fallback, cross-language
+stems, and dynamic CommonJS resolution. This is the silent-empty-graph canary
+for every language claimed in the table.
+
+TypeScript/JavaScript module evidence now also covers explicit local export
+lists, local export aliases, named re-exports, CommonJS namespace/member/
+destructured `require`, and identifier-backed static `exports.name` /
+`module.exports` object assignments. CommonJS inference requires the standard
+`require`, `module`, and `exports` names to be unshadowed; any lexical binding
+with the relevant name makes that file abstain from the corresponding
+inference. Named re-exports create an exported alias
+node plus an `exports` edge to the proven source declaration, so a consumer can
+traverse the barrel without pretending the alias is the implementation.
+`export *` retains module import evidence but does not propagate an unbounded
+unknown export set. Unbound dynamic and side-effect-only `require` calls remain
+as ordinary unresolved call evidence and cannot fall through to an unrelated
+JavaScript-family project symbol; a genuine same-file lexical `require` can
+still resolve. Computed export names, conditional mutation
+of `module.exports`, and package `exports` maps remain unresolved rather than
+guessed.
 
 Each symbol also carries a concrete-syntax BLAKE3 digest that excludes comments
 and formatting whitespace while retaining semantic tokens. This supports
@@ -165,8 +206,18 @@ strictly ordered supervisor stages:
    `SourceSnapshot` or raw `ExtractedFile` values for the corpus.
 5. Resolve walks containment ancestry first, excluding class/interface members
    from bare lexical lookup while preserving explicit field-access resolution,
-   applies overload policy, then uses exact relative ES-module bindings. Default, named/aliased, and namespace
-   imports require an exported target in one normalized module; bare packages,
+   applies overload policy, then uses exact relative module bindings. Default,
+   named/aliased, and namespace imports require an exported target in one
+   normalized, language-compatible module; supported module stems now include
+   TypeScript/JavaScript, Rust, Python, and Go extensions. Cross-language stems
+   remain unresolved until an explicit bridge exists. JavaScript-family
+   directory resolution recognizes only `index` files; Rust recognizes only
+   `mod.rs`, and a simultaneous `name.rs` plus `name/mod.rs` match is
+   deliberately ambiguous. Python and Go do not inherit either directory
+   convention. Unbound project fallback
+   is restricted to the JavaScript family or a same-directory, same-package Go
+   file. Rust and Python cross-file references require explicit binding
+   evidence. Bare packages,
    missing/ambiguous modules, and ambiguous overloads remain explicit unresolved
    evidence. An ambiguous exact path or stem cannot fall through to a directory
    `index`. Named import declaration references use the exact binding span
@@ -251,20 +302,22 @@ The following work remains outside this slice:
    tracked source is later covered by an ignore rule; the first Rust walker
    applies ignore rules uniformly. Embedded-repository/submodule parity also
    needs a locked corpus.
-2. Explicit export lists/re-exports, TypeScript `paths` aliases, package exports,
-   CommonJS `require`, and receiver/type-directed qualified-member resolution.
-   These need richer provenance/confidence rather than name-only fallback.
+2. Star re-export propagation, TypeScript `paths` aliases, package exports,
+   dynamic/computed CommonJS, Python package-root policy, Cargo module/use-tree
+   semantics, `go.mod` import re-anchoring, and receiver/type-directed
+   qualified-member resolution. These need richer provenance/confidence rather
+   than name-only fallback.
 3. Separate exact reference-target spans from v1-compatible expression/site
    spans; imports and constructions currently retain the v1.1.33 site range.
 4. Richer TypeScript declarations such as properties, fields, parameters,
-   decorators, overrides, anonymous default exports, and explicit export lists.
+   decorators, overrides, anonymous default exports, and namespace re-exports.
 5. Retrieval evaluation for identifier/keyword body text, including field
    boosts and whether deterministic token deduplication improves BM25 without
    reintroducing literals or complete source bodies.
 6. Spill/partitioned resolution and streaming database reduction if measured
    real projects exceed the configured retained-generation cap.
-7. Framework resolvers and cross-language bridges, followed by the remaining
-   language families in the v2 plan.
+7. Framework resolvers, cross-language bridges, deeper Rust/Python/Go semantics,
+   and the remaining language families in the v2 plan.
 8. Per-worker parser reuse and additional large-corpus evidence to decide whether repeated
    component/digest/type traversals need fused language-specific walks.
 

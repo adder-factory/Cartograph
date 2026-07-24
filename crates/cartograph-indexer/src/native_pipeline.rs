@@ -52,8 +52,9 @@ const UUID_TEXT_BYTES: u64 = 36;
 const MAX_RESOLUTION_PROVENANCE_BYTES: u64 = 64;
 const VALIDATION_WORKING_MULTIPLIER: u64 = 4;
 const RESOLUTION_MAP_NODE_ALLOWANCE: u64 = 128;
-const MODULE_EXTENSIONS: [&str; 11] = [
-    ".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs",
+const MODULE_EXTENSIONS: [&str; 15] = [
+    ".d.ts", ".d.mts", ".d.cts", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs",
+    ".cjs", ".rs", ".py", ".go",
 ];
 const REFERENCE_EDGE_KINDS: [EdgeKind; ReferenceKind::DefUse as usize + 1] = [
     EdgeKind::Calls,
@@ -1115,18 +1116,27 @@ struct ResolutionCandidate {
     kind: SymbolKind,
     exported: bool,
     declaration_only: bool,
+    top_level: bool,
 }
 
 type CandidateMap = BTreeMap<String, Vec<ResolutionCandidate>>;
 type DefaultExportMap = BTreeMap<FileId, Vec<ResolutionCandidate>>;
 type ParentMap = BTreeMap<SymbolId, SymbolId>;
 type ModulePathMap = BTreeMap<String, Vec<FileId>>;
+type FileResolutionContextMap = BTreeMap<FileId, ResolutionFileContext>;
+
+struct ResolutionFileContext {
+    directory: String,
+    language: String,
+    package: Option<String>,
+}
 
 #[derive(Default)]
 struct ModulePathIndex {
     exact: ModulePathMap,
     stem: ModulePathMap,
     directory_index: ModulePathMap,
+    files: FileResolutionContextMap,
 }
 
 #[derive(Default)]
@@ -1256,7 +1266,14 @@ where
         if cancelled() {
             return Err(StageItemFailure);
         }
-        index_module_path(&mut index.modules, &file.file, budget)?;
+        index_module_path(
+            &mut index.modules,
+            ModuleFileIndexInput {
+                file: &file.file,
+                package: native_package_name(file),
+            },
+            budget,
+        )?;
         for containment in &file.containments {
             if cancelled() {
                 return Err(StageItemFailure);
@@ -1424,6 +1441,7 @@ impl<'a> ResolutionOutput<'a> {
             &ResolutionRequest {
                 file_id: &context.identity.file_id,
                 file_path: &context.identity.path,
+                language: &context.identity.language,
                 import_bindings: context.import_bindings,
                 owner: reference.owner.as_ref(),
                 name: &reference.name,
@@ -1569,6 +1587,18 @@ struct ModulePathInsertion<'a> {
     file_id: &'a FileId,
 }
 
+#[derive(Clone, Copy)]
+struct ModuleFileIndexInput<'a> {
+    file: &'a FileInput,
+    package: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct ModuleStemInput<'a> {
+    file: &'a FileInput,
+    stem: &'a str,
+}
+
 struct DefaultExportInsertion<'a> {
     symbol: &'a NativeSymbolFacts,
     parent_symbol_id: Option<&'a SymbolId>,
@@ -1598,9 +1628,11 @@ fn insert_parent(
 
 fn index_module_path(
     modules: &mut ModulePathIndex,
-    file: &FileInput,
+    input: ModuleFileIndexInput<'_>,
     budget: &mut ResolveBudget,
 ) -> Result<(), StageItemFailure> {
+    index_resolution_file_context(modules, input, budget)?;
+    let file = input.file;
     push_module_path(
         &mut modules.exact,
         ModulePathInsertion {
@@ -1612,27 +1644,90 @@ fn index_module_path(
     let Some(stem) = strip_module_extension(&file.normalized_path) else {
         return Ok(());
     };
+    index_module_stem(modules, ModuleStemInput { file, stem }, budget)
+}
+
+fn index_module_stem(
+    modules: &mut ModulePathIndex,
+    input: ModuleStemInput<'_>,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
     push_module_path(
         &mut modules.stem,
         ModulePathInsertion {
-            key: stem,
-            file_id: &file.file_id,
+            key: input.stem,
+            file_id: &input.file.file_id,
         },
         budget,
     )?;
-    if let Some(directory) = stem.strip_suffix("/index")
-        && !directory.is_empty()
-    {
+    if let Some(directory) = directory_module_stem(&input.file.language, input.stem) {
         push_module_path(
             &mut modules.directory_index,
             ModulePathInsertion {
                 key: directory,
-                file_id: &file.file_id,
+                file_id: &input.file.file_id,
             },
             budget,
         )?;
     }
     Ok(())
+}
+
+fn directory_module_stem<'a>(language: &str, stem: &'a str) -> Option<&'a str> {
+    let directory = if language == SourceLanguage::Rust.as_str() {
+        stem.strip_suffix("/mod")
+    } else if javascript_family_name(language) {
+        stem.strip_suffix("/index")
+    } else {
+        None
+    };
+    directory.filter(|value| !value.is_empty())
+}
+
+fn index_resolution_file_context(
+    modules: &mut ModulePathIndex,
+    input: ModuleFileIndexInput<'_>,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    if modules.files.contains_key(&input.file.file_id) {
+        return Err(StageItemFailure);
+    }
+    let directory = input
+        .file
+        .normalized_path
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
+    budget.charge(resolution_file_context_bytes(input, directory))?;
+    modules.files.insert(
+        input.file.file_id.clone(),
+        ResolutionFileContext {
+            directory: try_clone_text(directory)?,
+            language: try_clone_text(&input.file.language)?,
+            package: input.package.map(try_clone_text).transpose()?,
+        },
+    );
+    Ok(())
+}
+
+fn resolution_file_context_bytes(input: ModuleFileIndexInput<'_>, directory: &str) -> u64 {
+    RESOLUTION_MAP_NODE_ALLOWANCE
+        .saturating_add(usize_to_u64(size_of::<(FileId, ResolutionFileContext)>()))
+        .saturating_add(usize_to_u64(input.file.file_id.as_str().len()))
+        .saturating_add(usize_to_u64(directory.len()))
+        .saturating_add(usize_to_u64(input.file.language.len()))
+        .saturating_add(input.package.map_or(0, |name| usize_to_u64(name.len())))
+}
+
+fn native_package_name(file: &NativeFileFacts) -> Option<&str> {
+    if file.file.language != SourceLanguage::Go.as_str() {
+        return None;
+    }
+    file.symbols
+        .iter()
+        .find(|symbol| {
+            symbol.kind == SymbolKind::Module && symbol.input.qualified_name == symbol.name
+        })
+        .map(|symbol| symbol.name.as_str())
 }
 
 fn strip_module_extension(path: &str) -> Option<&str> {
@@ -1702,6 +1797,7 @@ fn push_candidate(
         kind: symbol.kind,
         exported: symbol.exported,
         declaration_only: symbol.declaration_only,
+        top_level: symbol.input.qualified_name == symbol.name,
     });
     Ok(())
 }
@@ -1742,6 +1838,7 @@ fn push_default_export(
         kind: symbol.kind,
         exported: symbol.exported,
         declaration_only: symbol.declaration_only,
+        top_level: symbol.input.qualified_name == symbol.name,
     });
     Ok(())
 }
@@ -1749,11 +1846,19 @@ fn push_default_export(
 struct ResolutionRequest<'a> {
     file_id: &'a FileId,
     file_path: &'a str,
+    language: &'a str,
     import_bindings: &'a [ExtractedImportBinding],
     owner: Option<&'a SymbolId>,
     name: &'a str,
     kind: ReferenceKind,
     span: SourceSpan,
+}
+
+struct ProjectCandidateInput<'a> {
+    modules: &'a ModulePathIndex,
+    source: &'a ResolutionFileContext,
+    source_file_id: &'a FileId,
+    candidate: &'a ResolutionCandidate,
 }
 
 #[derive(Clone, Copy)]
@@ -1765,6 +1870,12 @@ enum ImportReferenceSite {
 struct ImportResolutionRequest<'a, 'b> {
     reference: &'a ResolutionRequest<'b>,
     site: ImportReferenceSite,
+}
+
+struct ModuleResolutionRequest<'a> {
+    importing_path: &'a str,
+    specifier: &'a str,
+    importing_language: &'a str,
 }
 
 fn resolve_reference<Cancel>(
@@ -1781,6 +1892,26 @@ where
             ImportResolutionRequest {
                 reference: request,
                 site: ImportReferenceSite::Declaration,
+            },
+            cancelled,
+        )? {
+            ImportResolution::NotBound => {}
+            ImportResolution::Resolved(target) => {
+                return Ok(ReferenceResolution::resolved(target));
+            }
+            ImportResolution::Unresolved => {
+                return Ok(ReferenceResolution::unresolved(
+                    UNRESOLVED_IMPORT_PROVENANCE,
+                ));
+            }
+        }
+    }
+    if request.kind == ReferenceKind::Exports {
+        match resolve_import(
+            index,
+            ImportResolutionRequest {
+                reference: request,
+                site: ImportReferenceSite::Usage,
             },
             cancelled,
         )? {
@@ -1816,10 +1947,18 @@ where
             ));
         }
     }
-    if let Some(target) = resolve_project(index, request, cancelled)? {
+    if project_fallback_allowed(request)
+        && let Some(target) = resolve_project(index, request, cancelled)?
+    {
         return Ok(ReferenceResolution::resolved(target));
     }
     Ok(ReferenceResolution::unresolved(UNRESOLVED_PROVENANCE))
+}
+
+fn project_fallback_allowed(request: &ResolutionRequest<'_>) -> bool {
+    !(javascript_family_name(request.language)
+        && request.kind == ReferenceKind::Calls
+        && request.name == "require")
 }
 
 fn resolve_lexical<Cancel>(
@@ -1835,7 +1974,9 @@ where
         .get(request.name)
         .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
     let mut scope = request.owner;
-    for _ in 0..=index.parents.len() {
+    // There can be one more lexical scope than parent-map entries: an
+    // uncontained owner must still advance once to the file's top-level scope.
+    for _ in 0..=index.parents.len().saturating_add(1) {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -1868,11 +2009,25 @@ where
 }
 
 fn is_lexical_candidate(reference_kind: ReferenceKind, candidate: &ResolutionCandidate) -> bool {
-    reference_kind == ReferenceKind::FieldAccess
-        || !matches!(
-            candidate.kind,
-            SymbolKind::Method | SymbolKind::Property | SymbolKind::Field | SymbolKind::EnumMember
-        )
+    reference_kind_candidate(reference_kind, candidate)
+        && (reference_kind == ReferenceKind::FieldAccess
+            || !matches!(
+                candidate.kind,
+                SymbolKind::Method
+                    | SymbolKind::Property
+                    | SymbolKind::Field
+                    | SymbolKind::EnumMember
+            ))
+}
+
+fn reference_kind_candidate(
+    reference_kind: ReferenceKind,
+    candidate: &ResolutionCandidate,
+) -> bool {
+    !(matches!(
+        reference_kind,
+        ReferenceKind::Calls | ReferenceKind::Instantiates
+    ) && candidate.kind == SymbolKind::Module)
 }
 
 enum ImportResolution {
@@ -1918,8 +2073,11 @@ where
     }
     let Some(module_file_id) = resolve_module_file(
         &index.modules,
-        reference.file_path,
-        &binding.module_specifier,
+        ModuleResolutionRequest {
+            importing_path: reference.file_path,
+            specifier: &binding.module_specifier,
+            importing_language: reference.language,
+        },
     ) else {
         return Ok(ImportResolution::Unresolved);
     };
@@ -1936,7 +2094,13 @@ where
     };
     let Some(candidate) = select_candidate(
         candidates,
-        |candidate| &candidate.file_id == module_file_id && candidate.exported,
+        |candidate| {
+            &candidate.file_id == module_file_id
+                && candidate.exported
+                && reference_kind_candidate(reference.kind, candidate)
+                && (reference.language != SourceLanguage::Rust.as_str()
+                    || (candidate.parent_symbol_id.is_none() && candidate.top_level))
+        },
         cancelled,
     )?
     else {
@@ -1972,32 +2136,47 @@ fn runtime_binding_target_name<'a>(
             }
             reference_name
                 .strip_prefix(&binding.local_name)
-                .and_then(|suffix| suffix.strip_prefix('.'))
+                .and_then(|suffix| {
+                    suffix
+                        .strip_prefix('.')
+                        .or_else(|| suffix.strip_prefix("::"))
+                })
         }
     }
 }
 
 fn resolve_module_file<'a>(
     modules: &'a ModulePathIndex,
-    importing_path: &str,
-    specifier: &str,
+    request: ModuleResolutionRequest<'_>,
 ) -> Option<&'a FileId> {
-    let normalized = normalize_relative_module_path(importing_path, specifier)?;
-    match module_file_match(modules.exact.get(&normalized)) {
+    let normalized = normalize_relative_module_path(request.importing_path, request.specifier)?;
+    match module_file_match(
+        modules.exact.get(&normalized),
+        &modules.files,
+        request.importing_language,
+    ) {
         ModuleFileMatch::Unique(file_id) => return Some(file_id),
         ModuleFileMatch::Ambiguous => return None,
         ModuleFileMatch::Missing => {}
     }
     let stem = strip_module_extension(&normalized).unwrap_or(&normalized);
-    match module_file_match(modules.stem.get(stem)) {
+    let stem_match = module_file_match(
+        modules.stem.get(stem),
+        &modules.files,
+        request.importing_language,
+    );
+    let directory_match = module_file_match(
+        modules.directory_index.get(&normalized),
+        &modules.files,
+        request.importing_language,
+    );
+    match choose_module_file_match(
+        stem_match,
+        directory_match,
+        request.importing_language == SourceLanguage::Rust.as_str(),
+    ) {
         ModuleFileMatch::Unique(file_id) => Some(file_id),
-        ModuleFileMatch::Ambiguous => None,
-        ModuleFileMatch::Missing => {
-            match module_file_match(modules.directory_index.get(&normalized)) {
-                ModuleFileMatch::Unique(file_id) => Some(file_id),
-                ModuleFileMatch::Missing | ModuleFileMatch::Ambiguous => None,
-            }
-        }
+        ModuleFileMatch::Missing | ModuleFileMatch::Ambiguous => None,
     }
 }
 
@@ -2007,11 +2186,47 @@ enum ModuleFileMatch<'a> {
     Ambiguous,
 }
 
-fn module_file_match(candidates: Option<&Vec<FileId>>) -> ModuleFileMatch<'_> {
-    match candidates.map(Vec::as_slice).unwrap_or_default() {
-        [] => ModuleFileMatch::Missing,
-        [file_id] => ModuleFileMatch::Unique(file_id),
-        [_, _, ..] => ModuleFileMatch::Ambiguous,
+fn choose_module_file_match<'a>(
+    stem: ModuleFileMatch<'a>,
+    directory: ModuleFileMatch<'a>,
+    merge_conventions: bool,
+) -> ModuleFileMatch<'a> {
+    if !merge_conventions {
+        return match stem {
+            ModuleFileMatch::Missing => directory,
+            selected => selected,
+        };
+    }
+    match (stem, directory) {
+        (ModuleFileMatch::Missing, selected) | (selected, ModuleFileMatch::Missing) => selected,
+        (ModuleFileMatch::Ambiguous, _) | (_, ModuleFileMatch::Ambiguous) => {
+            ModuleFileMatch::Ambiguous
+        }
+        (ModuleFileMatch::Unique(_), ModuleFileMatch::Unique(_)) => ModuleFileMatch::Ambiguous,
+    }
+}
+
+fn module_file_match<'a>(
+    candidates: Option<&'a Vec<FileId>>,
+    files: &FileResolutionContextMap,
+    importing_language: &str,
+) -> ModuleFileMatch<'a> {
+    let mut matched = candidates
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|file_id| {
+            files.get(*file_id).is_some_and(|target| {
+                resolution_languages_compatible(importing_language, &target.language)
+            })
+        });
+    let Some(file_id) = matched.next() else {
+        return ModuleFileMatch::Missing;
+    };
+    if matched.next().is_some() {
+        ModuleFileMatch::Ambiguous
+    } else {
+        ModuleFileMatch::Unique(file_id)
     }
 }
 
@@ -2075,23 +2290,86 @@ fn resolve_project<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
+    let source = project_source_context(index, request)?;
     let candidates = index
         .candidates
         .get(request.name)
         .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
-    let Some(candidate) = select_candidate(
+    let candidate = select_candidate(
         candidates,
-        |candidate| &candidate.file_id != request.file_id && candidate.exported,
+        |candidate| {
+            is_project_candidate(ProjectCandidateInput {
+                modules: &index.modules,
+                source,
+                source_file_id: request.file_id,
+                candidate,
+            })
+        },
         cancelled,
-    )?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(ResolvedTarget {
+    )?;
+    Ok(candidate.map(project_resolved_target))
+}
+
+fn project_source_context<'a>(
+    index: &'a ResolutionIndex,
+    request: &ResolutionRequest<'_>,
+) -> Result<&'a ResolutionFileContext, StageItemFailure> {
+    let source = index
+        .modules
+        .files
+        .get(request.file_id)
+        .ok_or(StageItemFailure)?;
+    (source.language == request.language)
+        .then_some(source)
+        .ok_or(StageItemFailure)
+}
+
+fn is_project_candidate(input: ProjectCandidateInput<'_>) -> bool {
+    &input.candidate.file_id != input.source_file_id
+        && input.candidate.exported
+        && project_scope_matches(input.modules, input.source, &input.candidate.file_id)
+        && !matches!(
+            input.candidate.kind,
+            SymbolKind::Method
+                | SymbolKind::Property
+                | SymbolKind::Field
+                | SymbolKind::EnumMember
+                | SymbolKind::Parameter
+        )
+}
+
+fn project_resolved_target(candidate: &ResolutionCandidate) -> ResolvedTarget {
+    ResolvedTarget {
         symbol_id: candidate.symbol_id.clone(),
         confidence: EXACT_PROJECT_CONFIDENCE,
         provenance: EXACT_PROJECT_PROVENANCE,
-    }))
+    }
+}
+
+fn project_scope_matches(
+    modules: &ModulePathIndex,
+    source: &ResolutionFileContext,
+    target_file_id: &FileId,
+) -> bool {
+    let Some(target) = modules.files.get(target_file_id) else {
+        return false;
+    };
+    if javascript_family_name(&source.language) && javascript_family_name(&target.language) {
+        return true;
+    }
+    source.language == SourceLanguage::Go.as_str()
+        && target.language == SourceLanguage::Go.as_str()
+        && source.directory == target.directory
+        && source.package.is_some()
+        && source.package == target.package
+}
+
+fn javascript_family_name(language: &str) -> bool {
+    matches!(language, "typescript" | "tsx" | "javascript" | "jsx")
+}
+
+fn resolution_languages_compatible(source: &str, target: &str) -> bool {
+    source == target || (javascript_family_name(source) && javascript_family_name(target))
 }
 
 fn select_candidate<'a, Eligible, Cancel>(
@@ -2390,6 +2668,219 @@ mod tests {
     struct ModuleResolverFacts<'a> {
         facts: &'a CanonicalGenerationFacts,
     }
+
+    struct ExpectedResolvedReference {
+        caller_path: &'static str,
+        caller_name: &'static str,
+        reference_name: &'static str,
+        target_path: &'static str,
+        target_name: &'static str,
+        provenance: &'static str,
+    }
+
+    const POLYGLOT_RESOLVED_REFERENCES: [ExpectedResolvedReference; 11] = [
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
+            caller_name: "rust_use",
+            reference_name: "nested::nested_helper",
+            target_path: "nested/mod.rs",
+            target_name: "nested_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
+            caller_name: "rust_use",
+            reference_name: "rust_helper::rust_helper",
+            target_path: "rust_helper.rs",
+            target_name: "rust_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "py_consumer.py",
+            caller_name: "python_use",
+            reference_name: "python_helper",
+            target_path: "py_helpers.py",
+            target_name: "python_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "py_namespace_consumer.py",
+            caller_name: "python_namespace_use",
+            reference_name: "helpers.python_helper",
+            target_path: "py_helpers.py",
+            target_name: "python_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "go_consumer.go",
+            caller_name: "GoUse",
+            reference_name: "GoHelper",
+            target_path: "go_helpers.go",
+            target_name: "GoHelper",
+            provenance: EXACT_PROJECT_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "use_barrel.ts",
+            caller_name: "consume",
+            reference_name: "renamed",
+            target_path: "barrel.ts",
+            target_name: "renamed",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "use_local_alias.ts",
+            caller_name: "consumeLocalAlias",
+            reference_name: "publicInternal",
+            target_path: "local_alias.ts",
+            target_name: "publicInternal",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "use_default_local.ts",
+            caller_name: "useDefaultLocal",
+            reference_name: "selected",
+            target_path: "default_local.ts",
+            target_name: "defaultLocal",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "cjs_consumer.cjs",
+            caller_name: "cjsUse",
+            reference_name: "helper.cjsHelper",
+            target_path: "cjs_helper.js",
+            target_name: "cjsHelper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "cjs_destructured.cjs",
+            caller_name: "cjsSelectedUse",
+            reference_name: "selectedHelper",
+            target_path: "cjs_helper.js",
+            target_name: "cjsHelper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "local_require.cjs",
+            caller_name: "localRequireUse",
+            reference_name: "require",
+            target_path: "local_require.cjs",
+            target_name: "require",
+            provenance: EXACT_SAME_FILE_PROVENANCE,
+        },
+    ];
+
+    const POLYGLOT_DIRECTORIES: [&str; 5] = ["other", "nested", "conflict", "index_only", "fake"];
+
+    const POLYGLOT_FIXTURES: [(&str, &str); 30] = [
+        (
+            "rust_helper.rs",
+            "impl LateWorker { pub fn orphan_method() -> usize { 8 } }\npub struct LateWorker;\npub mod inner { pub fn nested_only() -> usize { 7 } }\npub fn rust_helper() -> usize { 1 }\npub(self) fn hidden() -> usize { 9 }\n",
+        ),
+        ("nested/mod.rs", "pub fn nested_helper() -> usize { 2 }\n"),
+        ("conflict.rs", "pub fn conflict_helper() -> usize { 3 }\n"),
+        (
+            "conflict/mod.rs",
+            "pub fn conflict_helper() -> usize { 4 }\n",
+        ),
+        (
+            "index_only/index.rs",
+            "pub fn index_helper() -> usize { 5 }\n",
+        ),
+        (
+            "lib.rs",
+            "mod conflict;\nmod index_only;\nmod nested;\nmod rust_helper;\npub fn rust_use() -> usize { nested::nested_helper() + rust_helper::rust_helper() }\npub fn rust_rejected() -> usize { rust_helper::hidden() + rust_helper::nested_only() + rust_helper::orphan_method() + rust_helper::inner() + conflict::conflict_helper() + index_only::index_helper() }\n",
+        ),
+        ("py_helpers.py", "def python_helper():\n    return 1\n"),
+        (
+            "py_consumer.py",
+            "from .py_helpers import python_helper\n\ndef python_use():\n    return python_helper()\n",
+        ),
+        (
+            "py_namespace_consumer.py",
+            "from . import py_helpers as helpers\n\ndef python_namespace_use():\n    return helpers.python_helper()\n",
+        ),
+        (
+            "go_helpers.go",
+            "package fixture\n\nfunc GoHelper() int { return 1 }\n",
+        ),
+        (
+            "go_consumer.go",
+            "package fixture\n\nfunc GoUse() int { return GoHelper() }\n",
+        ),
+        (
+            "go_bare.go",
+            "package fixture\n\nfunc BareGoCall() int { return Run() + ForeignOnly() + ExternalOnly() + fixture() }\n",
+        ),
+        (
+            "go_external_test.go",
+            "package fixture_test\n\nfunc ExternalOnly() int { return 1 }\n",
+        ),
+        (
+            "other/go_foreign.go",
+            "package other\n\nfunc ForeignOnly() int { return 1 }\n",
+        ),
+        (
+            "cross_language.ts",
+            "import { python_helper } from './py_helpers';\nexport function crossLanguage(): number { return python_helper(); }\n",
+        ),
+        (
+            "fake/mod.ts",
+            "export function fake(): number { return 1; }\n",
+        ),
+        (
+            "use_fake.ts",
+            "import { fake } from './fake';\nexport function useFake(): number { return fake(); }\n",
+        ),
+        ("core.ts", "export function core(): number { return 1; }\n"),
+        (
+            "barrel.ts",
+            "const core = (): number => 0;\nexport { core as renamed } from './core';\n",
+        ),
+        (
+            "use_barrel.ts",
+            "import { renamed } from './barrel';\nexport function consume(): number { return renamed(); }\n",
+        ),
+        (
+            "local_alias.ts",
+            "const internal = (): number => 2;\nexport { internal as publicInternal };\n",
+        ),
+        (
+            "use_local_alias.ts",
+            "import { publicInternal } from './local_alias';\nexport function consumeLocalAlias(): number { return publicInternal(); }\n",
+        ),
+        (
+            "default_local.ts",
+            "const defaultLocal = (): number => 5;\nexport default defaultLocal;\n",
+        ),
+        (
+            "use_default_local.ts",
+            "import selected from './default_local';\nexport function useDefaultLocal(): number { return selected(); }\n",
+        ),
+        (
+            "cjs_helper.js",
+            "function cjsHelper() { return 1; }\nexports.cjsHelper = cjsHelper;\n",
+        ),
+        (
+            "cjs_consumer.cjs",
+            "const helper = require('./cjs_helper');\nfunction cjsUse() { return helper.cjsHelper(); }\nmodule.exports = { cjsUse };\n",
+        ),
+        (
+            "cjs_destructured.cjs",
+            "const { cjsHelper: selectedHelper } = require('./cjs_helper');\nfunction cjsSelectedUse() { return selectedHelper(); }\nmodule.exports = { cjsSelectedUse };\n",
+        ),
+        (
+            "dynamic_require.cjs",
+            "function dynamicUse(name) { return require(name); }\nmodule.exports = { dynamicUse };\n",
+        ),
+        (
+            "exported_require.js",
+            "export function require() { return 1; }\n",
+        ),
+        (
+            "local_require.cjs",
+            "function require(name) { return name; }\nfunction localRequireUse() { return require('local'); }\nmodule.exports = { localRequireUse };\n",
+        ),
+    ];
 
     impl ModuleResolverFacts<'_> {
         fn symbol(&self, path: &str, qualified_name: &str) -> SymbolId {
@@ -3005,6 +3496,7 @@ mod tests {
                     kind: SymbolKind::Function,
                     exported: true,
                     declaration_only: false,
+                    top_level: true,
                 }
             })
             .collect::<Vec<_>>();
@@ -3176,6 +3668,157 @@ mod tests {
             .await;
         assert!(report.all_joined);
         assert!(report.worker_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn polyglot_and_module_forms_produce_resolved_nonempty_graphs() {
+        let directory = match tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("could not create polyglot pipeline fixture: {error}"),
+        };
+        write_polyglot_project(directory.path());
+        let generation = build(directory.path(), PARALLEL_WORKERS).await;
+        let facts = ModuleResolverFacts {
+            facts: generation.facts(),
+        };
+
+        assert_polyglot_languages(generation.facts());
+        assert_polyglot_resolved_references(&facts);
+
+        assert_polyglot_export_edges(&facts);
+        assert_polyglot_rejections(&facts);
+        assert_polyglot_files_are_nonempty(generation.facts());
+    }
+
+    fn assert_polyglot_languages(facts: &CanonicalGenerationFacts) {
+        let languages = facts
+            .files()
+            .iter()
+            .map(|file| file.language.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            languages,
+            BTreeSet::from(["go", "javascript", "python", "rust", "typescript"])
+        );
+    }
+
+    fn assert_polyglot_resolved_references(facts: &ModuleResolverFacts<'_>) {
+        for expected in POLYGLOT_RESOLVED_REFERENCES {
+            let caller = facts.symbol(expected.caller_path, expected.caller_name);
+            let target = facts.symbol(expected.target_path, expected.target_name);
+            let reference = facts.reference(&caller, expected.reference_name);
+            let label = format!("{}:{}", expected.caller_path, expected.reference_name);
+            assert_eq!(
+                reference.target_symbol_id.as_ref(),
+                Some(&target),
+                "{label}"
+            );
+            assert_eq!(
+                reference.resolution_provenance, expected.provenance,
+                "{label}"
+            );
+        }
+    }
+
+    fn assert_polyglot_export_edges(facts: &ModuleResolverFacts<'_>) {
+        assert_source_reexport_edge(facts);
+        assert_local_export_edge(facts);
+        assert_commonjs_declaration_edge(facts);
+    }
+
+    fn assert_source_reexport_edge(facts: &ModuleResolverFacts<'_>) {
+        let renamed = facts.symbol("barrel.ts", "renamed");
+        let core = facts.symbol("core.ts", "core");
+        let reference = facts.reference(&renamed, "core");
+        assert_eq!(reference.target_symbol_id.as_ref(), Some(&core));
+        assert_eq!(reference.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+    }
+
+    fn assert_local_export_edge(facts: &ModuleResolverFacts<'_>) {
+        let public_internal = facts.symbol("local_alias.ts", "publicInternal");
+        let internal = facts.symbol("local_alias.ts", "internal");
+        let reference = facts.reference(&public_internal, "internal");
+        assert_eq!(reference.target_symbol_id.as_ref(), Some(&internal));
+        assert_eq!(reference.resolution_provenance, EXACT_SAME_FILE_PROVENANCE);
+    }
+
+    fn assert_commonjs_declaration_edge(facts: &ModuleResolverFacts<'_>) {
+        let target = facts.symbol("cjs_helper.js", "cjsHelper");
+        let reference = facts.import_declaration_reference("cjs_destructured.cjs", "cjsHelper");
+        assert_eq!(reference.target_symbol_id.as_ref(), Some(&target));
+        assert_eq!(reference.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+    }
+
+    fn assert_polyglot_rejections(facts: &ModuleResolverFacts<'_>) {
+        let bare_go_call = facts.symbol("go_bare.go", "BareGoCall");
+        for name in ["Run", "ForeignOnly", "ExternalOnly", "fixture"] {
+            let reference = facts.reference(&bare_go_call, name);
+            assert!(reference.target_symbol_id.is_none(), "{name}");
+            assert_eq!(
+                reference.resolution_provenance, UNRESOLVED_PROVENANCE,
+                "{name}"
+            );
+        }
+        let cross_language = facts.symbol("cross_language.ts", "crossLanguage");
+        let reference = facts.reference(&cross_language, "python_helper");
+        assert!(reference.target_symbol_id.is_none());
+        assert_eq!(
+            reference.resolution_provenance,
+            UNRESOLVED_IMPORT_PROVENANCE
+        );
+        let rust_rejected = facts.symbol("lib.rs", "rust_rejected");
+        for name in [
+            "rust_helper::hidden",
+            "rust_helper::nested_only",
+            "rust_helper::orphan_method",
+            "rust_helper::inner",
+            "conflict::conflict_helper",
+            "index_only::index_helper",
+        ] {
+            let reference = facts.reference(&rust_rejected, name);
+            assert!(reference.target_symbol_id.is_none(), "{name}");
+            assert_eq!(
+                reference.resolution_provenance, UNRESOLVED_IMPORT_PROVENANCE,
+                "{name}"
+            );
+        }
+        let use_fake = facts.symbol("use_fake.ts", "useFake");
+        let reference = facts.reference(&use_fake, "fake");
+        assert!(reference.target_symbol_id.is_none());
+        assert_eq!(
+            reference.resolution_provenance,
+            UNRESOLVED_IMPORT_PROVENANCE
+        );
+        let dynamic_require = facts.symbol("dynamic_require.cjs", "dynamicUse");
+        let reference = facts.reference(&dynamic_require, "require");
+        assert!(reference.target_symbol_id.is_none());
+        assert_eq!(reference.resolution_provenance, UNRESOLVED_PROVENANCE);
+    }
+
+    fn assert_polyglot_files_are_nonempty(facts: &CanonicalGenerationFacts) {
+        for (path, _) in POLYGLOT_FIXTURES {
+            let file = facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == path)
+                .unwrap_or_else(|| panic!("polyglot file was not indexed: {path}"));
+            assert!(
+                facts
+                    .symbols()
+                    .iter()
+                    .any(|symbol| symbol.file_id == file.file_id),
+                "{path}"
+            );
+        }
+    }
+
+    fn write_polyglot_project(root: &std::path::Path) {
+        for directory in POLYGLOT_DIRECTORIES {
+            assert!(fs::create_dir(root.join(directory)).is_ok(), "{directory}");
+        }
+        for (path, source) in POLYGLOT_FIXTURES {
+            assert!(fs::write(root.join(path), source).is_ok(), "{path}");
+        }
     }
 
     #[test]

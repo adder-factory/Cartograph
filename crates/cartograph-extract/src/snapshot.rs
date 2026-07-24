@@ -189,13 +189,13 @@ pub enum SnapshotError {
     /// The path was absolute, escaping, empty, or oversized.
     #[error("native source path is invalid")]
     InvalidPath,
-    /// The extension is not owned by the native TypeScript/JavaScript slice.
+    /// The extension is not owned by a native grammar slice.
     #[error("native source language is unsupported")]
     UnsupportedLanguage,
     /// Exact input bytes exceeded the configured bound.
     #[error("native source exceeds the configured size limit")]
     SourceTooLarge,
-    /// The first native parser slice accepts UTF-8 source only.
+    /// Native parser slices accept UTF-8 source only.
     #[error("native source is not valid UTF-8")]
     InvalidUtf8,
     /// A bounded snapshot buffer could not be reserved without aborting the process.
@@ -203,12 +203,12 @@ pub enum SnapshotError {
     ResourceLimit,
 }
 
-/// True when a supported source path uses a test directory or test/spec filename marker.
+/// True when a supported source path uses a test directory or language-owned test filename.
 #[must_use]
 pub fn is_test_source_path(path: &str) -> bool {
-    if classify_extension(path).is_none() {
+    let Some(language) = classify_extension(path) else {
         return false;
-    }
+    };
     let mut components = path.split('/').peekable();
     while let Some(component) = components.next() {
         if components.peek().is_some()
@@ -217,14 +217,26 @@ pub fn is_test_source_path(path: &str) -> bool {
             return true;
         }
         if components.peek().is_none() {
-            let stem = component
-                .rsplit_once('.')
-                .map_or(component, |(stem, _)| stem);
-            let lower = stem.to_ascii_lowercase();
-            return lower.ends_with(".test") || lower.ends_with(".spec");
+            return is_test_filename(language, component);
         }
     }
     false
+}
+
+fn is_test_filename(language: SourceLanguage, filename: &str) -> bool {
+    let stem = filename
+        .rsplit_once('.')
+        .map_or(filename, |(stem, _)| stem)
+        .to_ascii_lowercase();
+    match language {
+        SourceLanguage::TypeScript
+        | SourceLanguage::Tsx
+        | SourceLanguage::JavaScript
+        | SourceLanguage::Jsx => stem.ends_with(".test") || stem.ends_with(".spec"),
+        SourceLanguage::Python => stem.starts_with("test_") || stem.ends_with("_test"),
+        SourceLanguage::Go => stem.ends_with("_test"),
+        SourceLanguage::Rust => false,
+    }
 }
 
 fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
@@ -244,6 +256,9 @@ fn classify_extension(path: &str) -> Option<SourceLanguage> {
         "tsx" => Some(SourceLanguage::Tsx),
         "js" | "mjs" | "cjs" | "xsjs" | "xsjslib" => Some(SourceLanguage::JavaScript),
         "jsx" => Some(SourceLanguage::Jsx),
+        "rs" => Some(SourceLanguage::Rust),
+        "py" | "pyi" => Some(SourceLanguage::Python),
+        "go" => Some(SourceLanguage::Go),
         _ => None,
     }
 }
@@ -265,11 +280,22 @@ mod tests {
             "src/module.test.jsx",
             "src/module.spec.xsjs",
             "src/module.test.xsjslib",
+            "tests/native_test.rs",
+            "tests/native_test.py",
+            "tests/native_test.pyi",
+            "tests/native_test.go",
+            "pkg/worker_test.go",
+            "python/test_worker.py",
+            "python/worker_test.py",
+            "python/test_types.pyi",
             "SRC/TESTS/Mixed.SPEC.TS",
         ] {
             assert!(is_test_source_path(value), "{value}");
         }
         assert!(!is_test_source_path("src/contest.ts"));
         assert!(!is_test_source_path("src/unit.test.md"));
+        assert!(!is_test_source_path("src/worker_test.ts"));
+        assert!(!is_test_source_path("src/test_worker.ts"));
+        assert!(!is_test_source_path("src/worker_test.rs"));
     }
 }

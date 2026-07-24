@@ -1,4 +1,8 @@
-use cartograph_domain::{FileParseStatus, ReferenceKind, SymbolId, SymbolKind, Visibility};
+use std::collections::BTreeSet;
+
+use cartograph_domain::{
+    FileParseStatus, ReferenceKind, SourceLanguage, SymbolId, SymbolKind, Visibility,
+};
 use tree_sitter::Node;
 
 use crate::{
@@ -12,6 +16,8 @@ use crate::{
 };
 
 mod declarations;
+mod module_system;
+mod polyglot;
 mod references;
 mod syntax;
 
@@ -40,6 +46,7 @@ pub(crate) fn extract(
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ExtractedFile, ExtractError> {
     let mut builder = ExtractionBuilder::new(snapshot, cancelled)?;
+    module_system::collect_explicit_exports(&mut builder, input.root)?;
     builder.visit(input.root, 0)?;
     let diagnostics = if input.parse_status == FileParseStatus::Partial {
         let diagnostics = collect_diagnostics(input.root, builder.context.cancelled)?;
@@ -86,6 +93,9 @@ struct ExtractionBuilder<'source, 'cancel> {
     facts: ExtractionFacts,
     owners: Vec<SymbolId>,
     qualifiers: Vec<String>,
+    explicit_exports: BTreeSet<String>,
+    explicit_default_exports: BTreeSet<String>,
+    commonjs_shadowing: module_system::CommonJsShadowing,
 }
 
 struct ExtractionContext<'source, 'cancel> {
@@ -136,6 +146,9 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             facts: ExtractionFacts::default(),
             owners: Vec::new(),
             qualifiers: Vec::new(),
+            explicit_exports: BTreeSet::new(),
+            explicit_default_exports: BTreeSet::new(),
+            commonjs_shadowing: module_system::CommonJsShadowing::default(),
         })
     }
 
@@ -151,6 +164,15 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     }
 
     fn visit_declaration(&mut self, node: Node<'_>, depth: usize) -> Result<bool, ExtractError> {
+        match self.context.snapshot.language() {
+            SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
+                return polyglot::visit_declaration(self, node, depth);
+            }
+            SourceLanguage::TypeScript
+            | SourceLanguage::Tsx
+            | SourceLanguage::JavaScript
+            | SourceLanguage::Jsx => {}
+        }
         match node.kind() {
             "interface_declaration" | "class_declaration" | "abstract_class_declaration" => {
                 self.visit_container(node, depth)?;
@@ -167,6 +189,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
                 self.visit_bindings(node, depth)?;
             }
             "import_statement" => declarations::visit_import(self, node)?,
+            "export_statement" => declarations::visit_export(self, node, depth)?,
             "type_alias_declaration" => declarations::visit_type_alias(self, node)?,
             "enum_declaration" => declarations::visit_enum(self, node)?,
             _ => return Ok(false),
@@ -175,6 +198,18 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     }
 
     fn visit_usage(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
+        match self.context.snapshot.language() {
+            SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
+                polyglot::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::TypeScript
+            | SourceLanguage::Tsx
+            | SourceLanguage::JavaScript
+            | SourceLanguage::Jsx => {
+                module_system::capture_commonjs_assignment(self, node)?;
+            }
+        }
         match node.kind() {
             "call_expression" => {
                 references::capture_invocation(self, node, references::InvocationKind::Call)?
@@ -301,11 +336,12 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             let Some(name_node) = declarator.child_by_field_name("name") else {
                 continue;
             };
+            let value = declarator.child_by_field_name("value");
+            module_system::capture_commonjs_require(self, name_node, value)?;
             if !matches!(name_node.kind(), "identifier" | "property_identifier") {
                 continue;
             }
             let name = self.context.owned_text(name_node)?;
-            let value = declarator.child_by_field_name("value");
             let callable = value
                 .filter(|value| matches!(value.kind(), "arrow_function" | "function_expression"));
             let symbol_node = callable.unwrap_or(declarator);
@@ -392,6 +428,9 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             self.context.snapshot.source(),
             self.context.cancelled,
         )?;
+        let top_level = self.owners.is_empty();
+        let explicit_export = top_level && self.explicit_exports.contains(&pending.name);
+        let explicit_default = top_level && self.explicit_default_exports.contains(&pending.name);
         let symbol = ExtractedSymbol {
             id: id.clone(),
             kind: pending.kind,
@@ -403,8 +442,8 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             body_search_text: body_search.text,
             body_search_truncated: body_search.truncated,
             declaration_only: pending.declaration_only,
-            exported: pending.exported,
-            default_export: pending.default_export,
+            exported: pending.exported || explicit_export || explicit_default,
+            default_export: pending.default_export || explicit_default,
             async_symbol: pending.async_symbol,
             static_member: pending.static_member,
             visibility: pending.visibility,

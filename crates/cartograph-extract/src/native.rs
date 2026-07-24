@@ -21,6 +21,9 @@ impl NativeExtractor {
             SourceLanguage::JavaScript | SourceLanguage::Jsx => {
                 tree_sitter_javascript::LANGUAGE.into()
             }
+            SourceLanguage::Rust => tree_sitter_rust::LANGUAGE.into(),
+            SourceLanguage::Python => tree_sitter_python::LANGUAGE.into(),
+            SourceLanguage::Go => tree_sitter_go::LANGUAGE.into(),
         };
         let mut parser = Parser::new();
         parser

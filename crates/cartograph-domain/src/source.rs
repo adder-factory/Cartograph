@@ -61,6 +61,12 @@ pub enum SourceLanguage {
     JavaScript,
     /// JavaScript with JSX syntax parsed with the native JavaScript grammar.
     Jsx,
+    /// Rust parsed with the native Rust grammar.
+    Rust,
+    /// Python parsed with the native Python grammar.
+    Python,
+    /// Go parsed with the native Go grammar.
+    Go,
 }
 
 impl SourceLanguage {
@@ -72,6 +78,9 @@ impl SourceLanguage {
             Self::Tsx => "tsx",
             Self::JavaScript => "javascript",
             Self::Jsx => "jsx",
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::Go => "go",
         }
     }
 }
@@ -471,6 +480,9 @@ mod tests {
         assert_eq!(SourceLanguage::Tsx.as_str(), "tsx");
         assert_eq!(SourceLanguage::JavaScript.as_str(), "javascript");
         assert_eq!(SourceLanguage::Jsx.as_str(), "jsx");
+        assert_eq!(SourceLanguage::Rust.as_str(), "rust");
+        assert_eq!(SourceLanguage::Python.as_str(), "python");
+        assert_eq!(SourceLanguage::Go.as_str(), "go");
         assert_eq!(SymbolKind::TypeAlias.as_str(), "type_alias");
         assert_eq!(SymbolKind::EnumMember.as_str(), "enum_member");
         assert_eq!(ReferenceKind::TypeOf.as_str(), "type_of");
@@ -491,6 +503,16 @@ mod tests {
                 .as_deref(),
             Some("\"javascript\"")
         );
+        for (language, encoded) in [
+            (SourceLanguage::Rust, "\"rust\""),
+            (SourceLanguage::Python, "\"python\""),
+            (SourceLanguage::Go, "\"go\""),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&language).ok().as_deref(),
+                Some(encoded)
+            );
+        }
         assert!(
             serde_json::from_str::<SourcePosition>(r#"{"byte":0,"line":0,"column":0}"#).is_err()
         );

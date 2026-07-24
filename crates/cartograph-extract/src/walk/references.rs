@@ -1,10 +1,10 @@
-use cartograph_domain::{ReferenceKind, SymbolId};
+use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolId};
 use tree_sitter::Node;
 
 use crate::{ExtractError, ExtractedReference};
 
 use super::{
-    ExtractionBuilder, PendingReference,
+    ExtractionBuilder, PendingReference, module_system,
     syntax::{
         descendants_including_root, is_call_or_construction_target, named_children,
         reference_type_node, span_for, starts_uppercase,
@@ -22,6 +22,13 @@ struct NodeReference<'tree> {
     name: Node<'tree>,
     kind: ReferenceKind,
     span: Node<'tree>,
+}
+
+#[derive(Clone, Copy)]
+struct TypeTreeCapture<'tree, 'owner> {
+    root: Node<'tree>,
+    owner: &'owner SymbolId,
+    kind: ReferenceKind,
 }
 
 pub(super) fn capture_heritage(
@@ -107,41 +114,84 @@ pub(super) fn capture_callable_types(
         .child_by_field_name("parameters")
         .or_else(|| node.child_by_field_name("parameter"))
     {
-        capture_type_nodes(builder, parameters, owner)?;
+        if builder.context.snapshot.language() == SourceLanguage::Python {
+            capture_python_parameter_types(builder, parameters, owner)?;
+        } else {
+            capture_type_nodes(builder, parameters, owner)?;
+        }
     }
-    if let Some(return_type) = node.child_by_field_name("return_type") {
-        for target in descendants_including_root(return_type) {
-            builder.context.ensure_active()?;
-            if target.kind() != "type_identifier" {
-                continue;
-            }
-            push_node_reference(
-                builder,
-                NodeReference {
-                    owner: Some(owner.clone()),
-                    name: target,
-                    kind: ReferenceKind::Returns,
-                    span: target,
-                },
-            )?;
-        }
-        for target in descendants_including_root(return_type) {
-            builder.context.ensure_active()?;
-            if target.kind() != "type_identifier" {
-                continue;
-            }
-            push_node_reference(
-                builder,
-                NodeReference {
-                    owner: Some(owner.clone()),
-                    name: target,
-                    kind: ReferenceKind::TypeOf,
-                    span: target,
-                },
-            )?;
-        }
+    if let Some(return_type) = node
+        .child_by_field_name("return_type")
+        .or_else(|| node.child_by_field_name("result"))
+    {
+        capture_type_tree(
+            builder,
+            TypeTreeCapture {
+                root: return_type,
+                owner,
+                kind: ReferenceKind::Returns,
+            },
+        )?;
+        capture_type_tree(
+            builder,
+            TypeTreeCapture {
+                root: return_type,
+                owner,
+                kind: ReferenceKind::TypeOf,
+            },
+        )?;
     }
     Ok(())
+}
+
+fn capture_python_parameter_types(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    owner: &SymbolId,
+) -> Result<(), ExtractError> {
+    for parameter in descendants_including_root(parameters) {
+        builder.context.ensure_active()?;
+        let Some(type_node) = parameter.child_by_field_name("type") else {
+            continue;
+        };
+        capture_type_tree(
+            builder,
+            TypeTreeCapture {
+                root: type_node,
+                owner,
+                kind: ReferenceKind::TypeOf,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn capture_type_tree(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: TypeTreeCapture<'_, '_>,
+) -> Result<(), ExtractError> {
+    let language = builder.context.snapshot.language();
+    for target in descendants_including_root(input.root) {
+        builder.context.ensure_active()?;
+        if !is_type_name(language, target) {
+            continue;
+        }
+        push_node_reference(
+            builder,
+            NodeReference {
+                owner: Some(input.owner.clone()),
+                name: target,
+                kind: input.kind,
+                span: target,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn is_type_name(language: SourceLanguage, node: Node<'_>) -> bool {
+    node.kind() == "type_identifier"
+        || (language == SourceLanguage::Python && node.kind() == "identifier")
 }
 
 pub(super) fn capture_type_nodes(
@@ -179,6 +229,9 @@ pub(super) fn capture_invocation(
     let Some(target) = node.child_by_field_name(target_field) else {
         return Ok(());
     };
+    if module_system::is_static_commonjs_binding_call(builder, node) {
+        return Ok(());
+    }
     let reference_node = match invocation {
         InvocationKind::Call => target,
         InvocationKind::Construction => node,
@@ -224,7 +277,18 @@ pub(super) fn capture_field_access(
     if is_call_or_construction_target(node) {
         return Ok(());
     }
-    let Some(property) = node.child_by_field_name("property") else {
+    capture_member_field(builder, node, "property")
+}
+
+pub(super) fn capture_member_field(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    field_name: &str,
+) -> Result<(), ExtractError> {
+    if is_call_or_construction_target(node) || is_commonjs_require_selection(builder, node) {
+        return Ok(());
+    }
+    let Some(property) = node.child_by_field_name(field_name) else {
         return Ok(());
     };
     let owner = builder.owners.last().cloned();
@@ -237,6 +301,24 @@ pub(super) fn capture_field_access(
             span: property,
         },
     )
+}
+
+fn is_commonjs_require_selection(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> bool {
+    if node.kind() != "member_expression"
+        || !matches!(
+            builder.context.snapshot.language(),
+            SourceLanguage::TypeScript
+                | SourceLanguage::Tsx
+                | SourceLanguage::JavaScript
+                | SourceLanguage::Jsx
+        )
+    {
+        return false;
+    }
+    node.child_by_field_name("object")
+        .filter(|object| object.kind() == "call_expression")
+        .and_then(|call| call.child_by_field_name("function"))
+        .is_some_and(|function| builder.context.text(function).trim() == "require")
 }
 
 fn push_node_reference<'tree>(

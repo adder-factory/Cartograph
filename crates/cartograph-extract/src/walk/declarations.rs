@@ -4,9 +4,77 @@ use tree_sitter::Node;
 use crate::{ExtractError, ExtractedImportBinding, ImportBindingKind};
 
 use super::{
-    ExtractionBuilder, PendingReference, PendingSymbol, references,
+    ExtractionBuilder, PendingReference, PendingSymbol, module_system, references,
     syntax::{descendants, export_flags, named_children, span_for, visibility},
 };
+
+pub(super) fn visit_export(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let source = node
+        .child_by_field_name("source")
+        .map(|source| builder.context.owned_unquoted_text(source))
+        .transpose()?;
+    let clause = named_children(node).find(|child| child.kind() == "export_clause");
+    if let Some(clause) = clause {
+        for specifier in named_children(clause) {
+            builder.context.ensure_active()?;
+            if specifier.kind() != "export_specifier" {
+                continue;
+            }
+            let Some(name_node) = specifier.child_by_field_name("name") else {
+                continue;
+            };
+            let local_name = builder.context.owned_unquoted_text(name_node)?;
+            let alias_node = specifier.child_by_field_name("alias");
+            let public_name = match alias_node {
+                Some(alias) => builder.context.owned_unquoted_text(alias)?,
+                None => local_name.clone(),
+            };
+            if source.is_some() || public_name != local_name {
+                module_system::emit_export_alias(
+                    builder,
+                    module_system::ExportAlias {
+                        public_name,
+                        local_name,
+                        span_node: specifier,
+                        reference_node: name_node,
+                        source: source.clone(),
+                    },
+                )?;
+            }
+        }
+    } else if let Some(module_name) = source {
+        let pending = PendingSymbol {
+            kind: SymbolKind::Import,
+            name: module_name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: None,
+            exported: false,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility: None,
+        };
+        builder.emit_symbol(pending)?;
+        references::push_reference(
+            builder,
+            PendingReference {
+                owner: None,
+                name: module_name,
+                kind: ReferenceKind::Imports,
+                node,
+            },
+        )?;
+    }
+    builder.visit_named_children(node, depth)
+}
 
 pub(super) fn visit_import(
     builder: &mut ExtractionBuilder<'_, '_>,
