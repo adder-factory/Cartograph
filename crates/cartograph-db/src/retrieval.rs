@@ -441,28 +441,7 @@ impl CartographDatabase {
         let name = validate_exact_text(name, "reference_name")?;
         validate_limit(limit, MAX_LOOKUP_LIMIT)?;
         let schema = crate::database::quoted_schema(&self.schema);
-        let sql = format!(
-            r#"SELECT references.reference_id, references.generation_id::text,
-                       references.file_id::text, files.normalized_path,
-                       references.owner_symbol_id::text,
-                       references.target_symbol_id::text,
-                       references.reference_name, references.reference_kind,
-                       references.start_byte, references.end_byte,
-                       references.confidence, references.resolution_provenance
-                FROM {schema}."references" AS references
-                INNER JOIN {schema}."projects" AS projects
-                    ON projects.project_id = references.project_id
-                   AND projects.current_generation_id = references.generation_id
-                INNER JOIN {schema}."files" AS files
-                    ON files.project_id = references.project_id
-                   AND files.generation_id = references.generation_id
-                   AND files.file_id = references.file_id
-                WHERE references.project_id = CAST($1 AS uuid)
-                  AND references.reference_name = $2
-                ORDER BY files.normalized_path, references.start_byte,
-                         references.reference_id
-                LIMIT $3"#
-        );
+        let sql = exact_reference_sql(&schema);
         let rows = query(AssertSqlSafe(sql))
             .bind(project_id.as_str())
             .bind(name)
@@ -519,6 +498,31 @@ impl CartographDatabase {
             .map_err(|_| database_error("graph-frontier-read"))?;
         rows.iter().map(decode_edge).collect()
     }
+}
+
+fn exact_reference_sql(schema: &str) -> String {
+    format!(
+        r#"SELECT refs.reference_id, refs.generation_id::text,
+                   refs.file_id::text, files.normalized_path,
+                   refs.owner_symbol_id::text,
+                   refs.target_symbol_id::text,
+                   refs.reference_name, refs.reference_kind,
+                   refs.start_byte, refs.end_byte,
+                   refs.confidence, refs.resolution_provenance
+                FROM {schema}."references" AS refs
+                INNER JOIN {schema}."projects" AS projects
+                    ON projects.project_id = refs.project_id
+                   AND projects.current_generation_id = refs.generation_id
+                INNER JOIN {schema}."files" AS files
+                    ON files.project_id = refs.project_id
+                   AND files.generation_id = refs.generation_id
+                   AND files.file_id = refs.file_id
+                WHERE refs.project_id = CAST($1 AS uuid)
+                  AND refs.reference_name = $2
+                ORDER BY files.normalized_path, refs.start_byte,
+                         refs.reference_id
+                LIMIT $3"#
+    )
 }
 
 fn symbol_select(schema: &str, predicate: &str) -> String {
@@ -744,5 +748,13 @@ mod tests {
         let rendered = error.to_string();
         assert!(!rendered.contains(secret));
         assert!(!rendered.contains("private-password"));
+    }
+
+    #[test]
+    fn exact_reference_sql_uses_a_non_keyword_alias() {
+        let sql = exact_reference_sql("\"fixture\"");
+        assert!(sql.contains("AS refs"));
+        assert!(!sql.contains("AS references"));
+        assert!(sql.contains("refs.target_symbol_id::text"));
     }
 }
