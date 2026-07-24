@@ -1,503 +1,290 @@
-# AGENTS.md — install + bootstrap cartograph from an AI assistant
+# AGENTS.md — install and use Cartograph v2 from an AI coding agent
 
-This file is the public install + bootstrap guide for Cartograph, written for
-AI assistants (Claude Code, Cursor, Windsurf, Codex, etc.) helping a user
-install it. The instructions are sequential so they can be followed
-mechanically: run a command, verify the output, move to the next step. If a
-step fails, the remediation is named in the failure-mode section at the end.
+Cartograph is this workspace's native code-intelligence MCP server. These
+instructions are deliberately mechanical: execute a step, verify its result,
+then continue.
 
-> **Working ON this repository (not just installing Cartograph)?** The
-> development conventions — architecture rules, the reviewer-agent step, the
-> gate / SonarQube workflow, the code-search order, and the `go` handoff
-> trigger — live in `AGENTS.local.md`, a local git-ignored file. Read it before
-> making changes. A fresh clone has this pointer but not the file; keep your
-> copy in a private backup.
+> Working on the Cartograph repository itself? Read `AGENTS.local.md` before
+> changing code. It contains the private development conventions, architecture
+> gates, Sonar workflow, reviewer step, and release procedure. A fresh public
+> clone does not contain that git-ignored file.
 
-## Fast path (recommended) — use the MCP wizard
+## Existing project rule
 
-If you (the agent) can already reach cartograph's MCP tools, skip
-straight to the agent-driven wizard:
+If `.cartograph/` or a project-local Cartograph MCP registration exists, use
+Cartograph for relationship-aware exploration:
 
-1. **`cartograph_admin({action: "llm-plan"})`** — returns a structured
-   plan: which LLM backends are already running on the user's machine,
-   which setup presets are available (`install-ollama` /
-   `install-llama-cpp` / `install-mlx` / `cloud-openai` /
-   `cloud-openai-compat` / `hybrid-claude-bridge` /
-   `hybrid-anthropic-api` / `use-detected-<kind>-<endpoint>` / `skip`),
-   and which one the wizard recommends. Each preset has a `summary`,
-   `description`, `nextSteps`, and `requiresInstall` flag.
+- `cartograph context` for broad coding-task evidence;
+- `cartograph find` for exact name/path/reference or BM25 lookup;
+- `cartograph graph` for callers, callees, and reverse impact;
+- `cartograph affected` for test selection;
+- `cartograph review` for compare-to-ref and dirty-worktree evidence;
+- `cartograph status` before relying on the index.
 
-2. **Render the presets to the user in your chat UI** and take their
-   pick.
+If the index is stale, run `cartograph index <project>` or call the MCP
+`cartograph_admin` index action. Do not present stale evidence as current.
 
-3. **`cartograph_admin({action: "llm-apply", preset: "<id>",
-   projectPath: "<absolute-path>"})`** — writes
-   `.cartograph/config.json` non-interactively. Returns the
-   `nextSteps` the user must run (install the backend, pull models,
-   start `llama-server` processes) for the configured endpoints to
-   actually serve traffic.
+If the project has no Cartograph setup, ask:
 
-4. **`cartograph_admin({action: "doctor", fix: true, projectPath:
-   "<abs-path>"})`** — verifies the install state. With `fix: true`
-   doctor auto-creates `.cartograph/`, downloads missing GGUFs, and
-   applies the planner's recommended preset for missing config. Two
-   things doctor can NOT auto-fix: starting a backend process (cartograph
-   doesn't manage backends), and a dangling Bun global link (the user
-   re-runs `bun link` from a stable checkout, or re-pins with `bun add
-   -g`) — so the user runs those commands themselves.
+> I notice this project does not have Cartograph initialized. Would you like me
+> to start its PostgreSQL/ParadeDB database, index it, and add project-local MCP
+> configuration?
 
-The rest of this file (Step 0 onward) is the slow path — the explicit
-CLI commands you'd give a user with no agent or no MCP access yet.
+## Architecture and hard requirements
 
----
+Cartograph v2 is:
 
-Cartograph is a local-first code-intelligence MCP server. It needs:
-- **Bun ≥ 1.3.0** as its runtime
-- **Storage**: SQLite by default; optional PostgreSQL 18+ when the user wants
-  external/shared storage, managed backups, or native pgvector search
-- An **OpenAI-compat HTTP LLM backend** running on localhost — cartograph
-  recommends llama-cpp's `llama-server`, but Ollama / mlx_lm.server /
-  LM Studio / vLLM / LocalAI all work. Cloud OpenAI (or any
-  OpenAI-compat cloud) is also a valid pick — see the `cloud-openai` /
-  `cloud-openai-compat` presets.
-- **GGUF model files** under `~/.cartograph/models/` (only if running
-  llama-server — Ollama / mlx_lm download models themselves; cloud
-  doesn't need them)
+- a native Rust executable;
+- PostgreSQL 18 only;
+- code-aware BM25 through ParadeDB `pg_search` 0.23.5;
+- pgvector-capable;
+- useful without an LLM through exact, lexical, graph, review, and test-impact
+  retrieval.
 
-**Migration arc 2026-05-24c (steps 1-4) deleted the in-process LLM
-pathway** (mini-nllc + libcgshim + Bun.ffi). Everything LLM-related
-runs over HTTP now. Old configs carrying `provider: 'nllc'` /
-`provider: 'local'` auto-migrate to `provider: 'openai-compat'` at
-load time with a stderr warning naming the tier + default endpoint.
+There is no SQLite runtime, importer, optional feature, or fallback. Never
+recommend SQLite for v2 and never attempt to open an old SQLite graph.
 
----
+## Step 0 — install the binary
 
-## Step 0 — verify prerequisites
+macOS/Linux:
 
 ```sh
-bun --version
+curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+cartograph --version
 ```
 
-Expect `1.3.x` or newer. If the command isn't found:
+Windows PowerShell:
 
-```sh
-curl -fsSL https://bun.sh/install | bash
+```powershell
+irm https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 | iex
+cartograph --version
 ```
 
-The user's shell needs to source the Bun env on the next prompt
-(`source ~/.zshrc` / `source ~/.bashrc`).
-
----
-
-## Step 1 — install cartograph from source
-
-Cartograph ships source directly (no compiled `dist/`); Bun transpiles
-on demand, so [Bun](https://bun.sh) ≥ 1.3 is required. Clone the repo,
-install dependencies, and link the `cartograph` command onto PATH:
+The installer verifies the selected native archive against the release
+`SHA256SUMS`. If installation from source is required:
 
 ```sh
 git clone https://github.com/adder-factory/cartograph.git
 cd cartograph
-bun install
-bun link
+cargo build --locked --release -p cartograph-cli
 ```
 
-Verify:
+The pinned Rust toolchain is loaded from `rust-toolchain.toml`.
+
+## Step 1 — choose database ownership
+
+### Managed local database (macOS/Linux)
+
+Use this when the user has a local Docker daemon and wants the normal local
+developer experience:
 
 ```sh
-cartograph --version
+cd /absolute/path/to/project
+cartograph db start --project-path .
+cartograph doctor .
 ```
 
-Expect a version number. If the command isn't found, Bun's global
-bin dir isn't on `$PATH` — run `bun pm bin -g` to print it and add
-that directory to `$PATH`.
+`db start` must report a private credential, a project-owned container/volume,
+the migrated schema version, and passing hard checks for PostgreSQL 18,
+`pg_search`, pgvector, preload, BM25, and code tokenization.
 
----
+Cartograph pins a local Docker endpoint and binds PostgreSQL to loopback. It
+refuses foreign resources with colliding names. Do not weaken those checks.
 
-## Step 2 — install an LLM backend
+### External PostgreSQL (all supported platforms)
 
-Cartograph speaks OpenAI-compat HTTP — any backend implementing
-`/v1/chat/completions` + `/v1/embeddings` works. Recommended:
-
-### Option A — llama-cpp (recommended)
+The database administrator must install PostgreSQL 18, `pg_search` 0.23.5, and
+pgvector, then create both extensions. Supply the URL through the environment:
 
 ```sh
-# macOS
-brew install llama.cpp
-
-# Linux / Windows: https://github.com/ggml-org/llama.cpp (build from source or use a release)
+export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
+export CARTOGRAPH_DATABASE_SCHEMA='cartograph'
+cartograph doctor /absolute/path/to/project
 ```
 
-llama-server is one-model-per-process. Cartograph's recommended config
-runs four instances on consecutive ports (one model per port). Start
-all four (each in its own terminal / tmux pane / systemd unit):
+Never write the database URL into committed project files or echo it in chat.
+Cartograph intentionally redacts it from errors.
+
+Windows release binaries support external PostgreSQL. The managed lifecycle is
+not enabled there until credential ACL handling can prove equivalent privacy.
+
+## Step 2 — index and verify
 
 ```sh
-# Embedding (always required)
-llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080 --embeddings
-
-# Chat: summarize + local
-llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081
-
-# Chat: ask (higher-stakes, optional — falls back to summarize)
-llama-server -m ~/.cartograph/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf --port 8082
-
-# Reranker (optional — improves semantic search precision)
-llama-server -m ~/.cartograph/models/bge-reranker-v2-m3-Q4_K_M.gguf --port 8083 --rerank
+cartograph index /absolute/path/to/project
+cartograph status /absolute/path/to/project
+cartograph context 'explain the primary request flow' \
+  --project-path /absolute/path/to/project
 ```
 
-### Option B — Ollama (simpler; auto-loads models on demand)
+A valid first index publishes one complete generation. Running the same index
+again should report an unchanged/no-op generation. If source changes,
+`cartograph status` must say stale until a new complete generation publishes.
+
+Do not call a setup ready solely because files or a container exist. Require:
+
+1. `cartograph doctor` succeeds;
+2. `cartograph index` succeeds;
+3. `cartograph status` reports a fresh current generation;
+4. one real `find` or `context` query returns generation-scoped evidence.
+
+## Step 3 — install MCP configuration
+
+Cartograph writes only project-local configuration and pins the absolute native
+executable:
 
 ```sh
-brew install ollama  # macOS — auto-starts as a service
-# Linux: https://ollama.com
+# OpenAI Codex: .codex/config.toml
+cartograph install --yes --target codex --location local \
+  --project-path /absolute/path/to/project
 
-ollama pull qwen2.5-coder:3b
-ollama pull nomic-embed-text
+# Claude Code: .mcp.json
+cartograph install --yes --target claude --location local \
+  --project-path /absolute/path/to/project
+
+# Cursor: .cursor/mcp.json
+cartograph install --yes --target cursor --location local \
+  --project-path /absolute/path/to/project
 ```
 
-Then point all cartograph LLM tiers at `http://localhost:11434` — edit
-`.cartograph/config.json` after `setup`. Ollama dynamically loads /
-unloads models; the cold-start cost is per first-call-per-model.
+The installer preserves unrelated MCP entries and refuses a symlink/non-file or
+oversized configuration. Restart the agent host after the write.
 
-### Option C — Apple MLX / LM Studio / vLLM / LocalAI / cloud OpenAI
-
-Same OpenAI-compat shape. Set each `*Llm.endpoint` accordingly.
-
----
-
-## Step 3 — bootstrap the project
-
-```sh
-cartograph index [project-path]
-```
-
-This is the no-download first-run path. It runs three steps in order:
-
-1. `admin init` — creates `.cartograph/` in the project directory.
-   SQLite is the zero-config storage default.
-2. `admin index` — builds the structural graph without summaries,
-   embeddings, or model downloads.
-3. `doctor` — verifies the install state and reports optional LLM gaps.
-
-Use `cartograph llm install` only when the user wants Cartograph to bootstrap local
-LLM model files as part of install. That path runs:
-
-1. `admin init` — creates `.cartograph/` if needed.
-2. `install-models` — downloads the curated GGUF set into
-   `~/.cartograph/models/`. ~7 GB for the full set; pass `--minimal`
-   for the ~2.1 GB subset (embed + 3B chat, no 7B chat or reranker).
-   Skip with `--no-models` if you're using Ollama or already have the
-   GGUFs.
-3. `doctor` — verifies the install state.
-
-The recommended `.cartograph/config.json` is written by
-`cartograph admin install-models --write-config` (or automatically by
-`cartograph llm install` whenever it installs models — i.e. unless
-`--no-models` is passed). It points all tiers at the `localhost:808x` ports from
-Option A above. If you picked Option B (Ollama), hand-edit each
-`*Llm.endpoint` to `http://localhost:11434` and each `*Llm.model` to
-the Ollama model id.
-
-```sh
-cartograph index /path/to/project
-
-# Optional local-model bootstrap:
-cartograph llm install --minimal /path/to/project
-```
-
-If the user asked for PostgreSQL, start a PostgreSQL 18+ database first and
-pass storage flags before the first init/setup. Do not switch storage just
-because PostgreSQL is available; SQLite is the recommended local default.
-
-```sh
-docker run --rm -d --name cartograph-postgres \
-  -e POSTGRES_USER=cartograph \
-  -e POSTGRES_PASSWORD=cartograph \
-  -e POSTGRES_DB=cartograph \
-  -p 5432:5432 \
-  pgvector/pgvector:pg18
-
-cartograph admin init -i /path/to/project \
-  --database-provider postgres \
-  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
-  --database-schema cartograph \
-  --database-pgvector auto
-
-# Optional local-model bootstrap after PostgreSQL init:
-cartograph llm install --minimal /path/to/project
-```
-
-For an existing SQLite project, use `cartograph admin storage-migrate
-/path/to/project --database-url <postgres-url> --database-schema <schema>`
-and restart any MCP server attached to the old SQLite database. The PostgreSQL
-target schema must be fresh or intentionally recreated with `--force`.
-To move a PostgreSQL-backed project back to local SQLite, use
-`cartograph admin storage-migrate /path/to/project --database-provider sqlite`
-and restart any MCP server attached to the old PostgreSQL database.
-
----
-
-## Step 4 — verify
-
-```sh
-cartograph doctor
-```
-
-The output is a Markdown report with one line per check:
-
-- `✓` — passed
-- `⚠` — non-blocking gap (a remediation is suggested)
-- `✗` — blocking failure (a remediation is required)
-
-A clean install shows all checks `✓` with "_All checks passed.
-cartograph is ready to use._" Doctor check areas include:
-
-1. Bun runtime version
-2. Bun global link — when installed via `bun link`, flags a dangling global
-   `cartograph` shim (e.g. linked from a release worktree that was then
-   removed) that would stop new CLI/MCP processes from starting
-3. Project init (`.cartograph/` exists)
-4. Project config (`config.json` parses, including storage and LLM config)
-5. Database storage — SQLite capability check or PostgreSQL 18+ connectivity,
-   schema, write, DDL, and pgvector checks
-6. GGUF models present under `~/.cartograph/models/` when configured
-7. Detected LLM backends — informational scan of common ports
-   (:8080 / :11434 / :8000 / :1234 / :5000)
-8. Embedding endpoint reachability — probes the configured
-   `embeddingLlm.endpoint`; surfaces detected alternatives on failure
-9. Backend tuning, start commands, lifecycle, and active Cartograph process
-   checks when relevant
-
----
-
-## Step 5 — wire cartograph into the user's AI assistant
-
-Cartograph runs as an MCP server. The exact wiring depends on the
-host AI assistant:
-
-### Claude Code
-
-Preferred private per-project install (also initializes, indexes, and
-installs the managed git hooks; add `--no-hooks` to skip them):
-
-```sh
-cartograph install --yes --target=claude --location=local
-```
-
-When `cartograph` is not resolvable on PATH, the installer pins an absolute
-executable path into the MCP config automatically. To set it explicitly
-(e.g. the host's GUI shell has a different PATH than this terminal):
-
-```sh
-cartograph install --yes --target=claude --location=local --command "$(command -v cartograph)"
-```
-
-That writes the MCP server into `~/.claude.json` under the current project's
-path. Manual equivalent:
+Manual MCP specification:
 
 ```json
 {
-  "projects": {
-    "/abs/path/to/project": {
-      "mcpServers": {
-        "cartograph": {
-          "type": "stdio",
-          "command": "cartograph",
-          "args": ["serve", "--mcp", "--project-path", "/abs/path/to/project"]
-        }
-      }
-    }
-  }
+  "command": "/absolute/path/to/cartograph",
+  "args": [
+    "serve",
+    "--mcp",
+    "--project-path",
+    "/absolute/path/to/project"
+  ]
 }
 ```
 
-For team-shared Claude MCP config, use `<project>/.mcp.json` with the standard
-top-level `mcpServers` shape.
+Use stdio transport. Profiles are `core`, `read-only`, and `review`.
 
-Restart Claude Code (`/restart`) so it picks up the new server.
+## Step 4 — use Cartograph while coding
 
-### Cursor / Windsurf / other MCP-capable hosts
+Route questions by evidence type:
 
-Follow the host's MCP-server registration UI. The server spec is:
+| Need | Command/tool |
+| --- | --- |
+| Broad task context | `cartograph context` / `cartograph_context` |
+| Exact declaration/path/reference | `cartograph find` / `cartograph_find` |
+| Lexical code relevance | `find --by bm25` |
+| Call or dependency shape | `cartograph graph` / `cartograph_graph` |
+| Tests likely affected | `cartograph affected` / `cartograph_affected` |
+| Review current changes | `cartograph review --ref main` / `cartograph_review` |
+| Freshness and counts | `cartograph status` / `cartograph_status` |
+| Explicit refresh | `cartograph index` / `cartograph_admin` |
 
-- command: `cartograph`
-- args: `["serve", "--mcp", "--project-path", "<absolute project path>"]`
-- transport: stdio
+Cartograph evidence narrows inspection; it does not replace reading the exact
+changed source or running the project test suite. Preserve confidence,
+freshness, truncation, and abstention fields in agent reasoning.
 
----
+## Managed database operations
 
-## Common failure modes
-
-### `Bun: command not found`
-
-Cartograph needs Bun. Install per Step 0. If the user has Bun but the
-shell doesn't see it, they need to `source` the relevant profile.
-
-### `LLM models ⚠ ~/.cartograph/models/ does not exist`
-
-Models haven't been downloaded. `cartograph admin install-models`
-(or `--minimal`). The download is large — warn the user before
-kicking it off on a metered connection. Skip the download if the user
-is using Ollama / mlx_lm (which manage their own models).
-
-### `Project config ⚠ no llm block configured`
-
-The `.cartograph/config.json` exists but doesn't reference the LLM
-backends. Run `cartograph admin install-models --write-config` to
-download + wire the recommended block in one go (creates a `.bak.<ts>`
-backup if config.json already exists).
-
-### `Database storage ✗ PostgreSQL server is too old`
-
-Cartograph PostgreSQL storage requires PostgreSQL 18 or newer. Use a
-PostgreSQL 18+ service, such as `pgvector/pgvector:pg18` for local Docker
-testing, or keep the default SQLite backend.
-
-### `Database storage ✗ PostgreSQL check failed`
-
-Verify `database.url`, credentials, network access, and that the configured
-server is running. If `database.pgvector` is `require`, make sure pgvector is
-installed in that database; for local Docker tests use `pgvector/pgvector:pg18`.
-
-### `Database storage ⚠ No SQLite database`
-
-The project was initialized but the SQLite graph file is missing. Run
-`cartograph admin init /path/to/project`, or configure PostgreSQL explicitly
-with `database.provider: "postgres"` and a PostgreSQL 18+ `database.url`.
-
-### `Embedding endpoint ⚠ http://localhost:8080 is not responding`
-
-The configured `embeddingLlm.endpoint` isn't reachable. Two paths:
-
-1. Start a backend at that URL. If you're on the recommended
-   llama-cpp setup: `llama-server -m
-   ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080
-   --embeddings`.
-2. If `cartograph doctor` ALSO reports a "Detected LLM backends" line
-   listing what IS running (e.g. "Ollama at http://localhost:11434
-   (N models)"), edit `embeddingLlm.endpoint` to that URL and
-   `embeddingLlm.model` to the model name the backend serves. No
-   re-install required.
-
-### `Detected LLM backends ✓ No OpenAI-compat backends running`
-
-Nothing's running on the common ports. Pick Option A / B / C from
-Step 2 and start the backend. The user only needs ONE backend for
-embeddings to work; chat / rerank are separate tiers.
-
-### `Auto-migrated legacy <tier>.provider value to "openai-compat"`
-
-A pre-2026-05-24c config still carrying `provider: 'nllc'` (chat
-tier) or `provider: 'local'` (embedding / reranker) was just
-in-memory-migrated to `provider: 'openai-compat'` with the default
-endpoint for that tier (8081 chat / 8080 embed / 8083 reranker). The
-on-disk file is NOT modified. Run `cartograph doctor` to verify the
-endpoint is up — usually it isn't (user wasn't running an HTTP
-backend before), so the embedding-reachability check flags it with
-the start command. The user can either (a) start the backend at the
-defaulted port, or (b) hand-edit the config to point at a different
-backend (Ollama, etc.).
-
-### Reranker is configured but `isReachable()` returns false
-
-The configured rerank backend doesn't expose `/v1/rerank`. Ollama and
-mlx_lm don't today; llama-server does (with `--rerank` flag), Jina /
-Voyage / Cohere do as cloud providers. Either start a llama-server
-with `--rerank` at the configured `rerankerLlm.endpoint`, point that
-config at a cloud rerank provider, or delete the `rerankerLlm` block
-to skip reranking (semantic search still works via plain cosine).
-
----
-
-## What an AI assistant should do, end to end
-
-If the user says "install cartograph", the minimal script is:
+Read-only/idempotent:
 
 ```sh
-# 0. Bun (cartograph runtime requirement)
-command -v bun >/dev/null || curl -fsSL https://bun.sh/install | bash
-
-# 1. Cartograph from source
-git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
-(cd /tmp/cartograph && bun install && bun link)
-
-# 2. An OpenAI-compat backend. macOS quickstart:
-brew install llama.cpp  # OR: brew install ollama (simpler, auto-starts)
-
-# 3. Bootstrap with SQLite storage and no model downloads
-cartograph index /path/to/the/users/project
-
-# 4. Optional: download/write local model config (--minimal = ~2.1 GB; drop the flag for full ~7 GB)
-cartograph llm install --minimal /path/to/the/users/project
-
-# 5. Start the backends (one llama-server per port — paste each in its
-#    own terminal):
-llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080 --embeddings &
-llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081 &
-
-# 6. Verify
-cartograph doctor /path/to/the/users/project
+cartograph db status --project-path .
+cartograph db logs --project-path . --tail 200
+cartograph db derived-index --project-path .
+cartograph db stop --project-path .
 ```
 
-If the user asked for PostgreSQL instead of SQLite, start PostgreSQL 18+ first
-and pass storage flags during setup:
+Backup:
 
 ```sh
-docker run --rm -d --name cartograph-postgres \
-  -e POSTGRES_USER=cartograph \
-  -e POSTGRES_PASSWORD=cartograph \
-  -e POSTGRES_DB=cartograph \
-  -p 5432:5432 \
-  pgvector/pgvector:pg18
-
-cartograph admin init -i /path/to/the/users/project \
-  --database-provider postgres \
-  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
-  --database-schema cartograph \
-  --database-pgvector auto
+cartograph db backup ./cartograph.backup --project-path .
 ```
 
-To move an existing PostgreSQL-backed project back to SQLite:
+Restore, upgrade, derived-index rebuild, and remove are destructive or
+replacement operations. They require the exact confirmation phrase documented
+by `cartograph db <command> --help`. Do not infer authorization for them from a
+read-only diagnostic request.
+
+## V1 migration
+
+V2 imports only from a v1.1.33 PostgreSQL schema. The importer is resumable,
+validates stable identities/counts/relations, and rebuilds BM25. It does not
+import or inspect SQLite.
+
+If a user needs data that exists only in a v1 SQLite index, give two choices:
+
+1. rebuild v2 from the source checkout; or
+2. use the v1.1.33 binary to migrate SQLite to PostgreSQL first, then run the v2
+   PostgreSQL importer.
+
+Do not install SQLite tooling into v2 to shorten this workflow.
+
+## Common failures
+
+### Managed database says Docker is unavailable
+
+Start a local Docker daemon or use external PostgreSQL. Cartograph intentionally
+rejects remote Docker contexts for managed secrets/resources.
+
+### PostgreSQL is too old
+
+Cartograph requires PostgreSQL 18. Upgrade the external service or use the
+pinned managed image.
+
+### `pg_search`, pgvector, preload, BM25, or tokenizer check fails
+
+Treat this as blocking. Install/enable the exact capabilities and rerun
+`cartograph doctor`; never silently reduce the engine to plain PostgreSQL FTS.
+
+### Managed port 55432 is occupied
+
+Choose another loopback port consistently:
 
 ```sh
-cartograph admin storage-migrate /path/to/the/users/project \
-  --database-provider sqlite
+cartograph db start --project-path . --port 55433
+export CARTOGRAPH_MANAGED_DATABASE_PORT=55433
 ```
 
-If the user picked Ollama instead, after the `cartograph index` step:
+The MCP process must inherit the same port variable.
+
+### Project has no index
+
+Run `cartograph index <project>`. An MCP configuration alone does not create a
+generation.
+
+### Index is stale
+
+Run a bounded index/sync, then re-run the query. Do not call stale evidence
+current.
+
+### ParadeDB Community index is unusable after a crash
+
+The local Community BM25 index is derived data. Inspect health, then use the
+confirmed `db derived-index --rebuild` path. Relational source-of-truth rows and
+backups remain separate.
+
+### Agent cannot start the MCP server after upgrade
+
+Run `cartograph --version` and `cartograph doctor <project>` in the same shell,
+then re-run `cartograph install --yes --target <host>` to repin the absolute
+executable. Restart the host.
+
+## Development and release gates
+
+For repository work, the minimum Rust gates are:
 
 ```sh
-ollama pull qwen2.5-coder:3b
-ollama pull nomic-embed-text
-# Then edit .cartograph/config.json — set every *Llm.endpoint to
-# http://localhost:11434 and update each *Llm.model to the Ollama
-# model name.
-cartograph doctor
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
+cargo deny --all-features check
 ```
 
-If `doctor` shows ✓ for all checks, tell the user the wiring for
-their AI assistant (Step 5 of this guide) and you're done.
-
-If `doctor` shows ⚠ or ✗, follow the remediation message printed in
-the report.
-
----
-
-## Where to look when something else breaks
-
-- `src/installer/doctor/` — every doctor check + remediation module.
-  Add a new check by extending the focused module and wiring it in
-  `src/installer/doctor/checks.ts`.
-- `src/installer/scan-backends.ts` — the per-port LLM-backend
-  detector. Extend `SCAN_TARGETS` to probe additional well-known
-  ports.
-- `src/installer/recommended-config.ts` — the per-tier port layout
-  the recommended config writes. Edit the `ENDPOINT_*` constants to
-  shift the default ports.
-- `src/llm/openai-sdk-{chat,embedding,reranker}-client.ts` — the
-  three HTTP clients. Each follows the same constructor / `isReachable`
-  / error-wrapping pattern.
-- `src/config/legacy-llm-migration.ts` — `migrateLegacyProviderValue`
-  handles the legacy `'nllc'` / `'local'` auto-translation at
-  config-load time.
+The live workflow additionally proves PostgreSQL/ParadeDB capabilities,
+migrations, deterministic COPY/publication, leases, fault handling,
+1/2/4/8/16-worker output identity, retrieval, migration, database maintenance,
+and cleanup. Stable releases require independent review, Sonar/static analysis,
+five native archive smokes, checksums, provenance, a signed tag, and a tag SHA
+equal to the published `main` head.

@@ -65,7 +65,10 @@ if (($userPath -split ';') -notcontains $binDir) {
 Write-Host "Installed to $dest"
 Write-Host 'Run: cartograph --help'
 Write-Host ''
-Write-Host 'Agent-friendly project setup:'
+Write-Host 'PostgreSQL/ParadeDB project setup:'
 Write-Host '  cd /path/to/your/project'
-Write-Host '  cartograph install --yes --location=local'
-Write-Host '  cartograph status --verbose'
+Write-Host '  $env:CARTOGRAPH_DATABASE_URL = "postgresql://..."'
+Write-Host '  cartograph index .'
+Write-Host '  cartograph install --yes --target codex --location local'
+Write-Host ''
+Write-Host 'Managed Docker lifecycle is available on macOS/Linux; Windows uses external PostgreSQL.'

@@ -33,7 +33,7 @@ if ($Version -ne $ExpectedVersion) {
 }
 
 $Help = (& $Binary --help) -join "`n"
-foreach ($Command in @('index', 'status', 'find', 'context', 'graph', 'affected', 'serve', 'doctor', 'db')) {
+foreach ($Command in @('index', 'status', 'find', 'context', 'graph', 'affected', 'review', 'install', 'uninstall', 'serve', 'doctor', 'db')) {
   if ($Help -notmatch "(?m)^\s+$([regex]::Escape($Command))(\s|$)") {
     throw "release binary help is missing '$Command'"
   }

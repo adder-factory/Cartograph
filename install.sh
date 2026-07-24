@@ -6,12 +6,9 @@ INSTALL_DIR="${CARTOGRAPH_INSTALL_DIR:-$HOME/.cartograph-cli}"
 BIN_DIR="${CARTOGRAPH_BIN_DIR:-$HOME/.local/bin}"
 
 if [ "${1:-}" = "--uninstall" ]; then
-  # Remove global agent MCP entries via the binary BEFORE deleting it
-  # (npm v7+/bun don't run the package preuninstall hook, so this is the
-  # only cleanup path for a standalone install). Best-effort.
-  if [ -x "$BIN_DIR/cartograph" ]; then
-    "$BIN_DIR/cartograph" uninstall --location global >/dev/null 2>&1 || true
-  fi
+  # Project-local MCP registrations are intentionally left in place because
+  # this installer cannot know which projects/agent hosts the user configured.
+  # Run `cartograph uninstall --yes --target <host>` inside each project first.
   rm -f "$BIN_DIR/cartograph"
   rm -rf "$INSTALL_DIR"
   echo "Cartograph standalone install removed."
@@ -106,7 +103,10 @@ esac
 echo ""
 echo "Run: cartograph --help"
 echo ""
-echo "Agent-friendly project setup:"
+echo "PostgreSQL/ParadeDB project setup:"
 echo "  cd /path/to/your/project"
-echo "  cartograph install --yes --location=local"
-echo "  cartograph status --verbose"
+echo "  cartograph db start --project-path ."
+echo "  cartograph index ."
+echo "  cartograph install --yes --target codex --location local"
+echo ""
+echo "Use --target claude or --target cursor for those agent hosts."
