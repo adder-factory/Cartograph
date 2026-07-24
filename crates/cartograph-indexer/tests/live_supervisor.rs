@@ -14,7 +14,8 @@ use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, GenerationContents, GenerationFacts,
     GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, NewGeneration, NewProject,
-    ReadyGeneration, SearchDocumentInput, SearchQuery, validate_generation_facts,
+    PrepareGenerationMetrics, ReadyGeneration, SearchDocumentInput, SearchQuery,
+    validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, GenerationId, GenerationState, ProjectId,
@@ -93,10 +94,12 @@ const COPY_CANCEL_GRACE: Duration = Duration::from_millis(20);
 const COPY_CANCEL_TIMEOUT: Duration = Duration::from_millis(200);
 const LONG_COPY_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const LONG_COPY_TIMEOUT: Duration = Duration::from_millis(500);
+const LARGE_COPY_OPERATION_TIMEOUT: Duration = Duration::from_secs(6);
 const LARGE_COPY_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(300);
-const LARGE_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_millis(500);
-const LONG_COPY_TRIGGER_DELAY_SECONDS: &str = "0.20";
-const LONG_COPY_CODE_BYTES: usize = 2 * 1_024 * 1_024;
+const LARGE_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
+const LARGE_COPY_TIMEOUT: Duration = Duration::from_secs(1);
+const LARGE_COPY_TRIGGER_DELAY_SECONDS: &str = "0.40";
+const LARGE_COPY_CODE_BYTES: usize = 2 * 1_024 * 1_024;
 const ORDERED_STAGE_ITEMS: u64 = 8;
 const ORDERED_STAGE_WORKERS: usize = 4;
 const ORDERED_STAGE_ITEM_BYTES: u64 = 16;
@@ -448,6 +451,8 @@ async fn large_payload_copy_uses_its_own_stage_deadline() {
     let generation_id = staged.generation_id().clone();
     let target = target(&fixture.project, &generation_id);
     let supervisor = IndexerSupervisor::new(fixture.database.clone(), large_payload_copy_config());
+    let metrics = PrepareGenerationMetrics::new();
+    let observed_metrics = metrics.clone();
     let current = supervisor
         .run(request(target.clone()), move |context| async move {
             context
@@ -456,13 +461,16 @@ async fn large_payload_copy_uses_its_own_stage_deadline() {
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
             context
-                .prepare_generation(GenerationContents::new(
-                    staged,
-                    canonical(GenerationFacts {
-                        documents: vec![large_copy_probe_document()],
-                        ..GenerationFacts::default()
-                    }),
-                ))
+                .prepare_generation(
+                    GenerationContents::new(
+                        staged,
+                        canonical(GenerationFacts {
+                            documents: vec![large_copy_probe_document()],
+                            ..GenerationFacts::default()
+                        }),
+                    )
+                    .with_metrics(metrics),
+                )
                 .await
                 .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
         })
@@ -475,6 +483,10 @@ async fn large_payload_copy_uses_its_own_stage_deadline() {
     assert_eq!(
         supervisor.status().await.state(),
         SupervisorState::Completed
+    );
+    assert!(
+        observed_metrics.snapshot().copy_duration() > LARGE_COPY_HEARTBEAT_TIMEOUT,
+        "COPY fixture did not exceed the heartbeat request deadline"
     );
     assert!(matches!(
         fixture.database.lease_status(&target).await,
@@ -1762,12 +1774,12 @@ fn long_copy_config() -> SupervisorConfig {
 }
 
 fn large_payload_copy_config() -> SupervisorConfig {
-    SupervisorConfig::new(LONG_COPY_OPERATION_TIMEOUT)
+    SupervisorConfig::new(LARGE_COPY_OPERATION_TIMEOUT)
         .with_heartbeat_interval(ABORT_HEARTBEAT_INTERVAL)
         .with_heartbeat_timeout(LARGE_COPY_HEARTBEAT_TIMEOUT)
         .with_progress_timeout(LARGE_COPY_PROGRESS_TIMEOUT)
         .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
-        .with_copy_timeout(LONG_COPY_TIMEOUT)
+        .with_copy_timeout(LARGE_COPY_TIMEOUT)
 }
 
 fn request(target: LeaseTarget) -> SupervisorRequest {
@@ -2107,7 +2119,7 @@ async fn install_copy_delay(fixture: &DatabaseFixture) {
             LANGUAGE plpgsql
             AS $delay$
             BEGIN
-                PERFORM pg_sleep({LONG_COPY_TRIGGER_DELAY_SECONDS});
+                PERFORM pg_sleep({LARGE_COPY_TRIGGER_DELAY_SECONDS});
                 RETURN NULL;
             END
             $delay$"#,
@@ -2245,7 +2257,7 @@ fn canonical(facts: GenerationFacts) -> CanonicalGenerationFacts {
 
 fn large_copy_probe_document() -> SearchDocumentInput {
     let mut document = copy_probe_document();
-    document.code = "x".repeat(LONG_COPY_CODE_BYTES);
+    document.code = "x".repeat(LARGE_COPY_CODE_BYTES);
     document.natural_text = "large payload COPY deadline probe".to_owned();
     document
 }
