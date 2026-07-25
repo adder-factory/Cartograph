@@ -13,6 +13,54 @@ $Archive = Join-Path $ReleaseDir "$StageName.zip"
 $Direct = Join-Path $ReleaseDir "$StageName.exe"
 $Binary = Join-Path $Root "target/$Target/release/cartograph.exe"
 
+# Rust panic locations and vendored C/C++ grammar diagnostics retain source
+# paths unless both toolchains are remapped. The PE audit below verifies that
+# none of these runner-owned roots survive in either published artifact.
+function Add-EncodedRustFlag {
+  param([Parameter(Mandatory = $true)][string]$Flag)
+
+  $Separator = [char]0x1f
+  if ([string]::IsNullOrWhiteSpace($env:CARGO_ENCODED_RUSTFLAGS)) {
+    $env:CARGO_ENCODED_RUSTFLAGS = $Flag
+  } else {
+    $env:CARGO_ENCODED_RUSTFLAGS += "$Separator$Flag"
+  }
+}
+
+function Add-CompilerFlag {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$Flag
+  )
+
+  $Current = [Environment]::GetEnvironmentVariable($Name)
+  $Next = if ([string]::IsNullOrWhiteSpace($Current)) { $Flag } else { "$Current $Flag" }
+  [Environment]::SetEnvironmentVariable($Name, $Next)
+}
+
+if ([string]::IsNullOrWhiteSpace($env:CARGO_ENCODED_RUSTFLAGS) -and
+    -not [string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
+  foreach ($InheritedFlag in ($env:RUSTFLAGS -split '\s+' | Where-Object { $_ })) {
+    Add-EncodedRustFlag -Flag $InheritedFlag
+  }
+}
+$env:RUSTFLAGS = $null
+
+$RemapRoots = @(
+  $Root,
+  $env:GITHUB_WORKSPACE,
+  $env:RUNNER_WORKSPACE,
+  $env:USERPROFILE,
+  $env:HOME,
+  $env:CARGO_HOME,
+  $env:RUSTUP_HOME
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+foreach ($RemapRoot in $RemapRoots) {
+  Add-EncodedRustFlag -Flag "--remap-path-prefix=$RemapRoot=."
+  Add-CompilerFlag -Name 'CFLAGS' -Flag "/pathmap:$RemapRoot=."
+  Add-CompilerFlag -Name 'CXXFLAGS' -Flag "/pathmap:$RemapRoot=."
+}
+
 function Assert-NoPrivateBuildRoots {
   param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -26,6 +74,8 @@ function Assert-NoPrivateBuildRoots {
     [PSCustomObject]@{ Label = 'GitHub runner workspace'; Value = $env:RUNNER_WORKSPACE },
     [PSCustomObject]@{ Label = 'Windows user profile'; Value = $env:USERPROFILE },
     [PSCustomObject]@{ Label = 'home directory'; Value = $env:HOME },
+    [PSCustomObject]@{ Label = 'Cargo home'; Value = $env:CARGO_HOME },
+    [PSCustomObject]@{ Label = 'Rustup home'; Value = $env:RUSTUP_HOME },
     [PSCustomObject]@{ Label = 'Windows user profile root'; Value = 'C:\Users\' },
     [PSCustomObject]@{ Label = 'Unix user profile root'; Value = '/Users/' },
     [PSCustomObject]@{ Label = 'GitHub Windows runner root'; Value = 'D:\a\' },

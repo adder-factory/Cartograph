@@ -1,8 +1,11 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::fs::OpenOptions;
 
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::NamedTempFile;

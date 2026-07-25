@@ -22,9 +22,20 @@ if find "$STAGE" -type l -print -quit | grep -q .; then
   exit 1
 fi
 
-for PRIVATE_FRAGMENT in "$PWD" "${HOME:-}" '/Users/' '/home/runner/work/'; do
+for PRIVATE_FRAGMENT in \
+  "$PWD" \
+  "${HOME:-}" \
+  "${CARGO_HOME:-}" \
+  "${RUSTUP_HOME:-}" \
+  "${GITHUB_WORKSPACE:-}" \
+  "${RUNNER_WORKSPACE:-}" \
+  '/Users/' \
+  '/home/runner/work/'; do
   [[ -n "$PRIVATE_FRAGMENT" ]] || continue
-  if strings "$BINARY" | grep -Fq "$PRIVATE_FRAGMENT"; then
+  # Require a directory boundary so a legitimate token such as `/root\.` does
+  # not masquerade as the root user's private filesystem path.
+  PRIVATE_FRAGMENT="${PRIVATE_FRAGMENT%/}/"
+  if LC_ALL=C grep -aFq -- "$PRIVATE_FRAGMENT" "$BINARY"; then
     echo "release binary contains a private build-root fragment" >&2
     exit 1
   fi

@@ -1705,7 +1705,7 @@ fn write_atomic(input: AtomicWrite<'_>) -> Result<(), InstallError> {
         path,
         contents,
         allowed_root,
-        unix_mode,
+        unix_mode: _unix_mode,
     } = input;
     if u64::try_from(contents.len()).unwrap_or(u64::MAX) > MAX_CONFIG_BYTES {
         return Err(InstallError::UnsafeConfig);
@@ -1722,7 +1722,7 @@ fn write_atomic(input: AtomicWrite<'_>) -> Result<(), InstallError> {
     {
         use std::os::unix::fs::PermissionsExt;
         file.as_file()
-            .set_permissions(fs::Permissions::from_mode(unix_mode))
+            .set_permissions(fs::Permissions::from_mode(_unix_mode))
             .map_err(|_| InstallError::WriteConfig)?;
     }
     file.write_all(contents)

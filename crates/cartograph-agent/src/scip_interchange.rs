@@ -1,9 +1,12 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::fs::File;
 
 use cartograph_db::{InterchangeSnapshot, InterchangeSnapshotError};
 use cartograph_domain::{GenerationId, NormalizedPath};
@@ -565,10 +568,10 @@ fn ensure_overlay_directory(root: &Path) -> Result<PathBuf, ProjectError> {
     Ok(canonical)
 }
 
-fn sync_parent(parent: &Path) -> Result<(), ProjectError> {
+fn sync_parent(_parent: &Path) -> Result<(), ProjectError> {
     #[cfg(unix)]
     {
-        File::open(parent)
+        File::open(_parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|_| ProjectError::ScipOverlayInvalid)?;
     }

@@ -149,6 +149,19 @@ jobs:
           fi
           echo 'No executable TypeScript/Bun/Node/browser-viewer runtime found.'
 
+  windows-portability:
+    name: Windows strict compile portability
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Windows all-target, all-feature Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
   paradedb:
     name: PostgreSQL 18 + ParadeDB + pgvector
     needs: quality
