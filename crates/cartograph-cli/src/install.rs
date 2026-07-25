@@ -20,7 +20,7 @@ const IGNORE_COMMENT: &str = "# Cartograph private agent configuration";
 const SECTION_START: &str = "<!-- CARTOGRAPH_START -->";
 const SECTION_END: &str = "<!-- CARTOGRAPH_END -->";
 const OPENCODE_SCHEMA: &str = "https://opencode.ai/config.json";
-const SKILL_TEMPLATE: &str = include_str!("../../../.codex/skills/cartograph/SKILL.md");
+const SKILL_TEMPLATE: &str = include_str!("../assets/cartograph-skill.md");
 const PERMISSIONS: [&str; 7] = [
     "mcp__cartograph__cartograph_find",
     "mcp__cartograph__cartograph_context",
