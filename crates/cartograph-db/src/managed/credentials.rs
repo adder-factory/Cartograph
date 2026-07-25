@@ -386,12 +386,14 @@ fn validate_private_permissions(_file: &File, _path: &Path) -> Result<(), Manage
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     const TEST_DATABASE_PORT: u16 = 55_432;
     #[cfg(unix)]
     const GROUP_READABLE_FILE_MODE: u32 = 0o640;
     #[cfg(unix)]
     const GROUP_WRITABLE_DIRECTORY_MODE: u32 = 0o770;
 
+    #[cfg(unix)]
     fn credential_store(project_root: &Path) -> CredentialStore {
         CredentialStore::new(project_root.join(".cartograph/v2/postgres.password"))
     }
@@ -427,6 +429,7 @@ mod tests {
         assert!(matches!(store.remove(), Ok(false)));
     }
 
+    #[cfg(unix)]
     fn test_directory() -> tempfile::TempDir {
         match tempfile::tempdir() {
             Ok(directory) => directory,
@@ -434,6 +437,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn load_test_credentials(store: &CredentialStore) -> LoadedCredentials {
         match store.load_or_create() {
             Ok(credentials) => credentials,
@@ -441,6 +445,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_database_url(credentials: &DatabaseCredentials) -> SecretString {
         match credentials.database_url(TEST_DATABASE_PORT) {
             Ok(url) => url,
