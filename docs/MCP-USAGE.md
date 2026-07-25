@@ -1,510 +1,126 @@
-# MCP Usage
+# MCP usage for coding agents
 
-Cartograph runs as a stdio MCP server:
+Cartograph v2 exposes a compact native stdio MCP server. Its core returns
+bounded, generation-scoped evidence and never makes the database a source of
+truth over the live checkout. The optional `cartograph_ask`, role, summary, and
+dead-code-judge branches can call configured LLM tiers; their model/evidence
+provenance, failure, and fallback states remain explicit.
 
-```sh
-cartograph serve --mcp
-```
+## Registration
 
-For most users, the installer is easier:
-
-```sh
-cartograph install
-```
-
-It can configure Claude Code, Cursor, Codex CLI, GitHub Copilot CLI,
-CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro,
-Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, Pi Agent, and
-Reasonix.
-
-## Agent-Assisted Install
-
-For a coding agent working inside the user's project, prefer the
-non-interactive local install:
+Prefer the native installer because it writes project-local configuration and
+pins the absolute executable path:
 
 ```sh
-cartograph install --yes --location=local
-cartograph status --verbose
+cartograph install --yes --target codex --location local --project-path .
+cartograph install --yes --target claude --location local --project-path .
+cartograph install --yes --target cursor --location local --project-path .
 ```
 
-If the current agent has no supported local config path, retry global wiring:
-
-```sh
-cartograph install --yes --location=global
-```
-
-`--yes` makes the command suitable for agents and CI: it auto-detects
-installed agent targets (`--target=auto`), and in local mode initializes
-`.cartograph/`, indexes the repository, installs the managed git hooks
-(`--no-hooks` to skip), and defers optional LLM setup instead of opening the
-interactive provider wizard. When `cartograph` is not resolvable on PATH, an
-absolute executable path is pinned into the generated MCP configs
-automatically; override with `--command <path>`.
-
-Generated local project config and instruction files are added to `.gitignore`
-because they can contain absolute checkout paths and personal agent rules. Local
-MCP server args include `--project-path <this-project>` where the client config
-is project-scoped.
-
-The full copy-paste task for users is in
-[Agent-Assisted Install](AGENT-INSTALL.md).
-
-## Server Profiles
-
-```sh
-cartograph serve --mcp --profile core       # default
-cartograph serve --mcp --profile coding     # lean task-to-verification surface
-cartograph serve --mcp --profile full       # all registered tools
-cartograph serve --mcp --profile read-only
-cartograph serve --mcp --profile review
-cartograph serve --mcp --no-write-tools
-cartograph serve --mcp --low-tokens-default
-cartograph serve --mcp --no-daemon          # standalone; opt out of the shared daemon
-```
-
-Profiles filter the advertised tool list. `core` is the 15-tool common
-coding-agent surface. `coding` is the lean 9-tool task-to-verification surface.
-`full` exposes every registered tool. `review` focuses
-diff/risk/test workflows. `read-only` advertises read-capable tools and blocks
-mutating branches of mixed tools.
-
-Shared daemon mode is the **default** for `cartograph serve --mcp`: every agent
-on a project connects (as a thin stdio proxy) to one shared per-project daemon,
-so multiple agents share a single writer instead of each re-indexing the project
-concurrently and clobbering each other. Pass `--no-daemon` for a standalone
-server in the current process (test isolation, one-shot / CI runs). It uses a
-per-project Unix socket on POSIX and a per-project named pipe on Windows. Startup
-retires stale lock/socket state and treats an active Windows named pipe as an
-already-running daemon instead of racing it. If the proxy cannot reach or start
-the daemon it falls back to a standalone server automatically.
-
-A running server watches `.cartograph/config.json` and re-resolves the `llm`
-tiers on the next LLM tool call, so `cartograph admin llm-apply` or a hand-edit
-by a separate process takes effect without restarting the server.
-
-The server advertises MCP `tools`, `resources`, and `prompts` capabilities.
-Cartograph's public surface is still tool-first; `resources/list`,
-`resources/templates/list`, and `prompts/list` return empty lists so clients
-that probe the modern MCP resource/prompt endpoints do not fail the session.
-
-## Suggested Agent Workflow
-
-Start with metadata tools before reading source:
-
-```text
-cartograph_status
-cartograph_context({task: "<task>", format: "plan"})
-cartograph_find
-cartograph_graph
-cartograph_node without code
-```
-
-After edits:
-
-```text
-cartograph_context({task: "<task>", format: "handoff"})
-cartograph_verify
-```
-
-Use `cartograph_playbook` for the full tool-selection guide. Start with
-`--profile full` when you need advanced tools such as digest, explore, imports,
-hotspots, sessions, or `cartograph_host`.
-For `cartograph_context`, send `task` as the canonical prompt parameter;
-`query` is accepted as an alias for MCP clients that already model search-like
-calls around a `query` field.
-During active development, `workingTree: "live"` skips context's inline
-auto-sync and ephemerally parses up to 20 modified/untracked source files. It
-does not write the graph; live roots are combined with stored graph edges and
-their provenance is explicit. `format: "handoff"` enables this behavior
-automatically and emits a resumable packet that tells the next agent which
-working-tree files to preserve and which verification call to make.
-With `localLearning: "auto"` (the default), context can also reuse a bounded
-signal from this project's redacted MCP trace: a similar prior context call
-followed by successful `node`, `graph`, `tests_for`, file/range inspection, or
-verification. This is deterministic, stays inside the project database, never
-echoes the prior task text, and reports its provenance. Pass
-`localLearning: "off"` for a history-independent call. Legacy trace sessions
-without an exact project-root stamp are never used.
-Before relying on embeddings after changing models, call
-`cartograph_admin({action: "embedding-audit"})`. The matching cleanup action is
-a dry run unless `confirm: true` is present. It protects active-model rows and
-legacy refs without an active replacement; superseded legacy refs can be
-detached before their now-orphaned rows are removed. `cartograph_review({mode: "trust"})`
-also surfaces mixed dimensions, protected legacy refs, cleanup candidates, and
-obsolete acceleration artifacts; `deep: true` separately executes the live
-endpoint and semantic golden probe.
-For file-focused lookups, use `cartograph_files`: `format: "symbols"` for a
-one-file outline, `format: "deps"` for local dependencies/dependents, and
-`format: "module"` for directory summaries.
-
-## Load Budget
-
-MCP clients request `tools/list` at startup, and many clients put that schema
-into the model context. Measure the current shape with:
-
-```sh
-cartograph mcp-budget
-bun run check:mcp-load
-```
-
-On this repository's profiles, the current measured startup load
-is:
-
-| Payload | Chars | Est. tokens |
-|---|---:|---:|
-| coding tools/list, 9 tools | 20,646 | ~5,162 |
-| core tools/list, 15 tools | 35,326 | ~8,832 |
-| initialize instructions | 3,158 | ~790 |
-| coding combined startup load | 23,804 | ~5,951 |
-| core combined startup load | 38,484 | ~9,621 |
-| full playbook, on demand | 16,845 | ~4,212 |
-
-The full 35-tool profile is 62,052 `tools/list` chars and 65,210 combined
-startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 34 tools, 57,067 `tools/list` chars, and 60,225
-combined startup chars. The review profile advertises 24 tools, 47,127
-`tools/list` chars, and 50,285 combined startup chars.
-
-`lowTokens: true` and `--low-tokens-default` reduce per-call output, not the
-advertised startup schema.
-
-## Client Snippets
-
-### Generic stdio
-
-| Field | Value |
-|---|---|
-| Command | `cartograph` |
-| Args | `["serve", "--mcp"]` |
-| Transport | `stdio` |
-
-Use `cartograph install --command /absolute/path/to/cartograph` to write a
-custom command value into supported client configs.
-
-The snippets below show minimal manual configs. `cartograph install
---location=local` writes the same target-specific shapes but pins project-scoped
-server args with `--project-path /absolute/path/to/project` and gitignores
-generated project-local files.
-
-If the client does not send `rootUri`, pass the project explicitly:
-
-```sh
-cartograph serve --mcp --project-path /absolute/path/to/project
-```
-
-### Claude Code
-
-Use the installer for the current Claude Code scopes:
-
-```sh
-cartograph install --yes --target=claude --location=local
-```
-
-Local Claude MCP scope is private per project and is stored in `~/.claude.json`
-under the current project path:
+Manual server definition:
 
 ```json
 {
-  "projects": {
-    "/absolute/path/to/project": {
-      "mcpServers": {
-        "cartograph": {
-          "type": "stdio",
-          "command": "cartograph",
-          "args": ["serve", "--mcp", "--project-path", "/absolute/path/to/project"]
-        }
-      }
-    }
-  }
+  "command": "/absolute/path/to/cartograph",
+  "args": [
+    "serve",
+    "--mcp",
+    "--project-path",
+    "/absolute/path/to/project"
+  ]
 }
 ```
 
-The same local install writes Claude permissions to
-`.claude/settings.local.json`, writes Cartograph instructions to
-`CLAUDE.local.md`, and adds both local project files to `.gitignore`.
+Restart the host after installation. An already-open host is not assumed to
+hot-reload an upgraded MCP process.
 
-For team-shared Claude MCP config, use a project `.mcp.json` with the standard
-`mcpServers` shape.
+## Profiles
 
-### Codex CLI
+- `coding`: lean retrieval, source, graph, test-selection, and review loop;
+- `core`: normal coding tools plus explicit bounded administration;
+- `full`: every advertised tool, including bounded administration;
+- `read-only`: retrieval without write/admin operations;
+- `review`: comparison and verification-oriented surface.
 
-Use the installer for Codex's user-global or trusted project-local config:
+Tool lists are deterministic, and a tool hidden by the selected profile cannot
+be called by name. Use the narrowest profile that supports the workflow.
 
-```sh
-cartograph install --yes --target=codex --location=local
-```
+## Tools
 
-Local Codex installs write `.codex/config.toml` in the current project and pin
-Cartograph to that project:
+| Tool | Purpose |
+| --- | --- |
+| `cartograph_status` | Current generation, row counts, and complete supported-source freshness |
+| `cartograph_context` | Intent-aware exact/BM25/hybrid packet, typed primary edit candidates, graph evidence, affected tests, trust, and live overlay |
+| `cartograph_find` | Exact name/path/reference or BM25/hybrid candidates |
+| `cartograph_files` | Bounded current-generation file inventory filtered by directory or language |
+| `cartograph_entry_points` | Typed routes, CLI commands, MCP tools, CLI declarations, and public API boundaries with exact totals |
+| `cartograph_at_range` | Exact symbols overlapping one source range or diff hunk |
+| `cartograph_node` | Exact symbol metadata and bounded source only when indexed line provenance is fresh |
+| `cartograph_graph` | Bounded callers/callees/impact, exact edge filters, shortest paths, or model-scoped pgvector symbol neighbors |
+| `cartograph_affected` | Structurally connected test candidates |
+| `cartograph_review` | Git-ref plus committed/staged/unstaged/untracked review packet |
+| `cartograph_playbook` | Complete agent workflow, tool-routing map, evidence discipline, and anti-patterns |
+| `cartograph_admin` | Start, inspect, or cancel bounded lifecycle, index, semantic, model, and SCIP interchange work |
 
-```toml
-[mcp_servers.cartograph]
-command = "cartograph"
-args = ["serve", "--mcp", "--project-path", "/absolute/path/to/project"]
-```
+`cartograph_context` classifies deterministic task intents such as symbol
+lookup, implementation trace, change planning, test selection, error diagnosis,
+architecture survey, and documentation lookup. Intent selects bounded candidate,
+graph, evidence, and affected-test policy and is returned in the packet.
 
-Use `--location=global` only when one global Cartograph default is acceptable,
-or keep passing `projectPath` explicitly in MCP calls. The installer adds the
-generated `.codex/config.toml` to `.gitignore` because it contains an absolute
-local path.
+When the durable generation is stale, supported changed/untracked files may
+contribute a separate live working-tree overlay. Overlay items include path,
+Git change kind, exact content digest, line-bounded excerpt, matched terms, and
+truncation. They are never relabeled as durable graph evidence.
 
-### Cursor
+## Reliable agent loop
 
-`~/.cursor/mcp.json` or `.cursor/mcp.json`:
+1. `cartograph_status`.
+2. `cartograph_context` with the concrete coding task and any known exact
+   name/path/reference anchors.
+3. Orient with `entry_points`, then focus with `files`, `at_range`, `find`,
+   `node`, or `graph`; use
+   `direction: path` with `toSymbolId` when the question is how two exact
+   symbols connect; use `direction: similar` for stored-vector peers and keep
+   the returned model ID and score provenance, then read the exact files before
+   editing.
+4. Make the change.
+5. `cartograph_review` against the intended base and `cartograph_affected` for
+   verification candidates.
+6. Run the project's actual formatter, linter, type, test, and security gates.
+7. Re-index only when current graph evidence is needed after source changes.
 
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "type": "stdio",
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
+The initialize handshake contains the compact version of this loop. Call
+`cartograph_playbook` for the complete on-demand guide, or run
+`cartograph guide` outside MCP.
 
-### GitHub Copilot CLI
+Always preserve generation ID, freshness, confidence, abstention, component
+ranks, coarse reference precision, multiplicity, truncation, and overlay status
+in downstream reasoning. A candidate is evidence to inspect, not proof that a
+change is correct.
 
-`~/.copilot/mcp-config.json`, `.mcp.json`, or `.github/mcp.json`:
+## Transport contract
 
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "type": "stdio",
-      "command": "cartograph",
-      "args": ["serve", "--mcp"],
-      "tools": ["*"]
-    }
-  }
-}
-```
+The server uses newline-delimited JSON-RPC over stdio and writes no diagnostic
+text to stdout. It enforces:
 
-The installer honors `COPILOT_HOME` for the global Copilot configuration
-directory. You can also add the same server interactively with Copilot CLI's
-`/mcp add` flow and then run `/mcp reload`.
+- bounded input and serialized output bytes;
+- bounded concurrent requests;
+- a hard wall-clock request deadline;
+- cancellation with worker abort/reaping;
+- stable public error codes and redacted internal failures;
+- deterministic tool/schema ordering.
 
-### CodeBuddy
+Do not retry by removing bounds or wrapping the server with an unbounded queue.
+For long index work, use `cartograph_admin` to start a job and poll status; cancel
+explicitly when the host/user abandons it.
 
-`~/.codebuddy/.mcp.json`, `~/.codebuddy/mcp.json`, or project `.mcp.json`:
+SCIP interchange is also job-based. Use `action: "scip-export"` with a
+project-relative `out`, or `action: "scip-import"` with a project-relative
+`in`. Import persists a digest-fenced overlay, forces indexing, preserves files
+the SCIP artifact does not cover, and reports exact typed-edge versus unresolved
+foreign-link counts. The browser visualizer is intentionally absent; graph and
+interchange data remain available to agents.
 
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "type": "stdio",
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
-
-The installer uses a JSONC-preserving writer for CodeBuddy so comments and
-trailing commas in existing config files are kept.
-
-### CodeWhale
-
-`~/.codewhale/mcp.json` or `.codewhale/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
-
-### Zed
-
-`~/.config/zed/settings.json` or `.zed/settings.json`:
-
-```json
-{
-  "context_servers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
-
-### opencode
-
-`opencode.json` or `~/.config/opencode/opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "cartograph": {
-      "type": "local",
-      "command": ["cartograph", "serve", "--mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-### Factory Droid
-
-`~/.factory/mcp.json` or `.factory/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "type": "stdio",
-      "command": "cartograph",
-      "args": ["serve", "--mcp"],
-      "disabled": false
-    }
-  }
-}
-```
-
-### Rovo Dev
-
-`~/.rovodev/mcp.json` or `.rovodev/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"],
-      "transport": "stdio"
-    }
-  }
-}
-```
-
-For local Rovo profiles, point `mcp.mcpConfigPath` at `.rovodev/mcp.json` if
-the profile does not already load that file.
-
-### Qoder CLI
-
-`~/.qoder/settings.json` or `.qoder/settings.local.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
-
-### IBM Bob
-
-`~/.bob/mcp_settings.json` or `.bob/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"],
-      "disabled": false
-    }
-  }
-}
-```
-
-Enable MCP servers in Bob settings if this is the first MCP server for the
-workspace.
-
-### Kimi Code
-
-`~/.kimi-code/mcp.json`, `$KIMI_CODE_HOME/mcp.json`, or
-`.kimi-code/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
-
-### Pi Agent
-
-`~/.pi/agent/mcp.json`, `$PI_CODING_AGENT_DIR/mcp.json`, or `.pi/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"],
-      "transport": "stdio"
-    }
-  }
-}
-```
-
-Pi support is adapter-backed: install the Pi MCP adapter or extension package
-before expecting Pi Agent to consume the config file.
-
-### Reasonix
-
-`~/.reasonix/config.json`:
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"],
-      "disabled": false
-    }
-  }
-}
-```
-
-Reasonix stores MCP servers in its global config; project `.reasonix/`
-directories are for project-scoped skills, memory, hooks, and settings.
-
-### LangChain
-
-```python
-from langchain_mcp_adapters.client import MultiServerMCPClient
-
-client = MultiServerMCPClient({
-    "cartograph": {
-        "command": "cartograph",
-        "args": ["serve", "--mcp"],
-        "transport": "stdio",
-    }
-})
-tools = await client.get_tools()
-```
-
-### Claude Agent SDK
-
-```python
-from claude_agent_sdk import query, ClaudeAgentOptions
-
-options = ClaudeAgentOptions(
-    mcp_servers={
-        "cartograph": {
-            "command": "cartograph",
-            "args": ["serve", "--mcp"],
-        }
-    },
-    allowed_tools=["mcp__cartograph__*"],
-)
-```
-
-Cartograph does not speak SSE/HTTP directly. Clients that only support SSE need
-a stdio bridge.
+If the MCP transport closes, report that limitation and use the equivalent
+native CLI as a control path. CLI success alone does not prove the host's MCP
+registration or running process was refreshed.

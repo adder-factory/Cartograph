@@ -1,124 +1,126 @@
-# Agent-Assisted Install
+# Agent-assisted installation
 
-Give this task to a coding agent from the repository you want Cartograph to
+Give the following task to a coding agent from the repository Cartograph should
 index:
 
 ```text
-Install Cartograph for this repository and wire it into my current coding
-agent. Use non-interactive commands.
+Install Cartograph v2 for this repository and register its native MCP server.
 
-1. If `cartograph --version` fails, install Cartograph from source
-   (requires Bun >= 1.3):
-   git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
-   cd /tmp/cartograph && bun install && bun link
+1. If `cartograph --version` is unavailable, use the checksum-verifying native
+   installer from the Cartograph release. Do not install Bun or an npm package.
+2. On macOS/Linux with a local Docker daemon, run:
+   cartograph db start --project-path .
+   cartograph doctor .
+   Otherwise configure an external PostgreSQL 18 database with pg_search and
+   pgvector through CARTOGRAPH_DATABASE_URL, then run doctor.
+3. Run `cartograph index .` followed by `cartograph status .` and one real
+   `cartograph context` query.
+4. Run `cartograph install --yes --target <current-host> --location local
+   --project-path .`.
+5. Report the exact files changed, database ownership, doctor result, current
+   generation/freshness, real retrieval result, and whether the host must be
+   restarted.
 
-2. From my project repository, run the one-command setup, then verify:
-   cartograph install --yes --location=local
-   cartograph status --verbose
-
-3. If no local agent config file was created, retry global agent wiring:
-   cartograph install --yes --location=global
-
-4. Report the exact files created or changed (including git hooks), whether
-   `.cartograph/` was initialized, the `cartograph status --verbose` result,
-   and whether I need to restart the coding agent.
-
-Do not download LLM models, configure cloud credentials, migrate storage, or
-switch to PostgreSQL unless I ask for those separately.
+Do not print or commit database/API credentials. Do not claim MCP health from
+CLI success alone; restart the host and make a live MCP call when possible.
 ```
 
-Prebuilt releases are published for macOS (arm64, x64), Linux (x64, arm64),
-and Windows (x64); step 1 can instead use the standalone installer
-(`install.sh`, or `install.ps1` for PowerShell):
+## Install the native executable
+
+macOS/Linux:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+cartograph --version
 ```
+
+Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 -useb | iex
+irm https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 | iex
+cartograph --version
 ```
 
-> **Installing a Bun global from git? Use the `git+https` clone spec, not
-> the `github:` shorthand.** bun resolves `github:adder-factory/cartograph#<tag>`
-> through GitHub's tarball API (`api.github.com/.../tarball` → codeload),
-> which has been returning `504` consistently for this repo (issue #23).
-> The `git+https` form does a real `git clone` (reusing your existing
-> `gh`/git credential helper) and sidesteps the tarball API entirely:
->
-> ```sh
-> bun add -g "git+https://github.com/adder-factory/cartograph.git#v1.1.5"
-> ```
->
-> `cartograph upgrade --apply` re-pins a Bun global to this exact form (and
-> migrates an older `github:` pin onto it). The standalone `install.sh`
-> above — a checksum-verified GitHub **Release binary**, not a tarball —
-> also avoids codeload, and is the recommended non-source path.
->
-> **Three further bun traps (field report #2):** an early `bun add -g`
-> install used to abort its first index because `web-tree-sitter.wasm`
-> lived only next to built output; the runtime now falls back to module
-> resolution and finds the hoisted dependency copy, so this works — but
-> `bun pm trust` RE-EXTRACTS the package (wiping any hand-patched files),
-> switching git refs in a global install can throw bun's `DependencyLoop`
-> until you `bun remove -g` the package first, and repeated `bun add -g`
-> with different ref specs can leave a duplicate `@adder-factory/cartograph`
-> key in the global manifest/lockfile (delete the lockfile + re-add, or
-> just let `cartograph upgrade --apply` own the re-pin). `install.sh`
-> avoids all of these.
+The installers select one of the five release platforms and verify the archive
+against the release `SHA256SUMS`. Building from source requires only the pinned
+Rust toolchain:
 
-The one-command local setup initializes `.cartograph/`, writes supported local
-MCP configuration, indexes the repository, installs the managed git hooks, and
-skips the interactive LLM wizard in `--yes` mode. Where the agent supports
-on-demand guidance artifacts, the installer also generates them from the same
-instructions template: a `cartograph` skill (`skills/cartograph/SKILL.md`) for
-Claude Code and Codex CLI, and a `/cartograph` custom command for opencode. Core search, graph, impact,
-review, status, and affected-test commands work without an LLM backend. If
-`cartograph` is not resolvable on PATH, the installer pins an absolute path
-into the generated config automatically; override with `--command <path>`.
-
-The managed `post-merge`, `post-checkout`, and `post-rewrite` hook blocks make
-pulls, branch switches, and rebases trigger a quiet background sync. Existing
-hook content is preserved. Skip them at install time with `--no-hooks`, and
-add or remove them later with `cartograph install-hooks [--remove]`. Repos
-using a `core.hooksPath` hook manager are supported: husky setups get the
-blocks in the tracked `.husky/<hook>` files, other custom hook directories are
-written directly, and `cartograph doctor` warns when blocks sit somewhere git
-will never execute.
-
-For local installs, generated project config and instruction files are added to
-`.gitignore` because local MCP entries can contain absolute checkout paths and
-personal agent rules. Local MCP server args include
-`--project-path <this-project>` where the client config is project-scoped. This
-avoids a global MCP entry defaulting to whichever project was installed last.
-Claude Code is a special case: the private project-scoped MCP entry is stored in
-`~/.claude.json`, while permissions, instructions, and the generated skill stay
-in the worktree as gitignored files.
-
-Supported installer targets include Claude Code, Cursor, Codex CLI, GitHub
-Copilot CLI, CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI,
-Antigravity, Kiro, Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, Pi
-Agent, and Reasonix.
-
-Optional follow-up tasks:
-
-```text
-Configure Cartograph's optional LLM features for semantic search and ask.
-Start with `cartograph llm setup`, run `cartograph backend start .` when the
-chosen preset uses managed local llama-server tiers, then run
-`cartograph llm smoke .` and `cartograph doctor .`.
+```sh
+git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
+cd /tmp/cartograph
+cargo build --locked --release -p cartograph-cli
+install -m 0755 target/release/cartograph "$HOME/.local/bin/cartograph"
 ```
 
-```text
-Move Cartograph storage from SQLite to PostgreSQL for this repository.
-Use PostgreSQL 18+, follow `docs/STORAGE-BACKENDS.md`, preserve the existing
-graph with `cartograph admin storage-migrate`, and run `cartograph doctor .`
-afterward.
+Cartograph v2 has no TypeScript/Bun or SQLite runtime.
+
+## Database bootstrap
+
+The normal local macOS/Linux path is:
+
+```sh
+cartograph db start --project-path .
+cartograph doctor .
+cartograph index .
+cartograph status .
+cartograph context 'explain the primary request flow' --project-path .
 ```
 
-```text
-Move Cartograph storage from PostgreSQL back to SQLite for this repository.
-Use `cartograph admin storage-migrate --database-provider sqlite`, run
-`cartograph doctor .` afterward, and restart any MCP server attached to the old
-database.
+The managed lifecycle creates project-owned, loopback-only Docker resources
+using the pinned upstream ParadeDB image. PostgreSQL 18, `pg_search` 0.23.5,
+pgvector, preload, BM25, and source-code tokenization are hard checks.
+
+For external PostgreSQL, create both extensions and pass secrets through the
+process environment:
+
+```sh
+export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
+export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
+cartograph doctor .
+cartograph index .
 ```
+
+Never write the URL into a committed config. See
+[PostgreSQL storage and operations](STORAGE-BACKENDS.md).
+
+## Register an agent host
+
+The installer supports 19 host targets and preserves unrelated configuration.
+Common examples:
+
+```sh
+cartograph install --yes --target codex --location local --project-path .
+cartograph install --yes --target claude --location local --project-path .
+cartograph install --yes --target cursor --location local --project-path .
+```
+
+It pins the absolute native executable, writes project-local MCP configuration,
+and can install managed Git hooks. Use `--no-hooks` to omit hook changes. Run
+`cartograph install-hooks --remove` to remove only Cartograph-owned blocks.
+
+Restart the host after registration or binary replacement. A shell `status`
+call validates the CLI/database path; it does not prove that an already-running
+MCP process was replaced.
+
+## Optional LLM capabilities
+
+Exact lookup, ParadeDB BM25, graph traversal, affected tests, review, structural
+summaries, roles, and code-health analysis work without an LLM. Embeddings,
+reranking, generated summaries/classifications, `ask`, and local chat are
+optional tiers.
+
+```sh
+cartograph llm setup
+cartograph backend start .       # only for configured local llama-server tiers
+cartograph llm smoke .
+cartograph doctor .
+```
+
+Supported chat providers are OpenAI-compatible HTTP, Anthropic Messages API,
+and the bounded local Claude CLI bridge. Embedding and reranker tiers use
+OpenAI-compatible HTTP. Credentials should be resolved from environment
+variables, not stored inline.
+
+The browser visual-graph viewer is the only v1 capability not present in v2.
+Typed graph data, paths, impact, similarity, JSON/DOT/Mermaid/Cytoscape export,
+and SCIP interchange remain available to agents and tools.

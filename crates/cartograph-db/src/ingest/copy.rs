@@ -157,19 +157,19 @@ const FILES_LAYOUT: CopyTableLayout = CopyTableLayout {
 const SYMBOLS_LAYOUT: CopyTableLayout = CopyTableLayout {
     copied_table: CopiedTable::Symbols,
     table: "symbols",
-    columns: "project_id, generation_id, symbol_id, file_id, symbol_kind, qualified_name, signature, start_byte, end_byte, start_line, end_line, structural_digest",
+    columns: "project_id, generation_id, symbol_id, file_id, symbol_kind, qualified_name, signature, start_byte, end_byte, start_line, end_line, structural_digest, visibility, exported, default_export, async_symbol, static_member, declaration_only, betweenness, pagerank",
     operation: "copy-symbols",
 };
 const EDGES_LAYOUT: CopyTableLayout = CopyTableLayout {
     copied_table: CopiedTable::Edges,
     table: "edges",
-    columns: "project_id, generation_id, source_symbol_id, target_symbol_id, edge_kind, confidence, provenance",
+    columns: "project_id, generation_id, source_symbol_id, target_symbol_id, edge_kind, confidence, provenance, site_count",
     operation: "copy-edges",
 };
 const REFERENCES_LAYOUT: CopyTableLayout = CopyTableLayout {
     copied_table: CopiedTable::References,
     table: "references",
-    columns: "project_id, generation_id, file_id, owner_symbol_id, target_symbol_id, reference_name, reference_kind, start_byte, end_byte, confidence, resolution_provenance",
+    columns: "project_id, generation_id, file_id, owner_symbol_id, target_symbol_id, reference_name, reference_kind, start_byte, end_byte, confidence, resolution_provenance, site_count, span_precision",
     operation: "copy-references",
 };
 const DOCUMENTS_LAYOUT: CopyTableLayout = CopyTableLayout {
@@ -365,6 +365,22 @@ fn encode_symbol(context: &CopyGenerationContext, symbol: &SymbolInput) -> Vec<u
     row.number(symbol.start_line);
     row.number(symbol.end_line);
     row.text(symbol.structural_digest.as_str());
+    row.optional_text(symbol.visibility.map(|visibility| visibility.as_str()));
+    row.number(symbol.exported);
+    row.number(symbol.default_export);
+    row.number(symbol.async_symbol);
+    row.number(symbol.static_member);
+    row.number(symbol.declaration_only);
+    row.optional_number(
+        symbol
+            .betweenness_ppb
+            .map(|score| f64::from(score) / 1_000_000_000.0),
+    );
+    row.optional_number(
+        symbol
+            .pagerank_ppb
+            .map(|score| f64::from(score) / 1_000_000_000.0),
+    );
     row.finish()
 }
 
@@ -377,6 +393,7 @@ fn encode_edge(context: &CopyGenerationContext, edge: &EdgeInput) -> Vec<u8> {
     row.text(edge.kind.as_str());
     row.number(edge.confidence);
     row.text(&edge.provenance);
+    row.number(edge.site_count);
     row.finish()
 }
 
@@ -403,6 +420,8 @@ fn encode_reference(context: &CopyGenerationContext, reference: &ReferenceInput)
     row.number(reference.end_byte);
     row.number(reference.confidence);
     row.text(&reference.resolution_provenance);
+    row.number(reference.site_count);
+    row.text(reference.span_precision.as_str());
     row.finish()
 }
 
@@ -453,6 +472,16 @@ impl TextRow {
 
     fn number(&mut self, value: impl Display) {
         self.text(&value.to_string());
+    }
+
+    fn optional_number(&mut self, value: Option<impl Display>) {
+        match value {
+            Some(value) => self.number(value),
+            None => {
+                self.delimiter();
+                self.bytes.extend_from_slice(br"\N");
+            }
+        }
     }
 
     fn delimiter(&mut self) {

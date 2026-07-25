@@ -20,14 +20,16 @@ case "$ASSET_TARGET" in
 esac
 
 RELEASE_DIR="$ROOT/release"
+STAGING_ROOT="$RELEASE_DIR/.staging"
 STAGE_NAME="cartograph-$ASSET_TARGET"
-STAGE="$RELEASE_DIR/$STAGE_NAME"
+STAGE="$STAGING_ROOT/$STAGE_NAME"
 ARCHIVE="$RELEASE_DIR/$STAGE_NAME.tar.gz"
+DIRECT="$RELEASE_DIR/$STAGE_NAME"
 BINARY="$ROOT/target/$TARGET/release/cartograph"
 
 cargo build --locked --release --package cartograph-cli --target "$TARGET"
 
-rm -rf "$STAGE" "$ARCHIVE"
+rm -rf "$STAGE" "$ARCHIVE" "$DIRECT"
 mkdir -p "$STAGE/bin" "$STAGE/share/cartograph"
 install -m 0755 "$BINARY" "$STAGE/bin/cartograph"
 install -m 0644 "$ROOT/LICENSE" "$STAGE/LICENSE"
@@ -38,5 +40,7 @@ install -m 0644 "$ROOT/docs/v2/LICENSING.md" "$STAGE/share/cartograph/PARADEDB-N
 "$ROOT/scripts/smoke-rust-release.sh" "$STAGE/bin/cartograph"
 "$ROOT/scripts/audit-rust-release.sh" "$STAGE" "$BINARY"
 
-tar -czf "$ARCHIVE" -C "$RELEASE_DIR" "$STAGE_NAME"
-echo "[rust-release] wrote $ARCHIVE"
+tar -czf "$ARCHIVE" -C "$STAGING_ROOT" "$STAGE_NAME"
+install -m 0755 "$BINARY" "$DIRECT"
+"$ROOT/scripts/smoke-rust-release.sh" "$DIRECT"
+echo "[rust-release] wrote $ARCHIVE and $DIRECT"

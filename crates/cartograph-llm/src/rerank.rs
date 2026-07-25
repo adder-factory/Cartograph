@@ -1,0 +1,307 @@
+use std::{path::Path, time::Duration};
+
+use futures_util::StreamExt as _;
+use reqwest::{StatusCode, header};
+use secrecy::{ExposeSecret as _, SecretString};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use url::Url;
+
+use crate::{ProjectLlmTier, load_project_llm_tier};
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const MAXIMUM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAXIMUM_QUERY_BYTES: usize = 128 * 1024;
+const MAXIMUM_DOCUMENTS: usize = 128;
+const MAXIMUM_DOCUMENT_BYTES: usize = 512 * 1024;
+const MAXIMUM_INPUT_BYTES: usize = 4 * 1024 * 1024;
+const MAXIMUM_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const USER_AGENT: &str = concat!("cartograph/", env!("CARGO_PKG_VERSION"));
+
+/// Validated Cohere-compatible `/v1/rerank` configuration.
+#[derive(Clone)]
+pub struct RerankSettings {
+    endpoint: Url,
+    model: String,
+    api_key: Option<SecretString>,
+    timeout: Duration,
+}
+
+impl std::fmt::Debug for RerankSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RerankSettings")
+            .field("endpoint", &"<redacted>")
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl RerankSettings {
+    /// Load the optional project reranker. An absent block keeps reciprocal-rank
+    /// fusion enabled without adding a model dependency.
+    pub fn try_from_project(project_root: &Path) -> Result<Option<Self>, RerankError> {
+        let Some(config) = load_project_llm_tier(project_root, ProjectLlmTier::Reranker)
+            .map_err(|_| RerankError::InvalidConfiguration)?
+        else {
+            return Ok(None);
+        };
+        let mut endpoint =
+            Url::parse(config.endpoint()).map_err(|_| RerankError::InvalidConfiguration)?;
+        let current = endpoint.path().trim_end_matches('/');
+        let base = current
+            .strip_suffix("/v1/rerank")
+            .or_else(|| current.strip_suffix("/v1"))
+            .unwrap_or(current);
+        endpoint.set_path(&format!("{base}/v1/rerank"));
+        let timeout = config
+            .timeout_ms()
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_TIMEOUT);
+        Ok(Some(Self {
+            endpoint,
+            model: config.model().to_owned(),
+            api_key: config.api_key().map(SecretString::from),
+            timeout,
+        }))
+    }
+}
+
+/// Input-ordered, finite reranker scores normalized to `[0, 1]`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankBatch {
+    model: String,
+    scores: Vec<f32>,
+}
+
+impl RerankBatch {
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    #[must_use]
+    pub fn scores(&self) -> &[f32] {
+        &self.scores
+    }
+}
+
+/// Bounded Cohere-compatible reranker client.
+#[derive(Clone)]
+pub struct OpenAiRerankClient {
+    settings: RerankSettings,
+    client: reqwest::Client,
+}
+
+impl OpenAiRerankClient {
+    pub fn new(settings: RerankSettings) -> Result<Self, RerankError> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(settings.timeout.min(MAXIMUM_CONNECT_TIMEOUT))
+            .timeout(settings.timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(USER_AGENT)
+            .build()
+            .map_err(|_| RerankError::ClientUnavailable)?;
+        Ok(Self { settings, client })
+    }
+
+    /// Score candidates and restore the response's rank-sorted rows to exact
+    /// input order. Malformed, duplicate, or missing rows fail closed.
+    pub async fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+    ) -> Result<RerankBatch, RerankError> {
+        validate_input(query, documents)?;
+        let request = RerankRequest {
+            model: &self.settings.model,
+            query,
+            documents,
+            top_n: documents.len(),
+        };
+        let mut builder = self
+            .client
+            .post(self.settings.endpoint.clone())
+            .json(&request);
+        if let Some(api_key) = &self.settings.api_key {
+            let authorization =
+                header::HeaderValue::from_str(&format!("Bearer {}", api_key.expose_secret()))
+                    .map_err(|_| RerankError::InvalidConfiguration)?;
+            builder = builder.header(header::AUTHORIZATION, authorization);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|_| RerankError::EndpointUnavailable)?;
+        if response.status() != StatusCode::OK {
+            return Err(RerankError::BackendRejected);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAXIMUM_RESPONSE_BYTES as u64)
+        {
+            return Err(RerankError::ResponseLimit);
+        }
+        let body = read_bounded(response).await?;
+        decode_response(&body, documents.len(), &self.settings.model)
+    }
+}
+
+#[derive(Serialize)]
+struct RerankRequest<'a> {
+    model: &'a str,
+    query: &'a str,
+    documents: &'a [String],
+    top_n: usize,
+}
+
+#[derive(Deserialize)]
+struct RerankResponse {
+    results: Vec<RerankRow>,
+}
+
+#[derive(Deserialize)]
+struct RerankRow {
+    index: usize,
+    relevance_score: f32,
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum RerankError {
+    #[error("Cartograph reranker configuration is invalid")]
+    InvalidConfiguration,
+    #[error("Cartograph reranker request exceeds configured bounds")]
+    RequestLimit,
+    #[error("Cartograph reranker HTTP client is unavailable")]
+    ClientUnavailable,
+    #[error("Cartograph reranker endpoint is unavailable")]
+    EndpointUnavailable,
+    #[error("Cartograph reranker endpoint rejected the request")]
+    BackendRejected,
+    #[error("Cartograph reranker response exceeds configured bounds")]
+    ResponseLimit,
+    #[error("Cartograph reranker endpoint returned an invalid response")]
+    InvalidResponse,
+}
+
+fn validate_input(query: &str, documents: &[String]) -> Result<(), RerankError> {
+    if query.trim().is_empty()
+        || query.len() > MAXIMUM_QUERY_BYTES
+        || query.contains('\0')
+        || documents.is_empty()
+        || documents.len() > MAXIMUM_DOCUMENTS
+    {
+        return Err(RerankError::RequestLimit);
+    }
+    let mut total = query.len();
+    for document in documents {
+        if document.trim().is_empty()
+            || document.len() > MAXIMUM_DOCUMENT_BYTES
+            || document.contains('\0')
+        {
+            return Err(RerankError::RequestLimit);
+        }
+        total = total
+            .checked_add(document.len())
+            .filter(|value| *value <= MAXIMUM_INPUT_BYTES)
+            .ok_or(RerankError::RequestLimit)?;
+    }
+    Ok(())
+}
+
+async fn read_bounded(response: reqwest::Response) -> Result<Vec<u8>, RerankError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| RerankError::EndpointUnavailable)?;
+        let next = body
+            .len()
+            .checked_add(chunk.len())
+            .filter(|value| *value <= MAXIMUM_RESPONSE_BYTES)
+            .ok_or(RerankError::ResponseLimit)?;
+        body.try_reserve(next.saturating_sub(body.len()))
+            .map_err(|_| RerankError::ResponseLimit)?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn decode_response(body: &[u8], expected: usize, model: &str) -> Result<RerankBatch, RerankError> {
+    let response =
+        serde_json::from_slice::<RerankResponse>(body).map_err(|_| RerankError::InvalidResponse)?;
+    if response.results.len() != expected {
+        return Err(RerankError::InvalidResponse);
+    }
+    let raw = response
+        .results
+        .iter()
+        .map(|row| row.relevance_score)
+        .collect::<Vec<_>>();
+    if raw.iter().any(|score| !score.is_finite()) {
+        return Err(RerankError::InvalidResponse);
+    }
+    let normalized = normalize_scores(&raw);
+    let mut scores = vec![None; expected];
+    for (row, score) in response.results.into_iter().zip(normalized) {
+        let slot = scores
+            .get_mut(row.index)
+            .ok_or(RerankError::InvalidResponse)?;
+        if slot.replace(score).is_some() {
+            return Err(RerankError::InvalidResponse);
+        }
+    }
+    let scores = scores
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or(RerankError::InvalidResponse)?;
+    Ok(RerankBatch {
+        model: model.to_owned(),
+        scores,
+    })
+}
+
+fn normalize_scores(scores: &[f32]) -> Vec<f32> {
+    if scores.iter().all(|score| (0.0..=1.0).contains(score)) {
+        return scores.to_vec();
+    }
+    let minimum = scores.iter().copied().fold(f32::INFINITY, f32::min);
+    let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if minimum == maximum {
+        return vec![1.0; scores.len()];
+    }
+    scores
+        .iter()
+        .map(|score| (score - minimum) / (maximum - minimum))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_is_input_ordered_and_raw_logits_are_normalized() {
+        let body = br#"{"results":[{"index":1,"relevance_score":4.0},{"index":0,"relevance_score":-2.0}]}"#;
+        let batch = decode_response(body, 2, "fixture")
+            .unwrap_or_else(|error| panic!("fixture response failed: {error}"));
+        assert_eq!(batch.scores(), &[0.0, 1.0]);
+    }
+
+    #[test]
+    fn duplicate_missing_and_nonfinite_rows_fail_closed() {
+        let duplicate =
+            br#"{"results":[{"index":0,"relevance_score":0.5},{"index":0,"relevance_score":0.2}]}"#;
+        assert_eq!(
+            decode_response(duplicate, 2, "fixture"),
+            Err(RerankError::InvalidResponse)
+        );
+        let nonfinite = br#"{"results":[{"index":0,"relevance_score":1e999}]}"#;
+        assert_eq!(
+            decode_response(nonfinite, 1, "fixture"),
+            Err(RerankError::InvalidResponse)
+        );
+    }
+}

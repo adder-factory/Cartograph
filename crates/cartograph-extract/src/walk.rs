@@ -1,13 +1,15 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use cartograph_domain::{
     FileParseStatus, ReferenceKind, SourceLanguage, SymbolId, SymbolKind, Visibility,
+    declaration_value_is_search_safe,
 };
 use tree_sitter::Node;
 
 use crate::{
     Containment, DiagnosticCode, ExtractError, ExtractedFile, ExtractedImportBinding,
-    ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, SourceSnapshot,
+    ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, ExtractionStrategy, LanguageSpec,
+    SourceSnapshot,
     budget::{
         ExtractionBudget, containment_budget_bytes, diagnostic_budget_bytes,
         import_binding_budget_bytes, reference_budget_bytes, symbol_budget_bytes,
@@ -15,16 +17,28 @@ use crate::{
     identity::SymbolIdentity,
 };
 
+mod c_family;
 mod declarations;
+mod dynamic_dispatch;
+mod embedded_sql;
+mod generic_family;
+mod graphql_family;
+mod jvm_dynamic_family;
+mod managed_family;
 mod module_system;
 mod polyglot;
+mod prisma_family;
 mod references;
-mod syntax;
+mod schema;
+mod shell_family;
+mod sql_family;
+pub(crate) mod syntax;
+mod value_references;
 
 use syntax::{
-    body_search_text, callable_signature, collect_diagnostics, contains_jsx, export_flags,
-    has_child_kind, jsdoc, named_children, span_for, starts_uppercase, structural_digest,
-    visibility,
+    body_search_text, callable_signature, clone_token_profile, collect_diagnostics, contains_jsx,
+    export_flags, has_child_kind, jsdoc, named_children, span_for, starts_uppercase,
+    structural_digest, visibility,
 };
 
 const MAX_AST_DEPTH: usize = 256;
@@ -45,9 +59,19 @@ pub(crate) fn extract(
     input: WalkInput<'_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ExtractedFile, ExtractError> {
+    let strategy = LanguageSpec::for_language(snapshot.language()).strategy();
+    if !strategy.is_executable() {
+        return Err(ExtractError::UnsupportedLanguage);
+    }
     let mut builder = ExtractionBuilder::new(snapshot, cancelled)?;
-    module_system::collect_explicit_exports(&mut builder, input.root)?;
-    builder.visit(input.root, 0)?;
+    if strategy != ExtractionStrategy::ParserOnly {
+        module_system::collect_explicit_exports(&mut builder, input.root)?;
+        builder.visit(input.root, 0)?;
+        dynamic_dispatch::enrich(&mut builder, input.root)?;
+        schema::enrich(&mut builder, input.root)?;
+        embedded_sql::enrich(&mut builder, input.root)?;
+        value_references::enrich(&mut builder, input.root)?;
+    }
     let diagnostics = if input.parse_status == FileParseStatus::Partial {
         let diagnostics = collect_diagnostics(input.root, builder.context.cancelled)?;
         if diagnostics.is_empty() {
@@ -68,17 +92,27 @@ pub(crate) fn extract(
             .reserve_fact(diagnostic_budget_bytes(), std::iter::empty())?;
     }
     let output_limit = builder.context.budget.output_limit();
+    let has_inline_tests = has_inline_tests(
+        snapshot.language(),
+        input.root,
+        snapshot.source(),
+        builder.context.cancelled,
+    )?;
     let file = ExtractedFile {
         file_id: snapshot.file_id().clone(),
         path: snapshot.path().clone(),
         language: snapshot.language(),
         content_hash: snapshot.content_hash().clone(),
         byte_size: snapshot.byte_size(),
+        line_count: snapshot.line_count(),
         parse_status: input.parse_status,
         symbols: builder.facts.symbols,
         containments: builder.facts.containments,
         references: builder.facts.references,
         import_bindings: builder.facts.import_bindings,
+        has_inline_tests,
+        test_search_text: String::new(),
+        test_search_truncated: false,
         diagnostics,
     };
     if file.modeled_retained_bytes() > output_limit {
@@ -87,11 +121,70 @@ pub(crate) fn extract(
     Ok(file)
 }
 
+fn has_inline_tests(
+    language: SourceLanguage,
+    root: Node<'_>,
+    source: &str,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<bool, ExtractError> {
+    if language != SourceLanguage::Rust {
+        return Ok(false);
+    }
+    for node in syntax::descendants_including_root(root) {
+        if cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        if node.kind() != "attribute_item" || !rust_attribute_precedes_function(node) {
+            continue;
+        }
+        let attribute = source
+            .get(node.start_byte()..node.end_byte())
+            .ok_or(ExtractError::InvalidSpan)?;
+        let mut compact = String::new();
+        compact
+            .try_reserve(attribute.len())
+            .map_err(|_| ExtractError::OutputLimit)?;
+        compact.extend(
+            attribute
+                .chars()
+                .filter(|character| !character.is_whitespace()),
+        );
+        if matches!(compact.as_str(), "#[test]" | "#[rstest]")
+            || compact.starts_with("#[tokio::test")
+            || compact.starts_with("#[async_std::test")
+            || compact.starts_with("#[actix_rt::test")
+            || compact.starts_with("#[test_case")
+            || compact.starts_with("#[rstest(")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn rust_attribute_precedes_function(node: Node<'_>) -> bool {
+    let mut sibling = node.next_named_sibling();
+    for _ in 0..16 {
+        let Some(candidate) = sibling else {
+            return false;
+        };
+        match candidate.kind() {
+            "function_item" => return true,
+            "attribute_item" => sibling = candidate.next_named_sibling(),
+            _ => return false,
+        }
+    }
+    false
+}
+
 struct ExtractionBuilder<'source, 'cancel> {
     context: ExtractionContext<'source, 'cancel>,
     identities: SymbolIdentity<'source>,
     facts: ExtractionFacts,
     owners: Vec<SymbolId>,
+    native_owner_kinds: Vec<SymbolKind>,
+    native_visibilities: Vec<Option<Visibility>>,
+    native_scope_symbols: HashMap<String, Option<(SymbolId, SymbolKind)>>,
     qualifiers: Vec<String>,
     explicit_exports: BTreeSet<String>,
     explicit_default_exports: BTreeSet<String>,
@@ -145,6 +238,9 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             identities: SymbolIdentity::new(snapshot.path()),
             facts: ExtractionFacts::default(),
             owners: Vec::new(),
+            native_owner_kinds: Vec::new(),
+            native_visibilities: Vec::new(),
+            native_scope_symbols: HashMap::new(),
             qualifiers: Vec::new(),
             explicit_exports: BTreeSet::new(),
             explicit_default_exports: BTreeSet::new(),
@@ -165,6 +261,57 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
 
     fn visit_declaration(&mut self, node: Node<'_>, depth: usize) -> Result<bool, ExtractError> {
         match self.context.snapshot.language() {
+            SourceLanguage::Bash
+            | SourceLanguage::Fish
+            | SourceLanguage::PowerShell
+            | SourceLanguage::Zsh => return shell_family::visit_declaration(self, node, depth),
+            SourceLanguage::C
+            | SourceLanguage::Cpp
+            | SourceLanguage::Cuda
+            | SourceLanguage::Glsl
+            | SourceLanguage::Hlsl => return c_family::visit_declaration(self, node, depth),
+            SourceLanguage::Java | SourceLanguage::CSharp => {
+                return managed_family::visit_declaration(self, node, depth);
+            }
+            SourceLanguage::Kotlin | SourceLanguage::Scala | SourceLanguage::Groovy => {
+                return jvm_dynamic_family::visit_declaration(self, node, depth);
+            }
+            SourceLanguage::GraphQl => {
+                return graphql_family::visit_declaration(self, node, depth);
+            }
+            SourceLanguage::Prisma => {
+                return prisma_family::visit_declaration(self, node, depth);
+            }
+            SourceLanguage::Sql => {
+                return sql_family::visit_declaration(self, node, depth);
+            }
+            SourceLanguage::Abap
+            | SourceLanguage::Apex
+            | SourceLanguage::ArkTs
+            | SourceLanguage::Astro
+            | SourceLanguage::Clojure
+            | SourceLanguage::CommonLisp
+            | SourceLanguage::Dart
+            | SourceLanguage::FSharp
+            | SourceLanguage::Hcl
+            | SourceLanguage::Html
+            | SourceLanguage::Khn
+            | SourceLanguage::Lean
+            | SourceLanguage::Lua
+            | SourceLanguage::Luau
+            | SourceLanguage::Nix
+            | SourceLanguage::ObjectiveC
+            | SourceLanguage::Pascal
+            | SourceLanguage::Php
+            | SourceLanguage::R
+            | SourceLanguage::ReScript
+            | SourceLanguage::Ruby
+            | SourceLanguage::Solidity
+            | SourceLanguage::Swift
+            | SourceLanguage::VbNet
+            | SourceLanguage::Yaml => {
+                return generic_family::visit_declaration(self, node, depth);
+            }
             SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
                 return polyglot::visit_declaration(self, node, depth);
             }
@@ -172,6 +319,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             | SourceLanguage::Tsx
             | SourceLanguage::JavaScript
             | SourceLanguage::Jsx => {}
+            _ => return Err(ExtractError::UnsupportedLanguage),
         }
         match node.kind() {
             "interface_declaration" | "class_declaration" | "abstract_class_declaration" => {
@@ -190,7 +338,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             }
             "import_statement" => declarations::visit_import(self, node)?,
             "export_statement" => declarations::visit_export(self, node, depth)?,
-            "type_alias_declaration" => declarations::visit_type_alias(self, node)?,
+            "type_alias_declaration" => declarations::visit_type_alias(self, node, depth)?,
             "enum_declaration" => declarations::visit_enum(self, node)?,
             _ => return Ok(false),
         }
@@ -199,6 +347,69 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
 
     fn visit_usage(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
         match self.context.snapshot.language() {
+            SourceLanguage::Bash
+            | SourceLanguage::Fish
+            | SourceLanguage::PowerShell
+            | SourceLanguage::Zsh => {
+                shell_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::C
+            | SourceLanguage::Cpp
+            | SourceLanguage::Cuda
+            | SourceLanguage::Glsl
+            | SourceLanguage::Hlsl => {
+                c_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::Java | SourceLanguage::CSharp => {
+                managed_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::Kotlin | SourceLanguage::Scala | SourceLanguage::Groovy => {
+                jvm_dynamic_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::GraphQl => {
+                graphql_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::Prisma => {
+                prisma_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::Sql => {
+                sql_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
+            SourceLanguage::Abap
+            | SourceLanguage::Apex
+            | SourceLanguage::ArkTs
+            | SourceLanguage::Astro
+            | SourceLanguage::Clojure
+            | SourceLanguage::CommonLisp
+            | SourceLanguage::Dart
+            | SourceLanguage::FSharp
+            | SourceLanguage::Hcl
+            | SourceLanguage::Html
+            | SourceLanguage::Khn
+            | SourceLanguage::Lean
+            | SourceLanguage::Lua
+            | SourceLanguage::Luau
+            | SourceLanguage::Nix
+            | SourceLanguage::ObjectiveC
+            | SourceLanguage::Pascal
+            | SourceLanguage::Php
+            | SourceLanguage::R
+            | SourceLanguage::ReScript
+            | SourceLanguage::Ruby
+            | SourceLanguage::Solidity
+            | SourceLanguage::Swift
+            | SourceLanguage::VbNet
+            | SourceLanguage::Yaml => {
+                generic_family::capture_usage(self, node)?;
+                return self.visit_named_children(node, depth);
+            }
             SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
                 polyglot::capture_usage(self, node)?;
                 return self.visit_named_children(node, depth);
@@ -209,10 +420,13 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             | SourceLanguage::Jsx => {
                 module_system::capture_commonjs_assignment(self, node)?;
             }
+            _ => return Err(ExtractError::UnsupportedLanguage),
         }
         match node.kind() {
             "call_expression" => {
-                references::capture_invocation(self, node, references::InvocationKind::Call)?
+                if !module_system::capture_dynamic_import(self, node)? {
+                    references::capture_invocation(self, node, references::InvocationKind::Call)?;
+                }
             }
             "new_expression" => references::capture_invocation(
                 self,
@@ -338,6 +552,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             };
             let value = declarator.child_by_field_name("value");
             module_system::capture_commonjs_require(self, name_node, value)?;
+            module_system::capture_dynamic_import_binding(self, name_node, value)?;
             if !matches!(name_node.kind(), "identifier" | "property_identifier") {
                 continue;
             }
@@ -361,7 +576,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             let signature = if let Some(callable_node) = callable {
                 self.context.callable_signature(callable_node)?
             } else if let Some(value_node) = value {
-                Some(self.context.assignment_signature(value_node)?)
+                self.context.assignment_signature(value_node)?
             } else {
                 None
             };
@@ -423,11 +638,40 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             }
             None => syntax::BodySearchText::default(),
         };
+        let health = syntax::symbol_health_metrics(
+            syntax::SymbolHealthInput {
+                declaration: pending.structural_node,
+                body: pending.body_node,
+                symbol_kind: pending.kind,
+                symbol_name: &pending.name,
+                signature: pending.signature.as_deref(),
+                docstring: docstring.as_deref(),
+                language: self.context.snapshot.language(),
+                async_symbol: pending.async_symbol,
+                source: self.context.snapshot.source(),
+            },
+            self.context.cancelled,
+        )?;
         let structural_digest = structural_digest(
             pending.structural_node,
             self.context.snapshot.source(),
             self.context.cancelled,
         )?;
+        let clone_shape_digest =
+            syntax::clone_shape_digest(pending.structural_node, self.context.cancelled)?;
+        let clone_token_profile = matches!(
+            pending.kind,
+            SymbolKind::Function | SymbolKind::Method | SymbolKind::Component
+        )
+        .then(|| {
+            clone_token_profile(
+                pending.structural_node,
+                self.context.snapshot.source(),
+                self.context.cancelled,
+            )
+        })
+        .transpose()?
+        .flatten();
         let top_level = self.owners.is_empty();
         let explicit_export = top_level && self.explicit_exports.contains(&pending.name);
         let explicit_default = top_level && self.explicit_default_exports.contains(&pending.name);
@@ -441,6 +685,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             docstring,
             body_search_text: body_search.text,
             body_search_truncated: body_search.truncated,
+            health,
             declaration_only: pending.declaration_only,
             exported: pending.exported || explicit_export || explicit_default,
             default_export: pending.default_export || explicit_default,
@@ -448,6 +693,8 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             static_member: pending.static_member,
             visibility: pending.visibility,
             structural_digest,
+            clone_shape_digest,
+            clone_token_profile,
         };
         self.context.budget.reserve_fact(
             symbol_budget_bytes(&symbol),
@@ -459,6 +706,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
                 symbol.docstring.as_deref().unwrap_or_default(),
                 symbol.body_search_text.as_str(),
                 symbol.structural_digest.as_str(),
+                symbol.clone_shape_digest.as_str(),
             ],
         )?;
         self.facts.symbols.push(symbol);
@@ -576,8 +824,11 @@ impl<'source, 'cancel> ExtractionContext<'source, 'cancel> {
         Ok(signature)
     }
 
-    fn assignment_signature(&mut self, node: Node<'_>) -> Result<String, ExtractError> {
+    fn assignment_signature(&mut self, node: Node<'_>) -> Result<Option<String>, ExtractError> {
         let value = self.owned_text(node)?;
+        if !declaration_value_is_search_safe(&value) {
+            return Ok(None);
+        }
         let length = value
             .len()
             .checked_add(2)
@@ -589,10 +840,13 @@ impl<'source, 'cancel> ExtractionContext<'source, 'cancel> {
             .map_err(|_| ExtractError::OutputLimit)?;
         signature.push_str("= ");
         signature.push_str(&value);
-        Ok(signature)
+        Ok(Some(signature))
     }
 
     fn jsdoc(&mut self, node: Node<'_>) -> Result<Option<String>, ExtractError> {
+        if self.snapshot.language() == SourceLanguage::GraphQl {
+            return graphql_family::description_from_context(self, node);
+        }
         let source = self.snapshot.source();
         let docstring = jsdoc(node, source, &mut *self.cancelled)?;
         if let Some(value) = &docstring {

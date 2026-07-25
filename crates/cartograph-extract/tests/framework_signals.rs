@@ -1,0 +1,1309 @@
+use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
+use cartograph_extract::{ExtractError, NativeExtractor, SourceLimits, SourceSnapshot};
+
+const SOURCE_LIMIT: usize = 1024 * 1024;
+const SECRET: &str = "cartograph_literal_secret_sentinel_7c1f";
+
+struct RouteFixture {
+    path: &'static str,
+    source: &'static str,
+    language: SourceLanguage,
+    route: &'static str,
+}
+
+const ROUTES: [RouteFixture; 13] = [
+    RouteFixture {
+        path: "src/server.ts",
+        source: "import express from 'express';\nconst app = express();\nexport function listOrders() {}\napp.get('/orders', listOrders);\nconst secret = 'cartograph_literal_secret_sentinel_7c1f';\n",
+        language: SourceLanguage::TypeScript,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "src/routes.ts",
+        source: "import { Routes } from '@angular/router';\nconst routes: Routes = [{ path: 'orders', component: OrdersPage }];\n",
+        language: SourceLanguage::TypeScript,
+        route: "ANY orders",
+    },
+    RouteFixture {
+        path: "src/server.js",
+        source: "Bun.serve({ routes: { '/orders': listOrders } });\n",
+        language: SourceLanguage::JavaScript,
+        route: "ANY /orders",
+    },
+    RouteFixture {
+        path: "app/api.py",
+        source: "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/orders')\ndef list_orders():\n    return []\n",
+        language: SourceLanguage::Python,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "routes/web.php",
+        source: "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/orders', [OrderController::class, 'index']);\n",
+        language: SourceLanguage::Php,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "config/routes.rb",
+        source: "Rails.application.routes.draw do\n  get '/orders', to: 'orders#index'\nend\n",
+        language: SourceLanguage::Ruby,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "src/OrderController.java",
+        source: "import org.springframework.web.bind.annotation.GetMapping;\nclass OrderController {\n @GetMapping(\"/orders\")\n public void listOrders() {}\n}\n",
+        language: SourceLanguage::Java,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "src/OrderController.cs",
+        source: "using Microsoft.AspNetCore.Mvc;\n[Route(\"api/orders\")]\nclass OrderController {\n [HttpGet(\"/orders\")] public void ListOrders() {}\n}\n",
+        language: SourceLanguage::CSharp,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "cmd/server.go",
+        source: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc listOrders() {}\nfunc main() { r := gin.Default(); r.GET(\"/orders\", listOrders) }\n",
+        language: SourceLanguage::Go,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "src/routes.rs",
+        source: "use actix_web::{get, HttpResponse};\n#[get(\"/orders\")]\nasync fn list_orders() -> HttpResponse { todo!() }\n",
+        language: SourceLanguage::Rust,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "lib/router.dart",
+        source: "final router = GoRouter(routes: [GoRoute(path: '/orders', builder: (context, state) => OrdersPage())]);\n",
+        language: SourceLanguage::Dart,
+        route: "ANY /orders",
+    },
+    RouteFixture {
+        path: "Sources/App/routes.swift",
+        source: "import Vapor\nfunc routes(_ app: Application) throws { app.get(\"/orders\", use: listOrders) }\n",
+        language: SourceLanguage::Swift,
+        route: "GET /orders",
+    },
+    RouteFixture {
+        path: "conf/routes",
+        source: "GET /orders controllers.OrderController.list()\n",
+        language: SourceLanguage::Yaml,
+        route: "GET /orders",
+    },
+];
+
+#[test]
+fn framework_routes_cover_major_v1_ecosystems_with_typed_searchable_symbols() {
+    for fixture in ROUTES {
+        let first = extract(fixture.path, fixture.source, fixture.language);
+        let second = extract(fixture.path, fixture.source, fixture.language);
+        assert_eq!(first, second, "{} was not deterministic", fixture.path);
+        let route = first
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Route && symbol.name == fixture.route)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} missing route {}; routes={:?}",
+                    fixture.path,
+                    fixture.route,
+                    first
+                        .symbols
+                        .iter()
+                        .filter(|symbol| symbol.kind == SymbolKind::Route)
+                        .map(|symbol| symbol.name.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(route.exported, "{} route was not public", fixture.path);
+        assert!(
+            !format!("{first:?}").contains(SECRET),
+            "{} leaked a source literal: {first:?}",
+            fixture.path,
+        );
+    }
+}
+
+#[test]
+fn framework_signals_add_cli_and_configuration_edges_without_copying_values() {
+    let typescript = extract(
+        "src/cli.ts",
+        "import { Command } from 'commander';\nconst program = new Command();\nprogram.command('serve');\nfunction locate(c: any) { return [process.env.DEPLOY_REGION, process.env['DEPLOY_TOKEN'], c.env.WORKER_REGION, __dirname, import.meta.url]; }\n// process.env.COMMENTED_OUT\nconst secret = 'cartograph_literal_secret_sentinel_7c1f';\n",
+        SourceLanguage::TypeScript,
+    );
+    assert!(
+        typescript
+            .symbols
+            .iter()
+            .any(|symbol| symbol.kind == SymbolKind::Route && symbol.name == "cmd serve")
+    );
+    for expected in [
+        "DEPLOY_REGION",
+        "DEPLOY_TOKEN",
+        "WORKER_REGION",
+        "__dirname",
+        "import.meta.url",
+    ] {
+        assert!(
+            typescript.references.iter().any(|reference| {
+                reference.kind == ReferenceKind::References && reference.name == expected
+            }),
+            "missing TypeScript config/build-context reference {expected}: {:?}",
+            typescript.references
+        );
+    }
+    assert!(
+        typescript
+            .references
+            .iter()
+            .all(|reference| reference.name != "COMMENTED_OUT")
+    );
+
+    let spring = extract(
+        "src/OrderService.java",
+        "class OrderService {\n @Value(\"${orders.cache.ttl:30}\") String ttl;\n void load() { System.getenv(\"ORDERS_REGION\"); }\n}\n",
+        SourceLanguage::Java,
+    );
+    for expected in ["orders.cache.ttl", "ORDERS_REGION"] {
+        assert!(
+            spring.references.iter().any(|reference| {
+                reference.kind == ReferenceKind::References && reference.name == expected
+            }),
+            "missing config reference {expected}"
+        );
+    }
+    assert!(
+        !format!("{typescript:?}{spring:?}").contains(SECRET),
+        "framework signal output leaked: typescript={typescript:?} spring={spring:?}"
+    );
+}
+
+#[test]
+fn framework_routes_ignore_comments_and_span_multiline_static_calls() {
+    let extracted = extract(
+        "src/server.ts",
+        r#"
+import express from 'express';
+// app.get('/commented-line', ignored);
+/*
+app.post('/commented-block', ignored);
+*/
+app.patch(
+  '/orders/:id',
+  OrderController.update,
+);
+router.options('/orders', corsHandler);
+router.use('/admin', adminRouter);
+router.use(authMiddleware);
+"#,
+        SourceLanguage::TypeScript,
+    );
+    let routes = extracted
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        routes,
+        ["PATCH /orders/:id", "OPTIONS /orders", "USE /admin"]
+    );
+    assert!(
+        extracted.references.iter().any(|reference| {
+            reference.kind == ReferenceKind::Calls && reference.name == "update"
+        })
+    );
+    assert!(!format!("{extracted:?}").contains("commented"));
+}
+
+#[test]
+fn framework_routes_cover_hono_on_and_fastify_object_forms() {
+    let extracted = extract(
+        "src/server.ts",
+        r#"
+import { Hono } from 'hono';
+import Fastify from 'fastify';
+app.on('PATCH', '/orders/:id', patchOrder);
+fastify.route({
+  method: 'POST',
+  url: '/orders',
+  handler: createOrder,
+});
+"#,
+        SourceLanguage::TypeScript,
+    );
+    let routes = extracted
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(routes, ["PATCH /orders/:id", "POST /orders"]);
+    for handler in ["patchOrder", "createOrder"] {
+        assert!(
+            extracted.references.iter().any(|reference| {
+                reference.kind == ReferenceKind::Calls && reference.name == handler
+            }),
+            "missing handler reference {handler}: {:?}",
+            extracted.references
+        );
+    }
+}
+
+#[test]
+fn path_convention_routes_cover_next_sveltekit_and_nuxt_even_when_files_are_empty() {
+    let fixtures = [
+        (
+            "src/pages/index.tsx",
+            SourceLanguage::Tsx,
+            SymbolKind::Route,
+            "/",
+        ),
+        (
+            "src/pages/blog/[slug].jsx",
+            SourceLanguage::Jsx,
+            SymbolKind::Route,
+            "/blog/:slug",
+        ),
+        (
+            "src/app/(shop)/orders/[id]/page.ts",
+            SourceLanguage::TypeScript,
+            SymbolKind::Route,
+            "/orders/:id",
+        ),
+        (
+            "src/routes/docs/[...rest]/+server.ts",
+            SourceLanguage::TypeScript,
+            SymbolKind::Route,
+            "/docs/*rest",
+        ),
+        (
+            "src/routes/[[locale]]/+layout.js",
+            SourceLanguage::JavaScript,
+            SymbolKind::Route,
+            "/:locale?",
+        ),
+        (
+            "pages/blog/[slug].vue",
+            SourceLanguage::Vue,
+            SymbolKind::Route,
+            "/blog/:slug",
+        ),
+        (
+            "server/api/users/[id].ts",
+            SourceLanguage::TypeScript,
+            SymbolKind::Route,
+            "/api/users/:id",
+        ),
+        (
+            "middleware/auth.global.ts",
+            SourceLanguage::TypeScript,
+            SymbolKind::Function,
+            "auth.global",
+        ),
+    ];
+    for (path, language, kind, name) in fixtures {
+        let extracted = extract(path, "", language);
+        let symbol = extracted
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == kind && symbol.name == name)
+            .unwrap_or_else(|| panic!("{path} missing {kind:?} {name}: {extracted:?}"));
+        assert_eq!(symbol.span.start_byte(), 0, "{path}");
+        assert_eq!(symbol.span.end_byte(), 0, "{path}");
+    }
+
+    let layout = extract(
+        "src/app/orders/layout.tsx",
+        "export default function Layout() { return null; }",
+        SourceLanguage::Tsx,
+    );
+    assert!(
+        layout
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != SymbolKind::Route)
+    );
+}
+
+#[test]
+fn framework_routes_cover_resource_axum_chi_and_python_docstring_boundaries() {
+    let php = extract(
+        "routes/web.php",
+        r#"<?php
+# Route::resource('ignored', IgnoredController::class);
+Route::resource('users', UserController::class);
+Route::apiResource('teams', TeamController::class);
+"#,
+        SourceLanguage::Php,
+    );
+    for expected in ["resource:users", "resource:teams"] {
+        assert!(
+            php.symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Route && symbol.name == expected }),
+            "missing {expected}: {php:?}"
+        );
+    }
+    assert!(
+        php.symbols
+            .iter()
+            .all(|symbol| symbol.name != "resource:ignored")
+    );
+
+    let rust = extract(
+        "src/routes.rs",
+        r#"
+use axum::{routing::{get, post}, Router};
+let app = Router::new()
+  .route("/orders", get(list_orders))
+  .route("/orders", post(create_order));
+"#,
+        SourceLanguage::Rust,
+    );
+    for expected in ["GET /orders", "POST /orders"] {
+        assert!(
+            rust.symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Route && symbol.name == expected }),
+            "missing {expected}: {rust:?}"
+        );
+    }
+
+    let go = extract(
+        "routes.go",
+        r#"
+package api
+import "github.com/go-chi/chi/v5"
+func routes(r chi.Router, req *http.Request) {
+  _ = req.Header.Get("Content-Type")
+  r.Get("/orders", listOrders)
+}
+"#,
+        SourceLanguage::Go,
+    );
+    assert!(
+        go.symbols
+            .iter()
+            .any(|symbol| { symbol.kind == SymbolKind::Route && symbol.name == "GET /orders" })
+    );
+    assert!(
+        go.symbols
+            .iter()
+            .all(|symbol| !symbol.name.contains("Content-Type"))
+    );
+
+    let python = extract(
+        "app.py",
+        r#"
+from flask import Flask
+"""Example only:
+@app.route('/not-real')
+"""
+# @app.route('/also-not-real')
+@app.route('/real')
+def real():
+    return None
+"#,
+        SourceLanguage::Python,
+    );
+    let routes = python
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(routes, ["ANY /real"]);
+}
+
+#[test]
+fn laravel_routes_keep_source_labels_and_qualified_controller_resolution_hints() {
+    let source = r#"<?php
+use App\Http\Controllers\OrderController;
+Route::get('/orders', [OrderController::class, 'index']);
+Route::post('/legacy', 'OrderController@store');
+Route::options('/orders', OrderController::class);
+Route::any('/health', healthCheck);
+Route::resource('users', UserController::class)->only(['index']);
+Route::get('/inline', static fn () => ['ok' => true]);
+"#;
+    let php = extract("routes/web.php", source, SourceLanguage::Php);
+    let expectations = [
+        ("GET /orders", "index", Some("OrderController::index")),
+        (
+            "POST /legacy",
+            "OrderController@store",
+            Some("OrderController::store"),
+        ),
+        (
+            "OPTIONS /orders",
+            "OrderController",
+            Some("OrderController"),
+        ),
+        ("ANY /health", "healthCheck", None),
+        ("resource:users", "UserController", Some("UserController")),
+    ];
+    for (route_name, reference_name, resolution_name) in expectations {
+        let route = php
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Route && symbol.name == route_name)
+            .unwrap_or_else(|| panic!("missing Laravel route {route_name}: {php:?}"));
+        let reference = php
+            .references
+            .iter()
+            .find(|reference| {
+                reference.owner.as_ref() == Some(&route.id)
+                    && reference.kind == ReferenceKind::Calls
+                    && reference.name == reference_name
+            })
+            .unwrap_or_else(|| {
+                panic!("missing Laravel target {route_name} -> {reference_name}: {php:?}")
+            });
+        assert_eq!(reference.resolution_name.as_deref(), resolution_name);
+        let start = usize::try_from(reference.span.start_byte())
+            .unwrap_or_else(|error| panic!("span start does not fit usize: {error}"));
+        let end = usize::try_from(reference.span.end_byte())
+            .unwrap_or_else(|error| panic!("span end does not fit usize: {error}"));
+        assert_eq!(&source[start..end], reference_name);
+    }
+
+    let inline = php
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == SymbolKind::Route && symbol.name == "GET /inline")
+        .unwrap_or_else(|| panic!("missing closure route: {php:?}"));
+    assert!(
+        php.references
+            .iter()
+            .all(|reference| reference.owner.as_ref() != Some(&inline.id)),
+        "inline closure must not invent a callable target: {php:?}"
+    );
+}
+
+#[test]
+fn framework_configuration_routes_cover_symfony_drupal_and_codeigniter() {
+    let symfony = extract(
+        "config/routes.yaml",
+        r#"
+orders_show:
+  path: /orders/{id}
+  controller: App\Controller\OrderController::show
+  methods: [GET]
+"#,
+        SourceLanguage::Yaml,
+    );
+    let route = symfony
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == SymbolKind::Route && symbol.name == "orders_show")
+        .unwrap_or_else(|| panic!("missing Symfony route: {symfony:?}"));
+    assert!(symfony.references.iter().any(|reference| {
+        reference.owner.as_ref() == Some(&route.id)
+            && reference.kind == ReferenceKind::Calls
+            && reference.name == "App\\Controller\\OrderController::show"
+            && reference.resolution_name.as_deref()
+                == Some("App\\Controller::OrderController::show")
+    }));
+
+    let drupal = extract(
+        "modules/custom/orders/orders.routing.yml",
+        r#"
+orders.hello:
+  path: '/hello'
+  defaults:
+    _controller: '\Drupal\orders\Controller\HelloController::build'
+  methods: [GET]
+"#,
+        SourceLanguage::Yaml,
+    );
+    assert!(
+        drupal
+            .symbols
+            .iter()
+            .any(|symbol| { symbol.kind == SymbolKind::Route && symbol.name == "GET /hello" })
+    );
+    assert!(drupal.references.iter().any(|reference| {
+        reference.name == "\\Drupal\\orders\\Controller\\HelloController::build"
+            && reference.resolution_name.as_deref()
+                == Some("Drupal\\orders\\Controller::HelloController::build")
+    }));
+
+    let codeigniter = extract(
+        "application/config/routes.php",
+        r#"<?php
+$route['default_controller'] = 'welcome';
+$route['product/(:num)']['DELETE'] = 'catalog/product_lookup_by_id/$1';
+"#,
+        SourceLanguage::Php,
+    );
+    for expected in ["ANY /", "DELETE /product/(:num)"] {
+        assert!(
+            codeigniter
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Route && symbol.name == expected }),
+            "missing {expected}: {codeigniter:?}"
+        );
+    }
+    assert!(
+        codeigniter
+            .references
+            .iter()
+            .any(|reference| { reference.name == "catalog/product_lookup_by_id/$1" })
+    );
+}
+
+#[test]
+fn framework_landmarks_cover_neug_swiftui_flutter_and_grouped_vapor_routes() {
+    let neug = extract(
+        "graph.py",
+        r#"
+import neug
+graph = neug.Graph("catalog")
+users = neug.Vertex("User")
+likes = neug.Edge("LIKES")
+"#,
+        SourceLanguage::Python,
+    );
+    for expected in ["neug:graph:catalog", "neug:vertex:User", "neug:edge:LIKES"] {
+        assert!(
+            neug.symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Resource && symbol.name == expected }),
+            "missing {expected}: {neug:?}"
+        );
+    }
+
+    let swiftui = extract(
+        "Sources/App.swift",
+        "import SwiftUI\nstruct ContentView: View { var body: some View { Text(\"Hi\") } }\n",
+        SourceLanguage::Swift,
+    );
+    assert!(
+        swiftui
+            .symbols
+            .iter()
+            .any(|symbol| { symbol.kind == SymbolKind::Component && symbol.name == "ContentView" }),
+        "missing SwiftUI component: {swiftui:?}"
+    );
+
+    let flutter = extract(
+        "lib/main.dart",
+        r#"
+import 'package:flutter/material.dart';
+MaterialApp(routes: {
+  '/': (context) => HomePage(),
+  '/settings': (context) => const SettingsPage(),
+});
+"#,
+        SourceLanguage::Dart,
+    );
+    for expected in ["ANY /", "ANY /settings"] {
+        assert!(
+            flutter
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Route && symbol.name == expected }),
+            "missing {expected}: {flutter:?}"
+        );
+    }
+
+    let vapor = extract(
+        "Sources/routes.swift",
+        "import Vapor\napp.grouped(\"api\").post(\"users\", use: createUser)\n",
+        SourceLanguage::Swift,
+    );
+    assert!(
+        vapor
+            .symbols
+            .iter()
+            .any(|symbol| { symbol.kind == SymbolKind::Route && symbol.name == "POST /api/users" })
+    );
+}
+
+#[test]
+fn nestjs_routes_join_controller_paths_and_gate_http_graphql_and_rpc_styles() {
+    let extracted = extract(
+        "src/hybrid.controller.ts",
+        r#"
+@Controller('/api/')
+@Resolver('Thing')
+class HybridController {
+  @Get()
+  list() {}
+
+  @Post('/:id/')
+  update() {}
+
+  @Query(() => Thing)
+  thing() {}
+
+  @MessagePattern('sum')
+  sum() {}
+
+  @SubscribeMessage('events')
+  events() {}
+
+  helper() {}
+}
+
+@Resolver('OnlyGraph')
+class OnlyGraphResolver {
+  @Get('/must-not-exist') wrongStyle() {}
+  @Mutation(() => Thing) mutate() {}
+}
+
+class NotAController {
+  @Get('/orphan') orphan() {}
+}
+"#,
+        SourceLanguage::TypeScript,
+    );
+    let routes = extracted
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "GET /api",
+        "POST /api/:id",
+        "GraphQL Query thing",
+        "MessagePattern sum",
+        "WebSocket events",
+        "GraphQL Mutation mutate",
+    ] {
+        assert!(routes.contains(&expected), "missing {expected}: {routes:?}");
+    }
+    for absent in ["GET /must-not-exist", "GET /orphan"] {
+        assert!(!routes.contains(&absent), "unexpected {absent}: {routes:?}");
+    }
+    for handler in ["list", "update", "thing", "sum", "events", "mutate"] {
+        assert!(
+            extracted.references.iter().any(|reference| {
+                reference.kind == ReferenceKind::Calls && reference.name == handler
+            }),
+            "missing NestJS handler edge for {handler}: {:?}",
+            extracted.references
+        );
+    }
+}
+
+#[test]
+fn bun_serve_routes_keep_method_maps_top_level_and_reject_nested_config_shapes() {
+    let extracted = extract(
+        "src/bun-server.ts",
+        r#"
+function health() {}
+function listUsers() {}
+function createUser() {}
+Bun.serve({
+  port: 3000,
+  routes: {
+    '/health': health,
+    '/users': { GET: listUsers, POST: createUser },
+    '/not-a-method-map': { description: 'metadata' },
+  },
+  nested: { routes: { '/not-top-level': health } },
+});
+// Bun.serve({ routes: { '/commented': health } });
+"#,
+        SourceLanguage::TypeScript,
+    );
+    let routes = extracted
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in ["ANY /health", "GET /users", "POST /users"] {
+        assert!(routes.contains(&expected), "missing {expected}: {routes:?}");
+    }
+    for absent in [
+        "ANY /not-a-method-map",
+        "ANY /not-top-level",
+        "ANY /commented",
+    ] {
+        assert!(!routes.contains(&absent), "unexpected {absent}: {routes:?}");
+    }
+    for handler in ["health", "listUsers", "createUser"] {
+        assert!(
+            extracted.references.iter().any(|reference| {
+                reference.kind == ReferenceKind::Calls && reference.name == handler
+            }),
+            "missing Bun handler edge for {handler}: {:?}",
+            extracted.references
+        );
+    }
+}
+
+#[test]
+fn hono_routes_are_receiver_scoped_and_mount_only_the_named_child_router() {
+    let extracted = extract(
+        "src/hono.ts",
+        r#"
+import { Hono } from 'hono';
+const app = new Hono();
+const users = new Hono();
+const admin = new OpenAPIHono();
+users.get('/users', listUsers);
+users.on('purge', '/cache', purgeCache);
+admin.post('/admin', createAdmin);
+database.get('/must-not-exist', unrelated);
+app.route('/api', users);
+"#,
+        SourceLanguage::TypeScript,
+    );
+    let routes = extracted
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "GET /users",
+        "PURGE /cache",
+        "POST /admin",
+        "GET /api/users",
+        "PURGE /api/cache",
+    ] {
+        assert!(routes.contains(&expected), "missing {expected}: {routes:?}");
+    }
+    assert!(
+        !routes.contains(&"GET /must-not-exist"),
+        "unrelated receiver leaked into Hono routes: {routes:?}"
+    );
+    assert!(
+        !routes.contains(&"POST /api/admin"),
+        "unnamed child router was mounted: {routes:?}"
+    );
+}
+
+#[test]
+fn spring_and_aspnet_routes_compose_class_and_method_paths_with_static_tokens() {
+    let spring = extract(
+        "src/OrdersController.java",
+        r#"
+@RequestMapping("/api")
+public class OrdersController {
+  @GetMapping
+  public void list() {}
+
+  @PostMapping("/orders")
+  public void create() {}
+
+  @RequestMapping(value = "/search", method = RequestMethod.PATCH)
+  public void search() {}
+}
+"#,
+        SourceLanguage::Java,
+    );
+    let spring_routes = spring
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in ["GET /api", "POST /api/orders", "PATCH /api/search"] {
+        assert!(
+            spring_routes.contains(&expected),
+            "missing {expected}: {spring_routes:?}"
+        );
+    }
+
+    let aspnet = extract(
+        "Controllers/OrdersController.cs",
+        r#"
+[Route("api/[controller]")]
+public class OrdersController {
+  [HttpGet("{id}")]
+  public void GetOne() {}
+
+  [HttpPost]
+  [Route("[action]")]
+  public void Create() {}
+}
+"#,
+        SourceLanguage::CSharp,
+    );
+    let aspnet_routes = aspnet
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in ["GET /api/Orders/{id}", "POST /api/Orders/Create"] {
+        assert!(
+            aspnet_routes.contains(&expected),
+            "missing {expected}: {aspnet_routes:?}"
+        );
+    }
+}
+
+#[test]
+fn rails_routes_expand_resources_compose_namespaces_and_keep_handler_identity() {
+    let extracted = extract(
+        "config/routes.rb",
+        r#"
+Rails.application.routes.draw do
+  root "home#index"
+  resources :orders
+  post "/checkout", to: "orders#create"
+  namespace :api do
+    get "/orders", to: "orders#index"
+  end
+end
+"#,
+        SourceLanguage::Ruby,
+    );
+    let routes = extracted
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "/ -> home#index",
+        "resource:orders",
+        "GET /orders",
+        "POST /orders",
+        "GET /orders/:id",
+        "PATCH /orders/:id",
+        "DELETE /orders/:id",
+        "POST /checkout",
+        "GET /api/orders",
+    ] {
+        assert!(routes.contains(&expected), "missing {expected}: {routes:?}");
+    }
+    for (name, resolution) in [
+        ("index", "HomeController::index"),
+        ("create", "OrdersController::create"),
+        ("index", "Api::OrdersController::index"),
+    ] {
+        assert!(
+            extracted.references.iter().any(|reference| {
+                reference.name == name && reference.resolution_name.as_deref() == Some(resolution)
+            }),
+            "missing Rails handler lookup {resolution}: {:?}",
+            extracted.references
+        );
+    }
+}
+
+#[test]
+fn drupal_services_hooks_plugins_and_tags_are_graph_visible_without_source_reparse() {
+    let services = extract(
+        "modules/custom/demo/demo.services.yml",
+        r#"
+services:
+  _defaults:
+    autowire: true
+  demo.listener:
+    class: Drupal\demo\Event\DemoListener
+    arguments: ['@logger.factory', '@?demo.optional']
+    tags:
+      - { name: event_subscriber }
+  demo.alias:
+    alias: demo.listener
+  demo.consumer:
+    arguments:
+      - !tagged_iterator event_subscriber
+"#,
+        SourceLanguage::Yaml,
+    );
+    for service in ["demo.listener", "demo.alias", "demo.consumer"] {
+        assert!(
+            services
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Resource && symbol.name == service }),
+            "missing Drupal service {service}: {services:?}"
+        );
+    }
+    assert!(services.symbols.iter().all(|symbol| {
+        symbol.name != "_defaults" || !symbol.qualified_name.contains("::drupal-service::")
+    }));
+    for reference in [
+        "Drupal\\demo\\Event\\DemoListener",
+        "logger.factory",
+        "demo.optional",
+        "demo.listener",
+    ] {
+        assert!(
+            services
+                .references
+                .iter()
+                .any(|candidate| candidate.name == reference),
+            "missing Drupal service reference {reference}: {:?}",
+            services.references
+        );
+    }
+    for role in ["::drupal-tag-provider::", "::drupal-tag-consumer::"] {
+        assert!(
+            services.symbols.iter().any(|symbol| {
+                symbol.name == "drupal-tag:event_subscriber" && symbol.qualified_name.contains(role)
+            }),
+            "missing Drupal tag role {role}: {:?}",
+            services.symbols
+        );
+    }
+
+    let hooks = extract(
+        "modules/custom/demo/demo.module",
+        r#"<?php
+/** @implements hook_form_alter(). */
+function demo_form_alter(&$form) {}
+function demo_help() {}
+function unrelated_helper() {}
+"#,
+        SourceLanguage::Php,
+    );
+    for contract in ["hook_form_alter", "hook_help"] {
+        assert!(
+            hooks
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Resource && symbol.name == contract }),
+            "missing Drupal hook {contract}: {hooks:?}"
+        );
+    }
+    assert!(
+        hooks
+            .symbols
+            .iter()
+            .all(|symbol| symbol.name != "hook_helper")
+    );
+
+    let plugins = extract(
+        "modules/custom/demo/src/Plugin/Block/HeroBlock.php",
+        r#"<?php
+/** @Block(id = "hero_block") */
+class HeroBlock {}
+
+#[Block(id: 'modern_block')]
+class ModernBlock {}
+"#,
+        SourceLanguage::Php,
+    );
+    for plugin in ["hero_block", "modern_block"] {
+        assert!(
+            plugins
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Resource && symbol.name == plugin }),
+            "missing Drupal plugin {plugin}: {plugins:?}"
+        );
+    }
+}
+
+#[test]
+fn codeigniter_controller_routes_and_loaded_resource_calls_keep_convention_identity() {
+    let extracted = extract(
+        "application/controllers/admin/Users.php",
+        r#"<?php
+class Users extends CI_Controller {
+  public function index() {}
+  public function show($id) {
+    $this->load->model('user_model');
+    $this->load->model('blog/queries', 'queryModel');
+    $this->load->library('email');
+    $this->user_model->active();
+    $this->queryModel->find();
+    $this->email->send();
+    $this->db->get();
+  }
+  public function _remap($method) {}
+  protected function hidden() {}
+}
+"#,
+        SourceLanguage::Php,
+    );
+    let routes = extracted
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route)
+        .map(|symbol| symbol.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in ["ANY /admin/users", "ANY /admin/users/show"] {
+        assert!(routes.contains(&expected), "missing {expected}: {routes:?}");
+    }
+    for absent in ["ANY /admin/users/_remap", "ANY /admin/users/hidden"] {
+        assert!(!routes.contains(&absent), "unexpected {absent}: {routes:?}");
+    }
+    for (name, resolution) in [
+        ("user_model", "User_model"),
+        ("blog/queries", "Queries"),
+        ("email", "Email"),
+        ("active", "User_model::active"),
+        ("find", "Queries::find"),
+        ("send", "Email::send"),
+    ] {
+        assert!(
+            extracted.references.iter().any(|reference| {
+                reference.name == name && reference.resolution_name.as_deref() == Some(resolution)
+            }),
+            "missing CodeIgniter lookup {name} -> {resolution}: {:?}",
+            extracted.references
+        );
+    }
+    assert!(
+        extracted
+            .references
+            .iter()
+            .all(|reference| reference.resolution_name.as_deref() != Some("Db::get"))
+    );
+
+    let routes_config = extract(
+        "application/config/routes.php",
+        "<?php\n$route['default_controller'] = 'welcome';\n$route['admin/users/show']['GET'] = 'admin/users/show';\n$route['translate_uri_dashes'] = FALSE;\n",
+        SourceLanguage::Php,
+    );
+    for resolution in ["Welcome::index", "Users::show"] {
+        assert!(
+            routes_config
+                .references
+                .iter()
+                .any(|reference| { reference.resolution_name.as_deref() == Some(resolution) }),
+            "missing CodeIgniter route lookup {resolution}: {:?}",
+            routes_config.references
+        );
+    }
+    assert!(routes_config.symbols.iter().all(|symbol| {
+        symbol.kind != SymbolKind::Route || !symbol.name.contains("translate_uri_dashes")
+    }));
+}
+
+#[test]
+fn framework_enrichment_honors_cancellation() {
+    let fixture = &ROUTES[0];
+    let snapshot = snapshot(fixture.path, fixture.source, fixture.language);
+    let mut extractor = NativeExtractor::new(fixture.language)
+        .unwrap_or_else(|error| panic!("framework extractor failed: {error}"));
+    let mut polls = 0_u8;
+    assert_eq!(
+        extractor.extract_with_cancellation(&snapshot, || {
+            polls = polls.saturating_add(1);
+            polls > 2
+        }),
+        Err(ExtractError::Cancelled)
+    );
+}
+
+#[test]
+fn dependency_manifests_are_graph_visible_workspace_aware_and_literal_safe() {
+    let package = extract(
+        "package.json",
+        r#"{
+  "name": "@acme/app",
+  "workspaces": { "packages": ["packages/*"] },
+  "dependencies": {
+    "@acme/core": "workspace:*",
+    "react": "cartograph_literal_secret_sentinel_7c1f"
+  },
+  "devDependencies": { "vitest": "^3" },
+  "tool": { "dependencies": { "nested-false-positive": "1" } }
+}"#,
+        SourceLanguage::Json,
+    );
+    for expected in [
+        "@acme/app",
+        "npm dependency @acme/core",
+        "npm dependency react",
+        "npm dependency vitest",
+        "npm workspace member packages/*",
+    ] {
+        assert!(
+            package.symbols.iter().any(|symbol| symbol.name == expected),
+            "missing package signal {expected}: {:?}",
+            package.symbols
+        );
+    }
+    assert!(
+        package
+            .symbols
+            .iter()
+            .all(|symbol| !symbol.name.contains("nested-false-positive"))
+    );
+    assert!(package.references.iter().any(|reference| {
+        reference.name == "@acme/core" && reference.kind == ReferenceKind::References
+    }));
+    assert!(package.symbols.iter().any(|symbol| {
+        symbol.name == "@acme/app" && symbol.qualified_name.ends_with("::manifest-dir::__root__")
+    }));
+    assert!(package.symbols.iter().any(|symbol| {
+        symbol.name == "npm workspace" && symbol.qualified_name.ends_with("::__root__")
+    }));
+
+    let composer = extract(
+        "services/api/composer.json",
+        r#"{
+  "name": "acme/api",
+  "require": { "php": "^8.4", "acme/domain": "dev-main" },
+  "require-dev": { "phpunit/phpunit": "^12" }
+}"#,
+        SourceLanguage::Json,
+    );
+    for expected in ["php", "acme/domain", "phpunit/phpunit"] {
+        assert!(
+            composer
+                .references
+                .iter()
+                .any(|reference| reference.name == expected),
+            "missing Composer dependency {expected}: {:?}",
+            composer.references
+        );
+    }
+
+    let cargo = extract(
+        "Cargo.toml",
+        r#"[package]
+name = "cartograph"
+version = "cartograph_literal_secret_sentinel_7c1f"
+
+[workspace]
+members = ["crates/*"]
+
+[dependencies]
+tokio = "1"
+serde_alias = { package = "serde", version = "1" }
+
+[workspace.dependencies]
+sqlx = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.30"
+"#,
+        SourceLanguage::Toml,
+    );
+    for expected in ["cartograph", "cargo workspace member crates/*"] {
+        assert!(
+            cargo.symbols.iter().any(|symbol| symbol.name == expected),
+            "missing Cargo signal {expected}: {:?}",
+            cargo.symbols
+        );
+    }
+    for expected in ["tokio", "sqlx", "nix"] {
+        assert!(
+            cargo
+                .references
+                .iter()
+                .any(|reference| reference.name == expected),
+            "missing Cargo dependency {expected}: {:?}",
+            cargo.references
+        );
+    }
+    assert!(cargo.references.iter().any(|reference| {
+        reference.name == "serde_alias" && reference.resolution_name.as_deref() == Some("serde")
+    }));
+    assert!(cargo.symbols.iter().any(|symbol| {
+        symbol.name == "cartograph" && symbol.qualified_name.ends_with("::manifest-dir::__root__")
+    }));
+    assert!(cargo.symbols.iter().any(|symbol| {
+        symbol.name == "cargo workspace" && symbol.qualified_name.ends_with("::__root__")
+    }));
+
+    for extracted in [&package, &composer, &cargo] {
+        assert!(!format!("{extracted:?}").contains(SECRET));
+    }
+}
+
+#[test]
+fn component_framework_builtins_stores_and_template_boundaries_are_precise() {
+    let vue = extract(
+        "pages/index.vue",
+        r##"<script setup lang="ts">
+import { useRoute } from '#imports'
+const props = defineProps<{ message: string }>()
+</script>
+<template><OrderCard @click="submitOrder()" />{{ formatOrder(order) }}</template>
+<style>.fake { content: "{{ styleGhost() }}"; }</style>
+"##,
+        SourceLanguage::Vue,
+    );
+    let vue_component = vue
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == SymbolKind::Component && symbol.name == "index")
+        .unwrap_or_else(|| panic!("missing Vue component: {:?}", vue.symbols));
+    assert!(vue_component.exported && vue_component.default_export);
+    assert!(
+        vue.symbols
+            .iter()
+            .any(|symbol| { symbol.kind == SymbolKind::Resource && symbol.name == "#imports" })
+    );
+    assert!(
+        vue.references
+            .iter()
+            .all(|reference| { !matches!(reference.name.as_str(), "defineProps" | "styleGhost") })
+    );
+    for expected in ["OrderCard", "submitOrder", "formatOrder"] {
+        assert!(
+            vue.references
+                .iter()
+                .any(|reference| reference.name == expected),
+            "missing Vue reference {expected}: {:?}",
+            vue.references
+        );
+    }
+
+    let svelte = extract(
+        "src/routes/+page.svelte",
+        r#"<script>
+import { goto } from '$app/navigation';
+let count = 0;
+const doubled = $count * 2;
+const rune = $state(0);
+</script>
+<button on:click="increment()">{$count}</button>
+<style>.fake { content: "$styleGhost"; }</style>
+"#,
+        SourceLanguage::Svelte,
+    );
+    let stores = svelte
+        .references
+        .iter()
+        .filter(|reference| reference.name == "$count")
+        .collect::<Vec<_>>();
+    assert_eq!(stores.len(), 2, "Svelte store sites drifted: {stores:?}");
+    assert!(stores.iter().all(|reference| {
+        reference.resolution_name.as_deref() == Some("count")
+            && reference.kind == ReferenceKind::References
+    }));
+    assert!(
+        svelte.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Resource && symbol.name == "$app/navigation"
+        })
+    );
+    assert!(
+        svelte
+            .references
+            .iter()
+            .all(|reference| { !matches!(reference.name.as_str(), "$state" | "$styleGhost") })
+    );
+}
+
+fn extract(
+    path: &str,
+    source: &str,
+    language: SourceLanguage,
+) -> cartograph_extract::ExtractedFile {
+    let snapshot = snapshot(path, source, language);
+    let mut extractor = NativeExtractor::new(language)
+        .unwrap_or_else(|error| panic!("{path} extractor failed: {error}"));
+    extractor
+        .extract(&snapshot)
+        .unwrap_or_else(|error| panic!("{path} extraction failed: {error}"))
+}
+
+fn snapshot(path: &str, source: &str, language: SourceLanguage) -> SourceSnapshot {
+    let snapshot = SourceSnapshot::from_bytes(path, source.as_bytes(), limits())
+        .unwrap_or_else(|error| panic!("{path} snapshot failed: {error}"));
+    assert_eq!(snapshot.language(), language, "{path}");
+    snapshot
+}
+
+fn limits() -> SourceLimits {
+    SourceLimits::new(SOURCE_LIMIT)
+        .unwrap_or_else(|error| panic!("framework source limit failed: {error}"))
+}

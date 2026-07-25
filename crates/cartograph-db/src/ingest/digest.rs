@@ -3,7 +3,7 @@ use cartograph_domain::ContentDigest;
 
 use super::model::ValidatedFactTables;
 
-const DIGEST_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v2";
+const DIGEST_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v4";
 
 pub(super) fn logical_digest<Cancel>(
     facts: &ValidatedFactTables,
@@ -40,6 +40,12 @@ where
         digest.u32(symbol.start_line);
         digest.u32(symbol.end_line);
         digest.text(symbol.structural_digest.as_str());
+        digest.optional_text(symbol.visibility.map(|visibility| visibility.as_str()));
+        digest.boolean(symbol.exported);
+        digest.boolean(symbol.default_export);
+        digest.boolean(symbol.async_symbol);
+        digest.boolean(symbol.static_member);
+        digest.boolean(symbol.declaration_only);
     }
     digest.section("edges", facts.edges.len());
     for edge in &facts.edges {
@@ -51,6 +57,7 @@ where
         digest.text(edge.kind.as_str());
         digest.u32(edge.confidence.to_bits());
         digest.text(&edge.provenance);
+        digest.u32(edge.site_count);
     }
     digest.section("references", facts.references.len());
     for reference in &facts.references {
@@ -66,6 +73,8 @@ where
         digest.u64(reference.end_byte);
         digest.u32(reference.confidence.to_bits());
         digest.text(&reference.resolution_provenance);
+        digest.u32(reference.site_count);
+        digest.text(reference.span_precision.as_str());
     }
     digest.section("search_documents", facts.documents.len());
     for document in &facts.documents {
@@ -130,6 +139,10 @@ impl CanonicalDigest {
 
     fn u32(&mut self, value: u32) {
         self.hasher.update(&value.to_be_bytes());
+    }
+
+    fn boolean(&mut self, value: bool) {
+        self.hasher.update(&[u8::from(value)]);
     }
 
     fn finish(self) -> ContentDigest {

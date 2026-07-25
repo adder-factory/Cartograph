@@ -8,12 +8,14 @@ members = [
   "crates/cartograph-domain",
   "crates/cartograph-extract",
   "crates/cartograph-indexer",
+  "crates/cartograph-llm",
   "crates/cartograph-mcp",
   "crates/cartograph-search",
+  "crates/cartograph-scip",
 ]
 
 [workspace.package]
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.96.1"
 authors = ["Adder Factory"]
@@ -21,11 +23,56 @@ license = "MIT"
 repository = "https://github.com/adder-factory/cartograph"
 
 [workspace.dependencies]
+arborium-bash = "=2.18.1"
+arborium-c = "=2.18.1"
+arborium-c-sharp = "=2.18.1"
+arborium-clojure = "=2.18.1"
+arborium-commonlisp = "=2.18.1"
+arborium-cpp = "=2.18.1"
+arborium-css = "=2.18.1"
+arborium-dart = "=2.18.1"
+arborium-elixir = "=2.18.1"
+arborium-fish = "=2.18.1"
+arborium-fsharp = "=2.18.1"
+arborium-glsl = "=2.18.1"
+arborium-graphql = "=2.18.1"
+arborium-groovy = "=2.18.1"
+arborium-haskell = "=2.18.1"
+arborium-hcl = "=2.18.1"
+arborium-hlsl = "=2.18.1"
+arborium-html = "=2.18.1"
+arborium-java = "=2.18.1"
+arborium-jsdoc = "=2.18.1"
+arborium-json = "=2.18.1"
+arborium-julia = "=2.18.1"
+arborium-kotlin = "=2.18.1"
+arborium-lean = "=2.18.1"
+arborium-lua = "=2.18.1"
+arborium-nix = "=2.18.1"
+arborium-objc = "=2.18.1"
+arborium-php = "=2.18.1"
+arborium-powershell = "=2.18.1"
+arborium-r = "=2.18.1"
+arborium-regex = "=2.18.1"
+arborium-rescript = "=2.18.1"
+arborium-ruby = "=2.18.1"
+arborium-scala = "=2.18.1"
+arborium-solidity = "=2.18.1"
+arborium-sql = "=2.18.1"
+arborium-swift = "=2.18.1"
+arborium-vb = "=2.18.1"
+arborium-verilog = "=2.18.1"
+arborium-yaml = "=2.18.1"
 blake3 = "1.8.5"
-clap = { version = "4.6.4", features = ["derive"] }
+clap = { version = "4.6.4", features = ["derive", "string"] }
 getrandom = "0.4.3"
 ignore = "0.4.31"
 libc = "0.2.183"
+notify = "=8.2.0"
+futures-util = "=0.3.33"
+globset = "0.4.19"
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
+regex = "1.13.1"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
@@ -38,6 +85,7 @@ sqlx-postgres = { version = "=0.9.0", default-features = false }
 thiserror = "2.0.19"
 tempfile = "3.23.0"
 tokio = { version = "1.53.1", features = [
+  "fs",
   "io-std",
   "io-util",
   "macros",
@@ -48,10 +96,21 @@ tokio = { version = "1.53.1", features = [
 ] }
 toml_edit = "=0.25.13"
 tree-sitter = "=0.26.11"
+tree-sitter-abap-sqry = "=29.0.6"
+tree-sitter-arkts = "=0.2.0"
+tree-sitter-astro-next = "=0.1.1"
+tree-sitter-cuda = "=0.21.1"
+tree-sitter-embedded-template = "=0.25.0"
 tree-sitter-go = "=0.25.0"
+unicode-ident = "=1.0.24"
 tree-sitter-javascript = "=0.25.0"
+tree-sitter-luau = "=1.2.0"
+tree-sitter-ocaml = "=0.25.0"
+tree-sitter-pascal = "=0.10.2"
+tree-sitter-prisma-io = "=1.6.0"
 tree-sitter-python = "=0.25.0"
 tree-sitter-rust = "=0.24.2"
+tree-sitter-sfapex = "=3.0.0"
 tree-sitter-typescript = "=0.23.2"
 url = "2.5.8"
 

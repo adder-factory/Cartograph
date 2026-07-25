@@ -1,29 +1,61 @@
 //! Deterministic, non-LLM retrieval over Cartograph's published PostgreSQL graph.
 
 mod engine;
+mod hybrid;
+mod intent;
 mod model;
 mod packet;
+mod qualified;
 mod review;
 mod traversal;
 
+pub use cartograph_db::{EntryPointBucket, SimilarSymbolHit, SimilarSymbolsResult};
 pub use engine::DeterministicRetriever;
+pub use hybrid::{
+    ChannelCandidate, ChannelContribution, ChannelResults, FusedSearchItem, HybridSearchInput,
+    HybridSearchPacket, LexicalComponent, RetrievalAbstention, RetrievalChannel, RetrievalChannels,
+    RetrievalDocument, RetrievalExecution, RetrievalFallback, SearchMode, SemanticReadiness,
+    fuse_search,
+};
+pub use intent::{ContextGraphDirection, TaskIntent};
 pub use model::{
-    AffectedTest, AffectedTestsResult, ContextAbstention, ContextAnchor, ContextBudget,
-    ContextPacket, ContextRequest, EvidenceItem, EvidenceReason, ExactPathResult,
-    GenerationEvidence, IndexFreshness, RetrievalConfidence, RetrievalError, ReviewAbstention,
-    ReviewBudget, ReviewPacket, ReviewRequest, ReviewTruncation, TraversalBudget,
-    TraversalDirection, TraversalHop, TraversalNode, TraversalRequest, TraversalResult,
+    AffectedTest, AffectedTestsResult, BidirectionalTraversalResult, CONTEXT_ANCHOR_MAXIMUM_BYTES,
+    CONTEXT_QUERY_MAXIMUM_BYTES, ContextAbstention, ContextAnchor, ContextBudget,
+    ContextBudgetInput, ContextPacket, ContextRequest, ContextRequestOptions, EditCandidate,
+    EditCandidateBasis, EditCandidateSet, EntryPointsQuery, EntryPointsResult, EvidenceItem,
+    EvidenceReason, ExactPathQuery, ExactPathResult, ExactTextQuery, FileInventoryQuery,
+    FileInventoryResult, GenerationEvidence, GraphEvidence, GraphPathRequest, GraphPathResult,
+    GraphPathStep, IndexFreshness, LexicalQuery, ReferenceEvidence, ReferenceSpanPrecision,
+    RetrievalConfidence, RetrievalError, ReviewAbstention, ReviewBudget, ReviewBudgetInput,
+    ReviewPacket, ReviewRequest, ReviewRequestOptions, ReviewTruncation, SimilarRequest,
+    SourceRangeQuery, SourceRangeResult, TraversalBudget, TraversalDirection, TraversalHop,
+    TraversalNode, TraversalRequest, TraversalResult, WORKING_TREE_OVERLAY_MAXIMUM_EXCERPT_BYTES,
+    WORKING_TREE_OVERLAY_MAXIMUM_FILES, WORKING_TREE_OVERLAY_MAXIMUM_RESULTS,
+    WORKING_TREE_OVERLAY_MAXIMUM_SOURCE_BYTES, WorkingTreeChangeKind, WorkingTreeEvidence,
+    WorkingTreeEvidenceInput, WorkingTreeOverlay, WorkingTreeOverlayInput,
+    WorkingTreeOverlayStatus,
+};
+pub use qualified::{
+    CentralityComparator, CentralityFilter, ParsedQualifiedQuery, QualifiedSort,
+    parse_qualified_query,
 };
 pub use traversal::is_test_path;
 
 #[cfg(test)]
+use model::{GraphEvidenceFixture, evidence_fixture, graph_evidence_fixture};
+#[cfg(any(test, feature = "test-support"))]
+use model::{
+    ReferenceEvidenceFixture, SearchEvidenceFixture, enrich_search_evidence_fixture,
+    reference_evidence_fixture,
+};
+#[cfg(any(test, feature = "test-support"))]
 use packet::{PacketAssembly, assemble_packet};
 #[cfg(test)]
 use review::{ReviewAssembly, assemble_review_packet};
 #[cfg(test)]
-use traversal::{GraphArc, expand_frontier};
+use traversal::{FrontierInput, GraphArc, GraphArcFixture, expand_frontier, strongest_arc};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn fixture_generation() -> GenerationEvidence {
     let generation_id =
         match cartograph_domain::GenerationId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") {
@@ -33,11 +65,112 @@ fn fixture_generation() -> GenerationEvidence {
     GenerationEvidence::new(generation_id, 1)
 }
 
-#[cfg(test)]
-mod contract_tests {
-    use cartograph_domain::{NormalizedPath, ProjectId, SymbolId};
+#[cfg(any(test, feature = "test-support"))]
+fn fixture_retrieval() -> HybridSearchPacket {
+    let input = HybridSearchInput::new(
+        SearchMode::Deterministic,
+        SemanticReadiness::NotConfigured,
+        1,
+    )
+    .unwrap_or_else(|error| panic!("fixture retrieval input failed: {error}"));
+    fuse_search(input).unwrap_or_else(|error| panic!("fixture retrieval failed: {error}"))
+}
+
+/// Deterministic typed fixtures for downstream protocol tests.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    use cartograph_domain::{DocumentKind, SourceLanguage, SymbolId};
 
     use super::*;
+
+    const OWNER_SYMBOL_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const TARGET_SYMBOL_ID: &str = "22222222-2222-4222-8222-222222222222";
+    const REFERENCE_ID: u64 = 101;
+    const START_BYTE: u64 = 12;
+    const END_BYTE: u64 = 19;
+    const CONFIDENCE: f32 = 0.95;
+    const SITE_COUNT: u64 = 7;
+    const EVIDENCE_LIMIT: u16 = 10;
+
+    /// Build a real context packet containing one exact retained reference.
+    #[must_use]
+    pub fn exact_reference_context_packet() -> ContextPacket {
+        let evidence = reference_evidence_fixture(ReferenceEvidenceFixture {
+            reference_id: REFERENCE_ID,
+            path: "src/reference_fixture.rs",
+            qualified_name: "fixture::target",
+            owner_symbol_id: Some(fixture_symbol_id(OWNER_SYMBOL_ID)),
+            target_symbol_id: Some(fixture_symbol_id(TARGET_SYMBOL_ID)),
+            start_byte: START_BYTE,
+            end_byte: END_BYTE,
+            span_precision: ReferenceSpanPrecision::Exact,
+            confidence: CONFIDENCE,
+            provenance: "resolved_fixture",
+            represented_site_count: SITE_COUNT,
+        });
+        let evidence = enrich_search_evidence_fixture(
+            evidence,
+            SearchEvidenceFixture {
+                file_id: None,
+                symbol_id: Some(fixture_symbol_id(TARGET_SYMBOL_ID)),
+                language: SourceLanguage::Rust,
+                document_kind: DocumentKind::Symbol,
+                fused_rank: None,
+                reciprocal_rank_score: None,
+            },
+        );
+        assemble_packet(PacketAssembly {
+            task: "trace fixture target",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::ImplementationTrace,
+            graph_direction: Some(ContextGraphDirection::Callers),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: vec![evidence],
+            affected_tests: Vec::new(),
+            evidence_limit: EVIDENCE_LIMIT,
+            truncated: false,
+        })
+    }
+
+    fn fixture_symbol_id(value: &str) -> SymbolId {
+        SymbolId::parse(value)
+            .unwrap_or_else(|error| panic!("test-support symbol id is invalid: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use cartograph_domain::{DocumentKind, NormalizedPath, ProjectId, SourceLanguage, SymbolId};
+
+    use super::*;
+
+    const VALID_DEPTH: u8 = 2;
+    const EXCESSIVE_DEPTH: u8 = 51;
+    const VALID_NODE_LIMIT: u16 = 50;
+    const SAMPLE_NODE_LIMIT: u16 = 10;
+    const EXCESSIVE_NODE_LIMIT: u16 = 501;
+    const PACKET_EVIDENCE_LIMIT: u16 = 10;
+    const FIRST_EDGE_CONFIDENCE: f32 = 0.8;
+    const SECOND_EDGE_CONFIDENCE: f32 = 0.9;
+    const REFERENCE_EDGE_CONFIDENCE: f32 = 0.7;
+    const GRAPH_SITE_COUNT: u32 = 1;
+    const STRONG_GRAPH_SITE_COUNT: u32 = 3;
+    const WEAK_HIGH_MULTIPLICITY_COUNT: u32 = 9;
+    const REPRESENTED_REFERENCE_SITES: u64 = 7;
+    const ADDITIONAL_REFERENCE_SITES: u64 = 4;
+    const TOTAL_REFERENCE_SITES: u64 = REPRESENTED_REFERENCE_SITES + ADDITIONAL_REFERENCE_SITES;
+    const REFERENCE_ROW_COUNT: usize = 3;
+    const FIRST_REFERENCE_ID: u64 = 101;
+    const SECOND_REFERENCE_ID: u64 = 102;
+    const COARSE_REFERENCE_ID: u64 = 103;
+    const FIRST_REFERENCE_START: u64 = 12;
+    const FIRST_REFERENCE_END: u64 = 19;
+    const SECOND_REFERENCE_START: u64 = 22;
+    const SECOND_REFERENCE_END: u64 = 29;
+    const COARSE_REFERENCE_START: u64 = 40;
+    const COARSE_REFERENCE_END: u64 = 41;
 
     fn project_id() -> ProjectId {
         match ProjectId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") {
@@ -53,13 +186,119 @@ mod contract_tests {
         }
     }
 
+    fn ranked_evidence(path: &str, reason: EvidenceReason, rank: u16) -> EvidenceItem {
+        enrich_search_evidence_fixture(
+            evidence_fixture(path, path, reason),
+            SearchEvidenceFixture {
+                file_id: None,
+                symbol_id: None,
+                language: SourceLanguage::Rust,
+                document_kind: DocumentKind::Symbol,
+                fused_rank: Some(rank),
+                reciprocal_rank_score: Some(1.0 / f64::from(rank)),
+            },
+        )
+    }
+
+    fn ranked_symbol_evidence(
+        path: &str,
+        qualified_name: &str,
+        reason: EvidenceReason,
+        rank: u16,
+        symbol: &str,
+    ) -> EvidenceItem {
+        enrich_search_evidence_fixture(
+            evidence_fixture(path, qualified_name, reason),
+            SearchEvidenceFixture {
+                file_id: None,
+                symbol_id: Some(symbol_id(symbol)),
+                language: SourceLanguage::TypeScript,
+                document_kind: DocumentKind::Symbol,
+                fused_rank: Some(rank),
+                reciprocal_rank_score: Some(1.0 / f64::from(rank)),
+            },
+        )
+    }
+
+    fn reference_evidence_rows(owner: SymbolId, target: SymbolId) -> Vec<EvidenceItem> {
+        let first = reference_evidence_fixture(ReferenceEvidenceFixture {
+            reference_id: FIRST_REFERENCE_ID,
+            path: "src/a_call.ts",
+            qualified_name: "shared_target",
+            owner_symbol_id: Some(owner.clone()),
+            target_symbol_id: Some(target.clone()),
+            start_byte: FIRST_REFERENCE_START,
+            end_byte: FIRST_REFERENCE_END,
+            span_precision: ReferenceSpanPrecision::Exact,
+            confidence: FIRST_EDGE_CONFIDENCE,
+            provenance: "resolved_fixture",
+            represented_site_count: REPRESENTED_REFERENCE_SITES,
+        });
+        let second = reference_evidence_fixture(ReferenceEvidenceFixture {
+            reference_id: SECOND_REFERENCE_ID,
+            path: "src/b_call.ts",
+            qualified_name: "shared_target",
+            owner_symbol_id: Some(owner.clone()),
+            target_symbol_id: Some(target),
+            start_byte: SECOND_REFERENCE_START,
+            end_byte: SECOND_REFERENCE_END,
+            span_precision: ReferenceSpanPrecision::Exact,
+            confidence: SECOND_EDGE_CONFIDENCE,
+            provenance: "resolved_fixture",
+            represented_site_count: ADDITIONAL_REFERENCE_SITES,
+        });
+        let coarse = reference_evidence_fixture(ReferenceEvidenceFixture {
+            reference_id: COARSE_REFERENCE_ID,
+            path: "legacy/coarse_call.ts",
+            qualified_name: "legacy_target",
+            owner_symbol_id: Some(owner),
+            target_symbol_id: None,
+            start_byte: COARSE_REFERENCE_START,
+            end_byte: COARSE_REFERENCE_END,
+            span_precision: ReferenceSpanPrecision::CoarseOwner,
+            confidence: REFERENCE_EDGE_CONFIDENCE,
+            provenance: "legacy_fixture",
+            represented_site_count: GRAPH_SITE_COUNT.into(),
+        });
+        vec![coarse, second, first.clone(), first]
+    }
+
     #[test]
     fn traversal_budget_rejects_unbounded_work() {
-        assert!(TraversalBudget::new(0, 10).is_err());
-        assert!(TraversalBudget::new(2, 0).is_err());
-        assert!(TraversalBudget::new(9, 10).is_err());
-        assert!(TraversalBudget::new(2, 501).is_err());
-        assert!(TraversalBudget::new(2, 50).is_ok());
+        assert!(TraversalBudget::new(0, SAMPLE_NODE_LIMIT).is_err());
+        assert!(TraversalBudget::new(VALID_DEPTH, 0).is_err());
+        assert!(TraversalBudget::new(EXCESSIVE_DEPTH, SAMPLE_NODE_LIMIT).is_err());
+        assert!(TraversalBudget::new(VALID_DEPTH, EXCESSIVE_NODE_LIMIT).is_err());
+        assert!(TraversalBudget::new(VALID_DEPTH, VALID_NODE_LIMIT).is_ok());
+    }
+
+    #[test]
+    fn similar_requests_reject_unbounded_results_and_non_finite_scores() {
+        let source = symbol_id("11111111-1111-4111-8111-111111111111");
+        assert!(SimilarRequest::new(project_id(), source.clone(), 1).is_ok());
+        assert!(SimilarRequest::new(project_id(), source.clone(), 0).is_err());
+        assert!(SimilarRequest::new(project_id(), source.clone(), 51).is_err());
+        let request = SimilarRequest::new(project_id(), source, 5)
+            .unwrap_or_else(|error| panic!("similar request failed: {error}"));
+        assert!(request.clone().with_minimum_score(0.0).is_ok());
+        assert!(request.clone().with_minimum_score(1.0).is_ok());
+        assert!(request.clone().with_minimum_score(-0.1).is_err());
+        assert!(request.clone().with_minimum_score(1.1).is_err());
+        assert!(request.with_minimum_score(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn traversal_roots_preserve_caller_relevance_order_while_deduplicating() {
+        let high_id = symbol_id("ffffffff-ffff-4fff-8fff-ffffffffffff");
+        let low_id = symbol_id("11111111-1111-4111-8111-111111111111");
+        let request = TraversalRequest::new(
+            project_id(),
+            [high_id.clone(), low_id.clone(), high_id.clone()],
+            TraversalBudget::new(VALID_DEPTH, VALID_NODE_LIMIT)
+                .unwrap_or_else(|error| panic!("traversal budget failed: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("traversal request failed: {error}"));
+        assert_eq!(request.roots(), &[high_id, low_id]);
     }
 
     #[test]
@@ -67,8 +306,7 @@ mod contract_tests {
         let request = match ContextRequest::new(
             project_id(),
             "credential shaped private query",
-            IndexFreshness::Current,
-            ContextBudget::default(),
+            ContextRequestOptions::new(IndexFreshness::Current, ContextBudget::default()),
         ) {
             Ok(request) => request,
             Err(error) => panic!("context request fixture was rejected: {error}"),
@@ -100,23 +338,179 @@ mod contract_tests {
         let first = symbol_id("22222222-2222-4222-8222-222222222222");
         let second = symbol_id("33333333-3333-4333-8333-333333333333");
         let arcs = vec![
-            GraphArc::fixture(root.clone(), second.clone(), "calls", 0.8),
-            GraphArc::fixture(root.clone(), first.clone(), "calls", 0.9),
-            GraphArc::fixture(root.clone(), first.clone(), "references", 0.7),
+            GraphArc::fixture(GraphArcFixture {
+                source: root.clone(),
+                target: second.clone(),
+                edge_kind: "calls",
+                confidence: FIRST_EDGE_CONFIDENCE,
+                site_count: GRAPH_SITE_COUNT,
+            }),
+            GraphArc::fixture(GraphArcFixture {
+                source: root.clone(),
+                target: first.clone(),
+                edge_kind: "calls",
+                confidence: SECOND_EDGE_CONFIDENCE,
+                site_count: GRAPH_SITE_COUNT,
+            }),
+            GraphArc::fixture(GraphArcFixture {
+                source: root.clone(),
+                target: first.clone(),
+                edge_kind: "references",
+                confidence: REFERENCE_EDGE_CONFIDENCE,
+                site_count: GRAPH_SITE_COUNT,
+            }),
         ];
-        let expansion = expand_frontier(&[root], &arcs, TraversalDirection::Outgoing, 10);
+        let roots = [root];
+        let expansion = expand_frontier(FrontierInput {
+            frontier: &roots,
+            arcs: &arcs,
+            direction: TraversalDirection::Outgoing,
+            max_new_nodes: usize::from(SAMPLE_NODE_LIMIT),
+        });
         assert_eq!(expansion.next, vec![first, second]);
         assert_eq!(expansion.arcs.len(), 3);
     }
 
     #[test]
+    fn graph_frontier_fairly_admits_relevant_roots_before_extra_fanout() {
+        let first_root = symbol_id("ffffffff-ffff-4fff-8fff-ffffffffffff");
+        let second_root = symbol_id("11111111-1111-4111-8111-111111111111");
+        let first_best = symbol_id("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+        let first_extra = symbol_id("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+        let second_best = symbol_id("22222222-2222-4222-8222-222222222222");
+        let arcs = vec![
+            GraphArc::fixture(GraphArcFixture {
+                source: first_root.clone(),
+                target: first_extra,
+                edge_kind: "calls",
+                confidence: FIRST_EDGE_CONFIDENCE,
+                site_count: GRAPH_SITE_COUNT,
+            }),
+            GraphArc::fixture(GraphArcFixture {
+                source: first_root.clone(),
+                target: first_best.clone(),
+                edge_kind: "calls",
+                confidence: SECOND_EDGE_CONFIDENCE,
+                site_count: GRAPH_SITE_COUNT,
+            }),
+            GraphArc::fixture(GraphArcFixture {
+                source: second_root.clone(),
+                target: second_best.clone(),
+                edge_kind: "calls",
+                confidence: REFERENCE_EDGE_CONFIDENCE,
+                site_count: GRAPH_SITE_COUNT,
+            }),
+        ];
+        let roots = [first_root, second_root];
+        let expansion = expand_frontier(FrontierInput {
+            frontier: &roots,
+            arcs: &arcs,
+            direction: TraversalDirection::Outgoing,
+            max_new_nodes: 2,
+        });
+        assert_eq!(expansion.next, vec![first_best, second_best]);
+        assert!(expansion.truncated);
+    }
+
+    #[test]
+    fn strongest_graph_hop_is_independent_of_database_row_order() {
+        let first_root = symbol_id("11111111-1111-4111-8111-111111111111");
+        let second_root = symbol_id("22222222-2222-4222-8222-222222222222");
+        let target = symbol_id("33333333-3333-4333-8333-333333333333");
+        let mut arcs = vec![
+            GraphArc::fixture(GraphArcFixture {
+                source: second_root.clone(),
+                target: target.clone(),
+                edge_kind: "references",
+                confidence: REFERENCE_EDGE_CONFIDENCE,
+                site_count: WEAK_HIGH_MULTIPLICITY_COUNT,
+            }),
+            GraphArc::fixture(GraphArcFixture {
+                source: second_root.clone(),
+                target: target.clone(),
+                edge_kind: "imports",
+                confidence: SECOND_EDGE_CONFIDENCE,
+                site_count: STRONG_GRAPH_SITE_COUNT,
+            }),
+            GraphArc::fixture(GraphArcFixture {
+                source: second_root,
+                target: target.clone(),
+                edge_kind: "calls",
+                confidence: SECOND_EDGE_CONFIDENCE,
+                site_count: STRONG_GRAPH_SITE_COUNT,
+            }),
+            GraphArc::fixture(GraphArcFixture {
+                source: first_root.clone(),
+                target: target.clone(),
+                edge_kind: "calls",
+                confidence: SECOND_EDGE_CONFIDENCE,
+                site_count: STRONG_GRAPH_SITE_COUNT,
+            }),
+        ];
+        let selected = strongest_arc(&arcs, &target, TraversalDirection::Outgoing)
+            .unwrap_or_else(|| panic!("strongest graph arc was not selected"))
+            .clone();
+        assert_eq!(selected.source, first_root);
+        assert_eq!(selected.edge_kind, "calls");
+        assert_eq!(selected.site_count, STRONG_GRAPH_SITE_COUNT);
+
+        arcs.reverse();
+        let reversed = strongest_arc(&arcs, &target, TraversalDirection::Outgoing)
+            .unwrap_or_else(|| panic!("reversed graph arc was not selected"));
+        assert_eq!(reversed, &selected);
+    }
+
+    #[test]
+    fn graph_evidence_serializes_edge_strength_provenance_and_multiplicity() {
+        let from = symbol_id("11111111-1111-4111-8111-111111111111");
+        let to = symbol_id("22222222-2222-4222-8222-222222222222");
+        let evidence = graph_evidence_fixture(
+            "src/graph_target.rs",
+            "graph_target",
+            GraphEvidenceFixture {
+                from_symbol_id: from.clone(),
+                to_symbol_id: to.clone(),
+                depth: VALID_DEPTH,
+                edge_kind: "calls",
+                confidence: SECOND_EDGE_CONFIDENCE,
+                provenance: "extractor_fixture",
+                site_count: u64::from(GRAPH_SITE_COUNT),
+            },
+        );
+        let graph = evidence
+            .graph()
+            .unwrap_or_else(|| panic!("graph fixture lost typed edge evidence"));
+        assert_eq!(graph.from_symbol_id(), &from);
+        assert_eq!(graph.to_symbol_id(), &to);
+        assert_eq!(graph.site_count(), u64::from(GRAPH_SITE_COUNT));
+        assert_eq!(graph.confidence(), SECOND_EDGE_CONFIDENCE);
+        assert_eq!(graph.provenance(), "extractor_fixture");
+        let serialized = serde_json::to_string(&evidence)
+            .unwrap_or_else(|error| panic!("graph evidence did not serialize: {error}"));
+        for field in [
+            "from_symbol_id",
+            "to_symbol_id",
+            "edge_kind",
+            "confidence",
+            "provenance",
+            "site_count",
+        ] {
+            assert!(serialized.contains(field));
+        }
+    }
+
+    #[test]
     fn packet_abstains_without_evidence_and_orders_evidence_deterministically() {
         let empty = assemble_packet(PacketAssembly {
+            task: "change missing project",
             generation: None,
+            intent: TaskIntent::ChangePlanning,
+            graph_direction: Some(ContextGraphDirection::Callers),
             freshness: IndexFreshness::Unknown,
+            retrieval: fixture_retrieval(),
             evidence: Vec::new(),
             affected_tests: Vec::new(),
-            evidence_limit: 10,
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
             truncated: false,
         });
         assert_eq!(empty.confidence(), RetrievalConfidence::None);
@@ -132,17 +526,21 @@ mod contract_tests {
         assert!(serialized.contains("\"freshness\":\"unknown\""));
 
         let mut evidence = vec![
-            EvidenceItem::fixture("src/z.ts", "z", EvidenceReason::Bm25),
-            EvidenceItem::fixture("src/a.ts", "a", EvidenceReason::ExactName),
-            EvidenceItem::fixture("src/b.ts", "b", EvidenceReason::ExactReference),
+            evidence_fixture("src/z.ts", "z", EvidenceReason::Bm25),
+            evidence_fixture("src/a.ts", "a", EvidenceReason::ExactName),
+            evidence_fixture("src/b.ts", "b", EvidenceReason::ExactReference),
         ];
         evidence.reverse();
         let packet = assemble_packet(PacketAssembly {
+            task: "change exact symbol",
             generation: Some(fixture_generation()),
+            intent: TaskIntent::ChangePlanning,
+            graph_direction: Some(ContextGraphDirection::Callers),
             freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
             evidence,
             affected_tests: Vec::new(),
-            evidence_limit: 10,
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
             truncated: false,
         });
         let paths = packet
@@ -156,6 +554,331 @@ mod contract_tests {
     }
 
     #[test]
+    fn packet_edit_candidates_prefer_concentrated_task_terms_over_generic_hits() {
+        let packet = assemble_packet(PacketAssembly {
+            task: "Fix the watcher event gate so an empty file path never triggers incremental sync",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::ChangePlanning,
+            graph_direction: Some(ContextGraphDirection::Callers),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: vec![
+                ranked_symbol_evidence(
+                    "src/watcher.ts",
+                    "watcherHandleFileEvent",
+                    EvidenceReason::Bm25,
+                    1,
+                    "11111111-1111-4111-8111-111111111111",
+                ),
+                ranked_symbol_evidence(
+                    "src/sync.ts",
+                    "runSync",
+                    EvidenceReason::Bm25,
+                    4,
+                    "22222222-2222-4222-8222-222222222222",
+                ),
+                ranked_symbol_evidence(
+                    "src/postgres-maintenance.ts",
+                    "syncPostgresGraph",
+                    EvidenceReason::Bm25,
+                    7,
+                    "33333333-3333-4333-8333-333333333333",
+                ),
+            ],
+            affected_tests: Vec::new(),
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
+            truncated: false,
+        });
+        assert_eq!(packet.edit_candidates().candidates().len(), 1);
+        let candidate = &packet.edit_candidates().candidates()[0];
+        assert_eq!(candidate.path(), "src/watcher.ts");
+        assert_eq!(candidate.basis(), EditCandidateBasis::TaskTerms);
+        assert_eq!(candidate.matched_term_count(), 2);
+        assert_eq!(candidate.best_rank(), Some(1));
+        assert_eq!(candidate.qualified_names(), &["watcherHandleFileEvent"]);
+        assert!(!packet.edit_candidates().truncated());
+    }
+
+    #[test]
+    fn packet_edit_candidates_honor_exact_anchors_and_abstain_without_term_overlap() {
+        let exact = assemble_packet(PacketAssembly {
+            task: "change watcher behavior",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::ChangePlanning,
+            graph_direction: Some(ContextGraphDirection::Callers),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: vec![
+                ranked_symbol_evidence(
+                    "src/watcher.ts",
+                    "watcherHandleFileEvent",
+                    EvidenceReason::Bm25,
+                    1,
+                    "44444444-4444-4444-8444-444444444444",
+                ),
+                ranked_symbol_evidence(
+                    "src/explicit.ts",
+                    "explicitOverride",
+                    EvidenceReason::ExactName,
+                    8,
+                    "55555555-5555-4555-8555-555555555555",
+                ),
+            ],
+            affected_tests: Vec::new(),
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
+            truncated: false,
+        });
+        assert_eq!(exact.edit_candidates().candidates().len(), 1);
+        assert_eq!(
+            exact.edit_candidates().candidates()[0].path(),
+            "src/explicit.ts"
+        );
+        assert_eq!(
+            exact.edit_candidates().candidates()[0].basis(),
+            EditCandidateBasis::ExactAnchor
+        );
+
+        let absent = assemble_packet(PacketAssembly {
+            task: "mobile push APNS retry",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::ChangePlanning,
+            graph_direction: Some(ContextGraphDirection::Callers),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: vec![ranked_symbol_evidence(
+                "src/watcher.ts",
+                "watcherHandleFileEvent",
+                EvidenceReason::Bm25,
+                1,
+                "66666666-6666-4666-8666-666666666666",
+            )],
+            affected_tests: Vec::new(),
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
+            truncated: false,
+        });
+        assert!(absent.edit_candidates().candidates().is_empty());
+    }
+
+    #[test]
+    fn packet_bounds_exact_then_fused_rank_without_path_reordering() {
+        let packet = assemble_packet(PacketAssembly {
+            task: "trace ranked evidence",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::ImplementationTrace,
+            graph_direction: Some(ContextGraphDirection::Callees),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: vec![
+                ranked_evidence("src/a_rank_2.rs", EvidenceReason::Bm25, 2),
+                ranked_evidence("src/z_rank_1.rs", EvidenceReason::Semantic, 1),
+                evidence_fixture("src/z_exact.rs", "exact", EvidenceReason::ExactName),
+            ],
+            affected_tests: Vec::new(),
+            evidence_limit: 2,
+            truncated: false,
+        });
+        assert_eq!(
+            packet
+                .evidence()
+                .iter()
+                .map(EvidenceItem::path)
+                .collect::<Vec<_>>(),
+            vec!["src/z_exact.rs", "src/z_rank_1.rs"]
+        );
+        assert!(packet.truncated());
+        assert_eq!(packet.evidence()[1].fused_rank(), Some(1));
+        assert_eq!(packet.evidence()[1].language(), Some(SourceLanguage::Rust));
+        assert_eq!(
+            packet.evidence()[1].document_kind(),
+            Some(DocumentKind::Symbol)
+        );
+    }
+
+    #[test]
+    fn duplicate_symbol_evidence_keeps_metadata_from_the_stronger_fused_hit() {
+        let shared_symbol = symbol_id("99999999-9999-4999-8999-999999999999");
+        let strongest = enrich_search_evidence_fixture(
+            evidence_fixture("tests/shared.py", "shared", EvidenceReason::Semantic),
+            SearchEvidenceFixture {
+                file_id: None,
+                symbol_id: Some(shared_symbol.clone()),
+                language: SourceLanguage::Python,
+                document_kind: DocumentKind::Test,
+                fused_rank: Some(1),
+                reciprocal_rank_score: Some(1.0),
+            },
+        );
+        let weaker = enrich_search_evidence_fixture(
+            evidence_fixture("tests/shared.py", "shared", EvidenceReason::Bm25),
+            SearchEvidenceFixture {
+                file_id: None,
+                symbol_id: Some(shared_symbol),
+                language: SourceLanguage::Rust,
+                document_kind: DocumentKind::Symbol,
+                fused_rank: Some(2),
+                reciprocal_rank_score: Some(0.5),
+            },
+        );
+        let packet = assemble_packet(PacketAssembly {
+            task: "select shared tests",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::TestSelection,
+            graph_direction: Some(ContextGraphDirection::Callers),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: vec![strongest, weaker],
+            affected_tests: Vec::new(),
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
+            truncated: false,
+        });
+        assert_eq!(packet.evidence().len(), 1);
+        assert_eq!(packet.evidence()[0].fused_rank(), Some(1));
+        assert_eq!(
+            packet.evidence()[0].language(),
+            Some(SourceLanguage::Python)
+        );
+        assert_eq!(
+            packet.evidence()[0].document_kind(),
+            Some(DocumentKind::Test)
+        );
+    }
+
+    #[test]
+    fn reference_evidence_preserves_rows_precision_links_and_site_totals() {
+        let owner = symbol_id("44444444-4444-4444-8444-444444444444");
+        let target = symbol_id("55555555-5555-4555-8555-555555555555");
+        let packet = assemble_packet(PacketAssembly {
+            task: "change exact reference",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::ChangePlanning,
+            graph_direction: Some(ContextGraphDirection::Callers),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: reference_evidence_rows(owner, target),
+            affected_tests: Vec::new(),
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
+            truncated: false,
+        });
+
+        assert_eq!(packet.evidence().len(), REFERENCE_ROW_COUNT);
+        let references = packet
+            .evidence()
+            .iter()
+            .map(|item| {
+                item.reference()
+                    .unwrap_or_else(|| panic!("reference fixture lost metadata"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(references[0].reference_id(), SECOND_REFERENCE_ID);
+        assert_eq!(references[1].reference_id(), FIRST_REFERENCE_ID);
+        assert_eq!(references[2].reference_id(), COARSE_REFERENCE_ID);
+        assert_eq!(
+            references[0].target_symbol_id(),
+            references[1].target_symbol_id()
+        );
+        assert!(references[2].target_symbol_id().is_none());
+        assert!(references[2].owner_symbol_id().is_some());
+        assert_eq!(
+            references[2].span_precision(),
+            ReferenceSpanPrecision::CoarseOwner
+        );
+        assert_eq!(
+            packet.evidence()[2].reasons(),
+            &[EvidenceReason::CoarseReference]
+        );
+        let represented_sites = references
+            .iter()
+            .map(|reference| reference.represented_site_count())
+            .sum::<u64>();
+        assert_eq!(
+            represented_sites,
+            TOTAL_REFERENCE_SITES + u64::from(GRAPH_SITE_COUNT)
+        );
+        let serialized = serde_json::to_string(&packet)
+            .unwrap_or_else(|error| panic!("reference packet did not serialize: {error}"));
+        for field in [
+            "reference_id",
+            "owner_symbol_id",
+            "target_symbol_id",
+            "start_byte",
+            "end_byte",
+            "span_precision",
+            "confidence",
+            "provenance",
+            "represented_site_count",
+        ] {
+            assert!(serialized.contains(field));
+        }
+        assert!(serialized.contains("coarse_owner"));
+        assert!(serialized.contains("coarse_reference"));
+    }
+
+    #[test]
+    fn intent_budgets_and_packet_provenance_are_typed_and_bounded() {
+        let lookup = ContextBudget::for_intent(TaskIntent::SymbolLookup);
+        let change = ContextBudget::for_intent(TaskIntent::ChangePlanning);
+        let tests = ContextBudget::for_intent(TaskIntent::TestSelection);
+        assert!(lookup.candidate_limit() < change.candidate_limit());
+        assert!(lookup.traversal().max_depth() < change.traversal().max_depth());
+        assert!(tests.affected_test_limit() > change.affected_test_limit());
+
+        let packet = assemble_packet(PacketAssembly {
+            task: "diagnose failure",
+            generation: Some(fixture_generation()),
+            intent: TaskIntent::ErrorDiagnosis,
+            graph_direction: Some(ContextGraphDirection::Callers),
+            freshness: IndexFreshness::Current,
+            retrieval: fixture_retrieval(),
+            evidence: vec![evidence_fixture(
+                "src/failure.rs",
+                "failure",
+                EvidenceReason::Bm25,
+            )],
+            affected_tests: Vec::new(),
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
+            truncated: false,
+        });
+        assert_eq!(packet.intent(), TaskIntent::ErrorDiagnosis);
+        assert_eq!(
+            packet.graph_direction(),
+            Some(ContextGraphDirection::Callers)
+        );
+        assert_eq!(
+            packet.working_tree_overlay().status(),
+            WorkingTreeOverlayStatus::NotChecked
+        );
+        let live = WorkingTreeEvidence::new(WorkingTreeEvidenceInput {
+            path: NormalizedPath::parse("src/failure.rs")
+                .unwrap_or_else(|error| panic!("overlay path failed: {error}")),
+            change_kind: WorkingTreeChangeKind::Modified,
+            content_digest: cartograph_domain::ContentDigest::from_bytes([7_u8; 32]),
+            start_line: 1,
+            end_line: 2,
+            excerpt: "fn failure() {}\n".to_owned(),
+            matched_terms: vec!["failure".to_owned()],
+        })
+        .unwrap_or_else(|error| panic!("overlay evidence failed: {error}"));
+        let overlay = WorkingTreeOverlay::completed(WorkingTreeOverlayInput {
+            changed_file_count: 1,
+            considered_file_count: 1,
+            unreadable_file_count: 0,
+            files: vec![live],
+            truncated: false,
+        })
+        .unwrap_or_else(|error| panic!("overlay failed: {error}"));
+        let packet = packet.with_working_tree_overlay(overlay);
+        assert_eq!(
+            packet.working_tree_overlay().status(),
+            WorkingTreeOverlayStatus::Used
+        );
+        let serialized = serde_json::to_string(&packet)
+            .unwrap_or_else(|error| panic!("intent packet did not serialize: {error}"));
+        assert!(serialized.contains("\"intent\":\"error_diagnosis\""));
+        assert!(serialized.contains("\"graph_direction\":\"callers\""));
+        assert!(serialized.contains("\"status\":\"used\""));
+    }
+
+    #[test]
     fn review_packet_exposes_freshness_abstention_and_per_stage_truncation() {
         let path = NormalizedPath::parse("src/service.rs")
             .unwrap_or_else(|error| panic!("review path fixture failed: {error}"));
@@ -166,7 +889,7 @@ mod contract_tests {
             indexed_changed_files: Vec::new(),
             evidence: Vec::new(),
             affected_tests: Vec::new(),
-            evidence_limit: 10,
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
             truncation: ReviewTruncation::default(),
         });
         assert_eq!(
@@ -182,7 +905,7 @@ mod contract_tests {
             indexed_changed_files: Vec::new(),
             evidence: Vec::new(),
             affected_tests: Vec::new(),
-            evidence_limit: 10,
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
             truncation: ReviewTruncation::default(),
         });
         assert_eq!(
@@ -195,19 +918,43 @@ mod contract_tests {
             freshness: IndexFreshness::Stale,
             changed_file_count: 1,
             indexed_changed_files: vec![path],
-            evidence: vec![EvidenceItem::fixture(
+            evidence: vec![evidence_fixture(
                 "src/service.rs",
                 "service",
                 EvidenceReason::ExactPath,
             )],
             affected_tests: Vec::new(),
-            evidence_limit: 10,
-            truncation: ReviewTruncation::new(true, true, false, false),
+            evidence_limit: PACKET_EVIDENCE_LIMIT,
+            truncation: ReviewTruncation {
+                changed_files: true,
+                symbol_roots: true,
+                ..ReviewTruncation::default()
+            },
         });
         assert_eq!(stale.abstention(), Some(ReviewAbstention::StaleIndex));
         assert_eq!(stale.confidence(), RetrievalConfidence::Low);
         assert!(stale.truncation().changed_files());
         assert!(stale.truncation().symbol_roots());
         assert!(stale.truncation().any());
+    }
+
+    #[test]
+    fn file_inventory_and_source_range_requests_reject_unbounded_inputs() {
+        assert!(FileInventoryQuery::new(0).is_err());
+        assert!(FileInventoryQuery::new(501).is_err());
+        assert!(FileInventoryQuery::new(500).is_ok());
+        assert!(EntryPointsQuery::new(0).is_err());
+        assert!(EntryPointsQuery::new(201).is_err());
+        let entry_points = EntryPointsQuery::new(200)
+            .unwrap_or_else(|error| panic!("entry-point fixture failed: {error}"))
+            .with_bucket(EntryPointBucket::PublicExports);
+        assert_eq!(entry_points.bucket(), Some(EntryPointBucket::PublicExports));
+        let path = NormalizedPath::parse("src/service.rs")
+            .unwrap_or_else(|error| panic!("range path fixture failed: {error}"));
+        assert!(SourceRangeQuery::new(path.clone(), 0, 1, 20).is_err());
+        assert!(SourceRangeQuery::new(path.clone(), 2, 1, 20).is_err());
+        assert!(SourceRangeQuery::new(path.clone(), 1, 100_001, 20).is_err());
+        assert!(SourceRangeQuery::new(path.clone(), 1, 1, 0).is_err());
+        assert!(SourceRangeQuery::new(path, 1, 1, 200).is_ok());
     }
 }

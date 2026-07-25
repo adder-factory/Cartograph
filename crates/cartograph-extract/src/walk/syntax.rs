@@ -1,10 +1,13 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use cartograph_domain::{ContentDigest, SourcePosition, SourceSpan, Visibility};
+use cartograph_domain::{
+    ContentDigest, SourceLanguage, SourcePosition, SourceSpan, SymbolKind, Visibility,
+};
 use tree_sitter::{Node, TreeCursor};
 
 use crate::{
-    DiagnosticCode, ExtractError, ExtractionDiagnostic, budget::ensure_fact_string_length,
+    CloneTokenCount, CloneTokenProfile, DiagnosticCode, ExtractError, ExtractionDiagnostic,
+    SymbolHealthMetrics, budget::ensure_fact_string_length,
 };
 
 const MAX_DIAGNOSTICS: usize = 32;
@@ -12,8 +15,840 @@ const MAX_BODY_SEARCH_BYTES: usize = 16 * 1024;
 const BODY_SEARCH_PREFIX_BYTES: usize = MAX_BODY_SEARCH_BYTES / 2;
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
 const TEXT_POLL_STRIDE: usize = 4096;
+const MAX_DOC_COMMENT_NODES: usize = 1024;
+const HEALTH_POLL_STRIDE: usize = 1_024;
+const MAX_HEALTH_AST_NODES: usize = 1_000_000;
+const MAX_CLONE_PROFILE_DISTINCT_TOKENS: usize = 32 * 1_024;
+const MAX_CLONE_PROFILE_TOTAL_TOKENS: u32 = 1_000_000;
+const SECRET_API_KEY: u16 = 1 << 0;
+const SECRET_JWT: u16 = 1 << 1;
+const SECRET_PASSWORD: u16 = 1 << 2;
+const SECRET_CRYPTO: u16 = 1 << 3;
+const SECRET_AWS: u16 = 1 << 4;
+const SECRET_ENV: u16 = 1 << 5;
+const SECRET_PII: u16 = 1 << 6;
+const SECRET_LITERAL: u16 = 1 << 7;
 
-pub(super) fn span_for(node: Node<'_>) -> Result<SourceSpan, ExtractError> {
+struct SensitiveMetricInput<'tree, 'source> {
+    declaration: Node<'tree>,
+    body: Option<Node<'tree>>,
+    symbol_kind: SymbolKind,
+    symbol_name: &'source str,
+    signature: Option<&'source str>,
+    docstring: Option<&'source str>,
+    source: &'source str,
+}
+
+pub(crate) struct SymbolHealthInput<'tree, 'source> {
+    pub(crate) declaration: Node<'tree>,
+    pub(crate) body: Option<Node<'tree>>,
+    pub(crate) symbol_kind: SymbolKind,
+    pub(crate) symbol_name: &'source str,
+    pub(crate) signature: Option<&'source str>,
+    pub(crate) docstring: Option<&'source str>,
+    pub(crate) language: SourceLanguage,
+    pub(crate) async_symbol: bool,
+    pub(crate) source: &'source str,
+}
+
+pub(crate) fn symbol_health_metrics(
+    input: SymbolHealthInput<'_, '_>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<SymbolHealthMetrics, ExtractError> {
+    let SymbolHealthInput {
+        declaration,
+        body,
+        symbol_kind,
+        symbol_name,
+        signature,
+        docstring,
+        language,
+        async_symbol,
+        source,
+    } = input;
+    let mut metrics = SymbolHealthMetrics {
+        parameter_count: parameter_count(declaration),
+        cyclomatic: u16::from(body.is_some()),
+        ..SymbolHealthMetrics::default()
+    };
+    populate_sensitive_and_documentation_metrics(
+        &mut metrics,
+        SensitiveMetricInput {
+            declaration,
+            body,
+            symbol_kind,
+            symbol_name,
+            signature,
+            docstring,
+            source,
+        },
+    );
+    let Some(body) = body else {
+        return Ok(metrics);
+    };
+    let mut stack = vec![(body, 0_u16, true)];
+    let mut visited = 0_usize;
+    while let Some((node, nesting, root)) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if visited > MAX_HEALTH_AST_NODES {
+            return Err(ExtractError::OutputLimit);
+        }
+        if visited.is_multiple_of(HEALTH_POLL_STRIDE) && cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        if !root && is_callable_node(node.kind()) {
+            continue;
+        }
+        let node_text = text_for(source, node);
+        let outermost_string_literal = is_string_literal(node.kind())
+            && node
+                .parent()
+                .is_none_or(|parent| !is_string_literal(parent.kind()));
+        if outermost_string_literal || is_numeric_literal(node.kind()) {
+            metrics.literal_bytes = metrics.literal_bytes.saturating_add(
+                u32::try_from(node.end_byte().saturating_sub(node.start_byte()))
+                    .unwrap_or(u32::MAX),
+            );
+        }
+        if is_numeric_literal(node.kind()) && is_magic_number(node_text, language) {
+            metrics.magic_numbers = metrics.magic_numbers.saturating_add(1);
+        }
+        if is_string_literal(node.kind()) && contains_hardcoded_url(node_text) {
+            metrics.hardcoded_urls = metrics.hardcoded_urls.saturating_add(1);
+        }
+        let control = is_control_node(node.kind());
+        let next_nesting = if control {
+            metrics.cyclomatic = metrics.cyclomatic.saturating_add(1);
+            let depth = nesting.saturating_add(1);
+            metrics.max_nesting = metrics.max_nesting.max(depth);
+            if let Some(condition) = condition_node(node) {
+                metrics.max_conditional_operands = metrics
+                    .max_conditional_operands
+                    .max(logical_operator_count(condition, source).saturating_add(1));
+            }
+            depth
+        } else {
+            nesting
+        };
+        let logical = direct_logical_operator_count(node, source);
+        metrics.cyclomatic = metrics.cyclomatic.saturating_add(logical);
+        if node.kind() == "catch_clause" && catch_is_empty(node, source) {
+            metrics.empty_catches = metrics.empty_catches.saturating_add(1);
+        }
+        if is_loop_node(node.kind()) {
+            let text = text_for(source, node);
+            if contains_ascii_case_insensitive(text, "await")
+                && !contains_ascii_case_insensitive(text, "for await")
+            {
+                metrics.sequential_await_loops = metrics.sequential_await_loops.saturating_add(1);
+            }
+            if text.contains("namedChildCount") && text.contains("namedChild(") {
+                metrics.accidental_quadratic = metrics.accidental_quadratic.saturating_add(1);
+            }
+        }
+        let child_nesting = if control { next_nesting } else { nesting };
+        for child in named_children(node) {
+            stack.push((child, child_nesting, false));
+        }
+    }
+    let raw = text_for(source, body);
+    populate_text_metrics(&mut metrics, raw, language, async_symbol);
+    Ok(metrics)
+}
+
+fn parameter_count(declaration: Node<'_>) -> u16 {
+    declaration.child_by_field_name("parameters").map_or_else(
+        || u16::from(declaration.child_by_field_name("parameter").is_some()),
+        |parameters| u16::try_from(parameters.named_child_count()).unwrap_or(u16::MAX),
+    )
+}
+
+fn populate_sensitive_and_documentation_metrics(
+    metrics: &mut SymbolHealthMetrics,
+    input: SensitiveMetricInput<'_, '_>,
+) {
+    let declaration_text = text_for(input.source, input.declaration);
+    let body_text = input
+        .body
+        .map_or(declaration_text, |body| text_for(input.source, body));
+    let fields = [
+        input.symbol_name,
+        input.signature.unwrap_or_default(),
+        input.docstring.unwrap_or_default(),
+        body_text,
+    ];
+    let (mut score, signal_mask) = secret_score(&fields);
+    if is_test_symbol_name(input.symbol_name) {
+        score /= 2;
+    }
+    metrics.secrets_score = score.min(100);
+    metrics.secrets_signal_mask = signal_mask;
+    if input.symbol_kind == SymbolKind::Constant
+        && let Some(docstring) = input.docstring
+        && !looks_like_regex_literal(body_text)
+    {
+        let doc_claims = numeric_claims(docstring);
+        let value_claims = numeric_claims(body_text);
+        if !doc_claims.is_empty()
+            && !value_claims.is_empty()
+            && doc_claims.is_disjoint(&value_claims)
+        {
+            metrics.stale_doc_numbers = u16::try_from(doc_claims.len()).unwrap_or(u16::MAX);
+        }
+    }
+}
+
+fn secret_score(fields: &[&str]) -> (u16, u16) {
+    let mut score = 0_u16;
+    let mut signal_mask = 0_u16;
+    let api_key = fields.iter().any(|field| {
+        contains_ascii_case_insensitive(field, "api_key")
+            || contains_ascii_case_insensitive(field, "api-key")
+            || contains_ascii_case_insensitive(field, "apikey")
+            || contains_ascii_case_insensitive(field, "access_key")
+            || contains_ascii_case_insensitive(field, "accesskey")
+            || contains_ascii_case_insensitive(field, "client_secret")
+            || contains_ascii_case_insensitive(field, "clientsecret")
+            || contains_word_ascii_case_insensitive(field, "secret")
+            || contains_word_ascii_case_insensitive(field, "token")
+    });
+    add_secret_signal(&mut score, &mut signal_mask, api_key, SECRET_API_KEY, 30);
+
+    let literal_jwt = fields.iter().any(|field| contains_jwt_literal(field));
+    let jwt = literal_jwt
+        || fields.iter().any(|field| {
+            contains_ascii_case_insensitive(field, "verifyjwt")
+                || contains_ascii_case_insensitive(field, "decodejwt")
+                || contains_ascii_case_insensitive(field, "signjwt")
+                || contains_ascii_case_insensitive(field, "jwt.sign")
+                || contains_ascii_case_insensitive(field, "jwt.verify")
+                || contains_ascii_case_insensitive(field, "jwt.decode")
+        });
+    add_secret_signal(
+        &mut score,
+        &mut signal_mask,
+        jwt,
+        SECRET_JWT,
+        if literal_jwt { 50 } else { 30 },
+    );
+
+    let password = fields.iter().any(|field| {
+        ["password", "passwd", "pwd", "passphrase"]
+            .iter()
+            .any(|term| contains_word_ascii_case_insensitive(field, term))
+    });
+    add_secret_signal(&mut score, &mut signal_mask, password, SECRET_PASSWORD, 30);
+
+    let crypto = fields.iter().any(|field| {
+        ["hmac", "encrypt", "decrypt", "sign", "verify"]
+            .iter()
+            .any(|term| contains_ascii_case_insensitive(field, term))
+            && ["secret", "key"]
+                .iter()
+                .any(|term| contains_ascii_case_insensitive(field, term))
+    });
+    add_secret_signal(&mut score, &mut signal_mask, crypto, SECRET_CRYPTO, 20);
+
+    let literal_aws = fields
+        .iter()
+        .any(|field| contains_aws_access_key_literal(field));
+    let aws = literal_aws
+        || fields.iter().any(|field| {
+            contains_ascii_case_insensitive(field, "aws_secret_access_key")
+                || contains_ascii_case_insensitive(field, "aws_access_key_id")
+                || contains_ascii_case_insensitive(field, "aws-secret-access-key")
+                || contains_ascii_case_insensitive(field, "aws-access-key-id")
+        });
+    add_secret_signal(
+        &mut score,
+        &mut signal_mask,
+        aws,
+        SECRET_AWS,
+        if literal_aws { 60 } else { 40 },
+    );
+
+    let env_secret = fields.iter().any(|field| {
+        (contains_ascii_case_insensitive(field, "process.env.")
+            || contains_ascii_case_insensitive(field, "env[")
+            || contains_ascii_case_insensitive(field, "getenv("))
+            && ["secret", "token", "key", "password"]
+                .iter()
+                .any(|term| contains_ascii_case_insensitive(field, term))
+    });
+    add_secret_signal(&mut score, &mut signal_mask, env_secret, SECRET_ENV, 30);
+
+    let pii = fields.iter().any(|field| {
+        [
+            "ssn",
+            "social_security",
+            "social-security",
+            "credit_card",
+            "credit-card",
+            "date_of_birth",
+            "phone_number",
+            "email_address",
+        ]
+        .iter()
+        .any(|term| contains_ascii_case_insensitive(field, term))
+    });
+    add_secret_signal(&mut score, &mut signal_mask, pii, SECRET_PII, 20);
+
+    let literal = fields
+        .iter()
+        .any(|field| contains_long_token_literal(field));
+    add_secret_signal(&mut score, &mut signal_mask, literal, SECRET_LITERAL, 20);
+    (score.min(100), signal_mask)
+}
+
+fn add_secret_signal(
+    score: &mut u16,
+    signal_mask: &mut u16,
+    matched: bool,
+    signal: u16,
+    weight: u16,
+) {
+    if matched {
+        *score = score.saturating_add(weight);
+        *signal_mask |= signal;
+    }
+}
+
+fn contains_word_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .enumerate()
+        .any(|(index, window)| {
+            window.eq_ignore_ascii_case(needle.as_bytes())
+                && index
+                    .checked_sub(1)
+                    .and_then(|previous| haystack.as_bytes().get(previous))
+                    .is_none_or(|byte| !is_identifier_byte(*byte))
+                && haystack
+                    .as_bytes()
+                    .get(index.saturating_add(needle.len()))
+                    .is_none_or(|byte| !is_identifier_byte(*byte))
+        })
+}
+
+const fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn contains_jwt_literal(text: &str) -> bool {
+    text.as_bytes().windows(3).any(|window| window == b"eyJ")
+}
+
+fn contains_aws_access_key_literal(text: &str) -> bool {
+    text.as_bytes().windows(20).any(|window| {
+        window.starts_with(b"AKIA")
+            && window[4..]
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    })
+}
+
+fn contains_long_token_literal(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        let quote = bytes[index];
+        if !matches!(quote, b'\'' | b'"' | b'`') {
+            index = index.saturating_add(1);
+            continue;
+        }
+        let start = index.saturating_add(1);
+        index = start;
+        while index < bytes.len() && bytes[index] != quote {
+            if bytes[index] == b'\\' {
+                index = index.saturating_add(1);
+            }
+            index = index.saturating_add(1);
+        }
+        let Some(token) = text.get(start..index) else {
+            continue;
+        };
+        let mime = [
+            "application/",
+            "audio/",
+            "font/",
+            "image/",
+            "message/",
+            "model/",
+            "multipart/",
+            "text/",
+            "video/",
+        ]
+        .iter()
+        .any(|prefix| token.starts_with(prefix));
+        if !mime
+            && token.len() >= 32
+            && token.bytes().any(|byte| byte.is_ascii_digit())
+            && token.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'/' | b'+' | b'=' | b'-')
+            })
+        {
+            return true;
+        }
+        index = index.saturating_add(1);
+    }
+    false
+}
+
+fn is_test_symbol_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("test")
+        || lower.starts_with("spec")
+        || lower.starts_with("should")
+        || lower.starts_with("describe")
+        || lower.ends_with("_test")
+        || lower.ends_with("-test")
+        || lower.ends_with("_spec")
+        || lower.ends_with("-spec")
+}
+
+fn looks_like_regex_literal(body: &str) -> bool {
+    let trimmed = body.trim().trim_start_matches('=').trim();
+    trimmed.starts_with('/') && !trimmed.starts_with("//") && !trimmed.starts_with("/*")
+}
+
+fn numeric_claims(text: &str) -> BTreeSet<String> {
+    let bytes = text.as_bytes();
+    let mut claims = BTreeSet::new();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if !(bytes[index].is_ascii_digit()
+            || bytes[index] == b'-'
+                && bytes
+                    .get(index.saturating_add(1))
+                    .is_some_and(u8::is_ascii_digit))
+        {
+            index = index.saturating_add(1);
+            continue;
+        }
+        let start = index;
+        if bytes[index] == b'-' {
+            index = index.saturating_add(1);
+        }
+        let mut decimal_seen = false;
+        while let Some(byte) = bytes.get(index) {
+            if byte.is_ascii_digit() || *byte == b'_' {
+                index = index.saturating_add(1);
+            } else if *byte == b'.'
+                && !decimal_seen
+                && bytes
+                    .get(index.saturating_add(1))
+                    .is_some_and(u8::is_ascii_digit)
+            {
+                decimal_seen = true;
+                index = index.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+        if !numeric_claim_is_value(text, start, index) {
+            continue;
+        }
+        let Some(raw) = text.get(start..index) else {
+            continue;
+        };
+        let normalized = raw.replace('_', "");
+        if let Ok(number) = normalized.parse::<f64>()
+            && number.is_finite()
+            && !(1900.0..=2100.0).contains(&number)
+        {
+            claims.insert(canonical_number(number));
+        }
+    }
+    claims
+}
+
+fn numeric_claim_is_value(text: &str, start: usize, end: usize) -> bool {
+    let bytes = text.as_bytes();
+    if start > 0 {
+        let previous = bytes[start - 1];
+        if is_identifier_byte(previous) || matches!(previous, b'#' | b'\'') {
+            return false;
+        }
+    }
+    if let Some(next) = bytes.get(end)
+        && (next.is_ascii_alphabetic() || matches!(next, b'%' | b'-'))
+    {
+        return false;
+    }
+    let prefix = text.get(..start).unwrap_or_default().trim_end();
+    let last_word = prefix
+        .rsplit(|character: char| !character.is_ascii_alphabetic())
+        .find(|word| !word.is_empty())
+        .unwrap_or_default();
+    if ["rfc", "port", "issue", "pr", "chapter", "section", "figure"]
+        .iter()
+        .any(|word| last_word.eq_ignore_ascii_case(word))
+    {
+        return false;
+    }
+    let tail = text.get(end..).unwrap_or_default().trim_start();
+    let unit = tail
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    ![
+        "ms",
+        "msec",
+        "millisecond",
+        "milliseconds",
+        "s",
+        "sec",
+        "second",
+        "seconds",
+        "min",
+        "minute",
+        "minutes",
+        "h",
+        "hr",
+        "hour",
+        "hours",
+        "day",
+        "days",
+        "week",
+        "weeks",
+        "byte",
+        "bytes",
+        "kb",
+        "kib",
+        "mb",
+        "mib",
+        "gb",
+        "gib",
+        "tb",
+        "tib",
+    ]
+    .iter()
+    .any(|candidate| unit.eq_ignore_ascii_case(candidate))
+}
+
+fn canonical_number(number: f64) -> String {
+    if number.fract() == 0.0 {
+        format!("{number:.0}")
+    } else {
+        number.to_string()
+    }
+}
+
+fn is_numeric_literal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "number"
+            | "number_literal"
+            | "numeric_literal"
+            | "integer_literal"
+            | "float_literal"
+            | "int_literal"
+            | "decimal_integer_literal"
+            | "hex_integer_literal"
+            | "octal_integer_literal"
+            | "binary_integer_literal"
+            | "real_literal"
+            | "integer"
+            | "float"
+    )
+}
+
+fn is_magic_number(raw: &str, language: SourceLanguage) -> bool {
+    let normalized = raw.trim().replace('_', "").to_ascii_lowercase();
+    if normalized.is_empty()
+        || !normalized
+            .trim_start_matches(['-', '+'])
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    if matches!(
+        normalized.as_str(),
+        "0" | "1" | "-1" | "2" | "0.0" | "1.0" | "-1.0"
+    ) {
+        return false;
+    }
+    if language == SourceLanguage::Go
+        && matches!(
+            normalized.as_str(),
+            "7" | "24" | "30" | "60" | "365" | "1000" | "1024" | "86400"
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn is_string_literal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "string"
+            | "string_literal"
+            | "raw_string_literal"
+            | "interpreted_string_literal"
+            | "template_string"
+            | "string_content"
+    )
+}
+
+fn contains_hardcoded_url(raw: &str) -> bool {
+    [
+        "http://", "https://", "ws://", "wss://", "ftp://", "s3://", "gs://",
+    ]
+    .iter()
+    .any(|scheme| {
+        let mut offset = 0_usize;
+        while let Some(relative) = raw.get(offset..).and_then(|tail| tail.find(scheme)) {
+            let start = offset.saturating_add(relative);
+            let after = start.saturating_add(scheme.len());
+            if raw.as_bytes().get(after).is_some_and(|byte| {
+                !byte.is_ascii_whitespace()
+                    && !matches!(byte, b'\'' | b'"' | b'`' | b')' | b'%' | b'{' | b'$')
+            }) {
+                return true;
+            }
+            offset = after;
+        }
+        false
+    })
+}
+
+fn is_callable_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_declaration"
+            | "function_expression"
+            | "arrow_function"
+            | "method_definition"
+            | "function_item"
+            | "function_definition"
+            | "method_declaration"
+            | "lambda"
+            | "closure_expression"
+    )
+}
+
+fn is_control_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "if_statement"
+            | "if_expression"
+            | "elif_clause"
+            | "else_if_clause"
+            | "unless"
+            | "for_statement"
+            | "for_in_statement"
+            | "for_expression"
+            | "while_statement"
+            | "while_expression"
+            | "do_statement"
+            | "catch_clause"
+            | "except_clause"
+            | "rescue"
+            | "case_statement"
+            | "switch_case"
+            | "match_arm"
+            | "when_entry"
+            | "conditional_expression"
+            | "ternary_expression"
+    )
+}
+
+fn is_loop_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "for_statement"
+            | "for_in_statement"
+            | "for_expression"
+            | "while_statement"
+            | "while_expression"
+            | "do_statement"
+    )
+}
+
+fn condition_node(node: Node<'_>) -> Option<Node<'_>> {
+    node.child_by_field_name("condition")
+        .or_else(|| node.child_by_field_name("predicate"))
+        .or_else(|| node.child_by_field_name("value"))
+}
+
+fn logical_operator_count(node: Node<'_>, source: &str) -> u16 {
+    descendants_including_root(node).fold(0_u16, |count, node| {
+        count.saturating_add(direct_logical_operator_count(node, source))
+    })
+}
+
+fn direct_logical_operator_count(node: Node<'_>, source: &str) -> u16 {
+    if !matches!(
+        node.kind(),
+        "binary_expression" | "boolean_operator" | "logical_expression"
+    ) {
+        return 0;
+    }
+    let mut count = 0_u16;
+    for index in 0..node.child_count() {
+        let Some(child) = u32::try_from(index)
+            .ok()
+            .and_then(|index| node.child(index))
+        else {
+            continue;
+        };
+        if matches!(text_for(source, child).trim(), "&&" | "||" | "and" | "or") {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+fn catch_is_empty(node: Node<'_>, source: &str) -> bool {
+    node.child_by_field_name("body")
+        .map(|body| text_for(source, body))
+        .is_some_and(body_is_empty)
+}
+
+fn populate_text_metrics(
+    metrics: &mut SymbolHealthMetrics,
+    raw: &str,
+    language: SourceLanguage,
+    async_symbol: bool,
+) {
+    let javascript = matches!(
+        language,
+        SourceLanguage::TypeScript
+            | SourceLanguage::Tsx
+            | SourceLanguage::JavaScript
+            | SourceLanguage::Jsx
+    );
+    let typescript = matches!(language, SourceLanguage::TypeScript | SourceLanguage::Tsx);
+    if typescript {
+        metrics.ts_any_casts = count_ascii_case_insensitive(raw, " as any")
+            .saturating_add(count_ascii_case_insensitive(raw, " as unknown as "));
+        metrics.ts_suppressions = count_ascii_case_insensitive(raw, "@ts-ignore")
+            .saturating_add(count_ascii_case_insensitive(raw, "@ts-expect-error"));
+    }
+    if javascript {
+        let diagnostic_gate = ["process.env", "debug", "verbose", "trace"]
+            .iter()
+            .any(|needle| contains_ascii_case_insensitive(raw, needle));
+        if !diagnostic_gate {
+            metrics.debug_logs = [
+                "console.log(",
+                "console.error(",
+                "console.warn(",
+                "console.info(",
+                "console.debug(",
+            ]
+            .iter()
+            .fold(0_u16, |count, needle| {
+                count.saturating_add(count_ascii_case_insensitive(raw, needle))
+            });
+        }
+        metrics.dynamic_eval = count_ascii_case_insensitive(raw, "eval(")
+            .saturating_add(count_ascii_case_insensitive(raw, "new function("));
+        metrics.insecure_hash = count_ascii_case_insensitive(raw, "createhash('md5'")
+            .saturating_add(count_ascii_case_insensitive(raw, "createhash(\"md5\""))
+            .saturating_add(count_ascii_case_insensitive(raw, "createhash('sha1'"))
+            .saturating_add(count_ascii_case_insensitive(raw, "createhash(\"sha1\""));
+        if contains_security_word(raw) {
+            metrics.insecure_random = count_ascii_case_insensitive(raw, "math.random(");
+        }
+        let network_calls = count_ascii_case_insensitive(raw, "fetch(")
+            .saturating_add(count_ascii_case_insensitive(raw, "axios."));
+        if network_calls > 0
+            && !contains_ascii_case_insensitive(raw, "timeout")
+            && !contains_ascii_case_insensitive(raw, "signal")
+        {
+            metrics.http_without_timeout = network_calls;
+        }
+        if contains_sql_word(raw) && (raw.contains("${") || raw.contains(" + ")) {
+            metrics.sql_string_concatenation = 1;
+        }
+        let json_parse = count_ascii_case_insensitive(raw, "json.parse(");
+        if json_parse > 0 && !contains_ascii_case_insensitive(raw, "try") {
+            metrics.unsafe_json_parse = json_parse;
+        }
+        let env_reads = count_ascii_case_insensitive(raw, "process.env.");
+        if env_reads > 0 && !contains_ascii_case_insensitive(raw, "z.") {
+            metrics.unvalidated_env = env_reads;
+        }
+        if async_symbol {
+            metrics.sync_io_in_async = [
+                "readfilesync(",
+                "writefilesync(",
+                "appendfilesync(",
+                "execsync(",
+                "execfilesync(",
+                "spawnsync(",
+            ]
+            .iter()
+            .fold(0_u16, |count, needle| {
+                count.saturating_add(count_ascii_case_insensitive(raw, needle))
+            });
+        }
+    }
+    metrics.incomplete_markers = ["todo", "fixme", "xxx", "hack", "not implemented"]
+        .iter()
+        .fold(0_u16, |count, needle| {
+            count.saturating_add(count_ascii_case_insensitive(raw, needle))
+        });
+    metrics.empty_body = u16::from(body_is_empty(raw));
+}
+
+fn body_is_empty(raw: &str) -> bool {
+    let compact = raw
+        .chars()
+        .filter(|character| !character.is_whitespace() && !matches!(character, '{' | '}' | ';'))
+        .collect::<String>();
+    matches!(compact.as_str(), "" | "return" | "returnundefined" | "pass")
+}
+
+fn contains_security_word(raw: &str) -> bool {
+    [
+        "token",
+        "secret",
+        "password",
+        "nonce",
+        "salt",
+        "csrf",
+        "session",
+        "auth",
+        "apikey",
+        "privatekey",
+        "accesskey",
+    ]
+    .iter()
+    .any(|needle| contains_ascii_case_insensitive(raw, needle))
+}
+
+fn contains_sql_word(raw: &str) -> bool {
+    ["select ", "insert ", "update ", "delete "]
+        .iter()
+        .any(|needle| contains_ascii_case_insensitive(raw, needle))
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    count_ascii_case_insensitive(haystack, needle) > 0
+}
+
+fn count_ascii_case_insensitive(haystack: &str, needle: &str) -> u16 {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .fold(0_u16, |count, window| {
+            count.saturating_add(u16::from(window.eq_ignore_ascii_case(needle.as_bytes())))
+        })
+}
+
+pub(crate) fn span_for(node: Node<'_>) -> Result<SourceSpan, ExtractError> {
     let start = node.start_position();
     let end = node.end_position();
     let start_line = u32::try_from(start.row)
@@ -348,7 +1183,7 @@ pub(super) fn reference_type_node(node: Node<'_>) -> Option<Node<'_>> {
     }
 }
 
-pub(super) fn structural_digest(
+pub(crate) fn structural_digest(
     root: Node<'_>,
     source: &str,
     cancelled: &mut dyn FnMut() -> bool,
@@ -377,6 +1212,134 @@ pub(super) fn structural_digest(
         }
     }
     Ok(ContentDigest::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+pub(crate) fn clone_shape_digest(
+    root: Node<'_>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<ContentDigest, ExtractError> {
+    let mut hasher =
+        blake3::Hasher::new_derive_key("cartograph.v2.clone-token-shape-digest.2026-07-24");
+    for node in descendants_including_root(root) {
+        if cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        if clone_token_class(node.kind()) == CloneTokenClass::Comment
+            || children(node).next().is_some()
+        {
+            continue;
+        }
+        let normalized = match clone_token_class(node.kind()) {
+            CloneTokenClass::Identifier => "I",
+            CloneTokenClass::Literal => "L",
+            CloneTokenClass::Structural => node.kind(),
+            CloneTokenClass::Comment => continue,
+        };
+        hash_field(&mut hasher, normalized.as_bytes());
+    }
+    Ok(ContentDigest::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+pub(crate) fn clone_token_profile(
+    root: Node<'_>,
+    source: &str,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Option<CloneTokenProfile>, ExtractError> {
+    let mut counts = BTreeMap::<u64, u32>::new();
+    let mut total_tokens = 0_u32;
+    for node in descendants_including_root(root) {
+        if cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        let class = clone_token_class(node.kind());
+        if class == CloneTokenClass::Comment || children(node).next().is_some() {
+            continue;
+        }
+        total_tokens = match total_tokens.checked_add(1) {
+            Some(total) if total <= MAX_CLONE_PROFILE_TOTAL_TOKENS => total,
+            _ => return Ok(None),
+        };
+        let fingerprint =
+            clone_token_fingerprint(class, node.kind(), text_for(source, node), cancelled)?;
+        if let Some(count) = counts.get_mut(&fingerprint) {
+            *count = count.saturating_add(1);
+            continue;
+        }
+        if counts.len() >= MAX_CLONE_PROFILE_DISTINCT_TOKENS {
+            return Ok(None);
+        }
+        counts.insert(fingerprint, 1);
+    }
+    if total_tokens == 0 {
+        return Ok(None);
+    }
+    let mut retained = Vec::new();
+    retained
+        .try_reserve_exact(counts.len())
+        .map_err(|_| ExtractError::OutputLimit)?;
+    retained.extend(
+        counts
+            .into_iter()
+            .map(|(fingerprint, count)| CloneTokenCount(fingerprint, count)),
+    );
+    Ok(Some(CloneTokenProfile::new(retained, total_tokens)))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloneTokenClass {
+    Comment,
+    Identifier,
+    Literal,
+    Structural,
+}
+
+fn clone_token_class(kind: &str) -> CloneTokenClass {
+    if contains_ascii_case_insensitive(kind, "comment") {
+        CloneTokenClass::Comment
+    } else if contains_ascii_case_insensitive(kind, "identifier") {
+        CloneTokenClass::Identifier
+    } else if [
+        "string", "number", "integer", "float", "char", "rune", "numeric",
+    ]
+    .into_iter()
+    .any(|marker| contains_ascii_case_insensitive(kind, marker))
+    {
+        CloneTokenClass::Literal
+    } else {
+        CloneTokenClass::Structural
+    }
+}
+
+fn clone_token_fingerprint(
+    class: CloneTokenClass,
+    kind: &str,
+    text: &str,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<u64, ExtractError> {
+    let mut hasher = blake3::Hasher::new_derive_key("cartograph.v2.clone-token.2026-07-24");
+    match class {
+        CloneTokenClass::Identifier => {
+            hasher.update(b"identifier\0");
+            for chunk in text.as_bytes().chunks(HASH_CHUNK_BYTES) {
+                if cancelled() {
+                    return Err(ExtractError::Cancelled);
+                }
+                hasher.update(chunk);
+            }
+        }
+        CloneTokenClass::Literal => {
+            hasher.update(b"literal");
+        }
+        CloneTokenClass::Structural => {
+            hasher.update(b"structural\0");
+            hasher.update(kind.as_bytes());
+        }
+        CloneTokenClass::Comment => return Ok(0),
+    }
+    let digest = hasher.finalize();
+    let mut prefix = [0_u8; std::mem::size_of::<u64>()];
+    prefix.copy_from_slice(&digest.as_bytes()[..std::mem::size_of::<u64>()]);
+    Ok(u64::from_le_bytes(prefix))
 }
 
 fn hash_field(hasher: &mut blake3::Hasher, field: &[u8]) {
@@ -408,74 +1371,219 @@ pub(super) fn jsdoc(
     source: &str,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Option<String>, ExtractError> {
-    let anchor = node
+    let mut anchor = node;
+    while anchor
         .parent()
-        .filter(|parent| parent.kind() == "export_statement")
-        .unwrap_or(node);
-    let Some(comment) = anchor.prev_named_sibling() else {
-        return Ok(None);
-    };
-    if comment.kind() != "comment" {
+        .is_some_and(|parent| parent.kind() == "export_statement")
+        && anchor.prev_named_sibling().is_none()
+    {
+        if let Some(parent) = anchor.parent() {
+            anchor = parent;
+        }
+    }
+    let mut comments = Vec::new();
+    let mut retained_bytes = 0_usize;
+    let mut closer = anchor;
+    let mut sibling = anchor.prev_named_sibling();
+    while let Some(comment) = sibling {
+        if comments.len() >= MAX_DOC_COMMENT_NODES
+            || !is_comment_node(comment.kind())
+            || !has_contiguous_comment_gap(source, comment, closer, cancelled)?
+        {
+            break;
+        }
+        if text_for(source, comment).trim_start().starts_with("#!") {
+            break;
+        }
+        let raw_length = comment.end_byte().saturating_sub(comment.start_byte());
+        let Some(next_retained) = retained_bytes.checked_add(raw_length) else {
+            return Ok(None);
+        };
+        if ensure_fact_string_length(next_retained).is_err() {
+            return Ok(None);
+        }
+        comments
+            .try_reserve(1)
+            .map_err(|_| ExtractError::OutputLimit)?;
+        comments.push(comment);
+        retained_bytes = next_retained;
+        closer = comment;
+        sibling = comment.prev_named_sibling();
+    }
+    if comments.is_empty() {
         return Ok(None);
     }
-    if cancelled() {
-        return Err(ExtractError::Cancelled);
-    }
-    let raw_comment = text_for(source, comment);
-    if !raw_comment.starts_with("/**") || !raw_comment.ends_with("*/") {
-        return Ok(None);
-    }
-    ensure_fact_string_length(raw_comment.len())?;
-    let Some(gap) = source.get(comment.end_byte()..anchor.start_byte()) else {
-        return Ok(None);
+    comments.reverse();
+    normalize_preceding_comments(&comments, source, retained_bytes, cancelled)
+}
+
+fn is_comment_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "comment" | "line_comment" | "block_comment" | "documentation_comment"
+    )
+}
+
+fn has_contiguous_comment_gap(
+    source: &str,
+    left: Node<'_>,
+    right: Node<'_>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<bool, ExtractError> {
+    let Some(gap) = source.get(left.end_byte()..right.start_byte()) else {
+        return Ok(false);
     };
     if ensure_fact_string_length(gap.len()).is_err() {
-        return Ok(None);
+        return Ok(false);
     }
+    let mut line_breaks = 0_usize;
+    let mut prior_carriage_return = false;
     for (index, character) in gap.chars().enumerate() {
         if index % TEXT_POLL_STRIDE == 0 && cancelled() {
             return Err(ExtractError::Cancelled);
         }
         if !character.is_whitespace() {
-            return Ok(None);
+            return Ok(false);
+        }
+        match character {
+            '\r' => {
+                line_breaks = line_breaks.saturating_add(1);
+                prior_carriage_return = true;
+            }
+            '\n' => {
+                if !prior_carriage_return {
+                    line_breaks = line_breaks.saturating_add(1);
+                }
+                prior_carriage_return = false;
+            }
+            _ => prior_carriage_return = false,
+        }
+        if line_breaks >= 2 {
+            return Ok(false);
         }
     }
-    normalize_jsdoc(raw_comment)
+    Ok(true)
 }
 
-fn normalize_jsdoc(raw: &str) -> Result<Option<String>, ExtractError> {
-    let Some(body) = raw
-        .trim()
-        .strip_prefix("/**")
-        .and_then(|body| body.strip_suffix("*/"))
-    else {
-        return Ok(None);
-    };
-    let mut lines = Vec::new();
-    for line in body.lines() {
-        lines
-            .try_reserve(1)
-            .map_err(|_| ExtractError::OutputLimit)?;
-        let trimmed = line.trim().strip_prefix('*').unwrap_or(line.trim()).trim();
-        lines.push(trimmed);
-    }
-    let Some(first) = lines.iter().position(|line| !line.is_empty()) else {
-        return Ok(None);
-    };
-    let Some(last) = lines.iter().rposition(|line| !line.is_empty()) else {
-        return Ok(None);
-    };
+fn normalize_preceding_comments(
+    comments: &[Node<'_>],
+    source: &str,
+    retained_bytes: usize,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Option<String>, ExtractError> {
     let mut normalized = String::new();
     normalized
-        .try_reserve(body.len())
+        .try_reserve(retained_bytes)
         .map_err(|_| ExtractError::OutputLimit)?;
-    for (index, line) in lines[first..=last].iter().enumerate() {
-        if index > 0 {
-            normalized.push('\n');
+    let mut pending_blank_lines = 0_usize;
+    for comment in comments {
+        if cancelled() {
+            return Err(ExtractError::Cancelled);
         }
-        normalized.push_str(line);
+        let raw = text_for(source, *comment);
+        let mut lines = raw.lines().peekable();
+        let mut first = true;
+        while let Some(line) = lines.next() {
+            let cleaned = clean_comment_line(line, first, lines.peek().is_none());
+            first = false;
+            if cleaned.is_empty() || is_decorative_rule_line(cleaned, cancelled)? {
+                if !normalized.is_empty() {
+                    pending_blank_lines = pending_blank_lines.saturating_add(1);
+                }
+                continue;
+            }
+            if !normalized.is_empty() {
+                let separators = pending_blank_lines.saturating_add(1);
+                let next_length = normalized
+                    .len()
+                    .checked_add(separators)
+                    .and_then(|length| length.checked_add(cleaned.len()))
+                    .ok_or(ExtractError::OutputLimit)?;
+                ensure_fact_string_length(next_length)?;
+                for _ in 0..separators {
+                    normalized.push('\n');
+                }
+            } else {
+                ensure_fact_string_length(cleaned.len())?;
+            }
+            pending_blank_lines = 0;
+            push_cancellable(&mut normalized, cleaned, cancelled)?;
+        }
     }
-    Ok(Some(normalized))
+    Ok((!normalized.is_empty()).then_some(normalized))
+}
+
+fn clean_comment_line(mut line: &str, first: bool, last: bool) -> &str {
+    line = line.trim();
+    if first {
+        if let Some(body) = line
+            .strip_prefix("/**")
+            .or_else(|| line.strip_prefix("/*!"))
+            .or_else(|| line.strip_prefix("/*"))
+        {
+            line = body;
+        } else if line.starts_with("//") {
+            line = line.trim_start_matches('/').trim_start_matches('!');
+        }
+    }
+    if last {
+        line = line.strip_suffix("*/").unwrap_or(line);
+    }
+    line.trim().strip_prefix('*').unwrap_or(line.trim()).trim()
+}
+
+fn is_decorative_rule_line(
+    line: &str,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<bool, ExtractError> {
+    let mut visible = 0_usize;
+    for (index, character) in line.chars().enumerate() {
+        if index % TEXT_POLL_STRIDE == 0 && cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        if character.is_whitespace() {
+            continue;
+        }
+        if !matches!(
+            character,
+            '-' | '='
+                | '*'
+                | '_'
+                | '~'
+                | '#'
+                | '/'
+                | '+'
+                | '<'
+                | '>'
+                | '·'
+                | '•'
+                | '─'
+                | '━'
+                | '┄'
+                | '┅'
+                | '╌'
+                | '╍'
+                | '═'
+        ) {
+            return Ok(false);
+        }
+        visible = visible.saturating_add(1);
+    }
+    Ok(visible >= 3)
+}
+
+fn push_cancellable(
+    output: &mut String,
+    value: &str,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), ExtractError> {
+    for (index, character) in value.chars().enumerate() {
+        if index % TEXT_POLL_STRIDE == 0 && cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        output.push(character);
+    }
+    Ok(())
 }
 
 pub(super) fn unquote(raw: &str) -> &str {
@@ -484,7 +1592,7 @@ pub(super) fn unquote(raw: &str) -> &str {
     if bytes.len() >= 2
         && matches!(
             (bytes.first(), bytes.last()),
-            (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"'))
+            (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) | (Some(b'`'), Some(b'`'))
         )
     {
         return &trimmed[1..trimmed.len() - 1];
@@ -492,7 +1600,7 @@ pub(super) fn unquote(raw: &str) -> &str {
     trimmed
 }
 
-pub(super) fn collect_diagnostics(
+pub(crate) fn collect_diagnostics(
     root: Node<'_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<ExtractionDiagnostic>, ExtractError> {
@@ -636,7 +1744,9 @@ fn text_for<'source>(source: &'source str, node: Node<'_>) -> &'source str {
 mod tests {
     use tree_sitter::Parser;
 
-    use super::structural_digest;
+    use super::{
+        clone_shape_digest, clone_token_profile, descendants_including_root, structural_digest,
+    };
     use crate::ExtractError;
 
     const FLAT_DECLARATIONS: usize = 10_000;
@@ -690,5 +1800,72 @@ mod tests {
 
         assert!(matches!(result, Err(ExtractError::Cancelled)));
         assert_eq!(polls, LARGE_EXPECTED_POLLS);
+    }
+
+    #[test]
+    fn clone_shape_folds_identifiers_literals_comments_but_profile_keeps_names() {
+        let left = "function alpha(value) { // note\n const total = value + 42; return total; }";
+        let right = "function beta(input) { /* other */ const result = input + 7; return result; }";
+        let mut parser = Parser::new();
+        let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        parser
+            .set_language(&language)
+            .unwrap_or_else(|error| panic!("test grammar setup failed: {error}"));
+        let left_tree = parser
+            .parse(left, None)
+            .unwrap_or_else(|| panic!("left clone fixture did not parse"));
+        let right_tree = parser
+            .parse(right, None)
+            .unwrap_or_else(|| panic!("right clone fixture did not parse"));
+        let left_node = descendants_including_root(left_tree.root_node())
+            .find(|node| node.kind() == "function_declaration")
+            .unwrap_or_else(|| panic!("left function was not found"));
+        let right_node = descendants_including_root(right_tree.root_node())
+            .find(|node| node.kind() == "function_declaration")
+            .unwrap_or_else(|| panic!("right function was not found"));
+        let left_shape = clone_shape_digest(left_node, &mut || false)
+            .unwrap_or_else(|error| panic!("left clone shape failed: {error}"));
+        let right_shape = clone_shape_digest(right_node, &mut || false)
+            .unwrap_or_else(|error| panic!("right clone shape failed: {error}"));
+        assert_eq!(left_shape, right_shape);
+
+        let left_profile = clone_token_profile(left_node, left, &mut || false)
+            .unwrap_or_else(|error| panic!("left clone profile failed: {error}"))
+            .unwrap_or_else(|| panic!("left clone profile was omitted"));
+        let right_profile = clone_token_profile(right_node, right, &mut || false)
+            .unwrap_or_else(|error| panic!("right clone profile failed: {error}"))
+            .unwrap_or_else(|| panic!("right clone profile was omitted"));
+        assert_ne!(left_profile.counts(), right_profile.counts());
+    }
+
+    #[test]
+    fn clone_profile_is_order_independent_while_shape_is_order_sensitive() {
+        let left = "function run(a, b) { log(a); if (b) { save(b); } }";
+        let right = "function run(a, b) { if (b) { save(b); } log(a); }";
+        let mut parser = Parser::new();
+        let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        parser
+            .set_language(&language)
+            .unwrap_or_else(|error| panic!("test grammar setup failed: {error}"));
+        let left_tree = parser
+            .parse(left, None)
+            .unwrap_or_else(|| panic!("left partial fixture did not parse"));
+        let right_tree = parser
+            .parse(right, None)
+            .unwrap_or_else(|| panic!("right partial fixture did not parse"));
+        let left_node = descendants_including_root(left_tree.root_node())
+            .find(|node| node.kind() == "function_declaration")
+            .unwrap_or_else(|| panic!("left partial function was not found"));
+        let right_node = descendants_including_root(right_tree.root_node())
+            .find(|node| node.kind() == "function_declaration")
+            .unwrap_or_else(|| panic!("right partial function was not found"));
+        assert_ne!(
+            clone_shape_digest(left_node, &mut || false),
+            clone_shape_digest(right_node, &mut || false)
+        );
+        assert_eq!(
+            clone_token_profile(left_node, left, &mut || false),
+            clone_token_profile(right_node, right, &mut || false)
+        );
     }
 }

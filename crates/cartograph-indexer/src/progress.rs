@@ -25,6 +25,8 @@ pub enum PipelineStage {
     Parse,
     /// Resolve cross-file symbols and references.
     Resolve,
+    /// Reconcile an optional persistent SCIP per-file overlay.
+    Overlay,
     /// Canonically reduce unordered worker facts.
     Reduce,
     /// COPY the validated logical generation.
@@ -37,6 +39,28 @@ pub enum PipelineStage {
     Vector,
     /// Atomically publish the completed generation.
     Publish,
+}
+
+/// Exact monotonic wall time spent in one supervisor stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineStageTiming {
+    stage: PipelineStage,
+    elapsed_millis: u64,
+}
+
+impl PipelineStageTiming {
+    /// Timed native pipeline/publication stage.
+    #[must_use]
+    pub const fn stage(self) -> PipelineStage {
+        self.stage
+    }
+
+    /// Saturating monotonic duration for this stage.
+    #[must_use]
+    pub const fn elapsed_millis(self) -> u64 {
+        self.elapsed_millis
+    }
 }
 
 /// Observable lifecycle for one one-shot supervisor.
@@ -86,6 +110,8 @@ pub struct SupervisorStatus {
     progress_idle_millis: u64,
     cancellation_reason: Option<CancellationReason>,
     grace_exceeded: bool,
+    stage_timings: Vec<PipelineStageTiming>,
+    total_elapsed_millis: u64,
 }
 
 impl SupervisorStatus {
@@ -136,12 +162,26 @@ impl SupervisorStatus {
     pub const fn grace_exceeded(&self) -> bool {
         self.grace_exceeded
     }
+
+    /// Completed stage durations in exact pipeline order.
+    #[must_use]
+    pub fn stage_timings(&self) -> &[PipelineStageTiming] {
+        &self.stage_timings
+    }
+
+    /// Monotonic wall time since this supervisor became active.
+    #[must_use]
+    pub const fn total_elapsed_millis(&self) -> u64 {
+        self.total_elapsed_millis
+    }
 }
 
 struct ProgressRecord {
     status: SupervisorStatus,
     last_progress: Instant,
     started: bool,
+    operation_started: Option<Instant>,
+    stage_started: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -163,9 +203,13 @@ impl SharedProgress {
                     progress_idle_millis: 0,
                     cancellation_reason: None,
                     grace_exceeded: false,
+                    stage_timings: Vec::new(),
+                    total_elapsed_millis: 0,
                 },
                 last_progress: Instant::now(),
                 started: false,
+                operation_started: None,
+                stage_started: None,
             })),
             notification: Arc::new(Notify::new()),
         }
@@ -185,13 +229,24 @@ impl SharedProgress {
         let record = self.record.read().await;
         let mut status = record.status.clone();
         status.progress_idle_millis = millis(record.last_progress.elapsed());
+        if let Some(started) = record.operation_started {
+            status.total_elapsed_millis = millis(started.elapsed());
+        }
+        if let (Some(stage), Some(started)) = (status.stage, record.stage_started) {
+            push_or_extend_stage_timing(&mut status.stage_timings, stage, started.elapsed());
+        }
         status
     }
 
     pub(crate) async fn mark_active(&self) {
         let mut record = self.record.write().await;
+        let now = Instant::now();
         record.status.state = SupervisorState::Active;
-        record.last_progress = Instant::now();
+        record.status.stage_timings.clear();
+        record.status.total_elapsed_millis = 0;
+        record.operation_started = Some(now);
+        record.stage_started = None;
+        record.last_progress = now;
         drop(record);
         self.notification.notify_one();
     }
@@ -213,6 +268,7 @@ impl SharedProgress {
 
     pub(crate) async fn mark_completed(&self) {
         let mut record = self.record.write().await;
+        finalize_timing(&mut record);
         record.status.state = SupervisorState::Completed;
         record.status.cancellation_reason = None;
         record.status.grace_exceeded = false;
@@ -220,11 +276,13 @@ impl SharedProgress {
 
     pub(crate) async fn mark_failed(&self) {
         let mut record = self.record.write().await;
+        finalize_timing(&mut record);
         record.status.state = SupervisorState::Failed;
     }
 
     pub(crate) async fn mark_cancelled(&self, reason: CancellationReason, grace_exceeded: bool) {
         let mut record = self.record.write().await;
+        finalize_timing(&mut record);
         record.status.state = if reason == CancellationReason::ProgressStalled || grace_exceeded {
             SupervisorState::Wedged
         } else {
@@ -250,8 +308,11 @@ impl SharedProgress {
         if record.status.stage.is_some_and(|current| stage <= current) {
             return Err(ProgressError::StageRegression);
         }
+        finalize_current_stage(&mut record);
         record.status.stage = Some(stage);
-        record.last_progress = Instant::now();
+        let now = Instant::now();
+        record.stage_started = Some(now);
+        record.last_progress = now;
         drop(record);
         self.notification.notify_one();
         Ok(())
@@ -279,6 +340,35 @@ impl SharedProgress {
         drop(record);
         self.notification.notify_one();
         Ok(())
+    }
+}
+
+fn finalize_current_stage(record: &mut ProgressRecord) {
+    if let (Some(stage), Some(started)) = (record.status.stage, record.stage_started.take()) {
+        push_or_extend_stage_timing(&mut record.status.stage_timings, stage, started.elapsed());
+    }
+}
+
+fn finalize_timing(record: &mut ProgressRecord) {
+    finalize_current_stage(record);
+    if let Some(started) = record.operation_started.take() {
+        record.status.total_elapsed_millis = millis(started.elapsed());
+    }
+}
+
+fn push_or_extend_stage_timing(
+    timings: &mut Vec<PipelineStageTiming>,
+    stage: PipelineStage,
+    elapsed: Duration,
+) {
+    let elapsed_millis = millis(elapsed);
+    if let Some(existing) = timings.last_mut().filter(|timing| timing.stage == stage) {
+        existing.elapsed_millis = existing.elapsed_millis.saturating_add(elapsed_millis);
+    } else {
+        timings.push(PipelineStageTiming {
+            stage,
+            elapsed_millis,
+        });
     }
 }
 

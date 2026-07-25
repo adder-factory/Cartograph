@@ -31,6 +31,7 @@ const MAX_CODE_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_NATURAL_TEXT_BYTES: usize = 1_024 * 1_024;
 const MAX_METADATA_BYTES: usize = 64 * 1_024;
 const MAX_METADATA_DEPTH: usize = 64;
+const MAX_SITE_COUNT: u32 = 100_000_000;
 const MIN_CANONICAL_OBJECT_ENTRY_BYTES: usize = 4;
 const MAX_DATABASE_BIGINT: u64 = i64::MAX.unsigned_abs();
 const MAX_DATABASE_INTEGER: u32 = i32::MAX.unsigned_abs();
@@ -322,6 +323,18 @@ where
         validate_optional_text(&symbol.signature, "signature", MAX_SIGNATURE_BYTES)?;
         validate_span(symbol.start_byte, symbol.end_byte, "symbol_byte_span")?;
         validate_lines(symbol.start_line, symbol.end_line)?;
+        if symbol
+            .betweenness_ppb
+            .is_some_and(|score| score > 1_000_000_000)
+        {
+            return Err(invalid("symbol_betweenness").into());
+        }
+        if symbol
+            .pagerank_ppb
+            .is_some_and(|score| score > 1_000_000_000)
+        {
+            return Err(invalid("symbol_pagerank").into());
+        }
         insert_unique(
             &mut by_id,
             UniqueInput {
@@ -352,6 +365,9 @@ where
                 .saturating_add(usize_to_u64(edge.provenance.len())),
         )?;
         edge.confidence = validate_confidence(edge.confidence)?;
+        if edge.site_count == 0 || edge.site_count > MAX_SITE_COUNT {
+            return Err(invalid("edge_site_count").into());
+        }
         validate_bounded_text(&edge.provenance, "provenance", MAX_PROVENANCE_BYTES)?;
         let key = (
             edge.source_symbol_id.as_str().to_owned(),
@@ -359,14 +375,20 @@ where
             edge.kind.as_str().to_owned(),
             edge.provenance.clone(),
         );
-        insert_unique(
-            &mut by_key,
-            UniqueInput {
-                key,
-                value: edge,
-                field: "duplicate_edge",
-            },
-        )?;
+        match by_key.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let existing = entry.get_mut();
+                existing.site_count = existing
+                    .site_count
+                    .checked_add(edge.site_count)
+                    .filter(|count| *count <= MAX_SITE_COUNT)
+                    .ok_or_else(|| invalid("edge_site_count"))?;
+                existing.confidence = existing.confidence.max(edge.confidence);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(edge);
+            }
+        }
     }
     collect_values(by_key, control)
 }
@@ -432,6 +454,9 @@ where
             reference.end_byte,
             "reference_byte_span",
         )?;
+        if reference.site_count == 0 || reference.site_count > MAX_SITE_COUNT {
+            return Err(invalid("reference_site_count").into());
+        }
         reference.confidence = validate_confidence(reference.confidence)?;
         let key = (
             reference.file_id.as_str().to_owned(),
@@ -993,6 +1018,12 @@ mod tests {
     const FIRST_UUID_SUFFIX: u8 = 1;
     const POLL_INCREMENT: u64 = 1;
     const VALIDATION_OUTPUT_WORKING_RATIO: u64 = 4;
+    const BASE_EDGE_CONFIDENCE: f32 = 0.4;
+    const MAXIMUM_EDGE_CONFIDENCE: f32 = 0.9;
+    const BASE_EDGE_SITE_COUNT: u32 = 2;
+    const REPEATED_EDGE_SITE_COUNT: u32 = 3;
+    const REDUCED_EDGE_SITE_COUNT: u32 = 5;
+    const CHANGED_EDGE_SITE_COUNT: u32 = 6;
 
     fn digest() -> ContentDigest {
         ContentDigest::from_bytes([TEST_DIGEST_BYTE; TEST_DIGEST_LENGTH])
@@ -1042,6 +1073,14 @@ mod tests {
             start_line: 1,
             end_line: 1,
             structural_digest: digest(),
+            visibility: None,
+            exported: false,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            declaration_only: false,
+            betweenness_ppb: None,
+            pagerank_ppb: None,
         }
     }
 
@@ -1056,6 +1095,8 @@ mod tests {
             end_byte: TEST_FILE_SIZE,
             confidence: 0.0,
             resolution_provenance: "test-unresolved".to_owned(),
+            site_count: 1,
+            span_precision: super::super::ReferenceSpanPrecision::Exact,
         }
     }
 
@@ -1425,6 +1466,7 @@ mod tests {
                     kind: cartograph_domain::EdgeKind::Calls,
                     confidence: 1.0,
                     provenance: "test".to_owned(),
+                    site_count: 1,
                 }],
                 &mut edges_control,
             ),
@@ -1461,7 +1503,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("reference evidence was rejected: {error}"));
         assert_eq!(canonical.references(), [resolved.clone()]);
 
-        let mut changed = resolved;
+        let mut changed = resolved.clone();
         changed.reference_name = "different_name".to_owned();
         let changed = validate_and_reduce(GenerationFacts {
             files: vec![file()],
@@ -1470,6 +1512,65 @@ mod tests {
             ..GenerationFacts::default()
         })
         .unwrap_or_else(|error| panic!("changed reference evidence was rejected: {error}"));
+        assert_ne!(canonical.digest(), changed.digest());
+
+        let mut multiplicity = resolved.clone();
+        multiplicity.site_count = 2;
+        let multiplicity = validate_and_reduce(GenerationFacts {
+            files: vec![file()],
+            symbols: vec![symbol()],
+            references: vec![multiplicity],
+            ..GenerationFacts::default()
+        })
+        .unwrap_or_else(|error| panic!("reference multiplicity was rejected: {error}"));
+        assert_ne!(canonical.digest(), multiplicity.digest());
+
+        let mut coarse = resolved;
+        coarse.span_precision = super::super::ReferenceSpanPrecision::CoarsePoint;
+        let coarse = validate_and_reduce(GenerationFacts {
+            files: vec![file()],
+            symbols: vec![symbol()],
+            references: vec![coarse],
+            ..GenerationFacts::default()
+        })
+        .unwrap_or_else(|error| panic!("reference precision was rejected: {error}"));
+        assert_ne!(canonical.digest(), coarse.digest());
+        assert_eq!(canonical.digest_version(), GenerationDigestVersion::CURRENT);
+    }
+
+    #[test]
+    fn edge_reduction_sums_sites_uses_maximum_confidence_and_digests_multiplicity() {
+        let edge = EdgeInput {
+            source_symbol_id: symbol_id(),
+            target_symbol_id: symbol_id(),
+            kind: cartograph_domain::EdgeKind::Calls,
+            confidence: BASE_EDGE_CONFIDENCE,
+            provenance: "test-sites".to_owned(),
+            site_count: BASE_EDGE_SITE_COUNT,
+        };
+        let mut repeated = edge.clone();
+        repeated.confidence = MAXIMUM_EDGE_CONFIDENCE;
+        repeated.site_count = REPEATED_EDGE_SITE_COUNT;
+        let canonical = validate_and_reduce(GenerationFacts {
+            files: vec![file()],
+            symbols: vec![symbol()],
+            edges: vec![edge, repeated],
+            ..GenerationFacts::default()
+        })
+        .unwrap_or_else(|error| panic!("repeated edge sites were rejected: {error}"));
+        assert_eq!(canonical.edges().len(), 1);
+        assert_eq!(canonical.edges()[0].site_count, REDUCED_EDGE_SITE_COUNT);
+        assert_eq!(canonical.edges()[0].confidence, MAXIMUM_EDGE_CONFIDENCE);
+
+        let mut changed = canonical.edges()[0].clone();
+        changed.site_count = CHANGED_EDGE_SITE_COUNT;
+        let changed = validate_and_reduce(GenerationFacts {
+            files: vec![file()],
+            symbols: vec![symbol()],
+            edges: vec![changed],
+            ..GenerationFacts::default()
+        })
+        .unwrap_or_else(|error| panic!("changed edge sites were rejected: {error}"));
         assert_ne!(canonical.digest(), changed.digest());
     }
 

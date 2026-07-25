@@ -2,9 +2,11 @@ use std::{error::Error, io, sync::Arc, time::Duration};
 
 use cartograph_mcp::{
     BoxToolFuture, ConfigError, ErrorCode, ProtocolServer, ServerConfig, ServerLimits,
-    ServerMetadata, ToolAnnotations, ToolCall, ToolCallContext, ToolContractError, ToolDefinition,
-    ToolError, ToolErrorCode, ToolHandler, ToolProfile, ToolProfiles, ToolResult,
+    ServerLimitsInput, ServerMetadata, ToolAnnotations, ToolCall, ToolCallContext,
+    ToolContractError, ToolDefinition, ToolDefinitionInput, ToolError, ToolErrorCode, ToolHandler,
+    ToolProfile, ToolProfiles, ToolResult,
 };
+use cartograph_search::test_support::exact_reference_context_packet;
 use serde_json::{Value, json};
 use tokio::{
     io::{
@@ -21,12 +23,14 @@ type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 #[derive(Clone)]
 struct FixtureHandler {
     slow_started: Arc<Notify>,
+    slow_dropped: Arc<Notify>,
 }
 
 impl FixtureHandler {
     fn new() -> Self {
         Self {
             slow_started: Arc::new(Notify::new()),
+            slow_dropped: Arc::new(Notify::new()),
         }
     }
 
@@ -35,6 +39,21 @@ impl FixtureHandler {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "slow fixture did not start"))?;
         Ok(())
+    }
+
+    async fn wait_for_slow_drop(&self) -> TestResult {
+        timeout(Duration::from_secs(2), self.slow_dropped.notified())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "slow fixture was not reaped"))?;
+        Ok(())
+    }
+}
+
+struct SlowDrop(Arc<Notify>);
+
+impl Drop for SlowDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
     }
 }
 
@@ -98,6 +117,12 @@ impl ToolHandler for FixtureHandler {
                 empty_schema(),
                 ToolProfiles::CORE,
             ),
+            definition(
+                "cartograph_context_fixture",
+                "Typed context-packet fixture",
+                empty_schema(),
+                ToolProfiles::CORE,
+            ),
         ]
     }
 
@@ -113,7 +138,13 @@ impl ToolHandler for FixtureHandler {
                 },
                 "cartograph_big" => Ok(ToolResult::text("x".repeat(8_192))),
                 "cartograph_fail" => Err(ToolError::internal()),
+                "cartograph_context_fixture" => {
+                    serde_json::to_string(&exact_reference_context_packet())
+                        .map(ToolResult::text)
+                        .map_err(|_| ToolError::internal())
+                }
                 "cartograph_slow" => {
+                    let _drop = SlowDrop(self.slow_dropped.clone());
                     self.slow_started.notify_one();
                     context.cancellation().cancelled().await;
                     std::future::pending::<Result<ToolResult, ToolError>>().await
@@ -203,6 +234,13 @@ impl Connection {
 }
 
 const DEFAULT_TEST_PROTOCOL: &str = "2024-11-05";
+const FIXTURE_REFERENCE_ID: u64 = 101;
+const FIXTURE_START_BYTE: u64 = 12;
+const FIXTURE_END_BYTE: u64 = 19;
+const FIXTURE_CONFIDENCE: f64 = 0.95;
+const FIXTURE_SITE_COUNT: u64 = 7;
+const FIXTURE_OWNER_SYMBOL_ID: &str = "11111111-1111-4111-8111-111111111111";
+const FIXTURE_TARGET_SYMBOL_ID: &str = "22222222-2222-4222-8222-222222222222";
 
 #[tokio::test]
 async fn initialize_initialized_and_ping_match_the_golden_wire_contract() -> TestResult {
@@ -215,15 +253,16 @@ async fn initialize_initialized_and_ping_match_the_golden_wire_contract() -> Tes
     connection.send(&initialize_request(1)).await?;
 
     let line = connection.read_line().await?;
-    assert_eq!(
-        line,
-        concat!(
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{",
-            "\"capabilities\":{\"tools\":{}},",
-            "\"protocolVersion\":\"2024-11-05\",",
-            "\"serverInfo\":{\"name\":\"cartograph\",\"version\":\"2.0.0-alpha.1\"}}}\n"
-        )
-    );
+    let expected = [
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{",
+        "\"capabilities\":{\"tools\":{}},",
+        "\"protocolVersion\":\"2024-11-05\",",
+        "\"serverInfo\":{\"name\":\"cartograph\",\"version\":\"",
+        env!("CARGO_PKG_VERSION"),
+        "\"}}}\n",
+    ]
+    .concat();
+    assert_eq!(line, expected);
 
     connection
         .send(&json!({
@@ -250,6 +289,31 @@ async fn initialize_initialized_and_ping_match_the_golden_wire_contract() -> Tes
 }
 
 #[tokio::test]
+async fn initialize_advertises_only_explicit_validated_server_instructions() -> TestResult {
+    const INSTRUCTIONS: &str =
+        "Check freshness first, inspect exact evidence, and run the repository gates.";
+    let config = ServerConfig::new(
+        ServerMetadata::cartograph(),
+        ToolProfile::Coding,
+        ServerLimits::default(),
+    )
+    .with_instructions(INSTRUCTIONS)?;
+    let server = ProtocolServer::new(config, FixtureHandler::new())?;
+    let mut connection = Connection::open(server).await;
+    connection.send(&initialize_request(1)).await?;
+    let response = connection.read_value().await?;
+    assert_eq!(response["result"]["instructions"], INSTRUCTIONS);
+    assert_eq!(response["result"]["protocolVersion"], DEFAULT_TEST_PROTOCOL);
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .await?;
+    connection.finish().await
+}
+
+#[tokio::test]
 async fn tools_list_is_sorted_schema_exact_profile_filtered_and_deterministic() -> TestResult {
     let first = tools_list_line(ToolProfile::Core).await?;
     let second = tools_list_line(ToolProfile::Core).await?;
@@ -260,6 +324,7 @@ async fn tools_list_is_sorted_schema_exact_profile_filtered_and_deterministic() 
         tool_names(&response),
         vec![
             "cartograph_big",
+            "cartograph_context_fixture",
             "cartograph_core",
             "cartograph_echo",
             "cartograph_fail",
@@ -282,6 +347,21 @@ async fn tools_list_is_sorted_schema_exact_profile_filtered_and_deterministic() 
     );
     assert!(echo.get("profiles").is_none());
 
+    let broad_read_tools = vec![
+        "cartograph_big",
+        "cartograph_echo",
+        "cartograph_fail",
+        "cartograph_slow",
+    ];
+    assert_eq!(
+        profile_tool_names(ToolProfile::Full).await?,
+        broad_read_tools
+    );
+    assert_eq!(
+        profile_tool_names(ToolProfile::Coding).await?,
+        broad_read_tools
+    );
+
     assert_eq!(
         profile_tool_names(ToolProfile::ReadOnly).await?,
         vec![
@@ -303,6 +383,54 @@ async fn tools_list_is_sorted_schema_exact_profile_filtered_and_deterministic() 
         ]
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn tool_transport_preserves_typed_reference_evidence_and_multiplicity() -> TestResult {
+    let server = test_server(
+        ToolProfile::Core,
+        ServerLimits::default(),
+        FixtureHandler::new(),
+    )?;
+    let mut connection = Connection::open(server).await;
+    connection.initialize().await?;
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": "evidence-1",
+            "method": "tools/call",
+            "params": {
+                "name": "cartograph_context_fixture",
+                "arguments": {}
+            }
+        }))
+        .await?;
+
+    let response = connection.read_value().await?;
+    let transported = response["result"]["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("typed context packet was not transported as text"))?;
+    assert_eq!(
+        transported,
+        serde_json::to_string(&exact_reference_context_packet())?
+    );
+    let transported: Value = serde_json::from_str(transported)?;
+    let reference = &transported["evidence"][0]["reference"];
+    assert_eq!(transported["confidence"], "high");
+    assert_eq!(transported["graph_direction"], "callers");
+    assert_eq!(transported["evidence"][0]["reasons"][0], "exact_reference");
+    assert_eq!(transported["evidence"][0]["language"], "rust");
+    assert_eq!(transported["evidence"][0]["document_kind"], "symbol");
+    assert_eq!(reference["reference_id"], FIXTURE_REFERENCE_ID);
+    assert_eq!(reference["owner_symbol_id"], FIXTURE_OWNER_SYMBOL_ID);
+    assert_eq!(reference["target_symbol_id"], FIXTURE_TARGET_SYMBOL_ID);
+    assert_eq!(reference["span_precision"], "exact");
+    assert_eq!(reference["represented_site_count"], FIXTURE_SITE_COUNT);
+    assert_eq!(reference["start_byte"], FIXTURE_START_BYTE);
+    assert_eq!(reference["end_byte"], FIXTURE_END_BYTE);
+    assert_eq!(reference["confidence"], FIXTURE_CONFIDENCE);
+    assert_eq!(reference["provenance"], "resolved_fixture");
+    connection.finish().await
 }
 
 #[tokio::test]
@@ -447,7 +575,9 @@ async fn cancellation_aborts_and_reaps_an_inflight_tool_call() -> TestResult {
 
 #[tokio::test]
 async fn hard_request_deadline_aborts_and_reaps_noncompleting_work() -> TestResult {
-    let limits = ServerLimits::new(1_024, 4_096, 4, Duration::from_millis(25))?;
+    let limits = ServerLimits::new(
+        ServerLimitsInput::new(1_024, 4_096, 4).with_request_deadline(Duration::from_millis(25)),
+    )?;
     let server = test_server(ToolProfile::Core, limits, FixtureHandler::new())?;
     let mut connection = Connection::open(server).await;
     connection.initialize().await?;
@@ -472,7 +602,9 @@ async fn inflight_capacity_and_duplicate_ids_are_bounded_without_locking_cancell
 {
     let handler = FixtureHandler::new();
     let observer = handler.clone();
-    let limits = ServerLimits::new(1_024, 4_096, 1, Duration::from_secs(1))?;
+    let limits = ServerLimits::new(
+        ServerLimitsInput::new(1_024, 4_096, 1).with_request_deadline(Duration::from_secs(1)),
+    )?;
     let server = test_server(ToolProfile::Core, limits, handler)?;
     let mut connection = Connection::open(server).await;
     connection.initialize().await?;
@@ -529,7 +661,9 @@ async fn inflight_capacity_and_duplicate_ids_are_bounded_without_locking_cancell
 
 #[tokio::test]
 async fn input_and_output_byte_limits_fail_closed_without_killing_the_session() -> TestResult {
-    let input_limits = ServerLimits::new(256, 4_096, 4, Duration::from_secs(1))?;
+    let input_limits = ServerLimits::new(
+        ServerLimitsInput::new(256, 4_096, 4).with_request_deadline(Duration::from_secs(1)),
+    )?;
     let input_server = test_server(ToolProfile::Core, input_limits, FixtureHandler::new())?;
     let mut input_connection = Connection::open(input_server).await;
     input_connection.send_raw(&"x".repeat(300)).await?;
@@ -546,7 +680,9 @@ async fn input_and_output_byte_limits_fail_closed_without_killing_the_session() 
     assert_eq!(input_connection.read_value().await?["result"], json!({}));
     input_connection.finish().await?;
 
-    let output_limits = ServerLimits::new(1_024, 512, 4, Duration::from_secs(1))?;
+    let output_limits = ServerLimits::new(
+        ServerLimitsInput::new(1_024, 512, 4).with_request_deadline(Duration::from_secs(1)),
+    )?;
     let output_server = test_server(ToolProfile::Core, output_limits, FixtureHandler::new())?;
     let mut output_connection = Connection::open(output_server).await;
     output_connection.initialize().await?;
@@ -569,45 +705,136 @@ async fn input_and_output_byte_limits_fail_closed_without_killing_the_session() 
     output_connection.finish().await
 }
 
+#[tokio::test]
+async fn broken_output_terminates_an_open_input_session_and_reaps_calls() -> TestResult {
+    let handler = FixtureHandler::new();
+    let server = test_server(ToolProfile::Core, ServerLimits::default(), handler.clone())?;
+    let (mut client_input, server_input) = duplex(8_192);
+    let (server_output, abandoned_output) = duplex(8_192);
+    drop(abandoned_output);
+    let server_task = tokio::spawn(async move { server.serve(server_input, server_output).await });
+
+    client_input
+        .write_all(
+            concat!(
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",",
+                "\"params\":{\"protocolVersion\":\"2024-11-05\",",
+                "\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",",
+                "\"version\":\"1.0\"}}}\n"
+            )
+            .as_bytes(),
+        )
+        .await?;
+    client_input.flush().await?;
+
+    let result = timeout(Duration::from_secs(2), server_task)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "broken writer was not observed"))?
+        .map_err(|_| io::Error::other("MCP server task failed"))?;
+    assert_eq!(result, Err(cartograph_mcp::ServeError::OutputWriteFailed));
+    Ok(())
+}
+
+#[tokio::test]
+async fn writer_failure_cancels_and_reaps_active_calls_before_returning() -> TestResult {
+    let handler = FixtureHandler::new();
+    let server = test_server(ToolProfile::Core, ServerLimits::default(), handler.clone())?;
+    let (mut input, server_input) = duplex(16 * 1_024);
+    let (server_output, client_output) = duplex(16 * 1_024);
+    let mut output = BufReader::new(client_output);
+    let server_task = tokio::spawn(async move { server.serve(server_input, server_output).await });
+
+    input
+        .write_all(format!("{}\n", initialize_request(1)).as_bytes())
+        .await?;
+    input.flush().await?;
+    let mut initialized = String::new();
+    output.read_line(&mut initialized).await?;
+    assert!(!initialized.is_empty());
+    input
+        .write_all(
+            concat!(
+                "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",",
+                "\"params\":{\"name\":\"cartograph_slow\",\"arguments\":{}}}\n"
+            )
+            .as_bytes(),
+        )
+        .await?;
+    input.flush().await?;
+    handler.wait_for_slow_call().await?;
+
+    drop(output);
+    input
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n")
+        .await?;
+    input.flush().await?;
+    let result = timeout(Duration::from_secs(2), server_task)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "writer failure did not terminate"))?
+        .map_err(|_| io::Error::other("MCP server task failed"))?;
+    assert_eq!(result, Err(cartograph_mcp::ServeError::OutputWriteFailed));
+    handler.wait_for_slow_drop().await?;
+    Ok(())
+}
+
 #[test]
 fn public_configuration_and_schema_boundaries_reject_invalid_contracts() {
+    for instructions in ["".to_owned(), "   \n".to_owned(), "bad\0value".to_owned()] {
+        assert_eq!(
+            ServerConfig::default()
+                .with_instructions(instructions)
+                .err(),
+            Some(ConfigError::InvalidInstructions)
+        );
+    }
     assert_eq!(
-        ServerLimits::new(127, 4_096, 1, Duration::from_secs(1)),
+        ServerConfig::default()
+            .with_instructions("x".repeat(16 * 1_024 + 1))
+            .err(),
+        Some(ConfigError::InvalidInstructions)
+    );
+    assert_eq!(
+        ServerLimits::new(
+            ServerLimitsInput::new(127, 4_096, 1).with_request_deadline(Duration::from_secs(1)),
+        ),
         Err(ConfigError::InvalidInputLimit)
     );
     assert_eq!(
-        ServerLimits::new(1_024, 511, 1, Duration::from_secs(1)),
+        ServerLimits::new(
+            ServerLimitsInput::new(1_024, 511, 1).with_request_deadline(Duration::from_secs(1)),
+        ),
         Err(ConfigError::InvalidOutputLimit)
     );
     assert_eq!(
-        ServerLimits::new(1_024, 4_096, 0, Duration::from_secs(1)),
+        ServerLimits::new(
+            ServerLimitsInput::new(1_024, 4_096, 0).with_request_deadline(Duration::from_secs(1)),
+        ),
         Err(ConfigError::InvalidInflightLimit)
     );
     assert_eq!(
         ServerLimits::new(
-            1_024,
-            4_096,
-            1,
-            Duration::from_secs(600) + Duration::from_nanos(1)
+            ServerLimitsInput::new(1_024, 4_096, 1)
+                .with_request_deadline(Duration::from_secs(600) + Duration::from_nanos(1),),
         ),
         Err(ConfigError::InvalidRequestDeadline)
     );
     assert_eq!(
         ToolDefinition::new(
-            "bad_schema",
-            "Invalid properties shape",
-            json!({"type": "object", "properties": []}),
-            ToolProfiles::CORE,
+            ToolDefinitionInput::new(
+                "bad_schema",
+                "Invalid properties shape",
+                json!({"type": "object", "properties": []}),
+            )
+            .with_profiles(ToolProfiles::CORE),
         )
         .err(),
         Some(ToolContractError::InvalidInputSchema)
     );
     assert_eq!(
         ToolDefinition::new(
-            "no_profile",
-            "No advertised profile",
-            empty_schema(),
-            ToolProfiles::NONE,
+            ToolDefinitionInput::new("no_profile", "No advertised profile", empty_schema())
+                .with_profiles(ToolProfiles::NONE),
         )
         .err(),
         Some(ToolContractError::EmptyProfiles)
@@ -620,7 +847,9 @@ fn definition(
     schema: Value,
     profiles: ToolProfiles,
 ) -> ToolDefinition {
-    match ToolDefinition::new(name, description, schema, profiles) {
+    match ToolDefinition::new(
+        ToolDefinitionInput::new(name, description, schema).with_profiles(profiles),
+    ) {
         Ok(definition) => definition,
         Err(error) => panic!("fixture tool definition failed: {error}"),
     }

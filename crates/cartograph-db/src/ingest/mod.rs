@@ -5,8 +5,8 @@ mod validate;
 
 pub use model::{
     CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, GenerationFacts,
-    GenerationMemoryMeasurement, GenerationMemoryModelError, ReferenceInput, SearchDocumentInput,
-    SymbolInput,
+    GenerationMemoryMeasurement, GenerationMemoryModelError, ReferenceInput,
+    ReferenceSpanPrecision, SearchDocumentInput, SymbolInput,
 };
 pub use validate::{
     GenerationValidationError, GenerationValidationLimits, GenerationValidationReport,

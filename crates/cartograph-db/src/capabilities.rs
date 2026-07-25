@@ -1,12 +1,13 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use serde::Serialize;
 use sqlx_core::{query::query, query_scalar::query_scalar, row::Row};
-use sqlx_postgres::PgPool;
+use sqlx_postgres::{PgConnection, PgPool};
 
 use crate::DatabaseError;
 
 const MINIMUM_POSTGRES_VERSION_NUM: i32 = 180_000;
+const DEFAULT_CAPABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPECTED_SOURCE_CODE_TOKENS: [&str; 5] = ["cartograph", "search", "snake", "case", "42"];
 
 /// Stable status for one database capability check.
@@ -69,8 +70,50 @@ struct CheckInput {
 
 /// Probe PostgreSQL, ParadeDB, and pgvector without mutating the database.
 pub async fn probe_capabilities(pool: &PgPool) -> Result<CapabilityReport, DatabaseError> {
+    probe_capabilities_bounded(pool, DEFAULT_CAPABILITY_PROBE_TIMEOUT).await
+}
+
+/// Probe required capabilities under an explicit PostgreSQL-side deadline.
+pub async fn probe_capabilities_bounded(
+    pool: &PgPool,
+    statement_timeout: Duration,
+) -> Result<CapabilityReport, DatabaseError> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| DatabaseError::CapabilityProbe {
+            check: "connection",
+        })?;
+    if crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+        .await
+        .is_err()
+    {
+        let _ = transaction.rollback().await;
+        return Err(DatabaseError::CapabilityProbe {
+            check: "statement-timeout",
+        });
+    }
+    let report = probe_capabilities_connection(&mut transaction).await;
+    match report {
+        Ok(report) => {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| DatabaseError::CapabilityProbe { check: "commit" })?;
+            Ok(report)
+        }
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn probe_capabilities_connection(
+    connection: &mut PgConnection,
+) -> Result<CapabilityReport, DatabaseError> {
     let version_row = query("SELECT current_setting('server_version_num'), version()")
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await
         .map_err(|_| DatabaseError::CapabilityProbe {
             check: "postgres-version",
@@ -92,7 +135,7 @@ pub async fn probe_capabilities(pool: &PgPool) -> Result<CapabilityReport, Datab
     let extension_rows = query(
         "SELECT extname, extversion FROM pg_extension WHERE extname IN ('pg_search', 'vector')",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(|_| DatabaseError::CapabilityProbe {
         check: "extensions",
@@ -114,14 +157,14 @@ pub async fn probe_capabilities(pool: &PgPool) -> Result<CapabilityReport, Datab
 
     let preload_libraries =
         query_scalar::<_, String>("SELECT current_setting('shared_preload_libraries')")
-            .fetch_one(pool)
+            .fetch_one(&mut *connection)
             .await
             .map_err(|_| DatabaseError::CapabilityProbe {
                 check: "pg-search-preload",
             })?;
     let has_bm25_access_method =
         query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pg_am WHERE amname = 'bm25')")
-            .fetch_one(pool)
+            .fetch_one(&mut *connection)
             .await
             .map_err(|_| DatabaseError::CapabilityProbe {
                 check: "bm25-access-method",
@@ -130,7 +173,7 @@ pub async fn probe_capabilities(pool: &PgPool) -> Result<CapabilityReport, Datab
     let source_code_tokens = query_scalar::<_, Vec<String>>(
         "SELECT 'cartographSearch snake_case 42'::pdb.source_code::text[]",
     )
-    .fetch_one(pool)
+    .fetch_one(connection)
     .await
     .map_err(|_| ());
 

@@ -1,367 +1,162 @@
-# Extending extractors + framework resolvers
+# Extending native extraction and resolution
 
-> Extracted from CLAUDE.md (2026-05-29) to keep the always-loaded project memory lean. These are the accumulated per-arc "what to know when extending" notes — read before adding a language, a framework resolver, or a cross-language bridge. CLAUDE.md keeps a one-paragraph pointer to this file.
+Cartograph v2 extracts code in Rust and publishes typed, generation-scoped facts
+to PostgreSQL. This guide covers the registration points and failure modes for
+adding a language, resolver, framework fact, or cross-language bridge.
 
-### Polyglot / monorepo coverage (G16 arc — 2026-05-22)
+Do not call the v1 TypeScript runtime, load its WASM grammars, introduce SQLite,
+or shell out to a parser to make an extension appear complete. Unsupported
+source must remain explicit until the complete native contract is implemented.
 
-The 5 patterns above retire bug CLASSES. The G16 arc closed COVERAGE GAPS in those patterns, surfaced by hunting against an unfamiliar repo (Bun workspaces monorepo with TS+TSX+Rust). What to know when extending the same tools:
+## Choose the smallest correct mechanism
 
-- **`cartograph_deps` walks workspaces.** `src/deps/unused.ts` builds a `WorkspaceManifest[]` from `workspaces:` (array OR yarn-classic `{packages: [...]}` object) via `Bun.Glob.scanSync`. `USED_SIGNAL_RULES` + `UNDECLARED_SUPPRESSION_RULES` iterate this list, so any new used-signal / undeclared-suppression rule gets workspace coverage for free. `!apps/excluded` negation entries are intentionally skipped (Bun.Glob can't express them); pnpm-workspace.yaml is a separate file format and remains a follow-up.
-- **`bun-serve` is a registered framework resolver.** `src/resolution/frameworks/bun-serve.ts` emits `kind:'route'` nodes for `Bun.serve({routes: {...}})` calls. Two shapes: `'/path': handler` (one node, no method prefix — Bun.serve dispatches method in handler) and `'/path': { GET, POST }` (one node per method, `GET /path` matching Express convention). New Bun-native HTTP frameworks should follow the same regex-based shape with `findMatchingClose` + `depthAtIndex` for nested-brace safety. Bun.serve detection signals: `@types/bun` / `bun` package.json dep, `bunfig.toml` presence, source-level `Bun.serve(` token.
-- **JSX usage is a `references` use-edge.** `ts-extract-bodies.ts > captureBodyJsxReferences` emits a `references` unresolved-ref for every PascalCase JSX identifier (`<RailGroup />`, `<foo.Bar />`, `<svg:rect />`). HTML primitives (lowercase first letter) skipped. Reads into the existing `ORPHAN_LIVENESS_EDGE_KINDS` set used by `findOrphanedSymbols` + the cross-file `unused_export` rule, so React components used only via JSX in their own file no longer false-flag as dead. Any new JSX-like syntax (Solid, Preact, Astro JSX dialects) inherits this for free via the same node types.
+| Graph gap | Mechanism |
+| --- | --- |
+| Syntax/declarations/references from a new grammar | Native language slice |
+| Another extension using identical syntax/semantics | Existing language slice plus extension mapping |
+| Import/package/receiver resolution inside one language | Deterministic language resolver |
+| Literal route, command, resource, or component declaration | Framework fact extraction after explicit detection |
+| Reference in one language to a declaration in another | Cross-language bridge over typed facts |
+| Convention relating two already extracted nodes | Deterministic generation build step |
 
-### Polyglot / Go coverage (2026-05-23d arc — ollama bug-hunt)
+A framework resolver should not become a second parser. A cross-language bridge
+should not fabricate declarations. A derived edge should not be added after
+publication, because that would make the visible generation differ from its
+digest.
 
-Companion arc to G16; surfaced 15+ real bugs by hunting against ollama (807 .go + 209 .cpp + small embedded TS UI). What to know when extending the same tools:
+## Native language checklist
 
-- **Go `is_exported` follows the PascalCase convention.** `src/extraction/languages/go.ts` `isExported` callback returns `/^[A-Z]/.test(name)`. Methods (`methodsAreTopLevel: true`) get evaluated per-method via `tsEmitMethodNode`'s methodsTopLevel branch — JS/TS classic-OO unchanged (the enclosing class still carries the export). Name-only check; strict-spec receiver-type check is a deferred follow-up. Downstream cascade: `findUnusedExports` (`is_exported = 1` filter) + entry-points `public_exports` bucket both light up for Go.
-- **Go struct fields + interface methods are first-class nodes.** `tsExtractField`'s Go branch handles `field_declaration > field_identifier` (multi-name + tag-stripping). Interface `method_elem` walked by `extractInterfaceTypeAlias` after pushing the interface onto `nodeStack` so `createNode`'s auto-`contains` edge fires interface→method (NOT file→method — that was a real reviewer-caught bug in the first draft). Qualified embedded fields (`model.Base` / `*tokenizer.Tokenizer`) handled via the new `qualified_type` branch in `extractGoEmbeddedField`; bare `type_identifier` already covered the `*Options` collapsed-pointer case.
-- **`classifyImport` carries three optional per-language hints.** `ClassifyImportOpts.goModuleAlias` (strip + reanchor `github.com/<mod>/...` to local dirs), `cIncludeStyle: 'quoted' | 'angled'` (probe relative to importing file for C `#include "x"`), `tsPathAliases` (resolve TS `@/*` aliases via the nearest tsconfig walked from the importing dir). New per-language behaviors should follow the same caller-pure-classifier pattern: helper reads disk + caches; classifier stays pure.
-- **`goResolver.resolve` proximity tiebreak.** All four framework patterns (Handler / Service / Middleware / Model) now pass `ref.filePath` into `resolveByNameAndKind`, which sorts surviving candidates by same-file → shared-dir-segments before picking `pool[0]`. Without this, alphabetical name-index order picked an arbitrary winner — 13 of 14 ollama Options-embed edges resolved to the wrong target package.
-- **cgo Go→C call edges.** `tsResolveMemberCallName` strips the `C.` pseudo-receiver for Go so `C.foo(...)` resolves to the bare `foo` C function. Cgo identifier `C` is the only legal way to use that name in Go (the pseudo-import); a JS/TS one-letter class wouldn't get the same strip.
-- **Go `implements` edges via `go-implements` hook.** Project-wide post-pass in Group B. Method-name superset match struct ⊇ interface; empty interfaces skipped. New `last_mined_go_implements_algo_version` metadata key; mismatch triggers a full re-mine on next sync.
-- **Cobra is a registered CLI framework.** `src/resolution/frameworks/go.ts` `cobraCommandPattern` extracts `&cobra.Command{Use: "verb ..."}` literals as `cmd <verb>` routes (matching the JS commander/yargs/cac convention). `isCliCommandRoute()` folds both into the existing cli bucket without further wiring. Comment-strip pass now applies to ALL five Go framework patterns (Gin / Echo / Chi / http / cobra) — extending one means routing it through `stripCommentsForRegex(content, 'go')`.
-- **`MCP ProjectCache` survives CLI re-init.** `_project-cache.ts` fingerprints `.cartograph/cartograph.db` by inode + size at open; mismatch on lookup evicts + reopens. CLI `admin init` (or any rm-then-recreate cycle) under an active MCP no longer leaves the cached handle pointing at the deleted inode.
+### 1. Stable language identity
 
-Provenance: `[[project_session_handoff_2026_05_23d_ollama_bug_hunt]]`.
+Add the language to `cartograph-domain::SourceLanguage` with a stable serialized
+and database value. Update the domain round-trip tests. These values are part of
+generation facts and migration compatibility; renaming one is a schema change.
 
-Provenance + reviewer findings: structural-campaign backlog section D (codegraph-lineage; not carried into the Cartograph repo).
+### 2. Discovery and snapshot admission
 
-### Upstream Codegraph review pass (2026-06-07)
+Update `crates/cartograph-extract/src/snapshot.rs`:
 
-This pass borrowed public issue/PR ideas from Codegraph but reimplemented them
-inside Cartograph's feature-slice boundaries. Reuse these patterns when closing
-similar extraction or resolver gaps:
+- map canonical extensions to the language;
+- route language-specific test filenames;
+- cover case normalization and compound extensions;
+- prove unsupported extensions still fail explicitly.
 
-- **Python `from pkg import module` module-member calls resolve in the import
-  resolver, not in extraction.** Keep the import statement shape unchanged
-  (`importName: 'pkg'`, `symbolName: 'module'`), then let
-  `pickMatchingImport` recognize a call such as `module.run()` and resolve
-  `pkg/module.py::run`. This preserves normal Python import semantics and keeps
-  `classifyImport` focused on file-path classification.
-- **Go receiver ownership is a post-index edge pass.** Methods are extracted as
-  top-level nodes for Go, so cross-file owner edges are inserted by the
-  `go-implements` hook before interface matching. Keep the association scoped
-  to the same package directory to avoid linking same-named structs in sibling
-  packages.
-- **Return-type-backed chained calls belong in the name matcher.** Extraction
-  should emit the full static call shape (`b.build().commit`); resolution then
-  resolves `b.build`, reads its return type from the signature, and resolves the
-  terminal method on that returned type. Keep the cheap resolver prefilter in
-  sync with this shape by admitting the terminal member name.
-- **C# primary constructors use the language hook, not a one-off parser pass.**
-  `extractClassLikeHeader` enriches class/struct declarations with a
-  constructor-shaped method node and type references from constructor
-  parameters. Type-only filtering in `tree-sitter-typerefs.ts` prevents
-  parameter names and base-constructor arguments from becoming bogus type refs.
-- **PHP includes are file imports.** Treat string-literal
-  `include`/`include_once`/`require`/`require_once` as import references so the
-  existing import graph and `imports` command see them without a PHP-only edge
-  type.
-- **Salesforce framework references should stay namespaced at extraction
-  boundaries.** LWC Apex imports use the documented `@salesforce/apex/...`
-  module shape, and Aura server actions are emitted as `c.method` rather than a
-  bare method name. This lets the framework resolver bypass JS built-in names
-  such as `fetch` without weakening the generic built-in filter.
-- **Kotlin property receiver typing belongs in the JVM name matcher.** The
-  extractor emits typed `field` nodes for class-body and primary-constructor
-  `val`/`var` declarations plus `type_of` refs; the resolver reads JVM-style
-  field signatures and package directives to disambiguate explicit imports,
-  same-package classes, and wildcard imports even when the source file name does
-  not mirror the package path.
-- **Extension-only JavaScript dialects should reuse the JavaScript slice.**
-  SAP HANA XSJS files (`.xsjs`, `.xsjslib`) use the existing JavaScript
-  tree-sitter extractor plus JS-family import resolver extension probing. Do
-  not create a new language mode unless the dialect needs distinct grammar or
-  symbol semantics.
-- **Receiver-specific JS frameworks need their own resolver when the receiver
-  set is framework-defined.** Hono route extraction first identifies
-  `new Hono()` / `new OpenAPIHono()` variables, then matches route calls only
-  on those receivers and synthesizes local `app.route('/prefix', router)`
-  mounted paths. This avoids broadening Express's `app|router` regex and keeps
-  language gating explicit.
-- **Literal route arrays/maps are framework extractors, not import-resolver
-  hacks.** Angular (`src/resolution/frameworks/angular.ts`) and Flutter
-  (`src/resolution/frameworks/flutter.ts`) synthesize `route` nodes from
-  static route declarations and emit unresolved refs to routed components.
-  Keep these scanners conservative: literal route paths, bounded object/window
-  parsing, explicit `languages`, and package/file detection in `detect()`.
-- **Controller-string frameworks should claim only their controller ref shape.**
-  Symfony (`src/resolution/frameworks/symfony.ts`) emits YAML/PHP route nodes
-  and claims `Controller::method` strings so the normal prefilter lets its
-  resolver see those names. Avoid broad `claimsReference()` patterns.
-- **Resource-oriented packages can be resource extractors.** NeuG support
-  (`src/resolution/frameworks/neug.ts`) mines literal Python graph resources
-  into `kind:'resource'` nodes only after dependency/import detection. Do not
-  invent runtime graph semantics when the package API is dynamic.
-- **Spring config annotations stay in the Spring config-binding hook.**
-  `@ConditionalOnProperty` reads `Node.decoratorArgs` alongside `@Value`,
-  normalizes `prefix + name/value`, and emits `references` edges to
-  `.properties` constants with a distinct `synthesizedBy` marker. Add future
-  Spring config annotations in that hook unless they need a separate storage
-  contract.
-- **Nested git repositories are file-discovery policy, not orchestrator logic.**
-  Keep submodule/embedded-repo discovery in `src/extraction/file-discovery-policy.ts`
-  and let `src/extraction/index.ts` decide only when to use git-backed scan
-  versus filesystem fallback.
-- **CodeIgniter 3 route and magic-property refs stay namespaced.** The
-  resolver emits `ci3:*` references from `application/config/routes.php`,
-  convention-dispatched controller methods, and `$this->load` model/library
-  calls. Keep those refs inside `src/resolution/frameworks/codeigniter.ts`
-  so generic PHP name matching does not learn CI3's dynamic `$this->...`
-  property conventions.
+`SourceRoot` performs project-root validation and bounded chunked reads.
+`SourceSnapshot` owns UTF-8, language, size, path, file identity, and exact
+content digest. New code must consume that boundary rather than reading an
+arbitrary path directly.
 
-### Cross-language bridging + framework-resolver hooks (B12 arc — 2026-05-29)
+### 3. Grammar registration
 
-Landed with B12 sub-channel 1 (Swift↔ObjC `@objc` bridge, commit `4009f5f9`).
-Reusable infrastructure for the remaining B12 channels (RN / Expo / Fabric)
-and any future cross-language or selector-shape resolver:
+Pin the tree-sitter crate in the workspace and select its grammar in
+`crates/cartograph-extract/src/native.rs`. Create a fresh parser per bounded
+operation or use the established worker-local pattern; never share mutable
+tree-sitter state across concurrent workers.
 
-- **Swift attributes are captured into `Node.decorators`.** Swift `@objc` /
-  `@objcMembers` / `@nonobjc` / `@IBAction` parse as
-  `modifiers > attribute > user_type > type_identifier`; `findDecoratorTarget`
-  (`ts-extract-calls.ts`) descends the `user_type` to its `type_identifier`
-  (mirrors the Kotlin `constructor_invocation` branch). So
-  `@objc func play()` → `Node.decorators = ['objc']`. **Read `@objc`
-  exposure STRUCTURALLY off `Node.decorators`, never by re-parsing a source
-  window** — that's the audit fix `isNodeObjcExposed` in `swift-objc.ts`
-  encodes (`@nonobjc` opts out; own `@objc` opts in; AND class-level
-  `@objcMembers` blanket-exposes every member via `buildObjcMembersExposedSet`,
-  which maps members to their class by line-range since `ResolutionContext`
-  has no edge/container query). The `user_type` branch also improved
-  bare-Kotlin-annotation (`@Foo`) capture.
-- **`FrameworkResolver.claimsReference(name): boolean`** (optional) — a
-  pre-filter bypass. `resolve()` only runs for refs that pass the known-node
-  gate (`resolverHasAnyPossibleMatch`), but some framework refs are named
-  after NOTHING in the graph (a bridged ObjC selector resolves to a
-  differently-named Swift method). Returning true opts a name past the gate
-  (wired via `resolverAnyFrameworkClaims` in `resolveOne`). **Consulted ONLY
-  for DETECTED frameworks**, so an opt-in is scoped to projects using the
-  framework. Keep it NARROW — swift-objc claims only names the bridge
-  *transforms* (`fooWithBar`→`foo`), not every name.
-- **`FrameworkResolver.clearCache(context): void`** (optional) — per-context
-  cache invalidation. A resolver memoizing graph-derived state keyed by the
-  `ResolutionContext` (e.g. swift-objc's reverse-bridge `WeakMap` of ObjC
-  method nodes) implements this; `ReferenceResolver.clearCaches()` calls it at
-  every resolution-pass boundary. **The context is long-lived and REUSED
-  across syncs**, so a context-keyed cache that isn't cleared here goes stale
-  when a sync adds/removes nodes (it self-invalidates only on full `indexAll`,
-  which makes a fresh context). Required for any per-context resolver cache.
-- **Resolver lifecycle: `detect()` that reads the INDEX must rely on the
-  `warmCaches()` re-detect.** `createResolver()` → `initialize()` →
-  `detectFrameworks()` runs at resolver CREATION, *before* extraction — so a
-  `detect()` reading `context.getAllFiles()` (swift-objc / swiftUI / uikit)
-  saw an empty index and silently never fired (disk-based detects like
-  drupal/composer.json were unaffected, which masked the bug for a long time).
-  `warmCaches()` now re-runs `detectFrameworks()` post-extraction (once per
-  pass; strictly more detections than the empty-index run, so no regression).
-  New resolvers whose `detect()` queries the graph depend on this.
-- **ObjC CALL refs carry the FULL selector, matching method DEFINITIONS
-  (since F#82a).** `[obj fooWithBar:42]` → unresolved-ref `obj.fooWithBar:`
-  (receiver prefix + every keyword, colons kept), and the method-definition
-  NODE is named with the same full selector `fooWithBar:` (and
-  `downloadURL:completion:`). So a same-language ObjC call resolves through the
-  plain name-matcher, and a cross-language bridge fires only when the target is
-  a colon-free Swift node — `swiftBaseNamesForObjcSelector` strips the trailing
-  colons internally and recovers `foo` from `fooWithBar:`. **Consequence for a
-  resolver that runs on colon-bearing ObjC refs: BAIL when a real ObjC node
-  owns the selector** (framework resolvers run before the name-matcher in
-  `resolveOne`, so a bridge that doesn't bail will hijack an ObjC→ObjC call to a
-  same-base-named Swift method — see `resolveObjcCallToSwift`). Pre-F#82a these
-  refs were colon-STRIPPED (`obj.fooWithBar`); resolvers written against that
-  older shape must be revisited.
+Add tests for:
 
-Provenance: commit `4009f5f9`; BACKLOG.md "B12 sub-channel 1".
+- grammar/language mismatch;
+- malformed but recoverable syntax;
+- cancellation;
+- maximum input and output bounds;
+- zero-symbol files that are legitimately empty versus unsupported files.
 
-### React Native JS↔native bridge — synthesize when the grammar can't parse (B12 sub-channel 2 — 2026-05-29)
+### 4. Declarations and references
 
-`reactNativeBridgeResolver` (`src/resolution/frameworks/react-native.ts`;
-pure parsing in `react-native-bridge.ts`) bridges JS callers to native impls.
-Patterns worth reusing for the remaining channels (Expo / Fabric / event
-synthesizers) and any ObjC-macro-based or codegen-spec resolver:
+Extend the walker dispatch in `walk.rs` and focused modules under `walk/`.
+Produce typed facts with:
 
-- **ObjC RN bridge MACROS don't parse — SYNTHESIZE the target nodes.**
-  `RCT_EXPORT_METHOD` / `RCT_REMAP_METHOD` / `RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD`
-  degrade to `macro_type_specifier` + cascading ERROR nodes in the vendored
-  `objc.wasm` grammar, so the ObjC extractor emits ZERO method nodes for them
-  (and the ERROR cascade swallows adjacent non-macro methods in the same
-  `@implementation` — F#82). A `resolve()`-only resolver has nothing to point
-  at. The fix: the resolver's **`extractNodes` hook regex-parses the macros and
-  MINTS a `method` node per export** (named by its JS-visible name — first
-  selector keyword, or the `RCT_REMAP` override — tagged
-  `decorators:['RCTExport']` so `buildRNMaps` finds them; emitter built-ins
-  skipped at synthesis). `languages: ['objc']` gates `extractNodes` to `.m`/`.mm`
-  (both are the single `objc` Language); `resolve()` is NOT gated by `languages`
-  (the orchestrator calls every detected resolver's `resolve()`), so the same
-  resolver self-filters `resolve()` to JS refs. Mirrors the Drupal virtual-node
-  precedent.
-- **Read JVM `@ReactMethod` structurally — no synthesis.** Java AND Kotlin
-  `@ReactMethod` land in `Node.decorators=['ReactMethod']` (the same
-  `findDecoratorTarget` machinery as Swift `@objc`). Filter
-  `getNodesByKind('method')` on the decorator; cleaner than upstream's regex,
-  and the `getName()` module-name string is unreachable from the graph anyway
-  (only `body_hash`), so resolve keys on the JS method name, not the module.
-- **`claimsReference` can admit a whole CLASS of names via a `detect()`-built
-  set.** The known-node pre-filter (`resolverHasAnyPossibleMatch`) drops a bare
-  JS ref (`getTotalLength`) when its only native impl is a regular colon-named
-  Codegen ObjC node (`getTotalLength:`) — it never reaches `resolve()`.
-  `claimsReference(name)` is **context-free by interface**, so it can't query
-  the graph; instead `detect()` (which runs in `warmCaches`, before any ref
-  resolves, AND has the context) populates a **module-level add-only `Set`** of
-  TurboModule spec method names, and `claimsReference` membership-checks it.
-  Over-claiming is safe — it only costs an extra `resolve()` that returns null
-  (resolve is context-correct, keyed off the per-context cache that `clearCache`
-  DOES invalidate). **Unit-testing `resolve()` directly BYPASSES this gate** —
-  add an end-to-end test through `Cartograph.init` to exercise the real
-  pre-filter (a reviewer caught this gap precisely because the unit test hid it).
-- **Codegen spec files: brace-balanced body extraction, not a `{…}` regex.**
-  A TurboModule `Spec` interface is the JS-visible ground truth. A non-greedy
-  `\{([\s\S]*?)\}` truncates at an inline object type
-  (`getConstants(): {x: string};` — real in RN's `NativeDeviceInfo`), dropping
-  later methods; a greedy last-`}` over-captures trailing code. Walk braces from
-  the opening `{` to the depth-0 close (the shared
-  `extractInterfaceBody(src, 'Spec')` in `src/resolution/_interface-body.ts` —
-  see the Fabric channel below). Normalize
-  CRLF→LF first. Gate the `.ts` scan on the codegen `Native*`/`*Spec` filename
-  convention (non-lossy — codegen requires that naming) to bound the per-pass
-  read.
+- deterministic symbol/reference IDs;
+- one-based lines and exact byte ranges;
+- explicit symbol/reference kinds and visibility;
+- safe literal-free callable signatures;
+- explicit confidence, provenance, and site multiplicity;
+- recoverable diagnostics instead of panics.
 
-Provenance: BACKLOG.md "B12 sub-channel 2"; tests in
-`__tests__/react-native-bridge.test.ts`.
+Do not resolve during syntax walking. Retain enough unambiguous typed evidence
+for the resolver; leave dynamic or ambiguous references unresolved.
 
-### Expo Modules — synthesize the DSL, and resolve() is mandatory here (B12 sub-channel 3 — 2026-05-29)
+### 5. Resolution
 
-`expoModulesResolver` (`src/resolution/frameworks/expo-modules.ts`; pure DSL
-parsing in `expo-modules-bridge.ts`) bridges JS `requireNativeModule('X').y()`
-to the Swift/Kotlin Expo `Module { Name("X"); Function("y") { … } }` DSL.
+Resolution must be deterministic and module-aware. Prefer exact module/path and
+qualified-name evidence before any name-only fallback. If more than one target
+remains plausible, retain unresolved evidence instead of choosing by worker or
+database order.
 
-- **The DSL's JS names are string ARGS — synthesize, don't read the graph.**
-  `Function("y")` / `AsyncFunction` / `Property` / `Constants("y")` and the
-  module's `Name("X")` are string literals passed to builder calls. The
-  universal extractor records only a call's CALLEE name (`Function`, `Name`),
-  never its string args — so `"y"`/`"X"` are unreachable from any node, ref,
-  edge, decorator, or signature (verified empirically for BOTH Swift and
-  Kotlin; the lambda BODIES are walked, but that doesn't recover the member
-  name). So `extractNodes` regexes the source and MINTS a `method` node per
-  member, named by the JS-visible name, tagged `decorators:['ExpoExport']`.
-  Same forced strategy as ch.2's ObjC-macro synthesizer.
-- **THE LOAD-BEARING FORK FINDING: the member-call name-matcher is
-  receiver-TYPE-driven.** Upstream's Expo resolver sets `resolve()` to null and
-  relies on the standard name-matcher to close a JS `Foo.takePictureAsync()`
-  call to the synthesized node by method name. **That does NOT work in this
-  fork** — the end-to-end tests proved it: when the receiver (`Foo =
-  requireNativeModule('X')`) is an untyped binding, the matcher can't type the
-  receiver and never resolves the member by name alone (it DOES resolve
-  same-class `self.foo()` calls — the gap is specifically untyped-receiver
-  cross-language member calls). **So every JS↔native channel in this fork must
-  carry a `resolve()` that bridges by name; a synthesizer alone is not enough.**
-  Expo's `resolve()` looks up the `ExpoExport`-tagged node by
-  `stripReceiverPrefix(ref.referenceName)` (iOS/swift-preferred), confidence
-  0.6 / `resolvedBy:'framework'`. No `claimsReference` (the synthesized JS name
-  is already in `knownNames`, so the pre-filter passes); no per-context cache /
-  `clearCache` (a direct `getNodesByName` + decorator filter, no memo).
-- **Marker decorator scopes the bridge.** `resolve()` keys on method name, so
-  the `ExpoExport` tag is what stops it from bridging to an unrelated same-named
-  ordinary method. The trade-off it does NOT solve: it ignores the JS receiver's
-  module binding, so a common member name can over-bridge an unrelated
-  `obj.name()` call (0.6/INFERRED, Expo-projects only) — matches upstream's
-  name-only precision; tracking `requireNativeModule('X')` bindings is the
-  future precision lever.
-- **Stateful `g`-flag regex.** The member-scan regex is built fresh per parse
-  (`new RegExp(src, 'g')`) — a shared module-level `/…/g` leaks `lastIndex`
-  across files and silently skips matches on the 2nd+ file.
+Every new resolution rule needs fixtures for:
 
-Provenance: BACKLOG.md "B12 sub-channel 3"; tests in
-`__tests__/expo-modules.test.ts`.
+- the exact success path;
+- same-name private declarations in different modules;
+- ambiguous candidates;
+- missing modules;
+- import aliases/re-exports relevant to the language;
+- identical output under reversed input order and every supported worker count.
 
-### Fabric/Paper view components — JSX resolves FREE by name; node→node bridges are index-hooks (B12 sub-channel 4 — 2026-05-29)
+### 6. Search documents
 
-`fabricViewResolver` (`src/resolution/frameworks/fabric.ts`; parsing in
-`fabric-bridge.ts`) synthesizes `component` + `property` nodes for RN view
-components; the `fabric-native-impl` index-hook
-(`src/index-hooks/fabric-native-impl.ts`) bridges them to native classes.
+Ensure canonical generation building emits safe search documents for new files
+and symbols. Code/name fields are tokenized by ParadeDB's `pdb.source_code`;
+natural documentation uses the text field. A new language is not end-to-end
+complete until a live PostgreSQL publication returns its expected BM25 hit.
 
-- **Component-name resolution is NOT the receiver-type-driven member-call
-  matcher — so a synthesized `component` node resolves JSX for free.** This is
-  the key contrast with ch.3: a JSX `<MyView>` ref is emitted (PascalCase, by
-  `captureBodyJsxReferences`) and `react.ts` `resolveComponent` resolves it BY
-  NAME against kind ∈ {component, function, class}. So a synthesized
-  `kind:'component'` node named `MyView` (from `codegenNativeComponent('MyView')`
-  or a `*ViewManager` class) closes the JS→component edge with **no `resolve()`
-  and no marker decorator** on the resolver — which is why fabric's `resolve()`
-  is a no-op. (The string args + view-prop macros are still grammar-invisible,
-  so the nodes are still SYNTHESIZED from source — same as ch.2/ch.3.)
-- **A node→node link by convention is an INDEX-HOOK, not a `resolve()`.** The
-  component→native-class bridge has no JS ref to resolve — both endpoints are
-  already nodes; the edge is established post-extraction by name+suffix
-  convention (`Foo` → `Foo`/`FooView`/`FooViewManager`/`FooComponentView`/
-  `FooManager`). That's an index-hook's job (cf. `go-implements`,
-  `drupal-service-tags`): walk the nodes, emit `references` edges with
-  `metadata.synthesizedBy`, with an `*_ALGO_VERSION` self-heal + a clean-slate
-  `DELETE … json_extract(metadata,'$.synthesizedBy')=?` before re-inserting.
-  Register in `src/index-hooks/registry.ts` (Group B, before the Group C
-  centrality/biomarkers that count the edges) AND add the hook name to
-  `__tests__/hook-groups-invariance.test.ts`'s `EXPECTED_GROUP_B`, AND its
-  metadata key to `MetadataKey` in `src/db/queries-metadata.ts`.
-- **Scan PAST helper classes when finding the framework class.** A
-  `source.match(/class …/)` grabs only the FIRST class; a `data class` / helper
-  declared before the `*ViewManager` makes it silently miss the manager. Scan
-  all matches for the first whose name fits the convention
-  (`findManagerClass`). (Same trap applies to any per-file "find THE class".)
-- **Share brace-balanced interface parsing.** `extractInterfaceBody(src, name)`
-  in `src/resolution/_interface-body.ts` (escapeRegExp-guarded) is the one
-  brace-balanced TS-interface-body extractor — reused by the RN `Spec` and
-  Fabric `NativeProps` parsers; don't re-implement the `\{…\}` scan (a regex
-  truncates at inline object types).
+### 7. Import and freshness boundary
 
-Provenance: BACKLOG.md "B12 sub-channel 4"; tests in
-`__tests__/fabric-view.test.ts`.
+The v1 PostgreSQL importer may admit only languages the v2 runtime can index and
+include in its complete source revision. Update importer preflight and live
+cutover tests when expanding support. Otherwise an imported generation could
+appear fresh while unsupported files change or disappear on the next index.
 
-### RN event channel — re-read source in a hook; and the algo-hash `[]` trap (B12 sub-channel 5 — 2026-05-29)
+## Framework facts and bridges
 
-`rn-event-channel` (`src/index-hooks/rn-event-channel.ts`; parsing in
-`rn-event-bridge.ts`) links a native event dispatch (`sendEventWithName:@"X"`
-/ `sendEvent(withName:"X")` / `.emit("X",…)`) to every JS subscriber
-(`.addListener("X", handler)`) sharing the literal event name.
+Framework extraction runs only after an explicit, deterministic detection
+signal. It must have hard file/node/byte limits and emit ordinary typed facts so
+the same canonical reducer, digest, COPY, validation, and publication rules
+apply.
 
-- **An index-hook CAN re-read source** even though `IndexHookContext` lacks
-  `readFile`/`getAllFiles`: use `getAllFiles(ctx.queries)` (→ `FileRecord[]`
-  with `.path`/`.language`) + `readFileSafe(path.join(ctx.projectRoot,
-  file.path))` + `stripCommentsForRegex(raw, file.language)` — the
-  `value-ref-edges` idiom. Needed whenever the signal is a string literal the
-  extractor doesn't node-ify (event names, like the other channels' string
-  args). Map a match offset → enclosing graph node with
-  `ctx.queries.getNodesByFile(path)` + a tightest-encloser scan over
-  function/method/component nodes.
-- **Use `makeLineIndex(content)` for offset→line, never
-  `content.slice(0,idx).split('\n').length`** — the latter is the F#72
-  Schlemiel-quadratic bug class (re-scans the prefix per match). It bit this
-  hook in review.
-- **THE ALGO-HASH `[]` TRAP (F#85).** `computeAlgoHash(import.meta.url, [])`
-  hashes NOTHING — it returns the empty-input SHA constant for every caller, so
-  the hook's `*_ALGO_VERSION` never changes on a logic edit and its self-heal
-  silently no-ops (re-mines only on first run + changed-file syncs; a logic
-  change then needs a manual `admin index`). **Pass a stable repo-relative
-  source path plus the hook's own sibling basename(s):**
-  `computeAlgoHash('src/index-hooks/my-hook.ts', ['./my-hook'])`, plus any
-  sibling module whose logic the hook depends on (rn-event-channel adds
-  `'../resolution/rn-event-bridge'`). (The first arg is a repo-relative path
-  string, NOT `import.meta.url` — `src/algo-hash.ts` accepts a `file:` URL only
-  for back-compat, since compiled standalone bundles can't recover module source
-  from Bun's virtual `import.meta.url`; every shipped hook now passes the path
-  literal.) `__tests__/hook-algo-versions.test.ts`
-  guards every hook against regressing to `[]`. (All 10 `src/index-hooks/*`
-  hooks shipped with the `[]` no-op until this fix; the curated string-miners
-  under `src/<miner>/index.ts` always passed `['./index']` correctly.)
-- **String-name ↔ string-name synthesizers are index-hooks** (both endpoints
-  are existing nodes; the match key is a parsed string), `kind:'calls'` +
-  `confidence:'INFERRED'` + `metadata.synthesizedBy`, with a fan-out cap
-  (`EVENT_FANOUT_CAP=6`) to skip too-generic names.
-- **Dynamic dispatch tables are inferred calls, not extracted calls.**
-  `dynamic-dispatch` (`src/index-hooks/dynamic-dispatch.ts`) scans same-file
-  TS/JS object/Map tables such as `HANDLERS[kind]?.()` and emits bounded
-  `calls` edges with `confidence:'INFERRED'`. Keep the fanout cap low and
-  same-file only unless a later resolver can prove cross-file table imports.
+A cross-language bridge consumes existing facts from both languages. It must:
 
-Provenance: BACKLOG.md "B12 sub-channel 5" + "F#85"; tests in
-`__tests__/rn-event-channel.test.ts` + `__tests__/hook-algo-versions.test.ts`.
+- state the exact convention it recognizes;
+- scope candidates by module/package/framework identity;
+- preserve ambiguity;
+- cap fan-out;
+- attach confidence and provenance;
+- prove that input order and worker count cannot change the result.
+
+Do not add a mutable post-publication hook. Derived relationships belong in the
+staged generation before validation and atomic publication.
+
+## Silent-failure traps
+
+- Extension mapped but grammar selection missing: discovery succeeds and parse
+  fails for every file.
+- Grammar selected but walker dispatch missing: files look successfully empty.
+- Declarations added without search documents: exact graph exists but BM25
+  cannot find it.
+- Resolver uses global name-only matching: private same-name symbols acquire
+  false edges.
+- Unsupported language admitted by v1 import: status can misreport freshness
+  and reindex drops data.
+- Per-worker map iteration reaches the digest: output changes with scheduling.
+- Literal-bearing signatures enter search: secrets or source literals can leak
+  into evidence.
+- New edge kind omitted from bulk relation validation: invalid staged rows may
+  reach publication or valid rows may fail late.
+
+## Required gates
+
+At minimum:
+
+```sh
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked -p cartograph-domain -p cartograph-extract -p cartograph-indexer
+```
+
+Then run the live native-corpus supervisor and 1/2/4/8/16-worker benchmark from
+`.github/workflows/v2-rust.yml`. The locked corpus must retain identical logical
+digest, row counts, edge kinds, diagnostics, ordered BM25 IDs, terminal task
+state, and cleanup. Finish with the full workspace, PostgreSQL/ParadeDB, Sonar,
+structural, archive, and independent-review gates.
+
+See [native extraction](v2/EXTRACTION.md) and
+[v2 architecture](v2/ARCHITECTURE.md) for the current implemented boundary.

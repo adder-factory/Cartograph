@@ -1,0 +1,21 @@
+[package]
+name = "cartograph-scip"
+publish = false
+description = "Bounded zero-runtime SCIP interchange for Cartograph v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+blake3.workspace = true
+cartograph-db = { path = "../cartograph-db" }
+cartograph-domain = { path = "../cartograph-domain" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

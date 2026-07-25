@@ -1,222 +1,166 @@
 # Configuration
 
-Cartograph stores project config in `.cartograph/config.json`.
+Cartograph keeps non-secret project policy in `.cartograph/config.json`.
+Database URLs and API credentials belong in the process environment or private
+managed state, never in a committed file.
 
-Most projects can omit the file or keep it small; defaults are intentionally
-conservative.
+The file is optional. A representative v2 configuration is:
 
 ```json
 {
-  "version": 1,
-  "rootDir": ".",
-  "languages": ["typescript", "javascript"],
-  "exclude": ["**/node_modules/**", "**/dist/**", "**/build/**"],
-  "frameworks": [],
-  "maxFileSize": 5242880
+  "version": 2,
+  "languages": ["typescript", "python", "rust"],
+  "include": ["src/**", "tests/**"],
+  "exclude": ["vendor/**", "generated/**"],
+  "maxFileSize": 5242880,
+  "extractDocstrings": true,
+  "trackCallSites": true,
+  "enableCentrality": true,
+  "enableBetweenness": true,
+  "enableChurn": true,
+  "enableCoChange": true,
+  "enableBiomarkers": true,
+  "enableIssueHistory": true,
+  "enableConfigRefs": true,
+  "enableSqlRefs": true,
+  "enableBuildContextRefs": true,
+  "enableStringImports": true,
+  "duplicateCodePartialClones": false,
+  "duplicateCodeAllowlist": ["generated/**"]
 }
 ```
 
-## Common Options
+## Source and evidence policy
 
-| Option | Description | Default |
-|---|---|---|
-| `rootDir` | Root directory relative to project path | `"."` |
-| `include` | Glob patterns to index | language defaults |
-| `languages` | Languages to index; empty means auto-detect | `[]` |
-| `exclude` | Glob patterns to ignore | dependency/build/cache/generated defaults |
-| `maxFileSize` | Skip files larger than this many bytes | `5242880` |
-| `frameworks` | Framework hints for extraction/resolution | `[]` |
-| `extractDocstrings` | Extract docstrings from code | `true` |
-| `trackCallSites` | Track call site locations | `true` |
-| `enableCentrality` | Compute graph centrality | `true` |
-| `enableBetweenness` | Compute betweenness centrality | `false` |
-| `enableChurn` | Mine git churn signals | `true` |
-| `enableIssueHistory` | Mine issue-history signals | `true` |
-| `enableCoChange` | Mine co-change signals | `true` |
-| `enableConfigRefs` | Add config/env reference edges | `true` |
-| `enableSqlRefs` | Add SQL reference edges | `true` |
-| `enableBuildContextRefs` | Add Docker/build context refs | `true` |
-| `enableStringImports` | Add string import edges | `true` |
-| `indexSubmodules` | Recurse into git submodules | `true` |
-| `indexEmbeddedRepos` | Recurse into standalone nested git repos hidden by the parent repo ignore rules when submodule indexing is enabled | `true` |
-| `dependenciesAllowlist` | Packages never flagged by dependency audit | `[]` |
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `version` | Config contract version. Use `2` for new files | `2` when Cartograph writes a file |
+| `languages` | Stable language-mode allowlist; empty means every supported mode | all |
+| `include` | Project-relative glob allowlist; omitted means all admitted paths | omitted |
+| `exclude` | Additional project-relative glob exclusions | `[]` plus built-in exclusions |
+| `maxFileSize` | Per-source byte ceiling, 1 byte through 32 MiB | runtime default |
+| `extractDocstrings` | Retain safe structural documentation evidence | `true` |
+| `trackCallSites` | Retain reference-site provenance | `true` |
+| `indexSubmodules` | Include Git submodules | `true` |
+| `indexEmbeddedRepos` | Include detected nested repositories; disabled when submodules are disabled | `true` |
+| `enableCentrality` | Compute native PageRank | `true` |
+| `enableBetweenness` | Compute bounded sampled Brandes betweenness | `true` |
+| `enableChurn` | Derive bounded Git churn evidence | `true` |
+| `enableCoChange` | Derive bounded Git co-change evidence | `true` |
+| `enableBiomarkers` | Compute deterministic code-health findings | `true` |
+| `enableIssueHistory` | Derive issue-tagged symbol history | `true` |
+| `enableConfigRefs` | Add configuration/environment-reference evidence | `true` |
+| `enableSqlRefs` | Add embedded SQL relation evidence | `true` |
+| `enableBuildContextRefs` | Add build/container context evidence | `true` |
+| `enableStringImports` | Add bounded import-shaped literal evidence | `true` |
+| `duplicateCodePartialClones` | Enable the wider Type-3 partial-clone band | `false` |
+| `duplicateCodeAllowlist` | Globs exempt from duplicate-code findings | `[]` |
 
-`indexEmbeddedRepos` covers nested repositories that are not registered git
-submodules, for example a checked-out SDK under a parent-ignored `vendor/` or
-`embedded/` directory. Set it to `false` when those nested repositories should
-stay outside the graph. `indexSubmodules: false` disables both submodule and
-embedded-repository recursion.
+V1 config files remain readable. For a legacy `version` below 2, Cartograph
+adds `.pyi` and `.toml` admission when an old explicit include list would
+otherwise hide v2's additive coverage. New configuration should use version 2.
 
-Cartograph also reads a root `.ignore` file as a local indexing override after
-Git discovery. Non-negated patterns hide matching paths from Cartograph, while
-negated patterns such as `!customer/` re-include local source that `.gitignore`
-hides. This does not change Git semantics and does not override explicit
-Cartograph `exclude` patterns or `.cartographignore` marker directories.
+Discovery follows Git-compatible ignore behavior, then applies explicit
+Cartograph policy. A `.cartographignore` marker excludes its directory tree; at
+the project root it opts the entire checkout out of indexing.
 
-A `.cartographignore` marker excludes its containing directory (and everything
-below it) from indexing. Placed at the **project root**, it opts the whole
-project out: `cartograph index` discovers zero files, and agents carrying the
-generated Cartograph instructions treat the root marker as "do not offer to
-initialize this project."
+Dependency audit allowlists are read from `dependenciesAllowlist` or
+`analysis.dependenciesAllowlist`. Architecture-layer policy uses `layers` and
+`layerExceptions`; see command help and emitted validation errors for its
+bounded schema.
 
-`maxFileSize` can also be set from the CLI. `cartograph admin init
---max-file-size <size>` writes it into the initial config; `admin index`,
-`admin sync`, `admin embed-only`, and `sync-if-dirty` accept the same flag as a
-transient one-run override. Values can be bytes or binary suffixes such as
-`512kb` or `10mb`. The default remains 5 MiB, and explicit config or CLI
-values are capped at 10 MiB.
+## PostgreSQL settings
 
-## Storage Options
-
-SQLite is default. PostgreSQL options live under `database` and require
-PostgreSQL 18 or newer:
-
-| Option | Description | Default |
-|---|---|---|
-| `database.provider` | `sqlite` or `postgres` | `sqlite` |
-| `database.url` | PostgreSQL 18+ connection URL | unset |
-| `database.schema` | PostgreSQL schema | auto-derived per project (`cartograph_<name>_<hash8>`) |
-| `database.pgvector` | `auto`, `off`, or `require` | `auto` |
-| `database.maxConnections` | PostgreSQL pool cap | `1` |
-| `database.connectionTimeoutSeconds` | PostgreSQL connection timeout | `30` |
-| `database.queryTimeoutMs` | Adapter wait timeout and `statement_timeout` | `120000` |
-| `database.idleTimeoutSeconds` | Close idle PostgreSQL connections | Bun default |
-| `database.maxLifetimeSeconds` | Recycle PostgreSQL connections | Bun default |
-| `database.ssl` | Force TLS on/off; prefer URL `sslmode=` for verification | URL/default |
-
-Environment fallbacks:
+Cartograph v2 is PostgreSQL-only. Storage selection is not a project-config
+option: use environment/private managed state.
 
 ```sh
-CARTOGRAPH_DATABASE_PROVIDER=postgres
-CARTOGRAPH_DATABASE_URL=postgres://user:pass@host:5432/cartograph
-DATABASE_URL=postgres://user:pass@host:5432/cartograph
-CARTOGRAPH_DATABASE_SCHEMA=cartograph
-CARTOGRAPH_DATABASE_PGVECTOR=auto
-CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS=120000
-CARTOGRAPH_DATABASE_CONNECTION_TIMEOUT_SECONDS=30
-CARTOGRAPH_DATABASE_MAX_CONNECTIONS=1
-CARTOGRAPH_DATABASE_SSL=true
+export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
+export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
+export CARTOGRAPH_DATABASE_MAX_CONNECTIONS=8
+export CARTOGRAPH_DATABASE_ACQUIRE_TIMEOUT_MS=5000
+export CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS=120000
+export CARTOGRAPH_DATABASE_REQUIRE_SSL=true
 ```
 
-For a local SQLite project, omit the `database` block or set
-`database.provider` to `sqlite`. To copy an existing PostgreSQL-backed graph
-back to SQLite and remove the PostgreSQL config, run
-`cartograph admin storage-migrate --database-provider sqlite`.
+| Variable | Bound/default |
+| --- | --- |
+| `CARTOGRAPH_DATABASE_URL` | Required for an external database; `postgres`/`postgresql` URL with a host |
+| `CARTOGRAPH_DATABASE_SCHEMA` | ASCII identifier, 1..63 bytes; default `cartograph` |
+| `CARTOGRAPH_DATABASE_MAX_CONNECTIONS` | 1..64; default 8 |
+| `CARTOGRAPH_DATABASE_ACQUIRE_TIMEOUT_MS` | 1..120000; default 5000 |
+| `CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS` | 1..600000; default 120000 |
+| `CARTOGRAPH_DATABASE_REQUIRE_SSL` | `true`/`false` or `1`/`0`; default false |
 
-See [Storage Backends](STORAGE-BACKENDS.md) for setup and migration.
+When `cartograph db start` owns the database, the runtime resolves the private
+project-local credential instead. There is no SQLite provider, importer,
+migration target, or pgvector-off mode.
 
-## LLM Options
+## Optional LLM tiers
 
-LLM tiers use OpenAI-compatible HTTP providers. The core graph does not require
-LLMs.
+The project `llm` object controls optional embeddings, reranking, generated
+summaries/roles, ask, and local chat. Structural graph and retrieval features
+remain usable without it.
 
-Use the wizard:
+```json
+{
+  "version": 2,
+  "llm": {
+    "enabled": true,
+    "summarize": true,
+    "summarizeEagerLimit": 600,
+    "minBodyLines": 4,
+    "minBodyLinesByKind": { "route": 1 },
+    "embeddingLlm": {
+      "provider": "openai-compat",
+      "endpoint": "http://127.0.0.1:8080",
+      "model": "jina-embeddings-v2-base-code"
+    },
+    "summarizeLlm": {
+      "provider": "openai-compat",
+      "endpoint": "http://127.0.0.1:8081",
+      "model": "/absolute/path/to/chat.gguf",
+      "concurrency": 1,
+      "summaryBatchSize": 4,
+      "llamaServerArgs": ["-c", "8192"]
+    },
+    "askLlm": {
+      "provider": "anthropic-api",
+      "endpoint": "https://api.anthropic.com",
+      "model": "claude-sonnet-4-6",
+      "apiKeyEnv": "ANTHROPIC_API_KEY"
+    }
+  }
+}
+```
+
+Tier keys retained from v1.1.33 are `embeddingLlm`, `summarizeLlm`, `localLlm`,
+`askLlm`, `classifyLlm`, and `rerankerLlm`. Ask/local/classify may fall back to
+the summarize tier. Chat providers are:
+
+- `openai-compat` for local or cloud OpenAI-compatible HTTP;
+- `anthropic-api` for the Anthropic Messages API;
+- `claude-bridge` for the bounded local Claude CLI bridge.
+
+Embedding and reranker tiers require OpenAI-compatible HTTP. Optional tier
+fields include bounded `timeoutMs`, `concurrency`, `summaryBatchSize`,
+`apiKeyEnv`, `claudeBin`, `llamaServerArgs`, and `externallyManaged` where
+applicable. Inline legacy keys are read for compatibility but environment
+lookup is the safe configuration.
+
+Use the native planner/wizard instead of hand-writing provider details:
 
 ```sh
 cartograph llm setup
-cartograph doctor --fix .
-cartograph backend start .
 cartograph llm smoke .
+cartograph doctor .
 ```
 
-Common backend choices are Ollama, llama-cpp `llama-server`, Apple MLX, LM
-Studio, vLLM, LocalAI, and cloud OpenAI-compatible providers.
+Planner presets cover detected endpoints, llama.cpp, Ollama, MLX/custom
+OpenAI-compatible endpoints, cloud OpenAI, hybrid Claude bridge, hybrid
+Anthropic API, and skip. `cartograph backend` manages only explicitly
+configured local `llama-server` processes; external providers remain
+operator-owned.
 
-Changes to the `llm` section are picked up live: a running `cartograph serve
---mcp` watches `.cartograph/config.json` and re-resolves on the next LLM tool
-call, so `cartograph admin llm-apply` (or a hand-edit by a separate process)
-takes effect without restarting the server.
-
-For cloud, two presets are first-class: `cloud-openai` (reads `OPENAI_API_KEY`
-from the environment) and `cloud-openrouter` (one key in front of hundreds of
-hosted models; set `OPENROUTER_API_KEY`, get one at <https://openrouter.ai/keys>).
-Apply either with `cartograph admin llm-apply --preset <id>` or pick it in the
-wizard. The OpenRouter preset configures the chat tiers only — pair a local or
-cloud embedding provider if you want semantic search:
-
-```json
-{
-  "llm": {
-    "summarizeLlm": {
-      "provider": "openai-compat",
-      "endpoint": "https://openrouter.ai/api",
-      "model": "google/gemini-2.5-flash-lite"
-    },
-    "askLlm": {
-      "provider": "openai-compat",
-      "endpoint": "https://openrouter.ai/api",
-      "model": "anthropic/claude-haiku-4.5"
-    },
-    "embeddingLlm": {
-      "provider": "openai-compat",
-      "endpoint": "http://localhost:8080",
-      "model": "jina-embeddings-v2-base-code"
-    }
-  }
-}
-```
-
-Any other OpenAI-compatible cloud (together.ai, fireworks.ai, groq, ...) works
-through the generic `cloud-openai-compat` template with an explicit `apiKey`.
-
-### Tuning a managed local llama-server
-
-`cartograph backend start` generates one `llama-server` process per unique local
-endpoint. Two per-tier knobs control the generated command line — useful when a
-large chat model loads but every decode hits a Metal/VRAM out-of-memory error
-because the default `--parallel` plus prompt cache overshoot the GPU budget:
-
-- **`concurrency`** — the cartograph-side concurrency override (also set via
-  `cartograph_admin({action: "llm-tune", tier, concurrency})`) now also drives
-  the backend's `--parallel N`, so lowering it reduces KV-slot and decode-buffer
-  memory.
-- **`llamaServerArgs`** — an array of extra flags appended verbatim to the start
-  command for that tier. Use it to cap prompt cache, context, or GPU offload
-  (`--cache-ram`, `-c`, `-ngl`, ...). An explicit `--parallel`/`-np` here
-  overrides the computed value entirely, leaving you in full control.
-
-```json
-{
-  "llm": {
-    "summarizeLlm": {
-      "provider": "openai-compat",
-      "endpoint": "http://localhost:8081",
-      "model": "/abs/path/to/chat-30b.Q4_K_M.gguf",
-      "concurrency": 1,
-      "llamaServerArgs": ["--cache-ram", "1024", "-c", "8192"]
-    }
-  }
-}
-```
-
-Because a managed backend is now identified by its **endpoint** (a port hosts one
-process), changing a tier's model or `llamaServerArgs` no longer orphans the
-running `llama-server`: `cartograph backend status`/`stop` keep tracking it by
-port. If you move a tier to a different port, the process bound to the old port
-is surfaced as `orphaned` so `cartograph backend stop` can reclaim it.
-
-> **Watch the per-slot context.** llama.cpp splits a server's **total** `-c`
-> across its `--parallel` slots, so each request only gets `-c ÷ --parallel`
-> tokens. Pin a small `-c` with a high `--parallel` (e.g. `-c 8192 --parallel 8`
-> → 1024/slot) and cartograph's summary prompts (up to ~3.3k tokens for file
-> summaries) start failing with HTTP 400 "exceeds context". Either leave `-c`
-> unset (llama.cpp then uses the model's native context) or keep
-> `-c ÷ --parallel ≥ 4096`. `cartograph doctor` probes each reachable chat/ask
-> backend's effective per-slot context and **warns** when it drops below that
-> floor — so you don't have to compute it by hand.
-
-### A/B-testing a chat model for one invocation
-
-To compare chat models without editing `config.json` or restarting a backend,
-`cartograph admin summarize` and `cartograph ask` (code mode) accept per-call
-`--model <path>` and `--endpoint <url>` overrides. They apply only to that one
-invocation — e.g. point `ask` at a second `llama-server` serving the candidate:
-
-```sh
-cartograph ask "how does retrieval work?" --endpoint http://localhost:9091 --model /models/candidate-B.gguf
-```
-
-`summarize` caches its summaries under the override model id, so each candidate's
-summaries are kept distinct. An `--endpoint` implies an `openai-compat` HTTP
-backend (point it at a cloud OpenAI-compatible API and supply its key via that
-tier's config if needed).
+The MCP process reloads LLM configuration at the next LLM operation. Agent-host
+MCP registration or binary replacement still requires a host restart.

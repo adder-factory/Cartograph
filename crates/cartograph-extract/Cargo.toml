@@ -9,21 +9,77 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+arborium-bash.workspace = true
+arborium-c.workspace = true
+arborium-c-sharp.workspace = true
+arborium-clojure.workspace = true
+arborium-commonlisp.workspace = true
+arborium-cpp.workspace = true
+arborium-css.workspace = true
+arborium-dart.workspace = true
+arborium-elixir.workspace = true
+arborium-fish.workspace = true
+arborium-fsharp.workspace = true
+arborium-glsl.workspace = true
+arborium-graphql.workspace = true
+arborium-groovy.workspace = true
+arborium-haskell.workspace = true
+arborium-hcl.workspace = true
+arborium-hlsl.workspace = true
+arborium-html.workspace = true
+arborium-java.workspace = true
+arborium-jsdoc.workspace = true
+arborium-json.workspace = true
+arborium-julia.workspace = true
+arborium-kotlin.workspace = true
+arborium-lean.workspace = true
+arborium-lua.workspace = true
+arborium-nix.workspace = true
+arborium-objc.workspace = true
+arborium-php.workspace = true
+arborium-powershell.workspace = true
+arborium-r.workspace = true
+arborium-regex.workspace = true
+arborium-rescript.workspace = true
+arborium-ruby.workspace = true
+arborium-scala.workspace = true
+arborium-solidity.workspace = true
+arborium-sql.workspace = true
+arborium-swift.workspace = true
+arborium-vb.workspace = true
+arborium-verilog.workspace = true
+arborium-yaml.workspace = true
 blake3.workspace = true
 cartograph-domain = { path = "../cartograph-domain" }
+globset.workspace = true
 ignore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+toml_edit.workspace = true
 tree-sitter.workspace = true
+tree-sitter-abap-sqry.workspace = true
+tree-sitter-arkts.workspace = true
+tree-sitter-astro-next.workspace = true
+tree-sitter-cuda.workspace = true
+tree-sitter-embedded-template.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-javascript.workspace = true
+tree-sitter-luau.workspace = true
+tree-sitter-ocaml.workspace = true
+tree-sitter-pascal.workspace = true
+tree-sitter-prisma-io.workspace = true
 tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
+tree-sitter-sfapex.workspace = true
 tree-sitter-typescript.workspace = true
 
 [dev-dependencies]
-serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+[build-dependencies]
+blake3.workspace = true
 
 [lints]
 workspace = true

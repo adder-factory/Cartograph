@@ -16,14 +16,16 @@ pub use native_extraction::{
     NativeExtractionStageConfig, NativeExtractionStageError, run_native_extraction_stage,
 };
 pub use native_pipeline::{
-    NativeGeneration, NativePipelineConfig, NativePipelineConfigError, NativePipelineDeadlines,
-    NativePipelineError, NativePipelineLimits, NativePipelineParallelism, NativePipelineReport,
-    NativeRetainedLimits, build_native_generation,
+    NativeGeneration, NativeParseCache, NativeParseCacheReport, NativePipelineConfig,
+    NativePipelineConfigError, NativePipelineDeadlines, NativePipelineError, NativePipelineLimits,
+    NativePipelineParallelism, NativePipelineReport, NativeRetainedLimits, ScipOverlayInput,
+    build_native_generation, build_native_generation_with_scip,
+    build_native_generation_with_scip_and_cache,
 };
 pub use prepare_scope::SupervisedPrepareError;
 pub use progress::{
-    CancellationReason, CancellationSignal, PipelineStage, ProgressError, ProgressReporter,
-    SupervisorContext, SupervisorState, SupervisorStatus,
+    CancellationReason, CancellationSignal, PipelineStage, PipelineStageTiming, ProgressError,
+    ProgressReporter, SupervisorContext, SupervisorState, SupervisorStatus,
 };
 pub use stage::{
     StageCancellation, StageCapacity, StageDeadlinePolicy, StageEnvelope, StageExecution,

@@ -32,6 +32,7 @@ impl ErrorCode {
 
 /// Stable machine-readable error values carried in JSON-RPC `error.data.code`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum StableErrorCode {
     ParseError,
     InvalidRequest,
@@ -50,27 +51,29 @@ pub enum StableErrorCode {
     AlreadyInitialized,
 }
 
+const STABLE_ERROR_CODE_NAMES: [&str; 15] = [
+    "parse_error",
+    "invalid_request",
+    "method_not_found",
+    "invalid_params",
+    "internal_error",
+    "server_not_initialized",
+    "request_timeout",
+    "input_too_large",
+    "output_too_large",
+    "duplicate_request_id",
+    "server_busy",
+    "request_cancelled",
+    "unknown_tool",
+    "unsupported_cursor",
+    "already_initialized",
+];
+
 impl StableErrorCode {
     /// Stable snake-case wire value.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ParseError => "parse_error",
-            Self::InvalidRequest => "invalid_request",
-            Self::MethodNotFound => "method_not_found",
-            Self::InvalidParams => "invalid_params",
-            Self::InternalError => "internal_error",
-            Self::ServerNotInitialized => "server_not_initialized",
-            Self::RequestTimeout => "request_timeout",
-            Self::InputTooLarge => "input_too_large",
-            Self::OutputTooLarge => "output_too_large",
-            Self::DuplicateRequestId => "duplicate_request_id",
-            Self::ServerBusy => "server_busy",
-            Self::RequestCancelled => "request_cancelled",
-            Self::UnknownTool => "unknown_tool",
-            Self::UnsupportedCursor => "unsupported_cursor",
-            Self::AlreadyInitialized => "already_initialized",
-        }
+        STABLE_ERROR_CODE_NAMES[self as usize]
     }
 }
 
@@ -134,11 +137,15 @@ impl ToolError {
         }
     }
 
-    pub(crate) const fn code(&self) -> ToolErrorCode {
+    /// Stable safe category for adapters composing or auditing tool calls.
+    #[must_use]
+    pub const fn code(&self) -> ToolErrorCode {
         self.code
     }
 
-    pub(crate) fn wire_message(&self) -> &str {
+    /// Agent-safe message, with internal failures fully redacted.
+    #[must_use]
+    pub fn wire_message(&self) -> &str {
         self.safe_message
             .as_deref()
             .unwrap_or("Tool execution failed")
@@ -167,6 +174,7 @@ impl Error for ToolError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigError {
     InvalidServerMetadata,
+    InvalidInstructions,
     InvalidProtocolVersion,
     InvalidInputLimit,
     InvalidOutputLimit,
@@ -180,6 +188,7 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidServerMetadata => "MCP server metadata is invalid",
+            Self::InvalidInstructions => "MCP server instructions are invalid",
             Self::InvalidProtocolVersion => "MCP protocol version is invalid",
             Self::InvalidInputLimit => "MCP input byte limit is invalid",
             Self::InvalidOutputLimit => "MCP output byte limit is invalid",

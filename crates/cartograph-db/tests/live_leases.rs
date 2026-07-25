@@ -6,8 +6,8 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, LeaseError, LeaseOwner, LeaseRequest, LeaseTarget, MigrationError,
-    NewProject, RecoverableGeneration,
+    CartographDatabase, GenerationRecoveryRequest, LeaseError, LeaseOwner, LeaseRequest,
+    LeaseTarget, MigrationError, NewProject, RecoverableGeneration,
 };
 use cartograph_domain::{
     ContentDigest, GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation,
@@ -32,22 +32,65 @@ const OPERATION_LEASES_MIGRATION_VERSION: i64 = 2;
 const COMPLETE_EDGE_KINDS_MIGRATION_VERSION: i64 = 3;
 const REFERENCE_EVIDENCE_MIGRATION_VERSION: i64 = 4;
 const DIGEST_VERSION_MIGRATION_VERSION: i64 = 5;
-const LATEST_MIGRATION_VERSION: i64 = 6;
-const LATER_MIGRATION_COUNT: u64 = 5;
-const EXPECTED_MIGRATIONS: [i64; 6] = [
+const BULK_RELATION_VALIDATION_MIGRATION_VERSION: i64 = 6;
+const V1_IMPORT_RETENTION_MIGRATION_VERSION: i64 = 7;
+const SEMANTIC_STORAGE_MIGRATION_VERSION: i64 = 8;
+const REFERENCE_MULTIPLICITY_MIGRATION_VERSION: i64 = 9;
+const EXACT_LOOKUP_MIGRATION_VERSION: i64 = 10;
+const GENERATION_SEARCH_RELATIONS_MIGRATION_VERSION: i64 = 11;
+const TYPED_SYMBOL_SEMANTICS_MIGRATION_VERSION: i64 = 12;
+const AGENT_EVIDENCE_MIGRATION_VERSION: i64 = 13;
+const AGENT_SESSION_MIGRATION_VERSION: i64 = 14;
+const STRUCTURAL_BRIDGE_MIGRATION_VERSION: i64 = 15;
+const MATERIALIZED_SIMILARITY_MIGRATION_VERSION: i64 = 16;
+const NATIVE_PARSE_CACHE_MIGRATION_VERSION: i64 = 17;
+const SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION: i64 = 18;
+const SYMBOL_PAGERANK_MIGRATION_VERSION: i64 = 19;
+const SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION: i64 = 20;
+const LATEST_MIGRATION_VERSION: i64 = SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION;
+const LATER_MIGRATION_COUNT: u64 = 19;
+const EXPECTED_MIGRATIONS: [i64; 20] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
     REFERENCE_EVIDENCE_MIGRATION_VERSION,
     DIGEST_VERSION_MIGRATION_VERSION,
-    LATEST_MIGRATION_VERSION,
+    BULK_RELATION_VALIDATION_MIGRATION_VERSION,
+    V1_IMPORT_RETENTION_MIGRATION_VERSION,
+    SEMANTIC_STORAGE_MIGRATION_VERSION,
+    REFERENCE_MULTIPLICITY_MIGRATION_VERSION,
+    EXACT_LOOKUP_MIGRATION_VERSION,
+    GENERATION_SEARCH_RELATIONS_MIGRATION_VERSION,
+    TYPED_SYMBOL_SEMANTICS_MIGRATION_VERSION,
+    AGENT_EVIDENCE_MIGRATION_VERSION,
+    AGENT_SESSION_MIGRATION_VERSION,
+    STRUCTURAL_BRIDGE_MIGRATION_VERSION,
+    MATERIALIZED_SIMILARITY_MIGRATION_VERSION,
+    NATIVE_PARSE_CACHE_MIGRATION_VERSION,
+    SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION,
+    SYMBOL_PAGERANK_MIGRATION_VERSION,
+    SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
 ];
-const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 5] = [
+const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 19] = [
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
     REFERENCE_EVIDENCE_MIGRATION_VERSION,
     DIGEST_VERSION_MIGRATION_VERSION,
-    LATEST_MIGRATION_VERSION,
+    BULK_RELATION_VALIDATION_MIGRATION_VERSION,
+    V1_IMPORT_RETENTION_MIGRATION_VERSION,
+    SEMANTIC_STORAGE_MIGRATION_VERSION,
+    REFERENCE_MULTIPLICITY_MIGRATION_VERSION,
+    EXACT_LOOKUP_MIGRATION_VERSION,
+    GENERATION_SEARCH_RELATIONS_MIGRATION_VERSION,
+    TYPED_SYMBOL_SEMANTICS_MIGRATION_VERSION,
+    AGENT_EVIDENCE_MIGRATION_VERSION,
+    AGENT_SESSION_MIGRATION_VERSION,
+    STRUCTURAL_BRIDGE_MIGRATION_VERSION,
+    MATERIALIZED_SIMILARITY_MIGRATION_VERSION,
+    NATIVE_PARSE_CACHE_MIGRATION_VERSION,
+    SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION,
+    SYMBOL_PAGERANK_MIGRATION_VERSION,
+    SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
 ];
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -103,6 +146,15 @@ async fn assert_stale_takeover(fixture: &LeaseFixture<'_>) {
         ))
         .await;
     assert!(matches!(blocked, Err(LeaseError::Busy)));
+    let cross_operation = fixture
+        .database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(fixture.project.clone(), ProjectOperation::Hook, None),
+            owner(303, "cross-operation"),
+            LEASE_DURATION,
+        ))
+        .await;
+    assert!(matches!(cross_operation, Err(LeaseError::Busy)));
     let status = match fixture.database.lease_status(&target).await {
         Ok(Some(status)) => status,
         Ok(None) => panic!("active lease was not observable"),
@@ -183,6 +235,13 @@ async fn assert_v1_to_latest_upgrade(
     pool: &sqlx_postgres::PgPool,
     schema: &str,
 ) {
+    remove_post_v12_schema(pool, schema).await;
+    remove_typed_symbol_semantics_schema(pool, schema).await;
+    remove_generation_search_relations_schema(pool, schema).await;
+    remove_exact_lookup_schema(pool, schema).await;
+    remove_reference_multiplicity_schema(pool, schema).await;
+    remove_semantic_storage_schema(pool, schema).await;
+    remove_v1_import_retention_schema(pool, schema).await;
     restore_pre_v6_relation_constraints(pool, schema).await;
     let drop_leases = format!(r#"DROP TABLE "{schema}"."project_operation_leases""#);
     if let Err(error) = query(AssertSqlSafe(drop_leases)).execute(pool).await {
@@ -231,6 +290,160 @@ async fn assert_v1_to_latest_upgrade(
             if report.applied_versions.is_empty()
                 && report.current_version == LATEST_MIGRATION_VERSION
     ));
+}
+
+async fn remove_post_v12_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(r#"DROP TABLE "{schema}"."summary_priority_queue""#),
+        format!(r#"DROP INDEX "{schema}"."symbols_pagerank_idx""#),
+        format!(r#"ALTER TABLE "{schema}"."symbols" DROP COLUMN pagerank"#),
+        format!(r#"DROP TABLE "{schema}"."issue_history_refreshes""#),
+        format!(r#"DROP TABLE "{schema}"."symbol_issues""#),
+        format!(r#"DROP TABLE "{schema}"."native_parse_cache""#),
+        format!(r#"DROP TABLE "{schema}"."symbol_similarity_edges""#),
+        format!(r#"DROP TABLE "{schema}"."symbol_similarity_builds""#),
+        format!(r#"DROP INDEX "{schema}"."search_documents_one_symbol_document_idx""#),
+        format!(r#"DROP INDEX "{schema}"."symbols_betweenness_idx""#),
+        format!(r#"ALTER TABLE "{schema}"."symbols" DROP COLUMN betweenness"#),
+        format!(r#"DROP TABLE "{schema}"."mcp_tool_calls""#),
+        format!(r#"DROP TABLE "{schema}"."mcp_sessions""#),
+        format!(r#"DROP TABLE "{schema}"."mcp_macros""#),
+        format!(r#"DROP TABLE "{schema}"."agent_artifacts""#),
+        format!(r#"DROP TABLE "{schema}"."file_cochanges""#),
+        format!(r#"DROP TABLE "{schema}"."file_history""#),
+        format!(r#"DROP TABLE "{schema}"."symbol_coverage""#),
+        format!(r#"DROP TABLE "{schema}"."coverage_sources""#),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove post-v12 migration fixture: {error}");
+        }
+    }
+}
+
+async fn remove_typed_symbol_semantics_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(r#"DROP INDEX "{schema}"."symbols_exported_idx""#),
+        format!(
+            r#"ALTER TABLE "{schema}"."symbols"
+                DROP CONSTRAINT symbols_visibility_check,
+                DROP COLUMN visibility,
+                DROP COLUMN exported,
+                DROP COLUMN default_export,
+                DROP COLUMN async_symbol,
+                DROP COLUMN static_member,
+                DROP COLUMN declaration_only"#,
+        ),
+        format!(
+            r#"ALTER TABLE "{schema}"."index_generations"
+                DROP CONSTRAINT index_generations_digest_version_check,
+                ADD CONSTRAINT index_generations_digest_version_check
+                    CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3))"#,
+        ),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove typed-symbol migration fixture: {error}");
+        }
+    }
+}
+
+async fn remove_generation_search_relations_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(r#"DROP TABLE "{schema}"."generation_search_relations""#),
+        format!(r#"DROP INDEX "{schema}"."index_generations_global_identity_idx""#),
+        format!(
+            r#"CREATE INDEX search_documents_bm25_idx
+                ON "{schema}"."search_documents"
+                USING bm25 (
+                    id,
+                    project_id,
+                    generation_id,
+                    document_id,
+                    file_id,
+                    symbol_id,
+                    path,
+                    language,
+                    document_kind,
+                    (qualified_name::pdb.source_code),
+                    (code::pdb.source_code),
+                    natural_text,
+                    metadata
+                )
+                WITH (key_field = 'id')"#,
+        ),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove generation-search migration fixture: {error}");
+        }
+    }
+}
+
+async fn remove_exact_lookup_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(r#"DROP INDEX "{schema}"."symbols_simple_name_idx""#),
+        format!(r#"DROP INDEX "{schema}"."references_exact_name_site_idx""#),
+        format!(r#"ALTER TABLE "{schema}"."symbols" DROP COLUMN simple_name"#),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove exact-lookup migration fixture: {error}");
+        }
+    }
+}
+
+async fn remove_reference_multiplicity_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(
+            r#"ALTER TABLE "{schema}"."references"
+                DROP COLUMN site_count,
+                DROP COLUMN span_precision"#,
+        ),
+        format!(r#"ALTER TABLE "{schema}"."edges" DROP COLUMN site_count"#),
+        format!(
+            r#"ALTER TABLE "{schema}"."v1_import_runs"
+                DROP COLUMN source_edge_sites,
+                DROP COLUMN source_reference_sites"#,
+        ),
+        format!(
+            r#"ALTER TABLE "{schema}"."index_generations"
+                DROP CONSTRAINT index_generations_digest_version_check,
+                ADD CONSTRAINT index_generations_digest_version_check
+                    CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2))"#,
+        ),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove reference-multiplicity migration fixture: {error}");
+        }
+    }
+}
+
+async fn remove_semantic_storage_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(r#"DROP TABLE "{schema}"."document_embeddings""#),
+        format!(r#"DROP FUNCTION "{schema}"."validate_document_embedding"()"#),
+        format!(r#"DROP TABLE "{schema}"."embedding_models""#),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove semantic-storage migration fixture: {error}");
+        }
+    }
+}
+
+async fn remove_v1_import_retention_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(r#"DROP TABLE "{schema}"."v1_import_checkpoints""#),
+        format!(r#"DROP TABLE "{schema}"."v1_import_runs""#),
+        format!(r#"DROP INDEX "{schema}"."index_generations_retention_idx""#),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove v1 import/retention migration fixture: {error}");
+        }
+    }
 }
 
 async fn restore_pre_v6_relation_constraints(pool: &sqlx_postgres::PgPool, schema: &str) {
@@ -373,7 +586,7 @@ async fn assert_upgraded_v1_reference_fixture(
     let generation = GenerationId::parse(V1_GENERATION_ID)
         .unwrap_or_else(|error| panic!("v1 generation ID was invalid: {error}"));
     let recovered = database
-        .recover_generation(&project, &generation)
+        .recover_generation(GenerationRecoveryRequest::new(&project, &generation))
         .await
         .unwrap_or_else(|error| panic!("v1 ready generation recovery failed: {error}"));
     assert!(matches!(

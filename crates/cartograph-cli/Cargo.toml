@@ -14,19 +14,30 @@ name = "cartograph"
 path = "src/main.rs"
 
 [dependencies]
+blake3.workspace = true
 cartograph-agent = { path = "../cartograph-agent" }
 cartograph-config = { path = "../cartograph-config" }
 cartograph-db = { path = "../cartograph-db" }
 cartograph-domain = { path = "../cartograph-domain" }
+cartograph-llm = { path = "../cartograph-llm" }
 cartograph-mcp = { path = "../cartograph-mcp" }
 cartograph-search = { path = "../cartograph-search" }
 clap.workspace = true
+notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+futures-util.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml_edit.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+sqlx-core.workspace = true

@@ -1,32 +1,17 @@
-# Dependencies
-node_modules/
-
-# Build output. dist/ is NOT shipped via npm install -g — the package
-# ships `src/` directly and the `cartograph` bin points at
-# `src/bin/cartograph.ts` with a `#!/usr/bin/env bun` shebang. Bun
-# transpiles the TypeScript on demand, no install-time build step
-# needed (which sidesteps the npm-9+-doesn't-install-devDeps-on-git-
-# install bug). `npm run build` still works for type-checking + dist
-# generation for library consumers; dist/ stays local.
-dist/
-
-# Rust workspace output. Cartograph v2 is built from the root Cargo
-# workspace; Cargo.lock is intentionally tracked because the CLI/server are
-# applications rather than a reusable library distribution.
+# Rust workspace output. Cargo.lock is intentionally tracked because the
+# CLI/server are applications rather than a reusable library distribution.
 /target/
 
-# Standalone bundle staging and archives produced by
-# `bun run build:standalone`.
+# Disposable v1 build/dependency outputs may remain in a long-lived checkout
+# during the v2 cutover. They are never Rust release inputs.
+/dist/
+/node_modules/
+/.stryker-tmp/
+/.flake-log
+/__tests__/evaluation/results/
+
+# Native archive staging produced by the Rust release scripts.
 release/
-
-# Docker-extracted libcgshim artifact — produced by
-# `docker build -f docker/libcgshim/Dockerfile .` + `docker cp`.
-# Cross-platform prebuilts ship via the build-libcgshim CI workflow as
-# release assets; the local extraction directory is for development
-# iteration only.
-docker/libcgshim/build/
-
-.cmem
 
 # IDE
 .idea/
@@ -44,7 +29,6 @@ Thumbs.db
 
 # SonarQube scanner working directory
 /.scannerwork/
-.nyc_output/
 
 # Environment
 .env
@@ -57,14 +41,6 @@ Thumbs.db
 
 # Logs
 *.log
-npm-debug.log*
-
-# TypeScript build info
-*.tsbuildinfo
-
-# SQLite WAL mode files
-*.db-wal
-*.db-shm
 
 # Local Claude settings
 .claude/settings.local.json
@@ -76,27 +52,9 @@ npm-debug.log*
 # Cartograph data directories (in test projects)
 .cartograph/
 
-test_frameworks
-
-# Test language repos for manual testing
-test-languages/
-
-# Eval-harness reports (accumulate per-run; keep ignored, baseline
-# reports get checked in explicitly when needed)
-__tests__/evaluation/results/
-
-# Synthesised large-scale fixture for the B7 latency-budget eval.
-# Regenerated on demand via `npm run eval:large`; never committed.
-__tests__/evaluation/fixtures/large/
-
 # Local archive of stale design docs / session memos — kept on disk
 # for reference but never pushed.
 docs/archive/
-
-nul
-
-# Flaky-test survivor log (scripts/test-parallel.sh RETRY pass)
-.flake-log
 CLAUDE.local.md
 AGENTS.local.md
 .claude/skills/cartograph/SKILL.md

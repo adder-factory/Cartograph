@@ -9,7 +9,9 @@ use std::{
 use cartograph_domain::NormalizedPath;
 use thiserror::Error;
 
-use crate::{SnapshotError, SourceLimits, SourceSnapshot, snapshot::StreamedSource};
+use crate::{
+    DiscoveryPolicy, SnapshotError, SourceLimits, SourceSnapshot, snapshot::StreamedSource,
+};
 
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_UTF8_CARRY_BYTES: usize = 3;
@@ -18,6 +20,7 @@ const MAX_UTF8_CARRY_BYTES: usize = 3;
 #[derive(Clone)]
 pub struct SourceRoot {
     canonical: Arc<PathBuf>,
+    discovery_policy: DiscoveryPolicy,
 }
 
 /// Validated size policy plus a caller-owned cooperative read-cancellation probe.
@@ -36,6 +39,15 @@ impl<Cancel> SourceReadOptions<Cancel> {
 impl SourceRoot {
     /// Resolve and validate one directory root before any project-relative reads.
     pub fn open(root: &Path) -> Result<Self, SourceReadError> {
+        let policy = DiscoveryPolicy::v1_defaults().map_err(|_| SourceReadError::InvalidPolicy)?;
+        Self::open_with_policy(root, policy)
+    }
+
+    /// Resolve a directory root with one validated project discovery policy.
+    pub fn open_with_policy(
+        root: &Path,
+        discovery_policy: DiscoveryPolicy,
+    ) -> Result<Self, SourceReadError> {
         let canonical = fs::canonicalize(root).map_err(|_| SourceReadError::RootUnavailable)?;
         let metadata = fs::metadata(&canonical).map_err(|_| SourceReadError::RootUnavailable)?;
         if !metadata.is_dir() {
@@ -43,6 +55,7 @@ impl SourceRoot {
         }
         Ok(Self {
             canonical: Arc::new(canonical),
+            discovery_policy,
         })
     }
 
@@ -71,8 +84,11 @@ impl SourceRoot {
         if cancelled() {
             return Err(SourceReadError::Cancelled);
         }
-        if !SourceSnapshot::supports_path(path) {
-            return Err(SourceReadError::InvalidSnapshot);
+        if !self.discovery_policy.supports_path(path.as_str()) {
+            return Err(SourceReadError::UnsupportedLanguage);
+        }
+        if self.discovery_policy.excludes(path.as_str()) {
+            return Err(SourceReadError::UnsupportedLanguage);
         }
         let target = self.resolve_target(path)?;
         let target_metadata =
@@ -126,12 +142,22 @@ impl SourceRoot {
         let source = utf8.finish()?;
         let content_hash =
             cartograph_domain::ContentDigest::from_bytes(*hasher.finalize().as_bytes());
-        SourceSnapshot::from_streamed_source(
+        let snapshot = SourceSnapshot::from_streamed_source(
             path.as_str(),
             StreamedSource::new(source, content_hash),
             limits,
         )
-        .map_err(map_snapshot_error)
+        .map_err(map_snapshot_error)?;
+        if !self.discovery_policy.allows_language(snapshot.language()) {
+            return Err(SourceReadError::UnsupportedLanguage);
+        }
+        Ok(snapshot)
+    }
+
+    /// Whether the project configuration exempts this indexed path from clone biomarkers.
+    #[must_use]
+    pub fn duplicate_code_allowlisted(&self, path: &str) -> bool {
+        self.discovery_policy.duplicate_code_allowlisted(path)
     }
 
     fn resolve_target(&self, path: &NormalizedPath) -> Result<PathBuf, SourceReadError> {
@@ -145,6 +171,10 @@ impl SourceRoot {
 
     pub(crate) fn canonical_path(&self) -> &Path {
         self.canonical.as_path()
+    }
+
+    pub(crate) const fn discovery_policy(&self) -> &DiscoveryPolicy {
+        &self.discovery_policy
     }
 }
 
@@ -163,6 +193,9 @@ pub enum SourceReadError {
     /// The configured root could not be canonicalized as a directory.
     #[error("native source root is unavailable")]
     RootUnavailable,
+    /// A built-in or project exclusion policy could not be compiled.
+    #[error("native source discovery policy is invalid")]
+    InvalidPolicy,
     /// The requested source could not be opened as a canonical path.
     #[error("native source file is unavailable")]
     FileUnavailable,
@@ -181,7 +214,11 @@ pub enum SourceReadError {
     /// A bounded source buffer could not be reserved without aborting the process.
     #[error("native source buffer could not be reserved")]
     ResourceLimit,
-    /// The bounded bytes failed path, language, or UTF-8 snapshot validation.
+    /// The path was a discovery candidate, but bounded content classification
+    /// did not select a native-indexable language.
+    #[error("native source language is unsupported")]
+    UnsupportedLanguage,
+    /// The bounded bytes failed path or UTF-8 snapshot validation.
     #[error("native source snapshot is invalid")]
     InvalidSnapshot,
 }
@@ -189,9 +226,8 @@ pub enum SourceReadError {
 fn map_snapshot_error(error: SnapshotError) -> SourceReadError {
     match error {
         SnapshotError::SourceTooLarge => SourceReadError::SourceTooLarge,
-        SnapshotError::InvalidPath
-        | SnapshotError::UnsupportedLanguage
-        | SnapshotError::InvalidUtf8 => SourceReadError::InvalidSnapshot,
+        SnapshotError::UnsupportedLanguage => SourceReadError::UnsupportedLanguage,
+        SnapshotError::InvalidPath | SnapshotError::InvalidUtf8 => SourceReadError::InvalidSnapshot,
         SnapshotError::ResourceLimit => SourceReadError::ResourceLimit,
     }
 }

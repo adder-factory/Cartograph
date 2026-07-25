@@ -148,6 +148,82 @@ pub(super) fn capture_commonjs_require(
     emit_commonjs_module_reference(builder, require)
 }
 
+pub(super) fn capture_dynamic_import_binding(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    name_node: Node<'_>,
+    value: Option<Node<'_>>,
+) -> Result<(), ExtractError> {
+    if !is_javascript_family(builder.context.snapshot.language()) {
+        return Ok(());
+    }
+    let Some((call, selected_member)) = dynamic_import_binding_shape(value) else {
+        return Ok(());
+    };
+    let Some(source) = dynamic_import_source(builder, call) else {
+        return Ok(());
+    };
+    let module_specifier = builder.context.owned_unquoted_text(source)?;
+    match name_node.kind() {
+        "identifier" | "property_identifier" => {
+            let local_name = builder.context.owned_text(name_node)?;
+            let (kind, imported_name, span_node) = match selected_member {
+                Some(member) => (
+                    ImportBindingKind::Named,
+                    builder.context.owned_unquoted_text(member)?,
+                    member,
+                ),
+                None => (ImportBindingKind::Namespace, "*".to_owned(), name_node),
+            };
+            builder.emit_import_binding(ExtractedImportBinding {
+                kind,
+                module_specifier,
+                imported_name,
+                local_name,
+                span: span_for(span_node)?,
+            })?;
+        }
+        "object_pattern" if selected_member.is_none() => {
+            capture_commonjs_destructuring(builder, name_node, &module_specifier)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn dynamic_import_binding_shape(value: Option<Node<'_>>) -> Option<(Node<'_>, Option<Node<'_>>)> {
+    let mut node = value?;
+    for _ in 0..8 {
+        match node.kind() {
+            "await_expression"
+            | "as_expression"
+            | "satisfies_expression"
+            | "type_assertion"
+            | "parenthesized_expression"
+            | "non_null_expression" => {
+                node = node
+                    .child_by_field_name("expression")
+                    .or_else(|| node.child_by_field_name("value"))
+                    .or_else(|| node.named_child(0))?;
+            }
+            "member_expression" => {
+                let object = node.child_by_field_name("object")?;
+                let property = node.child_by_field_name("property")?;
+                return dynamic_import_source_node(object).map(|call| (call, Some(property)));
+            }
+            "call_expression" => {
+                return dynamic_import_source_node(node).map(|call| (call, None));
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn dynamic_import_source_node(call: Node<'_>) -> Option<Node<'_>> {
+    let function = call.child_by_field_name("function")?;
+    (call.kind() == "call_expression" && function.kind() == "import").then_some(call)
+}
+
 fn parse_commonjs_require<'tree>(
     builder: &mut ExtractionBuilder<'_, '_>,
     value: Option<Node<'tree>>,
@@ -218,6 +294,118 @@ pub(super) fn is_static_commonjs_binding_call(
     };
     matches!(name.kind(), "identifier" | "property_identifier")
         || (name.kind() == "object_pattern" && selected_member.is_none())
+}
+
+/// Emit an exact module reference for a statically named `import()` call.
+///
+/// Returns true for every JavaScript-family dynamic-import call, including
+/// non-literal expressions, so the generic call extractor does not retain the
+/// reserved keyword as a misleading callable named `import`.
+pub(super) fn capture_dynamic_import(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    call: Node<'_>,
+) -> Result<bool, ExtractError> {
+    if call.kind() != "call_expression"
+        || !is_javascript_family(builder.context.snapshot.language())
+    {
+        return Ok(false);
+    }
+    let Some(function) = call.child_by_field_name("function") else {
+        return Ok(false);
+    };
+    if builder.context.text(function).trim() != "import" {
+        return Ok(false);
+    }
+    let Some(source) = dynamic_import_source(builder, call) else {
+        return Ok(true);
+    };
+    let module_specifier = builder.context.owned_unquoted_text(source)?;
+    references::push_reference(
+        builder,
+        PendingReference {
+            owner: None,
+            name: module_specifier.clone(),
+            kind: ReferenceKind::Imports,
+            node: call,
+        },
+    )?;
+    if let Some(member) = dynamic_import_selected_member(call) {
+        let imported_name = builder.context.owned_unquoted_text(member)?;
+        builder.emit_import_binding(ExtractedImportBinding {
+            kind: ImportBindingKind::Named,
+            module_specifier,
+            imported_name: imported_name.clone(),
+            local_name: imported_name.clone(),
+            span: span_for(member)?,
+        })?;
+        emit_imported_name_reference(builder, imported_name, member)?;
+    }
+    Ok(true)
+}
+
+fn dynamic_import_source<'tree>(
+    builder: &ExtractionBuilder<'_, '_>,
+    call: Node<'tree>,
+) -> Option<Node<'tree>> {
+    dynamic_import_source_node(call)?;
+    let arguments = call.child_by_field_name("arguments")?;
+    if arguments.named_child_count() != 1 {
+        return None;
+    }
+    static_dynamic_import_source(arguments.named_child(0)?)
+        .filter(|source| !builder.context.text(*source).trim().is_empty())
+}
+
+fn dynamic_import_selected_member(call: Node<'_>) -> Option<Node<'_>> {
+    let mut expression = call;
+    for _ in 0..8 {
+        let parent = expression.parent()?;
+        if parent.kind() == "member_expression" && field_matches(parent, "object", expression) {
+            return parent.child_by_field_name("property").filter(|property| {
+                matches!(
+                    property.kind(),
+                    "identifier" | "property_identifier" | "type_identifier"
+                )
+            });
+        }
+        if matches!(
+            parent.kind(),
+            "await_expression"
+                | "as_expression"
+                | "satisfies_expression"
+                | "type_assertion"
+                | "parenthesized_expression"
+                | "non_null_expression"
+        ) {
+            expression = parent;
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+fn static_dynamic_import_source(mut node: Node<'_>) -> Option<Node<'_>> {
+    for _ in 0..8 {
+        match node.kind() {
+            "string" => return Some(node),
+            "template_string" => {
+                return (!has_child_kind(node, "template_substitution")).then_some(node);
+            }
+            "as_expression"
+            | "satisfies_expression"
+            | "type_assertion"
+            | "parenthesized_expression"
+            | "non_null_expression" => {
+                node = node
+                    .child_by_field_name("expression")
+                    .or_else(|| node.child_by_field_name("value"))
+                    .or_else(|| node.named_child(0))?;
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn commonjs_binding_declarator(call: Node<'_>) -> Option<(Node<'_>, Option<Node<'_>>)> {
@@ -439,6 +627,30 @@ pub(super) fn emit_export_alias(
             node: alias.reference_node,
         },
     )
+}
+
+pub(super) fn emit_namespace_reexport(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    namespace_node: Node<'_>,
+    public_node: Node<'_>,
+    module_specifier: String,
+) -> Result<(), ExtractError> {
+    let public_name = builder.context.owned_unquoted_text(public_node)?;
+    let alias = ExportAlias {
+        public_name: public_name.clone(),
+        local_name: public_name.clone(),
+        span_node: namespace_node,
+        reference_node: public_node,
+        source: None,
+    };
+    emit_export_alias_symbol(builder, &alias)?;
+    builder.emit_import_binding(ExtractedImportBinding {
+        kind: ImportBindingKind::ReExportNamespace,
+        module_specifier,
+        imported_name: "*".to_owned(),
+        local_name: public_name,
+        span: span_for(public_node)?,
+    })
 }
 
 fn emit_export_alias_symbol(

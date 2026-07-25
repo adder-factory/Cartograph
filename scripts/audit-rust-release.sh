@@ -40,4 +40,25 @@ if cargo tree --locked --workspace --all-features -e normal | grep -Eiq '(^|[-_ 
   exit 1
 fi
 
-echo "[rust-release] archive allowlist, privacy, license boundary, and no-SQLite checks passed"
+TRACKED_LEGACY="$({
+  git ls-files '*.ts' '*.tsx' '*.js' '*.jsx' '*.mts' '*.cts' '*.mjs' '*.cjs'
+} | grep -Ev '^(crates/cartograph-indexer/tests/fixtures/native_corpus_v1/|crates/cartograph-extract/tests/fixtures/v1_1_33/|docs/test-beds/)' || true)"
+if [[ -n "$TRACKED_LEGACY" ]]; then
+  echo "Cartograph v2 tracks executable legacy runtime source outside frozen fixtures" >&2
+  printf '%s\n' "$TRACKED_LEGACY" >&2
+  exit 1
+fi
+
+for LEGACY_MANIFEST in package.json package-lock.json bun.lock bunfig.toml tsconfig.json biome.json; do
+  if git ls-files --error-unmatch "$LEGACY_MANIFEST" >/dev/null 2>&1; then
+    echo "Cartograph v2 tracks legacy runtime manifest $LEGACY_MANIFEST" >&2
+    exit 1
+  fi
+done
+
+if git ls-files 'src/**' '__tests__/**' 'bench/**' | grep -q .; then
+  echo "Cartograph v2 still tracks the executable v1 source/test/bench tree" >&2
+  exit 1
+fi
+
+echo "[rust-release] archive allowlist, privacy, license, native-runtime, and no-SQLite checks passed"

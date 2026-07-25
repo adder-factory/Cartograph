@@ -1,0 +1,1944 @@
+[
+  {
+    "name": "cartograph_admin",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "init",
+            "uninit",
+            "unlock",
+            "sync",
+            "biomarkers-refresh",
+            "index",
+            "embed-only",
+            "migrate",
+            "storage-migrate",
+            "build-similarity-edges",
+            "prune-store",
+            "embedding-audit",
+            "embedding-cleanup",
+            "scip-export",
+            "scip-import",
+            "summarize",
+            "embed",
+            "classify",
+            "install-models",
+            "doctor",
+            "llm-plan",
+            "llm-apply",
+            "llm-tune"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "databaseProvider": {
+          "type": "string"
+        },
+        "databaseUrl": {
+          "type": "string"
+        },
+        "databaseSchema": {
+          "type": "string"
+        },
+        "databasePgvector": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off",
+            "require"
+          ]
+        },
+        "databaseMaxConnections": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "databaseQueryTimeoutMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "databaseConnectionTimeoutSeconds": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "databaseSsl": {
+          "type": "boolean"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "clearParseCache": {
+          "type": "boolean"
+        },
+        "clearParseCacheLanguage": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "minScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "maxAgeDays": {
+          "type": "number",
+          "minimum": 0
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "summarizeLimit": {
+          "type": "number"
+        },
+        "out": {
+          "type": "string"
+        },
+        "in": {
+          "type": "string"
+        },
+        "minimal": {
+          "type": "boolean"
+        },
+        "dir": {
+          "type": "string"
+        },
+        "writeConfig": {
+          "type": "boolean"
+        },
+        "skipProjectChecks": {
+          "type": "boolean"
+        },
+        "fix": {
+          "type": "boolean"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "embed",
+            "chat",
+            "ask",
+            "reranker"
+          ]
+        },
+        "projectPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_affected",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "filter": {
+          "type": "string"
+        },
+        "includeCommands": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_ask",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "code",
+            "local_chat"
+          ]
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "retrieveK": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 30
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64000
+        },
+        "system": {
+          "type": "string"
+        },
+        "maxTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_at_range",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "diff": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "startLine": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "startLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "endLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "file",
+              "startLine",
+              "endLine"
+            ]
+          }
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "compact": {
+          "type": "boolean"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "name",
+              "kind",
+              "path",
+              "line",
+              "endLine",
+              "signature"
+            ]
+          }
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_biomarkers",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "symbol",
+            "ranked",
+            "stats"
+          ]
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "symbols": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "biomarker": {
+          "type": "string",
+          "enum": [
+            "large_method",
+            "complex_method",
+            "nested_complexity",
+            "complex_conditional",
+            "brain_method",
+            "long_parameter_list",
+            "magic_number",
+            "hardcoded_url",
+            "recently_grew",
+            "stale_doc",
+            "unused_export",
+            "god_class",
+            "feature_envy",
+            "illegal_import",
+            "secrets_handling",
+            "low_coverage",
+            "duplicate_code",
+            "accidental_quadratic",
+            "empty_catch",
+            "sync_io_in_async",
+            "forof_await",
+            "ts_any_cast",
+            "ts_ignore_suppression",
+            "agent_debug_log",
+            "incomplete_marker",
+            "dynamic_eval",
+            "insecure_hash",
+            "random_for_security",
+            "http_no_timeout",
+            "sql_string_concat",
+            "unsafe_json_parse",
+            "env_no_validation",
+            "empty_function_body"
+          ]
+        },
+        "minSeverity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "json"
+          ]
+        },
+        "minCentrality": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minMetric": {
+          "type": "number"
+        },
+        "maxMetric": {
+          "type": "number"
+        },
+        "excludeFile": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_blame",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "perCommitPeers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "symbol"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_changed_since",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "projectPath": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_compare_to_ref",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pathFilter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "includeBiomarkers": {
+          "type": "boolean"
+        },
+        "findingsDelta": {
+          "type": "boolean"
+        },
+        "includeEdges": {
+          "type": "boolean"
+        },
+        "suppressLineRangeOnly": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_context",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "maxNodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "code": {
+          "type": "boolean"
+        },
+        "includeCode": {
+          "type": "boolean"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "json",
+            "plan",
+            "handoff"
+          ]
+        },
+        "explain": {
+          "type": "boolean"
+        },
+        "retrievalMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "deterministic",
+            "hybrid"
+          ]
+        },
+        "workingTree": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "live",
+            "off"
+          ]
+        },
+        "localLearning": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off"
+          ]
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_coverage",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "symbol",
+            "ranked",
+            "stats",
+            "load",
+            "refresh",
+            "sources",
+            "drop"
+          ]
+        },
+        "via": {
+          "type": "string",
+          "enum": [
+            "rule",
+            "llm",
+            "auto"
+          ]
+        },
+        "reportPath": {
+          "type": "string"
+        },
+        "clear": {
+          "type": "boolean"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "minCentrality": {
+          "type": "number"
+        },
+        "maxPct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "pathFilter": {
+          "type": "string"
+        },
+        "includeTests": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_dead_code",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "via": {
+          "type": "string",
+          "enum": [
+            "rule",
+            "llm",
+            "auto"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "static",
+            "judge"
+          ]
+        },
+        "maxCandidates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "dead",
+            "live",
+            "uncertain",
+            "all"
+          ]
+        },
+        "excludeFixtures": {
+          "type": "boolean"
+        },
+        "includeTests": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_deps",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "unused",
+            "coverage"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_digest",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_entry_points",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "enum": [
+            "routes",
+            "cli",
+            "mcp_tools",
+            "cli_files",
+            "public_exports"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_explore",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "summary": {
+          "type": "boolean"
+        },
+        "since": {
+          "type": "string"
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_files",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "tree",
+            "flat",
+            "grouped",
+            "summary",
+            "symbols",
+            "deps",
+            "module",
+            "read"
+          ]
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lineOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "lineLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "kinds": {
+          "type": "string"
+        },
+        "includeParameters": {
+          "type": "boolean"
+        },
+        "includeImports": {
+          "type": "boolean"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "both",
+            "dependencies",
+            "dependents"
+          ]
+        },
+        "symbols": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "dirPath": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "boolean"
+        },
+        "maxDepth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "path": {},
+        "includeMetadata": {
+          "type": "boolean"
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_find",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string",
+          "enum": [
+            "name",
+            "content",
+            "env",
+            "sql"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "fuzzy",
+            "semantic",
+            "intent"
+          ]
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file",
+            "module",
+            "class",
+            "struct",
+            "interface",
+            "trait",
+            "protocol",
+            "function",
+            "method",
+            "property",
+            "field",
+            "variable",
+            "constant",
+            "enum",
+            "enum_member",
+            "type_alias",
+            "namespace",
+            "parameter",
+            "import",
+            "export",
+            "route",
+            "component",
+            "table",
+            "resource"
+          ]
+        },
+        "sameLanguage": {
+          "type": "boolean"
+        },
+        "differentLanguage": {
+          "type": "boolean"
+        },
+        "languageFilter": {
+          "type": "string"
+        },
+        "caseSensitive": {
+          "type": "boolean"
+        },
+        "pathFilter": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "ddl"
+          ]
+        },
+        "includeTests": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "since": {
+          "type": "string"
+        },
+        "compact": {
+          "type": "boolean"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "name",
+              "kind",
+              "path",
+              "line",
+              "signature",
+              "id"
+            ]
+          }
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "by"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_graph",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "symbols": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "callers",
+            "callees",
+            "impact",
+            "both",
+            "similar",
+            "path"
+          ]
+        },
+        "hops": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "maxNodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "edgeKind": {
+          "type": "string",
+          "enum": [
+            "calls",
+            "instantiates",
+            "references",
+            "type_of",
+            "returns",
+            "extends",
+            "implements",
+            "overrides",
+            "decorates",
+            "imports",
+            "contains",
+            "exports",
+            "tests",
+            "field_access",
+            "similar_to",
+            "def_use"
+          ]
+        },
+        "rankBy": {
+          "type": "string",
+          "enum": [
+            "bfs",
+            "centrality"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "minConfidence": {
+          "type": "string",
+          "enum": [
+            "EXTRACTED",
+            "INFERRED",
+            "AMBIGUOUS"
+          ]
+        },
+        "compact": {
+          "type": "boolean"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "name",
+              "kind",
+              "path",
+              "line",
+              "id",
+              "role"
+            ]
+          }
+        },
+        "since": {
+          "type": "string"
+        },
+        "includeRoles": {
+          "type": "boolean"
+        },
+        "includeTests": {
+          "type": "boolean"
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "minScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "sameLanguage": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "direction"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_history",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "minCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "symbol"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_host",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "diagnostics",
+            "discover"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "maxDepth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "location": {
+          "type": "string",
+          "enum": [
+            "global",
+            "local",
+            "both"
+          ]
+        },
+        "includeInstallTargets": {
+          "type": "boolean"
+        },
+        "lowTokens": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_hotspots",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "risk",
+            "maintenance",
+            "brittle",
+            "all"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "minCommits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "minCentrality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "sortBy": {
+          "type": "string",
+          "enum": [
+            "risk",
+            "centrality",
+            "churn"
+          ]
+        },
+        "recencyDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_imports",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "static",
+            "literal",
+            "all"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "enum": [
+            "file",
+            "directory",
+            "bare",
+            "unresolvable"
+          ]
+        },
+        "extMissing": {
+          "type": "boolean"
+        },
+        "dynamic": {
+          "type": "boolean"
+        },
+        "pathFilter": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "excludeFixtures": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_node",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string"
+        },
+        "symbols": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "code": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string",
+          "enum": [
+            "preview",
+            "full"
+          ]
+        },
+        "includeCallers": {
+          "type": "boolean"
+        },
+        "includeCallees": {
+          "type": "boolean"
+        },
+        "includeBiomarkers": {
+          "type": "boolean"
+        },
+        "includeTests": {
+          "type": "boolean"
+        },
+        "includeBetweenness": {
+          "type": "boolean"
+        },
+        "deep": {
+          "type": "boolean"
+        },
+        "liveSource": {
+          "type": "boolean"
+        },
+        "lineOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "lineLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "lowTokens": {
+          "type": "boolean"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_note",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "add",
+            "list",
+            "delete"
+          ]
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "note",
+            "question",
+            "followup",
+            "bookmark"
+          ]
+        },
+        "author": {
+          "type": "string"
+        },
+        "since": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "id": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "projectPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_playbook",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_propose_rename",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string"
+        },
+        "newName": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "docLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "symbol",
+        "newName"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_review",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "context",
+            "neighbors",
+            "risk",
+            "agent-audit",
+            "trust"
+          ]
+        },
+        "diff": {
+          "type": "string"
+        },
+        "maxCallersPerSymbol": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxCalleesPerSymbol": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxCoChangeWarnings": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "minCoChangeJaccard": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minDiffMagnitude": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "topN": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "minCentrality": {
+          "type": "number",
+          "minimum": 0
+        },
+        "coverageSource": {
+          "type": "string"
+        },
+        "pathFilter": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "symbols": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "dedupeByName": {
+          "type": "boolean"
+        },
+        "perDetectorLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "minSeverity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        "deep": {
+          "type": "boolean"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300000
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_role",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "api_endpoint",
+            "business_logic",
+            "data_model",
+            "util",
+            "framework_glue",
+            "test_helper",
+            "unknown"
+          ]
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "symbols": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "via": {
+          "type": "string",
+          "enum": [
+            "rule",
+            "llm",
+            "auto"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_session",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "create",
+            "resume",
+            "audit",
+            "list",
+            "delete",
+            "usage",
+            "macro_save",
+            "macro_run",
+            "macro_list",
+            "macro_delete"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {}
+          }
+        },
+        "args": {
+          "type": "array",
+          "items": {}
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "projectPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_sql",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "schema": {
+          "type": "boolean"
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compact": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 60000
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_status",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectPath": {
+          "type": "string"
+        },
+        "topHotspots": {
+          "type": "number"
+        },
+        "topBiomarkers": {
+          "type": "number"
+        },
+        "summaryBreakdown": {
+          "type": "boolean"
+        },
+        "verbose": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_summaries",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "save"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 40
+        },
+        "modelHint": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "nodeId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "contentHash": {
+                "type": "string",
+                "minLength": 1
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "nodeId",
+              "contentHash",
+              "summary"
+            ]
+          }
+        },
+        "model": {
+          "type": "string"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_tests_for",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "filter": {
+          "type": "string"
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "cartograph_trace_to_culprits",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "trace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200000
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "trace"
+      ]
+    }
+  },
+  {
+    "name": "cartograph_verify",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "minItems": 1,
+          "maxItems": 200,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "json"
+          ]
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "allowStale": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+]

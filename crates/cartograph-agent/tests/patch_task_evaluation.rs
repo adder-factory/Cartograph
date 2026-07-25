@@ -8,6 +8,7 @@ use std::{
 
 use cartograph_agent::{IndexOptions, ProjectRuntime, ReviewOptions};
 use cartograph_config::DatabaseSettings;
+use cartograph_db::CurrentSymbolSetLookup;
 use cartograph_search::{
     ContextAbstention, ContextBudget, ContextPacket, ContextRequest, DeterministicRetriever,
     EvidenceItem, EvidenceReason, IndexFreshness, RetrievalConfidence, ReviewAbstention,
@@ -229,20 +230,19 @@ async fn evaluate_case(
     case: fixture::PatchCase,
 ) -> EvalResult<CaseObservation> {
     let query = task_query(case.task);
-    let budget = ContextBudget::new(
-        8,
-        20,
-        TraversalBudget::new(3, 40)
+    let budget = ContextBudget::new(cartograph_search::ContextBudgetInput {
+        candidate_limit: 8,
+        exact_limit: 20,
+        traversal: TraversalBudget::new(3, 40)
             .map_err(|error| format!("patch-task traversal budget failed: {error}"))?,
-        40,
-        20,
-    )
+        evidence_limit: 40,
+        affected_test_limit: 20,
+    })
     .map_err(|error| format!("patch-task context budget failed: {error}"))?;
     let request = ContextRequest::new(
         project_id.clone(),
         query.clone(),
-        IndexFreshness::Current,
-        budget,
+        cartograph_search::ContextRequestOptions::new(IndexFreshness::Current, budget),
     )
     .map_err(|error| format!("patch-task context request failed: {error}"))?;
     let context = retriever
@@ -361,6 +361,12 @@ async fn ranked_symbols(
     task: &str,
 ) -> EvalResult<Vec<RankedSymbol>> {
     let task_tokens = lexical_tokens(task);
+    let primary_edit_paths = packet
+        .edit_candidates()
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.path().to_owned())
+        .collect::<BTreeSet<_>>();
     let candidate_ids = packet
         .evidence()
         .iter()
@@ -368,9 +374,16 @@ async fn ranked_symbols(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let generation = packet
+        .generation()
+        .ok_or_else(|| "patch-task packet had no generation".to_owned())?;
     let callable_ids = runtime
         .database()
-        .current_symbols_by_ids(project_id, &candidate_ids)
+        .current_symbols_by_ids(CurrentSymbolSetLookup::new(
+            project_id,
+            generation.generation_id(),
+            &candidate_ids,
+        ))
         .await
         .map_err(|error| format!("patch-task symbol hydration failed: {error}"))?
         .into_iter()
@@ -387,6 +400,7 @@ async fn ranked_symbols(
                 .is_none_or(|symbol_id| !callable_ids.contains(symbol_id))
                 || item.qualified_name().is_empty()
                 || cartograph_search::is_test_path(item.path())
+                || !primary_edit_paths.contains(item.path())
             {
                 return None;
             }
@@ -422,7 +436,11 @@ async fn reference_affected_tests(
     let mut tests = BTreeSet::new();
     for name in reference_names {
         for reference in retriever
-            .exact_reference(project_id, name, 50)
+            .exact_reference(
+                project_id,
+                cartograph_search::ExactTextQuery::new(name, 50)
+                    .map_err(|error| format!("patch-task exact-reference input failed: {error}"))?,
+            )
             .await
             .map_err(|error| format!("patch-task exact-reference lookup failed: {error}"))?
         {
@@ -617,8 +635,9 @@ fn assert_report_meets_baseline(report: &EvaluationReport) {
     assert_eq!(report.mean_mrr, 1.0, "MRR regressed: {:#?}", report.scores);
     assert!(
         report.mean_edit_precision >= BASELINE_EDIT_PRECISION,
-        "edit precision regressed: {}",
-        report.mean_edit_precision
+        "edit precision regressed: {}\n{:#?}",
+        report.mean_edit_precision,
+        report.scores,
     );
     assert_eq!(report.mean_edit_recall, 1.0, "edit recall regressed");
     assert_eq!(
@@ -669,7 +688,9 @@ fn summarize_evidence(evidence: &[EvidenceItem]) -> Vec<String> {
                     EvidenceReason::ExactName => "exact_name",
                     EvidenceReason::ExactPath => "exact_path",
                     EvidenceReason::ExactReference => "exact_reference",
+                    EvidenceReason::CoarseReference => "coarse_reference",
                     EvidenceReason::Bm25 => "bm25",
+                    EvidenceReason::Semantic => "semantic",
                     EvidenceReason::Graph => "graph",
                 })
                 .collect::<Vec<_>>()

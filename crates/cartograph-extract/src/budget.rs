@@ -109,6 +109,16 @@ impl ExtractionBudget {
             Ok(())
         }
     }
+
+    pub(crate) fn reserve_additional_string(&mut self, value: &str) -> Result<(), ExtractError> {
+        self.ensure_string_length(value.len())?;
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(usize_to_u64(value.len()))
+            .filter(|next| *next <= self.output_limit)
+            .ok_or(ExtractError::OutputLimit)?;
+        Ok(())
+    }
 }
 
 pub(crate) fn ensure_fact_string_length(length: usize) -> Result<(), ExtractError> {
@@ -167,6 +177,7 @@ impl ExtractedFile {
                     self.diagnostics.capacity(),
                 ))
             })
+            .and_then(|bytes| bytes.checked_add(usize_to_u64(self.test_search_text.capacity())))
             .unwrap_or(u64::MAX)
     }
 }
@@ -222,6 +233,15 @@ fn symbol_string_bytes(symbol: &ExtractedSymbol) -> u64 {
         })
         .and_then(|bytes| bytes.checked_add(usize_to_u64(symbol.body_search_text.capacity())))
         .and_then(|bytes| bytes.checked_add(usize_to_u64(symbol.structural_digest.as_str().len())))
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(symbol.clone_shape_digest.as_str().len())))
+        .and_then(|bytes| {
+            bytes.checked_add(usize_to_u64(
+                symbol
+                    .clone_token_profile
+                    .as_ref()
+                    .map_or(0, crate::CloneTokenProfile::retained_bytes),
+            ))
+        })
         .unwrap_or(u64::MAX)
 }
 
@@ -234,7 +254,14 @@ fn reference_string_bytes(reference: &ExtractedReference) -> u64 {
         .owner
         .as_ref()
         .map_or(0, |owner| owner.as_str().len());
-    usize_to_u64(owner).saturating_add(usize_to_u64(reference.name.capacity()))
+    usize_to_u64(owner)
+        .saturating_add(usize_to_u64(reference.name.capacity()))
+        .saturating_add(usize_to_u64(
+            reference
+                .resolution_name
+                .as_ref()
+                .map_or(0, String::capacity),
+        ))
 }
 
 fn import_binding_string_bytes(binding: &ExtractedImportBinding) -> u64 {

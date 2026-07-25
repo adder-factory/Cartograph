@@ -7,10 +7,10 @@ use std::{
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationContents,
-    GenerationFacts, GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget,
-    NewGeneration, NewProject, PrepareGenerationMetrics, ProjectLease, ReadyGeneration,
-    RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError, SymbolInput,
-    validate_generation_facts,
+    GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
+    LeaseRequest, LeaseTarget, NewGeneration, NewProject, PrepareGenerationMetrics, ProjectLease,
+    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError,
+    SymbolInput, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
@@ -44,7 +44,7 @@ const STRUCTURAL_HASH_ONE: &str =
 const STRUCTURAL_HASH_TWO: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "efe38a8a1252eb72910f6829ee683ce5ad99a69c5f352b1e724fca519bc54931";
+    "78e670ffab6e4b56b3b046d32df0a40c5d0b83720f3494fd758f7e9270823280";
 const SINGLE_WORKER: u16 = 1;
 const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
@@ -82,8 +82,8 @@ async fn copy_ingestion_is_atomic_and_logically_deterministic() {
     .await;
     let second = prepare_generation(&fixture, PARALLEL_WORKERS, generation_facts(true)).await;
     assert_eq!(first.content_digest(), second.content_digest());
-    assert_eq!(first.digest_version(), GenerationDigestVersion::V2);
-    assert_eq!(second.digest_version(), GenerationDigestVersion::V2);
+    assert_eq!(first.digest_version(), GenerationDigestVersion::CURRENT);
+    assert_eq!(second.digest_version(), GenerationDigestVersion::CURRENT);
     assert_eq!(first.content_digest().as_str(), EXPECTED_LOGICAL_DIGEST);
     assert_persisted_generation(&fixture, &first).await;
     assert_persisted_generation(&fixture, &second).await;
@@ -230,7 +230,10 @@ fn chunk_document(id: &str, path: &str, code_bytes: usize) -> SearchDocumentInpu
 async fn assert_ready_digest_recovery(fixture: &DatabaseFixture, ready: &ReadyGeneration) {
     let recovered = fixture
         .database
-        .recover_generation(&fixture.project, ready.generation_id())
+        .recover_generation(GenerationRecoveryRequest::new(
+            &fixture.project,
+            ready.generation_id(),
+        ))
         .await;
     let recovered = match recovered {
         Ok(Some(RecoverableGeneration::Ready(recovered))) => recovered,
@@ -465,14 +468,13 @@ async fn assert_relation_validation_rolls_back(fixture: &DatabaseFixture) {
 fn generation_facts(reversed: bool) -> GenerationFacts {
     let mut files = vec![file_one(), file_two()];
     let mut symbols = vec![symbol_one(), symbol_two()];
-    let mut edges = vec![edge()];
+    let edges = vec![edge()];
     let mut references = vec![reference()];
     let mut documents = vec![document_one(reversed), document_two()];
     if reversed {
         files.reverse();
         symbols.reverse();
         documents.reverse();
-        edges.push(edge());
         references.push(reference());
         documents.push(document_two());
     }
@@ -520,6 +522,14 @@ fn symbol_one() -> SymbolInput {
         start_line: 1,
         end_line: 4,
         structural_digest: digest(STRUCTURAL_HASH_ONE),
+        visibility: None,
+        exported: true,
+        default_export: false,
+        async_symbol: false,
+        static_member: false,
+        declaration_only: false,
+        betweenness_ppb: None,
+        pagerank_ppb: None,
     }
 }
 
@@ -535,6 +545,14 @@ fn symbol_two() -> SymbolInput {
         start_line: SYMBOL_TWO_START_LINE,
         end_line: SYMBOL_TWO_END_LINE,
         structural_digest: digest(STRUCTURAL_HASH_TWO),
+        visibility: None,
+        exported: false,
+        default_export: false,
+        async_symbol: false,
+        static_member: false,
+        declaration_only: false,
+        betweenness_ppb: None,
+        pagerank_ppb: None,
     }
 }
 
@@ -545,6 +563,7 @@ fn edge() -> EdgeInput {
         kind: EdgeKind::Tests,
         confidence: 1.0,
         provenance: "tree-sitter\ttest-resolver\\v2".to_owned(),
+        site_count: 1,
     }
 }
 
@@ -559,6 +578,8 @@ fn reference() -> ReferenceInput {
         end_byte: REFERENCE_END_BYTE,
         confidence: REFERENCE_CONFIDENCE,
         resolution_provenance: "test-exact".to_owned(),
+        site_count: 1,
+        span_precision: cartograph_db::ReferenceSpanPrecision::Exact,
     }
 }
 
@@ -655,7 +676,7 @@ async fn assert_persisted_generation(fixture: &DatabaseFixture, ready: &ReadyGen
     );
     assert!(matches!(
         row.try_get::<i16, _>("digest_version"),
-        Ok(value) if value == GenerationDigestVersion::V2.database_value()
+        Ok(value) if value == GenerationDigestVersion::CURRENT.database_value()
     ));
 }
 

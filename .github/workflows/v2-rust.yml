@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   quality:
-    name: format + clippy + unit + no SQLite
+    name: format + clippy + unit + PostgreSQL-only
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -77,11 +77,83 @@ jobs:
           fi
           echo 'No SQLite production dependency found.'
 
+      - name: No SQLite runtime source
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          matches="$(
+            git grep -nI -E -i 'rusqlite|libsqlite|sqlx[-_:]?sqlite|bun:sqlite|sqlite3|sqlite://' -- \
+              Cargo.toml \
+              build.rs \
+              ':(glob)crates/*/Cargo.toml' \
+              ':(glob)crates/*/build.rs' \
+              ':(glob)crates/*/src/**' \
+              ':(glob)deploy/paradedb/**'
+          )"
+          grep_status=$?
+          set -e
+          if (( grep_status > 1 )); then
+            echo "SQLite source scan failed with status $grep_status." >&2
+            exit "$grep_status"
+          fi
+          unexpected=''
+          while IFS=: read -r path line text; do
+            if [[ -z "$path" ]]; then
+              continue
+            fi
+            trimmed="${text#"${text%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+
+            # This exact URL is test-only rejection coverage, never a runtime adapter.
+            if [[ "$path" == 'crates/cartograph-config/src/lib.rs' ]]; then
+              case "$trimmed" in
+                'let input = "sqlite:///tmp/private-cartograph.db?password=should-not-leak";')
+                  continue
+                  ;;
+              esac
+            fi
+
+            unexpected+="$path:$line:$text"$'\n'
+          done <<<"$matches"
+
+          if [[ -n "$unexpected" ]]; then
+            echo 'Cartograph v2 contains forbidden SQLite runtime source:' >&2
+            printf '%s' "$unexpected" >&2
+            exit 1
+          fi
+          echo 'No SQLite runtime source found.'
+
+      - name: No executable TypeScript, Bun, Node, or browser-viewer runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          unexpected="$({
+            git ls-files '*.ts' '*.tsx' '*.js' '*.jsx' '*.mts' '*.cts' '*.mjs' '*.cjs'
+          } | grep -Ev '^(crates/cartograph-indexer/tests/fixtures/native_corpus_v1/|crates/cartograph-extract/tests/fixtures/v1_1_33/|docs/test-beds/)' || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo 'Cartograph v2 contains executable legacy runtime source outside frozen fixtures:' >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+          for legacy in package.json package-lock.json bun.lock bunfig.toml tsconfig.json biome.json; do
+            if git ls-files --error-unmatch "$legacy" >/dev/null 2>&1; then
+              echo "Cartograph v2 still tracks legacy runtime manifest $legacy" >&2
+              exit 1
+            fi
+          done
+          if git ls-files 'src/**' '__tests__/**' 'bench/**' | grep -q .; then
+            echo 'Cartograph v2 still tracks the executable v1 source/test/bench tree.' >&2
+            git ls-files 'src/**' '__tests__/**' 'bench/**' >&2
+            exit 1
+          fi
+          echo 'No executable TypeScript/Bun/Node/browser-viewer runtime found.'
+
   paradedb:
     name: PostgreSQL 18 + ParadeDB + pgvector
     needs: quality
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     env:
       CARTOGRAPH_POSTGRES_PASSWORD: cartograph-v2-ci-only
       CARTOGRAPH_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
@@ -168,15 +240,40 @@ jobs:
           cargo test --locked --quiet -p cartograph-db
           --test live_leases -- --ignored --nocapture
 
+      - name: Semantic model, pgvector, HNSW, readiness, and retention integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_semantic -- --include-ignored --nocapture --test-threads=1
+
+      - name: V1 PostgreSQL import, rollback, resume, and retention integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_v1_import_retention -- --ignored --nocapture --test-threads=1
+
+      - name: Project purge fencing and physical-relation cleanup integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_project_purge -- --ignored --nocapture --test-threads=1
+
       - name: Lease-owned indexer supervisor integration test
         run: >-
           cargo test --locked --quiet -p cartograph-indexer
           --test live_supervisor -- --ignored --nocapture --test-threads=1
 
-      - name: Agent runtime index, no-op, freshness, and retrieval integration test
+      - name: Agent runtime index, hybrid retrieval, no-op, freshness, and review integration test
         run: >-
           cargo test --locked --quiet -p cartograph-agent
           --test live_project -- --ignored --nocapture --test-threads=1
+
+      - name: Native CLI/MCP summary, role, graph, history, session, and watcher integration tests
+        run: >-
+          cargo test --locked --quiet -p cartograph-cli
+          -- --ignored --nocapture --test-threads=1
+
+      - name: Locked native patch-task evaluation and repeatability gate
+        run: >-
+          cargo test --locked --quiet -p cartograph-agent
+          --test patch_task_evaluation -- --include-ignored --nocapture --test-threads=1
 
       - name: Frozen 1/2/4/8/16-worker determinism and scaling benchmark
         run: cargo bench --locked -p cartograph-indexer --bench index_scaling
@@ -184,7 +281,7 @@ jobs:
       - name: Managed database lifecycle integration test
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib
-          managed::tests:: -- --ignored --nocapture
+          managed::tests:: -- --ignored --nocapture --test-threads=1
 
       - name: Managed backup, restore, upgrade, rollback, and derived-index test
         run: >-

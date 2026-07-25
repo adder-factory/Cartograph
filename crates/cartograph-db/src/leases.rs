@@ -331,6 +331,23 @@ struct AcquireTransactionInput<'a> {
 }
 
 impl CartographDatabase {
+    /// Remove only database-clock-expired lease rows for one project.
+    /// Live ownership tokens are never selected by this maintenance path.
+    pub async fn remove_expired_leases(&self, project_id: &ProjectId) -> Result<u64, LeaseError> {
+        let schema = crate::database::quoted_schema(&self.schema);
+        let sql = format!(
+            r#"DELETE FROM {schema}."project_operation_leases"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND expires_at <= clock_timestamp()"#
+        );
+        audited_query(sql)
+            .bind(project_id.as_str())
+            .execute(&self.pool)
+            .await
+            .map(|result| result.rows_affected())
+            .map_err(|_| database_error("remove-expired"))
+    }
+
     /// Create opaque single-use acquisition and reconciliation capabilities.
     ///
     /// The generated token is deliberately inaccessible to the caller. The
@@ -348,11 +365,21 @@ impl CartographDatabase {
         Ok((LeaseAcquisitionAttempt { request, lease_id }, probe))
     }
 
-    /// Acquire an operation lease, or atomically take over its expired row,
-    /// under a transaction-scoped advisory lock.
+    /// Acquire the project's only live write lease, replacing expired project rows atomically.
     pub async fn acquire_lease(&self, request: LeaseRequest) -> Result<ProjectLease, LeaseError> {
         let (attempt, _) = Self::prepare_lease_acquisition(request)?;
         self.acquire_reconcilable_lease(attempt).await
+    }
+
+    /// Acquire an operation lease under a PostgreSQL-side statement deadline.
+    pub async fn acquire_lease_bounded(
+        &self,
+        request: LeaseRequest,
+        statement_timeout: Duration,
+    ) -> Result<ProjectLease, LeaseError> {
+        let (attempt, _) = Self::prepare_lease_acquisition(request)?;
+        self.acquire_reconcilable_lease_bounded(attempt, statement_timeout)
+            .await
     }
 
     /// Consume one opaque attempt and acquire or take over its target lease.
@@ -510,6 +537,39 @@ impl CartographDatabase {
 
     /// Release a lease only when its exact token is still current and unexpired.
     pub async fn release_lease(&self, lease: &ProjectLease) -> Result<(), LeaseError> {
+        self.release_lease_inner(lease, None).await
+    }
+
+    /// Release an exact lease token under a PostgreSQL-side statement deadline.
+    pub async fn release_lease_bounded(
+        &self,
+        lease: &ProjectLease,
+        statement_timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.release_lease_inner(lease, Some(statement_timeout))
+            .await
+    }
+
+    async fn release_lease_inner(
+        &self,
+        lease: &ProjectLease,
+        statement_timeout: Option<Duration>,
+    ) -> Result<(), LeaseError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("release-begin"))?;
+        if let Some(statement_timeout) = statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            return match transaction.rollback().await {
+                Ok(()) => Err(database_error("release-statement-timeout")),
+                Err(_) => Err(database_error("release-rollback")),
+            };
+        }
         let schema = crate::database::quoted_schema(&self.schema);
         let sql = format!(
             r#"DELETE FROM {schema}."project_operation_leases"
@@ -522,14 +582,26 @@ impl CartographDatabase {
             .bind(lease.target.project_id().as_str())
             .bind(lease.target.operation().as_str())
             .bind(lease.lease_id.as_str())
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
-            .map_err(|_| database_error("release"))?;
-        if result.rows_affected() == 1 {
-            Ok(())
-        } else {
-            Err(LeaseError::Lost)
+            .map_err(|_| database_error("release"));
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                return match transaction.rollback().await {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(database_error("release-rollback")),
+                };
+            }
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("release-commit"))?;
+        if result.rows_affected() != 1 {
+            return Err(LeaseError::Lost);
         }
+        Ok(())
     }
 
     /// Read current or expired owner metadata without mutating lease state.
@@ -667,7 +739,10 @@ async fn acquire_transaction(
     input: AcquireTransactionInput<'_>,
 ) -> Result<AcquiredLease, LeaseError> {
     let lock_row = query("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(operation_lock_key(input.schema, &input.request.target))
+        .bind(project_lock_key(
+            input.schema,
+            input.request.target.project_id(),
+        ))
         .fetch_one(&mut *connection)
         .await
         .map_err(|_| database_error("advisory-lock"))?;
@@ -678,6 +753,16 @@ async fn acquire_transaction(
         return Err(LeaseError::Busy);
     }
     let schema = crate::database::quoted_schema(input.schema);
+    let delete_expired = format!(
+        r#"DELETE FROM {schema}."project_operation_leases"
+            WHERE project_id = CAST($1 AS uuid)
+              AND expires_at <= clock_timestamp()"#
+    );
+    audited_query(delete_expired)
+        .bind(input.request.target.project_id().as_str())
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("acquire"))?;
     let sql = format!(
         r#"WITH lease_clock AS (SELECT clock_timestamp() AS now)
             INSERT INTO {schema}."project_operation_leases" (
@@ -690,16 +775,11 @@ async fn acquire_transaction(
                 lease_clock.now, lease_clock.now,
                 lease_clock.now + $6 * interval '1 millisecond'
             FROM lease_clock
-            ON CONFLICT (project_id, operation) DO UPDATE
-            SET lease_id = EXCLUDED.lease_id,
-                owner_pid = EXCLUDED.owner_pid,
-                owner_process_start = EXCLUDED.owner_process_start,
-                generation_id = EXCLUDED.generation_id,
-                acquired_at = EXCLUDED.acquired_at,
-                heartbeat_at = EXCLUDED.heartbeat_at,
-                expires_at = EXCLUDED.expires_at
-            WHERE project_operation_leases.expires_at <= EXCLUDED.acquired_at
-              AND project_operation_leases.lease_id <> EXCLUDED.lease_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {schema}."project_operation_leases"
+                WHERE project_id = CAST($1 AS uuid)
+            )
+            ON CONFLICT (project_id, operation) DO NOTHING
             RETURNING lease_id::text, expires_at::text"#
     );
     let row = audited_query(sql)
@@ -729,16 +809,11 @@ async fn acquire_transaction(
     })
 }
 
-pub(crate) fn operation_lock_key(
+pub(crate) fn project_lock_key(
     schema: &cartograph_config::DatabaseSchema,
-    target: &LeaseTarget,
+    project_id: &ProjectId,
 ) -> String {
-    format!(
-        "{LEASE_LOCK_NAMESPACE}:{}:{}:{}",
-        schema.as_str(),
-        target.project_id(),
-        target.operation().as_str()
-    )
+    format!("{LEASE_LOCK_NAMESPACE}:{}:{}", schema.as_str(), project_id,)
 }
 
 fn decode_status(row: &PgRow, target: &LeaseTarget) -> Result<LeaseStatus, LeaseError> {

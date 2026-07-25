@@ -1,230 +1,28 @@
-# Grammar Assets
+# Native grammar provenance
 
-Cartograph vendors tree-sitter WASM grammars under `src/extraction/wasm/`.
-Every newly added grammar must record source, version, license, and the
-checked-in asset hash here before it is merged.
+Cartograph v2 links pinned Rust tree-sitter grammar crates. It does not ship or
+load the v1 WebAssembly grammar directory.
 
-## Upstream Tree-sitter Parser Tranche (2026-06-07)
+The authoritative release inventory is:
 
-These assets close the initial gap against Tree-sitter's upstream parser list
-where the grammar is compatible with Cartograph's `web-tree-sitter` runtime.
-All packages are MIT-licensed. Most assets were harvested from the npm package's
-bundled `.wasm`; `verilog.wasm` was built from source by
-`scripts/build-grammar-wasm.ts` because the package did not ship a bundled WASM.
+- exact crate versions and checksums: `Cargo.lock`;
+- direct grammar pins: workspace dependencies in `Cargo.toml`;
+- language-to-grammar/custom-scanner registration:
+  `crates/cartograph-extract/src/language.rs`, `grammars.rs`, and related native
+  modules;
+- third-party licensing and upstream attribution: `ACKNOWLEDGEMENTS.md` and
+  `deny.toml`.
 
-| Asset | SHA-256 | Source package target | Package integrity | Repository |
-|---|---|---|---|---|
-| `src/extraction/wasm/css.wasm` | `8a23977fe271357cce6f254ef88c9bebf3854602d8046605aef6a45c02135c59` | `tree-sitter-css@0.25.0` | `sha512-FRc9R8ePrwJiUhZsuZ/wcFQ3K8Z+9yCgDrrUjuYswGWlN89UvcB9vslTUGZElQWGwhS8sUw3/r2n4lpb2sxT4Q==` | `https://github.com/tree-sitter/tree-sitter-css` |
-| `src/extraction/wasm/embedded_template.wasm` | `d15bbf3cb90901d0372b5599761c7a1ada344a0f11573c173ace7042636a6174` | `tree-sitter-embedded-template@0.25.0` | `sha512-DLWFFWito68hgjMC3kDaqDpcHRGr+ZC2cz4pFR/XeWilq9C0dLawsxi+pK6qRM/ICZw6YNmf5w28y0tpcfbNsA==` | `https://github.com/tree-sitter/tree-sitter-embedded-template` |
-| `src/extraction/wasm/haskell.wasm` | `37a6b07b1a838d02ffb4f4c2a06863637a8efe48432d60a275f50f1d08f1092c` | `tree-sitter-haskell@0.23.1` | `sha512-qG4CYhejveu9DLMLEGBz/n9/TTeGSFLC6wniwOgG6m8/v7Dng8qR0ob0EVG7+XH+9WiOxohpGA23EhceWuxY4w==` | `https://github.com/tree-sitter/tree-sitter-haskell` |
-| `src/extraction/wasm/html.wasm` | `c48fcd82c7ea8bf943180088ba7f28c48b2bb5287874179168bf9d31e394cf85` | `tree-sitter-html@0.23.2` | `sha512-TN+l+7cCeLx9db/1RhRSqMAZO/266Oh2BHb8J8hMSSFLuzYvFTYP/UnD3S0mny5awzw05KzFNgu2vnwzN9wVJg==` | `https://github.com/tree-sitter/tree-sitter-html` |
-| `src/extraction/wasm/jsdoc.wasm` | `5530e630fd42424b1c026ec4b2b260ff1b73b78b7040239ac33d4be22a9b2271` | `tree-sitter-jsdoc@0.25.0` | `sha512-ki7u9WA/AUZyk2ISULzFALL2iMax27O0Bz2O5WtyUkGAfJ97R0dgOSs0Bdf1zUpk6q5cq7bI2hBgJt29WH54Tw==` | `https://github.com/tree-sitter/tree-sitter-jsdoc` |
-| `src/extraction/wasm/json.wasm` | `d2119fb98d5912719b13f9458574f8608d2d29dfbe45f6be1f860ea1fe2a2405` | `tree-sitter-json@0.24.8` | `sha512-Tc9ZZYwHyWZ3Tt1VEw7Pa2scu1YO7/d2BCBbKTx5hXwig3UfdQjsOPkPyLpDJOn/m1UBEWYAtSdGAwCSyagBqQ==` | `https://github.com/tree-sitter/tree-sitter-json` |
-| `src/extraction/wasm/julia.wasm` | `e0f52c36eadf0299e46fccd6715c760d35eaa3f09721bec38633da551ac9e781` | `tree-sitter-julia@0.23.1` | `sha512-3vShY0GIu8ajR6hXzE0pyUk6kkfg4pGx3Bfzm6lGmR9aC3fe+LgoBMlaFJ7JY+t0fNFccc77J8HVP67ukuDMxQ==` | `https://github.com/tree-sitter/tree-sitter-julia` |
-| `src/extraction/wasm/ocaml.wasm` | `761a78a804931cfac1fa0c6238989b4b0e86cc70db461b1315d743de923f8246` | `tree-sitter-ocaml@0.24.2` | `sha512-H0RAeCepIyXyTPCQra6yMd7Bn5ZBYkIaddzdLNwVZpM9mCe2e8av+3O6Ojl7Z8YHrV/kYsfHvI2y+Hh7qzcYQQ==` | `https://github.com/tree-sitter/tree-sitter-ocaml` |
-| `src/extraction/wasm/ocaml_interface.wasm` | `c065e8da9052899592bd68c820ffda076e23394129de14c0bd2c46b189415ea9` | `tree-sitter-ocaml@0.24.2` | `sha512-H0RAeCepIyXyTPCQra6yMd7Bn5ZBYkIaddzdLNwVZpM9mCe2e8av+3O6Ojl7Z8YHrV/kYsfHvI2y+Hh7qzcYQQ==` | `https://github.com/tree-sitter/tree-sitter-ocaml` |
-| `src/extraction/wasm/regex.wasm` | `e63c28e3a023614e14f2086b0d818e190239ebe5b2fcce7e64a9940091d83a79` | `tree-sitter-regex@0.25.0` | `sha512-Xf3KU+LOfCS6djfIzEHdVlq4ITinLNfVy7LkWqFr0R4ZG1SGV2u/HS4ct+TNwuLTPfU9EA/tQZnbJ/KLtgljgQ==` | `https://github.com/tree-sitter/tree-sitter-regex` |
-| `src/extraction/wasm/verilog.wasm` | `67761c9e19dd2b809964194807017c32f4506405993c8ee53e1c40817bd5f662` | `tree-sitter-verilog@1.0.0` | `sha512-SSGUwA+mQ1Jxn/V2ROLj3+leO/68f+7MxWzoz5kOaJ3qzKAveSWjxOATGmiFMLy4DJ+/0pDXFnapwMDih2Cx6Q==` | `https://github.com/tree-sitter/tree-sitter-verilog` |
+Adding or upgrading a grammar requires more than a successful parser load:
 
-Regenerate check:
+1. pin an exact compatible crate version;
+2. verify its license and update acknowledgements/deny policy when needed;
+3. inspect its real node vocabulary and update native extraction;
+4. test declarations, references, malformed syntax, cancellation, bounds, and
+   literal safety;
+5. prove deterministic output under every supported worker count;
+6. publish the language corpus to live PostgreSQL/ParadeDB and verify BM25;
+7. run `cargo deny --all-features check` and the complete release gates.
 
-```sh
-npm install --no-save --package-lock=false \
-  tree-sitter-css@0.25.0 \
-  tree-sitter-embedded-template@0.25.0 \
-  tree-sitter-haskell@0.23.1 \
-  tree-sitter-html@0.23.2 \
-  tree-sitter-jsdoc@0.25.0 \
-  tree-sitter-json@0.24.8 \
-  tree-sitter-julia@0.23.1 \
-  tree-sitter-ocaml@0.24.2 \
-  tree-sitter-regex@0.25.0 \
-  tree-sitter-verilog@1.0.0
-for g in css embedded_template haskell html jsdoc json julia ocaml ocaml_interface regex verilog; do
-  bun scripts/build-grammar-wasm.ts --only="$g"
-done
-bun test __tests__/tree-sitter-upstream-languages.test.ts __tests__/language-registry.test.ts
-```
-
-## Codegraph-Idea Language Tranche (2026-06-08)
-
-These assets add ABAP/abapGit, Astro, Lean, and VB.NET support. ABAP, Astro,
-and Lean were built from pinned Git commits because their npm packages do not
-ship a bundled WASM artifact. VB.NET was built from its npm package.
-
-| Asset | SHA-256 | Source package target | Package integrity / source pin | Repository | License |
-|---|---|---|---|---|---|
-| `src/extraction/wasm/abap.wasm` | `1081a6862be801e076df86b32318665497f46a7883bd26e49174b50b9fb3f4c9` | `tree-sitter-abap@1.0.0` | Git commit `c7604df9e25d56ae879fa25694fd9f2ddbab05d8` | `https://github.com/mkoval1/tree-sitter-abap` | ISC |
-| `src/extraction/wasm/astro.wasm` | `e9e2949d21b7dc33bd11cc58a78d7038b1ae8f640aa6c46872c6a72f38158778` | `tree-sitter-astro@0.0.1` | Git commit `213f6e6973d9b456c6e50e86f19f66877e7ef0ee` | `https://github.com/virchau13/tree-sitter-astro` | MIT |
-| `src/extraction/wasm/lean.wasm` | `cbaf45e3dfad3d5c025352ce9b97895748313d4b2dc238ea554a5cdd0c503191` | `tree-sitter-lean@0.2.0` | Git commit `5255dc53a4e4f423f1978018ab430b6f9100f645` | `https://github.com/Julian/tree-sitter-lean` | MIT |
-| `src/extraction/wasm/vbnet.wasm` | `a54f7e5919476f119e0ac65054ca9b9307d156970defe70a5489b5d72c2f7fbb` | `tree-sitter-vb-dotnet@0.1.9` | `sha512-Qau+yoj2BTsZNWFUlfQ23X6gNfDC/P3TXFiKdKAUK1bUrHwIngD2mfLYgtqNZQ4C7RP/M9pvcYx7g7fddviYhg==` | `https://github.com/CodeAnt-AI/tree-sitter-vb-dotnet` | MIT |
-
-Regenerate check:
-
-```sh
-npm install --no-save --package-lock=false --ignore-scripts --legacy-peer-deps \
-  tree-sitter-vb-dotnet@0.1.9 \
-  github:virchau13/tree-sitter-astro#213f6e6973d9b456c6e50e86f19f66877e7ef0ee \
-  github:Julian/tree-sitter-lean#5255dc53a4e4f423f1978018ab430b6f9100f645 \
-  github:mkoval1/tree-sitter-abap#c7604df9e25d56ae879fa25694fd9f2ddbab05d8
-for g in abap astro lean vbnet; do
-  bun scripts/build-grammar-wasm.ts --only="$g" --force-build
-done
-bun test __tests__/borrowed-language-support.test.ts __tests__/language-registry.test.ts
-```
-
-## HLSL
-
-| Field | Value |
-|---|---|
-| Checked-in asset | `src/extraction/wasm/hlsl.wasm` |
-| SHA-256 | `4b78f6b5121164ea5c02935864f314fb118ed286d0f4d91582fd91457cb6db2a` |
-| Source package target | `tree-sitter-hlsl@0.2.0` |
-| Package integrity | `sha512-nwPhvXJjBueq32kYSjrqc5NgqajCkllHeSlHp0VrGRwe+Dk5jSa2yoTE1+BHy/INVKOIigT4/gqW6DgWFoApeg==` |
-| Repository | `https://github.com/tree-sitter-grammars/tree-sitter-hlsl` |
-| License | MIT |
-
-Regenerate check:
-
-```sh
-npm install --no-save --package-lock=false tree-sitter-hlsl@0.2.0
-bun scripts/build-grammar-wasm.ts --only=hlsl --force-build
-bun test __tests__/glsl-extraction.test.ts __tests__/language-registry.test.ts
-```
-
-## Nix
-
-| Field | Value |
-|---|---|
-| Checked-in asset | `src/extraction/wasm/nix.wasm` |
-| SHA-256 | `c61e4d1e557e59527032524e4945f9222042939c7e53e6b9b78a800d866826b5` |
-| Source package target | `tree-sitter-nix@0.0.2` |
-| Package integrity | `sha512-rPYc7NUi6hPOyFSoVdCVC9feqBk0kJ0Z3ftTWXo1ubyyKzPM5tJP6mD6xYl0gN45oh9GHGzvTbOmmwIk0XOj5A==` |
-| Repository | `https://github.com/nix-community/tree-sitter-nix` |
-| License | MIT |
-
-Regenerate check:
-
-```sh
-npm install --no-save --package-lock=false tree-sitter-nix@0.0.2
-bun scripts/build-grammar-wasm.ts --only=nix --force-build
-bun test __tests__/nix-extraction.test.ts __tests__/language-registry.test.ts
-```
-
-## Clojure / ClojureScript
-
-| Field | Value |
-|---|---|
-| Checked-in asset | `src/extraction/wasm/clojure.wasm` |
-| SHA-256 | `3c635e36fb807b7ae0bce07823307b2b8741290f8c2d7e48f61f46622dd41f14` |
-| Source package target | `tree-sitter-clojure@0.4.0` |
-| Package integrity | `sha512-Yzsu1Hwm9PZhl+FOEtY/WQxeal5CP1ZRLgEoYec50yXVn1SLXB1EQ8+zXI38l33Gecowl2XjYggA7DQzFi07Vw==` |
-| Repository | `https://github.com/oakmac/tree-sitter-clojure` |
-| License | MIT |
-
-Regenerate check:
-
-```sh
-npm install --no-save --package-lock=false --ignore-scripts tree-sitter-clojure@0.4.0
-bun scripts/build-grammar-wasm.ts --only=clojure --force-build
-bun test __tests__/clojure-extraction.test.ts __tests__/language-registry.test.ts
-```
-
-## Common Lisp
-
-| Field | Value |
-|---|---|
-| Checked-in asset | `src/extraction/wasm/common_lisp.wasm` |
-| SHA-256 | `eb7f0bbb4e0ad4e7184591f128d87ed016f80aac0eef374b7877e93cedfce7d5` |
-| Source package target | `tree-sitter-commonlisp@0.4.1` |
-| Package integrity | `sha512-owvpVac4HiCt0vAAndrDRGL9YgIFjNVvrEIf1/9x15TZwjKTsTGuldD7C2myV/pOU3zeaHEoSNUvY+DftpLRLQ==` |
-| Repository | `https://github.com/theHamsta/tree-sitter-commonlisp` |
-| License | MIT |
-
-Regenerate check:
-
-```sh
-npm install --no-save --package-lock=false --ignore-scripts --legacy-peer-deps tree-sitter-commonlisp@0.4.1
-bun scripts/build-grammar-wasm.ts --only=common_lisp --force-build
-bun test __tests__/common-lisp-extraction.test.ts __tests__/language-registry.test.ts
-```
-
-## Apex / Salesforce
-
-| Field | Value |
-|---|---|
-| Checked-in asset | `src/extraction/wasm/apex.wasm` |
-| SHA-256 | `ffb52ba4bc33374b1d8d94da1a83484a81cb1183750192f48007ab9d41a03071` |
-| Source package target | `tree-sitter-sfapex@3.0.0` (`apex/` subgrammar) |
-| Package integrity | `sha512-AGwAjSr9WDM+1IgqpQfYEsi+FN4zjGaagPEU9RGrO7abNVc51X6gaAnBEdl7FMVAxEH1qWgHO8nO2Nbb8jOgAA==` |
-| Repository | `https://github.com/aheber/tree-sitter-sfapex` |
-| License | MIT |
-
-Regenerate check:
-
-```sh
-npm install --no-save --package-lock=false tree-sitter-sfapex@3.0.0
-bun scripts/build-grammar-wasm.ts --only=apex --force-build
-bun test __tests__/salesforce.test.ts __tests__/language-registry.test.ts
-```
-
-Aura and Visualforce are custom markup extractors and do not add separate
-tree-sitter grammar assets.
-
-## Luau
-
-| Field | Value |
-|---|---|
-| Checked-in asset | `src/extraction/wasm/luau.wasm` |
-| SHA-256 | `f1647052518f2bdfae8e8c0b033ffdeca1193d69d11c78ba20f84c8374fd0fe3` |
-| Source package target | `tree-sitter-luau@1.2.0` |
-| Package integrity | `sha512-2LBeROsknOCLzryCFyqTgZ6AXiEl4U0/f32ILn7BQWCPABVtNwNh9U+MDnSUrGJRNvFicrfh+KcVRyKtG0ZEuQ==` |
-| Repository | `https://github.com/tree-sitter-grammars/tree-sitter-luau` |
-| License | MIT |
-
-Regenerate check:
-
-```sh
-bun add -d tree-sitter-luau@1.2.0
-bun scripts/build-grammar-wasm.ts --only=luau --force-build
-bun test __tests__/luau-extraction.test.ts __tests__/language-registry.test.ts
-```
-
-If a regenerated asset changes this hash, inspect the Luau AST and extraction
-fixtures before committing it. A tree-sitter load test only proves the grammar
-loads; it does not prove Cartograph's extractor still sees the same node shapes.
-
-## F# And PowerShell
-
-| Field | F# | PowerShell |
-|---|---|---|
-| Checked-in asset | `src/extraction/wasm/fsharp.wasm` | `src/extraction/wasm/powershell.wasm` |
-| SHA-256 | `93777f440c9f59dedc8692b3de34b8d4f034eca4c69ceb662bacfbe83ad2b6cc` | `796124137f0500e59713fd9dccda6812ff73d25f22e33430b1c5af6e132efa5e` |
-| Source target | `ionide/tree-sitter-fsharp@0.3.0` release source tarball | `tree-sitter-powershell@0.26.4` |
-| Source/package integrity | Verify the vendored WASM hash above after building from the GitHub source tag. | `sha512-5RwNW/qN/cKArZY0znvTOG+OWSau7Agel5K0A8KQ5Nubw/4SyZ5KC02RKCaYcA2ur5UQ8esyxe9+6yXup2MXkw==` |
-| Upstream repository | `https://github.com/ionide/tree-sitter-fsharp` | `https://github.com/airbus-cert/tree-sitter-powershell` |
-| License | MIT | MIT |
-
-`tree-sitter-fsharp@0.1.0` exists on npm and still advertises
-`https://github.com/tree-sitter/tree-sitter-fsharp` in its metadata, but that
-URL is no longer live and the npm package trails the active Ionide upstream.
-Use the Ionide release source tarball when checking grammar freshness or
-regenerating the asset.
-
-Regenerate check:
-
-```sh
-tmpdir=$(mktemp -d)
-curl -fsSL https://github.com/ionide/tree-sitter-fsharp/archive/refs/tags/0.3.0.tar.gz |
-  tar -xz --strip-components=1 -C "$tmpdir"
-node_modules/.bin/tree-sitter build --wasm \
-  --output src/extraction/wasm/fsharp.wasm \
-  "$tmpdir/fsharp"
-rm -rf "$tmpdir"
-
-npm install --no-save --package-lock=false --ignore-scripts --legacy-peer-deps \
-  tree-sitter-powershell@0.26.4
-bun scripts/build-grammar-wasm.ts --only=powershell
-shasum -a 256 src/extraction/wasm/fsharp.wasm src/extraction/wasm/powershell.wasm
-bun test __tests__/fsharp-powershell-vb6-extraction.test.ts __tests__/language-registry.test.ts
-```
+See [the native extension guide](EXTENDING-EXTRACTORS-RESOLVERS.md) for the
+full admission contract.

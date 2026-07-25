@@ -67,9 +67,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-${{ matrix.asset_target }}
-          path: |
-            release/cartograph-*.tar.gz
-            release/cartograph-*.zip
+          path: release/cartograph-*
           if-no-files-found: error
 
   publish:
@@ -94,8 +92,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find release-artifacts -type f \( -name 'cartograph-*.tar.gz' -o -name 'cartograph-*.zip' \) -exec cp {} release/ \;
-          expected=$'cartograph-darwin-arm64.tar.gz\ncartograph-darwin-x64.tar.gz\ncartograph-linux-arm64.tar.gz\ncartograph-linux-x64.tar.gz\ncartograph-windows-x64.zip'
+          find release-artifacts -type f -name 'cartograph-*' -exec cp {} release/ \;
+          expected=$'cartograph-darwin-arm64\ncartograph-darwin-arm64.tar.gz\ncartograph-darwin-x64\ncartograph-darwin-x64.tar.gz\ncartograph-linux-arm64\ncartograph-linux-arm64.tar.gz\ncartograph-linux-x64\ncartograph-linux-x64.tar.gz\ncartograph-windows-x64.exe\ncartograph-windows-x64.zip'
           actual="$(find release -maxdepth 1 -type f -name 'cartograph-*' -exec basename {} \; | LC_ALL=C sort)"
           if [[ "$actual" != "$expected" ]]; then
             echo 'release asset set mismatch' >&2

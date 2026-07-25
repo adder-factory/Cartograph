@@ -1,0 +1,481 @@
+use std::{
+    cmp::Ordering,
+    env, fs,
+    io::Write as _,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    time::Duration,
+};
+
+use futures_util::StreamExt as _;
+use reqwest::Client;
+use serde::Serialize;
+use sha2::{Digest as _, Sha256};
+use tempfile::NamedTempFile;
+use tokio::process::Command;
+
+const REMOTE: &str = "https://github.com/adder-factory/cartograph.git";
+const RELEASE_BASE: &str = "https://github.com/adder-factory/cartograph/releases/download";
+const LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/adder-factory/cartograph/releases/latest";
+const MAXIMUM_TAG_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const MAXIMUM_CHECKSUM_BYTES: usize = 1024 * 1024;
+const MAXIMUM_BINARY_BYTES: usize = 200 * 1024 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpgradeReport {
+    status: &'static str,
+    current_version: String,
+    latest_version: Option<String>,
+    apply_requested: bool,
+    applied: bool,
+    message: String,
+    next_steps: Vec<String>,
+}
+
+pub(super) fn render(report: &UpgradeReport) -> String {
+    let mut output = format!("{}\n", report.message);
+    for step in &report.next_steps {
+        output.push_str("- ");
+        output.push_str(step);
+        output.push('\n');
+    }
+    output
+}
+
+pub(super) fn succeeded(report: &UpgradeReport) -> bool {
+    report.status != "blocked" && report.status != "unknown"
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Version {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Vec<PrereleasePart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PrereleasePart {
+    Numeric(u64),
+    Text(String),
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.major
+            .cmp(&other.major)
+            .then(self.minor.cmp(&other.minor))
+            .then(self.patch.cmp(&other.patch))
+            .then_with(|| compare_prerelease(&self.prerelease, &other.prerelease))
+    }
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub(super) async fn run_upgrade(apply: bool) -> UpgradeReport {
+    let current_text = env!("CARGO_PKG_VERSION").to_owned();
+    let Some(current) = parse_version(&current_text) else {
+        return report_unknown(current_text, apply, "running version is not valid semver");
+    };
+    let latest_text = match latest_version().await {
+        Ok(version) => version,
+        Err(message) => return report_unknown(current_text, apply, &message),
+    };
+    let Some(latest) = parse_version(&latest_text) else {
+        return report_unknown(current_text, apply, "published version is not valid semver");
+    };
+    if current >= latest {
+        return UpgradeReport {
+            status: "current",
+            current_version: current_text.clone(),
+            latest_version: Some(latest_text),
+            apply_requested: apply,
+            applied: false,
+            message: format!("Cartograph {current_text} is current."),
+            next_steps: vec!["No update action is needed.".to_owned()],
+        };
+    }
+    if !apply {
+        return UpgradeReport {
+            status: "update_available",
+            current_version: current_text.clone(),
+            latest_version: Some(latest_text.clone()),
+            apply_requested: false,
+            applied: false,
+            message: format!("Cartograph {current_text} -> {latest_text} is available."),
+            next_steps: vec![
+                "Run `cartograph upgrade --apply` to install the verified native release."
+                    .to_owned(),
+                "Restart MCP clients after updating so they stop using the old process.".to_owned(),
+            ],
+        };
+    }
+    match apply_release(&latest_text).await {
+        Ok(path) => UpgradeReport {
+            status: "updated",
+            current_version: current_text,
+            latest_version: Some(latest_text.clone()),
+            apply_requested: true,
+            applied: true,
+            message: format!(
+                "Installed the checksum-verified Cartograph {latest_text} binary at {}.",
+                path.display()
+            ),
+            next_steps: vec![
+                "Restart MCP clients so every connection uses the new binary.".to_owned(),
+                "Run `cartograph --version` from a new process to verify the update.".to_owned(),
+            ],
+        },
+        Err(message) => UpgradeReport {
+            status: "blocked",
+            current_version: current_text,
+            latest_version: Some(latest_text),
+            apply_requested: true,
+            applied: false,
+            message,
+            next_steps: vec![
+                "Download the matching native asset and SHA256SUMS from the GitHub release."
+                    .to_owned(),
+                "Verify the checksum before replacing the current executable.".to_owned(),
+            ],
+        },
+    }
+}
+
+fn report_unknown(current: String, apply: bool, reason: &str) -> UpgradeReport {
+    UpgradeReport {
+        status: "unknown",
+        current_version: current,
+        latest_version: None,
+        apply_requested: apply,
+        applied: false,
+        message: format!("Could not resolve the latest Cartograph release: {reason}."),
+        next_steps: vec![
+            "Check https://github.com/adder-factory/cartograph/releases manually.".to_owned(),
+        ],
+    }
+}
+
+async fn latest_version() -> Result<String, String> {
+    match latest_git_tag().await {
+        Ok(version) => Ok(version),
+        Err(git_error) => latest_release_api().await.map_err(|api_error| {
+            format!("git tag lookup failed ({git_error}); GitHub API failed ({api_error})")
+        }),
+    }
+}
+
+async fn latest_git_tag() -> Result<String, String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new("git")
+            .args(["ls-remote", "--tags", "--refs", REMOTE, "v*"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "git ls-remote timed out".to_owned())?
+    .map_err(|_| "git ls-remote could not start".to_owned())?;
+    if !output.status.success() || output.stdout.len() > MAXIMUM_TAG_OUTPUT_BYTES {
+        return Err("git ls-remote failed or exceeded its output bound".to_owned());
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|_| "git ls-remote returned non-UTF-8 output".to_owned())?;
+    text.lines()
+        .filter_map(|line| line.split_once("refs/tags/v").map(|(_, version)| version))
+        .filter_map(|version| parse_version(version).map(|parsed| (parsed, version.to_owned())))
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, version)| version)
+        .ok_or_else(|| "git ls-remote returned no semver release tags".to_owned())
+}
+
+async fn latest_release_api() -> Result<String, String> {
+    let client = http_client()?;
+    let bytes = fetch_bounded(&client, LATEST_RELEASE_API, MAXIMUM_CHECKSUM_BYTES).await?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "GitHub API returned invalid JSON".to_owned())?;
+    let tag = value
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|tag| tag.strip_prefix('v'))
+        .ok_or_else(|| "GitHub API response has no release tag".to_owned())?;
+    parse_version(tag)
+        .map(|_| tag.to_owned())
+        .ok_or_else(|| "GitHub release tag is not semver".to_owned())
+}
+
+async fn apply_release(version: &str) -> Result<PathBuf, String> {
+    let executable =
+        env::current_exe().map_err(|_| "could not resolve the running executable".to_owned())?;
+    let executable = fs::canonicalize(&executable)
+        .map_err(|_| "could not resolve the running executable".to_owned())?;
+    let asset = asset_name()?;
+    let client = http_client()?;
+    let checksums_url = format!("{RELEASE_BASE}/v{version}/SHA256SUMS");
+    let asset_url = format!("{RELEASE_BASE}/v{version}/{asset}");
+    let checksums = fetch_bounded(&client, &checksums_url, MAXIMUM_CHECKSUM_BYTES).await?;
+    let expected = checksum_for_asset(&checksums, asset)?;
+    let binary = fetch_bounded(&client, &asset_url, MAXIMUM_BINARY_BYTES).await?;
+    let actual = sha256_hex(&binary);
+    if actual != expected {
+        return Err("downloaded native binary failed SHA-256 verification".to_owned());
+    }
+    install_binary(&executable, &binary, version)?;
+    Ok(executable)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn http_client() -> Result<Client, String> {
+    Client::builder()
+        .user_agent(format!("cartograph/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(2 * 60))
+        .build()
+        .map_err(|_| "could not initialize the HTTPS client".to_owned())
+}
+
+async fn fetch_bounded(client: &Client, url: &str, maximum: usize) -> Result<Vec<u8>, String> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| "release download failed".to_owned())?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|length| length > maximum as u64)
+    {
+        return Err("release download was unavailable or exceeded its size bound".to_owned());
+    }
+    let mut output = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| "release download failed".to_owned())?;
+        let next = output
+            .len()
+            .checked_add(chunk.len())
+            .filter(|length| *length <= maximum)
+            .ok_or_else(|| "release download exceeded its size bound".to_owned())?;
+        output
+            .try_reserve(next.saturating_sub(output.len()))
+            .map_err(|_| "release download exceeded local memory limits".to_owned())?;
+        output.extend_from_slice(&chunk);
+    }
+    Ok(output)
+}
+
+fn checksum_for_asset(checksums: &[u8], asset: &str) -> Result<String, String> {
+    let text = std::str::from_utf8(checksums).map_err(|_| "SHA256SUMS is not UTF-8".to_owned())?;
+    let matches = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let digest = fields.next()?;
+            let name = fields.next()?.trim_start_matches('*');
+            (name == asset && fields.next().is_none()).then_some(digest)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1
+        || matches[0].len() != 64
+        || !matches[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("SHA256SUMS has no unique valid entry for this platform".to_owned());
+    }
+    Ok(matches[0].to_ascii_lowercase())
+}
+
+fn install_binary(executable: &Path, bytes: &[u8], version: &str) -> Result<(), String> {
+    let directory = executable
+        .parent()
+        .ok_or_else(|| "running executable has no parent directory".to_owned())?;
+    let mut staged = NamedTempFile::new_in(directory)
+        .map_err(|_| "could not stage the native update beside the executable".to_owned())?;
+    staged
+        .write_all(bytes)
+        .and_then(|()| staged.as_file().sync_all())
+        .map_err(|_| "could not write the staged native update".to_owned())?;
+    set_executable(staged.as_file())?;
+    verify_staged_binary(staged.path(), version)?;
+    replace_executable(staged, executable)
+}
+
+fn verify_staged_binary(path: &Path, version: &str) -> Result<(), String> {
+    let output = ProcessCommand::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|_| "downloaded native binary could not start".to_owned())?;
+    let stdout = std::str::from_utf8(&output.stdout).unwrap_or_default();
+    if output.status.success() && stdout.split_whitespace().any(|part| part == version) {
+        Ok(())
+    } else {
+        Err("downloaded native binary did not report the expected version".to_owned())
+    }
+}
+
+#[cfg(unix)]
+fn set_executable(file: &fs::File) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(fs::Permissions::from_mode(0o755))
+        .map_err(|_| "could not mark the native update executable".to_owned())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_file: &fs::File) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_executable(staged: NamedTempFile, executable: &Path) -> Result<(), String> {
+    staged
+        .persist(executable)
+        .map(|_| ())
+        .map_err(|_| "could not atomically replace the running executable".to_owned())
+}
+
+#[cfg(windows)]
+fn replace_executable(staged: NamedTempFile, executable: &Path) -> Result<(), String> {
+    let backup = executable.with_extension("exe.cartograph-old");
+    let _ = fs::remove_file(&backup);
+    fs::rename(executable, &backup)
+        .map_err(|_| "could not move the running executable aside".to_owned())?;
+    match staged.persist(executable) {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            let _ = fs::rename(&backup, executable);
+            Err(
+                "could not replace the running executable; the prior binary was restored"
+                    .to_owned(),
+            )
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const fn asset_name() -> Result<&'static str, String> {
+    Ok("cartograph-darwin-arm64")
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const fn asset_name() -> Result<&'static str, String> {
+    Ok("cartograph-darwin-x64")
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const fn asset_name() -> Result<&'static str, String> {
+    Ok("cartograph-linux-arm64")
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const fn asset_name() -> Result<&'static str, String> {
+    Ok("cartograph-linux-x64")
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const fn asset_name() -> Result<&'static str, String> {
+    Ok("cartograph-windows-x64.exe")
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "x86_64")
+)))]
+fn asset_name() -> Result<&'static str, String> {
+    Err("no native release asset exists for this operating system and architecture".to_owned())
+}
+
+fn parse_version(raw: &str) -> Option<Version> {
+    let raw = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
+    let raw = raw.split_once('+').map_or(raw, |(core, _)| core);
+    let (core, prerelease) = raw.split_once('-').map_or((raw, ""), |parts| parts);
+    let mut numbers = core.split('.');
+    let major = numbers.next()?.parse().ok()?;
+    let minor = numbers.next()?.parse().ok()?;
+    let patch = numbers.next()?.parse().ok()?;
+    if numbers.next().is_some() {
+        return None;
+    }
+    let prerelease = if prerelease.is_empty() {
+        Vec::new()
+    } else {
+        prerelease
+            .split('.')
+            .map(|part| {
+                part.parse::<u64>()
+                    .map(PrereleasePart::Numeric)
+                    .unwrap_or_else(|_| PrereleasePart::Text(part.to_ascii_lowercase()))
+            })
+            .collect()
+    };
+    Some(Version {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
+fn compare_prerelease(left: &[PrereleasePart], right: &[PrereleasePart]) -> Ordering {
+    match (left.is_empty(), right.is_empty()) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+        (false, false) => {}
+    }
+    for (left, right) in left.iter().zip(right) {
+        let ordering = match (left, right) {
+            (PrereleasePart::Numeric(left), PrereleasePart::Numeric(right)) => left.cmp(right),
+            (PrereleasePart::Numeric(_), PrereleasePart::Text(_)) => Ordering::Less,
+            (PrereleasePart::Text(_), PrereleasePart::Numeric(_)) => Ordering::Greater,
+            (PrereleasePart::Text(left), PrereleasePart::Text(right)) => left.cmp(right),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semver_ordering_handles_stable_and_prerelease_tags() {
+        let parse = |value| {
+            parse_version(value).unwrap_or_else(|| panic!("invalid version fixture: {value}"))
+        };
+        assert!(parse("2.0.0") > parse("2.0.0-rc.2"));
+        assert!(parse("2.0.0-rc.10") > parse("2.0.0-rc.2"));
+        assert!(parse("2.0.0-alpha.1") > parse("1.1.33"));
+        assert!(parse("2.1.0") > parse("2.0.99"));
+    }
+
+    #[test]
+    fn checksum_parser_requires_one_exact_asset_entry() {
+        let sums = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  cartograph-darwin-arm64\n";
+        assert_eq!(
+            checksum_for_asset(sums, "cartograph-darwin-arm64"),
+            Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned())
+        );
+        assert!(checksum_for_asset(sums, "cartograph-linux-x64").is_err());
+    }
+}

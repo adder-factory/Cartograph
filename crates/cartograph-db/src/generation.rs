@@ -19,7 +19,11 @@ use crate::{
         CanonicalGenerationFacts, CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations,
         copy_generation_facts,
     },
-    leases::operation_lock_key,
+    leases::project_lock_key,
+    search_relation::{
+        GenerationSearchBuild, rebuild_generation_search_relation,
+        require_generation_search_relation,
+    },
 };
 
 const MAX_ROOT_IDENTITY_BYTES: usize = 4_096;
@@ -72,6 +76,24 @@ impl NewGeneration {
             project_id,
             source_revision: source_revision.into(),
             worker_count,
+        }
+    }
+}
+
+/// Exact project/generation identity used to rehydrate restart-safe type state.
+#[derive(Clone, Copy, Debug)]
+pub struct GenerationRecoveryRequest<'a> {
+    project_id: &'a ProjectId,
+    generation_id: &'a GenerationId,
+}
+
+impl<'a> GenerationRecoveryRequest<'a> {
+    /// Bind one immutable generation to its owning project.
+    #[must_use]
+    pub const fn new(project_id: &'a ProjectId, generation_id: &'a GenerationId) -> Self {
+        Self {
+            project_id,
+            generation_id,
         }
     }
 }
@@ -865,8 +887,63 @@ impl CartographDatabase {
     /// recoverable through this mutation surface.
     pub async fn recover_generation(
         &self,
-        project_id: &ProjectId,
-        generation_id: &GenerationId,
+        request: GenerationRecoveryRequest<'_>,
+    ) -> Result<Option<RecoverableGeneration>, StorageError> {
+        self.recover_generation_inner(request, None).await
+    }
+
+    /// Rehydrate one generation under a PostgreSQL-side statement deadline.
+    pub async fn recover_generation_bounded(
+        &self,
+        request: GenerationRecoveryRequest<'_>,
+        statement_timeout: Duration,
+    ) -> Result<Option<RecoverableGeneration>, StorageError> {
+        self.recover_generation_inner(request, Some(statement_timeout))
+            .await
+    }
+
+    async fn recover_generation_inner(
+        &self,
+        request: GenerationRecoveryRequest<'_>,
+        statement_timeout: Option<Duration>,
+    ) -> Result<Option<RecoverableGeneration>, StorageError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("recover-generation-begin"))?;
+        if let Some(statement_timeout) = statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            return match transaction.rollback().await {
+                Ok(()) => Err(database_error("recover-generation-statement-timeout")),
+                Err(_) => Err(database_error("recover-generation-rollback")),
+            };
+        }
+        let recovered = self
+            .recover_generation_connection(&mut transaction, request)
+            .await;
+        match recovered {
+            Ok(recovered) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| database_error("recover-generation-commit"))?;
+                Ok(recovered)
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(_) => Err(database_error("recover-generation-rollback")),
+            },
+        }
+    }
+
+    async fn recover_generation_connection(
+        &self,
+        connection: &mut PgConnection,
+        request: GenerationRecoveryRequest<'_>,
     ) -> Result<Option<RecoverableGeneration>, StorageError> {
         let schema = crate::database::quoted_schema(&self.schema);
         let sql = format!(
@@ -875,9 +952,9 @@ impl CartographDatabase {
                 WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)"#
         );
         let row = audited_query(sql)
-            .bind(project_id.as_str())
-            .bind(generation_id.as_str())
-            .fetch_optional(&self.pool)
+            .bind(request.project_id.as_str())
+            .bind(request.generation_id.as_str())
+            .fetch_optional(connection)
             .await
             .map_err(|_| database_error("recover-generation"))?;
         let Some(row) = row else {
@@ -901,8 +978,8 @@ impl CartographDatabase {
         Ok(match state {
             GenerationState::Staging if content_digest.is_none() && digest_version.is_none() => {
                 Some(RecoverableGeneration::Staged(StagedGeneration {
-                    project_id: project_id.clone(),
-                    generation_id: generation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    generation_id: request.generation_id.clone(),
                     sequence,
                 }))
             }
@@ -921,8 +998,8 @@ impl CartographDatabase {
                 let digest_version =
                     digest_version.ok_or_else(|| corrupt("content_digest_version"))?;
                 Some(RecoverableGeneration::Ready(ReadyGeneration {
-                    project_id: project_id.clone(),
-                    generation_id: generation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    generation_id: request.generation_id.clone(),
                     sequence,
                     content_digest,
                     digest_version,
@@ -1317,6 +1394,24 @@ async fn prepare_transaction(
         },
     )
     .await?;
+    rebuild_generation_search_relation(
+        connection,
+        GenerationSearchBuild {
+            schema: input.schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+            content_digest: &content_digest,
+        },
+    )
+    .await?;
+    carry_forward_unchanged_generation_evidence(
+        connection,
+        &quoted_schema,
+        input.generation,
+        &content_digest,
+        digest_version,
+    )
+    .await?;
     lock_generation_fence(connection, input.schema, input.fence).await?;
     validate_generation_state(
         connection,
@@ -1511,6 +1606,13 @@ async fn publish_transaction(
         FenceCheck::Lock,
     )
     .await?;
+    require_generation_search_relation(
+        connection,
+        input.schema,
+        generation.project_id(),
+        generation.generation_id(),
+    )
+    .await?;
 
     let current_sequence =
         lock_current_generation_sequence(connection, &quoted_schema, generation.project_id())
@@ -1570,6 +1672,165 @@ async fn publish_transaction(
         return Err(StorageError::GenerationNotFound);
     }
     delete_generation_fence(connection, &quoted_schema, fence).await?;
+    Ok(())
+}
+
+/// Re-link content-addressed bulk evidence while the new generation is staged.
+///
+/// Symbol and document identities are stable across generations, but every
+/// structural fact table is generation-fenced. Carrying rows forward inside
+/// the already-bounded prepare transaction prevents a successful re-index from
+/// eroding embeddings or coverage for unchanged code without making the short
+/// publication critical section scale with the corpus. Exact digest or
+/// rendered-document equality is required; changed source is deliberately left
+/// without derived evidence so callers cannot mistake it for fresh data.
+async fn carry_forward_unchanged_generation_evidence(
+    connection: &mut PgConnection,
+    quoted_schema: &str,
+    generation: &StagedGeneration,
+    content_digest: &ContentDigest,
+    digest_version: GenerationDigestVersion,
+) -> Result<(), StorageError> {
+    let project_id = generation.project_id().as_str();
+    let generation_id = generation.generation_id().as_str();
+
+    let embeddings = format!(
+        r#"INSERT INTO {quoted_schema}."document_embeddings" (
+                project_id, generation_id, document_id, model_id,
+                source_digest, embedding, created_at, updated_at
+            )
+            SELECT previous_embeddings.project_id, CAST($2 AS uuid),
+                   next_documents.document_id, previous_embeddings.model_id,
+                   previous_embeddings.source_digest, previous_embeddings.embedding,
+                   previous_embeddings.created_at, clock_timestamp()
+            FROM {quoted_schema}."projects" AS projects
+            JOIN {quoted_schema}."document_embeddings" AS previous_embeddings
+              ON previous_embeddings.project_id = projects.project_id
+             AND previous_embeddings.generation_id = projects.current_generation_id
+            JOIN {quoted_schema}."search_documents" AS previous_documents
+              ON previous_documents.project_id = previous_embeddings.project_id
+             AND previous_documents.generation_id = previous_embeddings.generation_id
+             AND previous_documents.document_id = previous_embeddings.document_id
+            JOIN {quoted_schema}."search_documents" AS next_documents
+              ON next_documents.project_id = previous_documents.project_id
+             AND next_documents.generation_id = CAST($2 AS uuid)
+             AND next_documents.document_id = previous_documents.document_id
+             AND next_documents.path = previous_documents.path
+             AND next_documents.language = previous_documents.language
+             AND next_documents.document_kind = previous_documents.document_kind
+             AND next_documents.qualified_name = previous_documents.qualified_name
+             AND next_documents.code = previous_documents.code
+             AND next_documents.natural_text = previous_documents.natural_text
+            JOIN {quoted_schema}."embedding_models" AS models
+              ON models.model_id = previous_embeddings.model_id
+             AND models.state = 'active'
+            WHERE projects.project_id = CAST($1 AS uuid)
+              AND projects.current_generation_id IS NOT NULL
+            ON CONFLICT (project_id, generation_id, document_id, model_id) DO NOTHING"#,
+    );
+    audited_query(embeddings)
+        .bind(project_id)
+        .bind(generation_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("prepare-carry-embeddings"))?;
+
+    let coverage = format!(
+        r#"INSERT INTO {quoted_schema}."symbol_coverage" (
+                project_id, generation_id, source_id, symbol_id,
+                lines_found, lines_hit, functions_found, functions_hit, updated_at
+            )
+            SELECT previous_coverage.project_id, CAST($2 AS uuid),
+                   previous_coverage.source_id, next_symbols.symbol_id,
+                   previous_coverage.lines_found, previous_coverage.lines_hit,
+                   previous_coverage.functions_found, previous_coverage.functions_hit,
+                   clock_timestamp()
+            FROM {quoted_schema}."projects" AS projects
+            JOIN {quoted_schema}."symbol_coverage" AS previous_coverage
+              ON previous_coverage.project_id = projects.project_id
+             AND previous_coverage.generation_id = projects.current_generation_id
+            JOIN {quoted_schema}."symbols" AS previous_symbols
+              ON previous_symbols.project_id = previous_coverage.project_id
+             AND previous_symbols.generation_id = previous_coverage.generation_id
+             AND previous_symbols.symbol_id = previous_coverage.symbol_id
+            JOIN {quoted_schema}."symbols" AS next_symbols
+              ON next_symbols.project_id = previous_symbols.project_id
+             AND next_symbols.generation_id = CAST($2 AS uuid)
+             AND next_symbols.symbol_id = previous_symbols.symbol_id
+             AND next_symbols.structural_digest = previous_symbols.structural_digest
+            WHERE projects.project_id = CAST($1 AS uuid)
+              AND projects.current_generation_id IS NOT NULL
+            ON CONFLICT (project_id, generation_id, source_id, symbol_id) DO NOTHING"#,
+    );
+    audited_query(coverage)
+        .bind(project_id)
+        .bind(generation_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("prepare-carry-coverage"))?;
+
+    // A materialized Top-K is valid only when the complete logical fact set is
+    // identical. Partial carry-forward would preserve stale ranks after a
+    // neighbor changed; omitting the build metadata intentionally makes reads
+    // fall back to authoritative live pgvector search instead.
+    let similarity_edges = format!(
+        r#"INSERT INTO {quoted_schema}."symbol_similarity_edges" (
+                project_id, generation_id, model_id, source_symbol_id,
+                target_symbol_id, score, neighbor_rank, built_at
+            )
+            SELECT edges.project_id, CAST($2 AS uuid), edges.model_id,
+                   edges.source_symbol_id, edges.target_symbol_id,
+                   edges.score, edges.neighbor_rank, edges.built_at
+            FROM {quoted_schema}."projects" AS projects
+            JOIN {quoted_schema}."index_generations" AS previous
+              ON previous.project_id = projects.project_id
+             AND previous.generation_id = projects.current_generation_id
+            JOIN {quoted_schema}."symbol_similarity_edges" AS edges
+              ON edges.project_id = previous.project_id
+             AND edges.generation_id = previous.generation_id
+            WHERE projects.project_id = CAST($1 AS uuid)
+              AND previous.content_digest = $3
+              AND previous.content_digest_version = $4
+            ON CONFLICT (
+                project_id, generation_id, model_id, source_symbol_id, target_symbol_id
+            ) DO NOTHING"#,
+    );
+    audited_query(similarity_edges)
+        .bind(project_id)
+        .bind(generation_id)
+        .bind(content_digest.as_str())
+        .bind(digest_version.database_value())
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("prepare-carry-similarity-edges"))?;
+    let similarity_builds = format!(
+        r#"INSERT INTO {quoted_schema}."symbol_similarity_builds" (
+                project_id, generation_id, model_id, neighbors_per_symbol,
+                minimum_score, source_symbols, edges_written, built_at
+            )
+            SELECT builds.project_id, CAST($2 AS uuid), builds.model_id,
+                   builds.neighbors_per_symbol, builds.minimum_score,
+                   builds.source_symbols, builds.edges_written, builds.built_at
+            FROM {quoted_schema}."projects" AS projects
+            JOIN {quoted_schema}."index_generations" AS previous
+              ON previous.project_id = projects.project_id
+             AND previous.generation_id = projects.current_generation_id
+            JOIN {quoted_schema}."symbol_similarity_builds" AS builds
+              ON builds.project_id = previous.project_id
+             AND builds.generation_id = previous.generation_id
+            WHERE projects.project_id = CAST($1 AS uuid)
+              AND previous.content_digest = $3
+              AND previous.content_digest_version = $4
+            ON CONFLICT (project_id, generation_id, model_id) DO NOTHING"#,
+    );
+    audited_query(similarity_builds)
+        .bind(project_id)
+        .bind(generation_id)
+        .bind(content_digest.as_str())
+        .bind(digest_version.database_value())
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("prepare-carry-similarity-builds"))?;
     Ok(())
 }
 
@@ -1658,7 +1919,7 @@ async fn lock_generation_mutation(
         .generation_id()
         .ok_or(StorageError::LeaseFenceLost)?;
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(operation_lock_key(schema, fence.target()))
+        .bind(project_lock_key(schema, fence.target().project_id()))
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("lock-generation-operation"))?;

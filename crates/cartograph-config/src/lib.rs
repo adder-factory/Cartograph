@@ -16,6 +16,10 @@ pub const DATABASE_URL_ENV: &str = "CARTOGRAPH_DATABASE_URL";
 pub const DATABASE_MAX_CONNECTIONS_ENV: &str = "CARTOGRAPH_DATABASE_MAX_CONNECTIONS";
 /// Environment variable controlling pool acquisition timeout in milliseconds.
 pub const DATABASE_ACQUIRE_TIMEOUT_MS_ENV: &str = "CARTOGRAPH_DATABASE_ACQUIRE_TIMEOUT_MS";
+/// Environment variable setting the connection's default PostgreSQL statement timeout.
+pub const DATABASE_QUERY_TIMEOUT_MS_ENV: &str = "CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS";
+/// Environment variable forcing PostgreSQL TLS when set to `true`.
+pub const DATABASE_REQUIRE_SSL_ENV: &str = "CARTOGRAPH_DATABASE_REQUIRE_SSL";
 /// Environment variable selecting the isolated PostgreSQL schema.
 pub const DATABASE_SCHEMA_ENV: &str = "CARTOGRAPH_DATABASE_SCHEMA";
 
@@ -23,6 +27,8 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 const MAX_CONNECTIONS_LIMIT: u32 = 64;
 const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 5_000;
 const MAX_ACQUIRE_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_QUERY_TIMEOUT_MS: u64 = 120_000;
+const MAX_QUERY_TIMEOUT_MS: u64 = 600_000;
 const DEFAULT_DATABASE_SCHEMA: &str = "cartograph";
 const POSTGRES_IDENTIFIER_LENGTH_LIMIT: usize = 63;
 
@@ -39,6 +45,8 @@ pub struct DatabaseSettings {
     url: SecretString,
     max_connections: NonZeroU32,
     acquire_timeout: Duration,
+    query_timeout: Duration,
+    require_ssl: bool,
     schema: DatabaseSchema,
 }
 
@@ -49,6 +57,8 @@ impl std::fmt::Debug for DatabaseSettings {
             .field("url", &"[REDACTED]")
             .field("max_connections", &self.max_connections)
             .field("acquire_timeout", &self.acquire_timeout)
+            .field("query_timeout", &self.query_timeout)
+            .field("require_ssl", &self.require_ssl)
             .field("schema", &self.schema)
             .finish()
     }
@@ -102,12 +112,16 @@ impl DatabaseSettings {
             env::var(DATABASE_URL_ENV).map_err(|_| ConfigError::MissingDatabaseUrl)?;
         let max_connections = env::var(DATABASE_MAX_CONNECTIONS_ENV).ok();
         let acquire_timeout_ms = env::var(DATABASE_ACQUIRE_TIMEOUT_MS_ENV).ok();
+        let query_timeout_ms = env::var(DATABASE_QUERY_TIMEOUT_MS_ENV).ok();
+        let require_ssl = parse_optional_bool_env(DATABASE_REQUIRE_SSL_ENV)?;
         let schema = DatabaseSchema::from_env()?;
         Self::parse(
             &database_url,
             max_connections.as_deref(),
             acquire_timeout_ms.as_deref(),
         )?
+        .with_query_timeout_ms(query_timeout_ms.as_deref())?
+        .with_require_ssl(require_ssl)
         .with_schema(schema.as_str())
     }
 
@@ -136,8 +150,53 @@ impl DatabaseSettings {
             url: SecretString::from(database_url.to_owned()),
             max_connections,
             acquire_timeout: Duration::from_millis(acquire_timeout_ms),
+            query_timeout: Duration::from_millis(DEFAULT_QUERY_TIMEOUT_MS),
+            require_ssl: false,
             schema: DatabaseSchema(DEFAULT_DATABASE_SCHEMA.to_owned()),
         })
+    }
+
+    /// Replace the connection-pool cap using the same hard bound as environment input.
+    pub fn with_max_connections(mut self, value: u32) -> Result<Self, ConfigError> {
+        self.max_connections = NonZeroU32::new(value)
+            .filter(|value| value.get() <= MAX_CONNECTIONS_LIMIT)
+            .ok_or(ConfigError::InvalidBoundedInteger {
+                key: DATABASE_MAX_CONNECTIONS_ENV,
+                minimum: 1,
+                maximum: u64::from(MAX_CONNECTIONS_LIMIT),
+            })?;
+        Ok(self)
+    }
+
+    /// Replace the pool/initial-connect acquisition timeout in milliseconds.
+    pub fn with_acquire_timeout_ms(mut self, value: u64) -> Result<Self, ConfigError> {
+        let value = parse_bounded_nonzero_u64(BoundedIntegerInput {
+            key: DATABASE_ACQUIRE_TIMEOUT_MS_ENV,
+            raw: Some(&value.to_string()),
+            default: DEFAULT_ACQUIRE_TIMEOUT_MS,
+            maximum: MAX_ACQUIRE_TIMEOUT_MS,
+        })?;
+        self.acquire_timeout = Duration::from_millis(value);
+        Ok(self)
+    }
+
+    /// Replace the PostgreSQL session statement timeout in milliseconds.
+    pub fn with_query_timeout_ms(mut self, raw: Option<&str>) -> Result<Self, ConfigError> {
+        let value = parse_bounded_nonzero_u64(BoundedIntegerInput {
+            key: DATABASE_QUERY_TIMEOUT_MS_ENV,
+            raw,
+            default: DEFAULT_QUERY_TIMEOUT_MS,
+            maximum: MAX_QUERY_TIMEOUT_MS,
+        })?;
+        self.query_timeout = Duration::from_millis(value);
+        Ok(self)
+    }
+
+    /// Force TLS at the driver boundary even when the URL omits `sslmode=require`.
+    #[must_use]
+    pub const fn with_require_ssl(mut self, require_ssl: bool) -> Self {
+        self.require_ssl = require_ssl;
+        self
     }
 
     /// Replace the default schema with a validated project/deployment schema.
@@ -162,6 +221,18 @@ impl DatabaseSettings {
     #[must_use]
     pub const fn acquire_timeout(&self) -> Duration {
         self.acquire_timeout
+    }
+
+    /// Default PostgreSQL statement timeout installed on every pooled connection.
+    #[must_use]
+    pub const fn query_timeout(&self) -> Duration {
+        self.query_timeout
+    }
+
+    /// Whether the driver must force TLS independently of URL parameters.
+    #[must_use]
+    pub const fn require_ssl(&self) -> bool {
+        self.require_ssl
     }
 
     /// Isolated PostgreSQL schema used by Cartograph.
@@ -201,6 +272,21 @@ pub enum ConfigError {
         "{DATABASE_SCHEMA_ENV} must be a 1..=63 byte ASCII identifier beginning with a letter or underscore"
     )]
     InvalidDatabaseSchema,
+    /// A boolean environment setting was neither `true` nor `false`.
+    #[error("{key} must be true or false")]
+    InvalidBoolean {
+        /// Environment key whose value was malformed.
+        key: &'static str,
+    },
+}
+
+fn parse_optional_bool_env(key: &'static str) -> Result<bool, ConfigError> {
+    match env::var(key) {
+        Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => Ok(true),
+        Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" => Ok(false),
+        Ok(_) | Err(env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidBoolean { key }),
+        Err(env::VarError::NotPresent) => Ok(false),
+    }
 }
 
 fn validate_database_url(database_url: &str) -> Result<(), ConfigError> {

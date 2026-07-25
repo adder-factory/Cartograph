@@ -12,6 +12,8 @@ const MAX_TOOL_DESCRIPTION_BYTES: usize = 4_096;
 /// Boxed async tool call returned by [`ToolHandler`].
 pub type BoxToolFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
+/// Boxed connection-shutdown reconciliation returned by a tool adapter.
+pub type BoxShutdownFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 /// Generic product adapter boundary consumed by the MCP server.
 pub trait ToolHandler: Send + Sync + 'static {
@@ -20,6 +22,11 @@ pub trait ToolHandler: Send + Sync + 'static {
 
     /// Execute one already envelope-validated call.
     fn call<'a>(&'a self, call: ToolCall, context: ToolCallContext) -> BoxToolFuture<'a>;
+
+    /// Cancel and reconcile adapter-owned background work before connection exit.
+    fn shutdown(&self) -> BoxShutdownFuture<'_> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 /// One validated MCP tool contract plus internal profile membership.
@@ -35,18 +42,51 @@ pub struct ToolDefinition {
     annotations: Option<ToolAnnotations>,
     #[serde(skip)]
     profiles: ToolProfiles,
+    #[serde(skip)]
+    read_only_carve_out: bool,
 }
 
-impl ToolDefinition {
-    /// Validate and construct a tool contract.
+/// Raw tool contract collected before validation at the transport boundary.
+pub struct ToolDefinitionInput {
+    name: String,
+    description: String,
+    input_schema: Value,
+    profiles: ToolProfiles,
+}
+
+impl ToolDefinitionInput {
+    /// Collect the human/machine contract with the broad default profile.
+    #[must_use]
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
         input_schema: Value,
-        profiles: ToolProfiles,
-    ) -> Result<Self, ToolContractError> {
-        let name = name.into();
-        let description = description.into();
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            profiles: ToolProfiles::ALL,
+        }
+    }
+
+    /// Restrict the tool to an explicit non-empty profile set before validation.
+    #[must_use]
+    pub const fn with_profiles(mut self, profiles: ToolProfiles) -> Self {
+        self.profiles = profiles;
+        self
+    }
+}
+
+impl ToolDefinition {
+    /// Validate and construct a tool contract.
+    pub fn new(input: ToolDefinitionInput) -> Result<Self, ToolContractError> {
+        let ToolDefinitionInput {
+            name,
+            description,
+            input_schema,
+            profiles,
+        } = input;
         validate_name(&name)?;
         if description.is_empty() || description.len() > MAX_TOOL_DESCRIPTION_BYTES {
             return Err(ToolContractError::InvalidDescription);
@@ -62,6 +102,7 @@ impl ToolDefinition {
             input_schema,
             annotations: None,
             profiles,
+            read_only_carve_out: false,
         })
     }
 
@@ -82,14 +123,48 @@ impl ToolDefinition {
         self
     }
 
+    /// Keep a mixed read/write family visible in read-only mode. The product
+    /// adapter remains responsible for rejecting every mutating call branch.
+    #[must_use]
+    pub const fn with_read_only_carve_out(mut self) -> Self {
+        self.read_only_carve_out = true;
+        self
+    }
+
     /// Canonical programmatic tool name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub(crate) const fn included_in(&self, profile: ToolProfile) -> bool {
+    /// Bounded human-facing description used by MCP and generated CLI help.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Exact JSON input schema shared by MCP and generated CLI commands.
+    #[must_use]
+    pub const fn input_schema(&self) -> &Value {
+        &self.input_schema
+    }
+
+    /// Standard MCP behavior hints used by profile/budget adapters.
+    #[must_use]
+    pub const fn annotations(&self) -> Option<ToolAnnotations> {
+        self.annotations
+    }
+
+    /// Whether this definition belongs to one advertised tool profile.
+    #[must_use]
+    pub const fn included_in(&self, profile: ToolProfile) -> bool {
         self.profiles.includes(profile)
+    }
+
+    /// Whether this mixed family has a product-enforced read-only branch.
+    #[must_use]
+    pub const fn has_read_only_carve_out(&self) -> bool {
+        self.read_only_carve_out
     }
 }
 
@@ -129,6 +204,17 @@ impl ToolCallContext {
             cancellation,
             deadline,
         }
+    }
+
+    /// Build a bounded context for an in-process CLI adapter that reuses the
+    /// exact MCP implementation without opening a transport connection.
+    #[must_use]
+    pub fn local(timeout: std::time::Duration) -> Self {
+        let now = Instant::now();
+        Self::new(
+            CancellationToken::new(),
+            now.checked_add(timeout).unwrap_or(now),
+        )
     }
 
     /// Cooperative cancellation probe.
@@ -199,6 +285,25 @@ impl ToolResult {
     pub fn with_structured_content(mut self, content: Map<String, Value>) -> Self {
         self.structured_content = Some(content);
         self
+    }
+
+    /// First text block for bounded macro composition and privacy-aware trace summaries.
+    #[must_use]
+    pub fn primary_text(&self) -> Option<&str> {
+        self.content.first().map(|content| content.text.as_str())
+    }
+
+    /// Structured result payload for native CLI rendering and bounded macro
+    /// composition without reparsing a Markdown text projection.
+    #[must_use]
+    pub fn structured_content(&self) -> Option<&Map<String, Value>> {
+        self.structured_content.as_ref()
+    }
+
+    /// Whether this result is an MCP tool-error envelope.
+    #[must_use]
+    pub const fn is_error(&self) -> bool {
+        self.is_error
     }
 
     pub(crate) fn from_error(error: ToolError) -> Self {

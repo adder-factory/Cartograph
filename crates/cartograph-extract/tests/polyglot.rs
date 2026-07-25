@@ -373,6 +373,33 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
             && reference.kind == ReferenceKind::Calls
     }));
 
+    let dynamic_import = extract(
+        "src/lazy.ts",
+        "async function load() {\n  const direct = await import('optional-pkg' as any);\n  const template = await import(`template-pkg`);\n  return [direct, template];\n}\n",
+    );
+    for package in ["optional-pkg", "template-pkg"] {
+        assert!(dynamic_import.references.iter().any(|reference| {
+            reference.owner.is_none()
+                && reference.name == package
+                && reference.kind == ReferenceKind::Imports
+        }));
+    }
+    assert!(
+        !dynamic_import.references.iter().any(|reference| {
+            reference.name == "import" && reference.kind == ReferenceKind::Calls
+        })
+    );
+
+    let computed_import = extract(
+        "src/computed-import.ts",
+        "async function load(name: string) { return import(name); }\n",
+    );
+    assert!(
+        !computed_import.references.iter().any(|reference| {
+            reference.name == "import" && reference.kind == ReferenceKind::Calls
+        })
+    );
+
     let side_effect = extract("src/side-effect.cjs", "require('./helper');\n");
     assert!(side_effect.import_bindings.is_empty());
     assert!(side_effect.references.iter().any(|reference| {
@@ -406,6 +433,104 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
         let shadowed_export = extract("src/shadowed-export.cjs", source);
         assert!(!symbol(&shadowed_export, "local").exported);
     }
+}
+
+#[test]
+fn symbol_health_metrics_are_ast_scoped_privacy_safe_and_agent_focused() {
+    let file = extract(
+        "src/risky.ts",
+        r#"
+export async function risky(a: string, b: string, c: string, d: string, e: string) {
+  // TODO: replace compatibility cast
+  const value = a as any;
+  readFileSync(a);
+  try { JSON.parse(value); } catch (error) {}
+  for (const item of [a, b]) { await fetch(item); }
+  if (a && b && c) { if (d) { return value; } }
+}
+export function network(url: string) { return fetch(url).then(JSON.parse); }
+export function debugOnly() { console.log('hello'); }
+export function empty() {}
+"#,
+    );
+    let risky = symbol(&file, "risky");
+    assert_eq!(risky.health.parameter_count, 5);
+    assert!(risky.health.cyclomatic >= 5);
+    assert!(risky.health.max_nesting >= 2);
+    assert!(risky.health.max_conditional_operands >= 3);
+    assert_eq!(risky.health.ts_any_casts, 1);
+    assert_eq!(risky.health.sync_io_in_async, 1);
+    assert_eq!(risky.health.empty_catches, 1);
+    assert_eq!(risky.health.sequential_await_loops, 1);
+    assert!(risky.health.incomplete_markers >= 1);
+    assert_eq!(symbol(&file, "network").health.http_without_timeout, 1);
+    assert_eq!(symbol(&file, "debugOnly").health.debug_logs, 1);
+    assert_eq!(symbol(&file, "empty").health.empty_body, 1);
+    assert!(!format!("{:?}", risky.health).contains("compatibility cast"));
+}
+
+#[test]
+fn symbol_health_retains_literal_and_sensitive_signals_without_retaining_literals() {
+    let file = extract(
+        "src/config.ts",
+        r#"
+/** Default retry count is 3. */
+export const RETRY_COUNT = 5;
+
+export function authenticate(apiKey: string, password: string) {
+  const endpoint = "https://api.example.com/v1";
+  const weights = [3, 4, 5, 6, 8];
+  return sign(endpoint, process.env.SECRET_KEY, apiKey, password, weights);
+}
+
+export function buildEndpoint(host: string) {
+  return `https://${host}/v1`;
+}
+"#,
+    );
+
+    let authenticate = symbol(&file, "authenticate");
+    assert_eq!(authenticate.health.magic_numbers, 5);
+    assert_eq!(authenticate.health.hardcoded_urls, 1);
+    assert!(authenticate.health.literal_bytes > 0);
+    assert!(authenticate.health.secrets_score >= 70);
+    assert_ne!(authenticate.health.secrets_signal_mask, 0);
+    let build_endpoint = symbol(&file, "buildEndpoint");
+    assert_eq!(build_endpoint.health.hardcoded_urls, 0);
+    assert!(build_endpoint.health.literal_bytes > 0);
+
+    let retry_count = symbol(&file, "RETRY_COUNT");
+    assert_eq!(retry_count.health.stale_doc_numbers, 1);
+    assert!(retry_count.signature.is_none());
+    assert!(!format!("{:?}", retry_count.health).contains("RETRY_COUNT"));
+}
+
+#[test]
+fn clone_shape_digest_detects_alpha_renamed_literal_changed_type_two_clones() {
+    let file = extract(
+        "src/clones.ts",
+        r#"
+export function first(input: number) {
+  const doubled = input * 3;
+  if (doubled > 9) {
+    return doubled - 4;
+  }
+  return doubled + 5;
+}
+
+export function second(value: number) {
+  const scaled = value * 7;
+  if (scaled > 21) {
+    return scaled - 8;
+  }
+  return scaled + 11;
+}
+"#,
+    );
+    let first = symbol(&file, "first");
+    let second = symbol(&file, "second");
+    assert_ne!(first.structural_digest, second.structural_digest);
+    assert_eq!(first.clone_shape_digest, second.clone_shape_digest);
 }
 
 fn extract(path: &str, source: &str) -> ExtractedFile {

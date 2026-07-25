@@ -1,15 +1,17 @@
 # V2 native real-corpus scaling benchmark
 
-Status: frozen resolver-v2 plus generation-scoped bulk-relation contract
+Status: v2.0.0 release-candidate extractor/resolver and digest-v4 contract
 Measured: 2026-07-24
-Current raw report: [`native-corpus-scaling-aarch64-2026-07-24-bulk-relations-v2.json`](./native-corpus-scaling-aarch64-2026-07-24-bulk-relations-v2.json)
 
-The immutable row-foreign-key resolver-v2 baseline remains
-[`native-corpus-scaling-aarch64-2026-07-23-resolver-v2.json`](./native-corpus-scaling-aarch64-2026-07-23-resolver-v2.json).
-The pre-resolver baseline remains
-[`native-corpus-scaling-aarch64-2026-07-23.json`](./native-corpus-scaling-aarch64-2026-07-23.json).
-Keeping all three reports makes both the intentional resolver contract change
-and the storage optimization reviewable instead of overwriting old evidence.
+The committed
+[`bulk-relations-v2`](./native-corpus-scaling-aarch64-2026-07-24-bulk-relations-v2.json),
+[`resolver-v2`](./native-corpus-scaling-aarch64-2026-07-23-resolver-v2.json),
+and [pre-resolver](./native-corpus-scaling-aarch64-2026-07-23.json) reports
+remain immutable historical baselines. The figures below are from the final
+release-candidate command output.
+
+Keeping the older reports makes each intentional extractor, resolver, digest,
+and storage-contract change reviewable instead of overwriting prior evidence.
 
 ## What this proves
 
@@ -18,13 +20,14 @@ Tree-sitter extraction, project resolution, canonical reduction, PostgreSQL
 COPY, atomic publication, and ParadeDB BM25 lookup at 1, 2, 4, 8, and 16
 workers. It does not call Bun, TypeScript, or an LLM.
 
-The corpus freezes 24 representative Cartograph v1 source files plus the four
-TypeScript/JavaScript/TSX/JSX v1.1.33 oracle sources. It contains 28 files and
-1,052,338 source bytes. Every source is compiled into the Rust test with
+The corpus freezes 24 representative Cartograph v1 source files, the four
+TypeScript/JavaScript/TSX/JSX v1.1.33 oracle sources, and six custom-language
+tag-search fixtures. It contains 34 files and 1,052,564 source bytes. Every
+source is compiled into the Rust test with
 `include_str!`; a length-delimited path/content fingerprint prevents a changed
 checkout from silently becoming a new baseline:
 
-`5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20`
+`ab91088c482ed36d31759382283342654ce6958be4e601429b8181da531c5fc1`
 
 Each worker count runs in its own child process so process RSS does not inherit
 another worker count's allocator high-water. Each child performs one warmup and
@@ -39,32 +42,30 @@ lease cleanup all pass.
 
 All 20 warmup/measured runs produced:
 
-- logical digest version 2,
-  `dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3`;
-- 28 files, 3,843 symbols, 3,699 edges, 12,660 references, and 3,871
+- logical digest version 4,
+  `95bb83066852d14034cbd16774818b8491798063b84d1e25a65c9e87520140cc`;
+- 34 files, 4,207 symbols, 6,818 edges, 14,326 references, and 4,207
   search documents;
-- edge kinds `calls`, `contains`, `extends`, `field_access`, `implements`,
-  `instantiates`, `returns`, and `type_of`;
-- 1,852 exactly resolved and 10,808 explicitly unresolved references;
+- edge kinds `calls`, `contains`, `exports`, `extends`, `field_access`,
+  `implements`, `instantiates`, `references`, `returns`, and `type_of`;
+- 2,852 exactly resolved and 11,486 explicitly unresolved references;
 - zero parser diagnostics;
-- an 8,473,292-byte modeled canonical generation, 61,210,798-byte resolve
-  charge, and 47,754,838-byte validation charge; and
-- the same ordered five-document BM25 result for `detectSecretsHandling`.
+- a 13,097,322-byte modeled canonical generation, 74,672,143-byte resolve
+  charge, and 85,429,377-byte validation charge;
+- the same ordered five-document BM25 result for `detectSecretsHandling`; and
+- the same ordered six-document cross-language BM25 result plus exact-name
+  lookup for `tagscanary`, with the secret sentinel absent from all stored
+  search evidence.
 
-The contract change is deliberate. Three declaration-only overload/signature
-symbols and their documents are now explicit, implementation bodies contribute
-bounded identifier/keyword text, and import aliases plus lexical scopes decide
-references. The old resolver linked any unique project-wide same-name symbol,
-including private declarations in unrelated modules. Resolver v2 removes those
-false-positive edges, permits only exported cross-file fallback, resolves exact
-relative default/named/namespace imports, chooses a unique overload
-implementation, stops ambiguous stems before directory-index fallback, and
-keeps class members out of bare lexical calls. Ambiguous or bare-package imports
-remain explicit. Named import declaration sites are resolved by their exact
-binding span before same-name lexical or project candidates. Seven former
-same-name member matches in this corpus are now unresolved and four false graph
-edges are gone; BM25 ordering is unchanged. That is why resolved/edge counts
-fall even though the resolver is more precise.
+The contract change is deliberate. The final native pipeline preserves typed
+declarations, module/export relationships, value and structural references,
+framework signals, reference multiplicity, and v1 custom-language tag
+extraction that earlier baselines had not all enabled together. Module-aware
+resolution still refuses ambiguous project-wide same-name fallbacks and keeps
+unresolved evidence explicit. The unchanged corpus fingerprint, zero
+diagnostics, exact cross-worker digest, literal row contracts, and independent
+language/resolver fixtures prevent this larger graph from being accepted as a
+blind snapshot.
 
 ## Environment and measurement
 
@@ -107,9 +108,10 @@ corrupted copied relation, and any failure rolls back every fact row while
 returning a recoverable staging token. A live trigger deliberately injects a
 missing edge symbol after valid input and proves the database check rejects and
 rolls back the generation. Facts are immutable after preparation. Failed
-generation metadata is retained; the product does not yet expose generation
-deletion, although the retained generation foreign keys define cascade behavior
-for that future path.
+generation metadata was retained without a public deletion command at the time
+of this frozen measurement. The final v2 runtime now exposes separately
+confirmed, bounded `db prune`; the foreign-key/cascade behavior measured here
+remains the basis of that collector.
 
 The first SQL prototype used anti-joins. A measured four-worker run spent about
 5.75 seconds in that check because fresh COPY targets had no useful planner
@@ -133,43 +135,34 @@ across the warmup and measured runs in each isolated worker process.
 
 | Workers | Native p50 / p95 | COPY p50 / p95 | Relation check p50 / p95 | Supervised pipeline p50 / p95 | Native files/s | Peak RSS MiB | RSS delta MiB |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1,261.97 / 1,281.04 | 284.38 / 286.79 | 8.38 / 8.61 | 1,582.43 / 1,584.19 | 22.19 | 66.94 | 56.75 |
-| 2 | 861.05 / 862.87 | 279.57 / 280.69 | 8.16 / 8.41 | 1,173.74 / 1,180.69 | 32.52 | 69.02 | 58.84 |
-| 4 | 681.52 / 683.74 | 285.68 / 295.55 | 8.07 / 8.21 | 1,007.45 / 1,008.13 | 41.08 | 71.47 | 61.27 |
-| 8 | 711.70 / 721.56 | 287.12 / 291.30 | 8.56 / 9.14 | 1,029.70 / 1,046.12 | 39.34 | 78.75 | 68.56 |
-| 16 | 945.40 / 957.23 | 281.14 / 281.71 | 8.18 / 8.24 | 1,263.45 / 1,274.07 | 29.62 | 92.94 | 82.72 |
+| 1 | 4,691.39 / 4,694.66 | 368.09 / 376.36 | 11.28 / 13.78 | 5,242.05 / 5,501.29 | 7.25 | 142.17 | 131.55 |
+| 2 | 2,988.77 / 3,229.41 | 452.31 / 972.98 | 13.96 / 27.10 | 3,850.59 / 4,176.63 | 11.38 | 141.52 | 130.89 |
+| 4 | 2,150.84 / 2,231.94 | 402.21 / 461.86 | 11.92 / 16.01 | 2,766.17 / 2,798.29 | 15.81 | 146.17 | 135.56 |
+| 8 | 1,724.47 / 1,731.99 | 404.30 / 458.52 | 13.90 / 35.90 | 2,317.41 / 2,360.53 | 19.72 | 154.06 | 143.45 |
+| 16 | 1,894.58 / 1,903.36 | 345.74 / 364.25 | 12.82 / 14.27 | 2,422.98 / 2,438.10 | 17.95 | 169.48 | 158.89 |
 
-Four workers are the measured scheduling knee for this 28-file corpus.
-Relative to one worker, native time falls 46.0% and supervised pipeline time
-falls 36.3%. Eight workers are 4.4% slower in native work and 2.2% slower end to
-end than four while adding 7.28 MiB peak RSS; 16 workers are 38.7% slower in
-native work and reach 92.94 MiB. At four workers, COPY consumes 28.4% and
-relation validation 0.8% of the supervised median.
-
-Against the immutable row-foreign-key resolver-v2 baseline, four-worker COPY
-falls 94.1%, from 4,809.56 ms to 285.68 ms. The complete supervised pipeline
-falls 81.8%, from 5,525.37 ms to 1,007.45 ms, with identical digest, rows,
-edge-kind set, resolved/unresolved accounting, and BM25 Top-5.
+Eight workers are the measured scheduling knee for this 34-file corpus.
+Relative to one worker, native time falls 63.2% and supervised pipeline time
+falls 55.8%. Sixteen workers are 9.9% slower in native work and 4.6% slower end
+to end than eight while adding 15.42 MiB peak RSS. At eight workers, COPY is
+17.4% of the supervised median and relation validation remains below 1%.
 
 ## Scheduler and optimization decision
 
 Do not replace the synthetic 16-worker upper bound with a universal fixed
-four-worker cap. The synthetic 256-item workload still scales through 16,
-whereas the real 28-file workload reaches its scheduling knee at four. The supported
-recommendation for an eventual production selector is therefore corpus-aware;
-the selector itself remains an implementation task:
+eight-worker cap. The synthetic 256-item workload still scales through 16,
+whereas this real 34-file workload reaches its scheduling knee at eight. The
+release selector therefore considers both file count and indexed source bytes:
 
-- use at most four read/parse workers for small projects around this size;
+- use eight read/parse workers for a corpus around 34 files and 1.05 MB;
 - retain 16 only as the measured upper bound for sufficiently large queues;
 - keep one queued item per active worker and the independent byte budget as
   the hard admission authority; and
 - re-run both baselines when changing the sizing heuristic.
 
-The COPY/ParadeDB floor is no longer dominant on this corpus. The next measured
-performance task is the deterministic corpus-aware worker selector, followed by
-resolver/extractor work on larger projects. Retain the per-table and relation
-metrics so a future schema, ParadeDB, or corpus change cannot silently recreate
-the old write floor.
+The COPY/ParadeDB floor is no longer dominant on this corpus. Retain the
+per-table and relation metrics so a future schema, ParadeDB, or corpus change
+cannot silently recreate the old write floor.
 
 ## Reproduce
 

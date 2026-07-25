@@ -28,6 +28,7 @@ The native executable uses these principal projects:
 | [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) | Apache-2.0 / CC0-1.0 | Stable identities, source revisions, and logical generation digests |
 | [rustls](https://github.com/rustls/rustls) / [ring](https://github.com/briansmith/ring) | Apache-2.0 / ISC / MIT | TLS used by PostgreSQL connections |
 | [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore) | MIT / Unlicense | Git-compatible bounded source discovery |
+| [notify](https://github.com/notify-rs/notify) | CC0-1.0 | Native recursive filesystem watching with a bounded polling fallback |
 | [secrecy](https://github.com/iqlusioninc/crates/tree/main/secrecy) | Apache-2.0 / MIT | Secret-bearing database URL wrappers |
 | [toml_edit](https://github.com/toml-rs/toml) | Apache-2.0 / MIT | Format-preserving Codex MCP configuration updates |
 | [tempfile](https://github.com/Stebalien/tempfile) | Apache-2.0 / MIT | Private temporary files and atomic configuration persistence |

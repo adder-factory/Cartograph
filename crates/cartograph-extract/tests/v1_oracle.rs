@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind};
+use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind, Visibility};
 use cartograph_extract::{
     ExtractError, ExtractedFile, ImportBindingKind, NativeExtractor, SnapshotError, SourceLimits,
     SourceSnapshot,
@@ -12,6 +12,12 @@ const JAVASCRIPT_SOURCE: &str = include_str!("fixtures/v1_1_33/worker.js");
 const TSX_SOURCE: &str = include_str!("fixtures/v1_1_33/view.tsx");
 const JSX_SOURCE: &str = include_str!("fixtures/v1_1_33/card.jsx");
 const EXPECTED: &str = include_str!("fixtures/v1_1_33/expected.json");
+const C_SOURCE: &str = include_str!("fixtures/v1_1_33/video.c");
+const CPP_SOURCE: &str = include_str!("fixtures/v1_1_33/widget.cpp");
+const C_FAMILY_EXPECTED: &str = include_str!("fixtures/v1_1_33/c_family_expected.json");
+const JAVA_SOURCE: &str = include_str!("fixtures/v1_1_33/OrderService.java");
+const CSHARP_SOURCE: &str = include_str!("fixtures/v1_1_33/OrderService.cs");
+const MANAGED_EXPECTED: &str = include_str!("fixtures/v1_1_33/managed_expected.json");
 const BODY_SEARCH_CALL_COUNT: usize = 1_200;
 const BODY_SEARCH_MAX_BYTES: usize = 16 * 1024;
 
@@ -61,6 +67,69 @@ struct OracleReference {
     kind: String,
     line: u32,
     column: u32,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct CapabilityOracle {
+    baseline: String,
+    policy: String,
+    cases: Vec<CapabilityCase>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct CapabilityCase {
+    path: String,
+    language: String,
+    symbols: Vec<CapabilitySymbol>,
+    containments: Vec<CapabilityContainment>,
+    references: Vec<CapabilityReference>,
+    forbidden_symbols: Vec<ForbiddenSymbol>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct CapabilitySymbol {
+    kind: String,
+    name: String,
+    qualified_name: String,
+    signature: Option<String>,
+    visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct CapabilityContainment {
+    parent: String,
+    child: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct CapabilityReference {
+    owner: Option<String>,
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct ForbiddenSymbol {
+    kind: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct ManagedOracle {
+    baseline: String,
+    captured_from_commit: String,
+    policy: String,
+    cases: Vec<ManagedCase>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct ManagedCase {
+    path: String,
+    language: String,
+    namespace_prefix: String,
+    symbols: Vec<OracleSymbol>,
+    containments: Vec<OracleContainment>,
+    references: Vec<OracleReference>,
 }
 
 #[test]
@@ -124,6 +193,122 @@ fn native_extractor_matches_the_locked_v1_1_33_projection() {
     ];
     let projected = actual.iter().map(project_v1_compatible).collect::<Vec<_>>();
     assert_eq!(projected, oracle.cases);
+}
+
+#[test]
+fn c_family_preserves_the_locked_v1_1_33_floor_and_fixes_known_defects() {
+    let oracle: CapabilityOracle = match serde_json::from_str(C_FAMILY_EXPECTED) {
+        Ok(oracle) => oracle,
+        Err(error) => panic!("locked C-family v1.1.33 oracle is invalid: {error}"),
+    };
+    assert_eq!(oracle.baseline, "v1.1.33");
+    assert!(!oracle.policy.is_empty());
+    let actual = [
+        extract_capability("video.c", C_SOURCE),
+        extract_capability("widget.cpp", CPP_SOURCE),
+    ];
+
+    for (file, expected) in actual.iter().zip(oracle.cases) {
+        assert_eq!(file.path.as_str(), expected.path);
+        assert_eq!(file.language.as_str(), expected.language);
+        let names = file
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.id.as_str(), symbol.qualified_name.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        let mut symbols = file
+            .symbols
+            .iter()
+            .map(|symbol| CapabilitySymbol {
+                kind: symbol.kind.as_str().to_owned(),
+                name: symbol.name.clone(),
+                qualified_name: symbol.qualified_name.clone(),
+                signature: symbol.signature.clone(),
+                visibility: symbol
+                    .visibility
+                    .map(|visibility| visibility.as_str().to_owned()),
+            })
+            .collect::<Vec<_>>();
+        symbols.sort();
+        assert_eq!(symbols, expected.symbols);
+
+        let mut containments = file
+            .containments
+            .iter()
+            .map(|containment| CapabilityContainment {
+                parent: names
+                    .get(containment.parent.as_str())
+                    .copied()
+                    .unwrap_or("<missing>")
+                    .to_owned(),
+                child: names
+                    .get(containment.child.as_str())
+                    .copied()
+                    .unwrap_or("<missing>")
+                    .to_owned(),
+            })
+            .collect::<Vec<_>>();
+        containments.sort();
+        assert_eq!(containments, expected.containments);
+
+        let mut references = file
+            .references
+            .iter()
+            .map(|reference| CapabilityReference {
+                owner: reference
+                    .owner
+                    .as_ref()
+                    .and_then(|owner| names.get(owner.as_str()).copied())
+                    .map(str::to_owned),
+                name: reference.name.clone(),
+                kind: reference.kind.as_str().to_owned(),
+            })
+            .collect::<Vec<_>>();
+        references.sort();
+        assert_eq!(references, expected.references);
+
+        for forbidden in expected.forbidden_symbols {
+            assert!(
+                file.symbols.iter().all(|symbol| {
+                    symbol.kind.as_str() != forbidden.kind || symbol.name != forbidden.name
+                }),
+                "v1 defect reappeared: {} {}",
+                forbidden.kind,
+                forbidden.name
+            );
+        }
+    }
+}
+
+#[test]
+fn managed_languages_preserve_the_immutable_v1_1_33_floor_with_asserted_improvements() {
+    let oracle: ManagedOracle = match serde_json::from_str(MANAGED_EXPECTED) {
+        Ok(oracle) => oracle,
+        Err(error) => panic!("locked managed-language v1.1.33 oracle is invalid: {error}"),
+    };
+    assert_eq!(oracle.baseline, "v1.1.33");
+    assert_eq!(
+        oracle.captured_from_commit,
+        "041e1859a25e27e867277a2b813ff0786ac2d0eb"
+    );
+    assert!(oracle.policy.contains("each delta is asserted"));
+
+    let actual = [
+        extract_capability("OrderService.java", JAVA_SOURCE),
+        extract_capability("OrderService.cs", CSHARP_SOURCE),
+    ];
+    for (file, expected) in actual.iter().zip(&oracle.cases) {
+        assert_eq!(file.path.as_str(), expected.path);
+        assert_eq!(file.language.as_str(), expected.language);
+        assert_managed_symbol_floor(file, expected);
+        assert_managed_containment_floor(file, expected);
+        assert_managed_reference_floor(file, expected);
+        assert_managed_improvements(file, expected);
+        let rendered = format!("{file:?}");
+        assert!(!rendered.contains("sk_live_java_secret"));
+        assert!(!rendered.contains("sk_live_csharp_secret"));
+        assert!(!rendered.contains("sk_live_attribute_secret"));
+    }
 }
 
 #[test]
@@ -431,6 +616,255 @@ fn cancellation_and_recoverable_syntax_damage_are_explicit() {
     assert!(damaged.symbols.iter().any(|entry| entry.name == "useful"));
 }
 
+fn assert_managed_symbol_floor(file: &ExtractedFile, expected: &ManagedCase) {
+    for baseline in &expected.symbols {
+        let symbol = file
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.kind.as_str() == baseline.kind
+                    && symbol.name == baseline.name
+                    && normalize_managed_name(&symbol.qualified_name, &expected.namespace_prefix)
+                        == baseline.qualified_name
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing v1 managed symbol {} {}; actual={:?}",
+                    baseline.kind,
+                    baseline.qualified_name,
+                    file.symbols
+                        .iter()
+                        .map(|symbol| (&symbol.name, &symbol.qualified_name))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            symbol.span.start_line(),
+            baseline.start_line,
+            "{baseline:?}"
+        );
+        assert_eq!(symbol.span.end_line(), baseline.end_line, "{baseline:?}");
+        assert_eq!(
+            symbol.span.start_column(),
+            baseline.start_column,
+            "{baseline:?}"
+        );
+        assert_eq!(
+            symbol.span.end_column(),
+            baseline.end_column,
+            "{baseline:?}"
+        );
+        assert_eq!(symbol.signature, baseline.signature, "{baseline:?}");
+        assert_eq!(
+            symbol.default_export, baseline.default_export,
+            "{baseline:?}"
+        );
+        assert_eq!(symbol.async_symbol, baseline.async_symbol, "{baseline:?}");
+        assert_eq!(symbol.static_member, baseline.static_member, "{baseline:?}");
+        assert_eq!(
+            symbol.visibility.map(Visibility::as_str),
+            baseline.visibility.as_deref(),
+            "{baseline:?}"
+        );
+        if expected.language == SourceLanguage::CSharp.as_str()
+            && baseline.qualified_name == "OrderService::GetOrderAsync"
+        {
+            assert_eq!(
+                baseline.docstring.as_deref(),
+                Some("/ <summary>Gets an order.</summary>")
+            );
+            assert_eq!(
+                symbol.docstring.as_deref(),
+                Some("<summary>Gets an order.</summary>")
+            );
+        } else {
+            assert_eq!(symbol.docstring, baseline.docstring, "{baseline:?}");
+        }
+        if symbol.visibility == Some(Visibility::Public) {
+            assert!(
+                !baseline.exported,
+                "the v1 capture unexpectedly exported a managed symbol"
+            );
+            assert!(symbol.exported, "v2 did not expose a public managed symbol");
+        } else {
+            assert_eq!(symbol.exported, baseline.exported, "{baseline:?}");
+        }
+    }
+}
+
+fn assert_managed_containment_floor(file: &ExtractedFile, expected: &ManagedCase) {
+    let names = file
+        .symbols
+        .iter()
+        .map(|symbol| {
+            (
+                symbol.id.as_str(),
+                normalize_managed_name(&symbol.qualified_name, &expected.namespace_prefix),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for baseline in &expected.containments {
+        assert!(
+            file.containments.iter().any(|containment| {
+                names.get(containment.parent.as_str()).map(String::as_str)
+                    == Some(baseline.parent.as_str())
+                    && names.get(containment.child.as_str()).map(String::as_str)
+                        == Some(baseline.child.as_str())
+            }),
+            "missing v1 managed containment {baseline:?}"
+        );
+    }
+}
+
+fn assert_managed_reference_floor(file: &ExtractedFile, expected: &ManagedCase) {
+    let names = file
+        .symbols
+        .iter()
+        .map(|symbol| {
+            (
+                symbol.id.as_str(),
+                normalize_managed_name(&symbol.qualified_name, &expected.namespace_prefix),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for baseline in &expected.references {
+        assert!(
+            file.references.iter().any(|reference| {
+                let owner = reference
+                    .owner
+                    .as_ref()
+                    .and_then(|owner| names.get(owner.as_str()))
+                    .map(String::as_str);
+                let kind = if expected.language == SourceLanguage::CSharp.as_str()
+                    && reference.kind == ReferenceKind::Inherits
+                {
+                    ReferenceKind::Extends.as_str()
+                } else {
+                    reference.kind.as_str()
+                };
+                let name = if expected.language == SourceLanguage::CSharp.as_str()
+                    && reference.kind == ReferenceKind::Calls
+                    && reference.name == "this._repository.FindById"
+                {
+                    "FindById"
+                } else {
+                    reference.name.as_str()
+                };
+                let column = if reference.kind == ReferenceKind::Instantiates {
+                    reference.span.start_column().saturating_sub(4)
+                } else if expected.language == SourceLanguage::Java.as_str()
+                    && reference.kind == ReferenceKind::Decorates
+                {
+                    reference.span.start_column().saturating_sub(1)
+                } else {
+                    reference.span.start_column()
+                };
+                owner == baseline.owner.as_deref()
+                    && name == baseline.name
+                    && kind == baseline.kind
+                    && reference.span.start_line() == baseline.line
+                    && column == baseline.column
+            }),
+            "missing v1 managed reference {baseline:?}; actual={:?}",
+            file.references
+                .iter()
+                .map(|reference| (&reference.name, reference.kind.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+fn assert_managed_improvements(file: &ExtractedFile, expected: &ManagedCase) {
+    let namespace = expected.namespace_prefix.trim_end_matches("::");
+    assert!(file.symbols.iter().any(|symbol| {
+        symbol.kind == SymbolKind::Namespace && symbol.qualified_name == namespace
+    }));
+    assert!(
+        file.symbols
+            .iter()
+            .any(|symbol| symbol.kind == SymbolKind::Variable && symbol.name == "result")
+    );
+    assert!(
+        file.symbols
+            .iter()
+            .filter(|symbol| {
+                !matches!(symbol.kind, SymbolKind::Import | SymbolKind::Namespace)
+                    && symbol.visibility == Some(Visibility::Public)
+            })
+            .all(|symbol| symbol.exported)
+    );
+    for baseline in expected
+        .references
+        .iter()
+        .filter(|baseline| baseline.kind == ReferenceKind::Instantiates.as_str())
+    {
+        assert!(file.references.iter().any(|reference| {
+            reference.kind == ReferenceKind::Instantiates
+                && reference.name == baseline.name
+                && reference.span.start_line() == baseline.line
+                && reference.span.start_column() == baseline.column.saturating_add(4)
+        }));
+    }
+
+    if file.language == SourceLanguage::Java {
+        assert_eq!(file.import_bindings.len(), 3);
+        assert_eq!(
+            file.references
+                .iter()
+                .filter(|reference| {
+                    reference.kind == ReferenceKind::Calls
+                        && reference.name == "repository.findById"
+                })
+                .count(),
+            2,
+            "v2 must retain both normalized Java call sites"
+        );
+        assert!(file.references.iter().any(|reference| {
+            reference.kind == ReferenceKind::TypeOf && reference.name == "Repository"
+        }));
+        for reference in file
+            .references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::Decorates)
+        {
+            let baseline = expected.references.iter().find(|baseline| {
+                baseline.name == reference.name
+                    && baseline.kind == ReferenceKind::Decorates.as_str()
+            });
+            assert_eq!(
+                baseline.map(|baseline| baseline.column.saturating_add(1)),
+                Some(reference.span.start_column())
+            );
+        }
+    } else {
+        assert_eq!(file.import_bindings.len(), 2);
+        let inheritance = file
+            .references
+            .iter()
+            .filter(|reference| matches!(reference.name.as_str(), "BaseService" | "IDisposable"))
+            .collect::<Vec<_>>();
+        assert_eq!(inheritance.len(), 2);
+        assert!(
+            inheritance
+                .iter()
+                .all(|reference| reference.kind == ReferenceKind::Inherits)
+        );
+        assert!(file.references.iter().any(|reference| {
+            reference.kind == ReferenceKind::Calls && reference.name == "this._repository.FindById"
+        }));
+        assert!(file.references.iter().any(|reference| {
+            reference.kind == ReferenceKind::TypeOf && reference.name == "IRepository"
+        }));
+    }
+}
+
+fn normalize_managed_name(value: &str, namespace_prefix: &str) -> String {
+    value
+        .strip_prefix(namespace_prefix)
+        .unwrap_or(value)
+        .to_owned()
+}
+
 fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
     let projected_ids = file
         .symbols
@@ -561,6 +995,25 @@ fn extract(path: &str, source: &str) -> ExtractedFile {
     match extractor.extract(&snapshot) {
         Ok(result) => result,
         Err(error) => panic!("test extraction failed: {error}"),
+    }
+}
+
+fn extract_capability(path: &str, source: &str) -> ExtractedFile {
+    let snapshot = match SourceSnapshot::from_bytes_for_capability_validation(
+        path,
+        source.as_bytes(),
+        limits(1024 * 1024),
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => panic!("capability snapshot failed: {error}"),
+    };
+    let mut extractor = match NativeExtractor::new_for_capability_validation(snapshot.language()) {
+        Ok(extractor) => extractor,
+        Err(error) => panic!("capability parser initialization failed: {error}"),
+    };
+    match extractor.extract(&snapshot) {
+        Ok(result) => result,
+        Err(error) => panic!("capability extraction failed: {error}"),
     }
 }
 

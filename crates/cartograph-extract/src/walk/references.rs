@@ -347,6 +347,7 @@ pub(super) fn push_reference(
     builder.emit_reference(ExtractedReference {
         owner: pending.owner,
         name: pending.name,
+        resolution_name: None,
         kind: pending.kind,
         span: span_for(pending.node)?,
     })

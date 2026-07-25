@@ -1,12 +1,12 @@
 # V2 bounded-index scaling benchmark
 
-Status: synthetic-stage baseline plus digest-v2 validation refresh
-Measured: 2026-07-22
-Original raw baseline: [`index-scaling-aarch64-2026-07-22.json`](./index-scaling-aarch64-2026-07-22.json).
-Current digest-v2 raw report: [`index-scaling-aarch64-2026-07-22-digest-v2.json`](./index-scaling-aarch64-2026-07-22-digest-v2.json).
-The original artifact remains byte-for-byte historical evidence. Every digest,
-timing, and table value below comes only from the separately committed digest-v2
-report after migration 5 and capacity-aware canonical validation.
+Status: release-candidate digest-v4 and byte-aware scheduler evidence
+Measured: 2026-07-24
+
+The committed 2026-07-22 [original](./index-scaling-aarch64-2026-07-22.json)
+and [digest-v2](./index-scaling-aarch64-2026-07-22-digest-v2.json) reports remain
+historical baselines. The figures below are from the v2.0.0 release-candidate
+run emitted directly by the reproducible command at the end of this document.
 
 ## What this proves
 
@@ -30,10 +30,10 @@ The first run cannot adopt a changed workload as a new baseline. A corpus,
 configuration, reducer, schema, or retrieval change must deliberately update
 the constants and raw evidence together.
 
-All 30 digest-v2 warmup/measured runs at 1, 2, 4, 8, and 16 workers produced:
+All 30 digest-v4 warmup/measured runs at 1, 2, 4, 8, and 16 workers produced:
 
-- logical generation digest version 2,
-  `3fcf25b6aef136419808799cc59b4b95ceb3f5014acef35192645242b4dd5d25`;
+- logical generation digest version 4,
+  `b6b88a0a91b17a75f670cc61694e3034a316a7d9a09756d6ceb42b8514391937`;
 - 256 files, 256 symbols, 255 edges, 255 references, and 256 search documents;
 - BM25 first hit `30000000-0000-4000-8000-000000000001` for
   `needle cartograph benchmark`;
@@ -69,37 +69,38 @@ and the verification queries.
 
 | Workers | Window | Stage p50 / p95 | COPY p50 / p95 | End-to-end p50 / p95 | Stage items/s | End-to-end items/s | Peak items | Peak reserved bytes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 2 | 150.98 / 152.60 | 66.90 / 77.91 | 240.11 / 251.22 | 1,696 | 1,066 | 2 | 268,435,456 |
-| 2 | 4 | 99.14 / 100.14 | 62.53 / 69.96 | 182.56 / 191.73 | 2,582 | 1,402 | 4 | 268,435,456 |
-| 4 | 8 | 68.85 / 70.26 | 59.74 / 66.80 | 149.26 / 156.19 | 3,718 | 1,715 | 8 | 268,435,456 |
-| 8 | 16 | 52.01 / 54.58 | 57.33 / 57.66 | 130.72 / 131.34 | 4,922 | 1,958 | 16 | 268,435,456 |
-| 16 | 32 | 37.91 / 39.59 | 58.05 / 62.26 | 116.38 / 125.13 | 6,754 | 2,200 | 32 | 268,435,456 |
+| 1 | 2 | 130.56 / 139.33 | 49.44 / 55.10 | 277.64 / 280.16 | 1,961 | 922 | 2 | 268,435,456 |
+| 2 | 4 | 81.50 / 86.26 | 43.89 / 61.14 | 213.26 / 223.59 | 3,141 | 1,200 | 4 | 268,435,456 |
+| 4 | 8 | 53.19 / 55.07 | 42.01 / 47.21 | 180.61 / 183.16 | 4,813 | 1,417 | 8 | 268,435,456 |
+| 8 | 16 | 39.13 / 40.97 | 40.97 / 56.93 | 168.39 / 182.30 | 6,542 | 1,520 | 16 | 268,435,456 |
+| 16 | 32 | 30.92 / 32.85 | 40.89 / 48.28 | 157.57 / 160.64 | 8,280 | 1,625 | 32 | 268,435,456 |
 
-The supervised Parse-plus-Reduce stage scaled by 3.98 times from 1 to 16 workers. End-to-end throughput
-scaled by 2.06 times because canonical validation, COPY, and publication become
-the fixed floor. The 16-worker row improved median end-to-end time by 11.0% over
-8 workers while doubling the bounded reservation window. The separate
+The supervised Parse-plus-Reduce stage scaled by 4.22 times from 1 to 16
+workers. End-to-end throughput scaled by 1.76 times because canonical
+validation, COPY, and publication become the fixed floor. The 16-worker row
+improved median end-to-end time by 6.4% over 8 workers while doubling the
+bounded reservation window. The separate
 [native real-corpus matrix](NATIVE-CORPUS-SCALING.md) now supplies the
 production workload counterpoint.
 
 ## Proposed scheduler decision
 
 Keep 16 as the upper bound for sufficiently large parse/extract queues, capped
-by available parallelism, with one queued envelope per active worker. A future
-selector should use at most four workers for small projects: the measured
-28-file native corpus reaches its scheduling knee at four; eight buys only 0.4%
-lower native p50 for 5.89 MiB more peak RSS, while 16 regresses. Keep the
-supervisor's byte budget as the hard admission authority. The synthetic harness
-reserves the full 256 MiB canonical-validation working ceiling during its
-supervised Reduce item, while larger real AST/fact payloads backpressure in
-Parse before the item window fills. COPY remains one retained database task; independently
-streaming destructive/terminal work from workers is still forbidden.
+by available parallelism, with one queued envelope per active worker. The
+release-candidate selector now considers both supported-file count and exact
+indexed source bytes: the 34-file/1.05 MB native corpus selects eight workers,
+while this 256-item/6.15 MB fixture selects 16. The supervisor's byte budget
+remains the hard admission authority. The synthetic harness reserves the full
+256 MiB canonical-validation working ceiling during its supervised Reduce
+item, while larger real AST/fact payloads backpressure in Parse before the item
+window fills. COPY remains one retained database task; independently streaming
+destructive or terminal work from workers remains forbidden.
 
 This is an upper scheduler cap, not a universal worker count. Re-run this
-matrix and the frozen native corpus together when implementing or changing the
-future adaptive sizing policy, and do not add a wall-clock threshold to shared
-CI. CI runs the matrix as a determinism, publication, BM25, bound, and cleanup
-gate; machine-local reports carry the performance interpretation.
+matrix and the frozen native corpus together when changing the adaptive sizing
+policy, and do not add a wall-clock threshold to shared CI. CI runs the matrix
+as a determinism, publication, BM25, bound, and cleanup gate; machine-local
+reports carry the performance interpretation.
 
 ## Reproduce
 

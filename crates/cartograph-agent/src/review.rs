@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, fmt, path::Path, process::Stdio, time::Duration
 use cartograph_domain::NormalizedPath;
 use cartograph_search::{
     DeterministicRetriever, IndexFreshness, ReviewBudget, ReviewPacket, ReviewRequest,
+    ReviewRequestOptions,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -16,7 +17,10 @@ const DEFAULT_MAX_CHANGED_FILES: u16 = 200;
 const MAX_CHANGED_FILES: u16 = 512;
 const MAX_REF_BYTES: usize = 256;
 const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1_048_576;
+const HARD_MAX_GIT_OUTPUT_BYTES: usize = 128 * 1_048_576;
+const GIT_READ_CHUNK_BYTES: usize = 8 * 1_024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const HARD_MAX_GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
 /// Bounded deterministic options for comparison against one Git revision.
 #[derive(Clone, PartialEq, Eq)]
@@ -246,9 +250,19 @@ impl super::ProjectRuntime {
     /// Compare the live checkout to a Git ref and attach deterministic current-generation
     /// exact-path, reverse-impact, and affected-test evidence.
     pub async fn review(&self, options: &ReviewOptions) -> Result<ReviewReport, ReviewError> {
+        self.review_with_cancellation(options, super::ProjectCancellation::new())
+            .await
+    }
+
+    /// Compare to a Git ref while keeping the source-freshness scan cancellable.
+    pub async fn review_with_cancellation(
+        &self,
+        options: &ReviewOptions,
+        cancellation: super::ProjectCancellation,
+    ) -> Result<ReviewReport, ReviewError> {
         let comparison = discover_git_comparison(&self.root, options).await?;
         let status = self
-            .status()
+            .status_with_cancellation(cancellation)
             .await
             .map_err(|_| ReviewError::ProjectStateUnavailable)?;
         let (project_id, freshness) = match status.snapshot {
@@ -265,9 +279,8 @@ impl super::ProjectRuntime {
         let request = ReviewRequest::new(
             project_id,
             comparison.files.iter().map(|file| file.path.clone()),
-            freshness,
-            options.evidence_budget,
-            comparison.truncated,
+            ReviewRequestOptions::new(freshness, options.evidence_budget)
+                .with_changed_files_truncated(comparison.truncated),
         )
         .map_err(|_| ReviewError::RetrievalUnavailable)?;
         let packet = DeterministicRetriever::new(self.database.clone())
@@ -379,12 +392,28 @@ pub async fn discover_git_comparison(
     })
 }
 
-struct GitOutput {
-    success: bool,
-    stdout: Vec<u8>,
+pub(super) struct GitOutput {
+    pub(super) success: bool,
+    pub(super) stdout: Vec<u8>,
 }
 
-async fn run_git(root: &Path, arguments: &[&str]) -> Result<GitOutput, ReviewError> {
+pub(super) async fn run_git(root: &Path, arguments: &[&str]) -> Result<GitOutput, ReviewError> {
+    run_git_bounded(root, arguments, MAX_GIT_OUTPUT_BYTES, GIT_COMMAND_TIMEOUT).await
+}
+
+pub(super) async fn run_git_bounded(
+    root: &Path,
+    arguments: &[&str],
+    maximum_output_bytes: usize,
+    command_timeout: Duration,
+) -> Result<GitOutput, ReviewError> {
+    if maximum_output_bytes == 0
+        || maximum_output_bytes > HARD_MAX_GIT_OUTPUT_BYTES
+        || command_timeout.is_zero()
+        || command_timeout > HARD_MAX_GIT_COMMAND_TIMEOUT
+    {
+        return Err(ReviewError::InvalidOptions);
+    }
     let mut child = Command::new("git")
         .arg("--no-pager")
         .args(["-c", "core.fsmonitor=false"])
@@ -404,8 +433,8 @@ async fn run_git(root: &Path, arguments: &[&str]) -> Result<GitOutput, ReviewErr
         .spawn()
         .map_err(|_| ReviewError::GitUnavailable)?;
     let stdout = child.stdout.take().ok_or(ReviewError::GitUnavailable)?;
-    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
-    let stdout = match timeout_at(deadline, read_bounded(stdout, MAX_GIT_OUTPUT_BYTES)).await {
+    let deadline = Instant::now() + command_timeout;
+    let stdout = match timeout_at(deadline, read_bounded(stdout, maximum_output_bytes)).await {
         Ok(Ok(stdout)) => stdout,
         Ok(Err(error)) => {
             terminate(&mut child).await;
@@ -434,8 +463,8 @@ async fn read_bounded(
     mut stdout: impl AsyncRead + Unpin,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, ReviewError> {
-    let mut output = Vec::with_capacity(maximum_bytes.min(8_192));
-    let mut chunk = [0_u8; 8_192];
+    let mut output = Vec::with_capacity(maximum_bytes.min(GIT_READ_CHUNK_BYTES));
+    let mut chunk = [0_u8; GIT_READ_CHUNK_BYTES];
     loop {
         let count = stdout
             .read(&mut chunk)
@@ -543,7 +572,7 @@ fn trim_ascii(output: &[u8]) -> &[u8] {
     &output[start..end]
 }
 
-fn valid_git_ref(reference: &str) -> bool {
+pub(super) fn valid_git_ref(reference: &str) -> bool {
     !reference.is_empty()
         && reference.len() <= MAX_REF_BYTES
         && !reference.starts_with('-')

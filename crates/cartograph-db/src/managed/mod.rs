@@ -35,8 +35,27 @@ pub struct ManagedDatabase {
     docker: DockerCli,
     schema: DatabaseSchema,
     port: u16,
-    startup_timeout: Duration,
-    maintenance_timeout: Duration,
+    timeouts: ManagedDatabaseTimeouts,
+}
+
+struct ManagedDatabaseTimeouts {
+    startup: Duration,
+    maintenance: Duration,
+}
+
+/// Focused lifecycle operations for an owned Cartograph PostgreSQL container.
+pub struct ManagedDatabaseLifecycle<'a> {
+    database: &'a ManagedDatabase,
+}
+
+/// Focused archive operations for an owned Cartograph PostgreSQL database.
+pub struct ManagedDatabaseArchives<'a> {
+    database: &'a ManagedDatabase,
+}
+
+/// Focused administrative operations for an owned Cartograph PostgreSQL database.
+pub struct ManagedDatabaseMaintenance<'a> {
+    database: &'a ManagedDatabase,
 }
 
 struct ManagedResourceIdentity {
@@ -125,7 +144,7 @@ pub enum ManagedDestructiveOperation {
     Remove,
     /// Replace an owned container with the exact supported image digest.
     Upgrade,
-    /// Drop and transactionally recreate the derived ParadeDB BM25 index.
+    /// Repair required generation-local ParadeDB BM25 relations.
     RebuildDerivedIndexes,
 }
 
@@ -202,14 +221,14 @@ pub struct ManagedUpgradeReport {
     pub schema: String,
 }
 
-/// Durable catalog health for the derived ParadeDB BM25 index.
+/// Aggregate catalog health for required generation-local ParadeDB BM25 relations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct ManagedDerivedIndexHealth {
-    /// Whether the expected schema-qualified index exists.
+    /// Whether the generation-relation catalog exists.
     pub present: bool,
-    /// PostgreSQL considers the index valid for queries.
+    /// Whether every required generation relation has a valid index.
     pub valid: bool,
-    /// PostgreSQL considers the index ready for writes.
+    /// Whether every required generation relation has an index ready for use.
     pub ready: bool,
     /// The catalog reports ParadeDB's `bm25` access method.
     pub bm25_access_method: bool,
@@ -235,20 +254,21 @@ impl ManagedDatabase {
     /// slow first image starts.
     #[must_use]
     pub fn with_startup_timeout(mut self, startup_timeout: Duration) -> Self {
-        self.startup_timeout = startup_timeout;
+        self.timeouts.startup = startup_timeout;
         self
     }
 
     /// Override the bounded post-restore and derived-index query wait.
     #[must_use]
     pub fn with_maintenance_timeout(mut self, maintenance_timeout: Duration) -> Self {
-        self.maintenance_timeout = maintenance_timeout;
+        self.timeouts.maintenance = maintenance_timeout;
         self
     }
 
     /// Load secret-safe connection settings for this project's existing managed database.
     ///
-    /// This never creates credentials or starts Docker; callers use [`Self::start`] first.
+    /// This never creates credentials or starts Docker; callers use
+    /// [`Self::lifecycle`] first.
     pub fn connection_settings(&self) -> Result<DatabaseSettings, ManagedDatabaseError> {
         let credentials = self.credentials.load()?;
         let url = credentials.database_url(self.port)?;
@@ -274,28 +294,50 @@ impl ManagedDatabase {
         })
     }
 
-    fn validate_destructive_confirmation(
-        &self,
-        confirmation: &ManagedDestructiveConfirmation,
-        expected: ManagedDestructiveOperation,
-    ) -> Result<(), ManagedDatabaseError> {
-        if confirmation.operation != expected
-            || confirmation.project_hash != self.identity.project_hash
-        {
-            Err(ManagedDatabaseError::DestructiveConfirmationMismatch)
-        } else {
-            Ok(())
-        }
+    /// Borrow the container lifecycle surface.
+    #[must_use]
+    pub const fn lifecycle(&self) -> ManagedDatabaseLifecycle<'_> {
+        ManagedDatabaseLifecycle { database: self }
     }
 
+    /// Borrow the backup and restore surface.
+    #[must_use]
+    pub const fn archives(&self) -> ManagedDatabaseArchives<'_> {
+        ManagedDatabaseArchives { database: self }
+    }
+
+    /// Borrow the destructive and derived-index maintenance surface.
+    #[must_use]
+    pub const fn maintenance(&self) -> ManagedDatabaseMaintenance<'_> {
+        ManagedDatabaseMaintenance { database: self }
+    }
+}
+
+fn validate_destructive_confirmation(
+    database: &ManagedDatabase,
+    confirmation: &ManagedDestructiveConfirmation,
+    expected: ManagedDestructiveOperation,
+) -> Result<(), ManagedDatabaseError> {
+    if confirmation.operation != expected
+        || confirmation.project_hash != database.identity.project_hash
+    {
+        Err(ManagedDatabaseError::DestructiveConfirmationMismatch)
+    } else {
+        Ok(())
+    }
+}
+
+impl ManagedDatabaseLifecycle<'_> {
     /// Start or reuse the owned database, initialize extensions, and prove all
     /// v2 capabilities live.
     pub async fn start(&self) -> Result<ManagedStartReport, ManagedDatabaseError> {
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
         let existing = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?;
         let prepared = match existing {
             Some(inspection) => self.prepare_existing_start(inspection).await?,
@@ -321,7 +363,7 @@ impl ManagedDatabase {
             container_created: prepared.container_created,
             capabilities: initialized.capabilities,
             migrations: initialized.migrations,
-            schema: self.schema.as_str().to_owned(),
+            schema: self.database.schema.as_str().to_owned(),
         })
     }
 
@@ -329,11 +371,13 @@ impl ManagedDatabase {
         &self,
         inspection: ContainerInspection,
     ) -> Result<PreparedStart, ManagedDatabaseError> {
-        validate_owned_container(&self.identity, &inspection, true)?;
-        verify_volume(&self.docker, &self.identity).await?;
-        validate_configured_port(self.port, &inspection)?;
-        let credentials = match self.credentials.load() {
-            Err(ManagedDatabaseError::CredentialRead) if !self.credentials.path().exists() => {
+        validate_owned_container(&self.database.identity, &inspection, true)?;
+        verify_volume(&self.database.docker.volumes(), &self.database.identity).await?;
+        validate_configured_port(self.database.port, &inspection)?;
+        let credentials = match self.database.credentials.load() {
+            Err(ManagedDatabaseError::CredentialRead)
+                if !self.database.credentials.path().exists() =>
+            {
                 return Err(ManagedDatabaseError::CredentialsMissingForContainer);
             }
             result => result?,
@@ -355,18 +399,25 @@ impl ManagedDatabase {
     ) -> Result<StartTransition, ManagedDatabaseError> {
         match state {
             ManagedContainerState::Created | ManagedContainerState::Stopped => {
-                ensure_loopback_port_available(self.port)?;
+                ensure_loopback_port_available(self.database.port)?;
                 if let Err(error) = self
+                    .database
                     .docker
-                    .install_password_file(&self.identity.container_name, self.credentials.path())
+                    .containers()
+                    .install_password_file(
+                        &self.database.identity.container_name,
+                        self.database.credentials.path(),
+                    )
                     .await
                 {
                     self.rollback_or_fail(StartTransition::Stop).await?;
                     return Err(error);
                 }
                 if let Err(error) = self
+                    .database
                     .docker
-                    .start_container(&self.identity.container_name, self.port)
+                    .containers()
+                    .start_container(&self.database.identity.container_name, self.database.port)
                     .await
                 {
                     self.rollback_or_fail(StartTransition::Stop).await?;
@@ -376,8 +427,10 @@ impl ManagedDatabase {
             }
             ManagedContainerState::Paused => {
                 if let Err(error) = self
+                    .database
                     .docker
-                    .unpause_container(&self.identity.container_name)
+                    .containers()
+                    .unpause_container(&self.database.identity.container_name)
                     .await
                 {
                     self.rollback_or_fail(StartTransition::Pause).await?;
@@ -396,18 +449,28 @@ impl ManagedDatabase {
     }
 
     async fn prepare_new_start(&self) -> Result<PreparedStart, ManagedDatabaseError> {
-        ensure_loopback_port_available(self.port)?;
-        self.docker.ensure_image(MANAGED_DATABASE_IMAGE).await?;
-        let volume_created = self.docker.ensure_volume(&self.identity).await?;
-        if !volume_created && !self.credentials.path().exists() {
+        ensure_loopback_port_available(self.database.port)?;
+        self.database
+            .docker
+            .ensure_image(MANAGED_DATABASE_IMAGE)
+            .await?;
+        let volume_created = self
+            .database
+            .docker
+            .volumes()
+            .ensure_volume(&self.database.identity)
+            .await?;
+        if !volume_created && !self.database.credentials.path().exists() {
             return Err(ManagedDatabaseError::CredentialsMissingForVolume);
         }
-        let loaded = self.credentials.load_or_create()?;
+        let loaded = self.database.credentials.load_or_create()?;
         if let Err(error) = self
+            .database
             .docker
+            .containers()
             .create_container(&ContainerCreateSpec {
-                identity: &self.identity,
-                port: self.port,
+                identity: &self.database.identity,
+                port: self.database.port,
                 image: MANAGED_DATABASE_IMAGE,
             })
             .await
@@ -416,16 +479,23 @@ impl ManagedDatabase {
             return Err(error);
         }
         if let Err(error) = self
+            .database
             .docker
-            .install_password_file(&self.identity.container_name, self.credentials.path())
+            .containers()
+            .install_password_file(
+                &self.database.identity.container_name,
+                self.database.credentials.path(),
+            )
             .await
         {
             self.cleanup_failed_create_or_fail().await?;
             return Err(error);
         }
         if let Err(error) = self
+            .database
             .docker
-            .start_container(&self.identity.container_name, self.port)
+            .containers()
+            .start_container(&self.database.identity.container_name, self.database.port)
             .await
         {
             self.cleanup_failed_create_or_fail().await?;
@@ -441,24 +511,26 @@ impl ManagedDatabase {
 
     /// Return state without creating credentials, volumes, or containers.
     pub async fn status(&self) -> Result<ManagedDatabaseStatus, ManagedDatabaseError> {
-        self.docker.ensure_available().await?;
+        self.database.docker.ensure_available().await?;
         let Some(inspection) = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?
         else {
             return Ok(ManagedDatabaseStatus {
-                container_name: self.identity.container_name.clone(),
+                container_name: self.database.identity.container_name.clone(),
                 state: ManagedContainerState::Missing,
-                port: self.port,
+                port: self.database.port,
                 image_matches: false,
             });
         };
-        validate_owned_container(&self.identity, &inspection, false)?;
-        verify_volume(&self.docker, &self.identity).await?;
+        validate_owned_container(&self.database.identity, &inspection, false)?;
+        verify_volume(&self.database.docker.volumes(), &self.database.identity).await?;
         let port = validate_published_port(&inspection)?;
         Ok(ManagedDatabaseStatus {
-            container_name: self.identity.container_name.clone(),
+            container_name: self.database.identity.container_name.clone(),
             state: container_state(&inspection),
             port,
             image_matches: inspection.image == MANAGED_DATABASE_IMAGE,
@@ -468,35 +540,45 @@ impl ManagedDatabase {
     /// Stop only the project-owned container. Missing/stopped is an idempotent
     /// success; a foreign name collision is refused.
     pub async fn stop(&self) -> Result<bool, ManagedDatabaseError> {
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
         let Some(inspection) = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?
         else {
             return Ok(false);
         };
-        validate_owned_container(&self.identity, &inspection, false)?;
+        validate_owned_container(&self.database.identity, &inspection, false)?;
         match inspection.process_state.as_str() {
             "running" | "restarting" => {
-                self.docker
-                    .stop_container(&self.identity.container_name)
+                self.database
+                    .docker
+                    .containers()
+                    .stop_container(&self.database.identity.container_name)
                     .await?;
                 Ok(true)
             }
             "paused" => {
-                self.docker
-                    .unpause_container(&self.identity.container_name)
+                self.database
+                    .docker
+                    .containers()
+                    .unpause_container(&self.database.identity.container_name)
                     .await?;
                 if let Err(error) = self
+                    .database
                     .docker
-                    .stop_container(&self.identity.container_name)
+                    .containers()
+                    .stop_container(&self.database.identity.container_name)
                     .await
                 {
                     if self
+                        .database
                         .docker
-                        .pause_container(&self.identity.container_name)
+                        .containers()
+                        .pause_container(&self.database.identity.container_name)
                         .await
                         .is_err()
                     {
@@ -513,26 +595,34 @@ impl ManagedDatabase {
 
     /// Read a bounded tail from only the project-owned container.
     pub async fn logs(&self, tail: u16) -> Result<String, ManagedDatabaseError> {
-        self.docker.ensure_available().await?;
+        self.database.docker.ensure_available().await?;
         let inspection = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?
             .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
-        validate_owned_container(&self.identity, &inspection, false)?;
-        self.docker.logs(&self.identity.container_name, tail).await
+        validate_owned_container(&self.database.identity, &inspection, false)?;
+        self.database
+            .docker
+            .containers()
+            .logs(&self.database.identity.container_name, tail)
+            .await
     }
 
     async fn cleanup_failed_create_or_fail(&self) -> Result<(), ManagedDatabaseError> {
         let cleanup = async {
             let Some(inspection) = self
+                .database
                 .docker
-                .inspect_container(&self.identity.container_name)
+                .containers()
+                .inspect_container(&self.database.identity.container_name)
                 .await?
             else {
                 return Ok(());
             };
-            if validate_owned_container(&self.identity, &inspection, true).is_err() {
+            if validate_owned_container(&self.database.identity, &inspection, true).is_err() {
                 return Ok(());
             }
             self.rollback_transition(StartTransition::Stop).await
@@ -558,8 +648,10 @@ impl ManagedDatabase {
             return Ok(());
         }
         let inspection = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?;
         let Some(inspection) = inspection else {
             return if transition == StartTransition::Stop {
@@ -568,26 +660,34 @@ impl ManagedDatabase {
                 Err(ManagedDatabaseError::ManagedContainerMissing)
             };
         };
-        validate_owned_container(&self.identity, &inspection, true)?;
+        validate_owned_container(&self.database.identity, &inspection, true)?;
         match (transition, inspection.process_state.as_str()) {
             (StartTransition::Stop, "running" | "restarting") => {
-                self.docker
-                    .rollback_container(&self.identity.container_name)
+                self.database
+                    .docker
+                    .containers()
+                    .rollback_container(&self.database.identity.container_name)
                     .await
             }
             (StartTransition::Stop, "paused") => {
-                self.docker
-                    .unpause_container(&self.identity.container_name)
+                self.database
+                    .docker
+                    .containers()
+                    .unpause_container(&self.database.identity.container_name)
                     .await?;
-                self.docker
-                    .rollback_container(&self.identity.container_name)
+                self.database
+                    .docker
+                    .containers()
+                    .rollback_container(&self.database.identity.container_name)
                     .await
             }
             (StartTransition::Stop, "created" | "exited" | "dead")
             | (StartTransition::Pause, "paused") => Ok(()),
             (StartTransition::Pause, "running") => {
-                self.docker
-                    .pause_container(&self.identity.container_name)
+                self.database
+                    .docker
+                    .containers()
+                    .pause_container(&self.database.identity.container_name)
                     .await
             }
             (StartTransition::None, _) => Ok(()),
@@ -603,11 +703,13 @@ impl ManagedDatabase {
     ) -> Result<(), ManagedDatabaseError> {
         loop {
             let inspection = self
+                .database
                 .docker
-                .inspect_container(&self.identity.container_name)
+                .containers()
+                .inspect_container(&self.database.identity.container_name)
                 .await?
                 .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
-            validate_owned_container(&self.identity, &inspection, true)?;
+            validate_owned_container(&self.database.identity, &inspection, true)?;
             match container_state(&inspection) {
                 ManagedContainerState::Healthy => return Ok(()),
                 ManagedContainerState::Unhealthy if !allow_unhealthy_recovery => {
@@ -632,13 +734,20 @@ impl ManagedDatabase {
         credentials: &DatabaseCredentials,
         allow_unhealthy_recovery: bool,
     ) -> Result<ManagedInitialization, ManagedDatabaseError> {
-        timeout(self.startup_timeout, async {
+        timeout(self.database.timeouts.startup, async {
             self.wait_until_healthy(allow_unhealthy_recovery).await?;
-            self.docker
-                .verify_loopback_port(&self.identity.container_name, self.port)
+            self.database
+                .docker
+                .containers()
+                .verify_loopback_port(&self.database.identity.container_name, self.database.port)
                 .await?;
-            initialize_extensions(&self.docker, &self.identity.container_name).await?;
-            initialize_managed_database(credentials, self.port, &self.schema).await
+            initialize_extensions(
+                &self.database.docker,
+                &self.database.identity.container_name,
+            )
+            .await?;
+            initialize_managed_database(credentials, self.database.port, &self.database.schema)
+                .await
         })
         .await
         .map_err(|_| ManagedDatabaseError::DatabaseStartupTimeout)?
@@ -670,8 +779,10 @@ fn managed_database_with_schema(
         docker: DockerCli::new(),
         schema,
         port,
-        startup_timeout: DEFAULT_STARTUP_TIMEOUT,
-        maintenance_timeout: DEFAULT_MAINTENANCE_TIMEOUT,
+        timeouts: ManagedDatabaseTimeouts {
+            startup: DEFAULT_STARTUP_TIMEOUT,
+            maintenance: DEFAULT_MAINTENANCE_TIMEOUT,
+        },
     })
 }
 
@@ -1153,22 +1264,24 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("valid removal confirmation failed: {error}"));
         assert!(
-            first_database
-                .validate_destructive_confirmation(
-                    &confirmation,
-                    ManagedDestructiveOperation::Remove,
-                )
-                .is_ok()
+            validate_destructive_confirmation(
+                &first_database,
+                &confirmation,
+                ManagedDestructiveOperation::Remove,
+            )
+            .is_ok()
         );
         assert!(matches!(
-            second_database.validate_destructive_confirmation(
+            validate_destructive_confirmation(
+                &second_database,
                 &confirmation,
                 ManagedDestructiveOperation::Remove,
             ),
             Err(ManagedDatabaseError::DestructiveConfirmationMismatch)
         ));
         assert!(matches!(
-            first_database.validate_destructive_confirmation(
+            validate_destructive_confirmation(
+                &first_database,
                 &confirmation,
                 ManagedDestructiveOperation::Restore,
             ),
@@ -1213,7 +1326,7 @@ mod tests {
             Err(error) => panic!("could not hold lifecycle lock fixture: {error}"),
         };
         assert!(matches!(
-            database.start().await,
+            database.lifecycle().start().await,
             Err(ManagedDatabaseError::LifecycleBusy)
         ));
         drop(held_lock);
@@ -1237,7 +1350,7 @@ mod tests {
             Err(error) => panic!("could not create foreign collision fixture: {error}"),
         };
         assert!(foreign.status.success());
-        let foreign_status = database.status().await;
+        let foreign_status = database.lifecycle().status().await;
         assert!(
             matches!(foreign_status, Err(ManagedDatabaseError::ForeignContainer)),
             "unexpected foreign-container result: {foreign_status:?}"
@@ -1263,7 +1376,7 @@ mod tests {
             Err(error) => panic!("could not create foreign volume fixture: {error}"),
         };
         assert!(foreign_volume.status.success());
-        let foreign_volume_start = database.start().await;
+        let foreign_volume_start = database.lifecycle().start().await;
         assert!(
             matches!(
                 foreign_volume_start,
@@ -1300,7 +1413,7 @@ mod tests {
         };
         assert!(malformed.status.success());
         assert!(matches!(
-            database.status().await,
+            database.lifecycle().status().await,
             Err(ManagedDatabaseError::InvalidManagedStorageMount)
         ));
         assert!(!database.credentials.path().exists());
@@ -1375,7 +1488,7 @@ mod tests {
             std::thread::sleep(RESTART_POLL_INTERVAL);
         }
         assert!(observed_restarting);
-        assert!(matches!(database.stop().await, Ok(true)));
+        assert!(matches!(database.lifecycle().stop().await, Ok(true)));
         let removed_restarting = std::process::Command::new("docker")
             .args([
                 "container",
@@ -1397,7 +1510,7 @@ mod tests {
     }
 
     async fn assert_first_start_and_idempotent_reuse(database: &ManagedDatabase) {
-        let first = match database.start().await {
+        let first = match database.lifecycle().start().await {
             Ok(report) => report,
             Err(error) => panic!("first managed start failed: {error}"),
         };
@@ -1410,7 +1523,7 @@ mod tests {
         );
         assert_eq!(first.schema, TEST_DATABASE_SCHEMA);
 
-        let status = match database.status().await {
+        let status = match database.lifecycle().status().await {
             Ok(status) => status,
             Err(error) => panic!("managed status failed: {error}"),
         };
@@ -1419,7 +1532,7 @@ mod tests {
         assert!(status.image_matches);
         assert_container_metadata_uses_password_file(database);
 
-        let second = match database.start().await {
+        let second = match database.lifecycle().start().await {
             Ok(report) => report,
             Err(error) => panic!("second managed start failed: {error}"),
         };
@@ -1435,12 +1548,12 @@ mod tests {
             .args(["container", "pause", &database.identity.container_name])
             .output();
         assert!(matches!(paused, Ok(output) if output.status.success()));
-        let paused_status = match database.status().await {
+        let paused_status = match database.lifecycle().status().await {
             Ok(status) => status,
             Err(error) => panic!("paused status failed: {error}"),
         };
         assert_eq!(paused_status.state, ManagedContainerState::Paused);
-        let resumed = match database.start().await {
+        let resumed = match database.lifecycle().start().await {
             Ok(report) => report,
             Err(error) => panic!("paused managed start failed: {error}"),
         };
@@ -1452,7 +1565,7 @@ mod tests {
             .output();
         assert!(matches!(paused, Ok(output) if output.status.success()));
 
-        let logs = match database.logs(LOG_TAIL_LINES).await {
+        let logs = match database.lifecycle().logs(LOG_TAIL_LINES).await {
             Ok(logs) => logs,
             Err(error) => panic!("managed logs failed: {error}"),
         };
@@ -1470,17 +1583,17 @@ mod tests {
             assert_eq!(mode & OTHER_ACCESS_MODE_MASK, 0);
         }
 
-        let stopped = match database.stop().await {
+        let stopped = match database.lifecycle().stop().await {
             Ok(stopped) => stopped,
             Err(error) => panic!("managed stop failed: {error}"),
         };
         assert!(stopped);
-        let stopped_status = match database.status().await {
+        let stopped_status = match database.lifecycle().status().await {
             Ok(status) => status,
             Err(error) => panic!("stopped status failed: {error}"),
         };
         assert_eq!(stopped_status.state, ManagedContainerState::Stopped);
-        assert!(!match database.stop().await {
+        assert!(!match database.lifecycle().stop().await {
             Ok(stopped) => stopped,
             Err(error) => panic!("idempotent stop failed: {error}"),
         });
@@ -1492,10 +1605,10 @@ mod tests {
             Err(error) => panic!("could not build timeout manager: {error}"),
         };
         assert!(matches!(
-            zero_timeout.start().await,
+            zero_timeout.lifecycle().start().await,
             Err(ManagedDatabaseError::DatabaseStartupTimeout)
         ));
-        let rolled_back = match zero_timeout.status().await {
+        let rolled_back = match zero_timeout.lifecycle().status().await {
             Ok(status) => status,
             Err(error) => panic!("rollback status failed: {error}"),
         };
@@ -1517,10 +1630,10 @@ mod tests {
         }
 
         assert!(matches!(
-            database.start().await,
+            database.lifecycle().start().await,
             Err(ManagedDatabaseError::CredentialsMissingForVolume)
         ));
-        let status = match database.status().await {
+        let status = match database.lifecycle().status().await {
             Ok(status) => status,
             Err(error) => panic!("missing-container status failed: {error}"),
         };
@@ -1573,7 +1686,7 @@ mod tests {
             volume_name: database.identity.volume_name.clone(),
         };
 
-        let occupied_start = database.start().await;
+        let occupied_start = database.lifecycle().start().await;
         assert!(
             matches!(
                 occupied_start,
@@ -1581,7 +1694,7 @@ mod tests {
             ),
             "unexpected occupied-port result: {occupied_start:?}"
         );
-        let status = match database.status().await {
+        let status = match database.lifecycle().status().await {
             Ok(status) => status,
             Err(error) => panic!("managed status failed: {error}"),
         };

@@ -15,12 +15,12 @@ SQLite library/database.
 | --- | ---: | ---: |
 | Hit@5 | 1.0000 | 1.0000 |
 | MRR | 1.0000 | 1.0000 |
-| Edit-site precision | 0.8667 | 0.9000 |
+| Edit-site precision | 0.8667 | 1.0000 |
 | Edit-site recall | 1.0000 | 1.0000 |
 | Affected-test recall | 1.0000 | 1.0000 |
 | Abstention accuracy | 1.0000 | 1.0000 |
-| Mean payload bytes | 3,927 | 943.20 |
-| Mean estimated tokens | at most 982 | 236.40 |
+| Mean payload bytes | 3,927 | 1,176.00 |
+| Mean estimated tokens | at most 982 | 294.20 |
 
 One invocation evaluates the complete corpus twice and compares the full
 ordered reports for exact equality. Both passes produced the figures above,
@@ -65,11 +65,12 @@ For each task it then:
 1. normalizes the natural-language task into sorted, non-stop lexical terms;
 2. requests a current `ContextPacket` with 8 BM25 candidates, graph depth 3,
    at most 40 graph nodes, 40 compact evidence items, and 20 affected tests;
-3. hydrates the BM25 symbol identities from the current generation and keeps
-   callable edit-site symbols (`function` and `method`) that share a specific
-   lexical term with the task;
-4. retains the first five callable symbols in native BM25 order and predicts
-   their unique source paths as edit sites;
+3. derives a typed, bounded primary edit-candidate set: explicit exact anchors
+   win; otherwise only files with the strongest distinct code-aware task-term
+   concentration across qualified names and paths are primary;
+4. hydrates callable symbols (`function` and `method`) from those primary paths,
+   retains the first five in native BM25 order, and predicts their unique
+   source paths as edit sites;
 5. applies a reversible dirty-worktree probe to those predicted paths and runs
    the real compare-to-`HEAD` review, requiring exact changed-file evidence and
    the honest `stale_index` abstention; and
@@ -99,8 +100,9 @@ confidence, abstention and truncation, callable ranking, edit paths, each test-
 selection channel, and every bounded context/review evidence item with rank,
 path, qualified name, and provenance. It omits latency and repeated opaque row
 identities, which do not help an agent decide where to edit or which tests to
-run. That compact evidence contract concretely accounts for the lower 236.40-
-token mean instead of silently comparing two differently bloated payloads.
+run. The typed primary edit-candidate evidence raises precision to 1.0000 while
+the complete decision payload remains 294.20 tokens on average, instead of
+silently comparing two differently bloated payloads.
 
 ## Failure and cleanup behavior
 

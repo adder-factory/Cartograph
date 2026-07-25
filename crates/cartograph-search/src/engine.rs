@@ -1,28 +1,54 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use cartograph_db::{
-    CartographDatabase, CurrentReferenceRecord, CurrentSymbolRecord, GraphDirection, SearchHit,
-    SearchQuery,
+    CartographDatabase, CurrentEntryPointsLookup, CurrentFileLookup, CurrentFileSymbolsLookup,
+    CurrentFilesLookup, CurrentGraphLookup, CurrentReferenceRecord, CurrentSourceRangeLookup,
+    CurrentSymbolRecord, CurrentSymbolSetLookup, EntryPointBucket, ExactTextLookup, GraphDirection,
+    SearchComponent, SearchHit, SearchQuery, SemanticStorageError, SimilarSymbolsInput,
+    SimilarSymbolsRequest, SimilarSymbolsResult,
 };
-use cartograph_domain::{NormalizedPath, ProjectId, SymbolId};
+use cartograph_domain::{
+    DocumentKind, EdgeKind, FileId, GenerationId, NormalizedPath, ProjectId, SourceLanguage,
+    SymbolId,
+};
 
 use crate::{
-    AffectedTestsResult, ContextAnchor, ContextPacket, ContextRequest, EvidenceItem,
-    EvidenceReason, ExactPathResult, GenerationEvidence, RetrievalError, ReviewPacket,
-    ReviewRequest, ReviewTruncation, TraversalDirection, TraversalHop, TraversalNode,
-    TraversalRequest, TraversalResult,
+    AffectedTest, AffectedTestsResult, BidirectionalTraversalResult, ChannelCandidate,
+    ChannelResults, ContextAnchor, ContextGraphDirection, ContextPacket, ContextRequest,
+    EntryPointsQuery, EntryPointsResult, EvidenceItem, EvidenceReason, ExactPathQuery,
+    ExactPathResult, ExactTextQuery, FileInventoryQuery, FileInventoryResult, GenerationEvidence,
+    GraphPathRequest, GraphPathResult, GraphPathStep, HybridSearchInput, LexicalComponent,
+    LexicalQuery, RetrievalChannel, RetrievalChannels, RetrievalDocument, RetrievalError,
+    ReviewPacket, ReviewRequest, ReviewTruncation, SearchMode, SemanticReadiness, SimilarRequest,
+    SourceRangeQuery, SourceRangeResult, TaskIntent, TraversalDirection, TraversalHop,
+    TraversalNode, TraversalRequest, TraversalResult, fuse_search,
+    model::{
+        evidence_from_file, evidence_from_fused_item, evidence_from_reference,
+        evidence_from_symbol, evidence_from_traversal_node,
+    },
     packet::{PacketAssembly, assemble_packet},
     review::{ReviewAssembly, assemble_review_packet},
-    traversal::{GraphArc, affected_tests_from_traversal, expand_frontier},
+    traversal::{
+        FrontierInput, GraphArc, affected_tests_from_nodes, affected_tests_from_traversal,
+        expand_frontier, strongest_arc,
+    },
 };
 
 const GRAPH_EDGE_READ_LIMIT: u16 = 2_000;
 const MAX_CONTEXT_ROOTS: usize = 32;
+const GENERATION_ATTEMPTS: usize = 2;
+const SEMANTIC_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const CALLER_DIRECTIONS: [TraversalDirection; 1] = [TraversalDirection::Incoming];
+const CALLEE_DIRECTIONS: [TraversalDirection; 1] = [TraversalDirection::Outgoing];
+const BIDIRECTIONAL_DIRECTIONS: [TraversalDirection; 2] =
+    [TraversalDirection::Incoming, TraversalDirection::Outgoing];
 
 #[derive(Clone, Copy)]
 enum TraversalKind {
-    Callers,
-    Callees,
+    Calls,
     Impact,
 }
 
@@ -43,11 +69,28 @@ impl DeterministicRetriever {
     pub async fn exact_name(
         &self,
         project_id: &ProjectId,
-        name: &str,
-        limit: u16,
+        query: ExactTextQuery<'_>,
+    ) -> Result<Vec<CurrentSymbolRecord>, RetrievalError> {
+        let Some(generation) = self.database.current_generation_record(project_id).await? else {
+            return Ok(Vec::new());
+        };
+        self.exact_name_at(project_id, generation.generation_id(), query)
+            .await
+    }
+
+    async fn exact_name_at(
+        &self,
+        project_id: &ProjectId,
+        expected_generation_id: &GenerationId,
+        query: ExactTextQuery<'_>,
     ) -> Result<Vec<CurrentSymbolRecord>, RetrievalError> {
         self.database
-            .exact_current_symbols_by_name(project_id, name, limit)
+            .exact_current_symbols_by_name(ExactTextLookup::new(
+                project_id,
+                expected_generation_id,
+                query.value(),
+                query.limit(),
+            ))
             .await
             .map_err(Into::into)
     }
@@ -56,37 +99,250 @@ impl DeterministicRetriever {
     pub async fn exact_path(
         &self,
         project_id: &ProjectId,
-        path: &NormalizedPath,
-        symbol_limit: u16,
+        query: ExactPathQuery<'_>,
     ) -> Result<Option<ExactPathResult>, RetrievalError> {
-        if symbol_limit == 0 || symbol_limit > 500 {
-            return Err(RetrievalError::InvalidInput {
-                field: "symbol_limit",
-            });
-        }
+        let Some(generation) = self.database.current_generation_record(project_id).await? else {
+            return Ok(None);
+        };
+        self.exact_path_at(project_id, generation.generation_id(), query)
+            .await
+    }
+
+    async fn exact_path_at(
+        &self,
+        project_id: &ProjectId,
+        expected_generation_id: &GenerationId,
+        query: ExactPathQuery<'_>,
+    ) -> Result<Option<ExactPathResult>, RetrievalError> {
         let Some(file) = self
             .database
-            .exact_current_file_by_path(project_id, path)
+            .exact_current_file_by_path(CurrentFileLookup::new(
+                project_id,
+                expected_generation_id,
+                query.path(),
+            ))
             .await?
         else {
             return Ok(None);
         };
         let symbols = self
             .database
-            .current_symbols_by_file(project_id, file.file_id(), symbol_limit)
+            .current_symbols_by_file(CurrentFileSymbolsLookup::new(
+                project_id,
+                expected_generation_id,
+                file.file_id(),
+                query.symbol_limit(),
+            ))
             .await?;
         Ok(Some(ExactPathResult::new(file, symbols)))
+    }
+
+    /// List a bounded current-generation file inventory with optional directory/language filters.
+    pub async fn files(
+        &self,
+        project_id: &ProjectId,
+        query: &FileInventoryQuery,
+    ) -> Result<FileInventoryResult, RetrievalError> {
+        let Some(generation) = self.database.current_generation_record(project_id).await? else {
+            return Ok(FileInventoryResult::new(Vec::new(), false));
+        };
+        let fetch_limit = query.limit().saturating_add(1);
+        let mut request =
+            CurrentFilesLookup::new(project_id, generation.generation_id(), fetch_limit);
+        if let Some(directory) = query.directory() {
+            request = request.within_directory(directory);
+        }
+        if let Some(language) = query.language() {
+            request = request.with_language(language);
+        }
+        let mut files = self.database.current_files(request).await?;
+        let truncated = files.len() > usize::from(query.limit());
+        files.truncate(usize::from(query.limit()));
+        Ok(FileInventoryResult::new(files, truncated))
+    }
+
+    /// Discover typed routes, commands, MCP tools, CLI declarations, and public API boundaries.
+    pub async fn entry_points(
+        &self,
+        project_id: &ProjectId,
+        query: EntryPointsQuery,
+    ) -> Result<EntryPointsResult, RetrievalError> {
+        for attempt in 0..GENERATION_ATTEMPTS {
+            let Some(generation) = self.database.current_generation_record(project_id).await?
+            else {
+                return Ok(EntryPointsResult::new(None, Vec::new()));
+            };
+            let selected = query.bucket();
+            let mut pages = Vec::with_capacity(if selected.is_some() { 1 } else { 5 });
+            let mut retry = false;
+            for bucket in EntryPointBucket::ALL {
+                if selected.is_some_and(|selected| selected != bucket) {
+                    continue;
+                }
+                let page = self
+                    .database
+                    .current_entry_points(CurrentEntryPointsLookup::new(
+                        project_id,
+                        generation.generation_id(),
+                        bucket,
+                        query.limit(),
+                    ))
+                    .await;
+                match page {
+                    Err(error) if attempt == 0 && is_generation_changed_storage(&error) => {
+                        retry = true;
+                        break;
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(page) => pages.push(page),
+                }
+            }
+            if retry {
+                continue;
+            }
+            return Ok(EntryPointsResult::new(
+                Some(generation.generation_id().clone()),
+                pages,
+            ));
+        }
+        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+    }
+
+    /// Resolve the smallest current-generation symbols overlapping one exact source range.
+    pub async fn symbols_at_range(
+        &self,
+        project_id: &ProjectId,
+        query: &SourceRangeQuery,
+    ) -> Result<Option<SourceRangeResult>, RetrievalError> {
+        for attempt in 0..GENERATION_ATTEMPTS {
+            let Some(generation) = self.database.current_generation_record(project_id).await?
+            else {
+                return Ok(None);
+            };
+            let file = self
+                .database
+                .exact_current_file_by_path(CurrentFileLookup::new(
+                    project_id,
+                    generation.generation_id(),
+                    query.path(),
+                ))
+                .await;
+            let file = match file {
+                Err(error) if attempt == 0 && is_generation_changed_storage(&error) => continue,
+                Err(error) => return Err(error.into()),
+                Ok(None) => return Ok(None),
+                Ok(Some(file)) => file,
+            };
+            let fetch_limit = query.limit().saturating_add(1);
+            let symbols = self
+                .database
+                .current_symbols_at_range(CurrentSourceRangeLookup::new(
+                    project_id,
+                    generation.generation_id(),
+                    query.path(),
+                    query.start_line(),
+                    query.end_line(),
+                    fetch_limit,
+                ))
+                .await;
+            let mut symbols = match symbols {
+                Err(error) if attempt == 0 && is_generation_changed_storage(&error) => continue,
+                Err(error) => return Err(error.into()),
+                Ok(symbols) => symbols,
+            };
+            let truncated = symbols.len() > usize::from(query.limit());
+            symbols.truncate(usize::from(query.limit()));
+            return Ok(Some(SourceRangeResult::new(file, symbols, truncated)));
+        }
+        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+    }
+
+    /// Find a bounded shortest outgoing dependency path under one generation fence.
+    pub async fn path(
+        &self,
+        request: &GraphPathRequest,
+    ) -> Result<GraphPathResult, RetrievalError> {
+        for attempt in 0..GENERATION_ATTEMPTS {
+            let Some(generation) = self
+                .database
+                .current_generation_record(request.project_id())
+                .await?
+            else {
+                return Ok(GraphPathResult::new(
+                    request.start().clone(),
+                    request.target().clone(),
+                    None,
+                    false,
+                ));
+            };
+            match run_graph_path(&self.database, request, generation.generation_id()).await {
+                Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+                result => return result,
+            }
+        }
+        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+    }
+
+    /// Find model-scoped symbol neighbors from a stored current-generation vector.
+    pub async fn similar(
+        &self,
+        request: &SimilarRequest,
+    ) -> Result<SimilarSymbolsResult, RetrievalError> {
+        for attempt in 0..GENERATION_ATTEMPTS {
+            let generation = self
+                .database
+                .current_generation_record(request.project_id())
+                .await?
+                .ok_or(SemanticStorageError::CurrentGenerationUnavailable)?;
+            let database_request = SimilarSymbolsRequest::new(SimilarSymbolsInput {
+                project_id: request.project_id().clone(),
+                expected_generation_id: generation.generation_id().clone(),
+                source_symbol_id: request.source_symbol_id().clone(),
+                model_id: request.model_id().cloned(),
+                limit: request.limit(),
+                minimum_score: request.minimum_score(),
+                same_language: request.same_language(),
+                statement_timeout: SEMANTIC_READ_TIMEOUT,
+            })?;
+            match self
+                .database
+                .similar_current_symbols(database_request)
+                .await
+            {
+                Err(SemanticStorageError::CurrentGenerationChanged) if attempt == 0 => continue,
+                Err(error) => return Err(error.into()),
+                Ok(result) => return Ok(result),
+            }
+        }
+        Err(SemanticStorageError::CurrentGenerationChanged.into())
     }
 
     /// Exact source-reference lookup, including unresolved reference evidence.
     pub async fn exact_reference(
         &self,
         project_id: &ProjectId,
-        name: &str,
-        limit: u16,
+        query: ExactTextQuery<'_>,
+    ) -> Result<Vec<CurrentReferenceRecord>, RetrievalError> {
+        let Some(generation) = self.database.current_generation_record(project_id).await? else {
+            return Ok(Vec::new());
+        };
+        self.exact_reference_at(project_id, generation.generation_id(), query)
+            .await
+    }
+
+    async fn exact_reference_at(
+        &self,
+        project_id: &ProjectId,
+        expected_generation_id: &GenerationId,
+        query: ExactTextQuery<'_>,
     ) -> Result<Vec<CurrentReferenceRecord>, RetrievalError> {
         self.database
-            .exact_current_references_by_name(project_id, name, limit)
+            .exact_current_references_by_name(ExactTextLookup::new(
+                project_id,
+                expected_generation_id,
+                query.value(),
+                query.limit(),
+            ))
             .await
             .map_err(Into::into)
     }
@@ -95,13 +351,117 @@ impl DeterministicRetriever {
     pub async fn bm25(
         &self,
         project_id: ProjectId,
-        query: impl Into<String>,
-        limit: u16,
+        query: LexicalQuery,
     ) -> Result<Vec<SearchHit>, RetrievalError> {
+        let Some(generation) = self.database.current_generation_record(&project_id).await? else {
+            return Ok(Vec::new());
+        };
+        self.bm25_at(project_id, generation.generation_id().clone(), &query)
+            .await
+    }
+
+    /// Current-generation ParadeDB fuzzy name search with explicit edit distance.
+    pub async fn fuzzy_name(
+        &self,
+        project_id: ProjectId,
+        query: LexicalQuery,
+        edit_distance: u8,
+    ) -> Result<Vec<SearchHit>, RetrievalError> {
+        let Some(generation) = self.database.current_generation_record(&project_id).await? else {
+            return Ok(Vec::new());
+        };
         self.database
-            .search_current_code(SearchQuery::new(project_id, query, limit))
+            .search_current_names_fuzzy(
+                SearchQuery::new(
+                    project_id,
+                    generation.generation_id().clone(),
+                    query.query(),
+                    query.limit(),
+                ),
+                edit_distance,
+            )
             .await
             .map_err(Into::into)
+    }
+
+    /// Current-generation ParadeDB name-only search.
+    pub async fn name(
+        &self,
+        project_id: ProjectId,
+        query: LexicalQuery,
+    ) -> Result<Vec<SearchHit>, RetrievalError> {
+        let Some(generation) = self.database.current_generation_record(&project_id).await? else {
+            return Ok(Vec::new());
+        };
+        self.database
+            .search_current_names(SearchQuery::new(
+                project_id,
+                generation.generation_id().clone(),
+                query.query(),
+                query.limit(),
+            ))
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Current-generation ParadeDB natural-language intent search.
+    pub async fn intent(
+        &self,
+        project_id: ProjectId,
+        query: LexicalQuery,
+    ) -> Result<Vec<SearchHit>, RetrievalError> {
+        let Some(generation) = self.database.current_generation_record(&project_id).await? else {
+            return Ok(Vec::new());
+        };
+        self.database
+            .search_current_intent(SearchQuery::new(
+                project_id,
+                generation.generation_id().clone(),
+                query.query(),
+                query.limit(),
+            ))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn bm25_at(
+        &self,
+        project_id: ProjectId,
+        expected_generation_id: GenerationId,
+        query: &LexicalQuery,
+    ) -> Result<Vec<SearchHit>, RetrievalError> {
+        self.database
+            .search_current_code(SearchQuery::new(
+                project_id,
+                expected_generation_id,
+                query.query(),
+                query.limit(),
+            ))
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Adapt current BM25 results into a channel that can run concurrently with semantics.
+    pub async fn lexical_channel(
+        &self,
+        project_id: ProjectId,
+        query: LexicalQuery,
+    ) -> Result<ChannelResults, RetrievalError> {
+        let hits = self.bm25(project_id, query).await?;
+        lexical_results(&hits)
+    }
+
+    /// Adapt BM25 results while fencing the read to one caller-observed generation.
+    pub async fn lexical_channel_for_generation(
+        &self,
+        project_id: ProjectId,
+        expected_generation_id: GenerationId,
+        query: LexicalQuery,
+    ) -> Result<ChannelResults, RetrievalError> {
+        let hits = self
+            .bm25_at(project_id, expected_generation_id, &query)
+            .await?;
+        lexical_results(&hits)
     }
 
     /// Follow incoming `calls` edges to discover bounded callers.
@@ -109,7 +469,8 @@ impl DeterministicRetriever {
         &self,
         request: &TraversalRequest,
     ) -> Result<TraversalResult, RetrievalError> {
-        self.traverse(request, TraversalKind::Callers).await
+        self.traverse_with_retry(request, TraversalKind::Calls, TraversalDirection::Incoming)
+            .await
     }
 
     /// Follow outgoing `calls` edges to discover bounded callees.
@@ -117,7 +478,49 @@ impl DeterministicRetriever {
         &self,
         request: &TraversalRequest,
     ) -> Result<TraversalResult, RetrievalError> {
-        self.traverse(request, TraversalKind::Callees).await
+        self.traverse_with_retry(request, TraversalKind::Calls, TraversalDirection::Outgoing)
+            .await
+    }
+
+    /// Follow incoming and outgoing dependency edges under one generation fence.
+    pub async fn both(
+        &self,
+        request: &TraversalRequest,
+    ) -> Result<BidirectionalTraversalResult, RetrievalError> {
+        for attempt in 0..GENERATION_ATTEMPTS {
+            let Some(generation) = self
+                .database
+                .current_generation_record(request.project_id())
+                .await?
+            else {
+                return Ok(BidirectionalTraversalResult::new(
+                    empty_traversal(request, TraversalDirection::Incoming),
+                    empty_traversal(request, TraversalDirection::Outgoing),
+                ));
+            };
+            let traversals = tokio::try_join!(
+                self.traverse_at(
+                    request,
+                    generation.generation_id(),
+                    TraversalKind::Impact,
+                    TraversalDirection::Incoming,
+                ),
+                self.traverse_at(
+                    request,
+                    generation.generation_id(),
+                    TraversalKind::Impact,
+                    TraversalDirection::Outgoing,
+                ),
+            );
+            match traversals {
+                Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+                Err(error) => return Err(error),
+                Ok((incoming, outgoing)) => {
+                    return Ok(BidirectionalTraversalResult::new(incoming, outgoing));
+                }
+            }
+        }
+        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
     }
 
     /// Follow incoming dependency relations to estimate a bounded impact cone.
@@ -125,7 +528,8 @@ impl DeterministicRetriever {
         &self,
         request: &TraversalRequest,
     ) -> Result<TraversalResult, RetrievalError> {
-        self.traverse(request, TraversalKind::Impact).await
+        self.traverse_with_retry(request, TraversalKind::Impact, TraversalDirection::Incoming)
+            .await
     }
 
     /// Discover test files/symbols in a bounded reverse impact cone.
@@ -134,7 +538,7 @@ impl DeterministicRetriever {
         request: &TraversalRequest,
         limit: u16,
     ) -> Result<AffectedTestsResult, RetrievalError> {
-        if limit == 0 || limit > 100 {
+        if limit == 0 || limit > 500 {
             return Err(RetrievalError::InvalidInput {
                 field: "affected_test_limit",
             });
@@ -153,115 +557,16 @@ impl DeterministicRetriever {
         &self,
         request: &ContextRequest,
     ) -> Result<ContextPacket, RetrievalError> {
-        let generation = self
-            .database
-            .current_generation_record(request.project_id())
-            .await?;
-        let Some(generation) = generation else {
-            return Ok(assemble_packet(PacketAssembly {
-                generation: None,
-                freshness: request.freshness(),
-                evidence: Vec::new(),
-                affected_tests: Vec::new(),
-                evidence_limit: request.budget().evidence_limit(),
-                truncated: false,
-            }));
-        };
+        build_context_packet_with_retry(self, request, None).await
+    }
 
-        let mut evidence = Vec::new();
-        let mut roots = BTreeSet::new();
-        let budget = request.budget();
-        for anchor in request.anchors() {
-            match anchor {
-                ContextAnchor::ExactName(name) => {
-                    for symbol in self
-                        .exact_name(request.project_id(), name, budget.exact_limit())
-                        .await?
-                    {
-                        roots.insert(symbol.symbol_id().clone());
-                        evidence.push(EvidenceItem::from_symbol(
-                            &symbol,
-                            EvidenceReason::ExactName,
-                        ));
-                    }
-                }
-                ContextAnchor::ExactPath(path) => {
-                    if let Some(result) = self
-                        .exact_path(request.project_id(), path, budget.exact_limit())
-                        .await?
-                    {
-                        evidence.push(EvidenceItem::from_file(result.file()));
-                        for symbol in result.symbols() {
-                            roots.insert(symbol.symbol_id().clone());
-                            evidence
-                                .push(EvidenceItem::from_symbol(symbol, EvidenceReason::ExactPath));
-                        }
-                    }
-                }
-                ContextAnchor::ExactReference(name) => {
-                    for reference in self
-                        .exact_reference(request.project_id(), name, budget.exact_limit())
-                        .await?
-                    {
-                        if let Some(symbol_id) = reference.target_symbol_id() {
-                            roots.insert(symbol_id.clone());
-                        }
-                        if let Some(symbol_id) = reference.owner_symbol_id() {
-                            roots.insert(symbol_id.clone());
-                        }
-                        evidence.push(EvidenceItem::from_reference(&reference));
-                    }
-                }
-            }
-        }
-
-        let hits = self
-            .bm25(
-                request.project_id().clone(),
-                request.query(),
-                budget.candidate_limit(),
-            )
-            .await?;
-        for (index, hit) in hits.iter().enumerate() {
-            if let Some(symbol_id) = hit.symbol_id() {
-                roots.insert(symbol_id.clone());
-            }
-            let rank = u16::try_from(index + 1).map_err(|_| RetrievalError::InvalidInput {
-                field: "candidate_limit",
-            })?;
-            evidence.push(EvidenceItem::from_search_hit(hit, rank));
-        }
-
-        let roots_were_truncated = roots.len() > MAX_CONTEXT_ROOTS;
-        let roots = roots
-            .into_iter()
-            .take(MAX_CONTEXT_ROOTS)
-            .collect::<Vec<_>>();
-        let (affected_tests, graph_was_truncated) = if roots.is_empty() {
-            (Vec::new(), false)
-        } else {
-            let traversal_request =
-                TraversalRequest::new(request.project_id().clone(), roots, budget.traversal())?;
-            let impact = self.impact(&traversal_request).await?;
-            for node in impact.nodes() {
-                evidence.push(EvidenceItem::from_traversal_node(node));
-            }
-            let (tests, tests_were_truncated) =
-                affected_tests_from_traversal(&impact, budget.affected_test_limit());
-            (tests, impact.truncated() || tests_were_truncated)
-        };
-
-        Ok(assemble_packet(PacketAssembly {
-            generation: Some(GenerationEvidence::new(
-                generation.generation_id().clone(),
-                generation.sequence(),
-            )),
-            freshness: request.freshness(),
-            evidence,
-            affected_tests,
-            evidence_limit: budget.evidence_limit(),
-            truncated: roots_were_truncated || graph_was_truncated,
-        }))
+    /// Assemble exact/graph/test evidence around caller-precomputed lexical and semantic channels.
+    pub async fn context_packet_with_channels(
+        &self,
+        request: &ContextRequest,
+        channels: RetrievalChannels,
+    ) -> Result<ContextPacket, RetrievalError> {
+        build_context_packet_with_retry(self, request, Some(channels)).await
     }
 
     /// Assemble exact changed-file, reverse-impact, and affected-test evidence
@@ -270,218 +575,1270 @@ impl DeterministicRetriever {
         &self,
         request: &ReviewRequest,
     ) -> Result<ReviewPacket, RetrievalError> {
-        let Some(project_id) = request.project_id() else {
-            return Ok(assemble_review_packet(ReviewAssembly {
-                generation: None,
-                freshness: request.freshness(),
-                changed_file_count: request.changed_paths().len(),
-                indexed_changed_files: Vec::new(),
-                evidence: Vec::new(),
-                affected_tests: Vec::new(),
-                evidence_limit: request.budget().evidence_limit(),
-                truncation: ReviewTruncation::new(
-                    request.changed_files_truncated(),
-                    false,
-                    false,
-                    false,
-                ),
-            }));
-        };
-        let generation = self.database.current_generation_record(project_id).await?;
-        let Some(generation) = generation else {
-            return Ok(assemble_review_packet(ReviewAssembly {
-                generation: None,
-                freshness: request.freshness(),
-                changed_file_count: request.changed_paths().len(),
-                indexed_changed_files: Vec::new(),
-                evidence: Vec::new(),
-                affected_tests: Vec::new(),
-                evidence_limit: request.budget().evidence_limit(),
-                truncation: ReviewTruncation::new(
-                    request.changed_files_truncated(),
-                    false,
-                    false,
-                    false,
-                ),
-            }));
-        };
-
-        let budget = request.budget();
-        let mut indexed_changed_files = Vec::new();
-        let mut evidence = Vec::new();
-        let mut roots = BTreeSet::new();
-        let mut symbol_roots_were_truncated = false;
-        for path in request.changed_paths() {
-            let Some(result) = self
-                .exact_path(project_id, path, budget.symbols_per_file())
-                .await?
-            else {
-                continue;
-            };
-            indexed_changed_files.push(path.clone());
-            evidence.push(EvidenceItem::from_file(result.file()));
-            if result.symbols().len() == usize::from(budget.symbols_per_file()) {
-                symbol_roots_were_truncated = true;
-            }
-            for symbol in result.symbols() {
-                if roots.contains(symbol.symbol_id()) {
-                    continue;
-                }
-                if roots.len() >= usize::from(budget.root_limit()) {
-                    symbol_roots_were_truncated = true;
-                    continue;
-                }
-                roots.insert(symbol.symbol_id().clone());
-                evidence.push(EvidenceItem::from_symbol(symbol, EvidenceReason::ExactPath));
-            }
-        }
-
-        let roots = roots.into_iter().collect::<Vec<_>>();
-        let (affected_tests, graph_was_truncated, tests_were_truncated) = if roots.is_empty() {
-            (Vec::new(), false, false)
-        } else {
-            let traversal_request =
-                TraversalRequest::new(project_id.clone(), roots, budget.traversal())?;
-            let impact = self.impact(&traversal_request).await?;
-            for node in impact.nodes() {
-                evidence.push(EvidenceItem::from_traversal_node(node));
-            }
-            let (tests, tests_were_truncated) =
-                affected_tests_from_traversal(&impact, budget.affected_test_limit());
-            (tests, impact.truncated(), tests_were_truncated)
-        };
-
-        Ok(assemble_review_packet(ReviewAssembly {
-            generation: Some(GenerationEvidence::new(
-                generation.generation_id().clone(),
-                generation.sequence(),
-            )),
-            freshness: request.freshness(),
-            changed_file_count: request.changed_paths().len(),
-            indexed_changed_files,
-            evidence,
-            affected_tests,
-            evidence_limit: budget.evidence_limit(),
-            truncation: ReviewTruncation::new(
-                request.changed_files_truncated(),
-                symbol_roots_were_truncated,
-                graph_was_truncated,
-                tests_were_truncated,
-            ),
-        }))
+        build_review_packet_with_retry(self, request).await
     }
 
-    async fn traverse(
+    async fn traverse_with_retry(
         &self,
         request: &TraversalRequest,
         kind: TraversalKind,
+        direction: TraversalDirection,
     ) -> Result<TraversalResult, RetrievalError> {
-        let direction = match kind {
-            TraversalKind::Callees => TraversalDirection::Outgoing,
-            TraversalKind::Callers | TraversalKind::Impact => TraversalDirection::Incoming,
-        };
-        let database_direction = match direction {
-            TraversalDirection::Outgoing => GraphDirection::Outgoing,
-            TraversalDirection::Incoming => GraphDirection::Incoming,
-        };
-        let budget = request.budget();
-        let mut visited = request.roots().iter().cloned().collect::<BTreeSet<_>>();
-        let mut frontier = request.roots().to_vec();
-        let mut discoveries = BTreeMap::<SymbolId, (u8, GraphArc)>::new();
-        let mut truncated = false;
-
-        for depth in 1..=budget.max_depth() {
-            let edges = self
+        for attempt in 0..GENERATION_ATTEMPTS {
+            let Some(generation) = self
                 .database
-                .current_graph_edges(
-                    request.project_id(),
-                    &frontier,
-                    database_direction,
-                    GRAPH_EDGE_READ_LIMIT,
-                )
-                .await?;
-            if edges.len() == usize::from(GRAPH_EDGE_READ_LIMIT) {
-                truncated = true;
-            }
-            let arcs = edges
-                .iter()
-                .map(GraphArc::from_record)
-                .filter(|arc| edge_is_relevant(arc, kind))
-                .filter(|arc| !visited.contains(arc.adjacent(direction)))
-                .collect::<Vec<_>>();
-            let remaining = usize::from(budget.max_nodes()).saturating_sub(discoveries.len());
-            if remaining == 0 {
-                if !arcs.is_empty() {
-                    truncated = true;
-                }
-                break;
-            }
-            let expansion = expand_frontier(&frontier, &arcs, direction, remaining);
-            truncated |= expansion.truncated;
-            for symbol_id in &expansion.next {
-                let first_arc = expansion
-                    .arcs
-                    .iter()
-                    .find(|arc| arc.adjacent(direction) == symbol_id);
-                if let Some(first_arc) = first_arc {
-                    visited.insert(symbol_id.clone());
-                    discoveries.insert(symbol_id.clone(), (depth, first_arc.clone()));
-                }
-            }
-            frontier = expansion.next;
-            if frontier.is_empty() {
-                break;
-            }
-        }
-
-        let ids = discoveries.keys().cloned().collect::<Vec<_>>();
-        let symbols = self
-            .database
-            .current_symbols_by_ids(request.project_id(), &ids)
-            .await?;
-        let mut symbols = symbols
-            .into_iter()
-            .map(|symbol| (symbol.symbol_id().clone(), symbol))
-            .collect::<BTreeMap<_, _>>();
-        let mut nodes = Vec::with_capacity(discoveries.len());
-        for (symbol_id, (depth, arc)) in discoveries {
-            let Some(symbol) = symbols.remove(&symbol_id) else {
-                truncated = true;
-                continue;
+                .current_generation_record(request.project_id())
+                .await?
+            else {
+                return Ok(empty_traversal(request, direction));
             };
-            let hop = TraversalHop::new(
-                arc.origin(direction).clone(),
-                arc.adjacent(direction).clone(),
-                arc.edge_kind,
-                arc.confidence,
-                arc.provenance,
-            );
-            nodes.push(TraversalNode::new(symbol, depth, hop));
+            match self
+                .traverse_at(request, generation.generation_id(), kind, direction)
+                .await
+            {
+                Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+                result => return result,
+            }
         }
-        nodes.sort_by(|left, right| {
-            left.depth()
-                .cmp(&right.depth())
-                .then_with(|| {
-                    left.symbol()
-                        .path()
-                        .as_str()
-                        .cmp(right.symbol().path().as_str())
-                })
-                .then_with(|| left.symbol().start_line().cmp(&right.symbol().start_line()))
-                .then_with(|| left.symbol().symbol_id().cmp(right.symbol().symbol_id()))
-        });
-        Ok(TraversalResult::new(
+        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+    }
+
+    async fn traverse_at(
+        &self,
+        request: &TraversalRequest,
+        expected_generation_id: &GenerationId,
+        kind: TraversalKind,
+        direction: TraversalDirection,
+    ) -> Result<TraversalResult, RetrievalError> {
+        run_traversal(
+            &self.database,
+            request,
+            expected_generation_id,
+            kind,
             direction,
-            request.roots().to_vec(),
-            nodes,
-            truncated,
-        ))
+        )
+        .await
     }
 }
 
-fn edge_is_relevant(arc: &GraphArc, kind: TraversalKind) -> bool {
+fn empty_traversal(request: &TraversalRequest, direction: TraversalDirection) -> TraversalResult {
+    TraversalResult {
+        direction,
+        roots: request.roots().to_vec(),
+        nodes: Vec::new(),
+        truncated: false,
+    }
+}
+
+fn is_generation_changed(error: &RetrievalError) -> bool {
+    matches!(
+        error,
+        RetrievalError::Storage(cartograph_db::StorageError::CurrentGenerationChanged)
+    )
+}
+
+fn is_generation_changed_storage(error: &cartograph_db::StorageError) -> bool {
+    matches!(error, cartograph_db::StorageError::CurrentGenerationChanged)
+}
+
+#[derive(Default)]
+struct ContextBuildState {
+    evidence: Vec<EvidenceItem>,
+    roots: OrderedRoots,
+    seen_reference_ids: BTreeSet<u64>,
+}
+
+#[derive(Default)]
+struct OrderedRoots {
+    values: Vec<SymbolId>,
+    seen: BTreeSet<SymbolId>,
+}
+
+impl OrderedRoots {
+    fn insert(&mut self, symbol_id: SymbolId) {
+        if self.seen.insert(symbol_id.clone()) {
+            self.values.push(symbol_id);
+        }
+    }
+
+    fn into_values(self) -> Vec<SymbolId> {
+        self.values
+    }
+}
+
+struct ContextExpansionInput<'request, 'generation, 'evidence> {
+    request: &'request ContextRequest,
+    expected_generation_id: &'generation GenerationId,
+    roots: Vec<SymbolId>,
+    evidence: &'evidence mut Vec<EvidenceItem>,
+    direct_tests: DirectTestResult,
+}
+
+struct ContextGraphResult {
+    affected_tests: Vec<AffectedTest>,
+    truncated: bool,
+}
+
+#[derive(Default)]
+struct DirectTestResult {
+    tests: Vec<AffectedTest>,
+    truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DirectTestCandidate {
+    Symbol(SymbolId),
+    File(FileId),
+}
+
+#[derive(Default)]
+struct ReviewBuildState {
+    indexed_changed_files: Vec<cartograph_domain::NormalizedPath>,
+    evidence: Vec<EvidenceItem>,
+    roots: BTreeSet<SymbolId>,
+    symbol_roots_truncated: bool,
+}
+
+struct ReviewExpansionInput<'request, 'generation, 'evidence> {
+    project_id: &'request ProjectId,
+    expected_generation_id: &'generation GenerationId,
+    request: &'request ReviewRequest,
+    roots: Vec<SymbolId>,
+    evidence: &'evidence mut Vec<EvidenceItem>,
+}
+
+struct ReviewGraphResult {
+    affected_tests: Vec<AffectedTest>,
+    graph_truncated: bool,
+    affected_tests_truncated: bool,
+}
+
+#[derive(Clone, Copy)]
+struct TraversalPlan {
+    kind: TraversalKind,
+    direction: TraversalDirection,
+    database_direction: GraphDirection,
+}
+
+struct GraphDiscovery {
+    direction: TraversalDirection,
+    discoveries: BTreeMap<SymbolId, (u8, GraphArc)>,
+    truncated: bool,
+}
+
+fn lexical_results(hits: &[SearchHit]) -> Result<ChannelResults, RetrievalError> {
+    let candidates = hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| lexical_candidate(hit, index))
+        .collect::<Result<Vec<_>, _>>()?;
+    ChannelResults::new(RetrievalChannel::Lexical, candidates)
+}
+
+fn lexical_candidate(hit: &SearchHit, index: usize) -> Result<ChannelCandidate, RetrievalError> {
+    let rank =
+        u16::try_from(index.saturating_add(1)).map_err(|_| RetrievalError::InvalidInput {
+            field: "candidate_limit",
+        })?;
+    let path = NormalizedPath::parse(hit.path()).map_err(|_| RetrievalError::InvalidInput {
+        field: "candidate_path",
+    })?;
+    let language =
+        SourceLanguage::from_stable_str(hit.language()).ok_or(RetrievalError::InvalidInput {
+            field: "candidate_language",
+        })?;
+    let document_kind = parse_document_kind(hit.document_kind())?;
+    let mut document = RetrievalDocument::new(
+        hit.document_id().clone(),
+        hit.generation_id().clone(),
+        path,
+        language,
+        document_kind,
+    );
+    if let Some(file_id) = hit.file_id() {
+        document = document.with_file_id(file_id.clone());
+    }
+    if let Some(symbol_id) = hit.symbol_id() {
+        document = document.with_symbol_id(symbol_id.clone());
+    }
+    let document = document.with_qualified_name(hit.qualified_name())?;
+    let components = hit
+        .components()
+        .iter()
+        .copied()
+        .map(lexical_component)
+        .collect();
+    Ok(ChannelCandidate::new(document, rank, hit.score())?.with_lexical_components(components))
+}
+
+fn parse_document_kind(value: &str) -> Result<DocumentKind, RetrievalError> {
+    match value {
+        "symbol" => Ok(DocumentKind::Symbol),
+        "file" => Ok(DocumentKind::File),
+        "documentation" => Ok(DocumentKind::Documentation),
+        "test" => Ok(DocumentKind::Test),
+        "configuration" => Ok(DocumentKind::Configuration),
+        _ => Err(RetrievalError::InvalidInput {
+            field: "candidate_document_kind",
+        }),
+    }
+}
+
+const fn lexical_component(component: SearchComponent) -> LexicalComponent {
+    match component {
+        SearchComponent::QualifiedName => LexicalComponent::QualifiedName,
+        SearchComponent::Code => LexicalComponent::Code,
+        SearchComponent::NaturalText => LexicalComponent::NaturalText,
+    }
+}
+
+struct DiscoveryStep<'expansion> {
+    depth: u8,
+    direction: TraversalDirection,
+    expansion: &'expansion crate::traversal::FrontierExpansion,
+}
+
+async fn run_graph_path(
+    database: &CartographDatabase,
+    request: &GraphPathRequest,
+    expected_generation_id: &GenerationId,
+) -> Result<GraphPathResult, RetrievalError> {
+    require_graph_path_endpoints(database, request, expected_generation_id).await?;
+    if request.start() == request.target() {
+        return hydrate_graph_path(
+            database,
+            request,
+            expected_generation_id,
+            vec![(request.start().clone(), None)],
+            false,
+        )
+        .await;
+    }
+
+    let budget = request.budget();
+    let mut visited = BTreeSet::from([request.start().clone()]);
+    let mut frontier = vec![request.start().clone()];
+    let mut parents = BTreeMap::<SymbolId, GraphArc>::new();
+    let mut truncated = false;
+    for depth in 1..=budget.max_depth() {
+        let edges = database
+            .current_graph_edges(
+                CurrentGraphLookup::new(
+                    request.project_id(),
+                    expected_generation_id,
+                    &frontier,
+                    GraphDirection::Outgoing,
+                )
+                .with_limit(GRAPH_EDGE_READ_LIMIT),
+            )
+            .await?;
+        truncated |= edges.len() == usize::from(GRAPH_EDGE_READ_LIMIT);
+        let arcs = edges
+            .iter()
+            .map(GraphArc::from_record)
+            .filter(|arc| arc.confidence >= request.minimum_confidence())
+            .filter(|arc| {
+                request
+                    .edge_kind()
+                    .is_none_or(|edge_kind| arc.edge_kind == edge_kind.as_str())
+            })
+            .filter(|arc| !visited.contains(&arc.target))
+            .collect::<Vec<_>>();
+        let remaining = usize::from(budget.max_nodes()).saturating_sub(parents.len());
+        if remaining == 0 {
+            truncated |= !arcs.is_empty();
+            break;
+        }
+        let expansion = expand_frontier(FrontierInput {
+            frontier: &frontier,
+            arcs: &arcs,
+            direction: TraversalDirection::Outgoing,
+            max_new_nodes: remaining,
+        });
+        truncated |= expansion.truncated;
+        record_path_parents(&expansion, &mut visited, &mut parents);
+        if visited.contains(request.target()) {
+            let path = reconstruct_graph_path(request, &parents)?;
+            return hydrate_graph_path(database, request, expected_generation_id, path, truncated)
+                .await;
+        }
+        frontier = expansion.next;
+        if frontier.is_empty() {
+            break;
+        }
+        if depth == budget.max_depth() {
+            truncated = true;
+        }
+    }
+    Ok(GraphPathResult::new(
+        request.start().clone(),
+        request.target().clone(),
+        None,
+        truncated,
+    ))
+}
+
+async fn require_graph_path_endpoints(
+    database: &CartographDatabase,
+    request: &GraphPathRequest,
+    expected_generation_id: &GenerationId,
+) -> Result<(), RetrievalError> {
+    let mut ids = vec![request.start().clone()];
+    if request.target() != request.start() {
+        ids.push(request.target().clone());
+    }
+    let found = database
+        .current_symbols_by_ids(CurrentSymbolSetLookup::new(
+            request.project_id(),
+            expected_generation_id,
+            &ids,
+        ))
+        .await?;
+    if found.len() != ids.len() {
+        return Err(RetrievalError::InvalidInput {
+            field: "path_endpoint",
+        });
+    }
+    Ok(())
+}
+
+fn record_path_parents(
+    expansion: &crate::traversal::FrontierExpansion,
+    visited: &mut BTreeSet<SymbolId>,
+    parents: &mut BTreeMap<SymbolId, GraphArc>,
+) {
+    for symbol_id in &expansion.next {
+        let Some(best_arc) =
+            strongest_arc(&expansion.arcs, symbol_id, TraversalDirection::Outgoing)
+        else {
+            continue;
+        };
+        visited.insert(symbol_id.clone());
+        parents.insert(symbol_id.clone(), best_arc.clone());
+    }
+}
+
+fn reconstruct_graph_path(
+    request: &GraphPathRequest,
+    parents: &BTreeMap<SymbolId, GraphArc>,
+) -> Result<Vec<(SymbolId, Option<GraphArc>)>, RetrievalError> {
+    let mut reversed = Vec::new();
+    let mut current = request.target().clone();
+    while &current != request.start() {
+        if reversed.len() > parents.len() {
+            return Err(cartograph_db::StorageError::CorruptStoredValue {
+                field: "graph_path",
+            }
+            .into());
+        }
+        let arc = parents.get(&current).cloned().ok_or(
+            cartograph_db::StorageError::CorruptStoredValue {
+                field: "graph_path",
+            },
+        )?;
+        reversed.push((current, Some(arc.clone())));
+        current = arc.source;
+    }
+    reversed.push((request.start().clone(), None));
+    reversed.reverse();
+    Ok(reversed)
+}
+
+async fn hydrate_graph_path(
+    database: &CartographDatabase,
+    request: &GraphPathRequest,
+    expected_generation_id: &GenerationId,
+    path: Vec<(SymbolId, Option<GraphArc>)>,
+    truncated: bool,
+) -> Result<GraphPathResult, RetrievalError> {
+    let ids = path
+        .iter()
+        .map(|(symbol_id, _)| symbol_id.clone())
+        .collect::<Vec<_>>();
+    let symbols = database
+        .current_symbols_by_ids(CurrentSymbolSetLookup::new(
+            request.project_id(),
+            expected_generation_id,
+            &ids,
+        ))
+        .await?;
+    let mut symbols = symbols
+        .into_iter()
+        .map(|symbol| (symbol.symbol_id().clone(), symbol))
+        .collect::<BTreeMap<_, _>>();
+    let mut steps = Vec::with_capacity(path.len());
+    for (symbol_id, arc) in path {
+        let symbol =
+            symbols
+                .remove(&symbol_id)
+                .ok_or(cartograph_db::StorageError::CorruptStoredValue {
+                    field: "graph_path_symbol",
+                })?;
+        let via = arc.map(|arc| traversal_hop(TraversalDirection::Outgoing, arc));
+        steps.push(GraphPathStep::new(symbol, via));
+    }
+    Ok(GraphPathResult::new(
+        request.start().clone(),
+        request.target().clone(),
+        Some(steps),
+        truncated,
+    ))
+}
+
+async fn run_traversal(
+    database: &CartographDatabase,
+    request: &TraversalRequest,
+    expected_generation_id: &GenerationId,
+    kind: TraversalKind,
+    direction: TraversalDirection,
+) -> Result<TraversalResult, RetrievalError> {
+    let discovery = discover_graph(
+        database,
+        request,
+        expected_generation_id,
+        traversal_plan(kind, direction),
+    )
+    .await?;
+    hydrate_traversal(database, request, expected_generation_id, discovery).await
+}
+
+const fn traversal_plan(kind: TraversalKind, direction: TraversalDirection) -> TraversalPlan {
+    let database_direction = match direction {
+        TraversalDirection::Outgoing => GraphDirection::Outgoing,
+        TraversalDirection::Incoming => GraphDirection::Incoming,
+    };
+    TraversalPlan {
+        kind,
+        direction,
+        database_direction,
+    }
+}
+
+async fn discover_graph(
+    database: &CartographDatabase,
+    request: &TraversalRequest,
+    expected_generation_id: &GenerationId,
+    plan: TraversalPlan,
+) -> Result<GraphDiscovery, RetrievalError> {
+    let budget = request.budget();
+    let mut visited = request.roots().iter().cloned().collect::<BTreeSet<_>>();
+    let mut frontier = request.roots().to_vec();
+    let mut discoveries = BTreeMap::new();
+    let mut truncated = false;
+    for depth in 1..=budget.max_depth() {
+        let edges = database
+            .current_graph_edges(
+                CurrentGraphLookup::new(
+                    request.project_id(),
+                    expected_generation_id,
+                    &frontier,
+                    plan.database_direction,
+                )
+                .with_limit(GRAPH_EDGE_READ_LIMIT)
+                .with_test_targets(request.include_test_nodes()),
+            )
+            .await?;
+        truncated |= edges.len() == usize::from(GRAPH_EDGE_READ_LIMIT);
+        let arcs = edges
+            .iter()
+            .map(GraphArc::from_record)
+            .filter(|arc| arc.confidence >= request.minimum_confidence())
+            .filter(|arc| edge_is_relevant(arc, plan.kind, request.edge_kind()))
+            .filter(|arc| !visited.contains(arc.adjacent(plan.direction)))
+            .collect::<Vec<_>>();
+        let remaining = usize::from(budget.max_nodes()).saturating_sub(discoveries.len());
+        if remaining == 0 {
+            truncated |= !arcs.is_empty();
+            break;
+        }
+        let expansion = expand_frontier(FrontierInput {
+            frontier: &frontier,
+            arcs: &arcs,
+            direction: plan.direction,
+            max_new_nodes: remaining,
+        });
+        truncated |= expansion.truncated;
+        record_discoveries(
+            DiscoveryStep {
+                depth,
+                direction: plan.direction,
+                expansion: &expansion,
+            },
+            &mut visited,
+            &mut discoveries,
+        );
+        frontier = expansion.next;
+        if frontier.is_empty() {
+            break;
+        }
+    }
+    Ok(GraphDiscovery {
+        direction: plan.direction,
+        discoveries,
+        truncated,
+    })
+}
+
+fn record_discoveries(
+    step: DiscoveryStep<'_>,
+    visited: &mut BTreeSet<SymbolId>,
+    discoveries: &mut BTreeMap<SymbolId, (u8, GraphArc)>,
+) {
+    for symbol_id in &step.expansion.next {
+        let best_arc = strongest_arc(&step.expansion.arcs, symbol_id, step.direction);
+        if let Some(best_arc) = best_arc {
+            visited.insert(symbol_id.clone());
+            discoveries.insert(symbol_id.clone(), (step.depth, best_arc.clone()));
+        }
+    }
+}
+
+async fn hydrate_traversal(
+    database: &CartographDatabase,
+    request: &TraversalRequest,
+    expected_generation_id: &GenerationId,
+    mut discovery: GraphDiscovery,
+) -> Result<TraversalResult, RetrievalError> {
+    let ids = discovery.discoveries.keys().cloned().collect::<Vec<_>>();
+    let symbols = database
+        .current_symbols_by_ids(CurrentSymbolSetLookup::new(
+            request.project_id(),
+            expected_generation_id,
+            &ids,
+        ))
+        .await?;
+    let mut symbols = symbols
+        .into_iter()
+        .map(|symbol| (symbol.symbol_id().clone(), symbol))
+        .collect::<BTreeMap<_, _>>();
+    let mut nodes = Vec::with_capacity(discovery.discoveries.len());
+    for (symbol_id, (depth, arc)) in discovery.discoveries {
+        let Some(symbol) = symbols.remove(&symbol_id) else {
+            discovery.truncated = true;
+            continue;
+        };
+        nodes.push(TraversalNode::new(
+            symbol,
+            depth,
+            traversal_hop(discovery.direction, arc),
+        ));
+    }
+    nodes.sort_by(traversal_node_order);
+    Ok(TraversalResult {
+        direction: discovery.direction,
+        roots: request.roots().to_vec(),
+        nodes,
+        truncated: discovery.truncated,
+    })
+}
+
+fn traversal_hop(direction: TraversalDirection, arc: GraphArc) -> TraversalHop {
+    TraversalHop {
+        from_symbol_id: arc.origin(direction).clone(),
+        to_symbol_id: arc.adjacent(direction).clone(),
+        edge_kind: arc.edge_kind,
+        confidence: arc.confidence,
+        provenance: arc.provenance,
+        site_count: arc.site_count,
+    }
+}
+
+fn traversal_node_order(left: &TraversalNode, right: &TraversalNode) -> std::cmp::Ordering {
+    left.depth()
+        .cmp(&right.depth())
+        .then_with(|| {
+            left.symbol()
+                .path()
+                .as_str()
+                .cmp(right.symbol().path().as_str())
+        })
+        .then_with(|| left.symbol().start_line().cmp(&right.symbol().start_line()))
+        .then_with(|| left.symbol().symbol_id().cmp(right.symbol().symbol_id()))
+}
+
+async fn build_context_packet_with_retry(
+    retriever: &DeterministicRetriever,
+    request: &ContextRequest,
+    precomputed_channels: Option<RetrievalChannels>,
+) -> Result<ContextPacket, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        let channels = if attempt == 0 {
+            precomputed_channels.clone()
+        } else {
+            None
+        };
+        match build_context_packet(retriever, request, channels).await {
+            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            result => return result,
+        }
+    }
+    Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+}
+
+async fn build_context_packet(
+    retriever: &DeterministicRetriever,
+    request: &ContextRequest,
+    precomputed_channels: Option<RetrievalChannels>,
+) -> Result<ContextPacket, RetrievalError> {
+    let generation = retriever
+        .database
+        .current_generation_record(request.project_id())
+        .await?;
+    let Some(generation) = generation else {
+        let retrieval = empty_context_retrieval(request)?;
+        return Ok(assemble_packet(empty_context_assembly(request, retrieval)));
+    };
+    let mut state = ContextBuildState::default();
+    collect_anchor_evidence(retriever, request, generation.generation_id(), &mut state).await?;
+    let channels = resolve_context_channels(
+        retriever,
+        request,
+        generation.generation_id(),
+        precomputed_channels,
+    )
+    .await?;
+    let include_semantic = context_uses_semantic(request);
+    validate_channel_generation(&channels, generation.generation_id(), include_semantic)?;
+    let retrieval = fuse_search(
+        HybridSearchInput::new(
+            request.search_mode(),
+            request.semantic_readiness(),
+            request.budget().candidate_limit(),
+        )?
+        .with_channels(channels),
+    )?;
+    collect_retrieval_evidence(&retrieval, &mut state);
+    let direct_tests = if context_selects_tests(request.intent()) {
+        collect_direct_tests(
+            retriever,
+            request,
+            generation.generation_id(),
+            &state.evidence,
+        )
+        .await?
+    } else {
+        DirectTestResult::default()
+    };
+    let (roots, roots_were_truncated) = bound_context_roots(state.roots.into_values());
+    let graph = expand_context_graph(
+        retriever,
+        ContextExpansionInput {
+            request,
+            roots,
+            evidence: &mut state.evidence,
+            direct_tests,
+            expected_generation_id: generation.generation_id(),
+        },
+    )
+    .await?;
+    Ok(assemble_packet(PacketAssembly {
+        task: request.query(),
+        generation: Some(GenerationEvidence::new(
+            generation.generation_id().clone(),
+            generation.sequence(),
+        )),
+        intent: request.intent(),
+        graph_direction: request.graph_direction(),
+        freshness: request.freshness(),
+        retrieval,
+        evidence: state.evidence,
+        affected_tests: graph.affected_tests,
+        evidence_limit: request.budget().evidence_limit(),
+        truncated: roots_were_truncated || graph.truncated,
+    }))
+}
+
+fn empty_context_assembly(
+    request: &ContextRequest,
+    retrieval: crate::HybridSearchPacket,
+) -> PacketAssembly<'_> {
+    PacketAssembly {
+        task: request.query(),
+        generation: None,
+        intent: request.intent(),
+        graph_direction: request.graph_direction(),
+        freshness: request.freshness(),
+        retrieval,
+        evidence: Vec::new(),
+        affected_tests: Vec::new(),
+        evidence_limit: request.budget().evidence_limit(),
+        truncated: false,
+    }
+}
+
+fn empty_context_retrieval(
+    request: &ContextRequest,
+) -> Result<crate::HybridSearchPacket, RetrievalError> {
+    fuse_search(HybridSearchInput::new(
+        request.search_mode(),
+        request.semantic_readiness(),
+        request.budget().candidate_limit(),
+    )?)
+}
+
+async fn collect_anchor_evidence(
+    retriever: &DeterministicRetriever,
+    request: &ContextRequest,
+    expected_generation_id: &GenerationId,
+    state: &mut ContextBuildState,
+) -> Result<(), RetrievalError> {
+    let exact_limit = request.budget().exact_limit();
+    for anchor in request.anchors() {
+        match anchor {
+            ContextAnchor::ExactName(name) => {
+                let query = ExactTextQuery::new(name, exact_limit)?;
+                for symbol in retriever
+                    .exact_name_at(request.project_id(), expected_generation_id, query)
+                    .await?
+                {
+                    state.roots.insert(symbol.symbol_id().clone());
+                    state
+                        .evidence
+                        .push(evidence_from_symbol(&symbol, EvidenceReason::ExactName));
+                }
+            }
+            ContextAnchor::ExactPath(path) => {
+                let query = ExactPathQuery::new(path, exact_limit)?;
+                if let Some(result) = retriever
+                    .exact_path_at(request.project_id(), expected_generation_id, query)
+                    .await?
+                {
+                    collect_exact_path_evidence(&result, state);
+                }
+            }
+            ContextAnchor::ExactReference(name) => {
+                let query = ExactTextQuery::new(name, exact_limit)?;
+                for reference in retriever
+                    .exact_reference_at(request.project_id(), expected_generation_id, query)
+                    .await?
+                {
+                    collect_reference_evidence(&reference, state);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_exact_path_evidence(result: &ExactPathResult, state: &mut ContextBuildState) {
+    state.evidence.push(evidence_from_file(result.file()));
+    for symbol in result.symbols() {
+        state.roots.insert(symbol.symbol_id().clone());
+        state
+            .evidence
+            .push(evidence_from_symbol(symbol, EvidenceReason::ExactPath));
+    }
+}
+
+fn collect_reference_evidence(reference: &CurrentReferenceRecord, state: &mut ContextBuildState) {
+    if !state.seen_reference_ids.insert(reference.reference_id()) {
+        return;
+    }
+    if let Some(symbol_id) = reference.target_symbol_id() {
+        state.roots.insert(symbol_id.clone());
+    }
+    if let Some(symbol_id) = reference.owner_symbol_id() {
+        state.roots.insert(symbol_id.clone());
+    }
+    state.evidence.push(evidence_from_reference(reference));
+}
+
+async fn resolve_context_channels(
+    retriever: &DeterministicRetriever,
+    request: &ContextRequest,
+    expected_generation_id: &GenerationId,
+    precomputed: Option<RetrievalChannels>,
+) -> Result<RetrievalChannels, RetrievalError> {
+    if let Some(channels) = precomputed {
+        return Ok(channels);
+    }
+    let query = LexicalQuery::new(request.query(), request.budget().candidate_limit())?;
+    let lexical = retriever
+        .lexical_channel_for_generation(
+            request.project_id().clone(),
+            expected_generation_id.clone(),
+            query,
+        )
+        .await?;
+    RetrievalChannels::new().with_channel(lexical)
+}
+
+fn collect_retrieval_evidence(
+    retrieval: &crate::HybridSearchPacket,
+    state: &mut ContextBuildState,
+) {
+    for item in retrieval.items() {
+        if let Some(symbol_id) = item.document().symbol_id() {
+            state.roots.insert(symbol_id.clone());
+        }
+        state.evidence.push(evidence_from_fused_item(item));
+    }
+}
+
+fn validate_channel_generation(
+    channels: &RetrievalChannels,
+    current_generation: &cartograph_domain::GenerationId,
+    include_semantic: bool,
+) -> Result<(), RetrievalError> {
+    let mismatched = policy_channels(channels, include_semantic)
+        .into_iter()
+        .flatten()
+        .flat_map(ChannelResults::candidates)
+        .any(|candidate| candidate.document().generation_id() != current_generation);
+    if mismatched {
+        return Err(cartograph_db::StorageError::CurrentGenerationChanged.into());
+    }
+    Ok(())
+}
+
+fn context_uses_semantic(request: &ContextRequest) -> bool {
+    request.search_mode() != SearchMode::Deterministic
+        && request.semantic_readiness() == SemanticReadiness::Ready
+}
+
+fn policy_channels(
+    channels: &RetrievalChannels,
+    include_semantic: bool,
+) -> [Option<&ChannelResults>; 2] {
+    [
+        channels.lexical(),
+        include_semantic.then_some(channels.semantic()).flatten(),
+    ]
+}
+
+fn bound_context_roots(mut roots: Vec<SymbolId>) -> (Vec<SymbolId>, bool) {
+    let truncated = roots.len() > MAX_CONTEXT_ROOTS;
+    roots.truncate(MAX_CONTEXT_ROOTS);
+    (roots, truncated)
+}
+
+async fn collect_direct_tests(
+    retriever: &DeterministicRetriever,
+    request: &ContextRequest,
+    expected_generation_id: &GenerationId,
+    evidence: &[EvidenceItem],
+) -> Result<DirectTestResult, RetrievalError> {
+    let limit = request.budget().affected_test_limit();
+    let (candidates, candidates_were_truncated) = direct_test_candidates(evidence, limit);
+    let symbol_ids = candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            DirectTestCandidate::Symbol(symbol_id) => Some(symbol_id.clone()),
+            DirectTestCandidate::File(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let symbols = retriever
+        .database
+        .current_symbols_by_ids(CurrentSymbolSetLookup::new(
+            request.project_id(),
+            expected_generation_id,
+            &symbol_ids,
+        ))
+        .await?
+        .into_iter()
+        .map(|symbol| (symbol.symbol_id().clone(), symbol))
+        .collect::<BTreeMap<_, _>>();
+    let mut tests = Vec::new();
+    let mut seen_files = BTreeSet::new();
+    let mut truncated = candidates_were_truncated;
+    for candidate in candidates {
+        let symbol = match candidate {
+            DirectTestCandidate::Symbol(symbol_id) => symbols.get(&symbol_id).cloned(),
+            DirectTestCandidate::File(file_id) => retriever
+                .database
+                .current_symbols_by_file(CurrentFileSymbolsLookup::new(
+                    request.project_id(),
+                    expected_generation_id,
+                    &file_id,
+                    1,
+                ))
+                .await?
+                .into_iter()
+                .next(),
+        };
+        let Some(symbol) = symbol else {
+            truncated = true;
+            continue;
+        };
+        if seen_files.insert(symbol.file_id().clone()) {
+            tests.push(AffectedTest::new(
+                symbol,
+                0,
+                "direct-test-document".to_owned(),
+            ));
+        }
+    }
+    Ok(DirectTestResult { tests, truncated })
+}
+
+fn direct_test_candidates(
+    evidence: &[EvidenceItem],
+    limit: u16,
+) -> (Vec<DirectTestCandidate>, bool) {
+    let mut seen_files = BTreeSet::new();
+    let mut seen_symbols = BTreeSet::new();
+    let mut candidates = Vec::new();
+    let mut truncated = false;
+    for item in evidence
+        .iter()
+        .filter(|item| item.document_kind() == Some(DocumentKind::Test))
+    {
+        let candidate = if let Some(file_id) = item.file_id() {
+            if !seen_files.insert(file_id.clone()) {
+                continue;
+            }
+            item.symbol_id().map_or_else(
+                || DirectTestCandidate::File(file_id.clone()),
+                |symbol_id| DirectTestCandidate::Symbol(symbol_id.clone()),
+            )
+        } else if let Some(symbol_id) = item.symbol_id() {
+            if !seen_symbols.insert(symbol_id.clone()) {
+                continue;
+            }
+            DirectTestCandidate::Symbol(symbol_id.clone())
+        } else {
+            continue;
+        };
+        if candidates.len() < usize::from(limit) {
+            candidates.push(candidate);
+        } else {
+            truncated = true;
+        }
+    }
+    (candidates, truncated)
+}
+
+async fn expand_context_graph(
+    retriever: &DeterministicRetriever,
+    input: ContextExpansionInput<'_, '_, '_>,
+) -> Result<ContextGraphResult, RetrievalError> {
+    let Some(kind) = context_traversal_kind(input.request.intent()) else {
+        return Ok(ContextGraphResult {
+            affected_tests: input.direct_tests.tests,
+            truncated: input.direct_tests.truncated,
+        });
+    };
+    let Some(graph_direction) = input.request.graph_direction() else {
+        return Ok(ContextGraphResult {
+            affected_tests: input.direct_tests.tests,
+            truncated: input.direct_tests.truncated,
+        });
+    };
+    if input.roots.is_empty() {
+        return Ok(ContextGraphResult {
+            affected_tests: input.direct_tests.tests,
+            truncated: input.direct_tests.truncated,
+        });
+    }
+    let budget = input.request.budget();
+    let traversal_request = TraversalRequest::new(
+        input.request.project_id().clone(),
+        input.roots,
+        budget.traversal(),
+    )?;
+    let traversals = context_traversals(
+        retriever,
+        &traversal_request,
+        input.expected_generation_id,
+        kind,
+        graph_direction,
+    )
+    .await?;
+    let traversal_was_truncated = traversals.iter().any(TraversalResult::truncated);
+    let (nodes, nodes_were_truncated) =
+        bound_context_graph_nodes(&traversals, budget.traversal().max_nodes());
+    input
+        .evidence
+        .extend(nodes.iter().map(evidence_from_traversal_node));
+    let (affected_tests, tests_were_truncated) = if context_selects_tests(input.request.intent()) {
+        let (graph_tests, graph_tests_were_truncated) =
+            affected_tests_from_nodes(&nodes, budget.affected_test_limit());
+        let (tests, union_was_truncated) = merge_affected_tests(
+            input.direct_tests.tests,
+            graph_tests,
+            budget.affected_test_limit(),
+        );
+        (
+            tests,
+            input.direct_tests.truncated || graph_tests_were_truncated || union_was_truncated,
+        )
+    } else {
+        (Vec::new(), false)
+    };
+    Ok(ContextGraphResult {
+        affected_tests,
+        truncated: traversal_was_truncated || nodes_were_truncated || tests_were_truncated,
+    })
+}
+
+fn merge_affected_tests(
+    direct: Vec<AffectedTest>,
+    graph: Vec<AffectedTest>,
+    limit: u16,
+) -> (Vec<AffectedTest>, bool) {
+    let mut seen_files = BTreeSet::new();
+    let mut tests = Vec::new();
+    let mut truncated = false;
+    for test in direct.into_iter().chain(graph) {
+        if !seen_files.insert(test.symbol().file_id().clone()) {
+            continue;
+        }
+        if tests.len() < usize::from(limit) {
+            tests.push(test);
+        } else {
+            truncated = true;
+        }
+    }
+    (tests, truncated)
+}
+
+async fn context_traversals(
+    retriever: &DeterministicRetriever,
+    request: &TraversalRequest,
+    expected_generation_id: &GenerationId,
+    kind: TraversalKind,
+    direction: ContextGraphDirection,
+) -> Result<Vec<TraversalResult>, RetrievalError> {
+    let directions = context_directions(direction);
+    let mut traversals = Vec::with_capacity(directions.len());
+    for direction in directions.iter().copied() {
+        traversals.push(
+            retriever
+                .traverse_at(request, expected_generation_id, kind, direction)
+                .await?,
+        );
+    }
+    Ok(traversals)
+}
+
+const fn context_directions(direction: ContextGraphDirection) -> &'static [TraversalDirection] {
+    match direction {
+        ContextGraphDirection::Callers => &CALLER_DIRECTIONS,
+        ContextGraphDirection::Callees => &CALLEE_DIRECTIONS,
+        ContextGraphDirection::Both => &BIDIRECTIONAL_DIRECTIONS,
+    }
+}
+
+fn bound_context_graph_nodes(
+    traversals: &[TraversalResult],
+    limit: u16,
+) -> (Vec<TraversalNode>, bool) {
+    let mut positions = BTreeMap::<SymbolId, usize>::new();
+    let mut nodes = Vec::<TraversalNode>::new();
+    for node in traversals
+        .iter()
+        .flat_map(|traversal| traversal.nodes().iter())
+    {
+        let symbol_id = node.symbol().symbol_id();
+        if let Some(position) = positions.get(symbol_id).copied() {
+            if context_graph_node_order(node, &nodes[position]).is_lt() {
+                nodes[position] = node.clone();
+            }
+        } else {
+            positions.insert(symbol_id.clone(), nodes.len());
+            nodes.push(node.clone());
+        }
+    }
+    nodes.sort_by(context_graph_node_order);
+    let truncated = nodes.len() > usize::from(limit);
+    nodes.truncate(usize::from(limit));
+    (nodes, truncated)
+}
+
+fn context_graph_node_order(left: &TraversalNode, right: &TraversalNode) -> std::cmp::Ordering {
+    left.depth()
+        .cmp(&right.depth())
+        .then_with(|| right.via().confidence().total_cmp(&left.via().confidence()))
+        .then_with(|| right.via().site_count().cmp(&left.via().site_count()))
+        .then_with(|| {
+            left.symbol()
+                .path()
+                .as_str()
+                .cmp(right.symbol().path().as_str())
+        })
+        .then_with(|| left.symbol().start_line().cmp(&right.symbol().start_line()))
+        .then_with(|| left.symbol().symbol_id().cmp(right.symbol().symbol_id()))
+}
+
+const fn context_traversal_kind(intent: TaskIntent) -> Option<TraversalKind> {
+    match intent {
+        TaskIntent::ImplementationTrace => Some(TraversalKind::Calls),
+        TaskIntent::ArchitectureSurvey
+        | TaskIntent::ChangePlanning
+        | TaskIntent::TestSelection
+        | TaskIntent::ErrorDiagnosis => Some(TraversalKind::Impact),
+        TaskIntent::SymbolLookup | TaskIntent::DocumentationLookup => None,
+    }
+}
+
+const fn context_selects_tests(intent: TaskIntent) -> bool {
+    matches!(
+        intent,
+        TaskIntent::ChangePlanning | TaskIntent::TestSelection | TaskIntent::ErrorDiagnosis
+    )
+}
+
+async fn build_review_packet_with_retry(
+    retriever: &DeterministicRetriever,
+    request: &ReviewRequest,
+) -> Result<ReviewPacket, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        match build_review_packet(retriever, request).await {
+            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            result => return result,
+        }
+    }
+    Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+}
+
+async fn build_review_packet(
+    retriever: &DeterministicRetriever,
+    request: &ReviewRequest,
+) -> Result<ReviewPacket, RetrievalError> {
+    let Some(project_id) = request.project_id() else {
+        return Ok(assemble_review_packet(empty_review_assembly(request)));
+    };
+    let generation = retriever
+        .database
+        .current_generation_record(project_id)
+        .await?;
+    let Some(generation) = generation else {
+        return Ok(assemble_review_packet(empty_review_assembly(request)));
+    };
+    let mut state =
+        collect_changed_file_evidence(retriever, project_id, generation.generation_id(), request)
+            .await?;
+    let roots = std::mem::take(&mut state.roots).into_iter().collect();
+    let graph = expand_review_graph(
+        retriever,
+        ReviewExpansionInput {
+            project_id,
+            expected_generation_id: generation.generation_id(),
+            request,
+            roots,
+            evidence: &mut state.evidence,
+        },
+    )
+    .await?;
+    Ok(assemble_review_packet(ReviewAssembly {
+        generation: Some(GenerationEvidence::new(
+            generation.generation_id().clone(),
+            generation.sequence(),
+        )),
+        freshness: request.freshness(),
+        changed_file_count: request.changed_paths().len(),
+        indexed_changed_files: state.indexed_changed_files,
+        evidence: state.evidence,
+        affected_tests: graph.affected_tests,
+        evidence_limit: request.budget().evidence_limit(),
+        truncation: ReviewTruncation {
+            changed_files: request.changed_files_truncated(),
+            symbol_roots: state.symbol_roots_truncated,
+            graph: graph.graph_truncated,
+            affected_tests: graph.affected_tests_truncated,
+            evidence: false,
+        },
+    }))
+}
+
+fn empty_review_assembly(request: &ReviewRequest) -> ReviewAssembly {
+    ReviewAssembly {
+        generation: None,
+        freshness: request.freshness(),
+        changed_file_count: request.changed_paths().len(),
+        indexed_changed_files: Vec::new(),
+        evidence: Vec::new(),
+        affected_tests: Vec::new(),
+        evidence_limit: request.budget().evidence_limit(),
+        truncation: ReviewTruncation {
+            changed_files: request.changed_files_truncated(),
+            ..ReviewTruncation::default()
+        },
+    }
+}
+
+async fn collect_changed_file_evidence(
+    retriever: &DeterministicRetriever,
+    project_id: &ProjectId,
+    expected_generation_id: &GenerationId,
+    request: &ReviewRequest,
+) -> Result<ReviewBuildState, RetrievalError> {
+    let mut state = ReviewBuildState::default();
+    let budget = request.budget();
+    for path in request.changed_paths() {
+        let query = ExactPathQuery::new(path, budget.symbols_per_file())?;
+        let Some(result) = retriever
+            .exact_path_at(project_id, expected_generation_id, query)
+            .await?
+        else {
+            continue;
+        };
+        state.indexed_changed_files.push(path.clone());
+        state.evidence.push(evidence_from_file(result.file()));
+        if result.symbols().len() == usize::from(budget.symbols_per_file()) {
+            state.symbol_roots_truncated = true;
+        }
+        collect_review_symbols(&result, budget.root_limit(), &mut state);
+    }
+    Ok(state)
+}
+
+fn collect_review_symbols(result: &ExactPathResult, root_limit: u16, state: &mut ReviewBuildState) {
+    for symbol in result.symbols() {
+        if state.roots.contains(symbol.symbol_id()) {
+            continue;
+        }
+        if state.roots.len() >= usize::from(root_limit) {
+            state.symbol_roots_truncated = true;
+            continue;
+        }
+        state.roots.insert(symbol.symbol_id().clone());
+        state
+            .evidence
+            .push(evidence_from_symbol(symbol, EvidenceReason::ExactPath));
+    }
+}
+
+async fn expand_review_graph(
+    retriever: &DeterministicRetriever,
+    input: ReviewExpansionInput<'_, '_, '_>,
+) -> Result<ReviewGraphResult, RetrievalError> {
+    if input.roots.is_empty() {
+        return Ok(ReviewGraphResult {
+            affected_tests: Vec::new(),
+            graph_truncated: false,
+            affected_tests_truncated: false,
+        });
+    }
+    let budget = input.request.budget();
+    let traversal_request =
+        TraversalRequest::new(input.project_id.clone(), input.roots, budget.traversal())?;
+    let impact = retriever
+        .traverse_at(
+            &traversal_request,
+            input.expected_generation_id,
+            TraversalKind::Impact,
+            TraversalDirection::Incoming,
+        )
+        .await?;
+    input
+        .evidence
+        .extend(impact.nodes().iter().map(evidence_from_traversal_node));
+    let (affected_tests, affected_tests_truncated) =
+        affected_tests_from_traversal(&impact, budget.affected_test_limit());
+    Ok(ReviewGraphResult {
+        affected_tests,
+        graph_truncated: impact.truncated(),
+        affected_tests_truncated,
+    })
+}
+
+fn edge_is_relevant(arc: &GraphArc, kind: TraversalKind, edge_kind: Option<EdgeKind>) -> bool {
+    if let Some(edge_kind) = edge_kind {
+        return arc.edge_kind == edge_kind.as_str();
+    }
     match kind {
-        TraversalKind::Callers | TraversalKind::Callees => arc.edge_kind == "calls",
+        TraversalKind::Calls => arc.edge_kind == "calls",
         TraversalKind::Impact => matches!(
             arc.edge_kind.as_str(),
             "calls"
@@ -499,5 +1856,188 @@ fn edge_is_relevant(arc: &GraphArc, kind: TraversalKind) -> bool {
                 | "def_use"
                 | "exports"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cartograph_domain::{EdgeKind, FileId};
+
+    use super::*;
+    use crate::model::{SearchEvidenceFixture, enrich_search_evidence_fixture, evidence_fixture};
+    use crate::traversal::GraphArcFixture;
+    use crate::{ContextBudget, ContextRequestOptions, IndexFreshness, TraversalBudget};
+
+    fn project_id() -> ProjectId {
+        ProjectId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap_or_else(|error| panic!("project fixture failed: {error}"))
+    }
+
+    fn context_request(task: &str) -> ContextRequest {
+        ContextRequest::new(
+            project_id(),
+            task,
+            ContextRequestOptions::new(IndexFreshness::Current, ContextBudget::default()),
+        )
+        .unwrap_or_else(|error| panic!("context request failed: {error}"))
+    }
+
+    fn symbol_id(index: u32) -> SymbolId {
+        let value = format!("{index:08x}-1111-4111-8111-111111111111");
+        SymbolId::parse(&value).unwrap_or_else(|error| panic!("symbol fixture failed: {error}"))
+    }
+
+    #[test]
+    fn intent_selects_graph_direction_and_test_expansion_explicitly() {
+        assert!(matches!(
+            context_traversal_kind(TaskIntent::ImplementationTrace),
+            Some(TraversalKind::Calls)
+        ));
+        assert!(matches!(
+            context_traversal_kind(TaskIntent::ChangePlanning),
+            Some(TraversalKind::Impact)
+        ));
+        assert!(context_traversal_kind(TaskIntent::SymbolLookup).is_none());
+        assert!(context_traversal_kind(TaskIntent::DocumentationLookup).is_none());
+        assert!(context_selects_tests(TaskIntent::TestSelection));
+        assert!(context_selects_tests(TaskIntent::ErrorDiagnosis));
+        assert!(!context_selects_tests(TaskIntent::ArchitectureSurvey));
+    }
+
+    #[test]
+    fn caller_callee_and_architecture_requests_select_only_declared_directions() {
+        let callers = context_request("trace callers of publish_generation")
+            .with_intent(TaskIntent::ImplementationTrace);
+        assert_eq!(
+            callers.graph_direction(),
+            Some(ContextGraphDirection::Callers)
+        );
+        assert_eq!(
+            context_directions(ContextGraphDirection::Callers),
+            &[TraversalDirection::Incoming]
+        );
+
+        let callees = context_request("trace what publish_generation calls");
+        assert_eq!(
+            callees.graph_direction(),
+            Some(ContextGraphDirection::Callees)
+        );
+        assert_eq!(
+            context_directions(ContextGraphDirection::Callees),
+            &[TraversalDirection::Outgoing]
+        );
+
+        let architecture = context_request("survey storage architecture");
+        assert_eq!(
+            architecture.graph_direction(),
+            Some(ContextGraphDirection::Both)
+        );
+        assert_eq!(
+            context_directions(ContextGraphDirection::Both),
+            &[TraversalDirection::Incoming, TraversalDirection::Outgoing]
+        );
+    }
+
+    #[test]
+    fn context_root_bound_preserves_anchor_and_fused_admission_order() {
+        let strongest_anchor = symbol_id(u32::MAX);
+        let mut roots = OrderedRoots::default();
+        roots.insert(strongest_anchor.clone());
+        for index in 0..MAX_CONTEXT_ROOTS as u32 {
+            roots.insert(symbol_id(index));
+        }
+        let (bounded, truncated) = bound_context_roots(roots.into_values());
+        assert!(truncated);
+        assert_eq!(bounded.len(), MAX_CONTEXT_ROOTS);
+        assert_eq!(bounded[0], strongest_anchor);
+        assert_eq!(bounded[1], symbol_id(0));
+        assert_eq!(bounded[MAX_CONTEXT_ROOTS - 1], symbol_id(30));
+    }
+
+    #[test]
+    fn direct_test_file_documents_survive_without_a_symbol_root() {
+        let file_id = FileId::parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+            .unwrap_or_else(|error| panic!("file fixture failed: {error}"));
+        let evidence = enrich_search_evidence_fixture(
+            evidence_fixture("tests/search.rs", "", EvidenceReason::Bm25),
+            SearchEvidenceFixture {
+                file_id: Some(file_id.clone()),
+                symbol_id: None,
+                language: SourceLanguage::Rust,
+                document_kind: DocumentKind::Test,
+                fused_rank: Some(1),
+                reciprocal_rank_score: Some(1.0),
+            },
+        );
+        let (candidates, truncated) = direct_test_candidates(&[evidence], 1);
+        assert_eq!(candidates, vec![DirectTestCandidate::File(file_id)]);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn explicit_graph_edge_filter_is_exact_and_overrides_direction_defaults() {
+        let imports = GraphArc::fixture(GraphArcFixture {
+            source: symbol_id(1),
+            target: symbol_id(2),
+            edge_kind: "imports",
+            confidence: 1.0,
+            site_count: 1,
+        });
+        assert!(!edge_is_relevant(&imports, TraversalKind::Calls, None));
+        assert!(edge_is_relevant(
+            &imports,
+            TraversalKind::Calls,
+            Some(EdgeKind::Imports)
+        ));
+        assert!(!edge_is_relevant(
+            &imports,
+            TraversalKind::Impact,
+            Some(EdgeKind::Calls)
+        ));
+    }
+
+    #[test]
+    fn path_reconstruction_retains_the_exact_ordered_parent_chain() {
+        let start = symbol_id(1);
+        let middle = symbol_id(2);
+        let target = symbol_id(3);
+        let request = GraphPathRequest::new(
+            project_id(),
+            start.clone(),
+            target.clone(),
+            TraversalBudget::new(4, 20)
+                .unwrap_or_else(|error| panic!("path budget failed: {error}")),
+        );
+        let first = GraphArc::fixture(GraphArcFixture {
+            source: start.clone(),
+            target: middle.clone(),
+            edge_kind: "calls",
+            confidence: 0.9,
+            site_count: 1,
+        });
+        let second = GraphArc::fixture(GraphArcFixture {
+            source: middle.clone(),
+            target: target.clone(),
+            edge_kind: "returns",
+            confidence: 0.8,
+            site_count: 2,
+        });
+        let parents = BTreeMap::from([(middle.clone(), first), (target.clone(), second)]);
+        let path = reconstruct_graph_path(&request, &parents)
+            .unwrap_or_else(|error| panic!("path reconstruction failed: {error}"));
+        let ids = path
+            .iter()
+            .map(|(symbol_id, _)| symbol_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![start, middle, target]);
+        assert!(path[0].1.is_none());
+        assert_eq!(
+            path[1].1.as_ref().map(|arc| arc.edge_kind.as_str()),
+            Some("calls")
+        );
+        assert_eq!(
+            path[2].1.as_ref().map(|arc| arc.edge_kind.as_str()),
+            Some("returns")
+        );
     }
 }

@@ -20,6 +20,7 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "BSL-1.0",
+  "CC0-1.0",
   "ISC",
   "MIT",
   "MIT-0",
@@ -45,6 +46,7 @@ skip = [
   { crate = "getrandom@0.2.17", reason = "ring/rustls has not yet adopted getrandom 0.4" },
   { crate = "hashbrown@0.16.1", reason = "sqlx hashlink and serde indexmap currently require adjacent releases" },
   { crate = "syn@2.0.119", reason = "Tokio and ICU derive macros have not yet adopted syn 3" },
+  { crate = "windows-sys@0.60.2", reason = "notify 8.2.0 has not yet adopted the workspace's windows-sys 0.61 line" },
 ]
 
 [sources]

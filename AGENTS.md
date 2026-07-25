@@ -37,7 +37,7 @@ Cartograph v2 is:
 - a native Rust executable;
 - PostgreSQL 18 only;
 - code-aware BM25 through ParadeDB `pg_search` 0.23.5;
-- pgvector-capable;
+- pgvector-required;
 - useful without an LLM through exact, lexical, graph, review, and test-impact
   retrieval.
 
@@ -164,7 +164,8 @@ Manual MCP specification:
 }
 ```
 
-Use stdio transport. Profiles are `core`, `read-only`, and `review`.
+Use stdio transport. Profiles are `coding`, `core`, `full`, `read-only`, and
+`review`.
 
 ## Step 4 — use Cartograph while coding
 
@@ -213,6 +214,38 @@ V2 imports only from a v1.1.33 PostgreSQL schema. The importer is resumable,
 validates stable identities/counts/relations, and rebuilds BM25. It does not
 import or inspect SQLite.
 
+The v1 source and v2 destination must be distinct schemas in the same database.
+Set `CARTOGRAPH_DATABASE_SCHEMA` to the v2 destination, preserve a database
+backup, quiesce index/sync/hook/rebuild writers for the project, and preflight
+the exact source checkout before authorizing mutation. The destination may
+already have a current generation; import publishes a new immutable one:
+
+```sh
+cartograph db import-v1 \
+  --project-path /absolute/path/to/checkout \
+  --source-schema cartograph_v1 \
+  --dry-run \
+  --format json
+
+cartograph db import-v1 \
+  --project-path /absolute/path/to/checkout \
+  --source-schema cartograph_v1 \
+  --confirm import-v1-postgres \
+  --format json
+```
+
+An interrupted exact run resumes when the same command is repeated. Never
+change schemas or checkout bytes to force a checkpoint forward. Keep the v1
+schema and backup until `status`, one real `context` query, and derived-index
+health all pass. Imported reference site counts preserve v1 multiplicity; spans
+remain explicitly coarse where v1 cannot prove an exact token. SCIP placeholder
+hashes cannot prove historical bytes that v1 did not retain.
+
+`ConcurrentPublication` means another writer published first. The importer
+atomically fails/releases its stale generation; with writers quiesced, repeat
+the identical confirmed command so it can reset the failed run and reserve a
+newer generation.
+
 If a user needs data that exists only in a v1 SQLite index, give two choices:
 
 1. rebuild v2 from the source checkout; or
@@ -220,6 +253,22 @@ If a user needs data that exists only in a v1 SQLite index, give two choices:
    PostgreSQL importer.
 
 Do not install SQLite tooling into v2 to shorten this workflow.
+
+Generation cleanup is separate and never implicit. After backup and import
+verification, a bounded example is:
+
+```sh
+cartograph db prune \
+  --project-path /absolute/path/to/checkout \
+  --keep-superseded 2 \
+  --maximum-deletions 100 \
+  --confirm prune-old-generations \
+  --format json
+```
+
+This preserves the current generation, active staging/ready work, and the two
+newest superseded generations. Inspect each report before requesting another
+batch.
 
 ## Common failures
 

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, process,
     sync::atomic::{AtomicU32, Ordering},
     time::Duration,
@@ -6,16 +7,21 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, EdgeInput,
+    AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope, AgentArtifactState,
+    CanonicalGenerationFacts, CartographDatabase, CurrentFileLookup, CurrentFilesLookup,
+    CurrentGeneration, CurrentGraphLookup, CurrentSourceRangeLookup, CurrentSymbolSetLookup,
+    DerivedStorePrunePolicy, DerivedStorePruneRequest, EdgeInput, ExactTextLookup,
     FailGenerationError, FailedGeneration, FileInput, GenerationContents, GenerationFacts,
-    GenerationValidationError, GenerationValidationLimits, GraphDirection, LeaseOwner,
-    LeaseRequest, LeaseTarget, MigrationError, NewGeneration, NewProject, PrepareGenerationError,
-    ProjectLease, PublishGenerationError, ReadyGeneration, RecoverableGeneration, ReferenceInput,
-    SearchDocumentInput, SearchQuery, StorageError, SymbolInput, validate_generation_facts,
+    GenerationRecoveryRequest, GenerationValidationError, GenerationValidationLimits,
+    GraphDirection, LeaseOwner, LeaseRequest, LeaseTarget, McpMacroStep, McpToolCallInput,
+    MigrationError, NewAgentArtifact, NewGeneration, NewMcpMacro, NewMcpSession, NewProject,
+    PrepareGenerationError, ProjectLease, PublishGenerationError, ReadOnlySqlRequest,
+    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
+    StorageError, SummaryCandidatePolicy, SymbolInput, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
-    GenerationState, NormalizedPath, ProjectId, ProjectOperation, SymbolId,
+    GenerationState, NormalizedPath, ProjectId, ProjectOperation, SymbolId, Visibility,
 };
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -30,6 +36,7 @@ const DOCUMENT_ONE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const DOCUMENT_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const DOCUMENT_THREE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const DOCUMENT_FOUR: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const EVIDENCE_MODEL: &str = "99999999-9999-4999-8999-999999999999";
 const RETRIEVAL_FILE: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const RETRIEVAL_TARGET: &str = "11111111-1111-4111-8111-111111111111";
 const RETRIEVAL_CALLER: &str = "22222222-2222-4222-8222-222222222222";
@@ -38,14 +45,43 @@ const OPERATION_LEASES_MIGRATION_VERSION: i64 = 2;
 const COMPLETE_EDGE_KINDS_MIGRATION_VERSION: i64 = 3;
 const REFERENCE_EVIDENCE_MIGRATION_VERSION: i64 = 4;
 const DIGEST_VERSION_MIGRATION_VERSION: i64 = 5;
-const LATEST_MIGRATION_VERSION: i64 = 6;
-const EXPECTED_MIGRATIONS: [i64; 6] = [
+const BULK_RELATION_VALIDATION_MIGRATION_VERSION: i64 = 6;
+const V1_IMPORT_RETENTION_MIGRATION_VERSION: i64 = 7;
+const SEMANTIC_STORAGE_MIGRATION_VERSION: i64 = 8;
+const REFERENCE_MULTIPLICITY_MIGRATION_VERSION: i64 = 9;
+const EXACT_LOOKUP_MIGRATION_VERSION: i64 = 10;
+const GENERATION_SEARCH_RELATIONS_MIGRATION_VERSION: i64 = 11;
+const TYPED_SYMBOL_SEMANTICS_MIGRATION_VERSION: i64 = 12;
+const AGENT_EVIDENCE_MIGRATION_VERSION: i64 = 13;
+const AGENT_SESSION_MIGRATION_VERSION: i64 = 14;
+const STRUCTURAL_BRIDGE_MIGRATION_VERSION: i64 = 15;
+const MATERIALIZED_SIMILARITY_MIGRATION_VERSION: i64 = 16;
+const NATIVE_PARSE_CACHE_MIGRATION_VERSION: i64 = 17;
+const SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION: i64 = 18;
+const SYMBOL_PAGERANK_MIGRATION_VERSION: i64 = 19;
+const SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION: i64 = 20;
+const LATEST_MIGRATION_VERSION: i64 = SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 20] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
     REFERENCE_EVIDENCE_MIGRATION_VERSION,
     DIGEST_VERSION_MIGRATION_VERSION,
-    LATEST_MIGRATION_VERSION,
+    BULK_RELATION_VALIDATION_MIGRATION_VERSION,
+    V1_IMPORT_RETENTION_MIGRATION_VERSION,
+    SEMANTIC_STORAGE_MIGRATION_VERSION,
+    REFERENCE_MULTIPLICITY_MIGRATION_VERSION,
+    EXACT_LOOKUP_MIGRATION_VERSION,
+    GENERATION_SEARCH_RELATIONS_MIGRATION_VERSION,
+    TYPED_SYMBOL_SEMANTICS_MIGRATION_VERSION,
+    AGENT_EVIDENCE_MIGRATION_VERSION,
+    AGENT_SESSION_MIGRATION_VERSION,
+    STRUCTURAL_BRIDGE_MIGRATION_VERSION,
+    MATERIALIZED_SIMILARITY_MIGRATION_VERSION,
+    NATIVE_PARSE_CACHE_MIGRATION_VERSION,
+    SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION,
+    SYMBOL_PAGERANK_MIGRATION_VERSION,
+    SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -57,6 +93,19 @@ const LOCK_OBSERVATION_ATTEMPTS: usize = 100;
 const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
 const LOCK_OBSERVATION_INTERVAL: Duration = Duration::from_millis(20);
+const INTERACTIVE_STALL_TIMEOUT: Duration = Duration::from_millis(75);
+const EXACT_LOOKUP_SCALE_ROWS: i32 = 20_000;
+const EXACT_LOOKUP_TARGET_NAME: &str = "tagscanary";
+const EXACT_LOOKUP_MIGRATION_CHECKSUM: &str =
+    "e9ba5a57487dd2f8d9c8e903147b2e083d19094d8c4ec289ac459b84e8b7b86a";
+const GENERATION_SEARCH_RELATIONS_MIGRATION_CHECKSUM: &str =
+    "a899f5923b2659a8b2be52da09b97784a954de8abd72d03a833005f5276d60ef";
+const TYPED_SYMBOL_SEMANTICS_MIGRATION_CHECKSUM: &str =
+    "b4539a68d90dac58c142fd0c6573965a93f70400ac94fa924c872c848db2a50c";
+const AGENT_EVIDENCE_MIGRATION_CHECKSUM: &str =
+    "6ddfc988c68cf7e88dc70c3291379e3afeceab667916fbbe597ef0fdd988eff8";
+const AGENT_SESSION_MIGRATION_CHECKSUM: &str =
+    "687d57c314fb32a6a16b6c892b6b04494384e651a575c9342ce0f0d22974168d";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -71,6 +120,14 @@ async fn migrations_are_idempotent_and_only_published_generations_are_searchable
         prepare_rollback_retry(&database, &project, current_one.generation_id()).await;
     let current_two = publish_newer_generation(&database, &project, &ready_older).await;
     assert_deterministic_retrieval(&database, &project, current_two.generation_id()).await;
+    assert_interactive_reads_timeout_and_pool_recovers(
+        &database,
+        &pool,
+        &schema,
+        &project,
+        current_two.generation_id(),
+    )
+    .await;
     reject_stale_publication(&database, ready_older).await;
     assert_state(
         &database,
@@ -110,6 +167,1000 @@ async fn migrations_are_idempotent_and_only_published_generations_are_searchable
     assert_restart_recovery(&database, &project).await;
     assert_validation_token_return(&database, &project).await;
     assert_ledger_tampering_is_refused(&database, &pool, &schema).await;
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn agent_sessions_trace_usage_and_macros_are_durable() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    assert_agent_session_migration(&pool, &schema).await;
+    let project = register_project(&database).await;
+
+    let automatic = database
+        .create_mcp_session(&project, &NewMcpSession::automatic())
+        .await
+        .unwrap_or_else(|error| panic!("could not create automatic session: {error}"));
+    let named_input = NewMcpSession::named("postgres-review", "Review durable query evidence")
+        .unwrap_or_else(|error| panic!("could not build named session: {error}"));
+    let named = database
+        .create_mcp_session(&project, &named_input)
+        .await
+        .unwrap_or_else(|error| panic!("could not create named session: {error}"));
+    let first_call = McpToolCallInput::new(
+        "cartograph_status",
+        serde_json::json!({"mode": "diagnostics"}),
+        "status current",
+        true,
+        12,
+    )
+    .unwrap_or_else(|error| panic!("could not build first trace call: {error}"));
+    let second_call = McpToolCallInput::new(
+        "cartograph_find",
+        serde_json::json!({"query": "missing"}),
+        "not_found: symbol was not found",
+        false,
+        48,
+    )
+    .unwrap_or_else(|error| panic!("could not build second trace call: {error}"));
+    let recorded_one = database
+        .record_mcp_tool_call(&project, named.session_id(), &first_call)
+        .await
+        .unwrap_or_else(|error| panic!("could not record first trace call: {error}"));
+    let recorded_two = database
+        .record_mcp_tool_call(&project, named.session_id(), &second_call)
+        .await
+        .unwrap_or_else(|error| panic!("could not record second trace call: {error}"));
+    assert_eq!(recorded_one.step(), 1);
+    assert_eq!(recorded_two.step(), 2);
+    let calls = database
+        .mcp_calls_for_session(&project, named.session_id(), 100)
+        .await
+        .unwrap_or_else(|error| panic!("could not read trace calls: {error}"));
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].tool_name(), "cartograph_status");
+    assert!(!calls[1].success());
+    let found = database
+        .find_mcp_session(&project, None, Some("postgres-review"), false)
+        .await
+        .unwrap_or_else(|error| panic!("could not find named session: {error}"))
+        .unwrap_or_else(|| panic!("named session was missing"));
+    assert_eq!(found.session_id(), named.session_id());
+    assert_eq!(found.tool_count(), 2);
+    let sessions = database
+        .list_mcp_sessions(&project, 10)
+        .await
+        .unwrap_or_else(|error| panic!("could not list sessions: {error}"));
+    assert_eq!(sessions.len(), 2);
+    let usage = serde_json::to_value(
+        database
+            .mcp_trace_usage(&project)
+            .await
+            .unwrap_or_else(|error| panic!("could not aggregate trace usage: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("could not serialize trace usage: {error}"));
+    assert_eq!(usage["sessionCount"], 2);
+    assert_eq!(usage["toolCallCount"], 2);
+    assert_eq!(usage["errorCount"], 1);
+
+    let macro_step = McpMacroStep::new(
+        "cartograph_find",
+        serde_json::Map::from_iter([(
+            "query".to_owned(),
+            serde_json::Value::String("${0}".to_owned()),
+        )]),
+    )
+    .unwrap_or_else(|error| panic!("could not build macro step: {error}"));
+    let macro_input = NewMcpMacro::new("find-symbol", vec![macro_step])
+        .unwrap_or_else(|error| panic!("could not build macro: {error}"));
+    let saved = database
+        .save_mcp_macro(&project, &macro_input)
+        .await
+        .unwrap_or_else(|error| panic!("could not save macro: {error}"));
+    assert_eq!(saved.name(), "find-symbol");
+    database
+        .mark_mcp_macro_run(&project, "find-symbol")
+        .await
+        .unwrap_or_else(|error| panic!("could not mark macro run: {error}"));
+    let macros = database
+        .list_mcp_macros(&project, 10)
+        .await
+        .unwrap_or_else(|error| panic!("could not list macros: {error}"));
+    assert_eq!(macros.len(), 1);
+    assert_eq!(macros[0].steps().len(), 1);
+    assert!(
+        database
+            .delete_mcp_macro(&project, "find-symbol")
+            .await
+            .unwrap_or_else(|error| panic!("could not delete macro: {error}"))
+    );
+    assert!(
+        database
+            .delete_mcp_session(&project, named.session_id())
+            .await
+            .unwrap_or_else(|error| panic!("could not delete session: {error}"))
+    );
+    assert!(
+        database
+            .mcp_calls_for_session(&project, named.session_id(), 100)
+            .await
+            .unwrap_or_else(|error| panic!("could not verify cascade: {error}"))
+            .is_empty()
+    );
+    assert_ne!(automatic.session_id(), named.session_id());
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn agent_artifacts_and_summary_digest_fences_are_durable() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    assert_agent_evidence_migration(&pool, &schema).await;
+    assert_agent_session_migration(&pool, &schema).await;
+    let project = register_project(&database).await;
+    let initial = publish_initial_generation(&database, &project).await;
+    let ready_older = prepare_rollback_retry(&database, &project, initial.generation_id()).await;
+    let current = publish_newer_generation(&database, &project, &ready_older).await;
+
+    let note = NewAgentArtifact::new(
+        AgentArtifactKind::Note,
+        AgentArtifactScope::Project,
+        "project",
+        "Review the public API boundary before editing.",
+    )
+    .unwrap_or_else(|error| panic!("could not build note fixture: {error}"));
+    let created = database
+        .create_agent_artifact(&project, &note)
+        .await
+        .unwrap_or_else(|error| panic!("could not create durable note: {error}"));
+    let notes = database
+        .list_agent_artifacts(
+            &project,
+            AgentArtifactQuery::new(10)
+                .unwrap_or_else(|error| panic!("could not build note query: {error}"))
+                .with_kind(AgentArtifactKind::Note),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not list durable notes: {error}"));
+    assert_eq!(notes.len(), 1);
+    let question = NewAgentArtifact::new(
+        AgentArtifactKind::Note,
+        AgentArtifactScope::Project,
+        "project",
+        "Does this boundary need an integration test?",
+    )
+    .and_then(|artifact| {
+        artifact.with_metadata(serde_json::json!({
+            "noteKind": "question",
+            "author": "integration-test"
+        }))
+    })
+    .unwrap_or_else(|error| panic!("could not build question note: {error}"));
+    database
+        .create_agent_artifact(&project, &question)
+        .await
+        .unwrap_or_else(|error| panic!("could not create question note: {error}"));
+    let questions = database
+        .list_agent_artifacts(
+            &project,
+            AgentArtifactQuery::new(10)
+                .unwrap_or_else(|error| panic!("could not build question query: {error}"))
+                .with_kind(AgentArtifactKind::Note)
+                .with_note_kind("question")
+                .unwrap_or_else(|error| panic!("could not filter question notes: {error}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not list question notes: {error}"));
+    assert_eq!(questions.len(), 1);
+
+    let summary_policy = SummaryCandidatePolicy::new(1, BTreeMap::new())
+        .unwrap_or_else(|error| panic!("could not build summary policy: {error}"));
+    let pending = database
+        .pending_symbol_summaries_with_policy(&project, 20, &summary_policy)
+        .await
+        .unwrap_or_else(|error| panic!("could not list pending summaries: {error}"));
+    let candidate = pending
+        .first()
+        .unwrap_or_else(|| panic!("published fixture must expose a pending symbol summary"));
+    let symbol_id = SymbolId::parse(candidate.symbol_id())
+        .unwrap_or_else(|error| panic!("pending summary symbol id was invalid: {error}"));
+    let source_digest = ContentDigest::parse(candidate.content_hash())
+        .unwrap_or_else(|error| panic!("pending summary digest was invalid: {error}"));
+    let role = NewAgentArtifact::new(
+        AgentArtifactKind::Role,
+        AgentArtifactScope::Symbol,
+        symbol_id.as_str(),
+        "business_logic",
+    )
+    .unwrap_or_else(|error| panic!("could not build role fixture: {error}"))
+    .with_generation(current.generation_id().clone())
+    .with_source_digest(source_digest.clone())
+    .with_state(AgentArtifactState::Complete)
+    .unwrap_or_else(|error| panic!("could not complete role fixture: {error}"));
+    database
+        .replace_scoped_agent_artifact(&project, &role)
+        .await
+        .unwrap_or_else(|error| panic!("could not save role fixture: {error}"));
+    database
+        .replace_scoped_agent_artifact(&project, &role)
+        .await
+        .unwrap_or_else(|error| panic!("could not replace role fixture: {error}"));
+    let roles = database
+        .list_agent_artifacts(
+            &project,
+            AgentArtifactQuery::new(10)
+                .unwrap_or_else(|error| panic!("could not build role query: {error}"))
+                .with_kind(AgentArtifactKind::Role)
+                .with_body("business_logic")
+                .unwrap_or_else(|error| panic!("could not filter role query: {error}"))
+                .current_generation_only(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not list role fixture: {error}"));
+    assert_eq!(roles.len(), 1);
+    assert_eq!(
+        database
+            .agent_role_distribution(&project)
+            .await
+            .unwrap_or_else(|error| panic!("could not aggregate role fixture: {error}"))
+            .len(),
+        1
+    );
+    let sql = ReadOnlySqlRequest::new(
+        "SELECT qualified_name, symbol_kind FROM symbols ORDER BY qualified_name",
+        20,
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|error| panic!("could not build read-only SQL fixture: {error}"));
+    let sql_result = database
+        .execute_read_only_sql(&project, &sql)
+        .await
+        .unwrap_or_else(|error| panic!("project-scoped SQL failed: {error}"));
+    let sql_json = serde_json::to_value(sql_result)
+        .unwrap_or_else(|error| panic!("SQL result did not serialize: {error}"));
+    assert_eq!(sql_json["rows"].as_array().map(Vec::len), Some(2));
+    let explain = ReadOnlySqlRequest::new(
+        "EXPLAIN SELECT * FROM symbols WHERE symbol_kind = 'function'",
+        100,
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|error| panic!("could not build SQL explain fixture: {error}"));
+    let explain_result = database
+        .execute_read_only_sql(&project, &explain)
+        .await
+        .unwrap_or_else(|error| panic!("project-scoped SQL explain failed: {error}"));
+    let explain_json = serde_json::to_value(explain_result)
+        .unwrap_or_else(|error| panic!("SQL explain did not serialize: {error}"));
+    assert_eq!(explain_json["explain"], true);
+    database
+        .save_symbol_summary(
+            &project,
+            &symbol_id,
+            &source_digest,
+            "Handles the live artifact fixture.",
+            "integration-test",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not save current summary: {error}"));
+    let after = database
+        .pending_symbol_summaries_with_policy(&project, 20, &summary_policy)
+        .await
+        .unwrap_or_else(|error| panic!("could not refresh pending summaries: {error}"));
+    assert_eq!(after.len() + 1, pending.len());
+    let stale_digest = digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    assert!(matches!(
+        database
+            .save_symbol_summary(
+                &project,
+                &symbol_id,
+                &stale_digest,
+                "This must not overwrite current evidence.",
+                "integration-test",
+            )
+            .await,
+        Err(StorageError::CurrentGenerationChanged)
+    ));
+    assert!(
+        database
+            .delete_agent_artifact(&project, created.artifact_id())
+            .await
+            .unwrap_or_else(|error| panic!("could not delete durable note: {error}"))
+    );
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn publication_carries_only_digest_identical_derived_evidence() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let initial_staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let initial_ready = prepare_fenced(
+        &database,
+        initial_staged,
+        derived_evidence_generation_facts(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("initial evidence generation failed: {error}"));
+    let initial = publish_fenced(&database, initial_ready)
+        .await
+        .unwrap_or_else(|error| panic!("initial evidence generation did not publish: {error}"));
+    let symbol_id = parse_symbol_id(RETRIEVAL_TARGET);
+    let document_id = parse_document_id(DOCUMENT_THREE);
+    let structural_digest = digest(DIGEST_ONE);
+
+    database
+        .save_symbol_role(
+            &project,
+            &symbol_id,
+            "business_logic",
+            serde_json::json!({"via": "integration-test"}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not save role evidence: {error}"));
+    database
+        .save_symbol_summary(
+            &project,
+            &symbol_id,
+            &structural_digest,
+            "Decodes a JSON payload.",
+            "integration-test",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not save summary evidence: {error}"));
+    seed_generation_bound_evidence(
+        &pool,
+        &schema,
+        &project,
+        initial.generation_id(),
+        &symbol_id,
+        &document_id,
+    )
+    .await;
+
+    let identical_staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_TWO,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let identical_ready = prepare_fenced(
+        &database,
+        identical_staged,
+        derived_evidence_generation_facts(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("identical evidence generation failed: {error}"));
+    let identical = publish_fenced(&database, identical_ready)
+        .await
+        .unwrap_or_else(|error| panic!("identical evidence generation did not publish: {error}"));
+    assert_current_derived_evidence(
+        &database,
+        &pool,
+        &schema,
+        &project,
+        identical.generation_id(),
+        1,
+    )
+    .await;
+
+    let mut changed_facts = derived_evidence_generation_facts();
+    changed_facts.symbols[0].structural_digest =
+        digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    changed_facts.documents[0].code = "fn decode_json_payload() { changed(); }".to_owned();
+    let changed_staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_THREE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let changed_ready = prepare_fenced(&database, changed_staged, changed_facts)
+        .await
+        .unwrap_or_else(|error| panic!("changed evidence generation failed: {error}"));
+    let changed = publish_fenced(&database, changed_ready)
+        .await
+        .unwrap_or_else(|error| panic!("changed evidence generation did not publish: {error}"));
+    assert_current_derived_evidence(
+        &database,
+        &pool,
+        &schema,
+        &project,
+        changed.generation_id(),
+        0,
+    )
+    .await;
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn cold_derived_prune_removes_only_unreferenced_artifacts_and_terminal_vectors() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let initial_staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let initial_ready = prepare_fenced(&database, initial_staged, retrieval_generation_facts())
+        .await
+        .unwrap_or_else(|error| panic!("initial prune generation failed: {error}"));
+    let initial = publish_fenced(&database, initial_ready)
+        .await
+        .unwrap_or_else(|error| panic!("initial prune generation did not publish: {error}"));
+    let symbol_id = parse_symbol_id(RETRIEVAL_TARGET);
+    let document_id = parse_document_id(DOCUMENT_THREE);
+    let structural_digest = digest(DIGEST_ONE);
+    database
+        .save_symbol_role(
+            &project,
+            &symbol_id,
+            "business_logic",
+            serde_json::json!({"via": "integration-test"}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not seed prune role: {error}"));
+    database
+        .save_symbol_summary(
+            &project,
+            &symbol_id,
+            &structural_digest,
+            "Decodes a cold JSON payload.",
+            "integration-test",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not seed prune summary: {error}"));
+    let note = NewAgentArtifact::new(
+        AgentArtifactKind::Note,
+        AgentArtifactScope::Project,
+        "project",
+        "This operator note must survive derived-store pruning.",
+    )
+    .unwrap_or_else(|error| panic!("could not build prune note: {error}"));
+    database
+        .create_agent_artifact(&project, &note)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed prune note: {error}"));
+    seed_generation_bound_evidence(
+        &pool,
+        &schema,
+        &project,
+        initial.generation_id(),
+        &symbol_id,
+        &document_id,
+    )
+    .await;
+
+    let mut changed_facts = retrieval_generation_facts();
+    changed_facts.symbols[0].structural_digest =
+        digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    changed_facts.documents[0].code = "fn decode_json_payload() { changed(); }".to_owned();
+    let changed_staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_TWO,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let changed_ready = prepare_fenced(&database, changed_staged, changed_facts)
+        .await
+        .unwrap_or_else(|error| panic!("changed prune generation failed: {error}"));
+    let changed = publish_fenced(&database, changed_ready)
+        .await
+        .unwrap_or_else(|error| panic!("changed prune generation did not publish: {error}"));
+
+    let lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "derived-prune-test"),
+            TEST_LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("could not acquire prune lease: {error}"));
+    let policy = DerivedStorePrunePolicy::new(Duration::ZERO, 100)
+        .unwrap_or_else(|error| panic!("could not build prune policy: {error}"));
+    let report = database
+        .prune_cold_derived_store(DerivedStorePruneRequest::new(
+            policy,
+            &lease.fence(),
+            Duration::from_secs(30),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("cold derived prune failed: {error}"));
+    assert_eq!(report.summaries_pruned, 1);
+    assert_eq!(report.roles_pruned, 1);
+    assert_eq!(report.embeddings_pruned, 1);
+    assert_eq!(report.total_pruned(), 3);
+    assert!(!report.artifacts_truncated);
+    assert!(!report.embeddings_truncated);
+    assert!(database.release_lease(&lease).await.is_ok());
+
+    let notes = database
+        .list_agent_artifacts(
+            &project,
+            AgentArtifactQuery::new(10)
+                .unwrap_or_else(|error| panic!("could not build post-prune note query: {error}"))
+                .with_kind(AgentArtifactKind::Note),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not read post-prune notes: {error}"));
+    assert_eq!(notes.len(), 1);
+    assert!(matches!(
+        database.current_generation_record(&project).await,
+        Ok(Some(current)) if current.generation_id() == changed.generation_id()
+    ));
+    let old_vectors = query(AssertSqlSafe(format!(
+        r#"SELECT count(*)::bigint FROM "{schema}"."document_embeddings"
+            WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)"#
+    )))
+    .bind(project.as_str())
+    .bind(initial.generation_id().as_str())
+    .fetch_one(&pool)
+    .await
+    .and_then(|row| row.try_get::<i64, _>(0))
+    .unwrap_or_else(|error| panic!("could not count post-prune vectors: {error}"));
+    assert_eq!(old_vectors, 0);
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn exact_name_indexes_are_live_frozen_and_used_at_scale() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    assert_exact_lookup_migration(&pool, &schema).await;
+    assert_generation_search_migration(&pool, &schema).await;
+    assert_typed_symbol_semantics_migration(&pool, &schema).await;
+    assert_agent_evidence_migration(&pool, &schema).await;
+    assert_agent_session_migration(&pool, &schema).await;
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    seed_exact_lookup_scale(
+        &pool,
+        &schema,
+        &project,
+        staged.generation_id(),
+        EXACT_LOOKUP_SCALE_ROWS,
+    )
+    .await;
+    assert_exact_lookup_plans_use_indexes(&pool, &schema, &project, staged.generation_id()).await;
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn expected_generation_reads_survive_publication_without_mixing_snapshots() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let current = publish_initial_generation(&database, &project).await;
+    seed_generation_fence_symbol(&pool, &schema, &project, current.generation_id()).await;
+    let ready = prepare_rollback_retry(&database, &project, current.generation_id()).await;
+
+    let mut blocker = pool
+        .begin()
+        .await
+        .unwrap_or_else(|error| panic!("generation fence blocker begin failed: {error}"));
+    let lock = format!(r#"LOCK TABLE "{schema}"."symbols" IN ACCESS EXCLUSIVE MODE"#);
+    query(AssertSqlSafe(lock))
+        .execute(&mut *blocker)
+        .await
+        .unwrap_or_else(|error| panic!("generation fence symbols lock failed: {error}"));
+
+    let lookup_database = database.clone();
+    let lookup_project = project.clone();
+    let expected_generation = current.generation_id().clone();
+    let lookup = tokio::spawn(async move {
+        lookup_database
+            .exact_current_symbols_by_name(ExactTextLookup::new(
+                &lookup_project,
+                &expected_generation,
+                "fencedCanary",
+                SEARCH_LIMIT,
+            ))
+            .await
+    });
+    wait_for_table_query_lock(&pool, &schema, "symbols").await;
+    let replacement = publish_fenced(&database, ready)
+        .await
+        .unwrap_or_else(|error| panic!("generation fence publication failed: {error}"));
+    blocker
+        .rollback()
+        .await
+        .unwrap_or_else(|error| panic!("generation fence blocker rollback failed: {error}"));
+
+    let observed = lookup
+        .await
+        .unwrap_or_else(|error| panic!("generation fence lookup task failed: {error}"))
+        .unwrap_or_else(|error| panic!("generation fence lookup failed: {error}"));
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].generation_id(), current.generation_id());
+    assert_eq!(observed[0].qualified_name(), "fencedCanary");
+    assert_eq!(
+        database
+            .exact_current_symbols_by_name(ExactTextLookup::new(
+                &project,
+                current.generation_id(),
+                "fencedCanary",
+                SEARCH_LIMIT,
+            ))
+            .await,
+        Err(StorageError::CurrentGenerationChanged)
+    );
+    let replacement_rows = database
+        .exact_current_symbols_by_name(ExactTextLookup::new(
+            &project,
+            replacement.generation_id(),
+            "fencedCanary",
+            SEARCH_LIMIT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("replacement generation lookup failed: {error}"));
+    assert!(replacement_rows.is_empty());
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn bm25_scores_and_order_are_generation_isolated_from_distractors() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let current = publish_bm25_isolation_generation(&database, &project).await;
+    let before = bm25_signature(&database, &project, current.generation_id()).await;
+
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_TWO,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    prepare(
+        &database,
+        PrepareFixture {
+            staged,
+            document: document(DocumentFixture {
+                id: DOCUMENT_THREE,
+                path: "src/ready_distractor.rs",
+                qualified_name: "readyDistractor",
+                code: "fn ready_distractor() { isolationtoken(); }",
+            }),
+        },
+    )
+    .await;
+
+    let other_project = database
+        .register_project(NewProject::new(
+            "workspace/cartograph-other",
+            digest(DIGEST_ONE),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("other BM25 project registration failed: {error}"));
+    let other_staged = begin(
+        &database,
+        GenerationFixture {
+            project: &other_project,
+            revision: REVISION_FOUR,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let other_ready = prepare(
+        &database,
+        PrepareFixture {
+            staged: other_staged,
+            document: document(DocumentFixture {
+                id: DOCUMENT_FOUR,
+                path: "src/other_distractor.rs",
+                qualified_name: "otherDistractor",
+                code: "fn other_distractor() { isolationtoken(); }",
+            }),
+        },
+    )
+    .await;
+    publish_fenced(&database, other_ready)
+        .await
+        .unwrap_or_else(|error| panic!("other BM25 project publication failed: {error}"));
+
+    let after = bm25_signature(&database, &project, current.generation_id()).await;
+    assert_eq!(after, before);
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn concurrent_bm25_reader_observes_one_complete_generation_relation() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let current = publish_initial_generation(&database, &project).await;
+    let ready = prepare_rollback_retry(&database, &project, current.generation_id()).await;
+    let table = search_relation_table_name(current.generation_id());
+    let mut blocker = pool
+        .begin()
+        .await
+        .unwrap_or_else(|error| panic!("BM25 relation blocker begin failed: {error}"));
+    let lock = format!(r#"LOCK TABLE "{schema}"."{table}" IN ACCESS EXCLUSIVE MODE"#);
+    query(AssertSqlSafe(lock))
+        .execute(&mut *blocker)
+        .await
+        .unwrap_or_else(|error| panic!("BM25 relation lock failed: {error}"));
+
+    let reader_database = database.clone();
+    let reader_project = project.clone();
+    let reader_generation = current.generation_id().clone();
+    let reader = tokio::spawn(async move {
+        reader_database
+            .search_current_code(SearchQuery::new(
+                reader_project,
+                reader_generation,
+                "http response",
+                SEARCH_LIMIT,
+            ))
+            .await
+    });
+    wait_for_table_query_lock(&pool, &schema, &table).await;
+    let replacement = publish_fenced(&database, ready)
+        .await
+        .unwrap_or_else(|error| panic!("concurrent BM25 publication failed: {error}"));
+    blocker
+        .rollback()
+        .await
+        .unwrap_or_else(|error| panic!("BM25 relation blocker rollback failed: {error}"));
+
+    let old_hits = reader
+        .await
+        .unwrap_or_else(|error| panic!("BM25 reader task failed: {error}"))
+        .unwrap_or_else(|error| panic!("old BM25 reader failed: {error}"));
+    assert_eq!(old_hits.len(), 1);
+    assert_eq!(old_hits[0].generation_id(), current.generation_id());
+    assert_eq!(old_hits[0].document_id().as_str(), DOCUMENT_ONE);
+    assert_eq!(
+        database
+            .search_current_code(SearchQuery::new(
+                project.clone(),
+                current.generation_id().clone(),
+                "http response",
+                SEARCH_LIMIT,
+            ))
+            .await,
+        Err(StorageError::CurrentGenerationChanged)
+    );
+    let new_hits = database
+        .search_current_code(SearchQuery::new(
+            project,
+            replacement.generation_id().clone(),
+            "json payload",
+            SEARCH_LIMIT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("replacement BM25 reader failed: {error}"));
+    assert_eq!(new_hits.len(), 1);
+    assert_eq!(new_hits[0].generation_id(), replacement.generation_id());
+    assert_eq!(new_hits[0].document_id().as_str(), DOCUMENT_TWO);
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn startup_rebuilds_crash_lost_search_relation_and_removes_trusted_orphan() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let current = publish_bm25_isolation_generation(&database, &project).await;
+    let before = bm25_signature(&database, &project, current.generation_id()).await;
+    let table = search_relation_table_name(current.generation_id());
+    let drop_current = format!(r#"DROP TABLE "{schema}"."{table}""#);
+    query(AssertSqlSafe(drop_current))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("crash-loss relation drop failed: {error}"));
+    assert_eq!(
+        database
+            .search_current_code(SearchQuery::new(
+                project.clone(),
+                current.generation_id().clone(),
+                "isolationtoken",
+                SEARCH_LIMIT,
+            ))
+            .await,
+        Err(StorageError::SearchRelationUnavailable)
+    );
+
+    let orphan_generation = parse_generation_id("99999999-9999-4999-8999-999999999999");
+    let orphan_table = search_relation_table_name(&orphan_generation);
+    let create_orphan = format!(r#"CREATE TABLE "{schema}"."{orphan_table}" (id bigint)"#);
+    query(AssertSqlSafe(create_orphan))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("orphan relation creation failed: {error}"));
+    let unrelated_table = "searchXg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let create_unrelated = format!(r#"CREATE TABLE "{schema}"."{unrelated_table}" (id bigint)"#);
+    query(AssertSqlSafe(create_unrelated))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("unrelated relation creation failed: {error}"));
+
+    let report = database
+        .migrate()
+        .await
+        .unwrap_or_else(|error| panic!("startup search repair failed: {error}"));
+    assert!(report.applied_versions.is_empty());
+    assert_eq!(report.current_version, LATEST_MIGRATION_VERSION);
+    let after = bm25_signature(&database, &project, current.generation_id()).await;
+    assert_eq!(after, before);
+    let orphan_exists = query("SELECT to_regclass($1) IS NOT NULL AS exists")
+        .bind(format!("{schema}.{orphan_table}"))
+        .fetch_one(&pool)
+        .await
+        .and_then(|row| row.try_get::<bool, _>("exists"))
+        .unwrap_or_else(|error| panic!("orphan relation verification failed: {error}"));
+    assert!(!orphan_exists);
+    let unrelated_exists = query("SELECT to_regclass($1) IS NOT NULL AS exists")
+        .bind(format!(r#"{schema}."{unrelated_table}""#))
+        .fetch_one(&pool)
+        .await
+        .and_then(|row| row.try_get::<bool, _>("exists"))
+        .unwrap_or_else(|error| panic!("unrelated relation verification failed: {error}"));
+    assert!(unrelated_exists);
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn failed_generation_search_build_never_reaches_ready_or_publication() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let current = publish_initial_generation(&database, &project).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_TWO,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let generation_id = staged.generation_id().clone();
+    let table = search_relation_table_name(&generation_id);
+    let create = format!(r#"CREATE TABLE "{schema}"."{table}" (sentinel bigint)"#);
+    query(AssertSqlSafe(create))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("failed-build barrier table creation failed: {error}"));
+    let mut blocker = pool
+        .begin()
+        .await
+        .unwrap_or_else(|error| panic!("failed-build blocker begin failed: {error}"));
+    let lock = format!(r#"LOCK TABLE "{schema}"."{table}" IN ACCESS SHARE MODE"#);
+    query(AssertSqlSafe(lock))
+        .execute(&mut *blocker)
+        .await
+        .unwrap_or_else(|error| panic!("failed-build relation lock failed: {error}"));
+    let lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    let fence = lease.fence();
+    let result = database
+        .prepare_generation_bounded(
+            GenerationContents::new(
+                staged,
+                canonical(GenerationFacts {
+                    documents: vec![document(DocumentFixture {
+                        id: DOCUMENT_TWO,
+                        path: "src/failed_build.rs",
+                        qualified_name: "failedBuild",
+                        code: "fn failed_build() {}",
+                    })],
+                    ..GenerationFacts::default()
+                }),
+            ),
+            cartograph_db::PrepareGenerationMutation::new(&fence, INTERACTIVE_STALL_TIMEOUT),
+        )
+        .await;
+    let staged = match result {
+        Err(error) => {
+            assert!(matches!(
+                error.error(),
+                StorageError::DatabaseOperation {
+                    operation: "search-relation-drop"
+                }
+            ));
+            error.into_parts().0
+        }
+        Ok(_) => panic!("blocked generation search build unexpectedly became ready"),
+    };
+    blocker
+        .rollback()
+        .await
+        .unwrap_or_else(|error| panic!("failed-build blocker rollback failed: {error}"));
+    assert!(database.release_lease(&lease).await.is_ok());
+    let drop_barrier = format!(r#"DROP TABLE "{schema}"."{table}""#);
+    query(AssertSqlSafe(drop_barrier))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("failed-build barrier cleanup failed: {error}"));
+    assert_state(
+        &database,
+        StateExpectation::new(&project, &generation_id, GenerationState::Staging),
+    )
+    .await;
+    let current_after = database
+        .current_generation_record(&project)
+        .await
+        .unwrap_or_else(|error| panic!("failed-build current lookup failed: {error}"))
+        .unwrap_or_else(|| panic!("failed-build current generation disappeared"));
+    assert_eq!(current_after.generation_id(), current.generation_id());
+    assert_generation_search_rows(&pool, &schema, &project, &generation_id, 0, 0).await;
+    assert!(
+        fail_fenced(&database, RecoverableGeneration::Staged(staged))
+            .await
+            .is_ok()
+    );
 
     drop(database);
     drop_schema(&pool, &schema).await;
@@ -382,6 +1433,118 @@ async fn wait_for_copy_barrier(pool: &sqlx_postgres::PgPool, schema: &str) {
     panic!("prepare COPY did not reach the deterministic advisory barrier");
 }
 
+async fn wait_for_table_query_lock(pool: &sqlx_postgres::PgPool, schema: &str, table: &str) {
+    let query_pattern = format!("%{schema}%{table}%");
+    for _ in 0..LOCK_OBSERVATION_ATTEMPTS {
+        let row = query(
+            r#"SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE application_name = 'cartograph-v2'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE $1
+                ) AS waiting"#,
+        )
+        .bind(&query_pattern)
+        .fetch_one(pool)
+        .await;
+        if matches!(
+            row.and_then(|row| row.try_get::<bool, _>("waiting")),
+            Ok(true)
+        ) {
+            return;
+        }
+        tokio::time::sleep(LOCK_OBSERVATION_INTERVAL).await;
+    }
+    panic!("bounded retrieval did not reach the {table} lock barrier");
+}
+
+fn search_relation_table_name(generation: &GenerationId) -> String {
+    let compact = generation.as_str().replace('-', "");
+    assert_eq!(compact.len(), 32);
+    assert!(compact.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    format!("search_g_{compact}")
+}
+
+async fn seed_generation_fence_symbol(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+) {
+    let file = format!(
+        r#"INSERT INTO "{schema}"."files" (
+                project_id, generation_id, file_id, normalized_path, language,
+                content_hash, byte_size, parse_status
+            ) VALUES (
+                CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid),
+                'src/fenced_canary.rs', 'rust', $4, 64, 'parsed'
+            )"#
+    );
+    query(AssertSqlSafe(file))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(RETRIEVAL_FILE)
+        .bind(DIGEST_ONE)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("generation fence file seed failed: {error}"));
+    let symbol = format!(
+        r#"INSERT INTO "{schema}"."symbols" (
+                project_id, generation_id, symbol_id, file_id, symbol_kind,
+                qualified_name, signature, start_byte, end_byte,
+                start_line, end_line, structural_digest
+            ) VALUES (
+                CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid),
+                CAST($4 AS uuid), 'function', 'fencedCanary',
+                'fn fenced_canary()', 0, 20, 1, 1, $5
+            )"#
+    );
+    query(AssertSqlSafe(symbol))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(RETRIEVAL_TARGET)
+        .bind(RETRIEVAL_FILE)
+        .bind(DIGEST_ONE)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("generation fence symbol seed failed: {error}"));
+}
+
+async fn assert_generation_search_rows(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+    expected_documents: i64,
+    expected_catalog_rows: i64,
+) {
+    let sql = format!(
+        r#"SELECT
+                (SELECT count(*)::bigint FROM "{schema}"."search_documents"
+                 WHERE project_id = CAST($1 AS uuid)
+                   AND generation_id = CAST($2 AS uuid)) AS documents,
+                (SELECT count(*)::bigint FROM "{schema}"."generation_search_relations"
+                 WHERE project_id = CAST($1 AS uuid)
+                   AND generation_id = CAST($2 AS uuid)) AS catalog_rows"#
+    );
+    let row = query(AssertSqlSafe(sql))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("generation search row verification failed: {error}"));
+    assert_eq!(
+        row.try_get::<i64, _>("documents")
+            .unwrap_or_else(|error| panic!("document count decode failed: {error}")),
+        expected_documents
+    );
+    assert_eq!(
+        row.try_get::<i64, _>("catalog_rows")
+            .unwrap_or_else(|error| panic!("catalog count decode failed: {error}")),
+        expected_catalog_rows
+    );
+}
+
 struct DocumentFixture<'a> {
     id: &'a str,
     path: &'a str,
@@ -503,7 +1666,10 @@ async fn publish_initial_generation(
         },
     )
     .await;
-    assert_search(database, SearchExpectation::empty(project, "http response")).await;
+    assert!(matches!(
+        database.current_generation_record(project).await,
+        Ok(None)
+    ));
     let current = match publish_fenced(database, ready).await {
         Ok(generation) => generation,
         Err(error) => panic!("first generation did not publish: {error}"),
@@ -521,6 +1687,63 @@ async fn publish_initial_generation(
     )
     .await;
     current
+}
+
+async fn publish_bm25_isolation_generation(
+    database: &CartographDatabase,
+    project: &ProjectId,
+) -> CurrentGeneration {
+    let staged = begin(
+        database,
+        GenerationFixture {
+            project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let facts = GenerationFacts {
+        documents: vec![
+            document(DocumentFixture {
+                id: DOCUMENT_ONE,
+                path: "src/isolation_one.rs",
+                qualified_name: "isolationOne",
+                code: "fn isolation_one() { isolationtoken(); }",
+            }),
+            document(DocumentFixture {
+                id: DOCUMENT_TWO,
+                path: "src/isolation_two.rs",
+                qualified_name: "isolationTwo",
+                code: "fn isolation_two() { isolationtoken(); isolationtoken(); }",
+            }),
+        ],
+        ..GenerationFacts::default()
+    };
+    let ready = prepare_fenced(database, staged, facts)
+        .await
+        .unwrap_or_else(|error| panic!("BM25 isolation generation prepare failed: {error}"));
+    publish_fenced(database, ready)
+        .await
+        .unwrap_or_else(|error| panic!("BM25 isolation generation publication failed: {error}"))
+}
+
+async fn bm25_signature(
+    database: &CartographDatabase,
+    project: &ProjectId,
+    generation: &GenerationId,
+) -> Vec<(String, u64)> {
+    database
+        .search_current_code(SearchQuery::new(
+            project.clone(),
+            generation.clone(),
+            "isolationtoken",
+            SEARCH_LIMIT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("BM25 isolation query failed: {error}"))
+        .into_iter()
+        .map(|hit| (hit.document_id().as_str().to_owned(), hit.score().to_bits()))
+        .collect()
 }
 
 async fn prepare_rollback_retry(
@@ -600,6 +1823,17 @@ async fn publish_newer_generation(
     )
     .await;
     assert!(staged.sequence() > ready_older.sequence());
+    let ready = match prepare_fenced(database, staged, retrieval_generation_facts()).await {
+        Ok(ready) => ready,
+        Err(error) => panic!("retrieval generation did not become ready: {error}"),
+    };
+    match publish_fenced(database, ready).await {
+        Ok(generation) => generation,
+        Err(error) => panic!("newer generation did not publish: {error}"),
+    }
+}
+
+fn retrieval_generation_facts() -> GenerationFacts {
     let file_id = parse_file_id(RETRIEVAL_FILE);
     let target_id = parse_symbol_id(RETRIEVAL_TARGET);
     let caller_id = parse_symbol_id(RETRIEVAL_CALLER);
@@ -611,7 +1845,7 @@ async fn publish_newer_generation(
     });
     search_document.file_id = Some(file_id.clone());
     search_document.symbol_id = Some(target_id.clone());
-    let facts = GenerationFacts {
+    GenerationFacts {
         files: vec![FileInput {
             file_id: file_id.clone(),
             normalized_path: "src/json_decoder.rs".to_owned(),
@@ -632,6 +1866,14 @@ async fn publish_newer_generation(
                 start_line: 1,
                 end_line: 1,
                 structural_digest: digest(DIGEST_ONE),
+                visibility: Some(Visibility::Public),
+                exported: true,
+                default_export: false,
+                async_symbol: false,
+                static_member: false,
+                declaration_only: false,
+                betweenness_ppb: None,
+                pagerank_ppb: None,
             },
             SymbolInput {
                 symbol_id: caller_id.clone(),
@@ -644,6 +1886,14 @@ async fn publish_newer_generation(
                 start_line: 2,
                 end_line: 4,
                 structural_digest: digest(DIGEST_ONE),
+                visibility: Some(Visibility::Private),
+                exported: false,
+                default_export: false,
+                async_symbol: true,
+                static_member: false,
+                declaration_only: false,
+                betweenness_ppb: None,
+                pagerank_ppb: None,
             },
         ],
         edges: vec![EdgeInput {
@@ -652,6 +1902,7 @@ async fn publish_newer_generation(
             kind: EdgeKind::Calls,
             confidence: 1.0,
             provenance: "live-retrieval-fixture".to_owned(),
+            site_count: 1,
         }],
         references: vec![ReferenceInput {
             file_id,
@@ -663,16 +1914,170 @@ async fn publish_newer_generation(
             end_byte: 57,
             confidence: 1.0,
             resolution_provenance: "live-retrieval-fixture".to_owned(),
+            site_count: 1,
+            span_precision: cartograph_db::ReferenceSpanPrecision::Exact,
         }],
         documents: vec![search_document],
-    };
-    let ready = match prepare_fenced(database, staged, facts).await {
-        Ok(ready) => ready,
-        Err(error) => panic!("retrieval generation did not become ready: {error}"),
-    };
-    match publish_fenced(database, ready).await {
-        Ok(generation) => generation,
-        Err(error) => panic!("newer generation did not publish: {error}"),
+    }
+}
+
+fn derived_evidence_generation_facts() -> GenerationFacts {
+    let mut facts = retrieval_generation_facts();
+    facts.documents[0].natural_text.clear();
+    facts
+}
+
+async fn seed_generation_bound_evidence(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+    symbol: &SymbolId,
+    document: &DocumentId,
+) {
+    let model = format!(
+        r#"INSERT INTO "{schema}"."embedding_models" (
+                model_id, fingerprint, provider, model_name, dimension, normalization
+            ) VALUES (
+                CAST($1 AS uuid), $2, 'integration-test', 'tiny-vector', 3, 'none'
+            )"#,
+    );
+    query(AssertSqlSafe(model))
+        .bind(EVIDENCE_MODEL)
+        .bind("9999999999999999999999999999999999999999999999999999999999999999")
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed embedding model: {error}"));
+    let embedding = format!(
+        r#"INSERT INTO "{schema}"."document_embeddings" (
+                project_id, generation_id, document_id, model_id, source_digest, embedding
+            ) VALUES (
+                CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid), CAST($4 AS uuid),
+                $5, CAST('[1,2,3]' AS vector)
+            )"#,
+    );
+    query(AssertSqlSafe(embedding))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(document.as_str())
+        .bind(EVIDENCE_MODEL)
+        .bind("8888888888888888888888888888888888888888888888888888888888888888")
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed document embedding: {error}"));
+    let coverage_source = format!(
+        r#"INSERT INTO "{schema}"."coverage_sources" (
+                project_id, label, report_format, report_digest
+            ) VALUES (CAST($1 AS uuid), 'integration-test', 'lcov', $2)
+            RETURNING source_id::text"#,
+    );
+    let source_id = query(AssertSqlSafe(coverage_source))
+        .bind(project.as_str())
+        .bind("7777777777777777777777777777777777777777777777777777777777777777")
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>(0))
+        .unwrap_or_else(|error| panic!("could not seed coverage source: {error}"));
+    let coverage = format!(
+        r#"INSERT INTO "{schema}"."symbol_coverage" (
+                project_id, generation_id, source_id, symbol_id,
+                lines_found, lines_hit, functions_found, functions_hit
+            ) VALUES (
+                CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid), CAST($4 AS uuid),
+                10, 8, 1, 1
+            )"#,
+    );
+    query(AssertSqlSafe(coverage))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(source_id)
+        .bind(symbol.as_str())
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed symbol coverage: {error}"));
+    let similarity_edge = format!(
+        r#"INSERT INTO "{schema}"."symbol_similarity_edges" (
+                project_id, generation_id, model_id, source_symbol_id,
+                target_symbol_id, score, neighbor_rank
+            ) VALUES (
+                CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid), CAST($4 AS uuid),
+                CAST($5 AS uuid), 0.8, 1
+            )"#,
+    );
+    query(AssertSqlSafe(similarity_edge))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(EVIDENCE_MODEL)
+        .bind(symbol.as_str())
+        .bind(RETRIEVAL_CALLER)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed similarity edge: {error}"));
+    let similarity_build = format!(
+        r#"INSERT INTO "{schema}"."symbol_similarity_builds" (
+                project_id, generation_id, model_id, neighbors_per_symbol,
+                minimum_score, source_symbols, edges_written
+            ) VALUES (
+                CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid), 10, 0.3, 1, 1
+            )"#,
+    );
+    query(AssertSqlSafe(similarity_build))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(EVIDENCE_MODEL)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed similarity build: {error}"));
+}
+
+async fn assert_current_derived_evidence(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+    expected: i64,
+) {
+    let roles = database
+        .list_agent_artifacts(
+            project,
+            AgentArtifactQuery::new(10)
+                .unwrap_or_else(|error| panic!("could not build role query: {error}"))
+                .with_kind(AgentArtifactKind::Role)
+                .current_generation_only(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not read current roles: {error}"));
+    assert_eq!(i64::try_from(roles.len()).unwrap_or(i64::MAX), expected);
+    let summary_policy = SummaryCandidatePolicy::new(1, BTreeMap::new())
+        .unwrap_or_else(|error| panic!("could not build summary policy: {error}"));
+    let summaries = database
+        .current_summary_coverage_with_policy(project, &summary_policy)
+        .await
+        .unwrap_or_else(|error| panic!("could not read current summaries: {error}"));
+    let summaries = serde_json::to_value(summaries)
+        .unwrap_or_else(|error| panic!("could not serialize summary coverage: {error}"));
+    assert_eq!(summaries["summarizedSymbols"].as_i64(), Some(expected));
+
+    for table in [
+        "document_embeddings",
+        "symbol_coverage",
+        "symbol_similarity_edges",
+        "symbol_similarity_builds",
+    ] {
+        let statement = format!(
+            r#"SELECT COUNT(*)::bigint FROM "{schema}"."{table}"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)"#,
+        );
+        let count = query(AssertSqlSafe(statement))
+            .bind(project.as_str())
+            .bind(generation.as_str())
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get::<i64, _>(0))
+            .unwrap_or_else(|error| panic!("could not count {table}: {error}"));
+        assert_eq!(count, expected, "unexpected current {table} rows");
     }
 }
 
@@ -691,24 +2096,77 @@ async fn assert_deterministic_retrieval(
         Ok(path) => path,
         Err(error) => panic!("retrieval path fixture is invalid: {error}"),
     };
-    let file = database.exact_current_file_by_path(project, &path).await;
+    let file = database
+        .exact_current_file_by_path(CurrentFileLookup::new(project, generation_id, &path))
+        .await;
     assert!(matches!(
         file,
         Ok(Some(file)) if file.file_id().as_str() == RETRIEVAL_FILE
     ));
 
+    let directory = NormalizedPath::parse("src")
+        .unwrap_or_else(|error| panic!("retrieval directory fixture is invalid: {error}"));
+    let files = database
+        .current_files(
+            CurrentFilesLookup::new(project, generation_id, SEARCH_LIMIT)
+                .within_directory(&directory)
+                .with_language(cartograph_domain::SourceLanguage::Rust),
+        )
+        .await;
+    assert!(matches!(
+        files,
+        Ok(files)
+            if files.len() == 1
+                && files[0].path().as_str() == "src/json_decoder.rs"
+    ));
+
+    let symbols_at_range = database
+        .current_symbols_at_range(CurrentSourceRangeLookup::new(
+            project,
+            generation_id,
+            &path,
+            2,
+            2,
+            SEARCH_LIMIT,
+        ))
+        .await;
+    assert!(matches!(
+        symbols_at_range,
+        Ok(symbols)
+            if symbols.len() == 1
+                && symbols[0].symbol_id().as_str() == RETRIEVAL_CALLER
+                && symbols[0].visibility() == Some(Visibility::Private)
+                && symbols[0].async_symbol()
+                && !symbols[0].exported()
+    ));
+
     let named = database
-        .exact_current_symbols_by_name(project, "decodeJSONPayload", SEARCH_LIMIT)
+        .exact_current_symbols_by_name(ExactTextLookup::new(
+            project,
+            generation_id,
+            "decodeJSONPayload",
+            SEARCH_LIMIT,
+        ))
         .await;
     assert!(matches!(
         named,
         Ok(symbols)
             if symbols.len() == 1
                 && symbols[0].symbol_id().as_str() == RETRIEVAL_TARGET
+                && symbols[0].visibility() == Some(Visibility::Public)
+                && symbols[0].exported()
+                && !symbols[0].default_export()
+                && !symbols[0].static_member()
+                && !symbols[0].declaration_only()
     ));
 
     let references = database
-        .exact_current_references_by_name(project, "decodeJSONPayload", SEARCH_LIMIT)
+        .exact_current_references_by_name(ExactTextLookup::new(
+            project,
+            generation_id,
+            "decodeJSONPayload",
+            SEARCH_LIMIT,
+        ))
         .await;
     assert!(matches!(
         references,
@@ -722,10 +2180,13 @@ async fn assert_deterministic_retrieval(
     let caller_id = parse_symbol_id(RETRIEVAL_CALLER);
     let incoming = database
         .current_graph_edges(
-            project,
-            std::slice::from_ref(&target_id),
-            GraphDirection::Incoming,
-            SEARCH_LIMIT,
+            CurrentGraphLookup::new(
+                project,
+                generation_id,
+                std::slice::from_ref(&target_id),
+                GraphDirection::Incoming,
+            )
+            .with_limit(SEARCH_LIMIT),
         )
         .await;
     assert!(matches!(
@@ -736,9 +2197,76 @@ async fn assert_deterministic_retrieval(
                 && edges[0].target_symbol_id() == &target_id
     ));
     let hydrated = database
-        .current_symbols_by_ids(project, &[caller_id, target_id])
+        .current_symbols_by_ids(CurrentSymbolSetLookup::new(
+            project,
+            generation_id,
+            &[caller_id, target_id],
+        ))
         .await;
     assert!(matches!(hydrated, Ok(symbols) if symbols.len() == 2));
+}
+
+async fn assert_interactive_reads_timeout_and_pool_recovers(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation_id: &GenerationId,
+) {
+    let mut blocker = match pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => panic!("could not begin interactive-read blocker: {error}"),
+    };
+    let lock = format!(r#"LOCK TABLE "{schema}"."projects" IN ACCESS EXCLUSIVE MODE"#);
+    if let Err(error) = query(AssertSqlSafe(lock)).execute(&mut *blocker).await {
+        panic!("could not lock interactive-read fixture: {error}");
+    }
+
+    let generation = database
+        .current_generation_record_bounded(project, INTERACTIVE_STALL_TIMEOUT)
+        .await;
+    assert!(matches!(
+        generation,
+        Err(StorageError::DatabaseOperation {
+            operation: "current-generation-read"
+        })
+    ));
+    let search = database
+        .search_current_code_bounded(
+            SearchQuery::new(
+                project.clone(),
+                generation_id.clone(),
+                "json payload",
+                SEARCH_LIMIT,
+            ),
+            INTERACTIVE_STALL_TIMEOUT,
+        )
+        .await;
+    assert!(matches!(
+        search,
+        Err(StorageError::DatabaseOperation {
+            operation: "expected-generation-read"
+        })
+    ));
+    if let Err(error) = blocker.rollback().await {
+        panic!("could not release interactive-read blocker: {error}");
+    }
+
+    assert!(matches!(
+        database.current_generation_record(project).await,
+        Ok(Some(_))
+    ));
+    assert!(matches!(
+        database
+            .search_current_code(SearchQuery::new(
+                project.clone(),
+                generation_id.clone(),
+                "json payload",
+                SEARCH_LIMIT,
+            ))
+            .await,
+        Ok(hits) if hits.len() == 1
+    ));
 }
 
 async fn reject_stale_publication(database: &CartographDatabase, ready: ReadyGeneration) {
@@ -771,7 +2299,10 @@ async fn assert_restart_recovery(database: &CartographDatabase, project: &Projec
     .await;
     let generation_id = staged.generation_id().clone();
     drop(staged);
-    let recovered = match database.recover_generation(project, &generation_id).await {
+    let recovered = match database
+        .recover_generation(GenerationRecoveryRequest::new(project, &generation_id))
+        .await
+    {
         Ok(Some(RecoverableGeneration::Staged(generation))) => generation,
         Ok(_) => panic!("staging generation was not recoverable after token loss"),
         Err(error) => panic!("generation recovery failed: {error}"),
@@ -832,9 +2363,15 @@ async fn assert_state(database: &CartographDatabase, expected: StateExpectation<
 }
 
 async fn assert_search(database: &CartographDatabase, expected: SearchExpectation<'_>) {
+    let current = database
+        .current_generation_record(expected.project)
+        .await
+        .unwrap_or_else(|error| panic!("current generation lookup failed: {error}"))
+        .unwrap_or_else(|| panic!("search fixture has no current generation"));
     let hits = database
         .search_current_code(SearchQuery::new(
             expected.project.clone(),
+            current.generation_id().clone(),
             expected.query,
             SEARCH_LIMIT,
         ))
@@ -1029,6 +2566,351 @@ async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool,
     (database, pool, schema)
 }
 
+async fn assert_exact_lookup_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 10"#
+    );
+    let checksum = query(AssertSqlSafe(ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify exact-lookup migration: {error}"));
+    assert_eq!(checksum, EXACT_LOOKUP_MIGRATION_CHECKSUM);
+
+    let indexes = query(
+        r#"SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = $1
+              AND indexname = ANY($2::text[])
+            ORDER BY indexname"#,
+    )
+    .bind(schema)
+    .bind(vec![
+        "references_exact_name_site_idx",
+        "symbols_simple_name_idx",
+    ])
+    .fetch_all(pool)
+    .await
+    .unwrap_or_else(|error| panic!("could not inspect exact-lookup indexes: {error}"));
+    assert_eq!(indexes.len(), 2);
+}
+
+async fn assert_generation_search_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 11"#
+    );
+    let checksum = query(AssertSqlSafe(ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify generation-search migration: {error}"));
+    assert_eq!(checksum, GENERATION_SEARCH_RELATIONS_MIGRATION_CHECKSUM);
+    let catalog = query(
+        r#"SELECT to_regclass($1) IS NOT NULL AS catalog_present,
+                  to_regclass($2) IS NULL AS global_bm25_absent"#,
+    )
+    .bind(format!("{schema}.generation_search_relations"))
+    .bind(format!("{schema}.search_documents_bm25_idx"))
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|error| panic!("could not inspect generation-search catalog: {error}"));
+    assert!(
+        catalog
+            .try_get::<bool, _>("catalog_present")
+            .unwrap_or(false)
+    );
+    assert!(
+        catalog
+            .try_get::<bool, _>("global_bm25_absent")
+            .unwrap_or(false)
+    );
+    let global_identity = query(
+        r#"SELECT indexes.indisunique
+            FROM pg_catalog.pg_namespace AS namespaces
+            INNER JOIN pg_catalog.pg_class AS relations
+              ON relations.relnamespace = namespaces.oid
+             AND relations.relname = 'index_generations_global_identity_idx'
+            INNER JOIN pg_catalog.pg_index AS indexes
+              ON indexes.indexrelid = relations.oid
+            WHERE namespaces.nspname = $1"#,
+    )
+    .bind(schema)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_else(|error| panic!("could not inspect global generation identity: {error}"));
+    assert!(global_identity.is_some_and(|row| row.try_get::<bool, _>(0).unwrap_or(false)));
+}
+
+async fn assert_typed_symbol_semantics_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 12"#
+    );
+    let checksum = query(AssertSqlSafe(ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify typed-symbol migration: {error}"));
+    assert_eq!(checksum, TYPED_SYMBOL_SEMANTICS_MIGRATION_CHECKSUM);
+
+    let typed_columns = query(
+        r#"SELECT count(*) AS column_count
+            FROM information_schema.columns
+            WHERE table_schema = $1
+              AND table_name = 'symbols'
+              AND column_name = ANY($2::text[])"#,
+    )
+    .bind(schema)
+    .bind(vec![
+        "visibility",
+        "exported",
+        "default_export",
+        "async_symbol",
+        "static_member",
+        "declaration_only",
+    ])
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<i64, _>("column_count"))
+    .unwrap_or_else(|error| panic!("could not inspect typed-symbol columns: {error}"));
+    assert_eq!(typed_columns, 6);
+}
+
+async fn assert_agent_evidence_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 13"#
+    );
+    let checksum = query(AssertSqlSafe(ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify agent-evidence migration: {error}"));
+    assert_eq!(checksum, AGENT_EVIDENCE_MIGRATION_CHECKSUM);
+
+    let catalogs = query(
+        r#"SELECT COUNT(*) AS table_count
+            FROM information_schema.tables
+            WHERE table_schema = $1
+              AND table_name = ANY($2::text[])"#,
+    )
+    .bind(schema)
+    .bind(vec![
+        "coverage_sources",
+        "symbol_coverage",
+        "file_history",
+        "file_cochanges",
+        "agent_artifacts",
+    ])
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<i64, _>("table_count"))
+    .unwrap_or_else(|error| panic!("could not inspect agent-evidence tables: {error}"));
+    assert_eq!(catalogs, 5);
+
+    let bm25 = query(r#"SELECT to_regclass($1) IS NOT NULL AS present"#)
+        .bind(format!("{schema}.agent_artifacts_bm25_idx"))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<bool, _>("present"))
+        .unwrap_or_else(|error| panic!("could not inspect artifact BM25 index: {error}"));
+    assert!(bm25);
+}
+
+async fn assert_agent_session_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 14"#
+    );
+    let checksum = query(AssertSqlSafe(ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify agent-session migration: {error}"));
+    assert_eq!(checksum, AGENT_SESSION_MIGRATION_CHECKSUM);
+
+    let catalogs = query(
+        r#"SELECT COUNT(*) AS table_count
+            FROM information_schema.tables
+            WHERE table_schema = $1
+              AND table_name = ANY($2::text[])"#,
+    )
+    .bind(schema)
+    .bind(vec!["mcp_sessions", "mcp_tool_calls", "mcp_macros"])
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<i64, _>("table_count"))
+    .unwrap_or_else(|error| panic!("could not inspect agent-session tables: {error}"));
+    assert_eq!(catalogs, 3);
+}
+
+async fn seed_exact_lookup_scale(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+    rows: i32,
+) {
+    let file = parse_file_id(RETRIEVAL_FILE);
+    let file_insert = format!(
+        r#"INSERT INTO "{schema}"."files" (
+                project_id, generation_id, file_id, normalized_path, language,
+                content_hash, byte_size, parse_status
+            ) VALUES (
+                CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid),
+                'scale/exact.rs', 'rust', $4, 1000000, 'parsed'
+            )"#
+    );
+    query(AssertSqlSafe(file_insert))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(file.as_str())
+        .bind(DIGEST_ONE)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed exact-lookup file: {error}"));
+
+    let symbol_insert = format!(
+        r#"INSERT INTO "{schema}"."symbols" (
+                project_id, generation_id, symbol_id, file_id, symbol_kind,
+                qualified_name, signature, start_byte, end_byte,
+                start_line, end_line, structural_digest
+            )
+            SELECT CAST($1 AS uuid), CAST($2 AS uuid),
+                   md5('symbol-' || series::text)::uuid, CAST($3 AS uuid), 'function',
+                   CASE WHEN series = 1 THEN 'Scale.tagscanary'
+                        ELSE 'Scale.symbol_' || series::text END,
+                   '', series::bigint * 2, series::bigint * 2 + 1,
+                   series, series, $4
+            FROM generate_series(1, $5) AS series"#
+    );
+    query(AssertSqlSafe(symbol_insert))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(file.as_str())
+        .bind(DIGEST_ONE)
+        .bind(rows)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed exact-lookup symbols: {error}"));
+
+    let reference_insert = format!(
+        r#"INSERT INTO "{schema}"."references" (
+                project_id, generation_id, file_id, target_symbol_id,
+                reference_kind, start_byte, end_byte, confidence,
+                owner_symbol_id, reference_name, resolution_provenance,
+                site_count, span_precision
+            )
+            SELECT CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid), NULL,
+                   'calls', series::bigint * 2, series::bigint * 2 + 1, 0.0,
+                   NULL,
+                   CASE WHEN series = 1 THEN 'tagscanary'
+                        ELSE 'other_' || series::text END,
+                   'scale-unresolved', 1, 'exact'
+            FROM generate_series(1, $4) AS series"#
+    );
+    query(AssertSqlSafe(reference_insert))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(file.as_str())
+        .bind(rows)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not seed exact-lookup references: {error}"));
+
+    for table in ["symbols", "references"] {
+        let analyze = format!(r#"ANALYZE "{schema}"."{table}""#);
+        query(AssertSqlSafe(analyze))
+            .execute(pool)
+            .await
+            .unwrap_or_else(|error| panic!("could not analyze exact-lookup {table}: {error}"));
+    }
+}
+
+async fn assert_exact_lookup_plans_use_indexes(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+) {
+    let symbol_plan = format!(
+        r#"EXPLAIN (FORMAT TEXT, COSTS OFF)
+            SELECT symbol_id
+            FROM "{schema}"."symbols"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND simple_name = $3
+            ORDER BY file_id, start_line, symbol_id
+            LIMIT 10"#
+    );
+    let symbols = explain_lookup(
+        pool,
+        symbol_plan,
+        project,
+        generation,
+        "symbols_simple_name_idx",
+        "symbols",
+    )
+    .await;
+    assert!(symbols.contains("Index"));
+
+    let reference_plan = format!(
+        r#"EXPLAIN (FORMAT TEXT, COSTS OFF)
+            SELECT reference_id
+            FROM "{schema}"."references"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND reference_name = $3
+            ORDER BY file_id, start_byte, reference_id
+            LIMIT 10"#
+    );
+    let references = explain_lookup(
+        pool,
+        reference_plan,
+        project,
+        generation,
+        "references_exact_name_site_idx",
+        "references",
+    )
+    .await;
+    assert!(references.contains("Index"));
+}
+
+async fn explain_lookup(
+    pool: &sqlx_postgres::PgPool,
+    statement: String,
+    project: &ProjectId,
+    generation: &GenerationId,
+    expected_index: &str,
+    table: &str,
+) -> String {
+    let rows = query(AssertSqlSafe(statement))
+        .bind(project.as_str())
+        .bind(generation.as_str())
+        .bind(EXACT_LOOKUP_TARGET_NAME)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not explain {table} exact lookup: {error}"));
+    let plan = rows
+        .iter()
+        .map(|row| {
+            row.try_get::<String, _>(0)
+                .unwrap_or_else(|error| panic!("could not decode {table} plan: {error}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains(expected_index), "{table} plan: {plan}");
+    assert!(!plan.contains(&format!("Seq Scan on {table}")), "{plan}");
+    plan
+}
+
 fn document(fixture: DocumentFixture<'_>) -> SearchDocumentInput {
     SearchDocumentInput {
         document_id: parse_document_id(fixture.id),
@@ -1049,6 +2931,11 @@ fn parse_document_id(raw: &str) -> DocumentId {
         Ok(id) => id,
         Err(error) => panic!("test document UUID is invalid: {error}"),
     }
+}
+
+fn parse_generation_id(raw: &str) -> GenerationId {
+    GenerationId::parse(raw)
+        .unwrap_or_else(|error| panic!("generation ID fixture is invalid: {error}"))
 }
 
 fn parse_file_id(raw: &str) -> FileId {

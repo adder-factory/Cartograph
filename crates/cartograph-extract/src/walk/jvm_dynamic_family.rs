@@ -1,0 +1,2384 @@
+use std::mem;
+
+use cartograph_domain::{
+    ReferenceKind, SourceLanguage, SymbolId, SymbolKind, Visibility,
+    callable_signature_is_literal_free,
+};
+use tree_sitter::Node;
+
+use crate::{ExtractError, ExtractedImportBinding, ImportBindingKind};
+
+use super::{
+    ExtractionBuilder, PendingReference, PendingSymbol, references,
+    syntax::{children, descendants_including_root, named_children, span_for},
+};
+
+const MAX_SIGNATURE_BYTES: usize = 512;
+const MAX_REFERENCE_TARGET_BYTES: usize = 512;
+const MAX_TYPE_DEPTH: usize = 64;
+const MAX_DOC_BYTES: usize = 16 * 1024;
+
+pub(super) fn visit_declaration(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    match builder.context.snapshot.language() {
+        SourceLanguage::Kotlin => visit_kotlin_declaration(builder, node, depth),
+        SourceLanguage::Scala => visit_scala_declaration(builder, node, depth),
+        SourceLanguage::Groovy => visit_groovy_declaration(builder, node, depth),
+        _ => Ok(false),
+    }
+}
+
+pub(super) fn capture_usage(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    match builder.context.snapshot.language() {
+        SourceLanguage::Kotlin => capture_kotlin_usage(builder, node),
+        SourceLanguage::Scala => capture_scala_usage(builder, node),
+        SourceLanguage::Groovy => capture_groovy_usage(builder, node),
+        _ => Ok(()),
+    }
+}
+
+fn visit_kotlin_declaration(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    match node.kind() {
+        "package_header" => visit_persistent_namespace(builder, node, None)?,
+        "import_header" => visit_kotlin_import(builder, node)?,
+        "class_declaration" | "object_declaration" => {
+            visit_kotlin_container(builder, node, depth)?;
+        }
+        "function_declaration" => visit_kotlin_callable(builder, node, depth)?,
+        "secondary_constructor" => visit_kotlin_secondary_constructor(builder, node, depth)?,
+        "property_declaration" => visit_kotlin_property(builder, node, depth)?,
+        "type_alias" => visit_kotlin_type_alias(builder, node)?,
+        "enum_entry" => visit_enum_member(builder, node, depth, kotlin_direct_name(node))?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn visit_scala_declaration(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    match node.kind() {
+        "package_clause" => visit_scala_package(builder, node, depth)?,
+        "import_declaration" => visit_scala_import(builder, node)?,
+        "class_definition" | "object_definition" | "trait_definition" | "enum_definition" => {
+            visit_scala_container(builder, node, depth)?;
+        }
+        "function_definition" | "function_declaration" => {
+            visit_scala_callable(builder, node, depth)?;
+        }
+        "val_definition" | "var_definition" => visit_scala_binding(builder, node, depth)?,
+        "simple_enum_case" | "full_enum_case" => {
+            visit_enum_member(builder, node, depth, node.child_by_field_name("name"))?;
+        }
+        "type_definition" => visit_scala_type_alias(builder, node)?,
+        "extension_definition" => visit_scala_extension(builder, node, depth)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn visit_groovy_declaration(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    if node.kind() == "identifier"
+        && builder.context.text(node).trim() == "enum"
+        && visit_groovy_recovered_enum(builder, node, depth)?
+    {
+        return Ok(true);
+    }
+    if node.kind() == "closure" && is_groovy_recovered_enum_body(builder, node) {
+        return Ok(true);
+    }
+    match node.kind() {
+        "groovy_package" => {
+            let name = named_children(node).find(|child| child.kind() == "qualified_name");
+            visit_persistent_namespace(builder, node, name)?;
+        }
+        "groovy_import" => visit_groovy_import(builder, node)?,
+        "class_definition" => visit_groovy_container(builder, node, depth)?,
+        "function_definition" | "function_declaration" => {
+            visit_groovy_callable(builder, node, depth)?;
+        }
+        "declaration" => visit_groovy_binding(builder, node, depth)?,
+        "function_call" if is_groovy_constructor_node(builder, node) => {
+            visit_groovy_constructor(builder, node, depth)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn visit_groovy_recovered_enum(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    keyword: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    let Some(name_node) = keyword
+        .next_named_sibling()
+        .filter(|sibling| sibling.kind() == "identifier")
+    else {
+        return Ok(false);
+    };
+    let Some(body) = name_node
+        .next_named_sibling()
+        .filter(|sibling| sibling.kind() == "closure")
+    else {
+        return Ok(false);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::Enum,
+            name: name.clone(),
+            span_node: name_node,
+            structural_node: body,
+            doc_anchor: keyword,
+            body_node: None,
+            declaration_only: false,
+            signature: None,
+            exported: true,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility: Some(Visibility::Public),
+        },
+    )?;
+    builder.owners.push(id);
+    builder.native_owner_kinds.push(SymbolKind::Enum);
+    builder.qualifiers.push(name);
+    for error in named_children(body).filter(|child| child.kind() == "ERROR") {
+        for parameter in descendants_including_root(error).filter(|child| {
+            child.kind() == "parameter"
+                && child
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "parameter_list")
+        }) {
+            builder.context.ensure_active()?;
+            visit_enum_member(
+                builder,
+                parameter,
+                depth.saturating_add(1),
+                parameter.child_by_field_name("name"),
+            )?;
+        }
+    }
+    builder.qualifiers.pop();
+    builder.native_owner_kinds.pop();
+    builder.owners.pop();
+    Ok(true)
+}
+
+fn is_groovy_recovered_enum_body(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> bool {
+    node.prev_named_sibling()
+        .filter(|name| name.kind() == "identifier")
+        .and_then(|name| name.prev_named_sibling())
+        .is_some_and(|keyword| {
+            keyword.kind() == "identifier" && builder.context.text(keyword).trim() == "enum"
+        })
+}
+
+fn visit_persistent_namespace(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    explicit_name: Option<Node<'_>>,
+) -> Result<(), ExtractError> {
+    let name_node = explicit_name.or_else(|| {
+        named_children(node).find(|child| {
+            matches!(
+                child.kind(),
+                "identifier" | "package_identifier" | "qualified_name"
+            )
+        })
+    });
+    let Some(name_node) = name_node else {
+        return Ok(());
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let id = emit_namespace(builder, node, name.clone())?;
+    builder.owners.push(id);
+    builder.native_owner_kinds.push(SymbolKind::Namespace);
+    builder.qualifiers.push(name);
+    Ok(())
+}
+
+fn visit_scala_package(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let Some(body) = node.child_by_field_name("body") else {
+        return visit_persistent_namespace(builder, node, Some(name_node));
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let id = emit_namespace(builder, node, name.clone())?;
+    builder.owners.push(id);
+    builder.native_owner_kinds.push(SymbolKind::Namespace);
+    builder.qualifiers.push(name);
+    let result = builder.visit(body, depth.saturating_add(1));
+    builder.qualifiers.pop();
+    builder.native_owner_kinds.pop();
+    builder.owners.pop();
+    result
+}
+
+fn emit_namespace(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    name: String,
+) -> Result<SymbolId, ExtractError> {
+    emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::Namespace,
+            name,
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: None,
+            exported: true,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility: None,
+        },
+    )
+}
+
+fn visit_kotlin_import(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    let Some(target_node) = named_children(node).find(|child| child.kind() == "identifier") else {
+        return Ok(());
+    };
+    let target = builder.context.owned_text(target_node)?;
+    if !safe_import_target(&target) {
+        return Ok(());
+    }
+    let alias = named_children(node)
+        .find(|child| child.kind() == "import_alias")
+        .and_then(|alias| named_children(alias).next())
+        .map(|alias| builder.context.owned_text(alias))
+        .transpose()?;
+    let wildcard = named_children(node).any(|child| child.kind() == "wildcard_import");
+    emit_import(builder, node, target.clone())?;
+    if wildcard {
+        emit_binding(
+            builder,
+            node,
+            ImportBindingKind::Namespace,
+            &target,
+            "*",
+            alias.as_deref().unwrap_or("*"),
+        )?;
+    } else if let Some((module, imported)) = target.rsplit_once('.') {
+        emit_binding(
+            builder,
+            node,
+            ImportBindingKind::Named,
+            module,
+            imported,
+            alias.as_deref().unwrap_or(imported),
+        )?;
+    }
+    Ok(())
+}
+
+fn visit_scala_import(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    let raw = builder.context.text(node).trim();
+    let Some(body) = raw.strip_prefix("import").map(str::trim) else {
+        return Ok(());
+    };
+    let target = body
+        .split(['{', ' '])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(".*")
+        .trim_end_matches("._")
+        .trim_end_matches('.');
+    if !safe_import_target(target) {
+        return Ok(());
+    }
+    let target = builder.context.copy_text(target)?;
+    emit_import(builder, node, target.clone())?;
+    if named_children(node).any(|child| child.kind() == "namespace_wildcard") {
+        emit_binding(
+            builder,
+            node,
+            ImportBindingKind::Namespace,
+            &target,
+            "*",
+            "*",
+        )?;
+    } else if let Some((module, imported)) = target.rsplit_once('.') {
+        emit_binding(
+            builder,
+            node,
+            ImportBindingKind::Named,
+            module,
+            imported,
+            imported,
+        )?;
+    }
+    Ok(())
+}
+
+fn visit_groovy_import(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    let Some(target_node) = node.child_by_field_name("import") else {
+        return Ok(());
+    };
+    let target = builder.context.owned_text(target_node)?;
+    if !safe_import_target(&target) {
+        return Ok(());
+    }
+    let alias = node
+        .child_by_field_name("import_alias")
+        .map(|alias| builder.context.owned_text(alias))
+        .transpose()?;
+    let wildcard = named_children(node).any(|child| child.kind() == "wildcard_import");
+    emit_import(builder, node, target.clone())?;
+    if wildcard {
+        emit_binding(
+            builder,
+            node,
+            ImportBindingKind::Namespace,
+            &target,
+            "*",
+            alias.as_deref().unwrap_or("*"),
+        )?;
+    } else if let Some((module, imported)) = target.rsplit_once('.') {
+        emit_binding(
+            builder,
+            node,
+            ImportBindingKind::Named,
+            module,
+            imported,
+            alias.as_deref().unwrap_or(imported),
+        )?;
+    }
+    Ok(())
+}
+
+fn safe_import_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= MAX_REFERENCE_TARGET_BYTES
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$'))
+}
+
+fn emit_import(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    name: String,
+) -> Result<(), ExtractError> {
+    let raw = builder.context.text(node).trim();
+    let signature = (raw.len() <= MAX_SIGNATURE_BYTES && callable_signature_is_literal_free(raw))
+        .then(|| builder.context.copy_text(raw))
+        .transpose()?;
+    let reference_name = name.clone();
+    emit_root_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::Import,
+            name,
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature,
+            exported: false,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility: None,
+        },
+    )?;
+    references::push_reference(
+        builder,
+        PendingReference {
+            owner: None,
+            name: reference_name,
+            kind: ReferenceKind::Imports,
+            node,
+        },
+    )
+}
+
+fn emit_root_symbol(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    pending: PendingSymbol<'_>,
+) -> Result<SymbolId, ExtractError> {
+    let owners = mem::take(&mut builder.owners);
+    let owner_kinds = mem::take(&mut builder.native_owner_kinds);
+    let visibilities = mem::take(&mut builder.native_visibilities);
+    let qualifiers = mem::take(&mut builder.qualifiers);
+    let result = emit_jvm_symbol(builder, pending);
+    builder.owners = owners;
+    builder.native_owner_kinds = owner_kinds;
+    builder.native_visibilities = visibilities;
+    builder.qualifiers = qualifiers;
+    result
+}
+
+fn emit_jvm_symbol(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    pending: PendingSymbol<'_>,
+) -> Result<SymbolId, ExtractError> {
+    let doc_anchor = pending.doc_anchor;
+    let custom_doc = preceding_jvm_doc(builder, doc_anchor)?;
+    let id = builder.emit_symbol(pending)?;
+    let needs_override = builder
+        .facts
+        .symbols
+        .last()
+        .is_some_and(|symbol| symbol.id == id && symbol.docstring.is_none());
+    if needs_override && let Some(docstring) = custom_doc {
+        builder.context.budget.reserve_fact(
+            u64::try_from(docstring.len()).map_err(|_| ExtractError::OutputLimit)?,
+            [docstring.as_str()],
+        )?;
+        if let Some(symbol) = builder.facts.symbols.last_mut() {
+            symbol.docstring = Some(docstring);
+        }
+    }
+    Ok(id)
+}
+
+fn preceding_jvm_doc(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    builder.context.ensure_active()?;
+    let source = builder.context.source();
+    let upper_bound = node.start_byte();
+    let mut lower_bound = upper_bound.saturating_sub(MAX_DOC_BYTES.saturating_add(4));
+    while lower_bound < upper_bound && !source.is_char_boundary(lower_bound) {
+        lower_bound = lower_bound.saturating_add(1);
+    }
+    let Some(before) = source.get(lower_bound..upper_bound) else {
+        return Ok(None);
+    };
+    let trimmed_end = before.trim_end_matches(char::is_whitespace).len();
+    let gap = before.get(trimmed_end..).unwrap_or_default();
+    if gap.bytes().filter(|byte| *byte == b'\n').count() > 1 {
+        return Ok(None);
+    }
+    let prefix = before.get(..trimmed_end).unwrap_or_default();
+    let raw = if prefix.ends_with("*/") {
+        let Some(relative_start) = prefix.rfind("/*") else {
+            return Ok(None);
+        };
+        if lower_bound > 0 && relative_start == 0 {
+            return Ok(None);
+        }
+        prefix.get(relative_start..).unwrap_or_default()
+    } else {
+        let mut start = prefix.len();
+        let mut found = false;
+        for line in prefix.lines().rev() {
+            let line_start = start.saturating_sub(line.len());
+            if !line.trim_start().starts_with("//") {
+                break;
+            }
+            found = true;
+            start = line_start.saturating_sub(1);
+            if prefix.len().saturating_sub(start) > MAX_DOC_BYTES {
+                return Ok(None);
+            }
+        }
+        if !found {
+            return Ok(None);
+        }
+        prefix.get(start..).unwrap_or_default().trim_start()
+    };
+    let raw = builder.context.copy_text(raw)?;
+    normalize_doc(builder, &raw)
+}
+
+fn normalize_doc(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    raw: &str,
+) -> Result<Option<String>, ExtractError> {
+    if raw.is_empty() || raw.len() > MAX_DOC_BYTES {
+        return Ok(None);
+    }
+    let block = raw.trim().starts_with("/*");
+    let mut normalized = String::new();
+    normalized
+        .try_reserve(raw.len())
+        .map_err(|_| ExtractError::OutputLimit)?;
+    for line in raw.lines() {
+        builder.context.ensure_active()?;
+        let mut cleaned = line.trim();
+        if block {
+            cleaned = cleaned
+                .strip_prefix("/**")
+                .or_else(|| cleaned.strip_prefix("/*!"))
+                .or_else(|| cleaned.strip_prefix("/*"))
+                .unwrap_or(cleaned)
+                .trim();
+            cleaned = cleaned.strip_suffix("*/").unwrap_or(cleaned).trim();
+            cleaned = cleaned.strip_prefix('*').unwrap_or(cleaned).trim();
+        } else {
+            cleaned = cleaned
+                .trim_start_matches('/')
+                .trim_start_matches('!')
+                .trim();
+        }
+        if cleaned.is_empty() {
+            continue;
+        }
+        if !normalized.is_empty() {
+            normalized.push('\n');
+        }
+        normalized.push_str(cleaned);
+    }
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    builder
+        .context
+        .budget
+        .ensure_string_length(normalized.len())?;
+    Ok(Some(normalized))
+}
+
+fn emit_binding(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    kind: ImportBindingKind,
+    module: &str,
+    imported: &str,
+    local: &str,
+) -> Result<(), ExtractError> {
+    builder.emit_import_binding(ExtractedImportBinding {
+        kind,
+        module_specifier: builder.context.copy_text(module)?,
+        imported_name: builder.context.copy_text(imported)?,
+        local_name: builder.context.copy_text(local)?,
+        span: span_for(node)?,
+    })
+}
+
+fn visit_kotlin_container(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = named_children(node).find(|child| child.kind() == "type_identifier")
+    else {
+        return builder.visit_named_children(node, depth);
+    };
+    let kind = if node.kind() == "object_declaration" {
+        SymbolKind::Class
+    } else if direct_keyword(builder, node, "interface")? {
+        SymbolKind::Interface
+    } else if direct_keyword(builder, node, "enum")? {
+        SymbolKind::Enum
+    } else {
+        SymbolKind::Class
+    };
+    let body =
+        named_children(node).find(|child| matches!(child.kind(), "class_body" | "enum_class_body"));
+    let name = builder.context.owned_text(name_node)?;
+    let visibility = jvm_visibility(builder, node)?;
+    let id = emit_container(builder, node, kind, name.clone(), visibility)?;
+    capture_kotlin_inheritance(builder, node, &id, kind)?;
+
+    builder.owners.push(id);
+    builder.native_owner_kinds.push(kind);
+    builder.qualifiers.push(name.clone());
+    if let Some(primary) = named_children(node).find(|child| child.kind() == "primary_constructor")
+    {
+        emit_kotlin_primary_constructor(builder, primary, &name, visibility)?;
+    }
+    let result = match body {
+        Some(body) => builder.visit(body, depth.saturating_add(1)),
+        None => Ok(()),
+    };
+    builder.qualifiers.pop();
+    builder.native_owner_kinds.pop();
+    builder.owners.pop();
+    result
+}
+
+fn visit_scala_container(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let kind = match node.kind() {
+        "trait_definition" => SymbolKind::Trait,
+        "enum_definition" => SymbolKind::Enum,
+        "class_definition" | "object_definition" => SymbolKind::Class,
+        _ => return builder.visit_named_children(node, depth),
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let visibility = jvm_visibility(builder, node)?;
+    let id = emit_container(builder, node, kind, name.clone(), visibility)?;
+    capture_scala_inheritance(builder, node, &id, kind)?;
+
+    builder.owners.push(id);
+    builder.native_owner_kinds.push(kind);
+    builder.qualifiers.push(name.clone());
+    if matches!(node.kind(), "class_definition" | "enum_definition") {
+        for parameters in named_children(node).filter(|child| child.kind() == "class_parameters") {
+            emit_scala_primary_constructor(builder, parameters, &name, visibility, node)?;
+        }
+    }
+    let result = if let Some(body) = node.child_by_field_name("body") {
+        builder.visit(body, depth.saturating_add(1))
+    } else {
+        Ok(())
+    };
+    builder.qualifiers.pop();
+    builder.native_owner_kinds.pop();
+    builder.owners.pop();
+    result
+}
+
+fn visit_groovy_container(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let kind = if direct_keyword(builder, node, "interface")?
+        || direct_keyword(builder, node, "@interface")?
+    {
+        SymbolKind::Interface
+    } else {
+        SymbolKind::Class
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let visibility = jvm_visibility(builder, node)?;
+    let id = emit_container(builder, node, kind, name.clone(), visibility)?;
+    if let Some(superclass) = node.child_by_field_name("superclass") {
+        capture_outer_type_reference(builder, superclass, &id, ReferenceKind::Extends)?;
+    }
+    capture_groovy_implements(builder, node, &id)?;
+
+    builder.owners.push(id);
+    builder.native_owner_kinds.push(kind);
+    builder.qualifiers.push(name);
+    let result = match node.child_by_field_name("body") {
+        Some(body) => builder.visit(body, depth.saturating_add(1)),
+        None => Ok(()),
+    };
+    builder.qualifiers.pop();
+    builder.native_owner_kinds.pop();
+    builder.owners.pop();
+    result
+}
+
+fn emit_container(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    kind: SymbolKind,
+    name: String,
+    visibility: Option<Visibility>,
+) -> Result<SymbolId, ExtractError> {
+    emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind,
+            name,
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: None,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility,
+        },
+    )
+}
+
+fn emit_kotlin_primary_constructor(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    name: &str,
+    visibility: Option<Visibility>,
+) -> Result<(), ExtractError> {
+    let signature = kotlin_parameters_signature(builder, parameters)?;
+    let constructor_visibility = jvm_visibility(builder, parameters)?.or(visibility);
+    let constructor_id =
+        emit_constructor(builder, parameters, name, signature, constructor_visibility)?;
+    for parameter in named_children(parameters).filter(|child| child.kind() == "class_parameter") {
+        builder.context.ensure_active()?;
+        if let Some(type_node) = kotlin_type_node(parameter) {
+            capture_type_references(
+                builder,
+                type_node,
+                &constructor_id,
+                ReferenceKind::TypeOf,
+                0,
+            )?;
+        }
+        if !named_children(parameter).any(|child| child.kind() == "binding_pattern_kind") {
+            continue;
+        }
+        emit_kotlin_property_symbol(builder, parameter, true)?;
+    }
+    Ok(())
+}
+
+fn emit_scala_primary_constructor(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    name: &str,
+    visibility: Option<Visibility>,
+    container: Node<'_>,
+) -> Result<(), ExtractError> {
+    let signature = scala_parameters_signature(builder, std::iter::once(parameters))?;
+    let constructor_id = emit_constructor(builder, parameters, name, signature, visibility)?;
+    let case_class = direct_keyword(builder, container, "case")?;
+    for parameter in named_children(parameters).filter(|child| child.kind() == "class_parameter") {
+        builder.context.ensure_active()?;
+        if let Some(type_node) = parameter.child_by_field_name("type") {
+            capture_type_references(
+                builder,
+                type_node,
+                &constructor_id,
+                ReferenceKind::TypeOf,
+                0,
+            )?;
+        }
+        if case_class
+            || direct_keyword(builder, parameter, "val")?
+            || direct_keyword(builder, parameter, "var")?
+        {
+            emit_scala_class_parameter(builder, parameter)?;
+        }
+    }
+    Ok(())
+}
+
+fn emit_constructor(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    name: &str,
+    signature: Option<String>,
+    visibility: Option<Visibility>,
+) -> Result<SymbolId, ExtractError> {
+    emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::Method,
+            name: builder.context.copy_text(name)?,
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility,
+        },
+    )
+}
+
+fn visit_kotlin_secondary_constructor(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name) = builder.qualifiers.last().cloned() else {
+        return builder.visit_named_children(node, depth);
+    };
+    let Some(parameters) =
+        named_children(node).find(|child| child.kind() == "function_value_parameters")
+    else {
+        return builder.visit_named_children(node, depth);
+    };
+    let body = named_children(node).find(|child| child.kind() == "statements");
+    let visibility = jvm_visibility(builder, node)?;
+    let signature = kotlin_parameters_signature(builder, parameters)?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::Method,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: body,
+            declaration_only: false,
+            signature,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility,
+        },
+    )?;
+    capture_kotlin_parameter_types(builder, parameters, &id)?;
+    visit_owned_body(builder, id, SymbolKind::Method, name, body, depth)
+}
+
+fn visit_kotlin_callable(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = kotlin_direct_name(node) else {
+        return builder.visit_named_children(node, depth);
+    };
+    let Some(parameters) =
+        named_children(node).find(|child| child.kind() == "function_value_parameters")
+    else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let kind = if current_type_scope(builder) {
+        SymbolKind::Method
+    } else {
+        SymbolKind::Function
+    };
+    let return_type = kotlin_return_type(node, parameters);
+    let body = named_children(node).find(|child| child.kind() == "function_body");
+    let visibility = jvm_visibility(builder, node)?;
+    let signature = kotlin_callable_signature(builder, parameters, return_type)?;
+    let async_symbol = has_modifier(builder, node, "suspend")?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: body,
+            declaration_only: body.is_none(),
+            signature,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol,
+            static_member: false,
+            visibility,
+        },
+    )?;
+    capture_kotlin_parameter_types(builder, parameters, &id)?;
+    if let Some(return_type) = return_type {
+        capture_type_references(builder, return_type, &id, ReferenceKind::Returns, 0)?;
+    }
+    if let Some(receiver) = node.child_by_field_name("receiver") {
+        capture_type_references(builder, receiver, &id, ReferenceKind::TypeOf, 0)?;
+    }
+    visit_owned_body(builder, id, kind, name, body, depth)
+}
+
+fn visit_scala_callable(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let kind = if current_type_scope(builder) {
+        SymbolKind::Method
+    } else {
+        SymbolKind::Function
+    };
+    let parameters = named_children(node)
+        .filter(|child| child.kind() == "parameters")
+        .collect::<Vec<_>>();
+    let return_type = node.child_by_field_name("return_type");
+    let body = node.child_by_field_name("body");
+    let visibility = jvm_visibility(builder, node)?;
+    let signature = scala_callable_signature(builder, &parameters, return_type)?;
+    let static_member = has_modifier(builder, node, "static")?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: body,
+            declaration_only: body.is_none(),
+            signature,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member,
+            visibility,
+        },
+    )?;
+    for parameter_list in &parameters {
+        capture_scala_parameter_types(builder, *parameter_list, &id)?;
+    }
+    if let Some(return_type) = return_type {
+        capture_type_references(builder, return_type, &id, ReferenceKind::Returns, 0)?;
+    }
+    visit_owned_body(builder, id, kind, name, body, depth)
+}
+
+fn visit_groovy_callable(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("function") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let Some(parameters) = node.child_by_field_name("parameters") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let kind = if current_type_scope(builder) {
+        SymbolKind::Method
+    } else {
+        SymbolKind::Function
+    };
+    let return_type = node.child_by_field_name("type");
+    let body = node.child_by_field_name("body");
+    let visibility = jvm_visibility(builder, node)?;
+    let signature = groovy_callable_signature(builder, parameters, return_type)?;
+    let static_member = has_modifier(builder, node, "static")?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: body,
+            declaration_only: body.is_none(),
+            signature,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member,
+            visibility,
+        },
+    )?;
+    capture_groovy_parameter_types(builder, parameters, &id)?;
+    if let Some(return_type) = return_type {
+        capture_type_references(builder, return_type, &id, ReferenceKind::Returns, 0)?;
+    }
+    visit_owned_body(builder, id, kind, name, body, depth)
+}
+
+fn is_groovy_constructor_node(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> bool {
+    if !current_type_scope(builder) {
+        return false;
+    }
+    let Some(function) = node.child_by_field_name("function") else {
+        return false;
+    };
+    let Some(container_name) = builder.qualifiers.last() else {
+        return false;
+    };
+    builder.context.text(function).trim() == container_name
+        && descendants_including_root(node).any(|child| child.kind() == "closure")
+}
+
+fn visit_groovy_constructor(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("function") else {
+        return Ok(());
+    };
+    let Some(arguments) = node.child_by_field_name("args") else {
+        return Ok(());
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let signature = groovy_recovered_constructor_signature(builder, arguments)?;
+    let visibility = jvm_visibility(builder, node)?;
+    let body = descendants_including_root(arguments)
+        .filter(|child| child.kind() == "closure")
+        .last();
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::Method,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: body,
+            declaration_only: false,
+            signature,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility,
+        },
+    )?;
+    capture_recovered_groovy_parameter_types(builder, arguments, &id)?;
+    visit_owned_body(builder, id, SymbolKind::Method, name, body, depth)
+}
+
+fn groovy_recovered_constructor_signature(
+    builder: &ExtractionBuilder<'_, '_>,
+    arguments: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    let raw = builder.context.text(arguments).trim();
+    let Some(parameters) = bounded_groovy_parameters(raw) else {
+        return Ok(None);
+    };
+    let mut signature = String::from("(");
+    for (index, parameter) in parameters.split(',').enumerate() {
+        let declaration = parameter.split('=').next().unwrap_or_default().trim();
+        if declaration.is_empty() {
+            continue;
+        }
+        if index > 0 {
+            signature.push_str(", ");
+        }
+        signature.push_str(declaration);
+        if signature.len().saturating_add(1) > MAX_SIGNATURE_BYTES {
+            return Ok(None);
+        }
+    }
+    signature.push(')');
+    safe_signature(builder, signature)
+}
+
+fn capture_recovered_groovy_parameter_types(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    arguments: Node<'_>,
+    owner: &SymbolId,
+) -> Result<(), ExtractError> {
+    let raw = builder.context.text(arguments).trim();
+    let Some(parameters) = bounded_groovy_parameters(raw) else {
+        return Ok(());
+    };
+    let parameters = builder.context.copy_text(parameters)?;
+    for parameter in parameters.split(',') {
+        builder.context.ensure_active()?;
+        let declaration = parameter.split('=').next().unwrap_or_default().trim();
+        let mut tokens = declaration.split_whitespace();
+        let Some(type_name) = tokens.next() else {
+            continue;
+        };
+        if tokens.next().is_none() || is_jvm_builtin(type_name) || !safe_import_target(type_name) {
+            continue;
+        }
+        let type_name = builder.context.copy_text(type_name)?;
+        push_named_reference(
+            builder,
+            Some(owner.clone()),
+            type_name,
+            ReferenceKind::TypeOf,
+            arguments,
+        )?;
+    }
+    Ok(())
+}
+
+fn bounded_groovy_parameters(raw: &str) -> Option<&str> {
+    let open = raw.find('(')?;
+    let start = open.checked_add(1)?;
+    let bounded_end = start.checked_add(MAX_SIGNATURE_BYTES)?.min(raw.len());
+    let bounded = raw.get(start..bounded_end)?;
+    let relative_close = bounded.find(')')?;
+    let parameters = bounded.get(..relative_close)?;
+    (!parameters.contains(['(', ')'])).then_some(parameters)
+}
+
+fn visit_owned_body(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    id: SymbolId,
+    kind: SymbolKind,
+    name: String,
+    body: Option<Node<'_>>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(body) = body else {
+        return Ok(());
+    };
+    builder.owners.push(id);
+    builder.native_owner_kinds.push(kind);
+    builder.qualifiers.push(name);
+    let result = builder.visit(body, depth.saturating_add(1));
+    builder.qualifiers.pop();
+    builder.native_owner_kinds.pop();
+    builder.owners.pop();
+    result
+}
+
+fn visit_kotlin_property(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(id) = emit_kotlin_property_symbol(builder, node, current_type_scope(builder))? else {
+        return builder.visit_named_children(node, depth);
+    };
+    let Some(variable) = named_children(node).find(|child| child.kind() == "variable_declaration")
+    else {
+        return Ok(());
+    };
+    for value in named_children(node).filter(|child| {
+        child.start_byte() >= variable.end_byte() && child.kind() != "type_constraints"
+    }) {
+        builder.owners.push(id.clone());
+        let result = builder.visit(value, depth.saturating_add(1));
+        builder.owners.pop();
+        result?;
+    }
+    Ok(())
+}
+
+fn emit_kotlin_property_symbol(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    class_scope: bool,
+) -> Result<Option<SymbolId>, ExtractError> {
+    let (name_node, type_node) = if node.kind() == "class_parameter" {
+        (kotlin_direct_name(node), kotlin_type_node(node))
+    } else {
+        let Some(variable) =
+            named_children(node).find(|child| child.kind() == "variable_declaration")
+        else {
+            return Ok(None);
+        };
+        (kotlin_direct_name(variable), kotlin_type_node(variable))
+    };
+    let Some(name_node) = name_node else {
+        return Ok(None);
+    };
+    let immutable = named_children(node)
+        .find(|child| child.kind() == "binding_pattern_kind")
+        .map(|child| builder.context.text(child).trim())
+        .and_then(|keyword| match keyword {
+            "val" => Some(true),
+            "var" => Some(false),
+            _ => None,
+        });
+    let Some(immutable) = immutable else {
+        return Ok(None);
+    };
+    let keyword = if immutable { "val" } else { "var" };
+    let name = builder.context.owned_text(name_node)?;
+    let kind = if class_scope {
+        SymbolKind::Field
+    } else if immutable {
+        SymbolKind::Constant
+    } else {
+        SymbolKind::Variable
+    };
+    let visibility = if class_scope {
+        jvm_visibility(builder, node)?
+    } else {
+        None
+    };
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: kotlin_property_signature(builder, keyword, &name, type_node)?,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility,
+        },
+    )?;
+    if let Some(type_node) = type_node {
+        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+    }
+    Ok(Some(id))
+}
+
+fn emit_scala_class_parameter(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return Ok(());
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let type_node = node.child_by_field_name("type");
+    let keyword = if direct_keyword(builder, node, "var")? {
+        "var"
+    } else {
+        "val"
+    };
+    let visibility = jvm_visibility(builder, node)?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::Field,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: keyword_typed_signature(builder, keyword, &name, type_node)?,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility,
+        },
+    )?;
+    if let Some(type_node) = type_node {
+        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+    }
+    Ok(())
+}
+
+fn visit_scala_binding(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(pattern) = node.child_by_field_name("pattern") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let Some(name_node) = scala_pattern_name(pattern) else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let class_scope = current_type_scope(builder);
+    let immutable = node.kind() == "val_definition";
+    let kind = if class_scope {
+        SymbolKind::Field
+    } else if immutable {
+        SymbolKind::Constant
+    } else {
+        SymbolKind::Variable
+    };
+    let type_node = node.child_by_field_name("type");
+    let value = node.child_by_field_name("value");
+    let visibility = if class_scope {
+        jvm_visibility(builder, node)?
+    } else {
+        None
+    };
+    let static_member = has_modifier(builder, node, "static")?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: keyword_typed_signature(
+                builder,
+                if immutable { "val" } else { "var" },
+                &name,
+                type_node,
+            )?,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member,
+            visibility,
+        },
+    )?;
+    if let Some(type_node) = type_node {
+        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+    }
+    if let Some(value) = value {
+        builder.owners.push(id);
+        let result = builder.visit(value, depth.saturating_add(1));
+        builder.owners.pop();
+        result?;
+    }
+    Ok(())
+}
+
+fn visit_groovy_binding(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let class_scope = current_type_scope(builder);
+    let kind = if class_scope {
+        SymbolKind::Field
+    } else if has_modifier(builder, node, "final")? {
+        SymbolKind::Constant
+    } else {
+        SymbolKind::Variable
+    };
+    let type_node = node.child_by_field_name("type");
+    let value = node.child_by_field_name("value");
+    let visibility = if class_scope {
+        jvm_visibility(builder, node)?
+    } else {
+        None
+    };
+    let static_member = has_modifier(builder, node, "static")?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: groovy_typed_signature(builder, type_node, &name)?,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member,
+            visibility,
+        },
+    )?;
+    if let Some(type_node) = type_node {
+        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+    }
+    if let Some(value) = value {
+        builder.owners.push(id);
+        let result = builder.visit(value, depth.saturating_add(1));
+        builder.owners.pop();
+        result?;
+    }
+    Ok(())
+}
+
+fn visit_kotlin_type_alias(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    let mut types = named_children(node).filter(|child| {
+        matches!(
+            child.kind(),
+            "type_identifier"
+                | "user_type"
+                | "nullable_type"
+                | "function_type"
+                | "parenthesized_type"
+        )
+    });
+    let Some(name_node) = types.next() else {
+        return Ok(());
+    };
+    let target = types.next();
+    emit_type_alias(builder, node, name_node, target)
+}
+
+fn visit_scala_type_alias(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return Ok(());
+    };
+    emit_type_alias(builder, node, name_node, node.child_by_field_name("type"))
+}
+
+fn emit_type_alias(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    name_node: Node<'_>,
+    target: Option<Node<'_>>,
+) -> Result<(), ExtractError> {
+    let name = builder.context.owned_text(name_node)?;
+    let visibility = jvm_visibility(builder, node)?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::TypeAlias,
+            name,
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: None,
+            exported: visibility == Some(Visibility::Public),
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility,
+        },
+    )?;
+    if let Some(target) = target {
+        capture_type_references(builder, target, &id, ReferenceKind::TypeOf, 0)?;
+    }
+    Ok(())
+}
+
+fn visit_enum_member(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+    name_node: Option<Node<'_>>,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = name_node else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let id = emit_jvm_symbol(
+        builder,
+        PendingSymbol {
+            kind: SymbolKind::EnumMember,
+            name: name.clone(),
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: None,
+            exported: true,
+            default_export: false,
+            async_symbol: false,
+            static_member: true,
+            visibility: Some(Visibility::Public),
+        },
+    )?;
+    let body =
+        named_children(node).find(|child| matches!(child.kind(), "class_body" | "template_body"));
+    visit_owned_body(builder, id, SymbolKind::EnumMember, name, body, depth)
+}
+
+fn visit_scala_extension(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    for child in named_children(node) {
+        builder.context.ensure_active()?;
+        if child.kind() != "parameters" && child.kind() != "type_parameters" {
+            builder.visit(child, depth.saturating_add(1))?;
+        }
+    }
+    Ok(())
+}
+
+fn capture_kotlin_inheritance(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    owner: &SymbolId,
+    owner_kind: SymbolKind,
+) -> Result<(), ExtractError> {
+    let mut index = 0_usize;
+    for specifier in named_children(node).filter(|child| child.kind() == "delegation_specifier") {
+        builder.context.ensure_active()?;
+        let construction =
+            named_children(specifier).any(|child| child.kind() == "constructor_invocation");
+        let kind = if owner_kind == SymbolKind::Interface || (construction && index == 0) {
+            ReferenceKind::Extends
+        } else {
+            ReferenceKind::Implements
+        };
+        capture_outer_type_reference(builder, specifier, owner, kind)?;
+        index = index.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn capture_scala_inheritance(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    owner: &SymbolId,
+    owner_kind: SymbolKind,
+) -> Result<(), ExtractError> {
+    let Some(clause) = node.child_by_field_name("extend") else {
+        return Ok(());
+    };
+    let mut index = 0_usize;
+    for target in named_children(clause).filter(|child| child.kind() != "arguments") {
+        builder.context.ensure_active()?;
+        let kind = if owner_kind == SymbolKind::Trait || index == 0 {
+            ReferenceKind::Extends
+        } else {
+            ReferenceKind::Implements
+        };
+        capture_outer_type_reference(builder, target, owner, kind)?;
+        index = index.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn capture_groovy_implements(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    owner: &SymbolId,
+) -> Result<(), ExtractError> {
+    for error in named_children(node).filter(|child| child.kind() == "ERROR") {
+        builder.context.ensure_active()?;
+        let raw = builder.context.text(error).trim();
+        let Some(targets) = raw.strip_prefix("implements").map(str::trim) else {
+            continue;
+        };
+        let targets = builder.context.copy_text(targets)?;
+        for target in targets.split(',') {
+            let Some(name) = normalize_reference(builder, target.trim())? else {
+                continue;
+            };
+            push_named_reference(
+                builder,
+                Some(owner.clone()),
+                name,
+                ReferenceKind::Implements,
+                error,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn capture_outer_type_reference(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    owner: &SymbolId,
+    kind: ReferenceKind,
+) -> Result<(), ExtractError> {
+    let target = descendants_including_root(node).find(|candidate| {
+        matches!(
+            candidate.kind(),
+            "user_type"
+                | "generic_type"
+                | "stable_type_identifier"
+                | "type_identifier"
+                | "dotted_identifier"
+                | "identifier"
+        )
+    });
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let Some(name) = safe_type_text(builder, target)? else {
+        return Ok(());
+    };
+    push_named_reference(builder, Some(owner.clone()), name, kind, target)
+}
+
+fn capture_type_references(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    owner: &SymbolId,
+    kind: ReferenceKind,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    if depth > MAX_TYPE_DEPTH {
+        return Err(ExtractError::NestingLimit);
+    }
+    builder.context.ensure_active()?;
+    let language = builder.context.snapshot.language();
+    let is_leaf = match language {
+        SourceLanguage::Kotlin | SourceLanguage::Scala => node.kind() == "type_identifier",
+        SourceLanguage::Groovy => matches!(node.kind(), "identifier" | "builtintype"),
+        _ => false,
+    };
+    if is_leaf {
+        if let Some(name) = safe_type_text(builder, node)?
+            && !is_jvm_builtin(&name)
+        {
+            push_named_reference(builder, Some(owner.clone()), name, kind, node)?;
+        }
+        return Ok(());
+    }
+    for child in named_children(node) {
+        capture_type_references(builder, child, owner, kind, depth.saturating_add(1))?;
+    }
+    Ok(())
+}
+
+fn capture_kotlin_usage(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    match node.kind() {
+        "call_expression" => {
+            let Some(target) = named_children(node).find(|child| child.kind() != "call_suffix")
+            else {
+                return Ok(());
+            };
+            let Some(name) = safe_reference_text(builder, target)? else {
+                return Ok(());
+            };
+            let kind = if terminal_name(&name)
+                .chars()
+                .next()
+                .is_some_and(char::is_uppercase)
+            {
+                ReferenceKind::Instantiates
+            } else {
+                ReferenceKind::Calls
+            };
+            push_named_reference(builder, builder.owners.last().cloned(), name, kind, target)
+        }
+        "navigation_expression" if !is_kotlin_call_target(node) => {
+            capture_terminal_member(builder, node)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn capture_scala_usage(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    match node.kind() {
+        "call_expression" => {
+            let Some(target) = node.child_by_field_name("function") else {
+                return Ok(());
+            };
+            let Some(name) = safe_reference_text(builder, target)? else {
+                return Ok(());
+            };
+            push_named_reference(
+                builder,
+                builder.owners.last().cloned(),
+                name,
+                ReferenceKind::Calls,
+                target,
+            )
+        }
+        "instance_expression" => {
+            let Some(target) = named_children(node).find(|child| child.kind() != "arguments")
+            else {
+                return Ok(());
+            };
+            let Some(name) = safe_type_text(builder, target)? else {
+                return Ok(());
+            };
+            push_named_reference(
+                builder,
+                builder.owners.last().cloned(),
+                name,
+                ReferenceKind::Instantiates,
+                target,
+            )
+        }
+        "field_expression" if !is_scala_call_target(node) => capture_terminal_member(builder, node),
+        _ => Ok(()),
+    }
+}
+
+fn capture_groovy_usage(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    match node.kind() {
+        "function_call" if !is_groovy_construction_target(node) => {
+            let Some(target) = node.child_by_field_name("function") else {
+                return Ok(());
+            };
+            let Some(name) = safe_reference_text(builder, target)? else {
+                return Ok(());
+            };
+            push_named_reference(
+                builder,
+                builder.owners.last().cloned(),
+                name,
+                ReferenceKind::Calls,
+                target,
+            )
+        }
+        "unary_op" if builder.context.text(node).trim_start().starts_with("new ") => {
+            let target = named_children(node)
+                .find(|child| child.kind() == "function_call")
+                .and_then(|call| call.child_by_field_name("function"));
+            let Some(target) = target else {
+                return Ok(());
+            };
+            let Some(name) = safe_reference_text(builder, target)? else {
+                return Ok(());
+            };
+            push_named_reference(
+                builder,
+                builder.owners.last().cloned(),
+                name,
+                ReferenceKind::Instantiates,
+                target,
+            )
+        }
+        "dotted_identifier" if !is_groovy_call_target(node) => {
+            capture_terminal_member(builder, node)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn capture_terminal_member(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    let Some(target) = descendants_including_root(node)
+        .filter(|candidate| {
+            matches!(
+                candidate.kind(),
+                "simple_identifier" | "identifier" | "operator_identifier"
+            )
+        })
+        .last()
+    else {
+        return Ok(());
+    };
+    let Some(name) = safe_reference_text(builder, target)? else {
+        return Ok(());
+    };
+    push_named_reference(
+        builder,
+        builder.owners.last().cloned(),
+        name,
+        ReferenceKind::FieldAccess,
+        target,
+    )
+}
+
+fn is_kotlin_call_target(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "call_expression"
+            && named_children(parent)
+                .find(|child| child.kind() != "call_suffix")
+                .is_some_and(|target| same_node(target, node))
+    })
+}
+
+fn is_scala_call_target(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "call_expression"
+            && parent
+                .child_by_field_name("function")
+                .is_some_and(|target| same_node(target, node))
+    })
+}
+
+fn is_groovy_call_target(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "function_call"
+            && parent
+                .child_by_field_name("function")
+                .is_some_and(|target| same_node(target, node))
+    })
+}
+
+fn is_groovy_construction_target(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "unary_op" && parent.child(0).is_some_and(|token| token.kind() == "new")
+    })
+}
+
+fn same_node(left: Node<'_>, right: Node<'_>) -> bool {
+    left.start_byte() == right.start_byte() && left.end_byte() == right.end_byte()
+}
+
+fn push_named_reference(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    owner: Option<SymbolId>,
+    name: String,
+    kind: ReferenceKind,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    references::push_reference(
+        builder,
+        PendingReference {
+            owner,
+            name,
+            kind,
+            node,
+        },
+    )
+}
+
+fn safe_reference_text(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    for descendant in descendants_including_root(node) {
+        builder.context.ensure_active()?;
+        if is_literal_kind(descendant.kind()) {
+            return Ok(None);
+        }
+    }
+    normalize_reference(builder, builder.context.text(node).trim())
+}
+
+fn safe_type_text(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    normalize_reference(
+        builder,
+        builder.context.text(node).trim().trim_end_matches('?'),
+    )
+}
+
+fn normalize_reference(
+    builder: &ExtractionBuilder<'_, '_>,
+    raw: &str,
+) -> Result<Option<String>, ExtractError> {
+    if raw.is_empty() || raw.len() > MAX_REFERENCE_TARGET_BYTES {
+        return Ok(None);
+    }
+    let mut normalized = String::new();
+    normalized
+        .try_reserve(raw.len())
+        .map_err(|_| ExtractError::OutputLimit)?;
+    let mut generic_depth = 0_usize;
+    let mut characters = raw.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '<' | '[' => generic_depth = generic_depth.saturating_add(1),
+            '>' | ']' if generic_depth > 0 => generic_depth = generic_depth.saturating_sub(1),
+            _ if generic_depth > 0 => {}
+            '?' if characters.peek() == Some(&'.') => {}
+            character if character.is_whitespace() => {}
+            character
+                if character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '.' | ':' | '$') =>
+            {
+                normalized.push(character);
+            }
+            _ => return Ok(None),
+        }
+    }
+    if generic_depth != 0
+        || normalized.is_empty()
+        || normalized.len() > MAX_REFERENCE_TARGET_BYTES
+        || normalized.starts_with('.')
+        || normalized.ends_with('.')
+    {
+        return Ok(None);
+    }
+    builder
+        .context
+        .budget
+        .ensure_string_length(normalized.len())?;
+    Ok(Some(normalized))
+}
+
+fn is_literal_kind(kind: &str) -> bool {
+    kind.contains("string")
+        || kind.contains("character")
+        || kind.contains("number_literal")
+        || kind.contains("integer_literal")
+        || kind.contains("floating_point_literal")
+        || matches!(
+            kind,
+            "boolean_literal" | "null" | "null_literal" | "real_literal"
+        )
+}
+
+fn kotlin_parameters_signature(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    let values = named_children(parameters)
+        .filter(|child| matches!(child.kind(), "parameter" | "class_parameter"));
+    parameter_signature(builder, values, ParameterStyle::NameColonType, None)
+}
+
+fn kotlin_callable_signature(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    return_type: Option<Node<'_>>,
+) -> Result<Option<String>, ExtractError> {
+    let values = named_children(parameters).filter(|child| child.kind() == "parameter");
+    parameter_signature(builder, values, ParameterStyle::NameColonType, return_type)
+}
+
+fn scala_parameters_signature<'tree>(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: impl IntoIterator<Item = Node<'tree>>,
+) -> Result<Option<String>, ExtractError> {
+    let mut signature = String::new();
+    for parameter_list in parameters {
+        let Some(group) = parameter_signature(
+            builder,
+            named_children(parameter_list)
+                .filter(|child| matches!(child.kind(), "parameter" | "class_parameter")),
+            ParameterStyle::NameColonType,
+            None,
+        )?
+        else {
+            return Ok(None);
+        };
+        if signature.len().saturating_add(group.len()) > MAX_SIGNATURE_BYTES {
+            return Ok(None);
+        }
+        signature.push_str(&group);
+    }
+    safe_signature(builder, signature)
+}
+
+fn scala_callable_signature(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: &[Node<'_>],
+    return_type: Option<Node<'_>>,
+) -> Result<Option<String>, ExtractError> {
+    let mut signature = if parameters.is_empty() {
+        String::new()
+    } else {
+        let Some(signature) = scala_parameters_signature(builder, parameters.iter().copied())?
+        else {
+            return Ok(None);
+        };
+        signature
+    };
+    append_return_type(builder, &mut signature, return_type)?;
+    safe_signature(builder, signature)
+}
+
+fn groovy_callable_signature(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    return_type: Option<Node<'_>>,
+) -> Result<Option<String>, ExtractError> {
+    let values = named_children(parameters).filter(|child| child.kind() == "parameter");
+    let Some(parameters) =
+        parameter_signature(builder, values, ParameterStyle::TypeSpaceName, None)?
+    else {
+        return Ok(None);
+    };
+    let Some(return_type) = return_type else {
+        return Ok(Some(parameters));
+    };
+    let return_text = builder.context.text(return_type).trim();
+    let length = return_text
+        .len()
+        .checked_add(parameters.len())
+        .and_then(|length| length.checked_add(1))
+        .ok_or(ExtractError::OutputLimit)?;
+    if length > MAX_SIGNATURE_BYTES {
+        return Ok(None);
+    }
+    let mut signature = String::new();
+    signature
+        .try_reserve(length)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    signature.push_str(return_text);
+    signature.push(' ');
+    signature.push_str(&parameters);
+    safe_signature(builder, signature)
+}
+
+#[derive(Clone, Copy)]
+enum ParameterStyle {
+    NameColonType,
+    TypeSpaceName,
+}
+
+fn parameter_signature<'tree>(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: impl IntoIterator<Item = Node<'tree>>,
+    style: ParameterStyle,
+    return_type: Option<Node<'tree>>,
+) -> Result<Option<String>, ExtractError> {
+    let mut signature = String::from("(");
+    let mut first = true;
+    for parameter in parameters {
+        builder.context.ensure_active()?;
+        let name_node = parameter
+            .child_by_field_name("name")
+            .or_else(|| kotlin_direct_name(parameter));
+        let Some(name_node) = name_node else {
+            return Ok(None);
+        };
+        let name = builder.context.text(name_node).trim();
+        let type_node = parameter
+            .child_by_field_name("type")
+            .or_else(|| kotlin_type_node(parameter));
+        let type_text = type_node.map(|node| builder.context.text(node).trim());
+        let separator = if first { "" } else { ", " };
+        let required = separator
+            .len()
+            .checked_add(name.len())
+            .and_then(|length| {
+                length.checked_add(type_text.map_or(0, |value| value.len().saturating_add(2)))
+            })
+            .ok_or(ExtractError::OutputLimit)?;
+        if signature.len().saturating_add(required).saturating_add(1) > MAX_SIGNATURE_BYTES {
+            return Ok(None);
+        }
+        signature.push_str(separator);
+        match (style, type_text) {
+            (ParameterStyle::NameColonType, Some(type_text)) => {
+                signature.push_str(name);
+                signature.push_str(": ");
+                signature.push_str(type_text);
+            }
+            (ParameterStyle::TypeSpaceName, Some(type_text)) => {
+                signature.push_str(type_text);
+                signature.push(' ');
+                signature.push_str(name);
+            }
+            (_, None) => signature.push_str(name),
+        }
+        first = false;
+    }
+    signature.push(')');
+    append_return_type(builder, &mut signature, return_type)?;
+    safe_signature(builder, signature)
+}
+
+fn append_return_type(
+    builder: &ExtractionBuilder<'_, '_>,
+    signature: &mut String,
+    return_type: Option<Node<'_>>,
+) -> Result<(), ExtractError> {
+    let Some(return_type) = return_type else {
+        return Ok(());
+    };
+    let return_text = builder.context.text(return_type).trim();
+    let length = signature
+        .len()
+        .checked_add(return_text.len())
+        .and_then(|length| length.checked_add(2))
+        .ok_or(ExtractError::OutputLimit)?;
+    if length > MAX_SIGNATURE_BYTES {
+        signature.clear();
+        return Ok(());
+    }
+    signature.push_str(": ");
+    signature.push_str(return_text);
+    Ok(())
+}
+
+fn safe_signature(
+    builder: &ExtractionBuilder<'_, '_>,
+    signature: String,
+) -> Result<Option<String>, ExtractError> {
+    if signature.is_empty()
+        || signature.len() > MAX_SIGNATURE_BYTES
+        || !callable_signature_is_literal_free(&signature)
+    {
+        return Ok(None);
+    }
+    builder
+        .context
+        .budget
+        .ensure_string_length(signature.len())?;
+    Ok(Some(signature))
+}
+
+fn kotlin_property_signature(
+    builder: &ExtractionBuilder<'_, '_>,
+    keyword: &str,
+    name: &str,
+    type_node: Option<Node<'_>>,
+) -> Result<Option<String>, ExtractError> {
+    keyword_typed_signature(builder, keyword, name, type_node)
+}
+
+fn keyword_typed_signature(
+    builder: &ExtractionBuilder<'_, '_>,
+    keyword: &str,
+    name: &str,
+    type_node: Option<Node<'_>>,
+) -> Result<Option<String>, ExtractError> {
+    let type_text = type_node.map(|node| builder.context.text(node).trim());
+    let length = keyword
+        .len()
+        .checked_add(name.len())
+        .and_then(|length| length.checked_add(1))
+        .and_then(|length| {
+            length.checked_add(type_text.map_or(0, |value| value.len().saturating_add(2)))
+        })
+        .ok_or(ExtractError::OutputLimit)?;
+    if length > MAX_SIGNATURE_BYTES {
+        return Ok(None);
+    }
+    let mut signature = String::new();
+    signature
+        .try_reserve(length)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    signature.push_str(keyword);
+    signature.push(' ');
+    signature.push_str(name);
+    if let Some(type_text) = type_text {
+        signature.push_str(": ");
+        signature.push_str(type_text);
+    }
+    safe_signature(builder, signature)
+}
+
+fn groovy_typed_signature(
+    builder: &ExtractionBuilder<'_, '_>,
+    type_node: Option<Node<'_>>,
+    name: &str,
+) -> Result<Option<String>, ExtractError> {
+    let Some(type_node) = type_node else {
+        return Ok(None);
+    };
+    let type_text = builder.context.text(type_node).trim();
+    let length = type_text
+        .len()
+        .checked_add(name.len())
+        .and_then(|length| length.checked_add(1))
+        .ok_or(ExtractError::OutputLimit)?;
+    if length > MAX_SIGNATURE_BYTES {
+        return Ok(None);
+    }
+    let mut signature = String::new();
+    signature
+        .try_reserve(length)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    signature.push_str(type_text);
+    signature.push(' ');
+    signature.push_str(name);
+    safe_signature(builder, signature)
+}
+
+fn capture_kotlin_parameter_types(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    owner: &SymbolId,
+) -> Result<(), ExtractError> {
+    for parameter in named_children(parameters)
+        .filter(|child| matches!(child.kind(), "parameter" | "class_parameter"))
+    {
+        builder.context.ensure_active()?;
+        if let Some(type_node) = kotlin_type_node(parameter) {
+            capture_type_references(builder, type_node, owner, ReferenceKind::TypeOf, 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn capture_scala_parameter_types(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    owner: &SymbolId,
+) -> Result<(), ExtractError> {
+    for parameter in named_children(parameters).filter(|child| child.kind() == "parameter") {
+        builder.context.ensure_active()?;
+        if let Some(type_node) = parameter.child_by_field_name("type") {
+            capture_type_references(builder, type_node, owner, ReferenceKind::TypeOf, 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn capture_groovy_parameter_types(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    parameters: Node<'_>,
+    owner: &SymbolId,
+) -> Result<(), ExtractError> {
+    for parameter in named_children(parameters).filter(|child| child.kind() == "parameter") {
+        builder.context.ensure_active()?;
+        if let Some(type_node) = parameter.child_by_field_name("type") {
+            capture_type_references(builder, type_node, owner, ReferenceKind::TypeOf, 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn kotlin_direct_name(node: Node<'_>) -> Option<Node<'_>> {
+    named_children(node).find(|child| child.kind() == "simple_identifier")
+}
+
+fn kotlin_type_node(node: Node<'_>) -> Option<Node<'_>> {
+    named_children(node).find(|child| {
+        matches!(
+            child.kind(),
+            "user_type"
+                | "nullable_type"
+                | "function_type"
+                | "parenthesized_type"
+                | "not_nullable_type"
+        )
+    })
+}
+
+fn kotlin_return_type<'tree>(node: Node<'tree>, parameters: Node<'tree>) -> Option<Node<'tree>> {
+    named_children(node).find(|child| {
+        child.start_byte() >= parameters.end_byte()
+            && matches!(
+                child.kind(),
+                "user_type"
+                    | "nullable_type"
+                    | "function_type"
+                    | "parenthesized_type"
+                    | "not_nullable_type"
+            )
+    })
+}
+
+fn scala_pattern_name(pattern: Node<'_>) -> Option<Node<'_>> {
+    if matches!(pattern.kind(), "identifier" | "operator_identifier") {
+        Some(pattern)
+    } else {
+        descendants_including_root(pattern)
+            .find(|child| matches!(child.kind(), "identifier" | "operator_identifier"))
+    }
+}
+
+fn current_type_scope(builder: &ExtractionBuilder<'_, '_>) -> bool {
+    matches!(
+        builder.native_owner_kinds.last(),
+        Some(
+            SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Interface
+                | SymbolKind::Trait
+                | SymbolKind::Enum
+        )
+    )
+}
+
+fn jvm_visibility(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<Option<Visibility>, ExtractError> {
+    for (keyword, visibility) in [
+        ("private", Visibility::Private),
+        ("protected", Visibility::Protected),
+        ("internal", Visibility::Internal),
+        ("public", Visibility::Public),
+    ] {
+        if has_modifier(builder, node, keyword)? {
+            return Ok(Some(visibility));
+        }
+    }
+    Ok(Some(Visibility::Public))
+}
+
+fn has_modifier(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    expected: &str,
+) -> Result<bool, ExtractError> {
+    for child in children(node) {
+        builder.context.ensure_active()?;
+        if modifier_token_matches(builder, child, expected) {
+            return Ok(true);
+        }
+        if !matches!(child.kind(), "modifiers" | "modifier" | "access_modifier") {
+            continue;
+        }
+        for token in children(child) {
+            builder.context.ensure_active()?;
+            if modifier_token_matches(builder, token, expected) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn modifier_token_matches(
+    builder: &ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    expected: &str,
+) -> bool {
+    if node.kind() == expected {
+        return true;
+    }
+    matches!(
+        node.kind(),
+        "modifier"
+            | "access_modifier"
+            | "visibility_modifier"
+            | "function_modifier"
+            | "member_modifier"
+            | "property_modifier"
+            | "class_modifier"
+            | "inheritance_modifier"
+            | "parameter_modifier"
+    ) && node.end_byte().saturating_sub(node.start_byte()) <= 32
+        && builder.context.text(node).trim() == expected
+}
+
+fn direct_keyword(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    expected: &str,
+) -> Result<bool, ExtractError> {
+    for child in children(node) {
+        builder.context.ensure_active()?;
+        if child.kind() == expected
+            || (child.end_byte().saturating_sub(child.start_byte()) <= 32
+                && builder.context.text(child).trim() == expected)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn is_jvm_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "Any"
+            | "Boolean"
+            | "Byte"
+            | "Char"
+            | "Double"
+            | "Float"
+            | "Int"
+            | "Long"
+            | "Nothing"
+            | "Short"
+            | "Unit"
+            | "Void"
+            | "boolean"
+            | "byte"
+            | "char"
+            | "def"
+            | "double"
+            | "float"
+            | "int"
+            | "long"
+            | "short"
+            | "void"
+    )
+}
+
+fn terminal_name(name: &str) -> &str {
+    name.rsplit(['.', ':'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name)
+}

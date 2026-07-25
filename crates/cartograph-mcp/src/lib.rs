@@ -18,9 +18,10 @@ pub use error::{
 };
 pub use profile::{ToolProfile, ToolProfiles};
 pub use protocol::{
-    DEFAULT_PROTOCOL_VERSION, ProtocolServer, RequestId, ServerConfig, ServerLimits, ServerMetadata,
+    DEFAULT_PROTOCOL_VERSION, ProtocolServer, RequestId, ServerConfig, ServerLimits,
+    ServerLimitsInput, ServerMetadata,
 };
 pub use tool::{
-    BoxToolFuture, TextContent, ToolAnnotations, ToolCall, ToolCallContext, ToolDefinition,
-    ToolHandler, ToolResult,
+    BoxShutdownFuture, BoxToolFuture, TextContent, ToolAnnotations, ToolCall, ToolCallContext,
+    ToolDefinition, ToolDefinitionInput, ToolHandler, ToolResult,
 };

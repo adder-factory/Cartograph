@@ -1,0 +1,460 @@
+use std::{path::Path, sync::Arc};
+
+use cartograph_db::{CurrentSourceRangeLookup, FileSurfaceQuery, FileSurfaceRow, StorageError};
+use cartograph_domain::{NormalizedPath, ProjectId, SourceLanguage};
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use regex::{Regex, RegexBuilder};
+use serde::Serialize;
+use thiserror::Error;
+
+use crate::{ProjectCancellation, ProjectRuntime};
+
+const MAXIMUM_PATTERN_BYTES: usize = 1_024;
+const MAXIMUM_RESULTS: u16 = 500;
+const MAXIMUM_INDEXED_FILES: u16 = 2_000;
+const MAXIMUM_FILE_BYTES: u64 = 1_000_000;
+const MAXIMUM_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const MAXIMUM_RETAINED_HITS_PER_FILE: usize = 500;
+const MAXIMUM_SNIPPET_CHARACTERS: usize = 200;
+const SCAN_CONCURRENCY: usize = 8;
+const ATTRIBUTION_CONCURRENCY: usize = 16;
+const ENCLOSING_SYMBOL_LIMIT: u16 = 20;
+
+/// Validated bounded live-source regex search over only current indexed files.
+#[derive(Clone)]
+pub struct SourceSearchOptions {
+    pattern: String,
+    case_sensitive: bool,
+    path_prefix: Option<NormalizedPath>,
+    language: Option<SourceLanguage>,
+    limit: u16,
+}
+
+impl SourceSearchOptions {
+    pub fn new(pattern: impl Into<String>, limit: u16) -> Result<Self, SourceSearchError> {
+        let pattern = pattern.into();
+        if pattern.is_empty()
+            || pattern.len() > MAXIMUM_PATTERN_BYTES
+            || pattern.contains('\0')
+            || limit == 0
+            || limit > MAXIMUM_RESULTS
+        {
+            return Err(SourceSearchError::InvalidOptions);
+        }
+        Ok(Self {
+            pattern,
+            case_sensitive: false,
+            path_prefix: None,
+            language: None,
+            limit,
+        })
+    }
+
+    #[must_use]
+    pub const fn with_case_sensitive(mut self, case_sensitive: bool) -> Self {
+        self.case_sensitive = case_sensitive;
+        self
+    }
+
+    #[must_use]
+    pub fn with_path_prefix(mut self, path_prefix: Option<NormalizedPath>) -> Self {
+        self.path_prefix = path_prefix;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_language(mut self, language: Option<SourceLanguage>) -> Self {
+        self.language = language;
+        self
+    }
+}
+
+/// Smallest indexed declaration enclosing one regex hit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSearchSymbol {
+    symbol_id: String,
+    qualified_name: String,
+    symbol_kind: String,
+    start_line: u32,
+    end_line: u32,
+}
+
+/// One bounded line match from an indexed project file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSearchHit {
+    path: NormalizedPath,
+    language: String,
+    line: u32,
+    snippet: String,
+    enclosing_symbol: Option<SourceSearchSymbol>,
+}
+
+/// Complete accounting for a parallel live-source search.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSearchReport {
+    hits: Vec<SourceSearchHit>,
+    total_matches_in_scanned_files: u64,
+    indexed_files: u64,
+    files_scanned: u64,
+    files_skipped_large: u64,
+    files_unreadable_or_unsafe: u64,
+    bytes_considered: u64,
+    file_inventory_truncated: bool,
+    byte_budget_truncated: bool,
+    result_truncated: bool,
+    regex_engine: &'static str,
+    attribution: &'static str,
+}
+
+impl SourceSearchHit {
+    #[must_use]
+    pub const fn path(&self) -> &NormalizedPath {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+
+    #[must_use]
+    pub const fn line(&self) -> u32 {
+        self.line
+    }
+
+    #[must_use]
+    pub fn snippet(&self) -> &str {
+        &self.snippet
+    }
+}
+
+impl SourceSearchReport {
+    #[must_use]
+    pub fn hits(&self) -> &[SourceSearchHit] {
+        &self.hits
+    }
+}
+
+/// Safe public failure classes for live source search.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum SourceSearchError {
+    #[error("source search options are invalid")]
+    InvalidOptions,
+    #[error("source search regex is invalid")]
+    InvalidRegex,
+    #[error("source search storage is unavailable")]
+    StorageUnavailable,
+    #[error("source search project root is unavailable")]
+    ProjectUnavailable,
+    #[error("source search was cancelled")]
+    Cancelled,
+    #[error("source search worker failed")]
+    WorkerFailed,
+}
+
+struct FileScanResult {
+    hits: Vec<SourceSearchHit>,
+    matched: u64,
+    scanned: bool,
+    skipped_large: bool,
+    unreadable_or_unsafe: bool,
+}
+
+impl ProjectRuntime {
+    /// Search current indexed source files with Rust's linear-time regex engine,
+    /// then attribute retained hits to the smallest indexed declaration.
+    pub async fn search_source(
+        &self,
+        project_id: &ProjectId,
+        options: SourceSearchOptions,
+        cancellation: ProjectCancellation,
+    ) -> Result<SourceSearchReport, SourceSearchError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceSearchError::Cancelled);
+        }
+        let regex = RegexBuilder::new(&options.pattern)
+            .case_insensitive(!options.case_sensitive)
+            .multi_line(false)
+            .size_limit(4 * 1024 * 1024)
+            .dfa_size_limit(4 * 1024 * 1024)
+            .build()
+            .map_err(|_| SourceSearchError::InvalidRegex)?;
+        let generation = self
+            .database
+            .current_generation_record(project_id)
+            .await
+            .map_err(map_storage)?
+            .ok_or(SourceSearchError::StorageUnavailable)?;
+        let mut surface_query =
+            FileSurfaceQuery::new(MAXIMUM_INDEXED_FILES).map_err(map_storage)?;
+        if let Some(language) = options.language {
+            surface_query = surface_query.with_language(language);
+        }
+        if let Some(prefix) = options.path_prefix.as_ref() {
+            let postgres_regex = format!("^{}", regex::escape(prefix.as_str()));
+            surface_query = surface_query
+                .with_path_regex(Some(&postgres_regex))
+                .map_err(map_storage)?;
+        }
+        let surface = self
+            .database
+            .current_file_surface(project_id, &surface_query)
+            .await
+            .map_err(map_storage)?;
+        let root = std::fs::canonicalize(&self.root)
+            .ok()
+            .filter(|path| path.is_dir())
+            .ok_or(SourceSearchError::ProjectUnavailable)?;
+        let mut selected = Vec::new();
+        let mut bytes_considered = 0_u64;
+        let mut byte_budget_truncated = false;
+        for file in surface.files() {
+            if bytes_considered.saturating_add(file.byte_size()) > MAXIMUM_TOTAL_BYTES {
+                byte_budget_truncated = true;
+                break;
+            }
+            bytes_considered = bytes_considered.saturating_add(file.byte_size());
+            selected.push(file.clone());
+        }
+        let root = Arc::new(root);
+        let regex = Arc::new(regex);
+        let cancellation = Arc::new(cancellation);
+        let scan_results = stream::iter(selected)
+            .map(|file| {
+                let root = root.clone();
+                let regex = regex.clone();
+                let cancellation = cancellation.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        scan_file(&root, &file, &regex, &cancellation)
+                    })
+                    .await
+                    .map_err(|_| SourceSearchError::WorkerFailed)
+                }
+            })
+            .buffered(SCAN_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+        if cancellation.is_cancelled() {
+            return Err(SourceSearchError::Cancelled);
+        }
+        let files_scanned = scan_results.iter().filter(|result| result.scanned).count() as u64;
+        let files_skipped_large = scan_results
+            .iter()
+            .filter(|result| result.skipped_large)
+            .count() as u64;
+        let files_unreadable_or_unsafe = scan_results
+            .iter()
+            .filter(|result| result.unreadable_or_unsafe)
+            .count() as u64;
+        let total_matches_in_scanned_files = scan_results
+            .iter()
+            .map(|result| result.matched)
+            .sum::<u64>();
+        let maximum_depth = scan_results
+            .iter()
+            .map(|result| result.hits.len())
+            .max()
+            .unwrap_or_default();
+        let mut interleaved = Vec::new();
+        'depth: for depth in 0..maximum_depth {
+            for result in &scan_results {
+                if let Some(hit) = result.hits.get(depth) {
+                    if interleaved.len() == usize::from(options.limit) {
+                        break 'depth;
+                    }
+                    interleaved.push(hit.clone());
+                }
+            }
+        }
+        let result_truncated =
+            total_matches_in_scanned_files > u64::try_from(interleaved.len()).unwrap_or(u64::MAX);
+        let database = self.database.clone();
+        let project_id = project_id.clone();
+        let generation_id = generation.generation_id().clone();
+        let attributed = stream::iter(interleaved)
+            .map(|mut hit| {
+                let database = database.clone();
+                let project_id = project_id.clone();
+                let generation_id = generation_id.clone();
+                async move {
+                    let symbols = database
+                        .current_symbols_at_range(CurrentSourceRangeLookup::new(
+                            &project_id,
+                            &generation_id,
+                            &hit.path,
+                            hit.line,
+                            hit.line,
+                            ENCLOSING_SYMBOL_LIMIT,
+                        ))
+                        .await
+                        .map_err(map_storage)?;
+                    hit.enclosing_symbol = symbols
+                        .iter()
+                        .find(|symbol| {
+                            matches!(
+                                symbol.symbol_kind(),
+                                "function"
+                                    | "method"
+                                    | "class"
+                                    | "interface"
+                                    | "trait"
+                                    | "component"
+                            )
+                        })
+                        .or_else(|| symbols.iter().find(|symbol| symbol.symbol_kind() != "file"))
+                        .map(|symbol| SourceSearchSymbol {
+                            symbol_id: symbol.symbol_id().as_str().to_owned(),
+                            qualified_name: symbol.qualified_name().to_owned(),
+                            symbol_kind: symbol.symbol_kind().to_owned(),
+                            start_line: symbol.start_line(),
+                            end_line: symbol.end_line(),
+                        });
+                    Ok::<_, SourceSearchError>(hit)
+                }
+            })
+            .buffered(ATTRIBUTION_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+        Ok(SourceSearchReport {
+            hits: attributed,
+            total_matches_in_scanned_files,
+            indexed_files: surface.total_files(),
+            files_scanned,
+            files_skipped_large,
+            files_unreadable_or_unsafe,
+            bytes_considered,
+            file_inventory_truncated: surface.truncated(),
+            byte_budget_truncated,
+            result_truncated,
+            regex_engine: "rust_regex_linear_time",
+            attribution: "smallest_current_generation_enclosing_symbol",
+        })
+    }
+}
+
+fn scan_file(
+    root: &Path,
+    file: &FileSurfaceRow,
+    regex: &Regex,
+    cancellation: &ProjectCancellation,
+) -> FileScanResult {
+    if cancellation.is_cancelled() {
+        return FileScanResult {
+            hits: Vec::new(),
+            matched: 0,
+            scanned: false,
+            skipped_large: false,
+            unreadable_or_unsafe: true,
+        };
+    }
+    if file.byte_size() > MAXIMUM_FILE_BYTES {
+        return FileScanResult {
+            hits: Vec::new(),
+            matched: 0,
+            scanned: false,
+            skipped_large: true,
+            unreadable_or_unsafe: false,
+        };
+    }
+    let Ok(path) = NormalizedPath::parse(file.path()) else {
+        return unsafe_file();
+    };
+    let joined = root.join(path.as_str());
+    let Some(canonical) = std::fs::canonicalize(&joined)
+        .ok()
+        .filter(|candidate| candidate.starts_with(root))
+    else {
+        return unsafe_file();
+    };
+    let Some(metadata) = std::fs::metadata(&canonical)
+        .ok()
+        .filter(|metadata| metadata.is_file() && metadata.len() <= MAXIMUM_FILE_BYTES)
+    else {
+        return unsafe_file();
+    };
+    let _metadata = metadata;
+    let Ok(source) = std::fs::read_to_string(canonical) else {
+        return unsafe_file();
+    };
+    let mut hits = Vec::new();
+    let mut matched = 0_u64;
+    for (index, line) in source.lines().enumerate() {
+        if index % 256 == 0 && cancellation.is_cancelled() {
+            break;
+        }
+        if !regex.is_match(line) {
+            continue;
+        }
+        matched = matched.saturating_add(1);
+        if hits.len() >= MAXIMUM_RETAINED_HITS_PER_FILE {
+            continue;
+        }
+        let line_number = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
+        hits.push(SourceSearchHit {
+            path: path.clone(),
+            language: file.language().to_owned(),
+            line: line_number,
+            snippet: clipped_snippet(line),
+            enclosing_symbol: None,
+        });
+    }
+    FileScanResult {
+        hits,
+        matched,
+        scanned: true,
+        skipped_large: false,
+        unreadable_or_unsafe: false,
+    }
+}
+
+fn clipped_snippet(line: &str) -> String {
+    let mut characters = line.chars();
+    let snippet = characters
+        .by_ref()
+        .take(MAXIMUM_SNIPPET_CHARACTERS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        format!("{snippet} …")
+    } else {
+        snippet
+    }
+}
+
+fn unsafe_file() -> FileScanResult {
+    FileScanResult {
+        hits: Vec::new(),
+        matched: 0,
+        scanned: false,
+        skipped_large: false,
+        unreadable_or_unsafe: true,
+    }
+}
+
+fn map_storage(_: StorageError) -> SourceSearchError {
+    SourceSearchError::StorageUnavailable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_search_rejects_unbounded_or_invalid_inputs() {
+        assert!(SourceSearchOptions::new("", 10).is_err());
+        assert!(SourceSearchOptions::new("x", 0).is_err());
+        assert!(SourceSearchOptions::new("x", 501).is_err());
+        assert!(SourceSearchOptions::new("x".repeat(1_025), 10).is_err());
+    }
+
+    #[test]
+    fn snippet_clipping_is_unicode_safe() {
+        let input = "🙂".repeat(MAXIMUM_SNIPPET_CHARACTERS + 1);
+        let clipped = clipped_snippet(&input);
+        assert!(clipped.ends_with(" …"));
+        assert_eq!(clipped.chars().count(), MAXIMUM_SNIPPET_CHARACTERS + 2);
+    }
+}

@@ -2,34 +2,65 @@ use std::ops::ControlFlow;
 
 use cartograph_domain::{FileParseStatus, SourceLanguage};
 use thiserror::Error;
-use tree_sitter::{Language, ParseOptions, Parser, Point};
+use tree_sitter::{ParseOptions, Parser, Point, Query};
 
-use crate::{ExtractedFile, SourceSnapshot, walk};
+use crate::{
+    ExtractedFile, ExtractionStrategy, LanguageSpec, SourceSnapshot, custom, framework, tags,
+    test_names, walk,
+};
 
 /// Reusable one-language native parser. Create one per bounded worker.
 pub struct NativeExtractor {
     language: SourceLanguage,
-    parser: Parser,
+    strategy: ExtractionStrategy,
+    tags_query: Option<&'static Query>,
+    parser: Option<Parser>,
 }
 
 impl NativeExtractor {
-    /// Load one statically linked native grammar and reject ABI mismatch.
+    /// Load one production-admitted native grammar and reject ABI mismatch.
     pub fn new(language: SourceLanguage) -> Result<Self, ExtractError> {
-        let grammar: Language = match language {
-            SourceLanguage::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            SourceLanguage::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-            SourceLanguage::JavaScript | SourceLanguage::Jsx => {
-                tree_sitter_javascript::LANGUAGE.into()
-            }
-            SourceLanguage::Rust => tree_sitter_rust::LANGUAGE.into(),
-            SourceLanguage::Python => tree_sitter_python::LANGUAGE.into(),
-            SourceLanguage::Go => tree_sitter_go::LANGUAGE.into(),
+        if !language.is_native_indexable() {
+            return Err(ExtractError::UnsupportedLanguage);
+        }
+        Self::new_for_capability_validation(language)
+    }
+
+    /// Load an implemented extractor before production admission.
+    ///
+    /// This constructor exists so a language family can be tested and reviewed without making
+    /// it importable or indexable. Production discovery and indexing must use [`Self::new`]; the
+    /// registry admits a mode only after extraction, cross-file resolution, publication, and
+    /// retrieval gates all pass.
+    pub fn new_for_capability_validation(language: SourceLanguage) -> Result<Self, ExtractError> {
+        let spec = LanguageSpec::for_language(language);
+        if !spec.strategy().is_executable() {
+            return Err(ExtractError::UnsupportedLanguage);
+        }
+        let (tags_query, parser) = if spec.strategy() == ExtractionStrategy::CustomStructural {
+            (None, None)
+        } else {
+            let grammar = spec
+                .grammar()
+                .ok_or(ExtractError::UnsupportedLanguage)?
+                .language();
+            let tags_query = if spec.strategy() == ExtractionStrategy::TagsQuery {
+                Some(tags::query_for(language, &grammar)?)
+            } else {
+                None
+            };
+            let mut parser = Parser::new();
+            parser
+                .set_language(&grammar)
+                .map_err(|_| ExtractError::GrammarUnavailable)?;
+            (tags_query, Some(parser))
         };
-        let mut parser = Parser::new();
-        parser
-            .set_language(&grammar)
-            .map_err(|_| ExtractError::GrammarUnavailable)?;
-        Ok(Self { language, parser })
+        Ok(Self {
+            language,
+            strategy: spec.strategy(),
+            tags_query,
+            parser,
+        })
     }
 
     /// Extract one immutable snapshot without an external cancellation probe.
@@ -49,6 +80,11 @@ impl NativeExtractor {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
+        if self.strategy == ExtractionStrategy::CustomStructural {
+            let extracted = custom::extract(snapshot, &mut cancelled)?;
+            let extracted = framework::enrich(snapshot, extracted, &mut cancelled)?;
+            return test_names::enrich(snapshot, extracted);
+        }
 
         let source = snapshot.source().as_bytes();
         let mut interrupted = false;
@@ -67,10 +103,15 @@ impl NativeExtractor {
             };
             let options = ParseOptions::new().progress_callback(&mut progress);
             self.parser
+                .as_mut()
+                .ok_or(ExtractError::GrammarUnavailable)?
                 .parse_with_options(&mut input, None, Some(options))
         };
         let Some(tree) = tree else {
-            self.parser.reset();
+            self.parser
+                .as_mut()
+                .ok_or(ExtractError::GrammarUnavailable)?
+                .reset();
             return if interrupted {
                 Err(ExtractError::Cancelled)
             } else {
@@ -87,17 +128,33 @@ impl NativeExtractor {
         } else {
             FileParseStatus::Parsed
         };
-        walk::extract(
+        if self.strategy == ExtractionStrategy::TagsQuery {
+            let extracted = tags::extract(
+                snapshot,
+                root,
+                parse_status,
+                self.tags_query.ok_or(ExtractError::GrammarUnavailable)?,
+                &mut cancelled,
+            )?;
+            let extracted = framework::enrich(snapshot, extracted, &mut cancelled)?;
+            return test_names::enrich(snapshot, extracted);
+        }
+        let extracted = walk::extract(
             snapshot,
             walk::WalkInput::new(root, parse_status),
             &mut cancelled,
-        )
+        )?;
+        let extracted = framework::enrich(snapshot, extracted, &mut cancelled)?;
+        test_names::enrich(snapshot, extracted)
     }
 }
 
 /// Credential-safe native grammar, cancellation, or source-boundary failure.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ExtractError {
+    /// No executable extractor exists, or production admission has not been granted.
+    #[error("source language is not available through this native extractor entry point")]
+    UnsupportedLanguage,
     /// The reusable parser was called with a snapshot for another grammar.
     #[error("native parser language does not match the source snapshot")]
     LanguageMismatch,

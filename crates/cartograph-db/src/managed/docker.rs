@@ -22,6 +22,7 @@ const ROLLBACK_STOP_POLICY: StopPolicy = StopPolicy {
 };
 const DATABASE_USER: &str = "cartograph";
 const DATABASE_NAME: &str = "cartograph";
+const MAINTENANCE_DATABASE_NAME: &str = "postgres";
 const CONTAINER_PASSWORD_PATH: &str = "/tmp/cartograph-postgres-password";
 const DATABASE_DATA_PATH: &str = "/var/lib/postgresql";
 const INSPECT_TEMPLATE: &str = concat!(
@@ -42,6 +43,18 @@ const VOLUME_INSPECT_TEMPLATE: &str = concat!(
 
 pub(super) struct DockerCli {
     runner: DockerCommandRunner,
+}
+
+pub(super) struct DockerContainerCli<'a> {
+    runner: &'a DockerCommandRunner,
+}
+
+pub(super) struct DockerArchiveCli<'a> {
+    runner: &'a DockerCommandRunner,
+}
+
+pub(super) struct DockerVolumeCli<'a> {
+    runner: &'a DockerCommandRunner,
 }
 
 struct DockerCommandRunner {
@@ -82,6 +95,57 @@ struct CommandOutput {
     status: ExitStatus,
     stdout: String,
     stderr: String,
+}
+
+struct CheckedDockerCommand {
+    operation: &'static str,
+    args: Vec<OsString>,
+    command_timeout: Duration,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum DatabaseArchiveOperation {
+    Create,
+    Verify,
+    Restore,
+}
+
+pub(super) struct DatabaseArchiveRequest<'a> {
+    name: &'a str,
+    container_path: &'a str,
+    operation: DatabaseArchiveOperation,
+}
+
+impl<'a> DatabaseArchiveRequest<'a> {
+    pub(super) const fn new(
+        name: &'a str,
+        container_path: &'a str,
+        operation: DatabaseArchiveOperation,
+    ) -> Self {
+        Self {
+            name,
+            container_path,
+            operation,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ContainerArchivePath<'a> {
+    pub(super) name: &'a str,
+    pub(super) path: &'a str,
+}
+
+#[derive(Clone, Copy)]
+enum ContainerCopyDirection {
+    FromContainer,
+    ToContainer,
+}
+
+struct ContainerArchiveCopy<'a> {
+    container: ContainerArchivePath<'a>,
+    host_path: &'a Path,
+    direction: ContainerCopyDirection,
 }
 
 #[derive(Clone, Copy)]
@@ -149,6 +213,26 @@ impl DockerCli {
             .map(|_| ())
     }
 
+    pub(super) const fn containers(&self) -> DockerContainerCli<'_> {
+        DockerContainerCli {
+            runner: &self.runner,
+        }
+    }
+
+    pub(super) const fn archives(&self) -> DockerArchiveCli<'_> {
+        DockerArchiveCli {
+            runner: &self.runner,
+        }
+    }
+
+    pub(super) const fn volumes(&self) -> DockerVolumeCli<'_> {
+        DockerVolumeCli {
+            runner: &self.runner,
+        }
+    }
+}
+
+impl DockerContainerCli<'_> {
     pub(super) async fn inspect_container(
         &self,
         name: &str,
@@ -167,7 +251,9 @@ impl DockerCli {
         }
         parse_container_inspection(trim_line_end(&output.stdout)).map(Some)
     }
+}
 
+impl DockerVolumeCli<'_> {
     pub(super) async fn ensure_volume(
         &self,
         identity: &ManagedResourceIdentity,
@@ -194,7 +280,9 @@ impl DockerCli {
         verify_volume(self, identity).await?;
         Ok(true)
     }
+}
 
+impl DockerContainerCli<'_> {
     pub(super) async fn create_container(
         &self,
         spec: &ContainerCreateSpec<'_>,
@@ -266,11 +354,11 @@ impl DockerCli {
     }
 
     pub(super) async fn stop_container(&self, name: &str) -> Result<(), ManagedDatabaseError> {
-        stop_container_with_grace(&self.runner, name, NORMAL_STOP_POLICY).await
+        stop_container_with_grace(self.runner, name, NORMAL_STOP_POLICY).await
     }
 
     pub(super) async fn rollback_container(&self, name: &str) -> Result<(), ManagedDatabaseError> {
-        stop_container_with_grace(&self.runner, name, ROLLBACK_STOP_POLICY).await
+        stop_container_with_grace(self.runner, name, ROLLBACK_STOP_POLICY).await
     }
 
     pub(super) async fn verify_loopback_port(
@@ -300,7 +388,9 @@ impl DockerCli {
         }
         Ok(join_output_streams(&output.stdout, &output.stderr))
     }
+}
 
+impl DockerVolumeCli<'_> {
     pub(super) async fn volume_exists_owned(
         &self,
         identity: &ManagedResourceIdentity,
@@ -311,97 +401,118 @@ impl DockerCli {
         validate_volume_ownership(&labels, identity)?;
         Ok(true)
     }
+}
 
-    pub(super) async fn create_database_archive(
-        &self,
-        name: &str,
-        container_path: &str,
-    ) -> Result<(), ManagedDatabaseError> {
-        self.runner
-            .checked_os_with_timeout(
-                "create managed database archive",
-                database_backup_arguments(name, container_path),
-                DOCKER_ARCHIVE_TIMEOUT,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|_| ManagedDatabaseError::BackupFailed)
-    }
-
-    pub(super) async fn verify_database_archive(
-        &self,
-        name: &str,
-        container_path: &str,
-    ) -> Result<(), ManagedDatabaseError> {
-        self.runner
-            .checked_os_with_timeout(
-                "verify managed database archive",
-                database_archive_list_arguments(name, container_path),
-                DOCKER_ARCHIVE_TIMEOUT,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|_| ManagedDatabaseError::RestoreArchiveInvalid)
-    }
-
-    pub(super) async fn restore_database_archive(
-        &self,
-        name: &str,
-        container_path: &str,
-    ) -> Result<(), ManagedDatabaseError> {
-        self.runner
-            .checked_os_with_timeout(
-                "restore managed database archive",
-                database_restore_arguments(name, container_path),
-                DOCKER_ARCHIVE_TIMEOUT,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|_| ManagedDatabaseError::RestoreFailed)
-    }
-
+impl DockerArchiveCli<'_> {
     pub(super) async fn copy_from_container(
         &self,
-        name: &str,
-        container_path: &str,
+        source: ContainerArchivePath<'_>,
         host_path: &Path,
     ) -> Result<(), ManagedDatabaseError> {
-        self.runner
-            .checked_os_with_timeout(
-                "copy managed database archive",
-                vec![
-                    OsString::from("container"),
-                    OsString::from("cp"),
-                    OsString::from(format!("{name}:{container_path}")),
-                    host_path.as_os_str().to_os_string(),
-                ],
-                DOCKER_ARCHIVE_TIMEOUT,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|_| ManagedDatabaseError::BackupFailed)
+        self.copy_container_archive(ContainerArchiveCopy {
+            container: source,
+            host_path,
+            direction: ContainerCopyDirection::FromContainer,
+        })
+        .await
     }
 
     pub(super) async fn copy_to_container(
         &self,
-        name: &str,
         host_path: &Path,
-        container_path: &str,
+        target: ContainerArchivePath<'_>,
     ) -> Result<(), ManagedDatabaseError> {
+        self.copy_container_archive(ContainerArchiveCopy {
+            container: target,
+            host_path,
+            direction: ContainerCopyDirection::ToContainer,
+        })
+        .await
+    }
+
+    pub(super) async fn database_archive(
+        &self,
+        request: DatabaseArchiveRequest<'_>,
+    ) -> Result<(), ManagedDatabaseError> {
+        if matches!(request.operation, DatabaseArchiveOperation::Restore) {
+            self.runner
+                .checked_os_with_timeout(CheckedDockerCommand {
+                    operation: "reset managed database before restore",
+                    args: database_reset_arguments(request.name),
+                    command_timeout: DOCKER_ARCHIVE_TIMEOUT,
+                })
+                .await
+                .map_err(|_| ManagedDatabaseError::RestoreFailed)?;
+        }
+        let (operation, args) = match request.operation {
+            DatabaseArchiveOperation::Create => (
+                "create managed database archive",
+                database_backup_arguments(request.name, request.container_path),
+            ),
+            DatabaseArchiveOperation::Verify => (
+                "verify managed database archive",
+                database_archive_list_arguments(request.name, request.container_path),
+            ),
+            DatabaseArchiveOperation::Restore => (
+                "restore managed database archive",
+                database_restore_arguments(request.name, request.container_path),
+            ),
+        };
         self.runner
-            .checked_os_with_timeout(
+            .checked_os_with_timeout(CheckedDockerCommand {
+                operation,
+                args,
+                command_timeout: DOCKER_ARCHIVE_TIMEOUT,
+            })
+            .await
+            .map(|_| ())
+            .map_err(|_| match request.operation {
+                DatabaseArchiveOperation::Create => ManagedDatabaseError::BackupFailed,
+                DatabaseArchiveOperation::Verify => ManagedDatabaseError::RestoreArchiveInvalid,
+                DatabaseArchiveOperation::Restore => ManagedDatabaseError::RestoreFailed,
+            })
+    }
+
+    async fn copy_container_archive(
+        &self,
+        request: ContainerArchiveCopy<'_>,
+    ) -> Result<(), ManagedDatabaseError> {
+        let container_path = OsString::from(format!(
+            "{}:{}",
+            request.container.name, request.container.path
+        ));
+        let host_path = request.host_path.as_os_str().to_os_string();
+        let (operation, args, failure) = match request.direction {
+            ContainerCopyDirection::FromContainer => (
+                "copy managed database archive",
+                vec![
+                    OsString::from("container"),
+                    OsString::from("cp"),
+                    container_path,
+                    host_path,
+                ],
+                ManagedDatabaseError::BackupFailed,
+            ),
+            ContainerCopyDirection::ToContainer => (
                 "copy managed restore archive",
                 vec![
                     OsString::from("container"),
                     OsString::from("cp"),
-                    host_path.as_os_str().to_os_string(),
-                    OsString::from(format!("{name}:{container_path}")),
+                    host_path,
+                    container_path,
                 ],
-                DOCKER_ARCHIVE_TIMEOUT,
-            )
+                ManagedDatabaseError::RestoreArchiveInvalid,
+            ),
+        };
+        self.runner
+            .checked_os_with_timeout(CheckedDockerCommand {
+                operation,
+                args,
+                command_timeout: DOCKER_ARCHIVE_TIMEOUT,
+            })
             .await
             .map(|_| ())
-            .map_err(|_| ManagedDatabaseError::RestoreArchiveInvalid)
+            .map_err(|_| failure)
     }
 
     pub(super) async fn remove_container_archive(
@@ -418,7 +529,9 @@ impl DockerCli {
             .map(|_| ())
             .map_err(|_| ManagedDatabaseError::ArchiveCleanupFailed)
     }
+}
 
+impl DockerContainerCli<'_> {
     pub(super) async fn rename_container(
         &self,
         current: &str,
@@ -442,7 +555,9 @@ impl DockerCli {
             .await
             .map(|_| ())
     }
+}
 
+impl DockerVolumeCli<'_> {
     pub(super) async fn remove_volume(&self, name: &str) -> Result<(), ManagedDatabaseError> {
         self.runner
             .checked("remove managed volume", ["volume", "rm", name])
@@ -542,14 +657,33 @@ fn database_restore_arguments(name: &str, container_path: &str) -> Vec<OsString>
         "--username",
         DATABASE_USER,
         "--dbname",
-        DATABASE_NAME,
-        "--clean",
-        "--if-exists",
+        MAINTENANCE_DATABASE_NAME,
+        "--create",
         "--exit-on-error",
-        "--single-transaction",
         "--no-owner",
         "--no-privileges",
         container_path,
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
+}
+
+fn database_reset_arguments(name: &str) -> Vec<OsString> {
+    [
+        "exec",
+        name,
+        "timeout",
+        "--signal=TERM",
+        "--kill-after",
+        CONTAINER_ARCHIVE_KILL_AFTER,
+        CONTAINER_ARCHIVE_TIMEOUT,
+        "dropdb",
+        "--username",
+        DATABASE_USER,
+        "--force",
+        "--if-exists",
+        DATABASE_NAME,
     ]
     .into_iter()
     .map(OsString::from)
@@ -585,7 +719,7 @@ pub(super) async fn initialize_extensions(
 }
 
 async fn inspect_volume_labels(
-    docker: &DockerCli,
+    docker: &DockerVolumeCli<'_>,
     identity: &ManagedResourceIdentity,
 ) -> Result<Option<String>, ManagedDatabaseError> {
     let existing = docker
@@ -610,7 +744,7 @@ async fn inspect_volume_labels(
 }
 
 pub(super) async fn verify_volume(
-    docker: &DockerCli,
+    docker: &DockerVolumeCli<'_>,
     identity: &ManagedResourceIdentity,
 ) -> Result<(), ManagedDatabaseError> {
     let labels = inspect_volume_labels(docker, identity)
@@ -675,13 +809,15 @@ impl DockerCommandRunner {
 
     async fn checked_os_with_timeout(
         &self,
-        operation: &'static str,
-        args: Vec<OsString>,
-        command_timeout: Duration,
+        command: CheckedDockerCommand,
     ) -> Result<String, ManagedDatabaseError> {
-        let output = self.execute_os_with_timeout(args, command_timeout).await?;
+        let output = self
+            .execute_os_with_timeout(command.args, command.command_timeout)
+            .await?;
         if !output.status.success() {
-            return Err(ManagedDatabaseError::DockerOperation { operation });
+            return Err(ManagedDatabaseError::DockerOperation {
+                operation: command.operation,
+            });
         }
         Ok(output.stdout)
     }
@@ -1056,11 +1192,16 @@ mod tests {
     fn archive_commands_use_fixed_database_identity_without_secret_arguments() {
         let backup = database_backup_arguments("cartograph-v2-test", "/tmp/managed.dump");
         let restore = database_restore_arguments("cartograph-v2-test", "/tmp/managed.dump");
+        let reset = database_reset_arguments("cartograph-v2-test");
         let rendered_backup: Vec<_> = backup
             .iter()
             .map(|argument| argument.to_string_lossy())
             .collect();
         let rendered_restore: Vec<_> = restore
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect();
+        let rendered_reset: Vec<_> = reset
             .iter()
             .map(|argument| argument.to_string_lossy())
             .collect();
@@ -1083,7 +1224,7 @@ mod tests {
                 .any(|argument| argument == "pg_restore")
         );
         assert!(
-            rendered_restore
+            !rendered_restore
                 .iter()
                 .any(|argument| argument == "--single-transaction")
         );
@@ -1092,6 +1233,18 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--exit-on-error")
         );
+        assert!(
+            rendered_restore
+                .iter()
+                .any(|argument| argument == "--create")
+        );
+        assert!(
+            rendered_restore
+                .windows(2)
+                .any(|pair| pair == ["--dbname", MAINTENANCE_DATABASE_NAME])
+        );
+        assert!(rendered_reset.iter().any(|argument| argument == "dropdb"));
+        assert!(rendered_reset.iter().any(|argument| argument == "--force"));
         assert!(
             !rendered_backup
                 .iter()

@@ -1,24 +1,83 @@
-use std::{env, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+#![recursion_limit = "256"]
 
-use cartograph_agent::{IndexOptions, IndexReport, ProjectRuntime, ProjectStatus};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    io::{IsTerminal as _, Read as _, Write as _},
+    path::{Path, PathBuf},
+    process::{self, Command as ProcessCommand, ExitCode, Stdio},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use cartograph_agent::{
+    EmbeddingOptions, IndexOptions, IndexReport, ProjectRuntime, RetrievalOptions,
+    RetrievalRequest, ReviewOptions, ReviewReport, SourceContextOptions, SourceContextRequest,
+    WorkingTreeOverlayRequest,
+};
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{
-    CapabilityReport, CheckStatus, DEFAULT_MANAGED_DATABASE_PORT, ManagedContainerState,
-    ManagedDatabase, ManagedDatabaseStatus, ManagedDestructiveOperation, ManagedStartReport,
+    CapabilityReport, CartographDatabase, CheckStatus, DEFAULT_MANAGED_DATABASE_PORT,
+    GenerationRetentionPolicy, GenerationRetentionRequest, GenerationValidationLimits, LeaseOwner,
+    LeaseRequest, LeaseTarget, ManagedContainerState, ManagedDatabase, ManagedDatabaseStatus,
+    ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedStartReport,
+    V1PostgresImportExecution, V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource,
+    V1PostgresSourceRevision,
 };
-use cartograph_domain::{NormalizedPath, ProjectId, SymbolId};
+use cartograph_domain::{
+    EdgeKind, ModelId, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage, SymbolId,
+};
+use cartograph_llm::{
+    ProjectLlmCredentialSource, ProjectLlmTier, load_exact_project_llm_tier,
+    probe_openai_compatible_endpoint,
+};
 use cartograph_mcp::{ProtocolServer, ServerConfig, ServerLimits, ServerMetadata, ToolProfile};
 use cartograph_search::{
-    ContextAnchor, ContextBudget, ContextRequest, DeterministicRetriever, IndexFreshness,
-    TraversalBudget, TraversalRequest,
+    ContextAnchor, ContextBudget, ContextRequest, ContextRequestOptions, DeterministicRetriever,
+    EntryPointBucket, EntryPointsQuery, ExactPathQuery, ExactTextQuery, FileInventoryQuery,
+    GraphPathRequest, IndexFreshness, LexicalQuery, SearchMode, SimilarRequest, SourceRangeQuery,
+    TaskIntent, TraversalBudget, TraversalRequest,
 };
-use clap::{Parser, Subcommand, ValueEnum};
-use mcp_handler::CartographMcpHandler;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use futures_util::{StreamExt as _, stream};
+use install::{
+    InstallLocation as AgentInstallLocation, InstallReport, InstallRequest, InstallTarget,
+};
+use mcp_handler::{AGENT_PLAYBOOK, CartographMcpHandler, HandlerDefaults};
 use serde::Serialize;
+use serde_json::{Map, Value};
+use url::Url;
 
+mod auto_sync;
+mod backend;
+mod completions;
+mod generated_cli;
+mod git_hooks;
+mod graph_export;
+mod host;
+mod install;
+mod llm_commands;
+mod mcp_budget;
 mod mcp_handler;
+mod upgrade;
+
+use graph_export::{DEFAULT_NODE_LIMIT, GraphExportFormat, GraphExportRequest};
 
 const MANAGED_DATABASE_PORT_ENV: &str = "CARTOGRAPH_MANAGED_DATABASE_PORT";
+const V1_IMPORT_CONFIRMATION: &str = "import-v1-postgres";
+const RETENTION_CONFIRMATION: &str = "prune-old-generations";
+const DEFAULT_IMPORT_MAXIMUM_ROWS: u64 = 10_000_000;
+const MAXIMUM_IMPORT_ROWS: u64 = 100_000_000;
+const DEFAULT_IMPORT_MAXIMUM_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+const MAXIMUM_IMPORT_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(test)]
+const EXCESSIVE_IMPORT_SOURCE_BYTES_TEXT: &str = "536870913";
+const DEFAULT_IMPORT_OUTPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_IMPORT_WORKING_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAINTENANCE_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
+const MAINTENANCE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(4 * 60);
+const MAXIMUM_TRANSIENT_FILE_BYTES: usize = 10 * 1024 * 1024;
+const MCP_SERVER_INSTRUCTIONS: &str = "Start with cartograph_status and do not treat stale or unknown-freshness graph evidence as current. Use cartograph_context for the concrete coding task, then narrow with entry_points, files, at_range, find, node, graph, or affected. Read live source before editing. After changes, use cartograph_review against the intended base and run the repository's real quality gates. Preserve generation, freshness, confidence, abstention, provenance, multiplicity, and truncation in your reasoning. Use cartograph_admin only for explicit bounded lifecycle work. Call cartograph_playbook when you need the full workflow and tool-routing guide.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,13 +86,22 @@ const MANAGED_DATABASE_PORT_ENV: &str = "CARTOGRAPH_MANAGED_DATABASE_PORT";
     about = "Rust/PostgreSQL/ParadeDB code intelligence for coding agents"
 )]
 struct Cli {
+    /// Disable ANSI color output. Retained for v1 command-line compatibility.
+    #[arg(long = "no-color", global = true)]
+    _no_color: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage configured local llama-server processes without owning external providers.
+    Backend {
+        #[command(subcommand)]
+        command: backend::BackendCommand,
+    },
     /// Build and atomically publish a complete native source generation.
+    #[command(alias = "quickstart")]
     Index {
         /// Existing project root to index.
         #[arg(default_value = ".")]
@@ -53,20 +121,60 @@ enum Command {
         /// Existing project root whose state should be inspected.
         #[arg(default_value = ".")]
         project_path: PathBuf,
+        /// Output the complete structured status as JSON.
+        #[arg(short = 'j', long)]
+        json: bool,
+        /// Include default hotspot, biomarker, and summary-provenance rollups.
+        #[arg(long)]
+        verbose: bool,
+        /// Inline the top-N hotspots; invalid or sub-one values suppress the rollup.
+        #[arg(long)]
+        top_hotspots: Option<String>,
+        /// Inline the top-N warning-or-worse biomarker findings.
+        #[arg(long)]
+        top_biomarkers: Option<String>,
+        /// Include summary coverage grouped by durable model provenance.
+        #[arg(long)]
+        summary_breakdown: bool,
+        /// Additive v2 output selector; --json takes precedence.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Embed missing current-generation documents through the configured endpoint.
+    Embed {
+        /// Existing indexed project whose search documents should be embedded.
+        #[arg(default_value = ".")]
+        project_path: PathBuf,
+        /// Maximum concurrent endpoint/database batches.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=16))]
+        workers: Option<u16>,
         /// Output format for humans or automation.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Find exact or ParadeDB-ranked evidence in the current generation.
+    /// Probe the configured embedding model and report PostgreSQL semantic readiness.
+    EmbeddingStatus {
+        /// Existing indexed project whose semantic coverage should be checked.
+        #[arg(default_value = ".")]
+        project_path: PathBuf,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Find exact, lexical, or hybrid evidence in the current generation.
+    #[command(name = "find-native", hide = true)]
     Find {
-        /// Name, project-relative path, reference text, or BM25 query.
+        /// Name, project-relative path, reference text, or natural-language query.
         query: String,
         /// Retrieval channel to execute.
-        #[arg(long, value_enum, default_value_t = FindBy::Name)]
+        #[arg(long, value_enum, default_value_t = FindBy::Auto)]
         by: FindBy,
         /// Maximum result rows.
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
         limit: u16,
+        /// Explicitly permit cached evidence when the live source revision is stale.
+        #[arg(long)]
+        allow_stale: bool,
         /// Existing project root whose current generation should be searched.
         #[arg(long, default_value = ".")]
         project_path: PathBuf,
@@ -74,7 +182,8 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Build a compact deterministic coding-task evidence packet.
+    /// Build an intent-routed evidence packet with provenance, graph policy, and live overlay.
+    #[command(name = "context-native", hide = true)]
     Context {
         /// Coding task or investigation question.
         task: String,
@@ -87,6 +196,9 @@ enum Command {
         /// Optional exact source-reference seed.
         #[arg(long)]
         exact_reference: Option<String>,
+        /// Natural-language retrieval policy; auto falls back to deterministic BM25.
+        #[arg(long, value_enum, default_value_t = RetrievalMode::Auto)]
+        mode: RetrievalMode,
         /// Existing project root whose evidence should be assembled.
         #[arg(long, default_value = ".")]
         project_path: PathBuf,
@@ -94,19 +206,106 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Traverse callers, callees, or reverse impact from an exact symbol ID.
+    /// List a bounded current-generation source-file inventory.
+    #[command(name = "files-native", hide = true)]
+    Files {
+        /// Optional exact project-relative directory subtree.
+        #[arg(long)]
+        dir: Option<String>,
+        /// Optional stable language identifier.
+        #[arg(long)]
+        language: Option<String>,
+        /// Maximum file rows.
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+        /// Explicitly permit cached evidence when the live source revision is stale.
+        #[arg(long)]
+        allow_stale: bool,
+        /// Existing project root whose current generation should be listed.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Discover typed top-of-stack routes, commands, MCP tools, CLI declarations, and public APIs.
+    #[command(name = "entry-points-native", hide = true)]
+    EntryPoints {
+        /// Optional category; omit to return every category in stable order.
+        #[arg(long, value_enum)]
+        bucket: Option<EntryPointBucketArg>,
+        /// Maximum symbols returned per category.
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=200))]
+        limit: u16,
+        /// Explicitly permit cached evidence when the live source revision is stale.
+        #[arg(long)]
+        allow_stale: bool,
+        /// Existing project root whose public boundary should be inspected.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Resolve indexed symbols overlapping one exact inclusive source range.
+    #[command(name = "at-range-native", hide = true)]
+    AtRange {
+        /// Exact project-relative source path.
+        file: String,
+        /// First one-based source line.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=10_000_000))]
+        start_line: u32,
+        /// Last one-based source line.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=10_000_000))]
+        end_line: u32,
+        /// Maximum overlapping symbols.
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=200))]
+        limit: u16,
+        /// Explicitly permit cached evidence when the live source revision is stale.
+        #[arg(long)]
+        allow_stale: bool,
+        /// Existing project root whose current generation should be queried.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Traverse or find a shortest dependency path from an exact symbol ID.
+    #[command(name = "graph-native", hide = true)]
     Graph {
         /// Exact UUID returned by `cartograph find` or `cartograph context`.
         symbol_id: String,
         /// Traversal orientation.
         #[arg(long, value_enum, default_value_t = GraphAxis::Impact)]
         direction: GraphAxis,
+        /// Exact target UUID required by `--direction path`.
+        #[arg(long)]
+        to: Option<String>,
+        /// Restrict traversal or path search to one exact edge kind.
+        #[arg(long, value_enum)]
+        edge_kind: Option<GraphEdgeKind>,
+        /// Semantic neighbor count for `--direction similar` (default 5, maximum 50).
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=50))]
+        k: Option<u16>,
+        /// Minimum cosine similarity for `--direction similar` (default 0.3).
+        #[arg(long)]
+        min_score: Option<f64>,
+        /// Restrict semantic neighbors to the source symbol's language.
+        #[arg(long)]
+        same_language: bool,
+        /// Exact active embedding-model UUID when multiple models are ready.
+        #[arg(long)]
+        model_id: Option<String>,
         /// Maximum graph depth.
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=8))]
         depth: u8,
         /// Maximum non-root symbols.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
         max_nodes: u16,
+        /// Explicitly permit cached evidence when the live source revision is stale.
+        #[arg(long)]
+        allow_stale: bool,
         /// Existing project root whose graph should be traversed.
         #[arg(long, default_value = ".")]
         project_path: PathBuf,
@@ -114,7 +313,28 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
+    /// Read bounded source context for one exact current-generation symbol ID.
+    Show {
+        /// Exact UUID returned by `cartograph find`, `context`, or `graph`.
+        symbol_id: String,
+        /// Symmetric source lines included before and after the declaration.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(0..=200))]
+        context_lines: u16,
+        /// Hard UTF-8 source payload ceiling.
+        #[arg(long, default_value_t = 65_536, value_parser = clap::value_parser!(u32).range(1024..=262144))]
+        max_bytes: u32,
+        /// Explicitly permit stale metadata with source omitted.
+        #[arg(long)]
+        allow_stale: bool,
+        /// Existing project root whose current symbol should be read.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
     /// Select bounded affected tests from reverse graph impact.
+    #[command(name = "affected-native", hide = true)]
     Affected {
         /// Exact changed symbol UUID.
         symbol_id: String,
@@ -127,7 +347,205 @@ enum Command {
         /// Maximum test results.
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
         limit: u16,
+        /// Explicitly permit cached evidence when the live source revision is stale.
+        #[arg(long)]
+        allow_stale: bool,
         /// Existing project root whose graph should be traversed.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Compare the live checkout to a Git ref and assemble deterministic review evidence.
+    #[command(name = "review-native", hide = true)]
+    Review {
+        /// Git revision to compare with the live index and working tree.
+        #[arg(long = "ref", default_value = "HEAD")]
+        base_ref: String,
+        /// Maximum changed files retained after stable path ordering.
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=512))]
+        max_changed_files: u16,
+        /// Existing project root whose Git checkout and graph should be reviewed.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Export a capped graph snapshot as JSON, DOT, Mermaid, or Cytoscape JSON.
+    Export {
+        /// Existing indexed project to export.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Explicit project path (overrides the positional path).
+        #[arg(short = 'p', long)]
+        project_path: Option<PathBuf>,
+        /// Graph artifact format.
+        #[arg(short = 'f', long, value_enum, default_value_t = GraphExportFormat::Json)]
+        format: GraphExportFormat,
+        /// Write the artifact to a file instead of stdout.
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+        /// Maximum exported nodes; edges are retained only between exported nodes.
+        #[arg(long, default_value_t = DEFAULT_NODE_LIMIT, value_parser = clap::value_parser!(u16).range(1..=50_000))]
+        limit: u16,
+        /// Comma-separated symbol kinds to include.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Comma-separated edge kinds to include.
+        #[arg(long)]
+        edge_kind: Option<String>,
+        /// Comma-separated languages to include.
+        #[arg(long)]
+        language: Option<String>,
+        /// Only include symbols whose project-relative file starts with this prefix.
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// Find embedding-cosine peers of an exact symbol name or UUID.
+    Similar {
+        /// Exact symbol name or UUID.
+        symbol: String,
+        /// Maximum semantic neighbors.
+        #[arg(short = 'k', long = "top-k", visible_alias = "k", default_value_t = 5, value_parser = clap::value_parser!(u16).range(1..=50))]
+        k: u16,
+        /// Minimum cosine similarity.
+        #[arg(long, default_value_t = 0.3)]
+        min_score: f64,
+        /// Restrict results to the source symbol's language.
+        #[arg(long)]
+        same_language: bool,
+        /// Exact active embedding-model UUID when more than one model is ready.
+        #[arg(long)]
+        model_id: Option<String>,
+        /// Explicitly permit cached evidence when the live source is stale.
+        #[arg(long)]
+        allow_stale: bool,
+        /// Existing indexed project.
+        #[arg(short = 'p', long, default_value = ".")]
+        project_path: PathBuf,
+    },
+    /// Re-index only when source state is dirty or the current generation is stale.
+    SyncIfDirty {
+        /// Existing indexed project.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Suppress hook-friendly output.
+        #[arg(short = 'q', long)]
+        quiet: bool,
+        /// Transient maximum source-file size (bytes, kb, or mb; maximum 10mb).
+        #[arg(long)]
+        max_file_size: Option<String>,
+    },
+    /// Install managed Git hooks that keep the Cartograph index fresh.
+    InstallHooks {
+        /// Existing Git working tree.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Comma-separated hooks: post-merge, post-checkout, post-rewrite.
+        #[arg(long)]
+        hooks: Option<String>,
+        /// Cartograph executable name or path embedded in the managed block.
+        #[arg(long)]
+        command: Option<String>,
+        /// Remove only Cartograph's managed hook blocks.
+        #[arg(long)]
+        remove: bool,
+        /// Print planned changes without writing hook files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Measure MCP startup payload size and its largest schema contributors.
+    McpBudget {
+        /// Advertised tool profile.
+        #[arg(long, value_enum, default_value_t = McpProfile::Core)]
+        profile: McpProfile,
+        /// Measure with only explicitly read-only tool contracts.
+        #[arg(long = "no-write-tools")]
+        no_write_tools: bool,
+        /// Exact tool names to omit; repeat the option or pass several names.
+        #[arg(long, num_args = 1.., action = clap::ArgAction::Append)]
+        disable_tool: Vec<String>,
+        /// Number of largest tool schemas to list.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(0..=100))]
+        top: u16,
+        /// Print structured JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print shell completion setup.
+    #[command(alias = "completion")]
+    Completions {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: completions::CompletionShell,
+    },
+    /// Internal dynamic shell-completion helper.
+    #[command(name = "__complete", hide = true, trailing_var_arg = true)]
+    CompleteInternal {
+        #[arg(allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+    /// Print the complete coding-agent workflow and tool-routing guide.
+    Guide,
+    /// Configure, install, and exercise optional OpenAI-compatible LLM tiers.
+    Llm {
+        #[command(subcommand)]
+        command: llm_commands::LlmCommand,
+    },
+    /// Deprecated alias of `cartograph llm install`.
+    #[command(name = "setup", hide = true)]
+    Setup(llm_commands::InstallArguments),
+    /// Check for a newer native release and optionally install it in place.
+    #[command(alias = "update")]
+    Upgrade {
+        /// Download, verify, smoke-test, and atomically install the latest release.
+        #[arg(long)]
+        apply: bool,
+        /// Output structured JSON.
+        #[arg(short = 'j', long)]
+        json: bool,
+    },
+    /// Configure Cartograph for one or more coding-agent hosts.
+    Install {
+        /// Comma-separated target ids, or auto, all, or none.
+        #[arg(short = 't', long)]
+        target: Option<String>,
+        /// Install globally for all projects or privately in this project.
+        #[arg(short = 'l', long, value_enum, default_value_t = InstallLocation::Global)]
+        location: InstallLocation,
+        /// Existing project root to expose through the MCP server.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
+        /// Use non-interactive defaults: global, auto-detected targets, permissions enabled.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Skip Claude/Qoder MCP auto-allow entries.
+        #[arg(long)]
+        no_permissions: bool,
+        /// Skip managed Git hooks for project-local installation.
+        #[arg(long)]
+        no_hooks: bool,
+        /// Command or absolute executable path written into host configuration.
+        #[arg(long)]
+        command: Option<String>,
+        /// Print one target's MCP configuration without writing files.
+        #[arg(long)]
+        print_config: Option<String>,
+        /// Output format for humans or automation.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Remove Cartograph-owned MCP entries and guidance from agent hosts.
+    Uninstall {
+        /// Optional comma-separated target ids; defaults to every known target.
+        #[arg(short = 't', long)]
+        target: Option<String>,
+        /// Remove global or project-local entries.
+        #[arg(short = 'l', long, value_enum, default_value_t = InstallLocation::Global)]
+        location: InstallLocation,
+        /// Existing project root containing the registration.
         #[arg(long, default_value = ".")]
         project_path: PathBuf,
         /// Output format for humans or automation.
@@ -140,17 +558,50 @@ enum Command {
         #[arg(long)]
         mcp: bool,
         /// Existing project root exposed to this MCP process.
-        #[arg(long, default_value = ".")]
+        #[arg(short = 'p', long, default_value = ".")]
         project_path: PathBuf,
         /// Advertised MCP tool profile.
         #[arg(long, value_enum, default_value_t = McpProfile::Core)]
         profile: McpProfile,
+        /// Compatibility flag; PostgreSQL advisory locks replace the v1 writer daemon.
+        #[arg(long, conflicts_with = "no_daemon")]
+        daemon: bool,
+        /// Run this MCP connection directly (the native v2 default).
+        #[arg(long = "no-daemon", conflicts_with = "daemon")]
+        no_daemon: bool,
+        /// Internal v1 compatibility flag; native v2 still serves this connection directly.
+        #[arg(long, hide = true)]
+        daemon_child: bool,
+        /// Advertise only explicitly read-only tool contracts.
+        #[arg(long = "no-write-tools")]
+        no_write_tools: bool,
+        /// Default allowStale to true when a supporting tool omits it.
+        #[arg(long)]
+        allow_stale_default: bool,
+        /// Default lowTokens to true when a supporting tool omits it.
+        #[arg(long)]
+        low_tokens_default: bool,
+        /// Exact tool names to omit from the advertised and callable surface.
+        #[arg(long, num_args = 1.., action = clap::ArgAction::Append)]
+        disable_tool: Vec<String>,
+        /// Skip the default one-time source catch-up before serving.
+        #[arg(long)]
+        no_startup_sync: bool,
     },
     /// Verify PostgreSQL 18, ParadeDB, pgvector, and code tokenization.
     Doctor {
         /// Existing project root used to discover managed credentials when no URL is exported.
         #[arg(default_value = ".")]
         project_path: PathBuf,
+        /// Repair safe local gaps: create private state, start the managed database, and install/configure missing minimal LLM tiers.
+        #[arg(long)]
+        fix: bool,
+        /// Skip project state, index, and LLM checks for fresh-install verification.
+        #[arg(long, visible_alias = "skip-project-checks")]
+        no_project_checks: bool,
+        /// Print structured JSON (alias of --format json).
+        #[arg(short = 'j', long)]
+        json: bool,
         /// Output format for humans or automation.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -165,132 +616,147 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum DatabaseCommand {
     /// Idempotently start, initialize, and verify the managed database.
-    Start {
-        /// Existing project root whose managed resources should be used.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port for PostgreSQL.
-        #[arg(long, default_value_t = 55432, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Maximum seconds to wait for managed database readiness.
-        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(1..=600))]
-        wait_seconds: u64,
-        /// Output format for humans or automation.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
+    Start(DatabaseStartArguments),
     /// Report the owned container state without creating anything.
-    Status {
-        /// Existing project root whose managed resources should be inspected.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Output format for humans or automation.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
+    Status(DatabaseStatusArguments),
     /// Stop only the container owned by this project.
-    Stop {
-        /// Existing project root whose managed resources should be stopped.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-    },
+    Stop(DatabaseStopArguments),
     /// Print a bounded tail from only the project-owned container.
-    Logs {
-        /// Existing project root whose managed logs should be read.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Maximum number of log lines.
-        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=10000))]
-        tail: u16,
-    },
+    Logs(DatabaseLogsArguments),
     /// Write a private, verified custom-format PostgreSQL archive.
-    Backup {
-        /// New archive path; an existing path is refused.
-        destination: PathBuf,
-        /// Existing project root whose owned database should be backed up.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Output format for humans or automation.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
+    Backup(DatabaseBackupArguments),
     /// Replace managed contents from a verified archive with automatic rollback.
-    Restore {
-        /// Existing custom-format archive to restore.
-        source: PathBuf,
-        /// Exact acknowledgement: restore-managed-database.
-        #[arg(long)]
-        confirm: String,
-        /// Existing project root whose owned database should be restored.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Output format for humans or automation.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
+    Restore(DatabaseRestoreArguments),
     /// Permanently remove only the resources owned by this project.
-    Remove {
-        /// Exact acknowledgement: remove-managed-database.
-        #[arg(long)]
-        confirm: String,
-        /// Existing project root whose owned resources should be removed.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Output format for humans or automation.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
+    Remove(DatabaseDestructiveArguments),
     /// Replace an owned older container with the supported image and rollback on failure.
-    Upgrade {
-        /// Exact acknowledgement: upgrade-managed-database.
-        #[arg(long)]
-        confirm: String,
-        /// Existing project root whose owned database should be upgraded.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Output format for humans or automation.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
+    Upgrade(DatabaseDestructiveArguments),
     /// Inspect or transactionally rebuild the derived ParadeDB BM25 index.
-    DerivedIndex {
-        /// Rebuild instead of only checking health.
-        #[arg(long)]
-        rebuild: bool,
-        /// Exact acknowledgement required with --rebuild.
-        #[arg(long, requires = "rebuild")]
-        confirm: Option<String>,
-        /// Existing project root whose derived index should be inspected.
-        #[arg(long, default_value = ".")]
-        project_path: PathBuf,
-        /// Loopback host port used by the managed database.
-        #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-        port: u16,
-        /// Output format for humans or automation.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
+    DerivedIndex(DatabaseDerivedIndexArguments),
+    /// Validate or resume a PostgreSQL-only v1.1.33 schema import.
+    ImportV1(V1ImportArguments),
+    /// Delete a bounded batch of failed and old superseded generations.
+    Prune(PruneArguments),
+}
+
+#[derive(Debug, Args)]
+struct DatabaseStartArguments {
+    /// Existing project root whose managed resources should be used.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port for PostgreSQL.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+    /// Maximum seconds to wait for managed database readiness.
+    #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(1..=600))]
+    wait_seconds: u64,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseStatusArguments {
+    /// Existing project root whose managed resources should be inspected.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port used by the managed database.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseStopArguments {
+    /// Existing project root whose managed resources should be stopped.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port used by the managed database.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseLogsArguments {
+    /// Existing project root whose managed logs should be read.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port used by the managed database.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+    /// Maximum number of log lines.
+    #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=10000))]
+    tail: u16,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseBackupArguments {
+    /// New archive path; an existing path is refused.
+    destination: PathBuf,
+    /// Existing project root whose owned database should be backed up.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port used by the managed database.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseRestoreArguments {
+    /// Existing custom-format archive to restore.
+    source: PathBuf,
+    /// Exact acknowledgement: restore-managed-database.
+    #[arg(long)]
+    confirm: String,
+    /// Existing project root whose owned database should be restored.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port used by the managed database.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseDestructiveArguments {
+    /// Exact acknowledgement for the requested destructive operation.
+    #[arg(long)]
+    confirm: String,
+    /// Existing project root whose owned database should be changed.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port used by the managed database.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseDerivedIndexArguments {
+    /// Rebuild instead of only checking health.
+    #[arg(long)]
+    rebuild: bool,
+    /// Exact acknowledgement required with --rebuild.
+    #[arg(long, requires = "rebuild")]
+    confirm: Option<String>,
+    /// Existing project root whose derived index should be inspected.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Loopback host port used by the managed database.
+    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: u16,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -300,10 +766,12 @@ enum OutputFormat {
     Json,
 }
 
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum McpProfile {
+    Full,
     #[default]
     Core,
+    Coding,
     ReadOnly,
     Review,
 }
@@ -311,24 +779,317 @@ enum McpProfile {
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum FindBy {
     #[default]
+    Auto,
     Name,
     Path,
     Reference,
     Bm25,
+    Hybrid,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum RetrievalMode {
+    #[default]
+    Auto,
+    Deterministic,
+    Hybrid,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum EntryPointBucketArg {
+    Routes,
+    Cli,
+    CliCommands,
+    McpTools,
+    CliFiles,
+    PublicExports,
+}
+
+impl From<EntryPointBucketArg> for EntryPointBucket {
+    fn from(value: EntryPointBucketArg) -> Self {
+        match value {
+            EntryPointBucketArg::Routes => Self::Routes,
+            EntryPointBucketArg::Cli | EntryPointBucketArg::CliCommands => Self::CliCommands,
+            EntryPointBucketArg::McpTools => Self::McpTools,
+            EntryPointBucketArg::CliFiles => Self::CliFiles,
+            EntryPointBucketArg::PublicExports => Self::PublicExports,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum GraphAxis {
     Callers,
     Callees,
+    Both,
+    Path,
+    Similar,
     #[default]
     Impact,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum GraphEdgeKind {
+    Calls,
+    Imports,
+    References,
+    Implements,
+    Extends,
+    Tests,
+    TypeOf,
+    Returns,
+    Instantiates,
+    Overrides,
+    Decorates,
+    FieldAccess,
+    DefUse,
+    Exports,
+    Contains,
+}
+
+impl From<GraphEdgeKind> for EdgeKind {
+    fn from(value: GraphEdgeKind) -> Self {
+        match value {
+            GraphEdgeKind::Calls => Self::Calls,
+            GraphEdgeKind::Imports => Self::Imports,
+            GraphEdgeKind::References => Self::References,
+            GraphEdgeKind::Implements => Self::Implements,
+            GraphEdgeKind::Extends => Self::Extends,
+            GraphEdgeKind::Tests => Self::Tests,
+            GraphEdgeKind::TypeOf => Self::TypeOf,
+            GraphEdgeKind::Returns => Self::Returns,
+            GraphEdgeKind::Instantiates => Self::Instantiates,
+            GraphEdgeKind::Overrides => Self::Overrides,
+            GraphEdgeKind::Decorates => Self::Decorates,
+            GraphEdgeKind::FieldAccess => Self::FieldAccess,
+            GraphEdgeKind::DefUse => Self::DefUse,
+            GraphEdgeKind::Exports => Self::Exports,
+            GraphEdgeKind::Contains => Self::Contains,
+        }
+    }
+}
+
+struct FindArguments {
+    project_path: PathBuf,
+    query: String,
+    by: FindBy,
+    limit: u16,
+    allow_stale: bool,
+    format: OutputFormat,
+}
+
+struct FilesArguments {
+    project_path: PathBuf,
+    directory: Option<String>,
+    language: Option<String>,
+    limit: u16,
+    allow_stale: bool,
+    format: OutputFormat,
+}
+
+struct EntryPointsArguments {
+    project_path: PathBuf,
+    bucket: Option<EntryPointBucket>,
+    limit: u16,
+    allow_stale: bool,
+    format: OutputFormat,
+}
+
+struct AtRangeArguments {
+    project_path: PathBuf,
+    file: String,
+    start_line: u32,
+    end_line: u32,
+    limit: u16,
+    allow_stale: bool,
+    format: OutputFormat,
+}
+
+struct ContextArguments {
+    project_path: PathBuf,
+    task: String,
+    exact_name: Option<String>,
+    exact_path: Option<String>,
+    exact_reference: Option<String>,
+    mode: RetrievalMode,
+    format: OutputFormat,
+}
+
+impl From<RetrievalMode> for SearchMode {
+    fn from(value: RetrievalMode) -> Self {
+        match value {
+            RetrievalMode::Auto => Self::Auto,
+            RetrievalMode::Deterministic => Self::Deterministic,
+            RetrievalMode::Hybrid => Self::Hybrid,
+        }
+    }
+}
+
+struct GraphArguments {
+    project_path: PathBuf,
+    symbol_id: String,
+    direction: GraphAxis,
+    target_symbol_id: Option<String>,
+    edge_kind: Option<EdgeKind>,
+    similar_limit: Option<u16>,
+    minimum_score: Option<f64>,
+    same_language: bool,
+    model_id: Option<String>,
+    depth: u8,
+    max_nodes: u16,
+    allow_stale: bool,
+    format: OutputFormat,
+}
+
+struct AffectedArguments {
+    project_path: PathBuf,
+    symbol_id: String,
+    depth: u8,
+    max_nodes: u16,
+    limit: u16,
+    allow_stale: bool,
+    format: OutputFormat,
+}
+
+struct ShowArguments {
+    project_path: PathBuf,
+    symbol_id: String,
+    context_lines: u16,
+    max_bytes: u32,
+    allow_stale: bool,
+    format: OutputFormat,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliFreshEvidence<'evidence, Evidence> {
+    freshness: IndexFreshness,
+    evidence: &'evidence Evidence,
+}
+
+struct ReviewArguments {
+    project_path: PathBuf,
+    base_ref: String,
+    max_changed_files: u16,
+    format: OutputFormat,
+}
+
+struct IndexArguments {
+    project_path: PathBuf,
+    workers: Option<u16>,
+    force: bool,
+    format: OutputFormat,
+}
+
+struct AgentInstallArguments {
+    target: Option<String>,
+    location: InstallLocation,
+    project_path: PathBuf,
+    yes: bool,
+    permissions: bool,
+    hooks: bool,
+    command: Option<String>,
+    print_config: Option<String>,
+    format: OutputFormat,
+    remove: bool,
+}
+
+struct McpServeArguments {
+    mcp: bool,
+    project_path: PathBuf,
+    profile: McpProfile,
+    daemon: bool,
+    no_daemon: bool,
+    daemon_child: bool,
+    no_write_tools: bool,
+    allow_stale_default: bool,
+    low_tokens_default: bool,
+    disable_tool: Vec<String>,
+    no_startup_sync: bool,
+}
+
+#[derive(Debug, Args)]
+struct V1ImportArguments {
+    /// Existing checkout whose bytes must match the v1 source rows.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Existing v1.1.33 PostgreSQL schema in the same database.
+    #[arg(long)]
+    source_schema: String,
+    /// Hard aggregate row ceiling for source admission.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_IMPORT_MAXIMUM_ROWS,
+        value_parser = clap::value_parser!(u64).range(1..=MAXIMUM_IMPORT_ROWS)
+    )]
+    maximum_rows: u64,
+    /// Hard aggregate source and legacy-metadata byte ceiling.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_IMPORT_MAXIMUM_SOURCE_BYTES,
+        value_parser = clap::value_parser!(u64).range(1..=MAXIMUM_IMPORT_SOURCE_BYTES)
+    )]
+    maximum_source_bytes: u64,
+    /// Validate source, checkout hashes, bounds, and canonical facts without importing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Exact acknowledgement required for mutation: import-v1-postgres.
+    #[arg(long, required_unless_present = "dry_run")]
+    confirm: Option<String>,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct PruneArguments {
+    /// Existing project whose current generation is always preserved.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Number of newest superseded generations that must be retained.
+    #[arg(long, default_value_t = 2)]
+    keep_superseded: u32,
+    /// Maximum terminal generations deleted in one transaction.
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=10000))]
+    maximum_deletions: u32,
+    /// Exact acknowledgement: prune-old-generations.
+    #[arg(long)]
+    confirm: String,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+struct TraversalArguments<'a> {
+    project_id: ProjectId,
+    symbol_id: &'a str,
+    depth: u8,
+    max_nodes: u16,
+    edge_kind: Option<EdgeKind>,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum InstallLocation {
+    #[default]
+    Global,
+    Local,
+}
+
+impl From<InstallLocation> for AgentInstallLocation {
+    fn from(value: InstallLocation) -> Self {
+        match value {
+            InstallLocation::Global => Self::Global,
+            InstallLocation::Local => Self::Local,
+        }
+    }
 }
 
 impl From<McpProfile> for ToolProfile {
     fn from(value: McpProfile) -> Self {
         match value {
+            McpProfile::Full => Self::Full,
             McpProfile::Core => Self::Core,
+            McpProfile::Coding => Self::Coding,
             McpProfile::ReadOnly => Self::ReadOnly,
             McpProfile::Review => Self::Review,
         }
@@ -337,8 +1098,29 @@ impl From<McpProfile> for ToolProfile {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli).await {
+    let parsed = match generated_cli::parse() {
+        Ok(parsed) => parsed,
+        Err(generated_cli::ParseFailure::Clap(error)) => {
+            let exit_code = if error.use_stderr() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            };
+            if error.print().is_err() {
+                return ExitCode::FAILURE;
+            }
+            return exit_code;
+        }
+        Err(generated_cli::ParseFailure::Contract(message)) => {
+            eprintln!("cartograph: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = match parsed {
+        generated_cli::ParsedCli::Static(cli) => run(cli).await,
+        generated_cli::ParsedCli::Tool(invocation) => generated_cli::run(invocation).await,
+    };
+    match result {
         Ok(exit_code) => exit_code,
         Err(message) => {
             eprintln!("cartograph: {message}");
@@ -349,128 +1131,675 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
+        command @ (Command::Index { .. }
+        | Command::Status { .. }
+        | Command::Embed { .. }
+        | Command::EmbeddingStatus { .. }) => run_index_command(command).await,
+        command @ (Command::Find { .. }
+        | Command::Context { .. }
+        | Command::Files { .. }
+        | Command::EntryPoints { .. }
+        | Command::AtRange { .. }) => run_search_command(command).await,
+        command @ (Command::Graph { .. }
+        | Command::Show { .. }
+        | Command::Affected { .. }
+        | Command::Review { .. }) => run_graph_command(command).await,
+        command => run_operator_command(command).await,
+    }
+}
+
+async fn run_index_command(command: Command) -> Result<ExitCode, String> {
+    match command {
         Command::Index {
             project_path,
             workers,
             force,
             format,
-        } => run_index(project_path, workers, force, format).await,
+        } => {
+            run_index(IndexArguments {
+                project_path,
+                workers,
+                force,
+                format,
+            })
+            .await
+        }
         Command::Status {
             project_path,
+            json,
+            verbose,
+            top_hotspots,
+            top_biomarkers,
+            summary_breakdown,
             format,
-        } => run_status(project_path, format).await,
+        } => {
+            run_status(
+                project_path,
+                json || matches!(format, OutputFormat::Json),
+                verbose,
+                top_hotspots.as_deref(),
+                top_biomarkers.as_deref(),
+                summary_breakdown,
+            )
+            .await
+        }
+        Command::Embed {
+            project_path,
+            workers,
+            format,
+        } => run_embed(project_path, workers, format).await,
+        Command::EmbeddingStatus {
+            project_path,
+            format,
+        } => run_embedding_status(project_path, format).await,
+        _ => Err("internal index command routing failed".to_owned()),
+    }
+}
+
+async fn run_search_command(command: Command) -> Result<ExitCode, String> {
+    match command {
         Command::Find {
             query,
             by,
             limit,
+            allow_stale,
             project_path,
             format,
-        } => run_find(project_path, query, by, limit, format).await,
+        } => {
+            run_find(FindArguments {
+                project_path,
+                query,
+                by,
+                limit,
+                allow_stale,
+                format,
+            })
+            .await
+        }
         Command::Context {
             task,
             exact_name,
             exact_path,
             exact_reference,
+            mode,
             project_path,
             format,
         } => {
-            run_context(
+            run_context(ContextArguments {
                 project_path,
                 task,
                 exact_name,
                 exact_path,
                 exact_reference,
+                mode,
                 format,
-            )
+            })
             .await
         }
+        Command::Files {
+            dir,
+            language,
+            limit,
+            allow_stale,
+            project_path,
+            format,
+        } => {
+            run_files(FilesArguments {
+                project_path,
+                directory: dir,
+                language,
+                limit,
+                allow_stale,
+                format,
+            })
+            .await
+        }
+        Command::EntryPoints {
+            bucket,
+            limit,
+            allow_stale,
+            project_path,
+            format,
+        } => {
+            run_entry_points(EntryPointsArguments {
+                project_path,
+                bucket: bucket.map(Into::into),
+                limit,
+                allow_stale,
+                format,
+            })
+            .await
+        }
+        Command::AtRange {
+            file,
+            start_line,
+            end_line,
+            limit,
+            allow_stale,
+            project_path,
+            format,
+        } => {
+            run_at_range(AtRangeArguments {
+                project_path,
+                file,
+                start_line,
+                end_line,
+                limit,
+                allow_stale,
+                format,
+            })
+            .await
+        }
+        _ => Err("internal search command routing failed".to_owned()),
+    }
+}
+
+async fn run_graph_command(command: Command) -> Result<ExitCode, String> {
+    match command {
         Command::Graph {
             symbol_id,
             direction,
+            to,
+            edge_kind,
+            k,
+            min_score,
+            same_language,
+            model_id,
             depth,
             max_nodes,
+            allow_stale,
             project_path,
             format,
-        } => run_graph(project_path, symbol_id, direction, depth, max_nodes, format).await,
+        } => {
+            run_graph(GraphArguments {
+                project_path,
+                symbol_id,
+                direction,
+                target_symbol_id: to,
+                edge_kind: edge_kind.map(Into::into),
+                similar_limit: k,
+                minimum_score: min_score,
+                same_language,
+                model_id,
+                depth,
+                max_nodes,
+                allow_stale,
+                format,
+            })
+            .await
+        }
+        Command::Show {
+            symbol_id,
+            context_lines,
+            max_bytes,
+            allow_stale,
+            project_path,
+            format,
+        } => {
+            run_show(ShowArguments {
+                project_path,
+                symbol_id,
+                context_lines,
+                max_bytes,
+                allow_stale,
+                format,
+            })
+            .await
+        }
         Command::Affected {
             symbol_id,
             depth,
             max_nodes,
             limit,
+            allow_stale,
             project_path,
             format,
-        } => run_affected(project_path, symbol_id, depth, max_nodes, limit, format).await,
+        } => {
+            run_affected(AffectedArguments {
+                project_path,
+                symbol_id,
+                depth,
+                max_nodes,
+                limit,
+                allow_stale,
+                format,
+            })
+            .await
+        }
+        Command::Review {
+            base_ref,
+            max_changed_files,
+            project_path,
+            format,
+        } => {
+            run_review(ReviewArguments {
+                project_path,
+                base_ref,
+                max_changed_files,
+                format,
+            })
+            .await
+        }
+        _ => Err("internal graph command routing failed".to_owned()),
+    }
+}
+
+async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
+    match command {
+        Command::Backend { command } => backend::run(command).await,
+        Command::Setup(arguments) => {
+            llm_commands::run(llm_commands::LlmCommand::Install(arguments)).await
+        }
+        Command::Install {
+            target,
+            location,
+            project_path,
+            yes,
+            no_permissions,
+            no_hooks,
+            command,
+            print_config,
+            format,
+        } => {
+            run_agent_install(AgentInstallArguments {
+                target,
+                location,
+                project_path,
+                yes,
+                permissions: !no_permissions,
+                hooks: !no_hooks,
+                command,
+                print_config,
+                format,
+                remove: false,
+            })
+            .await
+        }
+        Command::Uninstall {
+            target,
+            location,
+            project_path,
+            format,
+        } => {
+            run_agent_install(AgentInstallArguments {
+                target,
+                location,
+                project_path,
+                yes: true,
+                permissions: false,
+                hooks: false,
+                command: None,
+                print_config: None,
+                format,
+                remove: true,
+            })
+            .await
+        }
         Command::Serve {
             mcp,
             project_path,
             profile,
-        } => run_mcp_server(mcp, project_path, profile).await,
+            daemon,
+            no_daemon,
+            daemon_child,
+            no_write_tools,
+            allow_stale_default,
+            low_tokens_default,
+            disable_tool,
+            no_startup_sync,
+        } => {
+            run_mcp_server(McpServeArguments {
+                mcp,
+                project_path,
+                profile,
+                daemon,
+                no_daemon,
+                daemon_child,
+                no_write_tools,
+                allow_stale_default,
+                low_tokens_default,
+                disable_tool,
+                no_startup_sync,
+            })
+            .await
+        }
         Command::Doctor {
             project_path,
+            fix,
+            no_project_checks,
+            json,
             format,
-        } => run_doctor(project_path, format).await,
+        } => {
+            run_doctor(
+                project_path,
+                fix,
+                no_project_checks,
+                if json { OutputFormat::Json } else { format },
+            )
+            .await
+        }
         Command::Db { command } => run_database_command(command).await,
+        Command::Export {
+            path,
+            project_path,
+            format,
+            out,
+            limit,
+            kind,
+            edge_kind,
+            language,
+            file,
+        } => {
+            let project_path = project_path.unwrap_or(path);
+            let runtime = open_runtime(&project_path).await?;
+            let (project_id, freshness) = current_project(&runtime).await?;
+            require_freshness(freshness, false)?;
+            let output = graph_export::run_graph_export(
+                runtime.database(),
+                GraphExportRequest {
+                    project_id,
+                    format,
+                    output: out,
+                    limit,
+                    kinds: kind,
+                    edge_kinds: edge_kind,
+                    languages: language,
+                    file_prefix: file,
+                },
+            )
+            .await?;
+            print!("{output}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Similar {
+            symbol,
+            k,
+            min_score,
+            same_language,
+            model_id,
+            allow_stale,
+            project_path,
+        } => {
+            if !min_score.is_finite() || !(0.0..=1.0).contains(&min_score) {
+                return Err("--min-score must be between 0 and 1".to_owned());
+            }
+            let mut arguments = Map::from_iter([
+                ("start".to_owned(), Value::String(symbol)),
+                ("direction".to_owned(), Value::String("similar".to_owned())),
+                ("k".to_owned(), Value::from(k)),
+                ("minScore".to_owned(), Value::from(min_score)),
+                ("sameLanguage".to_owned(), Value::Bool(same_language)),
+                ("allowStale".to_owned(), Value::Bool(allow_stale)),
+            ]);
+            if let Some(model_id) = model_id {
+                arguments.insert("modelId".to_owned(), Value::String(model_id));
+            }
+            generated_cli::run_direct("cartograph_graph", project_path, arguments).await
+        }
+        Command::SyncIfDirty {
+            path,
+            quiet,
+            max_file_size,
+        } => run_sync_if_dirty(path, quiet, max_file_size.as_deref()).await,
+        Command::InstallHooks {
+            path,
+            hooks,
+            command,
+            remove,
+            dry_run,
+        } => {
+            let output = git_hooks::run_install_hooks(git_hooks::InstallHooksRequest {
+                project_path: path,
+                hooks,
+                command,
+                remove,
+                dry_run,
+            })?;
+            print!("{output}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::McpBudget {
+            profile,
+            no_write_tools,
+            disable_tool,
+            top,
+            json,
+        } => {
+            let definitions = mcp_handler::tool_definitions()
+                .map_err(|_| "MCP tool contracts are invalid".to_owned())?;
+            let registered = definitions
+                .iter()
+                .map(|definition| definition.name())
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Some(unknown) = disable_tool
+                .iter()
+                .find(|name| !registered.contains(name.as_str()))
+            {
+                return Err(format!("--disable-tool names an unknown tool: {unknown}"));
+            }
+            let report = mcp_budget::measure(
+                definitions,
+                profile.into(),
+                no_write_tools,
+                &disable_tool,
+                usize::from(top),
+                MCP_SERVER_INSTRUCTIONS,
+                AGENT_PLAYBOOK,
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .map_err(|_| "could not serialize MCP budget".to_owned())?
+                );
+            } else {
+                print!("{}", mcp_budget::render(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Completions { shell } => {
+            print!("{}", completions::render_script(shell));
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::CompleteInternal { words } => {
+            let command = generated_cli::command()?;
+            for candidate in completions::complete(&command, &words) {
+                println!("{candidate}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Guide => {
+            print!("{AGENT_PLAYBOOK}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Llm { command } => llm_commands::run(command).await,
+        Command::Upgrade { apply, json } => {
+            let report = upgrade::run_upgrade(apply).await;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .map_err(|_| "could not serialize upgrade report".to_owned())?
+                );
+            } else {
+                print!("{}", upgrade::render(&report));
+            }
+            Ok(if upgrade::succeeded(&report) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        _ => Err("internal operator command routing failed".to_owned()),
     }
 }
 
-async fn run_find(
-    project_path: PathBuf,
-    query: String,
-    by: FindBy,
-    limit: u16,
-    format: OutputFormat,
-) -> Result<ExitCode, String> {
+async fn run_find(arguments: FindArguments) -> Result<ExitCode, String> {
+    let FindArguments {
+        project_path,
+        query,
+        by,
+        limit,
+        allow_stale,
+        format,
+    } = arguments;
     let runtime = open_runtime(&project_path).await?;
-    let (project_id, _) = current_project(&runtime).await?;
+    let (project_id, freshness) = current_project(&runtime).await?;
+    require_freshness(freshness, allow_stale)?;
     let retrieval = DeterministicRetriever::new(runtime.database().clone());
     match by {
-        FindBy::Name => {
-            let result = retrieval
-                .exact_name(&project_id, &query, limit)
+        FindBy::Auto | FindBy::Hybrid => {
+            let mode = if matches!(by, FindBy::Hybrid) {
+                SearchMode::Hybrid
+            } else {
+                SearchMode::Auto
+            };
+            let options = RetrievalOptions::new(mode, limit).map_err(|error| error.to_string())?;
+            let result = runtime
+                .search(RetrievalRequest::new(project_id, query, options))
                 .await
                 .map_err(|error| error.to_string())?;
-            print_serialized(&result, format)?;
+            print_fresh_evidence(freshness, &result, format)?;
+        }
+        FindBy::Name => {
+            let query = ExactTextQuery::new(&query, limit).map_err(|error| error.to_string())?;
+            let result = retrieval
+                .exact_name(&project_id, query)
+                .await
+                .map_err(|error| error.to_string())?;
+            print_fresh_evidence(freshness, &result, format)?;
         }
         FindBy::Path => {
             let path = NormalizedPath::parse(&query)
                 .map_err(|_| "source path must be project-relative".to_owned())?;
+            let query = ExactPathQuery::new(&path, limit).map_err(|error| error.to_string())?;
             let result = retrieval
-                .exact_path(&project_id, &path, limit)
+                .exact_path(&project_id, query)
                 .await
                 .map_err(|error| error.to_string())?;
-            print_serialized(&result, format)?;
+            print_fresh_evidence(freshness, &result, format)?;
         }
         FindBy::Reference => {
+            let query = ExactTextQuery::new(&query, limit).map_err(|error| error.to_string())?;
             let result = retrieval
-                .exact_reference(&project_id, &query, limit)
+                .exact_reference(&project_id, query)
                 .await
                 .map_err(|error| error.to_string())?;
-            print_serialized(&result, format)?;
+            print_fresh_evidence(freshness, &result, format)?;
         }
         FindBy::Bm25 => {
+            let query = LexicalQuery::new(query, limit).map_err(|error| error.to_string())?;
             let result = retrieval
-                .bm25(project_id, query, limit)
+                .bm25(project_id, query)
                 .await
                 .map_err(|error| error.to_string())?;
-            print_serialized(&result, format)?;
+            print_fresh_evidence(freshness, &result, format)?;
         }
     }
     runtime.close().await;
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_context(
-    project_path: PathBuf,
-    task: String,
-    exact_name: Option<String>,
-    exact_path: Option<String>,
-    exact_reference: Option<String>,
-    format: OutputFormat,
-) -> Result<ExitCode, String> {
+async fn run_files(arguments: FilesArguments) -> Result<ExitCode, String> {
+    let runtime = open_runtime(&arguments.project_path).await?;
+    let (project_id, freshness) = current_project(&runtime).await?;
+    require_freshness(freshness, arguments.allow_stale)?;
+    let mut query = FileInventoryQuery::new(arguments.limit).map_err(|error| error.to_string())?;
+    if let Some(directory) = arguments.directory {
+        query = query.within_directory(
+            NormalizedPath::parse(&directory)
+                .map_err(|_| "source directory must be project-relative".to_owned())?,
+        );
+    }
+    if let Some(language) = arguments.language {
+        query = query.with_language(
+            SourceLanguage::from_stable_str(&language)
+                .ok_or_else(|| "language must be a registered stable identifier".to_owned())?,
+        );
+    }
+    let result = DeterministicRetriever::new(runtime.database().clone())
+        .files(&project_id, &query)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_fresh_evidence(freshness, &result, arguments.format)?;
+    runtime.close().await;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_entry_points(arguments: EntryPointsArguments) -> Result<ExitCode, String> {
+    let runtime = open_runtime(&arguments.project_path).await?;
+    let (project_id, freshness) = current_project(&runtime).await?;
+    require_freshness(freshness, arguments.allow_stale)?;
+    let mut query = EntryPointsQuery::new(arguments.limit).map_err(|error| error.to_string())?;
+    if let Some(bucket) = arguments.bucket {
+        query = query.with_bucket(bucket);
+    }
+    let result = DeterministicRetriever::new(runtime.database().clone())
+        .entry_points(&project_id, query)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_fresh_evidence(freshness, &result, arguments.format)?;
+    runtime.close().await;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_at_range(arguments: AtRangeArguments) -> Result<ExitCode, String> {
+    let runtime = open_runtime(&arguments.project_path).await?;
+    let (project_id, freshness) = current_project(&runtime).await?;
+    require_freshness(freshness, arguments.allow_stale)?;
+    let path = NormalizedPath::parse(&arguments.file)
+        .map_err(|_| "source file must be project-relative".to_owned())?;
+    let query = SourceRangeQuery::new(
+        path,
+        arguments.start_line,
+        arguments.end_line,
+        arguments.limit,
+    )
+    .map_err(|error| error.to_string())?;
+    let result = DeterministicRetriever::new(runtime.database().clone())
+        .symbols_at_range(&project_id, &query)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "source file was not found in the current generation".to_owned())?;
+    print_fresh_evidence(freshness, &result, arguments.format)?;
+    runtime.close().await;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_context(arguments: ContextArguments) -> Result<ExitCode, String> {
+    let ContextArguments {
+        project_path,
+        task,
+        exact_name,
+        exact_path,
+        exact_reference,
+        mode,
+        format,
+    } = arguments;
     let runtime = open_runtime(&project_path).await?;
     let (project_id, freshness) = current_project(&runtime).await?;
-    let mut request = ContextRequest::new(project_id, task, freshness, ContextBudget::default())
+    let mode = SearchMode::from(mode);
+    let overlay_task = task.clone();
+    let intent = TaskIntent::classify(&task);
+    let budget = ContextBudget::for_intent(intent);
+    let retrieval_options =
+        RetrievalOptions::new(mode, budget.candidate_limit()).map_err(|error| error.to_string())?;
+    let prepared = runtime
+        .prepare_retrieval(RetrievalRequest::new(
+            project_id.clone(),
+            task.clone(),
+            retrieval_options,
+        ))
+        .await
         .map_err(|error| error.to_string())?;
+    let mut request = ContextRequest::new(
+        project_id,
+        task,
+        ContextRequestOptions::new(freshness, budget)
+            .with_search(mode, prepared.semantic_readiness()),
+    )
+    .map_err(|error| error.to_string())?
+    .with_intent(intent);
     if let Some(name) = exact_name {
         request = request
             .with_anchor(ContextAnchor::ExactName(name))
@@ -490,42 +1819,140 @@ async fn run_context(
             .map_err(|error| error.to_string())?;
     }
     let result = DeterministicRetriever::new(runtime.database().clone())
-        .context_packet(&request)
+        .context_packet_with_channels(&request, prepared.into_channels())
         .await
         .map_err(|error| error.to_string())?;
+    let result = if freshness == IndexFreshness::Current {
+        result
+    } else {
+        let overlay = runtime
+            .working_tree_overlay(WorkingTreeOverlayRequest::new(
+                overlay_task,
+                cartograph_agent::ProjectCancellation::new(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        result.with_working_tree_overlay(overlay)
+    };
     print_serialized(&result, format)?;
     runtime.close().await;
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_graph(
-    project_path: PathBuf,
-    symbol_id: String,
-    direction: GraphAxis,
-    depth: u8,
-    max_nodes: u16,
-    format: OutputFormat,
-) -> Result<ExitCode, String> {
+async fn run_graph(arguments: GraphArguments) -> Result<ExitCode, String> {
+    let GraphArguments {
+        project_path,
+        symbol_id,
+        direction,
+        target_symbol_id,
+        edge_kind,
+        similar_limit,
+        minimum_score,
+        same_language,
+        model_id,
+        depth,
+        max_nodes,
+        allow_stale,
+        format,
+    } = arguments;
+    if direction != GraphAxis::Path && target_symbol_id.is_some() {
+        return Err("--to is only valid with --direction path".to_owned());
+    }
+    if direction == GraphAxis::Path && target_symbol_id.is_none() {
+        return Err("--to is required with --direction path".to_owned());
+    }
+    let has_similar_options =
+        similar_limit.is_some() || minimum_score.is_some() || same_language || model_id.is_some();
+    if direction != GraphAxis::Similar && has_similar_options {
+        return Err("--k, --min-score, --same-language, and --model-id are only valid with --direction similar".to_owned());
+    }
+    if direction == GraphAxis::Similar && edge_kind.is_some() {
+        return Err("--edge-kind is not valid with --direction similar".to_owned());
+    }
     let runtime = open_runtime(&project_path).await?;
-    let (project_id, _) = current_project(&runtime).await?;
-    let request = traversal_request(project_id, &symbol_id, depth, max_nodes)?;
+    let (project_id, freshness) = current_project(&runtime).await?;
+    require_freshness(freshness, allow_stale)?;
     let retrieval = DeterministicRetriever::new(runtime.database().clone());
+    if direction == GraphAxis::Similar {
+        let symbol = SymbolId::parse(&symbol_id)
+            .map_err(|_| "symbol ID must be a non-nil UUID".to_owned())?;
+        let mut request = SimilarRequest::new(project_id, symbol, similar_limit.unwrap_or(5))
+            .and_then(|request| request.with_minimum_score(minimum_score.unwrap_or(0.3)))
+            .map_err(|error| error.to_string())?
+            .with_same_language(same_language);
+        if let Some(model_id) = model_id {
+            request = request.with_model_id(
+                ModelId::parse(&model_id)
+                    .map_err(|_| "model ID must be a non-nil UUID".to_owned())?,
+            );
+        }
+        let result = retrieval
+            .similar(&request)
+            .await
+            .map_err(|error| error.to_string())?;
+        print_fresh_evidence(freshness, &result, format)?;
+        runtime.close().await;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let request = traversal_request(TraversalArguments {
+        project_id: project_id.clone(),
+        symbol_id: &symbol_id,
+        depth,
+        max_nodes,
+        edge_kind,
+    })?;
     match direction {
-        GraphAxis::Callers => print_serialized(
+        GraphAxis::Callers => print_fresh_evidence(
+            freshness,
             &retrieval
                 .callers(&request)
                 .await
                 .map_err(|error| error.to_string())?,
             format,
         )?,
-        GraphAxis::Callees => print_serialized(
+        GraphAxis::Callees => print_fresh_evidence(
+            freshness,
             &retrieval
                 .callees(&request)
                 .await
                 .map_err(|error| error.to_string())?,
             format,
         )?,
-        GraphAxis::Impact => print_serialized(
+        GraphAxis::Both => print_fresh_evidence(
+            freshness,
+            &retrieval
+                .both(&request)
+                .await
+                .map_err(|error| error.to_string())?,
+            format,
+        )?,
+        GraphAxis::Path => {
+            let target_symbol_id = target_symbol_id
+                .as_deref()
+                .ok_or_else(|| "--to is required with --direction path".to_owned())?;
+            let target = SymbolId::parse(target_symbol_id)
+                .map_err(|_| "target symbol ID must be a non-nil UUID".to_owned())?;
+            let mut path = GraphPathRequest::new(
+                project_id,
+                request.roots()[0].clone(),
+                target,
+                TraversalBudget::new(depth, max_nodes).map_err(|error| error.to_string())?,
+            );
+            if let Some(edge_kind) = edge_kind {
+                path = path.with_edge_kind(edge_kind);
+            }
+            print_fresh_evidence(
+                freshness,
+                &retrieval
+                    .path(&path)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                format,
+            )?;
+        }
+        GraphAxis::Similar => unreachable!("similar returned before structural traversal"),
+        GraphAxis::Impact => print_fresh_evidence(
+            freshness,
             &retrieval
                 .impact(&request)
                 .await
@@ -537,22 +1964,71 @@ async fn run_graph(
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_affected(
-    project_path: PathBuf,
-    symbol_id: String,
-    depth: u8,
-    max_nodes: u16,
-    limit: u16,
-    format: OutputFormat,
-) -> Result<ExitCode, String> {
+async fn run_affected(arguments: AffectedArguments) -> Result<ExitCode, String> {
+    let AffectedArguments {
+        project_path,
+        symbol_id,
+        depth,
+        max_nodes,
+        limit,
+        allow_stale,
+        format,
+    } = arguments;
     let runtime = open_runtime(&project_path).await?;
-    let (project_id, _) = current_project(&runtime).await?;
-    let request = traversal_request(project_id, &symbol_id, depth, max_nodes)?;
+    let (project_id, freshness) = current_project(&runtime).await?;
+    require_freshness(freshness, allow_stale)?;
+    let request = traversal_request(TraversalArguments {
+        project_id,
+        symbol_id: &symbol_id,
+        depth,
+        max_nodes,
+        edge_kind: None,
+    })?;
     let result = DeterministicRetriever::new(runtime.database().clone())
         .affected_tests(&request, limit)
         .await
         .map_err(|error| error.to_string())?;
-    print_serialized(&result, format)?;
+    print_fresh_evidence(freshness, &result, format)?;
+    runtime.close().await;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_show(arguments: ShowArguments) -> Result<ExitCode, String> {
+    let symbol_id = SymbolId::parse(&arguments.symbol_id)
+        .map_err(|_| "symbol ID must be a non-nil UUID".to_owned())?;
+    let maximum_bytes = usize::try_from(arguments.max_bytes)
+        .map_err(|_| "source-context byte limit is invalid".to_owned())?;
+    let options = SourceContextOptions::new(arguments.context_lines, maximum_bytes)
+        .map_err(|error| error.to_string())?;
+    let runtime = open_runtime(&arguments.project_path).await?;
+    let result = runtime
+        .source_context(SourceContextRequest::new(symbol_id, options))
+        .await;
+    runtime.close().await;
+    let result = result.map_err(|error| error.to_string())?;
+    if !result.fresh() && !arguments.allow_stale {
+        return Err(stale_index_message());
+    }
+    print_serialized(&result, arguments.format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_review(arguments: ReviewArguments) -> Result<ExitCode, String> {
+    let ReviewArguments {
+        project_path,
+        base_ref,
+        max_changed_files,
+        format,
+    } = arguments;
+    let options = ReviewOptions::new(base_ref)
+        .and_then(|options| options.with_max_changed_files(max_changed_files))
+        .map_err(|error| error.to_string())?;
+    let runtime = open_runtime(&project_path).await?;
+    let report = runtime
+        .review(&options)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_review_report(&report, format)?;
     runtime.close().await;
     Ok(ExitCode::SUCCESS)
 }
@@ -603,16 +2079,35 @@ async fn current_project(runtime: &ProjectRuntime) -> Result<(ProjectId, IndexFr
     ))
 }
 
-fn traversal_request(
-    project_id: ProjectId,
-    symbol_id: &str,
-    depth: u8,
-    max_nodes: u16,
-) -> Result<TraversalRequest, String> {
+fn require_freshness(freshness: IndexFreshness, allow_stale: bool) -> Result<(), String> {
+    if freshness == IndexFreshness::Current || allow_stale {
+        Ok(())
+    } else {
+        Err(stale_index_message())
+    }
+}
+
+fn stale_index_message() -> String {
+    "Cartograph index is stale; synchronize it or explicitly pass --allow-stale".to_owned()
+}
+
+fn traversal_request(arguments: TraversalArguments<'_>) -> Result<TraversalRequest, String> {
+    let TraversalArguments {
+        project_id,
+        symbol_id,
+        depth,
+        max_nodes,
+        edge_kind,
+    } = arguments;
     let symbol_id =
         SymbolId::parse(symbol_id).map_err(|_| "symbol ID must be a non-nil UUID".to_owned())?;
     let budget = TraversalBudget::new(depth, max_nodes).map_err(|error| error.to_string())?;
-    TraversalRequest::new(project_id, [symbol_id], budget).map_err(|error| error.to_string())
+    let request = TraversalRequest::new(project_id, [symbol_id], budget)
+        .map_err(|error| error.to_string())?;
+    Ok(match edge_kind {
+        Some(edge_kind) => request.with_edge_kind(edge_kind),
+        None => request,
+    })
 }
 
 fn print_serialized(value: &impl Serialize, format: OutputFormat) -> Result<(), String> {
@@ -624,26 +2119,393 @@ fn print_serialized(value: &impl Serialize, format: OutputFormat) -> Result<(), 
     Ok(())
 }
 
-async fn run_mcp_server(
-    mcp: bool,
-    project_path: PathBuf,
-    profile: McpProfile,
-) -> Result<ExitCode, String> {
+fn print_fresh_evidence(
+    freshness: IndexFreshness,
+    evidence: &impl Serialize,
+    format: OutputFormat,
+) -> Result<(), String> {
+    print_serialized(
+        &CliFreshEvidence {
+            freshness,
+            evidence,
+        },
+        format,
+    )
+}
+
+fn print_review_report(report: &ReviewReport, format: OutputFormat) -> Result<(), String> {
+    if matches!(format, OutputFormat::Json) {
+        return print_serialized(report, format);
+    }
+    let comparison = report.comparison();
+    let packet = report.packet();
+    println!(
+        "Review against {} ({}): {} worktree, {} changed file(s){}",
+        comparison.base_ref(),
+        comparison
+            .base_commit()
+            .chars()
+            .take(12)
+            .collect::<String>(),
+        if comparison.worktree_dirty() {
+            "dirty"
+        } else {
+            "clean"
+        },
+        comparison.files().len(),
+        if comparison.truncated() {
+            " (truncated)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "Index evidence: {:?} freshness, {:?} confidence, abstention {:?}",
+        packet.freshness(),
+        packet.confidence(),
+        packet.abstention()
+    );
+    for file in comparison.files() {
+        println!("- {} {}", file.kind().as_str(), file.path());
+    }
+    println!(
+        "Context: {} indexed changed file(s), {} evidence item(s), {} affected test(s)",
+        packet.indexed_changed_files().len(),
+        packet.evidence().len(),
+        packet.affected_tests().len()
+    );
+    if packet.truncation().any() {
+        println!(
+            "Truncation: changed_files={} symbol_roots={} graph={} affected_tests={} evidence={}",
+            packet.truncation().changed_files(),
+            packet.truncation().symbol_roots(),
+            packet.truncation().graph(),
+            packet.truncation().affected_tests(),
+            packet.truncation().evidence()
+        );
+    }
+    Ok(())
+}
+
+async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode, String> {
+    let AgentInstallArguments {
+        target,
+        location,
+        project_path,
+        yes,
+        permissions,
+        hooks,
+        command,
+        print_config,
+        format,
+        remove,
+    } = arguments;
+    let executable = env::current_exe()
+        .map_err(|_| "could not resolve the current Cartograph executable".to_owned())?;
+    let location = AgentInstallLocation::from(location);
+    if let Some(target) = print_config {
+        if remove {
+            return Err("--print-config is only available for install".to_owned());
+        }
+        let target = InstallTarget::parse(&target).ok_or_else(|| unknown_target(&target))?;
+        let request = InstallRequest::new(
+            &project_path,
+            &executable,
+            target,
+            location,
+            command.as_deref(),
+            permissions,
+        )
+        .map_err(|error| error.to_string())?;
+        print!(
+            "{}",
+            install::print_config(&request).map_err(|error| error.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let selector = target
+        .as_deref()
+        .unwrap_or(if remove { "all" } else { "auto" });
+    let targets = resolve_install_targets(
+        selector,
+        &project_path,
+        &executable,
+        location,
+        command.as_deref(),
+        permissions,
+    )?;
+    if !remove && !yes {
+        confirm_agent_install(location, &targets)?;
+    }
+
+    let mut reports = Vec::with_capacity(targets.len());
+    for target in targets {
+        if !target.supports(location) {
+            if matches!(format, OutputFormat::Text) {
+                eprintln!(
+                    "{}: skipped because it has no project-local MCP configuration",
+                    target.label()
+                );
+            }
+            continue;
+        }
+        let request = InstallRequest::new(
+            &project_path,
+            &executable,
+            target,
+            location,
+            command.as_deref(),
+            permissions,
+        )
+        .map_err(|error| error.to_string())?;
+        let report = if remove {
+            install::uninstall(&request)
+        } else {
+            install::install(&request)
+        }
+        .map_err(|error| format!("{}: {error}", target.label()))?;
+        reports.push(report);
+    }
+    print_install_reports(&reports, format, remove)?;
+
+    if !remove && location == AgentInstallLocation::Local {
+        if env::var_os(DATABASE_URL_ENV).is_none() {
+            run_database_start(DatabaseStartArguments {
+                project_path: project_path.clone(),
+                port: DEFAULT_MANAGED_DATABASE_PORT,
+                wait_seconds: 90,
+                format,
+            })
+            .await?;
+        }
+        run_index(IndexArguments {
+            project_path: project_path.clone(),
+            workers: None,
+            force: false,
+            format,
+        })
+        .await?;
+    }
+
+    if !remove && location == AgentInstallLocation::Local && hooks {
+        let hook_command = command.or_else(|| executable.to_str().map(str::to_owned));
+        match git_hooks::run_install_hooks(git_hooks::InstallHooksRequest {
+            project_path,
+            hooks: None,
+            command: hook_command,
+            remove: false,
+            dry_run: false,
+        }) {
+            Ok(output) if matches!(format, OutputFormat::Text) => print!("{output}"),
+            Ok(_) => {}
+            Err(error) if matches!(format, OutputFormat::Text) => {
+                eprintln!("Git hooks were not installed: {error}");
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn resolve_install_targets(
+    selector: &str,
+    project_path: &PathBuf,
+    executable: &PathBuf,
+    location: AgentInstallLocation,
+    command: Option<&str>,
+    permissions: bool,
+) -> Result<Vec<InstallTarget>, String> {
+    match selector.trim().to_ascii_lowercase().as_str() {
+        "none" => return Ok(Vec::new()),
+        "all" => return Ok(InstallTarget::ALL.to_vec()),
+        "auto" => {
+            let mut detected = Vec::new();
+            for target in InstallTarget::ALL {
+                if !target.supports(location) {
+                    continue;
+                }
+                let request = InstallRequest::new(
+                    project_path,
+                    executable,
+                    target,
+                    location,
+                    command,
+                    permissions,
+                )
+                .map_err(|error| error.to_string())?;
+                if request.detected() {
+                    detected.push(target);
+                }
+            }
+            if detected.is_empty() {
+                detected.push(InstallTarget::Claude);
+            }
+            return Ok(detected);
+        }
+        _ => {}
+    }
+    let mut targets = Vec::new();
+    for value in selector
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let target = InstallTarget::parse(value).ok_or_else(|| unknown_target(value))?;
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    if targets.is_empty() {
+        return Err("--target must name at least one agent, or auto, all, or none".to_owned());
+    }
+    Ok(targets)
+}
+
+fn unknown_target(value: &str) -> String {
+    let known = InstallTarget::ALL
+        .iter()
+        .map(|target| target.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("unknown target {value:?}; known targets: {known}, plus auto, all, none")
+}
+
+fn confirm_agent_install(
+    location: AgentInstallLocation,
+    targets: &[InstallTarget],
+) -> Result<(), String> {
+    if !std::io::stdin().is_terminal() {
+        return Err("install needs --yes when stdin is not interactive".to_owned());
+    }
+    let target_list = targets
+        .iter()
+        .map(|target| target.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    print!(
+        "Install Cartograph for {target_list} at {} scope? [Y/n] ",
+        match location {
+            AgentInstallLocation::Global => "global",
+            AgentInstallLocation::Local => "project-local",
+        }
+    );
+    std::io::stdout()
+        .flush()
+        .map_err(|_| "could not write the install prompt".to_owned())?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|_| "could not read the install confirmation".to_owned())?;
+    if answer.trim().is_empty() || answer.trim().eq_ignore_ascii_case("y") {
+        Ok(())
+    } else {
+        Err("installation cancelled".to_owned())
+    }
+}
+
+fn print_install_reports(
+    reports: &[InstallReport],
+    format: OutputFormat,
+    removed: bool,
+) -> Result<(), String> {
+    if matches!(format, OutputFormat::Json) {
+        return print_serialized(&reports, format);
+    }
+    if reports.is_empty() {
+        println!("No agent targets selected.");
+        return Ok(());
+    }
+    for report in reports {
+        println!(
+            "{} ({}): {}",
+            report.target().label(),
+            match report.location() {
+                AgentInstallLocation::Global => "global",
+                AgentInstallLocation::Local => "local",
+            },
+            if report.changed() {
+                if removed { "removed" } else { "installed" }
+            } else if removed {
+                "already absent"
+            } else {
+                "already current"
+            }
+        );
+        for file in report.files() {
+            println!("- {} {}", file.action().label(), file.path().display());
+        }
+        println!("  executable: {}", report.executable());
+        println!("  project: {}", report.project_root().display());
+    }
+    if reports.iter().any(InstallReport::changed) {
+        println!("Restart changed agent hosts to load the Cartograph MCP server.");
+    }
+    Ok(())
+}
+
+async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String> {
+    let McpServeArguments {
+        mcp,
+        project_path,
+        profile,
+        daemon: _daemon,
+        no_daemon: _no_daemon,
+        daemon_child: _daemon_child,
+        no_write_tools,
+        allow_stale_default,
+        low_tokens_default,
+        disable_tool,
+        no_startup_sync,
+    } = arguments;
     if !mcp {
         return Err("serve requires --mcp; Cartograph v2 uses stdio MCP transport".to_owned());
     }
+    let read_only_mode = no_write_tools || profile == McpProfile::ReadOnly;
     let settings = resolve_database_settings(&project_path)?;
-    let runtime = Arc::new(
-        ProjectRuntime::connect(&project_path, &settings)
+    let runtime = ProjectRuntime::connect(&project_path, &settings)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !no_startup_sync {
+        runtime
+            .index(IndexOptions::default())
             .await
-            .map_err(|error| error.to_string())?,
-    );
-    let handler = CartographMcpHandler::new(runtime).map_err(|error| error.to_string())?;
+            .map_err(|error| format!("MCP startup sync failed: {error}"))?;
+    }
+    let runtime = Arc::new(runtime);
+    let handler = CartographMcpHandler::new(runtime)
+        .map_err(|error| error.to_string())?
+        .with_defaults(HandlerDefaults {
+            allow_stale: allow_stale_default,
+            low_tokens: low_tokens_default,
+            trace_calls: !read_only_mode,
+            read_only: read_only_mode,
+        });
+    handler
+        .enable_auto_sync()
+        .await
+        .map_err(|error| error.to_string())?;
+    let definitions =
+        mcp_handler::tool_definitions().map_err(|_| "MCP tool contracts are invalid".to_owned())?;
+    let registered = definitions
+        .iter()
+        .map(|definition| definition.name())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(unknown) = disable_tool
+        .iter()
+        .find(|name| !registered.contains(name.as_str()))
+    {
+        return Err(format!("--disable-tool names an unknown tool: {unknown}"));
+    }
     let config = ServerConfig::new(
         ServerMetadata::cartograph(),
         profile.into(),
         ServerLimits::default(),
-    );
+    )
+    .with_instructions(MCP_SERVER_INSTRUCTIONS)
+    .and_then(|config| config.with_disabled_tools(disable_tool))
+    .map(|config| config.with_read_only_tools_only(read_only_mode))
+    .map_err(|error| error.to_string())?;
     let server = ProtocolServer::new(config, handler).map_err(|error| error.to_string())?;
     server
         .serve_stdio()
@@ -652,12 +2514,13 @@ async fn run_mcp_server(
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_index(
-    project_path: PathBuf,
-    workers: Option<u16>,
-    force: bool,
-    format: OutputFormat,
-) -> Result<ExitCode, String> {
+async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
+    let IndexArguments {
+        project_path,
+        workers,
+        force,
+        format,
+    } = arguments;
     let settings = resolve_database_settings(&project_path)?;
     let runtime = ProjectRuntime::connect(&project_path, &settings)
         .await
@@ -675,15 +2538,236 @@ async fn run_index(
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_status(project_path: PathBuf, format: OutputFormat) -> Result<ExitCode, String> {
-    let settings = resolve_database_settings(&project_path)?;
-    let runtime = ProjectRuntime::connect(&project_path, &settings)
+async fn run_sync_if_dirty(
+    project_path: PathBuf,
+    quiet: bool,
+    max_file_size: Option<&str>,
+) -> Result<ExitCode, String> {
+    let maximum_source_bytes = max_file_size.map(parse_max_file_size).transpose()?;
+    let runtime = open_runtime(&project_path).await?;
+    let status = runtime.status().await.map_err(|error| error.to_string())?;
+    let dirty = git_worktree_dirty(&project_path);
+    if !dirty && status.fresh {
+        if !quiet {
+            println!("No source changes and index is current; skipping sync");
+        }
+        runtime.close().await;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut options = IndexOptions::default();
+    if let Some(maximum_source_bytes) = maximum_source_bytes {
+        options = options
+            .with_max_source_bytes(maximum_source_bytes)
+            .map_err(|error| error.to_string())?;
+    }
+    let report = runtime
+        .index(options)
         .await
         .map_err(|error| error.to_string())?;
-    let result = runtime.status().await;
-    let status = result.map_err(|error| error.to_string())?;
-    print_project_status(&status, format)?;
+    if !quiet {
+        if report.published {
+            println!("Synced changed source into a new generation");
+        } else {
+            println!("Source manifest is unchanged; existing generation retained");
+        }
+    }
     runtime.close().await;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn parse_max_file_size(raw: &str) -> Result<usize, String> {
+    let value = raw.trim().to_ascii_lowercase();
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (quantity, unit) = value.split_at(split);
+    let unit = unit.trim();
+    let multiplier = match unit {
+        "" | "b" | "byte" | "bytes" => 1_usize,
+        "k" | "kb" | "kib" => 1_024,
+        "m" | "mb" | "mib" => 1_024 * 1_024,
+        _ => return Err(max_file_size_error(raw)),
+    };
+    let bytes = quantity
+        .parse::<usize>()
+        .ok()
+        .and_then(|quantity| quantity.checked_mul(multiplier))
+        .filter(|bytes| (1..=MAXIMUM_TRANSIENT_FILE_BYTES).contains(bytes))
+        .ok_or_else(|| max_file_size_error(raw))?;
+    Ok(bytes)
+}
+
+fn max_file_size_error(raw: &str) -> String {
+    format!("--max-file-size must be between 1 byte and 10mb (got {raw:?})")
+}
+
+fn git_worktree_dirty(project_path: &PathBuf) -> bool {
+    let mut child = match ProcessCommand::new("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=normal"])
+        .current_dir(project_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return true;
+    };
+    let mut byte = [0_u8; 1];
+    let read = stdout.read(&mut byte);
+    drop(stdout);
+    match read {
+        Ok(0) => child.wait().map_or(true, |status| !status.success()),
+        Ok(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        }
+    }
+}
+
+async fn run_status(
+    project_path: PathBuf,
+    json: bool,
+    verbose: bool,
+    top_hotspots: Option<&str>,
+    top_biomarkers: Option<&str>,
+    summary_breakdown: bool,
+) -> Result<ExitCode, String> {
+    let mut arguments = Map::new();
+    if verbose {
+        arguments.insert("verbose".to_owned(), Value::Bool(true));
+    }
+    if summary_breakdown {
+        arguments.insert("summaryBreakdown".to_owned(), Value::Bool(true));
+    }
+    if let Some(value) = normalize_status_rollup(top_hotspots) {
+        arguments.insert("topHotspots".to_owned(), Value::from(value));
+    }
+    if let Some(value) = normalize_status_rollup(top_biomarkers) {
+        arguments.insert("topBiomarkers".to_owned(), Value::from(value));
+    }
+    let result =
+        generated_cli::run_direct_result("cartograph_status", project_path, arguments).await?;
+    if result.is_error() {
+        return Ok(ExitCode::FAILURE);
+    }
+    let text = result
+        .primary_text()
+        .ok_or_else(|| "status returned no structured payload".to_owned())?;
+    if json {
+        println!("{text}");
+    } else {
+        let value: Value = serde_json::from_str(text)
+            .map_err(|_| "status returned malformed structured payload".to_owned())?;
+        render_status_text(&value);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn normalize_status_rollup(raw: Option<&str>) -> Option<f64> {
+    raw.map(|value| {
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value >= 1.0)
+            .unwrap_or(0.0)
+    })
+}
+
+fn render_status_text(value: &Value) {
+    let version = value
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let storage = value
+        .get("storage")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    println!("Cartograph {version} — {storage}");
+    let current = value
+        .pointer("/project/snapshot/current")
+        .filter(|current| current.is_object());
+    if let Some(current) = current {
+        let generation = current
+            .get("generation_id")
+            .or_else(|| current.get("generationId"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let counts = current.get("counts").unwrap_or(&Value::Null);
+        println!(
+            "Generation {generation}: {} files, {} symbols, {} edges; source {}",
+            counts.get("files").and_then(Value::as_u64).unwrap_or(0),
+            counts.get("symbols").and_then(Value::as_u64).unwrap_or(0),
+            counts.get("edges").and_then(Value::as_u64).unwrap_or(0),
+            if value
+                .pointer("/project/fresh")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "fresh"
+            } else {
+                "stale"
+            }
+        );
+    } else {
+        println!("Project has no published generation; run `cartograph index`.");
+    }
+    if let Some(state) = value
+        .pointer("/featureReadiness/state")
+        .and_then(Value::as_str)
+    {
+        println!("Feature readiness: {state}");
+    }
+    let hotspots = value
+        .pointer("/rollups/hotspots")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let biomarkers = value
+        .pointer("/rollups/biomarkers")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if hotspots > 0 || biomarkers > 0 {
+        println!("Inline rollups: {hotspots} hotspots, {biomarkers} biomarkers");
+    }
+    println!("Graph queries: retained; browser visualizer: intentionally removed");
+}
+
+async fn run_embed(
+    project_path: PathBuf,
+    workers: Option<u16>,
+    format: OutputFormat,
+) -> Result<ExitCode, String> {
+    let runtime = open_runtime(&project_path).await?;
+    let mut options = EmbeddingOptions::default();
+    if let Some(workers) = workers {
+        options = options
+            .with_max_workers(workers)
+            .map_err(|error| error.to_string())?;
+    }
+    let result = runtime.embed_current(options).await;
+    runtime.close().await;
+    print_serialized(&result.map_err(|error| error.to_string())?, format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_embedding_status(
+    project_path: PathBuf,
+    format: OutputFormat,
+) -> Result<ExitCode, String> {
+    let runtime = open_runtime(&project_path).await?;
+    let result = runtime.embedding_status().await;
+    runtime.close().await;
+    print_serialized(&result.map_err(|error| error.to_string())?, format)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -721,190 +2805,299 @@ fn print_index_report(report: &IndexReport, format: OutputFormat) -> Result<(), 
     Ok(())
 }
 
-fn print_project_status(status: &ProjectStatus, format: OutputFormat) -> Result<(), String> {
-    match format {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(status)
-                .map_err(|_| "could not serialize the project status".to_owned())?
-        ),
-        OutputFormat::Text => match status
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.current.as_ref())
-        {
-            Some(current) => println!(
-                "Project generation {}: {} files, {} symbols, {} edges; source {}",
-                current.generation_id,
-                current.counts.files,
-                current.counts.symbols,
-                current.counts.edges,
-                if status.fresh { "fresh" } else { "stale" }
-            ),
-            None => println!("Project has no published generation; run `cartograph index`."),
-        },
-    }
-    Ok(())
-}
-
 async fn run_database_command(command: DatabaseCommand) -> Result<ExitCode, String> {
     match command {
-        DatabaseCommand::Start {
-            project_path,
-            port,
-            wait_seconds,
-            format,
-        } => {
-            let database = ManagedDatabase::new(project_path, port)
-                .map_err(|error| error.to_string())?
-                .with_startup_timeout(Duration::from_secs(wait_seconds));
-            let report = database.start().await.map_err(|error| error.to_string())?;
-            print_managed_start(&report, format)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::Status {
-            project_path,
-            port,
-            format,
-        } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            let status = database.status().await.map_err(|error| error.to_string())?;
-            print_managed_status(&status, format)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::Stop { project_path, port } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            let stopped = database.stop().await.map_err(|error| error.to_string())?;
-            println!(
-                "{}",
-                if stopped {
-                    "Managed Cartograph database stopped."
-                } else {
-                    "Managed Cartograph database was already stopped or absent."
-                }
-            );
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::Logs {
-            project_path,
-            port,
-            tail,
-        } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            let logs = database
-                .logs(tail)
-                .await
-                .map_err(|error| error.to_string())?;
-            print!("{logs}");
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::Backup {
-            destination,
-            project_path,
-            port,
-            format,
-        } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            let report = database
-                .backup(destination)
-                .await
-                .map_err(|error| error.to_string())?;
-            print_serialized(&report, format)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::Restore {
-            source,
-            confirm,
-            project_path,
-            port,
-            format,
-        } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            let confirmation = database
-                .confirm_destructive_operation(ManagedDestructiveOperation::Restore, &confirm)
-                .map_err(|error| error.to_string())?;
-            let report = database
-                .restore(source, confirmation)
-                .await
-                .map_err(|error| error.to_string())?;
-            print_serialized(&report, format)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::Remove {
-            confirm,
-            project_path,
-            port,
-            format,
-        } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            let confirmation = database
-                .confirm_destructive_operation(ManagedDestructiveOperation::Remove, &confirm)
-                .map_err(|error| error.to_string())?;
-            let report = database
-                .remove(confirmation)
-                .await
-                .map_err(|error| error.to_string())?;
-            print_serialized(&report, format)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::Upgrade {
-            confirm,
-            project_path,
-            port,
-            format,
-        } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            let confirmation = database
-                .confirm_destructive_operation(ManagedDestructiveOperation::Upgrade, &confirm)
-                .map_err(|error| error.to_string())?;
-            let report = database
-                .upgrade(confirmation)
-                .await
-                .map_err(|error| error.to_string())?;
-            print_serialized(&report, format)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        DatabaseCommand::DerivedIndex {
-            rebuild,
-            confirm,
-            project_path,
-            port,
-            format,
-        } => {
-            let database =
-                ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
-            if rebuild {
-                let acknowledgement = confirm.ok_or_else(|| {
-                    "--confirm rebuild-managed-derived-indexes is required".to_owned()
-                })?;
-                let confirmation = database
-                    .confirm_destructive_operation(
-                        ManagedDestructiveOperation::RebuildDerivedIndexes,
-                        &acknowledgement,
-                    )
-                    .map_err(|error| error.to_string())?;
-                let report = database
-                    .rebuild_derived_indexes(confirmation)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                print_serialized(&report, format)?;
-            } else {
-                let report = database
-                    .derived_index_health()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                print_serialized(&report, format)?;
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        DatabaseCommand::Start(arguments) => run_database_start(arguments).await,
+        DatabaseCommand::Status(arguments) => run_database_status(arguments).await,
+        DatabaseCommand::Stop(arguments) => run_database_stop(arguments).await,
+        DatabaseCommand::Logs(arguments) => run_database_logs(arguments).await,
+        DatabaseCommand::Backup(arguments) => run_database_backup(arguments).await,
+        DatabaseCommand::Restore(arguments) => run_database_restore(arguments).await,
+        DatabaseCommand::Remove(arguments) => run_database_remove(arguments).await,
+        DatabaseCommand::Upgrade(arguments) => run_database_upgrade(arguments).await,
+        DatabaseCommand::DerivedIndex(arguments) => run_derived_index(arguments).await,
+        DatabaseCommand::ImportV1(arguments) => run_v1_postgres_import(arguments).await,
+        DatabaseCommand::Prune(arguments) => run_generation_prune(arguments).await,
     }
+}
+
+async fn run_database_start(arguments: DatabaseStartArguments) -> Result<ExitCode, String> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?
+        .with_startup_timeout(Duration::from_secs(arguments.wait_seconds));
+    let report = database
+        .lifecycle()
+        .start()
+        .await
+        .map_err(|error| error.to_string())?;
+    print_managed_start(&report, arguments.format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_status(arguments: DatabaseStatusArguments) -> Result<ExitCode, String> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?;
+    let status = database
+        .lifecycle()
+        .status()
+        .await
+        .map_err(|error| error.to_string())?;
+    print_managed_status(&status, arguments.format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_stop(arguments: DatabaseStopArguments) -> Result<ExitCode, String> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?;
+    let stopped = database
+        .lifecycle()
+        .stop()
+        .await
+        .map_err(|error| error.to_string())?;
+    println!(
+        "{}",
+        if stopped {
+            "Managed Cartograph database stopped."
+        } else {
+            "Managed Cartograph database was already stopped or absent."
+        }
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_logs(arguments: DatabaseLogsArguments) -> Result<ExitCode, String> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?;
+    let logs = database
+        .lifecycle()
+        .logs(arguments.tail)
+        .await
+        .map_err(|error| error.to_string())?;
+    print!("{logs}");
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_backup(arguments: DatabaseBackupArguments) -> Result<ExitCode, String> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?;
+    let report = database
+        .archives()
+        .backup(arguments.destination)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_serialized(&report, arguments.format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_restore(arguments: DatabaseRestoreArguments) -> Result<ExitCode, String> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?;
+    let confirmation = database
+        .confirm_destructive_operation(ManagedDestructiveOperation::Restore, &arguments.confirm)
+        .map_err(|error| error.to_string())?;
+    let report = database
+        .archives()
+        .restore(arguments.source, confirmation)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_serialized(&report, arguments.format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_remove(arguments: DatabaseDestructiveArguments) -> Result<ExitCode, String> {
+    let (database, confirmation, format) =
+        prepare_database_destruction(arguments, ManagedDestructiveOperation::Remove)?;
+    let report = database
+        .maintenance()
+        .remove(confirmation)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_serialized(&report, format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_upgrade(arguments: DatabaseDestructiveArguments) -> Result<ExitCode, String> {
+    let (database, confirmation, format) =
+        prepare_database_destruction(arguments, ManagedDestructiveOperation::Upgrade)?;
+    let report = database
+        .maintenance()
+        .upgrade(confirmation)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_serialized(&report, format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn prepare_database_destruction(
+    arguments: DatabaseDestructiveArguments,
+    operation: ManagedDestructiveOperation,
+) -> Result<
+    (
+        ManagedDatabase,
+        ManagedDestructiveConfirmation,
+        OutputFormat,
+    ),
+    String,
+> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?;
+    let confirmation = database
+        .confirm_destructive_operation(operation, &arguments.confirm)
+        .map_err(|error| error.to_string())?;
+    Ok((database, confirmation, arguments.format))
+}
+
+async fn run_derived_index(arguments: DatabaseDerivedIndexArguments) -> Result<ExitCode, String> {
+    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
+        .map_err(|error| error.to_string())?;
+    if arguments.rebuild {
+        rebuild_derived_index(&database, arguments.confirm, arguments.format).await?;
+    } else {
+        let report = database
+            .maintenance()
+            .derived_index_health()
+            .await
+            .map_err(|error| error.to_string())?;
+        print_serialized(&report, arguments.format)?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn rebuild_derived_index(
+    database: &ManagedDatabase,
+    confirmation: Option<String>,
+    format: OutputFormat,
+) -> Result<(), String> {
+    let acknowledgement = confirmation
+        .ok_or_else(|| "--confirm rebuild-managed-derived-indexes is required".to_owned())?;
+    let confirmation = database
+        .confirm_destructive_operation(
+            ManagedDestructiveOperation::RebuildDerivedIndexes,
+            &acknowledgement,
+        )
+        .map_err(|error| error.to_string())?;
+    let report = database
+        .maintenance()
+        .rebuild_derived_indexes(confirmation)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_serialized(&report, format)
+}
+
+async fn run_v1_postgres_import(arguments: V1ImportArguments) -> Result<ExitCode, String> {
+    let V1ImportArguments {
+        project_path,
+        source_schema,
+        maximum_rows,
+        maximum_source_bytes,
+        dry_run,
+        confirm,
+        format,
+    } = arguments;
+    if !dry_run && confirm.as_deref() != Some(V1_IMPORT_CONFIRMATION) {
+        return Err(format!(
+            "v1 import requires --confirm {V1_IMPORT_CONFIRMATION}"
+        ));
+    }
+    let source_schema = cartograph_config::DatabaseSchema::parse(&source_schema)
+        .map_err(|error| error.to_string())?;
+    let identity = ProjectRuntime::inspect_source_identity(&project_path)
+        .map_err(|error| error.to_string())?;
+    let validation =
+        GenerationValidationLimits::new(DEFAULT_IMPORT_OUTPUT_BYTES, DEFAULT_IMPORT_WORKING_BYTES)
+            .map_err(|error| error.to_string())?;
+    let limits = V1PostgresImportLimits::new(maximum_rows, maximum_source_bytes, validation)
+        .map_err(|error| error.to_string())?;
+    let execution = V1PostgresImportExecution::new(
+        maintenance_owner(),
+        MAINTENANCE_LEASE_DURATION,
+        MAINTENANCE_STATEMENT_TIMEOUT,
+    );
+    let source_revision =
+        V1PostgresSourceRevision::new(identity.repository_fingerprint, identity.source_revision);
+    let source = V1PostgresSource::new(source_schema, &project_path, source_revision);
+    let request = V1PostgresImportRequest::new(source, execution, limits);
+    let settings = resolve_database_settings(&project_path)?;
+    let pool = cartograph_db::connect(&settings)
+        .await
+        .map_err(|error| error.to_string())?;
+    let database = CartographDatabase::new(pool, settings.schema().clone());
+    let result = if dry_run {
+        database
+            .dry_run_v1_postgres_import(&request)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|report| print_serialized(&report, format))
+    } else {
+        database
+            .import_v1_postgres(request)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|report| print_serialized(&report, format))
+    };
+    database.close().await;
+    result?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_generation_prune(arguments: PruneArguments) -> Result<ExitCode, String> {
+    let PruneArguments {
+        project_path,
+        keep_superseded,
+        maximum_deletions,
+        confirm,
+        format,
+    } = arguments;
+    if confirm != RETENTION_CONFIRMATION {
+        return Err(format!(
+            "generation pruning requires --confirm {RETENTION_CONFIRMATION}"
+        ));
+    }
+    let policy = GenerationRetentionPolicy::new(keep_superseded, maximum_deletions)
+        .map_err(|error| error.to_string())?;
+    let runtime = open_runtime(&project_path).await?;
+    let status = runtime.status().await.map_err(|error| error.to_string())?;
+    let project_id = status
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.project_id.clone())
+        .ok_or_else(|| "project has no index; nothing can be pruned".to_owned())?;
+    let lease = runtime
+        .database()
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project_id, ProjectOperation::Migration, None),
+            maintenance_owner(),
+            MAINTENANCE_LEASE_DURATION,
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    let fence = lease.fence();
+    let cleanup = runtime
+        .database()
+        .cleanup_generations(GenerationRetentionRequest::new(
+            policy,
+            &fence,
+            MAINTENANCE_STATEMENT_TIMEOUT,
+        ))
+        .await
+        .map_err(|error| error.to_string());
+    let release = runtime
+        .database()
+        .release_lease(&lease)
+        .await
+        .map_err(|error| error.to_string());
+    let result = cleanup.and_then(|report| release.map(|()| report));
+    runtime.close().await;
+    print_serialized(&result?, format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn maintenance_owner() -> LeaseOwner {
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos();
+    LeaseOwner::new(process::id(), format!("cartograph-cli:{started}"))
 }
 
 fn print_managed_start(report: &ManagedStartReport, format: OutputFormat) -> Result<(), String> {
@@ -953,6 +3146,24 @@ fn print_managed_start(report: &ManagedStartReport, format: OutputFormat) -> Res
     Ok(())
 }
 
+fn render_text_report(report: &CapabilityReport) -> String {
+    let mut output = format!(
+        "# Cartograph v2 database capabilities\n\n{}\n",
+        report.postgres_version
+    );
+    for check in &report.checks {
+        let marker = match check.status {
+            CheckStatus::Pass => "✓",
+            CheckStatus::Fail => "✗",
+        };
+        output.push_str(&format!("\n{marker} {} — {}\n", check.id, check.message));
+        if let Some(remediation) = check.remediation {
+            output.push_str(&format!("  Fix: {remediation}\n"));
+        }
+    }
+    output
+}
+
 fn print_managed_status(
     status: &ManagedDatabaseStatus,
     format: OutputFormat,
@@ -992,25 +3203,49 @@ const fn managed_state_label(state: ManagedContainerState) -> &'static str {
     }
 }
 
-async fn run_doctor(project_path: PathBuf, format: OutputFormat) -> Result<ExitCode, String> {
-    let settings = resolve_database_settings(&project_path)?;
-    let pool = cartograph_db::connect(&settings)
-        .await
-        .map_err(|error| error.to_string())?;
-    let report = cartograph_db::probe_capabilities(&pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    pool.close().await;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Pass,
+    Warn,
+    Fail,
+}
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCheck {
+    id: String,
+    status: DoctorStatus,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remediation: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorReport {
+    ready: bool,
+    fixes_applied: Vec<String>,
+    checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database: Option<CapabilityReport>,
+}
+
+async fn run_doctor(
+    project_path: PathBuf,
+    fix: bool,
+    skip_project_checks: bool,
+    format: OutputFormat,
+) -> Result<ExitCode, String> {
+    let report = build_doctor_report(project_path, fix, skip_project_checks).await?;
     match format {
-        OutputFormat::Text => print!("{}", render_text_report(&report)),
+        OutputFormat::Text => print!("{}", render_doctor_report(&report)),
         OutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&report)
-                .map_err(|_| "could not serialize the capability report".to_owned())?
+                .map_err(|_| "could not serialize the doctor report".to_owned())?
         ),
     }
-
     Ok(if report.ready {
         ExitCode::SUCCESS
     } else {
@@ -1018,25 +3253,487 @@ async fn run_doctor(project_path: PathBuf, format: OutputFormat) -> Result<ExitC
     })
 }
 
-fn render_text_report(report: &CapabilityReport) -> String {
-    let mut output = format!(
-        "# Cartograph v2 database doctor\n\n{}\n",
-        report.postgres_version
-    );
+async fn build_doctor_report(
+    project_path: PathBuf,
+    fix: bool,
+    skip_project_checks: bool,
+) -> Result<DoctorReport, String> {
+    build_doctor_report_with_settings(project_path, fix, skip_project_checks, None).await
+}
+
+async fn build_doctor_report_with_settings(
+    project_path: PathBuf,
+    fix: bool,
+    skip_project_checks: bool,
+    explicit_database_settings: Option<&DatabaseSettings>,
+) -> Result<DoctorReport, String> {
+    let project_path = project_path
+        .canonicalize()
+        .map_err(|_| "doctor project path must be an existing directory".to_owned())?;
+    if !project_path.is_dir() {
+        return Err("doctor project path must be an existing directory".to_owned());
+    }
+    let mut fixes_applied = Vec::new();
+    let mut checks = Vec::new();
+
+    check_native_executable(&mut checks);
+    if !skip_project_checks {
+        check_or_fix_project_state(&project_path, fix, &mut fixes_applied, &mut checks)?;
+    }
+
+    let external_database =
+        explicit_database_settings.is_some() || env::var_os(DATABASE_URL_ENV).is_some();
+    if fix && !external_database {
+        match ManagedDatabase::new(&project_path, DEFAULT_MANAGED_DATABASE_PORT) {
+            Ok(database) => match database.lifecycle().start().await {
+                Ok(report) => fixes_applied.push(format!(
+                    "managed PostgreSQL is ready; {} migration(s) applied",
+                    report.migrations.applied_versions.len()
+                )),
+                Err(error) => checks.push(doctor_fail(
+                    "database-fix",
+                    error.to_string(),
+                    "Start Docker, then run `cartograph db start --project-path <path>`."
+                        .to_owned(),
+                )),
+            },
+            Err(error) => checks.push(doctor_fail(
+                "database-fix",
+                error.to_string(),
+                "Run `cartograph db start --project-path <path>`.".to_owned(),
+            )),
+        }
+    }
+
+    if fix && !skip_project_checks {
+        match llm_commands::doctor_fix_missing_tiers(&project_path).await {
+            Ok(fixes) => fixes_applied.extend(fixes),
+            Err(error) => checks.push(doctor_fail(
+                "llm-fix",
+                error,
+                "Run `cartograph llm setup` or `cartograph llm install --minimal`.".to_owned(),
+            )),
+        }
+    }
+
+    if !external_database {
+        check_managed_database(&project_path, &mut checks).await;
+    } else {
+        checks.push(doctor_pass(
+            "database-source",
+            if explicit_database_settings.is_some() {
+                "Using validated external PostgreSQL settings supplied to this process."
+            } else {
+                "Using validated external PostgreSQL settings from the process environment."
+            },
+        ));
+    }
+
+    let (database, settings) =
+        check_database_capabilities(&project_path, explicit_database_settings, &mut checks).await;
+    if !skip_project_checks && let Some(settings) = settings.as_ref() {
+        check_project_index(&project_path, settings, &mut checks).await;
+    }
+    if !skip_project_checks {
+        check_llm_configuration(&project_path, &mut checks).await;
+    }
+
+    let ready = !checks
+        .iter()
+        .any(|check| check.status == DoctorStatus::Fail);
+    Ok(DoctorReport {
+        ready,
+        fixes_applied,
+        checks,
+        database,
+    })
+}
+
+fn check_native_executable(checks: &mut Vec<DoctorCheck>) {
+    let healthy = env::current_exe()
+        .ok()
+        .and_then(|path| fs::symlink_metadata(path).ok())
+        .is_some_and(|metadata| metadata.file_type().is_file());
+    checks.push(if healthy {
+        doctor_pass(
+            "native-runtime",
+            concat!(
+                "Native Rust executable is available (",
+                env!("CARGO_PKG_VERSION"),
+                ")."
+            ),
+        )
+    } else {
+        doctor_fail(
+            "native-runtime",
+            "The running Cartograph executable could not be resolved safely.".to_owned(),
+            "Reinstall the native Cartograph release binary.".to_owned(),
+        )
+    });
+}
+
+fn check_or_fix_project_state(
+    project_path: &Path,
+    fix: bool,
+    fixes: &mut Vec<String>,
+    checks: &mut Vec<DoctorCheck>,
+) -> Result<(), String> {
+    let state = project_path.join(".cartograph");
+    match fs::symlink_metadata(&state) {
+        Ok(metadata) if metadata.file_type().is_dir() => checks.push(doctor_pass(
+            "project-state",
+            "The project has a real .cartograph state directory.",
+        )),
+        Ok(_) => checks.push(doctor_fail(
+            "project-state",
+            "The .cartograph state entry is not a real directory.".to_owned(),
+            "Replace it with a private directory after preserving any intentional contents."
+                .to_owned(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && fix => {
+            fs::create_dir(&state).map_err(|_| {
+                "doctor could not create the .cartograph state directory".to_owned()
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).map_err(|_| {
+                    "doctor could not make the .cartograph state directory private".to_owned()
+                })?;
+            }
+            fixes.push("created the private .cartograph state directory".to_owned());
+            checks.push(doctor_pass(
+                "project-state",
+                "The project has a real .cartograph state directory.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => checks.push(doctor_warn(
+            "project-state",
+            "The project is not initialized yet.",
+            "Run `cartograph doctor --fix` or `cartograph db start`.".to_owned(),
+        )),
+        Err(_) => checks.push(doctor_fail(
+            "project-state",
+            "The .cartograph state entry could not be inspected.".to_owned(),
+            "Check project-directory permissions.".to_owned(),
+        )),
+    }
+    Ok(())
+}
+
+async fn check_managed_database(project_path: &Path, checks: &mut Vec<DoctorCheck>) {
+    let database = match ManagedDatabase::new(project_path, DEFAULT_MANAGED_DATABASE_PORT) {
+        Ok(database) => database,
+        Err(error) => {
+            checks.push(doctor_fail(
+                "managed-database",
+                error.to_string(),
+                "Run `cartograph db start --project-path <path>`.".to_owned(),
+            ));
+            return;
+        }
+    };
+    match database.lifecycle().status().await {
+        Ok(status) if status.state == ManagedContainerState::Healthy && status.image_matches => {
+            checks.push(doctor_pass(
+                "managed-database",
+                "The project-owned PostgreSQL container is healthy and uses the pinned image.",
+            ));
+        }
+        Ok(status) => checks.push(doctor_fail(
+            "managed-database",
+            format!(
+                "Managed database state is {} and pinned-image match is {}.",
+                managed_state_label(status.state),
+                status.image_matches
+            ),
+            "Run `cartograph db start`; use `cartograph db upgrade` for an owned older image."
+                .to_owned(),
+        )),
+        Err(error) => checks.push(doctor_fail(
+            "managed-database",
+            error.to_string(),
+            "Start Docker and run `cartograph db start --project-path <path>`.".to_owned(),
+        )),
+    }
+}
+
+async fn check_database_capabilities(
+    project_path: &PathBuf,
+    explicit_database_settings: Option<&DatabaseSettings>,
+    checks: &mut Vec<DoctorCheck>,
+) -> (Option<CapabilityReport>, Option<DatabaseSettings>) {
+    let settings = match explicit_database_settings
+        .cloned()
+        .map_or_else(|| resolve_database_settings(project_path), Ok)
+    {
+        Ok(settings) => settings,
+        Err(error) => {
+            checks.push(doctor_fail(
+                "database-settings",
+                error,
+                "Set CARTOGRAPH_DATABASE_URL or run `cartograph db start`.".to_owned(),
+            ));
+            return (None, None);
+        }
+    };
+    let pool = match cartograph_db::connect(&settings).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            checks.push(doctor_fail(
+                "database-connection",
+                error.to_string(),
+                "Verify PostgreSQL connectivity or restart the managed database.".to_owned(),
+            ));
+            return (None, Some(settings));
+        }
+    };
+    let report = match cartograph_db::probe_capabilities(&pool).await {
+        Ok(report) => report,
+        Err(error) => {
+            pool.close().await;
+            checks.push(doctor_fail(
+                "database-capabilities",
+                error.to_string(),
+                "Use PostgreSQL 18 with pg_search and pgvector enabled.".to_owned(),
+            ));
+            return (None, Some(settings));
+        }
+    };
+    pool.close().await;
+    for capability in &report.checks {
+        checks.push(DoctorCheck {
+            id: format!("database-{}", capability.id),
+            status: match capability.status {
+                CheckStatus::Pass => DoctorStatus::Pass,
+                CheckStatus::Fail => DoctorStatus::Fail,
+            },
+            message: capability.message.clone(),
+            remediation: capability.remediation.map(str::to_owned),
+        });
+    }
+    (Some(report), Some(settings))
+}
+
+async fn check_project_index(
+    project_path: &Path,
+    settings: &DatabaseSettings,
+    checks: &mut Vec<DoctorCheck>,
+) {
+    let runtime = match ProjectRuntime::connect_read_only(project_path, settings).await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            checks.push(doctor_fail(
+                "schema-migrations",
+                error.to_string(),
+                "Run `cartograph db start` or verify the configured schema permissions.".to_owned(),
+            ));
+            return;
+        }
+    };
+    match runtime.status().await {
+        Ok(status)
+            if status
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.current.as_ref())
+                .is_none() =>
+        {
+            checks.push(doctor_warn(
+                "project-index",
+                "No published graph generation exists yet.",
+                "Run `cartograph index`.".to_owned(),
+            ));
+        }
+        Ok(status) if status.fresh => checks.push(doctor_pass(
+            "project-index",
+            "The published graph generation matches the live source manifest.",
+        )),
+        Ok(_) => checks.push(doctor_warn(
+            "project-index",
+            "The published graph generation is stale relative to live source.",
+            "Run `cartograph index` or `cartograph sync-if-dirty`.".to_owned(),
+        )),
+        Err(error) => checks.push(doctor_warn(
+            "project-index",
+            "Project index status could not be determined.",
+            format!("Run `cartograph index`; status detail: {error}"),
+        )),
+    }
+    runtime.close().await;
+}
+
+async fn check_llm_configuration(project_path: &Path, checks: &mut Vec<DoctorCheck>) {
+    let tiers = [
+        (ProjectLlmTier::Embedding, "embedding", true),
+        (ProjectLlmTier::Summarize, "summarize", true),
+        (ProjectLlmTier::Local, "local", false),
+        (ProjectLlmTier::Ask, "ask", false),
+        (ProjectLlmTier::Classify, "classify", false),
+        (ProjectLlmTier::Reranker, "reranker", false),
+    ];
+    let mut loopback = BTreeMap::<String, Vec<&'static str>>::new();
+    for (tier, label, required) in tiers {
+        let config = match load_exact_project_llm_tier(project_path, tier) {
+            Ok(Some(config)) => config,
+            Ok(None) if required => {
+                checks.push(doctor_warn(
+                    format!("llm-{label}"),
+                    format!("The {label} LLM tier is not configured; deterministic graph/BM25 retrieval remains available."),
+                    "Run `cartograph llm setup` or `cartograph llm install --minimal`.".to_owned(),
+                ));
+                continue;
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                checks.push(doctor_fail(
+                    format!("llm-{label}"),
+                    error.to_string(),
+                    "Repair .cartograph/config.json with `cartograph llm setup`.".to_owned(),
+                ));
+                continue;
+            }
+        };
+        if config.credential_source() == ProjectLlmCredentialSource::InlineLegacy {
+            checks.push(doctor_warn(
+                format!("llm-{label}-credential"),
+                "A legacy inline LLM credential is configured.",
+                "Move the credential to an environment variable and use apiKeyEnv.".to_owned(),
+            ));
+        }
+        check_local_model(label, config.model(), checks);
+        let is_loopback = Url::parse(config.endpoint())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|address| address.is_loopback())
+            });
+        if is_loopback {
+            loopback
+                .entry(config.endpoint().to_owned())
+                .or_default()
+                .push(label);
+        } else {
+            checks.push(doctor_pass(
+                format!("llm-{label}-config"),
+                format!("The {label} remote tier is valid; use `cartograph llm smoke` for an authenticated request."),
+            ));
+        }
+    }
+
+    let probes = stream::iter(loopback)
+        .map(|(endpoint, labels)| async move {
+            let result = probe_openai_compatible_endpoint(&endpoint, Duration::from_secs(2)).await;
+            (labels, result)
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+    for (labels, result) in probes {
+        for label in labels {
+            match &result {
+                Ok(probe) if probe.openai_compatible => checks.push(doctor_pass(
+                    format!("llm-{label}-endpoint"),
+                    format!("The {label} loopback endpoint is OpenAI-compatible."),
+                )),
+                Ok(probe) if probe.reachable => checks.push(doctor_warn(
+                    format!("llm-{label}-endpoint"),
+                    format!("The {label} loopback endpoint is reachable but did not expose a compatible model catalog."),
+                    "Start the configured OpenAI-compatible backend and run `cartograph llm smoke`.".to_owned(),
+                )),
+                Ok(_) | Err(_) => checks.push(doctor_warn(
+                    format!("llm-{label}-endpoint"),
+                    format!("The {label} loopback endpoint is not responding."),
+                    "Run `cartograph backend start` or start the externally managed provider.".to_owned(),
+                )),
+            }
+        }
+    }
+}
+
+fn check_local_model(label: &str, model: &str, checks: &mut Vec<DoctorCheck>) {
+    let path = Path::new(model);
+    if !path.is_absolute() || path.extension().and_then(|value| value.to_str()) != Some("gguf") {
+        return;
+    }
+    let valid = fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_file() && metadata.len() > 0);
+    checks.push(if valid {
+        doctor_pass(
+            format!("llm-{label}-model"),
+            format!("The {label} GGUF model is a non-empty regular file."),
+        )
+    } else {
+        doctor_warn(
+            format!("llm-{label}-model"),
+            format!("The configured {label} GGUF model is missing or unsafe."),
+            "Run `cartograph llm install --minimal` or repair the model path.".to_owned(),
+        )
+    });
+}
+
+fn doctor_pass(id: impl Into<String>, message: impl Into<String>) -> DoctorCheck {
+    DoctorCheck {
+        id: id.into(),
+        status: DoctorStatus::Pass,
+        message: message.into(),
+        remediation: None,
+    }
+}
+
+fn doctor_warn(
+    id: impl Into<String>,
+    message: impl Into<String>,
+    remediation: String,
+) -> DoctorCheck {
+    DoctorCheck {
+        id: id.into(),
+        status: DoctorStatus::Warn,
+        message: message.into(),
+        remediation: Some(remediation),
+    }
+}
+
+fn doctor_fail(
+    id: impl Into<String>,
+    message: impl Into<String>,
+    remediation: String,
+) -> DoctorCheck {
+    DoctorCheck {
+        id: id.into(),
+        status: DoctorStatus::Fail,
+        message: message.into(),
+        remediation: Some(remediation),
+    }
+}
+
+fn render_doctor_report(report: &DoctorReport) -> String {
+    let mut output = "# Cartograph v2 doctor\n".to_owned();
+    if !report.fixes_applied.is_empty() {
+        output.push_str("\nRepairs applied:\n");
+        for fix in &report.fixes_applied {
+            output.push_str(&format!("- {fix}\n"));
+        }
+    }
     for check in &report.checks {
         let marker = match check.status {
-            CheckStatus::Pass => "✓",
-            CheckStatus::Fail => "✗",
+            DoctorStatus::Pass => "✓",
+            DoctorStatus::Warn => "⚠",
+            DoctorStatus::Fail => "✗",
         };
         output.push_str(&format!("\n{marker} {} — {}\n", check.id, check.message));
-        if let Some(remediation) = check.remediation {
+        if let Some(remediation) = &check.remediation {
             output.push_str(&format!("  Fix: {remediation}\n"));
         }
     }
     output.push_str(if report.ready {
-        "\nAll hard requirements passed. Cartograph v2 storage is ready.\n"
+        "\nAll hard requirements passed. Cartograph v2 is ready; warnings identify optional or project-index gaps.\n"
     } else {
-        "\nOne or more hard requirements failed. Cartograph v2 will not start.\n"
+        "\nOne or more hard requirements failed. Cartograph v2 is not ready.\n"
     });
     output
 }
@@ -1044,34 +3741,188 @@ fn render_text_report(report: &CapabilityReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cartograph_db::{CapabilityCheck, CapabilityReport};
     use clap::Parser;
 
     #[test]
-    fn text_report_includes_actionable_failure_and_terminal_state() {
-        let report = CapabilityReport {
-            ready: false,
-            postgres_version_num: 170_009,
-            postgres_version: "PostgreSQL 17.9".to_owned(),
-            pg_search_version: None,
-            pgvector_version: None,
-            checks: vec![CapabilityCheck {
-                id: "postgres-18",
-                status: CheckStatus::Fail,
-                message: "PostgreSQL server reports version number 170009".to_owned(),
-                remediation: Some("Upgrade PostgreSQL."),
-            }],
-        };
+    fn v1_1_33_cli_tree_remains_available_except_browser_viewer() {
+        fn walk(command: &clap::Command, parent: &[String], rows: &mut BTreeMap<String, Value>) {
+            let mut path = parent.to_vec();
+            path.push(command.get_name().to_owned());
+            let path_key = path.join(" ");
+            let mut aliases = command
+                .get_all_aliases()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            aliases.sort();
+            let mut options = command
+                .get_arguments()
+                .flat_map(|argument| {
+                    argument
+                        .get_long()
+                        .into_iter()
+                        .chain(argument.get_all_aliases().unwrap_or_default())
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>();
+            options.sort();
+            let mut positionals = command
+                .get_positionals()
+                .map(|argument| {
+                    let id = match argument.get_id().as_str() {
+                        "__compat_ask_path" => "path",
+                        "__compat_files_target" => "target",
+                        "project_path" => "path",
+                        value => value,
+                    };
+                    (argument.get_index().unwrap_or(usize::MAX), id.to_owned())
+                })
+                .collect::<Vec<_>>();
+            positionals.sort_by_key(|(index, _)| *index);
+            rows.insert(
+                path_key.clone(),
+                serde_json::json!({
+                    "path": path_key,
+                    "aliases": aliases,
+                    "options": options,
+                    "positionals": positionals
+                        .into_iter()
+                        .map(|(_, positional)| positional)
+                        .collect::<Vec<_>>(),
+                }),
+            );
+            for child in command.get_subcommands() {
+                walk(child, &path, rows);
+            }
+        }
 
-        let rendered = render_text_report(&report);
+        let mut command = generated_cli::command()
+            .unwrap_or_else(|error| panic!("generated CLI command failed: {error}"));
+        command.build();
+        let mut current = BTreeMap::new();
+        walk(&command, &[], &mut current);
+        let tool_contracts = mcp_handler::tool_definitions()
+            .unwrap_or_else(|error| panic!("MCP definitions failed: {error}"))
+            .into_iter()
+            .map(|definition| (definition.name().to_owned(), definition))
+            .collect::<BTreeMap<_, _>>();
+        let legacy = serde_json::from_str::<Vec<Value>>(include_str!("v1_1_33_cli_contract.json"))
+            .unwrap_or_else(|error| panic!("v1.1.33 CLI fixture failed to parse: {error}"));
 
-        assert!(rendered.contains("✗ postgres-18"));
-        assert!(rendered.contains("Fix: Upgrade PostgreSQL."));
-        assert!(rendered.contains("will not start"));
+        for command in legacy {
+            let path = command["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("legacy CLI path was invalid"));
+            if path == "cartograph viewer" || path.starts_with("cartograph viewer ") {
+                continue;
+            }
+            let segments = path.split_whitespace().collect::<Vec<_>>();
+            let collapsed = if current.contains_key(path) {
+                None
+            } else if segments.len() == 3 {
+                let family = segments[1];
+                let value = segments[2];
+                let property = match family {
+                    "admin" | "summaries" | "session" => "action",
+                    "review" => "mode",
+                    _ => panic!("v2 dropped the v1.1.33 command `{path}`"),
+                };
+                let tool_name = format!("cartograph_{}", family.replace('-', "_"));
+                let definition = tool_contracts
+                    .get(&tool_name)
+                    .unwrap_or_else(|| panic!("{tool_name} contract was missing"));
+                let accepted = definition.input_schema()["properties"][property]["enum"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{tool_name}.{property} enum was missing"));
+                assert!(
+                    accepted.iter().any(|candidate| candidate == value),
+                    "v2 dropped the v1.1.33 action `{path}`"
+                );
+                Some(format!("cartograph {family}"))
+            } else {
+                panic!("v2 dropped the v1.1.33 command `{path}");
+            };
+            let actual_path = collapsed.as_deref().unwrap_or(path);
+            let actual = current
+                .get(actual_path)
+                .unwrap_or_else(|| panic!("v2 dropped the v1.1.33 command `{actual_path}`"));
+            for field in ["aliases", "options", "positionals"] {
+                let legacy_values = command[field]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("legacy `{path}` {field} were invalid"))
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>();
+                let actual_values = actual[field]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("current `{path}` {field} were invalid"))
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>();
+                if collapsed.is_some() && field == "aliases" {
+                    assert!(
+                        legacy_values
+                            .iter()
+                            .all(|alias| *alias == segments[2].replace('_', "-")),
+                        "collapsed action aliases drifted for `{path}`: {legacy_values:?}"
+                    );
+                    continue;
+                }
+                if collapsed.is_some() && field == "positionals" {
+                    assert!(
+                        legacy_values.len() <= actual_values.len().saturating_sub(1),
+                        "v2 dropped v1.1.33 positional capacity on `{path}`; legacy={legacy_values:?}, current={actual_values:?}"
+                    );
+                    continue;
+                }
+                let mut cursor = 0_usize;
+                for legacy_value in legacy_values {
+                    let Some(relative) = actual_values[cursor..]
+                        .iter()
+                        .position(|actual| *actual == legacy_value)
+                    else {
+                        panic!(
+                            "v2 dropped or reordered v1.1.33 {field} `{legacy_value}` on `{path}`; current={actual_values:?}"
+                        );
+                    };
+                    cursor = cursor.saturating_add(relative).saturating_add(1);
+                }
+            }
+        }
     }
 
     #[test]
-    fn stable_cli_parses_native_index_and_status_commands() {
+    fn text_report_includes_actionable_failure_and_terminal_state() {
+        let report = DoctorReport {
+            ready: false,
+            fixes_applied: Vec::new(),
+            checks: vec![DoctorCheck {
+                id: "database-postgres-18".to_owned(),
+                status: DoctorStatus::Fail,
+                message: "PostgreSQL server reports version number 170009".to_owned(),
+                remediation: Some("Upgrade PostgreSQL.".to_owned()),
+            }],
+            database: None,
+        };
+
+        let rendered = render_doctor_report(&report);
+
+        assert!(rendered.contains("✗ database-postgres-18"));
+        assert!(rendered.contains("Fix: Upgrade PostgreSQL."));
+        assert!(rendered.contains("is not ready"));
+    }
+
+    #[test]
+    fn compatibility_file_size_parser_is_strict_and_bounded() {
+        assert_eq!(parse_max_file_size("1"), Ok(1));
+        assert_eq!(parse_max_file_size("64kb"), Ok(64 * 1024));
+        assert_eq!(parse_max_file_size("10 MiB"), Ok(10 * 1024 * 1024));
+        assert!(parse_max_file_size("0").is_err());
+        assert!(parse_max_file_size("10.5mb").is_err());
+        assert!(parse_max_file_size("11mb").is_err());
+    }
+
+    #[test]
+    fn cli_parses_index_status_and_serve_commands() {
         let index = Cli::try_parse_from([
             "cartograph",
             "index",
@@ -1102,6 +3953,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("status CLI did not parse: {error}"));
         assert!(matches!(status.command, Command::Status { .. }));
 
+        let guide = Cli::try_parse_from(["cartograph", "guide"])
+            .unwrap_or_else(|error| panic!("guide CLI did not parse: {error}"));
+        assert!(matches!(guide.command, Command::Guide));
+
         let serve = Cli::try_parse_from([
             "cartograph",
             "serve",
@@ -1120,5 +3975,220 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn cli_parses_review_search_and_show_commands() {
+        let review = generated_cli::parse_from([
+            "cartograph",
+            "review",
+            "context",
+            "--ref",
+            "main",
+            "--project-path",
+            "workspace",
+        ])
+        .unwrap_or_else(|error| panic!("review CLI did not parse: {error}"));
+        let generated_cli::ParsedCli::Tool(review) = review else {
+            panic!("review did not route through the generated public command");
+        };
+        assert_eq!(review.tool_name(), "cartograph_review");
+        assert_eq!(review.arguments()["mode"], "context");
+        assert_eq!(review.arguments()["baseRef"], "main");
+
+        let find = generated_cli::parse_from(["cartograph", "find", "trace auth failure"])
+            .unwrap_or_else(|error| panic!("find CLI did not parse: {error}"));
+        assert!(matches!(find, generated_cli::ParsedCli::Tool(_)));
+
+        let context = generated_cli::parse_from([
+            "cartograph",
+            "context",
+            "trace auth failure",
+            "--mode",
+            "deterministic",
+        ])
+        .unwrap_or_else(|error| panic!("context CLI did not parse: {error}"));
+        assert!(matches!(context, generated_cli::ParsedCli::Tool(_)));
+
+        let show = Cli::try_parse_from([
+            "cartograph",
+            "show",
+            "11111111-1111-4111-8111-111111111111",
+            "--project-path",
+            "workspace",
+        ])
+        .unwrap_or_else(|error| panic!("show CLI did not parse: {error}"));
+        assert!(matches!(show.command, Command::Show { .. }));
+
+        let graph_path = generated_cli::parse_from([
+            "cartograph",
+            "graph",
+            "11111111-1111-4111-8111-111111111111",
+            "--direction",
+            "path",
+            "--to",
+            "22222222-2222-4222-8222-222222222222",
+            "--edge-kind",
+            "field-access",
+        ])
+        .unwrap_or_else(|error| panic!("graph path CLI did not parse: {error}"));
+        assert!(matches!(graph_path, generated_cli::ParsedCli::Tool(_)));
+        let graph_similar = generated_cli::parse_from([
+            "cartograph",
+            "graph",
+            "11111111-1111-4111-8111-111111111111",
+            "--direction",
+            "similar",
+            "--k",
+            "7",
+            "--min-score",
+            "0.75",
+            "--same-language",
+            "--model-id",
+            "22222222-2222-4222-8222-222222222222",
+        ])
+        .unwrap_or_else(|error| panic!("graph similar CLI did not parse: {error}"));
+        assert!(matches!(graph_similar, generated_cli::ParsedCli::Tool(_)));
+
+        let files = generated_cli::parse_from([
+            "cartograph",
+            "files",
+            "--dir",
+            "src",
+            "--language",
+            "rust",
+            "--allow-stale",
+        ])
+        .unwrap_or_else(|error| panic!("files CLI did not parse: {error}"));
+        assert!(matches!(files, generated_cli::ParsedCli::Tool(_)));
+
+        let entry_points = generated_cli::parse_from([
+            "cartograph",
+            "entry-points",
+            "--bucket",
+            "public-exports",
+            "--limit",
+            "40",
+            "--allow-stale",
+        ])
+        .unwrap_or_else(|error| panic!("entry-points CLI did not parse: {error}"));
+        assert!(matches!(entry_points, generated_cli::ParsedCli::Tool(_)));
+
+        let at_range = generated_cli::parse_from([
+            "cartograph",
+            "at-range",
+            "src/main.rs",
+            "10",
+            "20",
+            "--limit",
+            "50",
+        ])
+        .unwrap_or_else(|error| panic!("at-range CLI did not parse: {error}"));
+        let generated_cli::ParsedCli::Tool(at_range) = at_range else {
+            panic!("at-range did not route through the generated public command");
+        };
+        assert_eq!(at_range.arguments()["file"], "src/main.rs");
+        assert_eq!(at_range.arguments()["startLine"], 10);
+        assert_eq!(at_range.arguments()["endLine"], 20);
+    }
+
+    #[test]
+    fn cli_parses_install_and_database_commands() {
+        let install = Cli::try_parse_from([
+            "cartograph",
+            "install",
+            "--yes",
+            "--target",
+            "codex",
+            "--location",
+            "local",
+            "--project-path",
+            "workspace",
+        ])
+        .unwrap_or_else(|error| panic!("install CLI did not parse: {error}"));
+        assert!(matches!(
+            install.command,
+            Command::Install {
+                target: Some(ref target),
+                yes: true,
+                ..
+            } if target == "codex"
+        ));
+
+        let llm_install = Cli::try_parse_from([
+            "cartograph",
+            "llm",
+            "install",
+            "workspace",
+            "--no-models",
+            "--database-provider",
+            "postgres",
+            "--database-url",
+            "postgresql://cartograph@127.0.0.1:55432/cartograph",
+            "--database-schema",
+            "review_project",
+            "--database-pgvector",
+            "require",
+            "--database-max-connections",
+            "12",
+            "--database-query-timeout-ms",
+            "45000",
+            "--database-connection-timeout-seconds",
+            "7",
+            "--database-ssl",
+        ])
+        .unwrap_or_else(|error| panic!("LLM install compatibility CLI did not parse: {error}"));
+        assert!(matches!(
+            llm_install.command,
+            Command::Llm {
+                command: llm_commands::LlmCommand::Install(_)
+            }
+        ));
+
+        let database = Cli::try_parse_from(["cartograph", "db", "start"])
+            .unwrap_or_else(|error| panic!("database start CLI did not parse: {error}"));
+        assert!(matches!(
+            database.command,
+            Command::Db {
+                command: DatabaseCommand::Start(DatabaseStartArguments {
+                    port: DEFAULT_MANAGED_DATABASE_PORT,
+                    ..
+                })
+            }
+        ));
+
+        let import = Cli::try_parse_from([
+            "cartograph",
+            "db",
+            "import-v1",
+            "--source-schema",
+            "cartograph_v1",
+            "--dry-run",
+        ])
+        .unwrap_or_else(|error| panic!("database import CLI did not parse: {error}"));
+        assert!(matches!(
+            import.command,
+            Command::Db {
+                command: DatabaseCommand::ImportV1(V1ImportArguments {
+                    dry_run: true,
+                    maximum_rows: DEFAULT_IMPORT_MAXIMUM_ROWS,
+                    maximum_source_bytes: DEFAULT_IMPORT_MAXIMUM_SOURCE_BYTES,
+                    ..
+                })
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "cartograph",
+                "db",
+                "import-v1",
+                "--source-schema",
+                "cartograph_v1",
+                "--dry-run",
+                "--maximum-source-bytes",
+                EXCESSIVE_IMPORT_SOURCE_BYTES_TEXT,
+            ])
+            .is_err()
+        );
     }
 }

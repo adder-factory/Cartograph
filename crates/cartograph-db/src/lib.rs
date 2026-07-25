@@ -1,33 +1,104 @@
 //! PostgreSQL-only persistence and capability checks for Cartograph v2.
 
+mod adhoc;
+mod artifacts;
 mod capabilities;
+mod centrality;
+mod coverage;
 mod database;
+mod derived_prune;
+mod file_intelligence;
 mod generation;
+mod history;
 mod ingest;
+mod insights;
+mod interchange;
+mod issue_history;
 mod leases;
 mod managed;
 mod migrations;
+mod parse_cache;
 mod project;
+mod qualified;
+mod retention;
 mod retrieval;
 mod search;
+mod search_relation;
+mod semantic;
+mod sessions;
+mod summary_priority;
+mod v1_import;
 
 use std::str::FromStr;
 
-pub use capabilities::{CapabilityCheck, CapabilityReport, CheckStatus, probe_capabilities};
+pub use adhoc::{
+    ReadOnlySqlError, ReadOnlySqlRelation, ReadOnlySqlRequest, ReadOnlySqlResult, ReadOnlySqlRow,
+    read_only_sql_schema,
+};
+pub use artifacts::{
+    AgentArtifactKind, AgentArtifactQuery, AgentArtifactRecord, AgentArtifactScope,
+    AgentArtifactState, AgentRoleCount, CurrentModuleSummary, CurrentModuleSummaryPage,
+    FileSummarySaveRequest, ModuleSummaryRollupItem, ModuleSummarySaveRequest,
+    NeighborSummarySaveRequest, NeighborSummarySource, NewAgentArtifact, PendingFileSummary,
+    PendingModuleSummary, PendingNeighborSummary, PendingRoleSymbol, PendingStructuralSummary,
+    PendingSummarySymbol, StructuralSummaryEdge, SummaryCandidatePolicy, SummaryCoverageStats,
+    SummaryRollupItem,
+};
+pub use capabilities::{
+    CapabilityCheck, CapabilityReport, CheckStatus, probe_capabilities, probe_capabilities_bounded,
+};
 use cartograph_config::DatabaseSettings;
+pub use centrality::{
+    BetweennessError, BetweennessReport, PageRankError, PageRankReport, SymbolBetweennessScore,
+    SymbolPageRankScore, apply_page_rank, apply_sampled_betweenness,
+};
+pub use coverage::{
+    CoverageLoadReport, CoverageLoadRequest, CoverageSourceRecord, CoverageStats, CoverageTarget,
+    SymbolCoverageFact, SymbolCoverageQuery, SymbolCoverageRecord,
+};
 pub use database::{CartographDatabase, StorageError};
+pub use derived_prune::{
+    DerivedStorePruneError, DerivedStorePrunePolicy, DerivedStorePruneReport,
+    DerivedStorePruneRequest,
+};
+pub use file_intelligence::{
+    FileAggregateResult, FileDependencyDirection, FileDependencyQuery, FileDependencyResult,
+    FileDependencyRow, FileDirectoryAggregate, FileLanguageAggregate, FileSurfaceQuery,
+    FileSurfaceResult, FileSurfaceRow,
+};
 pub use generation::{
-    CurrentGeneration, FailGenerationError, FailedGeneration, GenerationContents, NewGeneration,
-    NewProject, ObservedGeneration, ObservedLease, OperationReconciliation, PrepareGenerationError,
-    PrepareGenerationMetrics, PrepareGenerationMetricsSnapshot, PrepareGenerationMutation,
-    PublishGenerationError, ReadyGeneration, RecoverableGeneration, StagedGeneration,
-    TerminalGenerationMutation,
+    CurrentGeneration, FailGenerationError, FailedGeneration, GenerationContents,
+    GenerationRecoveryRequest, NewGeneration, NewProject, ObservedGeneration, ObservedLease,
+    OperationReconciliation, PrepareGenerationError, PrepareGenerationMetrics,
+    PrepareGenerationMetricsSnapshot, PrepareGenerationMutation, PublishGenerationError,
+    ReadyGeneration, RecoverableGeneration, StagedGeneration, TerminalGenerationMutation,
+};
+pub use history::{
+    FileCochangeFact, FileCochangeRecord, FileHistoryFact, FileHistoryRecord,
+    HistoryRefreshMetadata, HistoryRefreshReport, HistoryRefreshRequest,
 };
 pub use ingest::{
     CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, GenerationFacts,
     GenerationMemoryMeasurement, GenerationMemoryModelError, GenerationValidationError,
-    GenerationValidationLimits, GenerationValidationReport, ReferenceInput, SearchDocumentInput,
-    SymbolInput, validate_generation_facts,
+    GenerationValidationLimits, GenerationValidationReport, ReferenceInput, ReferenceSpanPrecision,
+    SearchDocumentInput, SymbolInput, validate_generation_facts,
+};
+pub use insights::{
+    DeadCodeCandidate, DeadCodeQuery, DependencyCoverageRow, ExternalImportRecord, FileTestImpact,
+    FileTestImpactResult, GroupedPathInput, GroupedSymbolPeer, GroupedSymbolPeers,
+    GroupedSymbolQuery, ImportInsight, IndexedFileFingerprint, RenameReferenceSite,
+    StructuralCoverageRow, StructuralFinding, StructuralFindingGroup, StructuralFindingGroupQuery,
+    StructuralFindingQuery, StructuralFindingSeverity, StructuralFindingStats, StructuralHotspot,
+    StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort,
+};
+pub use interchange::{
+    InterchangeEdge, InterchangeFile, InterchangeReference, InterchangeSnapshot,
+    InterchangeSnapshotError, InterchangeSymbol,
+};
+pub use issue_history::{
+    IssueAttributionKind, IssueHistoryError, IssueHistoryRefreshMetadata,
+    IssueHistoryRefreshReport, IssueHistoryRefreshRequest, SymbolIssueAttribution,
+    SymbolIssueCommitPeer, SymbolIssueCommitPeers, SymbolIssuePeer, SymbolIssueRecord,
 };
 pub use leases::{
     LeaseAcquisitionAttempt, LeaseAcquisitionProbe, LeaseError, LeaseFence, LeaseOwner,
@@ -35,31 +106,87 @@ pub use leases::{
 };
 pub use managed::{
     DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedBackupReport,
-    ManagedContainerState, ManagedDatabase, ManagedDatabaseError, ManagedDatabaseStatus,
+    ManagedContainerState, ManagedDatabase, ManagedDatabaseArchives, ManagedDatabaseError,
+    ManagedDatabaseLifecycle, ManagedDatabaseMaintenance, ManagedDatabaseStatus,
     ManagedDerivedIndexHealth, ManagedDestructiveConfirmation, ManagedDestructiveOperation,
     ManagedRemoveReport, ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
 };
 pub use migrations::{MigrationError, MigrationReport};
-pub use project::{GenerationCounts, ProjectCurrentGeneration, ProjectSnapshot};
+pub use parse_cache::{
+    MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheError, NativeParseCacheKey,
+    NativeParseCacheRecord, NativeParseCacheWrite,
+};
+pub use project::{
+    GenerationCounts, ProjectCurrentGeneration, ProjectPurgeError, ProjectPurgeReport,
+    ProjectSnapshot,
+};
+pub use qualified::{
+    QualifiedCentralityComparator, QualifiedSymbolHit, QualifiedSymbolPage, QualifiedSymbolQuery,
+    QualifiedSymbolSort,
+};
+pub use retention::{
+    GenerationRetentionError, GenerationRetentionPolicy, GenerationRetentionReport,
+    GenerationRetentionRequest,
+};
 pub use retrieval::{
-    CurrentFileRecord, CurrentGenerationRecord, CurrentGraphEdge, CurrentReferenceRecord,
-    CurrentSymbolRecord, GraphDirection,
+    CurrentEntryPointPage, CurrentEntryPointsLookup, CurrentFileLookup, CurrentFileRecord,
+    CurrentFileSymbolsLookup, CurrentFilesLookup, CurrentGenerationRecord, CurrentGraphEdge,
+    CurrentGraphLookup, CurrentReferenceRecord, CurrentSourceRangeLookup, CurrentSymbolRecord,
+    CurrentSymbolSetLookup, EntryPointBucket, ExactTextLookup, GraphDirection,
 };
 pub use search::{SearchComponent, SearchHit, SearchQuery};
+pub use search_relation::SearchRelationMaintenanceReport;
 use secrecy::ExposeSecret;
-use sqlx_core::pool::PoolOptions;
-use sqlx_postgres::{PgConnectOptions, PgPool, Postgres};
+pub use semantic::{
+    EmbeddingBatchUpsertInput, EmbeddingBatchUpsertReport, EmbeddingBatchUpsertRequest,
+    EmbeddingHnswStatus, EmbeddingModelRegistration, EmbeddingModelRegistrationInput,
+    EmbeddingModelSelector, EmbeddingModelState, EmbeddingNormalization, EmbeddingPageCursor,
+    EmbeddingStorageAudit, EmbeddingUpsertRow, PendingEmbeddingDocument, PendingEmbeddingPage,
+    PendingEmbeddingPageInput, PendingEmbeddingPageRequest, RegisteredEmbeddingModel,
+    RetireEmbeddingModelRequest, RetiredEmbeddingCleanupReport, SemanticReadinessReport,
+    SemanticReadinessRequest, SemanticReadinessState, SemanticStorageError, SimilarSymbolHit,
+    SimilarSymbolsInput, SimilarSymbolsRequest, SimilarSymbolsResult,
+    SimilarityMaterializationReport, VectorSearchHit, VectorSearchInput, VectorSearchRequest,
+};
+pub use sessions::{
+    McpMacroRecord, McpMacroStep, McpSessionKind, McpSessionRecord, McpToolCallInput,
+    McpToolCallRecord, McpToolUsage, McpTraceUsage, NewMcpMacro, NewMcpSession,
+};
+use sqlx_core::{pool::PoolOptions, query::query};
+use sqlx_postgres::{PgConnectOptions, PgPool, PgSslMode, Postgres};
+pub use summary_priority::{
+    SummaryPriorityEnqueueReport, SummaryPriorityFailure, SummaryPriorityQueueStats,
+};
 use thiserror::Error;
+pub use v1_import::{
+    V1PostgresDryRunReport, V1PostgresImportCheckpoint, V1PostgresImportCounts,
+    V1PostgresImportError, V1PostgresImportExecution, V1PostgresImportLimits,
+    V1PostgresImportReport, V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
+};
 
 /// Connect to the configured PostgreSQL database with a bounded pool.
 pub async fn connect(settings: &DatabaseSettings) -> Result<PgPool, DatabaseError> {
-    let options = PgConnectOptions::from_str(settings.url().expose_secret())
+    let mut options = PgConnectOptions::from_str(settings.url().expose_secret())
         .map_err(|_| DatabaseError::InvalidConnectionOptions)?
         .application_name("cartograph-v2");
+    if settings.require_ssl() {
+        options = options.ssl_mode(PgSslMode::Require);
+    }
+    let query_timeout_ms = settings.query_timeout().as_millis().to_string();
 
     PoolOptions::<Postgres>::new()
         .max_connections(settings.max_connections().get())
         .acquire_timeout(settings.acquire_timeout())
+        .after_connect(move |connection, _metadata| {
+            let query_timeout_ms = query_timeout_ms.clone();
+            Box::pin(async move {
+                query("SELECT set_config('statement_timeout', $1, false)")
+                    .bind(format!("{query_timeout_ms}ms"))
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect_with(options)
         .await
         .map_err(|_| DatabaseError::ConnectionFailed)

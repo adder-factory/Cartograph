@@ -13,9 +13,9 @@ use std::{
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, GenerationContents, GenerationFacts,
-    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, NewGeneration, NewProject,
-    PrepareGenerationMetrics, ReadyGeneration, SearchDocumentInput, SearchQuery,
-    validate_generation_facts,
+    GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget,
+    NewGeneration, NewProject, PrepareGenerationMetrics, ReadyGeneration, SearchDocumentInput,
+    SearchQuery, StructuralFindingQuery, StructuralFindingSeverity, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, GenerationId, GenerationState, ProjectId,
@@ -106,16 +106,389 @@ const LARGE_COPY_CODE_BYTES: usize = 2 * 1_024 * 1_024;
 const ORDERED_STAGE_ITEMS: u64 = 8;
 const ORDERED_STAGE_WORKERS: usize = 4;
 const ORDERED_STAGE_ITEM_BYTES: u64 = 16;
-const NATIVE_MAX_FILES: usize = 64;
+const NATIVE_MAX_FILES: usize = 80;
 const NATIVE_MAX_PATH_BYTES: u64 = 1024 * 1024;
 const NATIVE_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const NATIVE_MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const NATIVE_MAX_GENERATION_BYTES: u64 = 32 * 1024 * 1024;
 const NATIVE_STAGE_TIMEOUT: Duration = Duration::from_secs(3);
-const NATIVE_EXPECTED_FILES: u64 = 2;
-const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 4;
+const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
+const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 14;
+const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
+const NATIVE_CUSTOM_FAMILY_FILE_COUNT: usize = 12;
+const NATIVE_EXPECTED_FILES: u64 = 67;
+const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 60;
 const NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES: u64 = 3;
 const NATIVE_SEARCH_LIMIT: u16 = 10;
+const NATIVE_PARSER_ONLY_FIXTURES: [(&str, &str, &str, &str); NATIVE_PARSER_ONLY_FILE_COUNT] = [
+    (
+        "styles/cssbeacon.css",
+        "body { color: red; }",
+        "css",
+        "cssbeacon",
+    ),
+    (
+        "views/templatebeacon.erb",
+        "<div><%= user.name %></div>",
+        "embedded_template",
+        "templatebeacon",
+    ),
+    (
+        "docs/jsdocbeacon.jsdoc",
+        "/** Adds one. */\n",
+        "jsdoc",
+        "jsdocbeacon",
+    ),
+    (
+        "config/jsonbeacon.json",
+        r#"{"enabled":true}"#,
+        "json",
+        "jsonbeacon",
+    ),
+    (
+        "notebooks/jupyterbeacon.ipynb",
+        r#"{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}"#,
+        "jupyter",
+        "jupyterbeacon",
+    ),
+    (
+        "patterns/regexbeacon.regex",
+        r"[a-z]+@[a-z]+\.[a-z]+",
+        "regex",
+        "regexbeacon",
+    ),
+];
+const NATIVE_ADMITTED_FAMILY_FIXTURES: [(&str, &str, &str, &str);
+    NATIVE_ADMITTED_FAMILY_FILE_COUNT] = [
+    (
+        "native/cbeacon.c",
+        "int cbeacon(void) { return 1; }\n",
+        "c",
+        "cbeacon",
+    ),
+    (
+        "native/cppbeacon.cpp",
+        "int cppbeacon() { return 1; }\n",
+        "cpp",
+        "cppbeacon",
+    ),
+    (
+        "native/cudabeacon.cu",
+        "__global__ void cudabeacon() {}\n",
+        "cuda",
+        "cudabeacon",
+    ),
+    (
+        "native/glslbeacon.glsl",
+        "void glslbeacon() {}\n",
+        "glsl",
+        "glslbeacon",
+    ),
+    (
+        "native/hlslbeacon.hlsl",
+        "float4 hlslbeacon() : SV_Target { return float4(1, 1, 1, 1); }\n",
+        "hlsl",
+        "hlslbeacon",
+    ),
+    (
+        "native/bashbeacon.sh",
+        "bashbeacon() { echo ok; }\n",
+        "bash",
+        "bashbeacon",
+    ),
+    (
+        "native/fishbeacon.fish",
+        "function fishbeacon\n  echo ok\nend\n",
+        "fish",
+        "fishbeacon",
+    ),
+    (
+        "native/powershellbeacon.ps1",
+        "function PowershellBeacon { Write-Output ok }\n",
+        "powershell",
+        "PowershellBeacon",
+    ),
+    (
+        "native/zshbeacon.zsh",
+        "zshbeacon() { print ok; }\n",
+        "zsh",
+        "zshbeacon",
+    ),
+    (
+        "native/JavaBeacon.java",
+        "public class JavaBeacon { public void runBeacon() {} }\n",
+        "java",
+        "JavaBeacon",
+    ),
+    (
+        "native/CsharpBeacon.cs",
+        "public class CsharpBeacon { public void RunBeacon() {} }\n",
+        "csharp",
+        "CsharpBeacon",
+    ),
+    (
+        "native/KotlinBeacon.kt",
+        "class KotlinBeacon { fun runBeacon() {} }\n",
+        "kotlin",
+        "KotlinBeacon",
+    ),
+    (
+        "native/ScalaBeacon.scala",
+        "class ScalaBeacon { def runBeacon(): Unit = () }\n",
+        "scala",
+        "ScalaBeacon",
+    ),
+    (
+        "native/GroovyBeacon.groovy",
+        "class GroovyBeacon { void runBeacon() {} }\n",
+        "groovy",
+        "GroovyBeacon",
+    ),
+];
+const NATIVE_GENERIC_FAMILY_FIXTURES: [(&str, &str, &str, &str); NATIVE_GENERIC_FAMILY_FILE_COUNT] = [
+    (
+        "generic/abapbeacon.abap",
+        "CLASS zcl_beacon DEFINITION.\n PUBLIC SECTION.\n METHODS run_beacon.\nENDCLASS.\n",
+        "abap",
+        "zcl_beacon",
+    ),
+    (
+        "generic/ApexBeacon.cls",
+        "public class ApexBeacon { public static void runBeacon() {} }\n",
+        "apex",
+        "ApexBeacon",
+    ),
+    (
+        "generic/arkbeacon.ets",
+        "export function arkBeacon(): void {}\n",
+        "arkts",
+        "arkBeacon",
+    ),
+    (
+        "generic/AstroBeacon.astro",
+        "---\nconst AstroBeacon = 'safe';\n---\n<CustomBeacon />\n",
+        "astro",
+        "CustomBeacon",
+    ),
+    (
+        "generic/clojurebeacon.clj",
+        "(ns beacon.core)\n(defn clojureBeacon [] 1)\n",
+        "clojure",
+        "clojureBeacon",
+    ),
+    (
+        "generic/lispbeacon.lisp",
+        "(defpackage :beacon)\n(in-package :beacon)\n(defun lisp-beacon () 1)\n",
+        "common_lisp",
+        "lisp-beacon",
+    ),
+    (
+        "generic/dart_beacon.dart",
+        "class DartBeacon { void runBeacon() {} }\n",
+        "dart",
+        "DartBeacon",
+    ),
+    (
+        "generic/FsharpBeacon.fs",
+        "module FsharpBeacon\nlet fsharpBeacon value = value\n",
+        "fsharp",
+        "fsharpBeacon",
+    ),
+    (
+        "generic/graphqlbeacon.graphql",
+        "type GraphBeacon { beaconField: String! }\n",
+        "graphql",
+        "GraphBeacon",
+    ),
+    (
+        "generic/hclbeacon.tf",
+        "resource \"null_resource\" \"hcl_beacon\" { triggers = { safe = \"yes\" } }\n",
+        "hcl",
+        "resource",
+    ),
+    (
+        "generic/htmlbeacon.html",
+        "<custom-beacon></custom-beacon>\n",
+        "html",
+        "custom-beacon",
+    ),
+    (
+        "generic/khnbeacon.khn",
+        "function khnBeacon() return 1 end\n",
+        "khn",
+        "khnBeacon",
+    ),
+    (
+        "generic/LeanBeacon.lean",
+        "def leanBeacon : Nat := 1\n",
+        "lean",
+        "leanBeacon",
+    ),
+    (
+        "generic/luabeacon.lua",
+        "function luaBeacon() return 1 end\n",
+        "lua",
+        "luaBeacon",
+    ),
+    (
+        "generic/luau_beacon.luau",
+        "local function luauBeacon(): number return 1 end\n",
+        "luau",
+        "luauBeacon",
+    ),
+    (
+        "generic/nixbeacon.nix",
+        "{ nixBeacon = 1; }\n",
+        "nix",
+        "nixBeacon",
+    ),
+    (
+        "generic/ObjcBeacon.m",
+        "@interface ObjcBeacon : NSObject\n- (void)runBeacon;\n@end\n@implementation ObjcBeacon\n- (void)runBeacon {}\n@end\n",
+        "objc",
+        "ObjcBeacon",
+    ),
+    (
+        "generic/pascalbeacon.pas",
+        "program PascalBeacon;\nprocedure runBeacon; begin end;\nbegin runBeacon; end.\n",
+        "pascal",
+        "PascalBeacon",
+    ),
+    (
+        "generic/PhpBeacon.php",
+        "<?php class PhpBeacon { public function runBeacon() {} }\n",
+        "php",
+        "PhpBeacon",
+    ),
+    (
+        "generic/prismabeacon.prisma",
+        "model PrismaBeacon { id Int @id }\n",
+        "prisma",
+        "PrismaBeacon",
+    ),
+    (
+        "generic/rbeacon.r",
+        "rBeacon <- function(value) value\n",
+        "r",
+        "rBeacon",
+    ),
+    (
+        "generic/RescriptBeacon.res",
+        "let rescriptBeacon = () => ()\n",
+        "rescript",
+        "rescriptBeacon",
+    ),
+    (
+        "generic/ruby_beacon.rb",
+        "class RubyBeacon\n  def run_beacon\n    1\n  end\nend\n",
+        "ruby",
+        "RubyBeacon",
+    ),
+    (
+        "generic/SolidityBeacon.sol",
+        "contract SolidityBeacon { function runBeacon() public pure returns (uint) { return 1; } }\n",
+        "solidity",
+        "SolidityBeacon",
+    ),
+    (
+        "generic/sqlbeacon.sql",
+        "CREATE TABLE sql_beacon (id INTEGER PRIMARY KEY);\n",
+        "sql",
+        "sql_beacon",
+    ),
+    (
+        "generic/SwiftBeacon.swift",
+        "public struct SwiftBeacon { public func runBeacon() {} }\n",
+        "swift",
+        "SwiftBeacon",
+    ),
+    (
+        "generic/VbBeacon.vb",
+        "Public Class VbBeacon\n  Public Sub RunBeacon()\n  End Sub\nEnd Class\n",
+        "vbnet",
+        "VbBeacon",
+    ),
+    (
+        "generic/yamlbeacon.yaml",
+        "yamlBeacon:\n  enabled: true\n",
+        "yaml",
+        "yamlBeacon",
+    ),
+];
+const NATIVE_CUSTOM_FAMILY_FIXTURES: [(&str, &str, &str, &str); NATIVE_CUSTOM_FAMILY_FILE_COUNT] = [
+    (
+        "force-app/main/default/aura/OrderPanel/OrderPanel.cmp",
+        "<aura:component><aura:attribute name=\"auraOrderBeacon\" type=\"Id\"/></aura:component>\n",
+        "aura",
+        "auraOrderBeacon",
+    ),
+    (
+        "custom/order.ann",
+        "game.states.AnubisOrderBeacon = State {\n nodes.LoadOrder = Action {\n OnEnter = function()\n StartOrder()\n end\n}\n",
+        "bg3_anubis",
+        "AnubisOrderBeacon",
+    ),
+    (
+        "Mods/Orders/Public/Data/order.lsx",
+        "<save><node id=\"OrderDefinition\"><attribute id=\"Name\" value=\"Bg3ResourceOrderBeacon\"/></node></save>\n",
+        "bg3_resource",
+        "Bg3ResourceOrderBeacon",
+    ),
+    (
+        "Game/Stats/Generated/Data/orders.txt",
+        "new entry \"Bg3StatsOrderBeacon\"\nusing \"BaseOrderStats\"\n",
+        "bg3_stats",
+        "Bg3StatsOrderBeacon",
+    ),
+    (
+        "sections/order-panel.liquid",
+        "{% assign liquidOrderBeacon = cart.total %}\n",
+        "liquid",
+        "liquidOrderBeacon",
+    ),
+    (
+        "Story/RawFiles/Goals/OrderGoal.txt",
+        "INITSECTION\nsyscall OsirisOrderBeacon((GUIDSTRING)_Order)\n",
+        "osiris",
+        "OsirisOrderBeacon",
+    ),
+    (
+        "config/application.properties",
+        "properties.order.beacon=enabled\n",
+        "properties",
+        "properties.order.beacon",
+    ),
+    (
+        "components/SvelteOrderBeacon.svelte",
+        "<script>export function svelteOrderBeacon() {}</script>\n",
+        "svelte",
+        "SvelteOrderBeacon",
+    ),
+    (
+        "legacy/Vb6OrderBeacon.bas",
+        "Attribute VB_Name = \"Vb6OrderBeacon\"\nPublic Sub LoadOrder()\nEnd Sub\n",
+        "vb6",
+        "Vb6OrderBeacon",
+    ),
+    (
+        "force-app/main/default/pages/VisualforceOrderBeacon.page",
+        "<apex:page controller=\"OrderController\"/>\n",
+        "visualforce",
+        "VisualforceOrderBeacon",
+    ),
+    (
+        "components/VueOrderBeacon.vue",
+        "<script setup>export function vueOrderBeacon() {}</script>\n",
+        "vue",
+        "VueOrderBeacon",
+    ),
+    (
+        "mappers/XmlOrderBeacon.xml",
+        "<mapper namespace=\"com.example.XmlOrderBeacon\"><select id=\"findOrder\">SELECT 1</select></mapper>\n",
+        "xml",
+        "XmlOrderBeacon",
+    ),
+];
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -275,22 +648,7 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
         Ok(directory) => directory,
         Err(error) => panic!("could not create native pipeline fixture: {error}"),
     };
-    assert!(std::fs::create_dir(directory.path().join(".git")).is_ok());
-    assert!(std::fs::create_dir_all(directory.path().join("src")).is_ok());
-    assert!(
-        std::fs::write(
-            directory.path().join("src/service.ts"),
-            "export interface Greeter {}\nexport class Service implements Greeter {\n  greet(): string { return format(); }\n}\n",
-        )
-        .is_ok()
-    );
-    assert!(
-        std::fs::write(
-            directory.path().join("src/build.ts"),
-            "export function build(): Service { return new Service(); }\n",
-        )
-        .is_ok()
-    );
+    write_native_live_project(directory.path());
     let source_root = match SourceRoot::open(directory.path()) {
         Ok(source_root) => source_root,
         Err(error) => panic!("could not open native pipeline fixture: {error}"),
@@ -338,6 +696,7 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
         .database
         .search_current_code(SearchQuery::new(
             fixture.project.clone(),
+            generation_id.clone(),
             "Service",
             NATIVE_SEARCH_LIMIT,
         ))
@@ -349,6 +708,94 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
     assert!(hits.iter().any(|hit| {
         hit.generation_id() == &generation_id && hit.qualified_name().contains("Service")
     }));
+    assert_parser_only_bm25_hits(&fixture, &generation_id).await;
+    assert_admitted_family_bm25_hits(&fixture, &generation_id).await;
+    assert_generic_family_bm25_hits(&fixture, &generation_id).await;
+    assert_custom_family_bm25_hits(&fixture, &generation_id).await;
+    let imports = fixture
+        .database
+        .current_imports(&fixture.project, 50)
+        .await
+        .unwrap_or_else(|error| panic!("current import insights failed: {error}"));
+    assert!(
+        !imports.is_empty(),
+        "native fixture import evidence must survive publication"
+    );
+    let dependency_coverage = fixture
+        .database
+        .current_dependency_coverage(&fixture.project, 50)
+        .await
+        .unwrap_or_else(|error| panic!("current dependency coverage failed: {error}"));
+    assert!(
+        !dependency_coverage.is_empty(),
+        "published references must contribute dependency coverage"
+    );
+    let hotspots = fixture
+        .database
+        .current_structural_hotspots(&fixture.project, 100)
+        .await
+        .unwrap_or_else(|error| panic!("current hotspot insights failed: {error}"));
+    assert_eq!(hotspots.len(), NATIVE_EXPECTED_FILES as usize);
+    let coverage = fixture
+        .database
+        .current_structural_coverage(&fixture.project, 50)
+        .await
+        .unwrap_or_else(|error| panic!("current structural coverage failed: {error}"));
+    assert!(
+        !coverage.is_empty(),
+        "published symbols must be visible to structural coverage"
+    );
+    let dead_code = fixture
+        .database
+        .current_dead_code(&fixture.project, 50, false)
+        .await
+        .unwrap_or_else(|error| panic!("current dead-code insights failed: {error}"));
+    assert!(
+        !dead_code.is_empty(),
+        "the deliberately disconnected fixture must produce dead-code candidates"
+    );
+    let unused_exports = fixture
+        .database
+        .query_current_structural_findings(
+            &fixture.project,
+            &StructuralFindingQuery::new(100)
+                .and_then(|query| query.with_finding(Some("unused_export")))
+                .map(|query| query.with_minimum_severity(StructuralFindingSeverity::Info))
+                .unwrap_or_else(|error| panic!("unused-export query was invalid: {error}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("current structural findings failed: {error}"));
+    for (path, name) in [
+        ("app/about/page.tsx", "metadata"),
+        ("app/api/things/route.ts", "GET"),
+        ("app/api/things/route.ts", "runtime"),
+        ("app/routes/dashboard.tsx", "loader"),
+        ("app/routes/dashboard.tsx", "Dashboard"),
+        ("src/routes/about.ts", "Route"),
+    ] {
+        assert!(
+            !has_structural_finding(&unused_exports, path, name),
+            "framework-owned export was incorrectly reported: {path}::{name}; findings={unused_exports:?}"
+        );
+    }
+    for (path, name) in [
+        ("app/about/page.tsx", "someHelper"),
+        ("app/api/things/route.ts", "metadata"),
+        ("app/api/things/route.ts", "buildResponse"),
+        ("app/routes/dashboard.tsx", "formatDate"),
+        ("src/routes/about.ts", "helper"),
+        ("lib/action.ts", "action"),
+    ] {
+        assert!(
+            has_structural_finding(&unused_exports, path, name),
+            "ordinary unused export was hidden: {path}::{name}; findings={unused_exports:?}"
+        );
+    }
+    fixture
+        .database
+        .current_structural_finding_stats(&fixture.project)
+        .await
+        .unwrap_or_else(|error| panic!("current structural finding stats failed: {error}"));
     assert_eq!(
         supervisor.status().await.state(),
         SupervisorState::Completed
@@ -359,6 +806,241 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
     ));
 
     fixture.close().await;
+}
+
+fn write_native_live_project(root: &std::path::Path) {
+    std::fs::create_dir(root.join(".git"))
+        .unwrap_or_else(|error| panic!("could not create native .git fixture: {error}"));
+    std::fs::create_dir_all(root.join("src"))
+        .unwrap_or_else(|error| panic!("could not create native source fixture: {error}"));
+    std::fs::write(
+        root.join("src/service.ts"),
+        "export interface Greeter {}\nexport class Service implements Greeter {\n  greet(): string { return format(); }\n}\n",
+    )
+    .unwrap_or_else(|error| panic!("could not write native service fixture: {error}"));
+    std::fs::write(
+        root.join("src/build.ts"),
+        "import { Service } from './service';\nexport function build(): Service { return new Service(); }\n",
+    )
+    .unwrap_or_else(|error| panic!("could not write native build fixture: {error}"));
+    for (path, source) in [
+        (
+            "app/about/page.tsx",
+            "export const metadata = { title: 'Safe' };\nexport function someHelper(): string { return 'safe'; }\n",
+        ),
+        (
+            "app/api/things/route.ts",
+            "export async function GET(): Promise<Response> { return new Response('safe'); }\nexport const runtime = 'nodejs';\nexport const metadata = { title: 'not-a-route-convention' };\nexport function buildResponse(): Response { return new Response('safe'); }\n",
+        ),
+        (
+            "app/routes/dashboard.tsx",
+            "export async function loader(): Promise<unknown> { return null; }\nexport default function Dashboard() { return <main />; }\nexport function formatDate(): string { return 'safe'; }\n",
+        ),
+        (
+            "src/routes/about.ts",
+            "export const Route = createFileRoute('/about')({ component: About });\nexport const helper = 1;\n",
+        ),
+        (
+            "lib/action.ts",
+            "export function action(): string { return 'ordinary-unused-action'; }\n",
+        ),
+    ] {
+        let target = root.join(path);
+        std::fs::create_dir_all(
+            target
+                .parent()
+                .unwrap_or_else(|| panic!("framework export fixture had no parent: {path}")),
+        )
+        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
+        std::fs::write(target, source)
+            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+    }
+    for (path, source, _, _) in NATIVE_PARSER_ONLY_FIXTURES {
+        let target = root.join(path);
+        std::fs::create_dir_all(
+            target
+                .parent()
+                .unwrap_or_else(|| panic!("parser-only live fixture had no parent: {path}")),
+        )
+        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
+        std::fs::write(target, source)
+            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+    }
+    for (path, source, _, _) in NATIVE_ADMITTED_FAMILY_FIXTURES {
+        let target = root.join(path);
+        std::fs::create_dir_all(
+            target
+                .parent()
+                .unwrap_or_else(|| panic!("admitted-family live fixture had no parent: {path}")),
+        )
+        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
+        std::fs::write(target, source)
+            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+    }
+    for (path, source, _, _) in NATIVE_GENERIC_FAMILY_FIXTURES {
+        let target = root.join(path);
+        std::fs::create_dir_all(
+            target
+                .parent()
+                .unwrap_or_else(|| panic!("generic-family live fixture had no parent: {path}")),
+        )
+        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
+        std::fs::write(target, source)
+            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+    }
+    for (path, source, _, _) in NATIVE_CUSTOM_FAMILY_FIXTURES {
+        let target = root.join(path);
+        std::fs::create_dir_all(
+            target
+                .parent()
+                .unwrap_or_else(|| panic!("custom-family live fixture had no parent: {path}")),
+        )
+        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
+        std::fs::write(target, source)
+            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+    }
+}
+
+fn has_structural_finding(
+    findings: &[cartograph_db::StructuralFinding],
+    path: &str,
+    name: &str,
+) -> bool {
+    findings.iter().any(|finding| {
+        finding.finding() == "unused_export"
+            && finding.path() == path
+            && finding
+                .qualified_name()
+                .rsplit([':', '.', '#', '/', '$'])
+                .find(|component| !component.is_empty())
+                == Some(name)
+    })
+}
+
+async fn assert_parser_only_bm25_hits(fixture: &DatabaseFixture, generation_id: &GenerationId) {
+    for (path, _, language, query) in NATIVE_PARSER_ONLY_FIXTURES {
+        let hits = fixture
+            .database
+            .search_current_code(SearchQuery::new(
+                fixture.project.clone(),
+                generation_id.clone(),
+                query,
+                NATIVE_SEARCH_LIMIT,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("parser-only BM25 query failed for {path}: {error}"));
+        assert!(
+            hits.iter().any(|hit| {
+                hit.generation_id() == generation_id
+                    && hit.path() == path
+                    && hit.language() == language
+                    && hit.document_kind() == "file"
+                    && hit.symbol_id().is_some()
+                    && hit.qualified_name().is_empty()
+                    && hit
+                        .components()
+                        .contains(&cartograph_db::SearchComponent::Code)
+            }),
+            "parser-only file document was not BM25 searchable: {path}"
+        );
+    }
+}
+
+async fn assert_admitted_family_bm25_hits(fixture: &DatabaseFixture, generation_id: &GenerationId) {
+    for (path, _, language, query) in NATIVE_ADMITTED_FAMILY_FIXTURES {
+        let hits = fixture
+            .database
+            .search_current_code(SearchQuery::new(
+                fixture.project.clone(),
+                generation_id.clone(),
+                query,
+                NATIVE_SEARCH_LIMIT,
+            ))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("admitted-family BM25 query failed for {path}: {error}")
+            });
+        assert!(
+            hits.iter().any(|hit| {
+                hit.generation_id() == generation_id
+                    && hit.path() == path
+                    && hit.language() == language
+                    && hit.symbol_id().is_some()
+                    && hit.document_kind() == "symbol"
+            }),
+            "admitted-family symbol document was not BM25 searchable: {path}"
+        );
+    }
+}
+
+async fn assert_generic_family_bm25_hits(fixture: &DatabaseFixture, generation_id: &GenerationId) {
+    for (path, _, language, query) in NATIVE_GENERIC_FAMILY_FIXTURES {
+        let hits = fixture
+            .database
+            .search_current_code(SearchQuery::new(
+                fixture.project.clone(),
+                generation_id.clone(),
+                query,
+                NATIVE_SEARCH_LIMIT,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("generic-family BM25 query failed for {path}: {error}"));
+        assert!(
+            hits.iter().any(|hit| {
+                hit.generation_id() == generation_id
+                    && hit.path() == path
+                    && hit.language() == language
+                    && hit.symbol_id().is_some()
+                    && hit.document_kind() == "symbol"
+            }),
+            "generic-family symbol document was not BM25 searchable: {path}; hits={:?}",
+            hits.iter()
+                .map(|hit| {
+                    (
+                        hit.path(),
+                        hit.language(),
+                        hit.document_kind(),
+                        hit.qualified_name(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+async fn assert_custom_family_bm25_hits(fixture: &DatabaseFixture, generation_id: &GenerationId) {
+    for (path, _, language, query) in NATIVE_CUSTOM_FAMILY_FIXTURES {
+        let hits = fixture
+            .database
+            .search_current_code(SearchQuery::new(
+                fixture.project.clone(),
+                generation_id.clone(),
+                query,
+                NATIVE_SEARCH_LIMIT,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("custom-family BM25 query failed for {path}: {error}"));
+        assert!(
+            hits.iter().any(|hit| {
+                hit.generation_id() == generation_id
+                    && hit.path() == path
+                    && hit.language() == language
+                    && hit.symbol_id().is_some()
+                    && hit.document_kind() == "symbol"
+            }),
+            "custom-family symbol document was not BM25 searchable: {path}; hits={:?}",
+            hits.iter()
+                .map(|hit| {
+                    (
+                        hit.path(),
+                        hit.language(),
+                        hit.document_kind(),
+                        hit.qualified_name(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 async fn assert_native_unresolved_reference(
@@ -533,7 +1215,10 @@ async fn recovered_ready_generation_still_publishes_through_supervisor_gate() {
     drop(ready);
     let ready = match fixture
         .database
-        .recover_generation(&fixture.project, &generation_id)
+        .recover_generation(GenerationRecoveryRequest::new(
+            &fixture.project,
+            &generation_id,
+        ))
         .await
     {
         Ok(Some(cartograph_db::RecoverableGeneration::Ready(ready))) => ready,
@@ -2182,7 +2867,7 @@ async fn assert_generation_state(
 async fn fail_recoverable_generation(fixture: &DatabaseFixture, generation: &GenerationId) {
     let recovered = match fixture
         .database
-        .recover_generation(&fixture.project, generation)
+        .recover_generation(GenerationRecoveryRequest::new(&fixture.project, generation))
         .await
     {
         Ok(Some(recovered)) => recovered,

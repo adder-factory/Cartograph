@@ -15,7 +15,8 @@ use std::{
 use std::process::Command as ProcessCommand;
 
 use cartograph_db::{
-    CurrentGeneration, GenerationContents, PrepareGenerationMetrics, SearchQuery, StagedGeneration,
+    CurrentGeneration, ExactTextLookup, GenerationContents, PrepareGenerationMetrics, SearchQuery,
+    StagedGeneration,
 };
 use cartograph_domain::{GenerationDigestVersion, GenerationId};
 use cartograph_indexer::NativePipelineReport;
@@ -32,38 +33,50 @@ const MATRIX_REPORT_PREFIX: &str = "CARTOGRAPH_NATIVE_CORPUS_MATRIX_REPORT=";
 const CORPUS_NAME: &str = "cartograph-v1-real-typescript-v1";
 const CORPUS_FINGERPRINT_DOMAIN: &[u8] = b"cartograph-v2-native-real-corpus-v1";
 const EXPECTED_CORPUS_FINGERPRINT: &str =
-    "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20";
+    "ab91088c482ed36d31759382283342654ce6958be4e601429b8181da531c5fc1";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3";
+    "95bb83066852d14034cbd16774818b8491798063b84d1e25a65c9e87520140cc";
 const EXPECTED_BM25_DOCUMENT_IDS: [&str; 5] = [
     "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
-    "29f064c9-f931-89d3-8eb8-d05e7906749f",
     "a5008cb5-184d-819e-a6bf-54c4f6207da0",
     "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
     "fc1a31af-afc0-827c-b3bc-acb5e56736d1",
+    "aaf947c6-c26f-8a97-9de2-c0e8df4e6470",
 ];
-const EXPECTED_FILES: i64 = 28;
-const EXPECTED_SYMBOLS: i64 = 3_843;
-const EXPECTED_EDGES: i64 = 3_699;
-const EXPECTED_REFERENCES: i64 = 12_660;
-const EXPECTED_DOCUMENTS: i64 = 3_871;
-const EXPECTED_EDGE_KINDS: [&str; 8] = [
+const EXPECTED_TAGS_BM25_DOCUMENT_IDS: [&str; 6] = [
+    "07ce3e1c-8912-83cb-8464-999aeef53935",
+    "f758d534-485c-8f11-82b9-b7a06d614ac1",
+    "d5f96fc2-4c1a-8d2a-955f-a8ecb5806548",
+    "6e845eea-7263-8ff8-a07a-95f7e2ad66da",
+    "94c5cdbf-1dbd-8a90-b83c-b55c79a0cd2c",
+    "72da0535-5a0c-830b-a9ec-ab9948bceb6e",
+];
+const EXPECTED_FILES: i64 = 34;
+const EXPECTED_SYMBOLS: i64 = 4_207;
+const EXPECTED_EDGES: i64 = 6_818;
+const EXPECTED_REFERENCES: i64 = 14_326;
+const EXPECTED_DOCUMENTS: i64 = 4_207;
+const EXPECTED_EDGE_KINDS: [&str; 10] = [
     "calls",
     "contains",
+    "exports",
     "extends",
     "field_access",
     "implements",
     "instantiates",
+    "references",
     "returns",
     "type_of",
 ];
-const EXPECTED_SOURCE_BYTES: u64 = 1_052_338;
-const EXPECTED_RESOLVED_REFERENCES: u64 = 1_852;
-const EXPECTED_UNRESOLVED_REFERENCES: u64 = 10_808;
-const EXPECTED_MODELED_GENERATION_BYTES: u64 = 8_473_292;
-const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 61_210_798;
-const EXPECTED_VALIDATION_HIGH_WATER_BYTES: u64 = 47_754_838;
+const EXPECTED_SOURCE_BYTES: u64 = 1_052_564;
+const EXPECTED_RESOLVED_REFERENCES: u64 = 2_852;
+const EXPECTED_UNRESOLVED_REFERENCES: u64 = 11_486;
+const EXPECTED_MODELED_GENERATION_BYTES: u64 = 13_097_322;
+const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 74_672_143;
+const EXPECTED_VALIDATION_HIGH_WATER_BYTES: u64 = 85_429_377;
 const CORPUS_QUERY: &str = "detectSecretsHandling";
+const TAGS_CORPUS_QUERY: &str = "tagscanary";
+const LIVE_SECRET_SENTINEL: &str = "sk_live_secret";
 const SOURCE_REVISION: &str = "native-real-corpus-v1";
 const WARMUP_SAMPLES: usize = 1;
 const MEASURED_SAMPLES: usize = 3;
@@ -98,99 +111,99 @@ struct CorpusSource {
 const CORPUS: &[CorpusSource] = &[
     CorpusSource {
         path: "src/types.ts",
-        source: include_str!("../../../../src/types.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/types.ts"),
     },
     CorpusSource {
         path: "src/config.ts",
-        source: include_str!("../../../../src/config.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/config.ts"),
     },
     CorpusSource {
         path: "src/index.ts",
-        source: include_str!("../../../../src/index.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/index.ts"),
     },
     CorpusSource {
         path: "src/cartograph-llm-service.ts",
-        source: include_str!("../../../../src/cartograph-llm-service.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/cartograph-llm-service.ts"),
     },
     CorpusSource {
         path: "src/context/candidate-search.ts",
-        source: include_str!("../../../../src/context/candidate-search.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/context/candidate-search.ts"),
     },
     CorpusSource {
         path: "src/context/subgraph.ts",
-        source: include_str!("../../../../src/context/subgraph.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/context/subgraph.ts"),
     },
     CorpusSource {
         path: "src/db/queries-search.ts",
-        source: include_str!("../../../../src/db/queries-search.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/db/queries-search.ts"),
     },
     CorpusSource {
         path: "src/db/postgres-worker.ts",
-        source: include_str!("../../../../src/db/postgres-worker.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/db/postgres-worker.ts"),
     },
     CorpusSource {
         path: "src/extraction/tree-sitter.ts",
-        source: include_str!("../../../../src/extraction/tree-sitter.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/extraction/tree-sitter.ts"),
     },
     CorpusSource {
         path: "src/extraction/tree-sitter-decls.ts",
-        source: include_str!("../../../../src/extraction/tree-sitter-decls.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/extraction/tree-sitter-decls.ts"),
     },
     CorpusSource {
         path: "src/extraction/ts-extract-calls.ts",
-        source: include_str!("../../../../src/extraction/ts-extract-calls.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/extraction/ts-extract-calls.ts"),
     },
     CorpusSource {
         path: "src/extraction/extraction-phases.ts",
-        source: include_str!("../../../../src/extraction/extraction-phases.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/extraction/extraction-phases.ts"),
     },
     CorpusSource {
         path: "src/resolution/import-resolver.ts",
-        source: include_str!("../../../../src/resolution/import-resolver.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/resolution/import-resolver.ts"),
     },
     CorpusSource {
         path: "src/resolution/name-matcher.ts",
-        source: include_str!("../../../../src/resolution/name-matcher.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/resolution/name-matcher.ts"),
     },
     CorpusSource {
         path: "src/mcp/tools/_search.ts",
-        source: include_str!("../../../../src/mcp/tools/_search.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/mcp/tools/_search.ts"),
     },
     CorpusSource {
         path: "src/mcp/tools/context.ts",
-        source: include_str!("../../../../src/mcp/tools/context.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/mcp/tools/context.ts"),
     },
     CorpusSource {
         path: "src/mcp/tools/explore.ts",
-        source: include_str!("../../../../src/mcp/tools/explore.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/mcp/tools/explore.ts"),
     },
     CorpusSource {
         path: "src/installer/llm-setup-plan.ts",
-        source: include_str!("../../../../src/installer/llm-setup-plan.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/installer/llm-setup-plan.ts"),
     },
     CorpusSource {
         path: "src/llm/secrets-detector.ts",
-        source: include_str!("../../../../src/llm/secrets-detector.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/llm/secrets-detector.ts"),
     },
     CorpusSource {
         path: "src/biomarkers/engine.ts",
-        source: include_str!("../../../../src/biomarkers/engine.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/biomarkers/engine.ts"),
     },
     CorpusSource {
         path: "src/mcp/tools/admin.ts",
-        source: include_str!("../../../../src/mcp/tools/admin.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/mcp/tools/admin.ts"),
     },
     CorpusSource {
         path: "src/db/queries-summaries.ts",
-        source: include_str!("../../../../src/db/queries-summaries.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/db/queries-summaries.ts"),
     },
     CorpusSource {
         path: "src/features/backend/runtime.ts",
-        source: include_str!("../../../../src/features/backend/runtime.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/features/backend/runtime.ts"),
     },
     CorpusSource {
         path: "src/index-hooks/types.ts",
-        source: include_str!("../../../../src/index-hooks/types.ts"),
+        source: include_str!("../fixtures/native_corpus_v1/src/index-hooks/types.ts"),
     },
     CorpusSource {
         path: "fixtures/greeter.ts",
@@ -207,6 +220,30 @@ const CORPUS: &[CorpusSource] = &[
     CorpusSource {
         path: "fixtures/card.jsx",
         source: include_str!("../../../cartograph-extract/tests/fixtures/v1_1_33/card.jsx"),
+    },
+    CorpusSource {
+        path: "tags/elixir.ex",
+        source: "defmodule T2Elixir do\n  def tagscanary, do: :sk_live_secret\nend\n",
+    },
+    CorpusSource {
+        path: "tags/haskell.hs",
+        source: "tagscanary x = x\n",
+    },
+    CorpusSource {
+        path: "tags/julia.jl",
+        source: "function tagscanary(x)\n  x\nend\n",
+    },
+    CorpusSource {
+        path: "tags/ocaml.ml",
+        source: "let tagscanary x = x\n",
+    },
+    CorpusSource {
+        path: "tags/ocaml.mli",
+        source: "val tagscanary : int -> int\n",
+    },
+    CorpusSource {
+        path: "tags/verilog.sv",
+        source: "module T2Verilog;\nfunction int tagscanary; endfunction\nendmodule\n",
     },
 ];
 
@@ -240,6 +277,7 @@ struct CorpusInvariant {
     rows: RowCounts,
     edge_kinds: Vec<String>,
     bm25_document_ids: Vec<String>,
+    tags_bm25_document_ids: Vec<String>,
     native: NativeReport,
 }
 
@@ -323,6 +361,7 @@ struct MatrixReport {
     corpus_source_bytes: u64,
     corpus_fingerprint: &'static str,
     bm25_query: &'static str,
+    tags_bm25_query: &'static str,
     rss_sample_interval_millis: u64,
     warmup_samples: usize,
     measured_samples: usize,
@@ -362,6 +401,14 @@ struct SampleInspection<'a> {
     lease_target: &'a LeaseTarget,
     supervisor: &'a IndexerSupervisor,
     completed: CompletedSample,
+}
+
+struct Bm25Inspection<'a> {
+    fixture: &'a DatabaseFixture,
+    current: &'a GenerationId,
+    query_text: &'static str,
+    limit: u16,
+    operation: &'static str,
 }
 
 struct WorkerSummaryInput {
@@ -497,6 +544,7 @@ async fn run_parent() -> CorpusResult<()> {
         corpus_source_bytes: EXPECTED_SOURCE_BYTES,
         corpus_fingerprint: EXPECTED_CORPUS_FINGERPRINT,
         bm25_query: CORPUS_QUERY,
+        tags_bm25_query: TAGS_CORPUS_QUERY,
         rss_sample_interval_millis: u64::try_from(RSS_SAMPLE_INTERVAL.as_millis())
             .map_err(|_| error("rss-sample-interval"))?,
         warmup_samples: WARMUP_SAMPLES,
@@ -892,21 +940,24 @@ async fn inspect_sample(request: SampleInspection<'_>) -> CorpusResult<SampleObs
     }
     let rows = row_counts(fixture, generation_id).await?;
     let edge_kinds = edge_kinds(fixture, generation_id).await?;
-    let hits = fixture
-        .database
-        .search_current_code(SearchQuery::new(fixture.project.clone(), CORPUS_QUERY, 5))
-        .await
-        .map_err(|_| error("bm25-query"))?;
-    if hits
-        .iter()
-        .any(|hit| hit.generation_id() != completed.current.generation_id())
-    {
-        return Err(error("bm25-noncurrent-generation"));
-    }
-    let bm25_document_ids = hits
-        .iter()
-        .map(|hit| hit.document_id().as_str().to_owned())
-        .collect::<Vec<_>>();
+    let bm25_document_ids = read_bm25_document_ids(Bm25Inspection {
+        fixture,
+        current: completed.current.generation_id(),
+        query_text: CORPUS_QUERY,
+        limit: 5,
+        operation: "bm25-query",
+    })
+    .await?;
+    let tags_bm25_document_ids = read_bm25_document_ids(Bm25Inspection {
+        fixture,
+        current: completed.current.generation_id(),
+        query_text: TAGS_CORPUS_QUERY,
+        limit: 6,
+        operation: "tags-bm25-query",
+    })
+    .await?;
+    assert_tags_exact_lookup(fixture, completed.current.generation_id()).await?;
+    assert_secret_sentinel_absent(fixture, generation_id).await?;
     Ok(SampleObservation {
         invariant: CorpusInvariant {
             corpus_fingerprint: corpus_fingerprint(),
@@ -915,6 +966,7 @@ async fn inspect_sample(request: SampleInspection<'_>) -> CorpusResult<SampleObs
             rows,
             edge_kinds,
             bm25_document_ids,
+            tags_bm25_document_ids,
             native: native_report(completed.native),
         },
         native_nanos: completed.native_nanos,
@@ -923,6 +975,133 @@ async fn inspect_sample(request: SampleInspection<'_>) -> CorpusResult<SampleObs
         copy_tables_nanos: completed.copy_tables_nanos,
         relation_validation_nanos: completed.relation_validation_nanos,
     })
+}
+
+async fn assert_tags_exact_lookup(
+    fixture: &DatabaseFixture,
+    current: &GenerationId,
+) -> CorpusResult<()> {
+    let simple = fixture
+        .database
+        .exact_current_symbols_by_name(ExactTextLookup::new(
+            &fixture.project,
+            current,
+            TAGS_CORPUS_QUERY,
+            16,
+        ))
+        .await
+        .map_err(|_| error("tags-simple-name-lookup"))?;
+    if simple.len() != EXPECTED_TAGS_BM25_DOCUMENT_IDS.len()
+        || simple
+            .iter()
+            .any(|symbol| !symbol.qualified_name().ends_with(TAGS_CORPUS_QUERY))
+    {
+        return Err(error("tags-simple-name-results"));
+    }
+    let full = fixture
+        .database
+        .exact_current_symbols_by_name(ExactTextLookup::new(
+            &fixture.project,
+            current,
+            "T2Elixir.tagscanary",
+            16,
+        ))
+        .await
+        .map_err(|_| error("tags-full-name-lookup"))?;
+    if full.len() != 1 || full[0].qualified_name() != "T2Elixir.tagscanary" {
+        return Err(error("tags-full-name-results"));
+    }
+    let substring = fixture
+        .database
+        .exact_current_symbols_by_name(ExactTextLookup::new(
+            &fixture.project,
+            current,
+            "scanary",
+            16,
+        ))
+        .await
+        .map_err(|_| error("tags-substring-name-lookup"))?;
+    if substring.is_empty() {
+        Ok(())
+    } else {
+        Err(error("tags-substring-false-positive"))
+    }
+}
+
+async fn read_bm25_document_ids(request: Bm25Inspection<'_>) -> CorpusResult<Vec<String>> {
+    let hits = request
+        .fixture
+        .database
+        .search_current_code(SearchQuery::new(
+            request.fixture.project.clone(),
+            request.current.clone(),
+            request.query_text,
+            request.limit,
+        ))
+        .await
+        .map_err(|_| error(request.operation))?;
+    if hits
+        .iter()
+        .any(|hit| hit.generation_id() != request.current)
+    {
+        return Err(error("bm25-noncurrent-generation"));
+    }
+    Ok(hits
+        .iter()
+        .map(|hit| hit.document_id().as_str().to_owned())
+        .collect())
+}
+
+async fn assert_secret_sentinel_absent(
+    fixture: &DatabaseFixture,
+    generation: &GenerationId,
+) -> CorpusResult<()> {
+    let statement = format!(
+        r#"WITH persisted(value) AS (
+                SELECT concat_ws(' ', normalized_path, language, parse_status)
+                FROM "{schema}"."files"
+                WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT concat_ws(' ', symbol_kind, qualified_name, signature)
+                FROM "{schema}"."symbols"
+                WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT concat_ws(' ', edge_kind, provenance)
+                FROM "{schema}"."edges"
+                WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT concat_ws(
+                    ' ', reference_kind, reference_name, resolution_provenance, span_precision
+                )
+                FROM "{schema}"."references"
+                WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT concat_ws(
+                    ' ', path, language, document_kind, qualified_name,
+                    code, natural_text, metadata::text
+                )
+                FROM "{schema}"."search_documents"
+                WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
+            )
+            SELECT count(*)::bigint AS matches
+            FROM persisted
+            WHERE position($3 in value) > 0"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(generation.as_str())
+        .bind(LIVE_SECRET_SENTINEL)
+        .fetch_one(&fixture.pool)
+        .await
+        .map_err(|_| error("secret-persistence-query"))?;
+    let matches = row
+        .try_get::<i64, _>("matches")
+        .map_err(|_| error("secret-persistence-decode"))?;
+    if matches != 0 {
+        return Err(error("secret-sentinel-persisted"));
+    }
+    Ok(())
 }
 
 fn pipeline_config(workers: u16) -> NativePipelineConfig {
@@ -1033,15 +1212,16 @@ fn validate_invariant(invariant: &CorpusInvariant) -> CorpusResult<()> {
     }
     if invariant.logical_digest != EXPECTED_LOGICAL_DIGEST {
         return Err(format!(
-            "logical digest changed to {}; rows={:?}; edge_kinds={:?}; bm25={:?}; native={:?}",
+            "logical digest changed to {}; rows={:?}; edge_kinds={:?}; bm25={:?}; tags_bm25={:?}; native={:?}",
             invariant.logical_digest,
             invariant.rows,
             invariant.edge_kinds,
             invariant.bm25_document_ids,
+            invariant.tags_bm25_document_ids,
             invariant.native,
         ));
     }
-    if invariant.logical_digest_version != GenerationDigestVersion::V2.database_value() {
+    if invariant.logical_digest_version != GenerationDigestVersion::CURRENT.database_value() {
         return Err(error("logical-digest-version"));
     }
     if invariant.rows != expected_row_counts() {
@@ -1054,6 +1234,12 @@ fn validate_invariant(invariant: &CorpusInvariant) -> CorpusResult<()> {
         return Err(format!(
             "BM25 hits changed to {:?}",
             invariant.bm25_document_ids
+        ));
+    }
+    if invariant.tags_bm25_document_ids != EXPECTED_TAGS_BM25_DOCUMENT_IDS {
+        return Err(format!(
+            "tags BM25 hits changed to {:?}",
+            invariant.tags_bm25_document_ids
         ));
     }
     if invariant.native != expected_native_report() {

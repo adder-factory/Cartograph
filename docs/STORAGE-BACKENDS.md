@@ -1,278 +1,217 @@
-# Storage Backends
+# PostgreSQL storage and operations
 
-Cartograph supports both storage backends:
+Cartograph v2 has one storage engine: PostgreSQL 18 with ParadeDB `pg_search`
+0.23.5 and pgvector. SQLite is not a backend, fallback, migration target,
+importer, feature, or test utility.
 
-- **SQLite** is the default. It needs no service, stores the graph at
-  `.cartograph/cartograph.db`, and is the fastest local single-writer path.
-  Cartograph verifies the Bun SQLite runtime supports SQLite 3.37+,
-  STRICT tables, FTS5, RTree, and JSON functions.
-- **PostgreSQL 18+** is opt-in. Use it when you want external/shared storage,
-  managed backups, operational DB controls, or native pgvector search.
+## Capability contract
 
-## SQLite Default
+`cartograph doctor` fails closed unless the selected database proves:
 
-```sh
-cartograph index /path/to/project
-cartograph status /path/to/project
-```
+- PostgreSQL major version 18 or newer;
+- the expected `pg_search` version and preload state;
+- the BM25 access method and `pdb.source_code` tokenizer behavior;
+- pgvector availability;
+- the complete append-only Cartograph migration ledger;
+- bounded read/write/DDL capability in the selected schema.
 
-No database config is required. SQLite uses FTS, RTree, JSON-backed variable
-lists, and sqlite-vec when the optional sqlite-vec extension is available.
-Doctor reports the SQLite version and feature check result.
+Cartograph never silently degrades to PostgreSQL built-in FTS or a local file.
 
-Cartograph intentionally uses `bun:sqlite` for this backend rather than
-Bun.SQL's SQLite adapter. The local graph API is synchronous and
-statement-oriented, and `bench/sqlite-driver.mts` currently shows `bun:sqlite`
-faster on Cartograph-shaped local workloads. Bun.SQL remains the right boundary
-for PostgreSQL and future external SQL backends.
+## Managed local database
 
-## PostgreSQL New Project
-
-Start a PostgreSQL 18+ database first. For local development and pgvector
-testing:
+On macOS/Linux with a local Docker daemon:
 
 ```sh
-docker run --rm -d --name cartograph-postgres \
-  -e POSTGRES_USER=cartograph \
-  -e POSTGRES_PASSWORD=cartograph \
-  -e POSTGRES_DB=cartograph \
-  -p 5432:5432 \
-  pgvector/pgvector:pg18
+cartograph db start --project-path .
+cartograph db status --project-path .
+cartograph doctor .
 ```
 
-Initialize the project with PostgreSQL storage before the first index:
+The native lifecycle creates a project-owned container and volume, generates a
+private local credential, binds PostgreSQL to loopback, and pulls the pinned
+upstream ParadeDB image. It refuses a remote Docker context, foreign resources
+with colliding names, wrong labels/mounts, a public bind, and an unproved
+database capability.
+
+Common read/idempotent operations:
 
 ```sh
-cartograph admin init -i /path/to/project \
-  --database-provider postgres \
-  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
-  --database-pgvector auto
-
-cartograph doctor /path/to/project
+cartograph db status --project-path .
+cartograph db logs --project-path . --tail 200
+cartograph db derived-index --project-path .
+cartograph db stop --project-path .
 ```
 
-No `--database-schema` needed: see
-[Per-project separation](#per-project-separation-on-a-shared-instance).
-Pass it only when you want a specific name.
-
-If you are also bootstrapping local LLM model files, `llm install` accepts the
-same storage flags:
+Backup:
 
 ```sh
-cartograph llm install /path/to/project \
-  --database-provider postgres \
-  --database-url "$DATABASE_URL" \
-  --database-pgvector auto
+cartograph db backup ./cartograph.backup --project-path .
 ```
 
-## Config File
+Restore, upgrade, derived-index rebuild, and removal replace or delete state and
+require the exact confirmation phrase shown by `cartograph db <command> --help`.
+The lifecycle validates archive/resource identity before mutation and tests
+rollback/recovery paths against the pinned service.
 
-The same settings can be committed to `.cartograph/config.json` except for
-secrets, which usually belong in environment variables:
+Windows release binaries use external PostgreSQL. Managed lifecycle remains
+disabled there until private credential ACL behavior can be proved equivalent.
 
-```json
-{
-  "database": {
-    "provider": "postgres",
-    "url": "postgres://user:pass@localhost:5432/cartograph",
-    "schema": "cartograph",
-    "pgvector": "auto",
-    "queryTimeoutMs": 120000,
-    "connectionTimeoutSeconds": 30,
-    "maxConnections": 1
-  }
-}
-```
+## External database
 
-Environment fallbacks:
+The database administrator installs PostgreSQL 18, `pg_search` 0.23.5, and
+pgvector and creates the extensions. Supply secrets only through the process
+environment:
 
 ```sh
-CARTOGRAPH_DATABASE_PROVIDER=postgres
-CARTOGRAPH_DATABASE_URL=postgres://user:pass@host:5432/cartograph
-CARTOGRAPH_DATABASE_SCHEMA=cartograph
-CARTOGRAPH_DATABASE_PGVECTOR=auto
-CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS=120000
-CARTOGRAPH_DATABASE_CONNECTION_TIMEOUT_SECONDS=30
-CARTOGRAPH_DATABASE_MAX_CONNECTIONS=1
-CARTOGRAPH_DATABASE_SSL=true
+export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
+export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
+cartograph doctor /absolute/path/to/project
+cartograph index /absolute/path/to/project
 ```
 
-`DATABASE_URL` is also accepted when `CARTOGRAPH_DATABASE_URL` is unset.
-
-## Per-Project Separation On A Shared Instance
-
-With SQLite every project is separate for free — the database file
-lives inside the project. One shared PostgreSQL server needs the same
-guarantee, and Cartograph manufactures it (one schema = one project =
-one graph = one viewer):
-
-- **Auto-derived schemas.** When `database.schema` is not configured,
-  every connection derives `cartograph_<name>_<hash8>` from the
-  project's absolute path instead of landing in `public`. Two projects
-  pointed at the same server get disjoint schemas with zero
-  configuration; the schema is created on first connect. The first
-  config-driven open pins the derived name into
-  `.cartograph/config.json` so renaming the project directory later
-  cannot re-derive a different name and "lose" the index. `doctor`,
-  `status`, and `storage-migrate` all report the effective schema.
-
-- **Ownership guard.** The first open of a schema stamps the project
-  root into its metadata; every later open verifies it. If two
-  projects are misconfigured onto one schema (for example both
-  copy-pasted `--database-schema cartograph`), the second project's
-  first open fails with both paths and the fix — instead of silently
-  interleaving two file trees into one graph.
-
-  If you intentionally **moved or renamed** a project, re-bind once:
-
-  ```sh
-  CARTOGRAPH_DATABASE_REBIND_PROJECT_ROOT=1 cartograph status /new/path
-  ```
-
-**Upgrading from a pre-1.0.3 implicit-`public` setup:** earlier builds
-landed in `public` when no schema was configured. After this change an
-unconfigured project derives its own schema and will report the
-(empty) derived schema as behind/fresh — set
-`database.schema: "public"` in `.cartograph/config.json` (or
-`CARTOGRAPH_DATABASE_SCHEMA=public`) to reconnect to existing data;
-the error message says exactly this when it detects the situation.
-
-## pgvector Modes
-
-`database.pgvector` defaults to `auto`.
-
-| Mode | Behavior |
-|---|---|
-| `auto` | Try `CREATE EXTENSION IF NOT EXISTS vector`; use native pgvector mirrors when available, otherwise fall back. |
-| `off` | Do not use pgvector, even if the extension exists. |
-| `require` | Fail initialization/doctor if pgvector is unavailable. |
-
-Canonical embeddings remain in Cartograph's regular BYTEA storage. pgvector
-tables are native mirrors used for PostgreSQL vector search and can be rebuilt
-from the canonical rows.
-
-## Migrate Existing Projects
-
-Use `storage-migrate` when a project already has a SQLite-backed graph and you
-want PostgreSQL without reindexing:
+Optional bounded pool controls:
 
 ```sh
-cartograph admin storage-migrate /path/to/project \
-  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
-  --database-schema cartograph \
-  --database-pgvector auto
+export CARTOGRAPH_DATABASE_MAX_CONNECTIONS=8
+export CARTOGRAPH_DATABASE_ACQUIRE_TIMEOUT_MS=5000
 ```
 
-The target schema must be fresh or nonexistent. Pass `--force` only when you
-intend Cartograph to drop and recreate that schema. The SQLite database is kept
-as a timestamped `.sqlite-backup.*` next to `.cartograph/cartograph.db`, and a
-small sentinel file remains so older tooling does not treat the project as
-uninitialized.
+Do not commit or print a database URL. Public errors and debug output are
+required to omit credentials, query text, and absolute project paths.
 
-Restart any MCP server that was attached to the old SQLite database after the
-migration finishes.
+## Generation model
 
-To move a PostgreSQL-backed project back to the default local SQLite database,
-target SQLite explicitly:
+Indexing stages a complete immutable generation, validates files/symbols/edges/
+references/search documents, and then builds derived search state from those
+canonical rows. For BM25, it populates an immutable physical
+`search_g_<generation UUID>` table, creates that table's `_bm25` index, verifies
+source/relation/distinct row counts plus catalog health, and records the project,
+generation, content digest, count, and format version in
+`generation_search_relations`. Migration 11 enforces generation UUIDs as
+globally unique because the trusted physical identifier is generation-derived.
+Only then can the generation become `ready`.
+The publication transaction requires that exact relation again before it swaps
+the project's current pointer. Any table/index build failure rolls back with the
+staging transaction and can never publish a partial generation.
+
+Writers use project/operation advisory locks, explicit leases, PostgreSQL-clock
+heartbeats, exact fencing tokens, bounded statement deadlines, and rollback on
+lost/expired ownership. Re-indexing an identical supported-source manifest is a
+no-op unless `--force` is explicit.
+
+## Derived BM25 and vector state
+
+Relational graph/search-document rows are source-of-truth data. ParadeDB BM25
+and model-scoped HNSW indexes are rebuildable derived state. BM25 is generation
+local rather than one global corpus, so documents in another project or a
+ready/superseded generation cannot perturb current-generation scores or order.
+A bounded read validates one expected current generation in a repeatable-read
+transaction and queries only its verified physical relation. Inspect aggregate
+derived-index health with:
 
 ```sh
-cartograph admin storage-migrate /path/to/project \
-  --database-provider sqlite
+cartograph db derived-index --project-path .
 ```
 
-Cartograph copies the current PostgreSQL rows into a fresh SQLite database,
-validates the row counts and SQLite foreign keys, swaps the new database into
-`.cartograph/cartograph.db`, removes the `database` block from
-`.cartograph/config.json`, and keeps timestamped backups of the old PostgreSQL
-sentinel and config file next to the project database.
+Use the exact confirmed rebuild form printed by command help when recovery is
+required. Never describe the Community BM25 index as WAL-crash-durable or use a
+rebuild to conceal loss of relational source rows.
 
-Restart any MCP server that was attached to the old PostgreSQL database after
-the migration finishes.
+Migration and startup reconciliation prioritize unhealthy current/ready
+relations, repair at most 64 per invocation from canonical `search_documents`,
+and fail closed if another bounded pass is required. It also removes at most 64
+orphan tables whose names strictly decode as generation relation identifiers.
+Builds, repairs, and retention drops share a generation-specific transactional
+advisory lock. Healthy catalog/table/index tuples are left unchanged.
 
-## Doctor And Status
+## Import from v1.1.33 PostgreSQL
+
+V2 never opens SQLite. If the only v1 graph is SQLite, either rebuild from the
+checkout or first use the v1.1.33 binary to migrate it to PostgreSQL.
+
+The v1 source and v2 destination must be different schemas in the same database.
+The destination may already contain a current generation; import publishes a
+new immutable generation. Back up the database, quiesce project
+index/sync/hook/rebuild writers, and select the v2 destination through
+`CARTOGRAPH_DATABASE_SCHEMA`. Preflight the exact checkout first:
 
 ```sh
-cartograph doctor /path/to/project
-cartograph status /path/to/project --verbose
+cartograph db import-v1 \
+  --project-path /absolute/path/to/checkout \
+  --source-schema cartograph_v1 \
+  --dry-run \
+  --format json
 ```
 
-Doctor verifies PostgreSQL 18+, connectivity, schema version, DML writes, DDL
-privileges for init/rebuild workflows, and pgvector availability when enabled.
-Status reports the active backend; PostgreSQL storage uses native GIN indexes
-and pgvector when available instead of SQLite-only sqlite-vec/RTree paths.
-After a write-bearing index or sync, maintenance runs PostgreSQL `ANALYZE
-(SKIP_LOCKED)` only on relations in the active project schema so the PG18
-planner can use fresh statistics without touching other Cartograph projects in
-the shared database. `SKIP_LOCKED` avoids waiting when the initial relation lock
-is already held and reduces conflict risk, but PostgreSQL may still wait later
-on indexes or partitions. No-change PostgreSQL syncs skip manual analysis;
-PostgreSQL autovacuum remains responsible for routine tuple cleanup.
+The preflight validates schema history, bounded rows/bytes/JSON, supported
+languages, repository/source identity, current checkout bytes, relations,
+coordinates, body/content hashes, and canonical output without writing the
+destination. The default aggregate source/metadata ceiling is 512 MiB; bounded
+advanced ceilings are available as `--maximum-rows` and
+`--maximum-source-bytes`.
 
-`cartograph admin prune-store` is separate, operator-triggered logical cleanup:
-it evicts cold, unreferenced summary and embedding cache rows after the chosen
-retention window. Cartograph does not schedule it automatically, and it does
-not replace PostgreSQL vacuum/reindex maintenance when an installation already
-has physically bloated tables or HNSW indexes.
-
-For embedding-model transitions, use `cartograph admin embedding-audit` first.
-It groups canonical rows by model, grain, and vector dimension; distinguishes
-referenced rows from cache orphans; detects mixed dimensions for one model; and
-reports sqlite-vec, pgvector, and HNSW artifacts. `cartograph admin
-embedding-cleanup` is a dry run. Adding `--confirm` first detaches an older-model
-ref only when the same node and grain have a stored active-model replacement,
-then deletes non-active rows left unreferenced. Active-model rows and older-model
-refs without an active replacement are always protected. A dimension table/file
-is dropped only when no canonical rows remain at that dimension; live mirrors
-are reconciled and stale HNSW state is invalidated. MCP agents use the matching
-`cartograph_admin` actions `embedding-audit` and `embedding-cleanup` with
-`confirm: true` for the apply step.
-
-## Production Notes
-
-Create the database and role outside Cartograph, then grant ownership or
-equivalent privileges on the project schema:
-
-```sql
-CREATE SCHEMA cartograph AUTHORIZATION cartograph;
-GRANT USAGE, CREATE ON SCHEMA cartograph TO cartograph;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA cartograph TO cartograph;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA cartograph TO cartograph;
-ALTER DEFAULT PRIVILEGES IN SCHEMA cartograph
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO cartograph;
-ALTER DEFAULT PRIVILEGES IN SCHEMA cartograph
-  GRANT USAGE, SELECT ON SEQUENCES TO cartograph;
-```
-
-For hosted PostgreSQL, prefer URL certificate policy such as
-`?sslmode=require`, `verify-ca`, or `verify-full`. The
-`database.ssl` / `CARTOGRAPH_DATABASE_SSL=true` setting only forces TLS on/off.
-
-PostgreSQL support requires PostgreSQL 18 or newer and currently bootstraps
-fresh schemas. It does not run
-SQLite's forward migration chain in PostgreSQL; use a new schema for upgrades
-that need a rebuild.
-
-## Benchmarks
-
-Run the local storage benchmark with:
+After a clean report:
 
 ```sh
-CARTOGRAPH_BENCH_POSTGRES_URL=postgres://user:pass@localhost:5432/cartograph \
-  bun bench/storage-backends.mts
+cartograph db import-v1 \
+  --project-path /absolute/path/to/checkout \
+  --source-schema cartograph_v1 \
+  --confirm import-v1-postgres \
+  --format json
 ```
 
-Reference run from 2026-06-07, Bun 1.3.14, `darwin arm64`, three fresh runs
-per backend:
+The importer persists monotonic `staged`, `ready`, `bm25_rebuilt`, and
+`complete` checkpoints. Repeat the identical command after a reported
+interruption; changed source identity or inconsistent checkpoint state fails
+closed. Reference/edge multiplicity is preserved. Exact spans remain exact only
+when v1 plus current source proves the token; otherwise the span is marked
+coarse. A SCIP placeholder hash proves its path-derived placeholder identity,
+not historical bytes v1 never stored.
 
-| Backend | Init median | Write median | Read median | Total median | DB size |
-|---|---:|---:|---:|---:|---:|
-| SQLite | 7 ms | 70 ms | 35 ms | 112 ms | 2.12 MB |
-| PostgreSQL | 102 ms | 241 ms | 470 ms | 795 ms | 7.46 MB |
+`ConcurrentPublication` is retryable only after writers are quiesced. The
+failed attempt atomically releases its stale generation; repeat the identical
+confirmed command to reset that durable run and reserve a newer generation.
 
-Workload: 200 files, 1,600 nodes, 3,200 candidate edges, 40 read iterations.
-Treat this as a machine- and workload-specific reference point. SQLite remains
-the fastest local single-writer default in this workload; PostgreSQL is the
-choice for shared/external storage, database operations, hosted backups, and
-native pgvector search.
+Before retiring v1, keep the source schema and backup and verify:
 
-See `bench/README.md` for benchmark knobs and caveats.
+```sh
+cartograph status /absolute/path/to/checkout
+cartograph context 'trace the primary request flow' --project-path /absolute/path/to/checkout
+cartograph db derived-index --project-path /absolute/path/to/checkout
+```
+
+## Bounded retention
+
+Generation pruning is explicit and separate from import, backup, `VACUUM`, and
+derived-index recovery. After a verified backup:
+
+```sh
+cartograph db prune \
+  --project-path /absolute/path/to/checkout \
+  --keep-superseded 2 \
+  --maximum-deletions 100 \
+  --confirm prune-old-generations \
+  --format json
+```
+
+One invocation deletes at most the requested batch of failed and old
+superseded generations. It always preserves the current generation,
+staging/ready work, failed generations referenced by non-complete v1 import
+runs, and the newest configured superseded histories. The import-run exception
+preserves the exact failed state needed for concurrent-publication recovery.
+The transaction also enforces independent canonical/cascade-row,
+generation-relation-byte, and DDL-relation caps. Defaults admit at most five
+million cascade rows, 8 GiB of generation search relations, and 64 relation
+drops; hard bounds are 100 million rows, 64 GiB, and 64 drops. For every
+selected terminal generation it accounts work first, drops the physical search
+table (including its BM25 index), deletes canonical rows by cascade, and reports
+the exact admitted rows, relations, and bytes. It acquires publication/retention
+locks and rechecks the exact live migration lease after deletion before commit.
+Inspect the report and request another batch explicitly if needed.
+
+## Distribution boundary
+
+Native Cartograph archives contain no PostgreSQL, ParadeDB, pgvector, image,
+extension binary, SQL dump, or database credential. The managed command pulls
+the separately distributed upstream image. See [licensing](v2/LICENSING.md) for
+the local Community and hosted/shared deployment boundary.

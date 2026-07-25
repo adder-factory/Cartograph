@@ -16,15 +16,23 @@ cartograph-db = { path = "../cartograph-db" }
 cartograph-domain = { path = "../cartograph-domain" }
 cartograph-extract = { path = "../cartograph-extract" }
 cartograph-indexer = { path = "../cartograph-indexer" }
+cartograph-llm = { path = "../cartograph-llm" }
 cartograph-search = { path = "../cartograph-search" }
+cartograph-scip = { path = "../cartograph-scip" }
+futures-util.workspace = true
+globset.workspace = true
+ignore.workspace = true
+libc.workspace = true
+regex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 sqlx-core.workspace = true
 sqlx-postgres.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

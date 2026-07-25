@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use cartograph_config::DatabaseSchema;
 use serde::Serialize;
@@ -6,7 +6,7 @@ use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::PgConnection;
 use thiserror::Error;
 
-use crate::{CartographDatabase, CheckStatus, probe_capabilities};
+use crate::{CartographDatabase, CheckStatus, capabilities::probe_capabilities_connection};
 
 const INITIAL_SCHEMA_VERSION: i64 = 1;
 const OPERATION_LEASES_SCHEMA_VERSION: i64 = 2;
@@ -14,7 +14,21 @@ const COMPLETE_EDGE_KINDS_SCHEMA_VERSION: i64 = 3;
 const REFERENCE_EVIDENCE_SCHEMA_VERSION: i64 = 4;
 const DIGEST_VERSION_SCHEMA_VERSION: i64 = 5;
 const BULK_RELATION_VALIDATION_SCHEMA_VERSION: i64 = 6;
-const LATEST_SCHEMA_VERSION: i64 = BULK_RELATION_VALIDATION_SCHEMA_VERSION;
+const V1_IMPORT_RETENTION_SCHEMA_VERSION: i64 = 7;
+const SEMANTIC_STORAGE_SCHEMA_VERSION: i64 = 8;
+const REFERENCE_MULTIPLICITY_SCHEMA_VERSION: i64 = 9;
+const EXACT_LOOKUP_INDEX_SCHEMA_VERSION: i64 = 10;
+const GENERATION_SEARCH_RELATIONS_SCHEMA_VERSION: i64 = 11;
+const TYPED_SYMBOL_SEMANTICS_SCHEMA_VERSION: i64 = 12;
+const AGENT_EVIDENCE_SCHEMA_VERSION: i64 = 13;
+const AGENT_SESSION_SCHEMA_VERSION: i64 = 14;
+const STRUCTURAL_BRIDGE_SCHEMA_VERSION: i64 = 15;
+const MATERIALIZED_SIMILARITY_SCHEMA_VERSION: i64 = 16;
+const NATIVE_PARSE_CACHE_SCHEMA_VERSION: i64 = 17;
+const SYMBOL_ISSUE_HISTORY_SCHEMA_VERSION: i64 = 18;
+const SYMBOL_PAGERANK_SCHEMA_VERSION: i64 = 19;
+const SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION: i64 = 20;
+const LATEST_SCHEMA_VERSION: i64 = SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 pub(crate) const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
@@ -311,13 +325,656 @@ const BULK_RELATION_VALIDATION_SCHEMA: Migration = Migration {
     ],
 };
 
-const MIGRATIONS: [&Migration; 6] = [
+const V1_IMPORT_RETENTION_SCHEMA: Migration = Migration {
+    version: V1_IMPORT_RETENTION_SCHEMA_VERSION,
+    name: "v1_postgres_import_and_generation_retention",
+    statements: &[
+        r#"CREATE TABLE {schema}."v1_import_runs" (
+            import_id uuid PRIMARY KEY,
+            project_id uuid NOT NULL REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            generation_id uuid NOT NULL,
+            source_schema text NOT NULL CHECK (length(source_schema) BETWEEN 1 AND 63),
+            source_fingerprint text NOT NULL CHECK (source_fingerprint ~ '^[0-9a-f]{64}$'),
+            content_digest text NOT NULL CHECK (content_digest ~ '^[0-9a-f]{64}$'),
+            source_files bigint NOT NULL CHECK (source_files >= 0),
+            source_symbols bigint NOT NULL CHECK (source_symbols >= 0),
+            source_edges bigint NOT NULL CHECK (source_edges >= 0),
+            source_references bigint NOT NULL CHECK (source_references >= 0),
+            source_documents bigint NOT NULL CHECK (source_documents >= 0),
+            checkpoint text NOT NULL
+                CHECK (checkpoint IN ('staged', 'ready', 'bm25_rebuilt', 'complete')),
+            started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            UNIQUE (project_id, source_schema)
+        )"#,
+        r#"CREATE TABLE {schema}."v1_import_checkpoints" (
+            checkpoint_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            import_id uuid NOT NULL
+                REFERENCES {schema}."v1_import_runs"(import_id) ON DELETE CASCADE,
+            checkpoint text NOT NULL
+                CHECK (checkpoint IN ('staged', 'ready', 'bm25_rebuilt', 'complete')),
+            recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            UNIQUE (import_id, checkpoint)
+        )"#,
+        r#"CREATE INDEX index_generations_retention_idx
+            ON {schema}."index_generations" (project_id, state, generation_sequence DESC)"#,
+    ],
+};
+
+const SEMANTIC_STORAGE_SCHEMA: Migration = Migration {
+    version: SEMANTIC_STORAGE_SCHEMA_VERSION,
+    name: "model_scoped_pgvector_semantic_storage",
+    statements: &[
+        r#"CREATE TABLE {schema}."embedding_models" (
+            model_id uuid PRIMARY KEY,
+            fingerprint text NOT NULL UNIQUE
+                CHECK (fingerprint ~ '^[0-9a-f]{64}$'),
+            provider text NOT NULL CHECK (length(provider) BETWEEN 1 AND 128),
+            model_name text NOT NULL CHECK (length(model_name) BETWEEN 1 AND 256),
+            dimension integer NOT NULL CHECK (dimension BETWEEN 1 AND 2000),
+            normalization text NOT NULL CHECK (normalization IN ('none', 'l2')),
+            state text NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'retired')),
+            registered_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            retired_at timestamptz,
+            CHECK (
+                (state = 'active' AND retired_at IS NULL)
+                OR (state = 'retired' AND retired_at IS NOT NULL)
+            )
+        )"#,
+        r#"CREATE TABLE {schema}."document_embeddings" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            document_id uuid NOT NULL,
+            model_id uuid NOT NULL
+                REFERENCES {schema}."embedding_models"(model_id) ON DELETE RESTRICT,
+            source_digest text NOT NULL CHECK (source_digest ~ '^[0-9a-f]{64}$'),
+            embedding vector NOT NULL,
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, generation_id, document_id, model_id),
+            FOREIGN KEY (project_id, generation_id, document_id)
+                REFERENCES {schema}."search_documents"(project_id, generation_id, document_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX document_embeddings_generation_model_idx
+            ON {schema}."document_embeddings" (
+                project_id, generation_id, model_id, document_id
+            )"#,
+        r#"CREATE FUNCTION {schema}."validate_document_embedding"()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            SET search_path = pg_catalog, public
+            AS $body$
+            DECLARE
+                expected_dimension integer;
+                expected_normalization text;
+                model_state text;
+                magnitude double precision;
+            BEGIN
+                SELECT dimension, normalization, state
+                INTO expected_dimension, expected_normalization, model_state
+                FROM {schema}."embedding_models"
+                WHERE model_id = NEW.model_id;
+                IF NOT FOUND OR model_state <> 'active' THEN
+                    RAISE EXCEPTION USING
+                        ERRCODE = '23514',
+                        MESSAGE = 'document embedding model is unavailable';
+                END IF;
+                IF vector_dims(NEW.embedding) <> expected_dimension THEN
+                    RAISE EXCEPTION USING
+                        ERRCODE = '23514',
+                        MESSAGE = 'document embedding dimension mismatch';
+                END IF;
+                magnitude := vector_norm(NEW.embedding);
+                IF magnitude IS NULL
+                    OR magnitude <= 0.0
+                    OR magnitude = 'Infinity'::float8
+                    OR magnitude = 'NaN'::float8 THEN
+                    RAISE EXCEPTION USING
+                        ERRCODE = '23514',
+                        MESSAGE = 'document embedding magnitude is invalid';
+                END IF;
+                IF expected_normalization = 'l2' AND abs(magnitude - 1.0) > 0.001 THEN
+                    RAISE EXCEPTION USING
+                        ERRCODE = '23514',
+                        MESSAGE = 'document embedding normalization mismatch';
+                END IF;
+                RETURN NEW;
+            END
+            $body$"#,
+        r#"CREATE TRIGGER document_embeddings_validate_trigger
+            BEFORE INSERT OR UPDATE OF model_id, embedding
+            ON {schema}."document_embeddings"
+            FOR EACH ROW
+            EXECUTE FUNCTION {schema}."validate_document_embedding"()"#,
+    ],
+};
+
+const REFERENCE_MULTIPLICITY_SCHEMA: Migration = Migration {
+    version: REFERENCE_MULTIPLICITY_SCHEMA_VERSION,
+    name: "reference_site_multiplicity_and_digest_v3",
+    statements: &[
+        r#"ALTER TABLE {schema}."references"
+            ADD COLUMN site_count bigint NOT NULL DEFAULT 1
+                CHECK (site_count BETWEEN 1 AND 100000000),
+            ADD COLUMN span_precision text NOT NULL DEFAULT 'exact'
+                CHECK (span_precision IN ('exact', 'coarse_point', 'coarse_owner'))"#,
+        r#"ALTER TABLE {schema}."edges"
+            ADD COLUMN site_count bigint NOT NULL DEFAULT 1
+                CHECK (site_count BETWEEN 1 AND 100000000)"#,
+        r#"ALTER TABLE {schema}."v1_import_runs"
+            ADD COLUMN source_edge_sites bigint,
+            ADD COLUMN source_reference_sites bigint"#,
+        r#"UPDATE {schema}."v1_import_runs"
+            SET source_edge_sites = source_edges,
+                source_reference_sites = source_references"#,
+        r#"ALTER TABLE {schema}."v1_import_runs"
+            ALTER COLUMN source_edge_sites SET NOT NULL,
+            ALTER COLUMN source_reference_sites SET NOT NULL,
+            ADD CONSTRAINT v1_import_runs_source_edge_sites_check
+                CHECK (source_edge_sites >= 0),
+            ADD CONSTRAINT v1_import_runs_source_reference_sites_check
+                CHECK (source_reference_sites >= 0)"#,
+        r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3))"#,
+    ],
+};
+
+const EXACT_LOOKUP_INDEX_SCHEMA: Migration = Migration {
+    version: EXACT_LOOKUP_INDEX_SCHEMA_VERSION,
+    name: "indexed_exact_symbol_and_reference_names",
+    statements: &[
+        r#"ALTER TABLE {schema}."symbols"
+            ADD COLUMN simple_name text GENERATED ALWAYS AS (
+                reverse(split_part(reverse(replace(qualified_name, '::', '.')), '.', 1))
+            ) STORED NOT NULL,
+            ADD CONSTRAINT symbols_simple_name_check
+                CHECK (length(simple_name) BETWEEN 1 AND 2048)"#,
+        r#"CREATE INDEX symbols_simple_name_idx
+            ON {schema}."symbols" (
+                project_id, generation_id, simple_name, file_id, start_line, symbol_id
+            )"#,
+        r#"CREATE INDEX references_exact_name_site_idx
+            ON {schema}."references" (
+                project_id, generation_id, reference_name, file_id, start_byte, reference_id
+            )"#,
+    ],
+};
+
+const GENERATION_SEARCH_RELATIONS_SCHEMA: Migration = Migration {
+    version: GENERATION_SEARCH_RELATIONS_SCHEMA_VERSION,
+    name: "immutable_generation_scoped_bm25_relations",
+    statements: &[
+        r#"CREATE UNIQUE INDEX index_generations_global_identity_idx
+            ON {schema}."index_generations" (generation_id)"#,
+        r#"CREATE TABLE {schema}."generation_search_relations" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            document_count bigint NOT NULL CHECK (document_count >= 0),
+            content_digest text NOT NULL CHECK (content_digest ~ '^[0-9a-f]{64}$'),
+            relation_format_version smallint NOT NULL DEFAULT 1
+                CHECK (relation_format_version = 1),
+            built_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            verified_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, generation_id),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"DROP INDEX IF EXISTS {schema}."search_documents_bm25_idx""#,
+    ],
+};
+
+const TYPED_SYMBOL_SEMANTICS_SCHEMA: Migration = Migration {
+    version: TYPED_SYMBOL_SEMANTICS_SCHEMA_VERSION,
+    name: "typed_symbol_semantics",
+    statements: &[
+        r#"ALTER TABLE {schema}."symbols"
+            ADD COLUMN visibility text,
+            ADD COLUMN exported boolean NOT NULL DEFAULT false,
+            ADD COLUMN default_export boolean NOT NULL DEFAULT false,
+            ADD COLUMN async_symbol boolean NOT NULL DEFAULT false,
+            ADD COLUMN static_member boolean NOT NULL DEFAULT false,
+            ADD COLUMN declaration_only boolean NOT NULL DEFAULT false"#,
+        r#"WITH semantics AS MATERIALIZED (
+                SELECT DISTINCT ON (documents.project_id, documents.generation_id, documents.symbol_id)
+                       documents.project_id, documents.generation_id, documents.symbol_id,
+                       documents.metadata
+                FROM {schema}."search_documents" AS documents
+                WHERE documents.symbol_id IS NOT NULL
+                ORDER BY documents.project_id, documents.generation_id, documents.symbol_id,
+                         CASE WHEN documents.document_kind = 'symbol' THEN 0 ELSE 1 END,
+                         documents.id
+            )
+            UPDATE {schema}."symbols" AS symbols
+            SET visibility = CASE semantics.metadata ->> 'visibility'
+                    WHEN 'public' THEN 'public'
+                    WHEN 'private' THEN 'private'
+                    WHEN 'protected' THEN 'protected'
+                    WHEN 'internal' THEN 'internal'
+                    ELSE NULL
+                END,
+                exported = COALESCE((semantics.metadata ->> 'exported') = 'true', false),
+                default_export = COALESCE(
+                    (semantics.metadata ->> 'default_export') = 'true', false
+                ),
+                async_symbol = COALESCE((semantics.metadata ->> 'async') = 'true', false),
+                static_member = COALESCE((semantics.metadata ->> 'static') = 'true', false),
+                declaration_only = COALESCE(
+                    (semantics.metadata ->> 'declaration_only') = 'true', false
+                )
+            FROM semantics
+            WHERE symbols.project_id = semantics.project_id
+              AND symbols.generation_id = semantics.generation_id
+              AND symbols.symbol_id = semantics.symbol_id"#,
+        r#"ALTER TABLE {schema}."symbols"
+            ADD CONSTRAINT symbols_visibility_check
+                CHECK (visibility IS NULL OR visibility IN ('public', 'private', 'protected', 'internal'))"#,
+        r#"CREATE INDEX symbols_exported_idx
+            ON {schema}."symbols" (
+                project_id, generation_id, exported, file_id, start_line, symbol_id
+            ) WHERE exported"#,
+        r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4))"#,
+    ],
+};
+
+const AGENT_EVIDENCE_SCHEMA: Migration = Migration {
+    version: AGENT_EVIDENCE_SCHEMA_VERSION,
+    name: "durable_agent_coverage_history_and_artifacts",
+    statements: &[
+        r#"CREATE TABLE {schema}."coverage_sources" (
+            project_id uuid NOT NULL
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            source_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            label text NOT NULL CHECK (length(label) BETWEEN 1 AND 256),
+            report_format text NOT NULL CHECK (report_format IN ('lcov')),
+            report_digest text NOT NULL CHECK (report_digest ~ '^[0-9a-f]{64}$'),
+            report_metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+                CHECK (jsonb_typeof(report_metadata) = 'object'),
+            loaded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, source_id),
+            UNIQUE (project_id, label)
+        )"#,
+        r#"CREATE TABLE {schema}."symbol_coverage" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            source_id uuid NOT NULL,
+            symbol_id uuid NOT NULL,
+            lines_found bigint NOT NULL CHECK (lines_found >= 0),
+            lines_hit bigint NOT NULL CHECK (lines_hit BETWEEN 0 AND lines_found),
+            functions_found bigint NOT NULL DEFAULT 0 CHECK (functions_found >= 0),
+            functions_hit bigint NOT NULL DEFAULT 0
+                CHECK (functions_hit BETWEEN 0 AND functions_found),
+            coverage_fraction double precision GENERATED ALWAYS AS (
+                CASE WHEN lines_found = 0 THEN NULL
+                     ELSE lines_hit::double precision / lines_found::double precision
+                END
+            ) STORED,
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, generation_id, source_id, symbol_id),
+            FOREIGN KEY (project_id, generation_id, symbol_id)
+                REFERENCES {schema}."symbols"(project_id, generation_id, symbol_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (project_id, source_id)
+                REFERENCES {schema}."coverage_sources"(project_id, source_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX symbol_coverage_ranking_idx
+            ON {schema}."symbol_coverage" (
+                project_id, generation_id, coverage_fraction, symbol_id
+            )"#,
+        r#"CREATE TABLE {schema}."file_history" (
+            project_id uuid NOT NULL
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            normalized_path text NOT NULL CHECK (length(normalized_path) BETWEEN 1 AND 4096),
+            head_commit text NOT NULL CHECK (head_commit ~ '^[0-9a-f]{40}([0-9a-f]{24})?$'),
+            commit_count bigint NOT NULL CHECK (commit_count >= 0),
+            author_count bigint NOT NULL CHECK (author_count >= 0),
+            insertions bigint NOT NULL CHECK (insertions >= 0),
+            deletions bigint NOT NULL CHECK (deletions >= 0),
+            last_touched_at timestamptz,
+            shallow_history boolean NOT NULL DEFAULT false,
+            refreshed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, normalized_path)
+        )"#,
+        r#"CREATE INDEX file_history_hotspots_idx
+            ON {schema}."file_history" (
+                project_id, commit_count DESC, last_touched_at DESC, normalized_path
+            )"#,
+        r#"CREATE TABLE {schema}."file_cochanges" (
+            project_id uuid NOT NULL
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            path_a text NOT NULL CHECK (length(path_a) BETWEEN 1 AND 4096),
+            path_b text NOT NULL CHECK (length(path_b) BETWEEN 1 AND 4096),
+            commit_count bigint NOT NULL CHECK (commit_count > 0),
+            confidence real NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+            refreshed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, path_a, path_b),
+            CHECK (path_a < path_b)
+        )"#,
+        r#"CREATE INDEX file_cochanges_reverse_idx
+            ON {schema}."file_cochanges" (project_id, path_b, commit_count DESC, path_a)"#,
+        r#"CREATE TABLE {schema}."agent_artifacts" (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            project_id uuid NOT NULL
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            artifact_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            artifact_kind text NOT NULL
+                CHECK (artifact_kind IN ('note', 'role', 'summary', 'session')),
+            scope_kind text NOT NULL
+                CHECK (scope_kind IN ('project', 'module', 'file', 'symbol', 'session')),
+            scope_key text NOT NULL CHECK (length(scope_key) BETWEEN 1 AND 4096),
+            body text NOT NULL CHECK (octet_length(body) <= 65536),
+            metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+                CHECK (jsonb_typeof(metadata) = 'object' AND octet_length(metadata::text) <= 65536),
+            generation_id uuid,
+            source_digest text CHECK (source_digest ~ '^[0-9a-f]{64}$'),
+            state text NOT NULL DEFAULT 'active'
+                CHECK (state IN ('pending', 'active', 'complete', 'stale', 'archived')),
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            UNIQUE (project_id, artifact_id),
+            CHECK (body <> '' OR state = 'pending')
+        )"#,
+        r#"CREATE INDEX agent_artifacts_scope_idx
+            ON {schema}."agent_artifacts" (
+                project_id, artifact_kind, scope_kind, scope_key, updated_at DESC
+            )"#,
+        r#"CREATE UNIQUE INDEX agent_artifacts_current_unique_scope_idx
+            ON {schema}."agent_artifacts" (
+                project_id, artifact_kind, scope_kind, scope_key
+            )
+            WHERE artifact_kind IN ('role', 'summary') AND state <> 'archived'"#,
+        r#"CREATE INDEX agent_artifacts_bm25_idx
+            ON {schema}."agent_artifacts"
+            USING bm25 (
+                id,
+                project_id,
+                artifact_id,
+                artifact_kind,
+                scope_kind,
+                scope_key,
+                body,
+                metadata
+            ) WITH (key_field = 'id')"#,
+    ],
+};
+
+const AGENT_SESSION_SCHEMA: Migration = Migration {
+    version: AGENT_SESSION_SCHEMA_VERSION,
+    name: "durable_agent_sessions_trace_and_macros",
+    statements: &[
+        r#"CREATE TABLE {schema}."mcp_sessions" (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            project_id uuid NOT NULL
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            session_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            label text CHECK (label IS NULL OR length(label) BETWEEN 1 AND 256),
+            objective text NOT NULL DEFAULT '' CHECK (octet_length(objective) <= 65536),
+            session_kind text NOT NULL
+                CHECK (session_kind IN ('automatic', 'named')),
+            state text NOT NULL DEFAULT 'active'
+                CHECK (state IN ('active', 'closed')),
+            tool_count bigint NOT NULL DEFAULT 0 CHECK (tool_count >= 0),
+            started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            last_activity_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            UNIQUE (project_id, session_id)
+        )"#,
+        r#"CREATE INDEX mcp_sessions_recent_idx
+            ON {schema}."mcp_sessions" (
+                project_id, last_activity_at DESC, id DESC
+            )"#,
+        r#"CREATE INDEX mcp_sessions_label_idx
+            ON {schema}."mcp_sessions" (
+                project_id, label, started_at DESC
+            ) WHERE label IS NOT NULL"#,
+        r#"CREATE TABLE {schema}."mcp_tool_calls" (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            project_id uuid NOT NULL,
+            session_id uuid NOT NULL,
+            step bigint NOT NULL CHECK (step > 0),
+            called_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            tool_name text NOT NULL CHECK (length(tool_name) BETWEEN 1 AND 128),
+            arguments jsonb NOT NULL DEFAULT '{}'::jsonb
+                CHECK (jsonb_typeof(arguments) = 'object'
+                       AND octet_length(arguments::text) <= 65536),
+            result_summary text NOT NULL CHECK (octet_length(result_summary) <= 2048),
+            result_kind text NOT NULL CHECK (result_kind IN ('success', 'error')),
+            duration_ms bigint NOT NULL CHECK (duration_ms >= 0),
+            UNIQUE (project_id, session_id, step),
+            FOREIGN KEY (project_id, session_id)
+                REFERENCES {schema}."mcp_sessions"(project_id, session_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX mcp_tool_calls_recent_idx
+            ON {schema}."mcp_tool_calls" (
+                project_id, called_at DESC, id DESC
+            )"#,
+        r#"CREATE TABLE {schema}."mcp_macros" (
+            project_id uuid NOT NULL
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            name text NOT NULL CHECK (length(name) BETWEEN 1 AND 256),
+            steps jsonb NOT NULL
+                CHECK (jsonb_typeof(steps) = 'array'
+                       AND jsonb_array_length(steps) BETWEEN 1 AND 32
+                       AND octet_length(steps::text) <= 262144),
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            last_run_at timestamptz,
+            run_count bigint NOT NULL DEFAULT 0 CHECK (run_count >= 0),
+            PRIMARY KEY (project_id, name)
+        )"#,
+        r#"CREATE INDEX mcp_macros_recent_idx
+            ON {schema}."mcp_macros" (project_id, updated_at DESC, name)"#,
+    ],
+};
+
+const STRUCTURAL_BRIDGE_SCHEMA: Migration = Migration {
+    version: STRUCTURAL_BRIDGE_SCHEMA_VERSION,
+    name: "sampled_brandes_structural_bridges",
+    statements: &[
+        r#"ALTER TABLE {schema}."symbols"
+            ADD COLUMN betweenness double precision
+                CHECK (betweenness IS NULL OR betweenness BETWEEN 0.0 AND 1.0)"#,
+        r#"CREATE INDEX symbols_betweenness_idx
+            ON {schema}."symbols" (
+                project_id, generation_id, betweenness DESC, symbol_id
+            ) WHERE betweenness IS NOT NULL"#,
+    ],
+};
+
+const MATERIALIZED_SIMILARITY_SCHEMA: Migration = Migration {
+    version: MATERIALIZED_SIMILARITY_SCHEMA_VERSION,
+    name: "materialized_model_scoped_symbol_similarity",
+    statements: &[
+        r#"CREATE UNIQUE INDEX search_documents_one_symbol_document_idx
+            ON {schema}."search_documents" (project_id, generation_id, symbol_id)
+            WHERE document_kind = 'symbol' AND symbol_id IS NOT NULL"#,
+        r#"CREATE TABLE {schema}."symbol_similarity_edges" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            model_id uuid NOT NULL
+                REFERENCES {schema}."embedding_models"(model_id) ON DELETE CASCADE,
+            source_symbol_id uuid NOT NULL,
+            target_symbol_id uuid NOT NULL,
+            score double precision NOT NULL CHECK (score BETWEEN 0.0 AND 1.0),
+            neighbor_rank smallint NOT NULL CHECK (neighbor_rank BETWEEN 1 AND 50),
+            built_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (
+                project_id, generation_id, model_id, source_symbol_id, target_symbol_id
+            ),
+            FOREIGN KEY (project_id, generation_id, source_symbol_id)
+                REFERENCES {schema}."symbols"(project_id, generation_id, symbol_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (project_id, generation_id, target_symbol_id)
+                REFERENCES {schema}."symbols"(project_id, generation_id, symbol_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX symbol_similarity_edges_source_rank_idx
+            ON {schema}."symbol_similarity_edges" (
+                project_id, generation_id, model_id, source_symbol_id,
+                neighbor_rank, target_symbol_id
+            )"#,
+        r#"CREATE TABLE {schema}."symbol_similarity_builds" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            model_id uuid NOT NULL
+                REFERENCES {schema}."embedding_models"(model_id) ON DELETE CASCADE,
+            neighbors_per_symbol smallint NOT NULL
+                CHECK (neighbors_per_symbol BETWEEN 1 AND 50),
+            minimum_score double precision NOT NULL
+                CHECK (minimum_score BETWEEN 0.0 AND 1.0),
+            source_symbols bigint NOT NULL CHECK (source_symbols >= 0),
+            edges_written bigint NOT NULL CHECK (edges_written >= 0),
+            built_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, generation_id, model_id),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE
+        )"#,
+    ],
+};
+
+const NATIVE_PARSE_CACHE_SCHEMA: Migration = Migration {
+    version: NATIVE_PARSE_CACHE_SCHEMA_VERSION,
+    name: "path_and_content_addressed_native_parse_cache",
+    statements: &[
+        r#"CREATE TABLE {schema}."native_parse_cache" (
+            project_id uuid NOT NULL
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            extractor_contract_digest text NOT NULL
+                CHECK (extractor_contract_digest ~ '^[0-9a-f]{64}$'),
+            path_digest text NOT NULL CHECK (path_digest ~ '^[0-9a-f]{64}$'),
+            normalized_path text NOT NULL
+                CHECK (length(normalized_path) BETWEEN 1 AND 4096),
+            language text NOT NULL CHECK (length(language) BETWEEN 1 AND 64),
+            content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+            source_bytes bigint NOT NULL CHECK (source_bytes >= 0),
+            payload bytea NOT NULL
+                CHECK (octet_length(payload) BETWEEN 1 AND 67108864),
+            payload_digest text NOT NULL CHECK (payload_digest ~ '^[0-9a-f]{64}$'),
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            last_used_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (
+                project_id, extractor_contract_digest, path_digest, language, content_hash
+            )
+        )"#,
+        r#"CREATE INDEX native_parse_cache_last_used_idx
+            ON {schema}."native_parse_cache" (project_id, last_used_at, path_digest)"#,
+    ],
+};
+
+const SYMBOL_ISSUE_HISTORY_SCHEMA: Migration = Migration {
+    version: SYMBOL_ISSUE_HISTORY_SCHEMA_VERSION,
+    name: "generation_fenced_symbol_issue_history",
+    statements: &[
+        r#"CREATE TABLE {schema}."symbol_issues" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            symbol_id uuid NOT NULL,
+            issue_number bigint NOT NULL CHECK (issue_number > 0),
+            commit_sha text NOT NULL CHECK (commit_sha ~ '^[0-9a-f]{40}([0-9a-f]{24})?$'),
+            attribution_kind text NOT NULL
+                CHECK (attribution_kind IN ('modified', 'added', 'removed')),
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (
+                project_id, generation_id, symbol_id, issue_number, commit_sha, attribution_kind
+            ),
+            FOREIGN KEY (project_id, generation_id, symbol_id)
+                REFERENCES {schema}."symbols"(project_id, generation_id, symbol_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX symbol_issues_issue_idx
+            ON {schema}."symbol_issues" (
+                project_id, generation_id, issue_number, symbol_id
+            )"#,
+        r#"CREATE TABLE {schema}."issue_history_refreshes" (
+            project_id uuid PRIMARY KEY
+                REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            generation_id uuid NOT NULL,
+            head_commit text NOT NULL
+                CHECK (head_commit ~ '^[0-9a-f]{40}([0-9a-f]{24})?$'),
+            commits_scanned bigint NOT NULL CHECK (commits_scanned >= 0),
+            tagged_commits bigint NOT NULL CHECK (tagged_commits >= 0),
+            oversized_commits_skipped bigint NOT NULL
+                CHECK (oversized_commits_skipped >= 0),
+            comparison_failures_skipped bigint NOT NULL
+                CHECK (comparison_failures_skipped >= 0),
+            attributions_written bigint NOT NULL CHECK (attributions_written >= 0),
+            truncated boolean NOT NULL,
+            refreshed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE
+        )"#,
+    ],
+};
+
+const SYMBOL_PAGERANK_SCHEMA: Migration = Migration {
+    version: SYMBOL_PAGERANK_SCHEMA_VERSION,
+    name: "generation_scoped_symbol_pagerank",
+    statements: &[
+        r#"ALTER TABLE {schema}."symbols"
+            ADD COLUMN pagerank double precision
+                CHECK (pagerank IS NULL OR pagerank BETWEEN 0.0 AND 1.0)"#,
+        r#"CREATE INDEX symbols_pagerank_idx
+            ON {schema}."symbols" (
+                project_id, generation_id, pagerank DESC, symbol_id
+            ) WHERE pagerank IS NOT NULL"#,
+    ],
+};
+
+const SUMMARY_PRIORITY_QUEUE_SCHEMA: Migration = Migration {
+    version: SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION,
+    name: "generation_scoped_summary_priority_queue",
+    statements: &[
+        r#"CREATE TABLE {schema}."summary_priority_queue" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            symbol_id uuid NOT NULL,
+            enqueued_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            requested_count bigint NOT NULL DEFAULT 1
+                CHECK (requested_count BETWEEN 1 AND 1000000000),
+            attempts smallint NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 3),
+            PRIMARY KEY (project_id, generation_id, symbol_id),
+            FOREIGN KEY (project_id, generation_id, symbol_id)
+                REFERENCES {schema}."symbols"(project_id, generation_id, symbol_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX summary_priority_queue_drain_idx
+            ON {schema}."summary_priority_queue" (
+                project_id, generation_id, enqueued_at DESC,
+                requested_count DESC, symbol_id
+            )"#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 20] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
     &REFERENCE_EVIDENCE_SCHEMA,
     &DIGEST_VERSION_SCHEMA,
     &BULK_RELATION_VALIDATION_SCHEMA,
+    &V1_IMPORT_RETENTION_SCHEMA,
+    &SEMANTIC_STORAGE_SCHEMA,
+    &REFERENCE_MULTIPLICITY_SCHEMA,
+    &EXACT_LOOKUP_INDEX_SCHEMA,
+    &GENERATION_SEARCH_RELATIONS_SCHEMA,
+    &TYPED_SYMBOL_SEMANTICS_SCHEMA,
+    &AGENT_EVIDENCE_SCHEMA,
+    &AGENT_SESSION_SCHEMA,
+    &STRUCTURAL_BRIDGE_SCHEMA,
+    &MATERIALIZED_SIMILARITY_SCHEMA,
+    &NATIVE_PARSE_CACHE_SCHEMA,
+    &SYMBOL_ISSUE_HISTORY_SCHEMA,
+    &SYMBOL_PAGERANK_SCHEMA,
+    &SUMMARY_PRIORITY_QUEUE_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -380,11 +1037,41 @@ impl CartographDatabase {
     /// Verify hard capabilities, then apply append-only migrations under a
     /// transaction-scoped advisory lock.
     pub async fn migrate(&self) -> Result<MigrationReport, MigrationError> {
-        let capabilities = probe_capabilities(&self.pool).await.map_err(|_| {
-            MigrationError::DatabaseOperation {
+        self.migrate_inner(None).await
+    }
+
+    /// Apply append-only migrations with a PostgreSQL-side statement deadline.
+    pub async fn migrate_bounded(
+        &self,
+        statement_timeout: Duration,
+    ) -> Result<MigrationReport, MigrationError> {
+        self.migrate_inner(Some(statement_timeout)).await
+    }
+
+    async fn migrate_inner(
+        &self,
+        statement_timeout: Option<Duration>,
+    ) -> Result<MigrationReport, MigrationError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| MigrationError::DatabaseOperation { operation: "begin" })?;
+        if let Some(statement_timeout) = statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            let _ = transaction.rollback().await;
+            return Err(MigrationError::DatabaseOperation {
+                operation: "statement-timeout",
+            });
+        }
+        let capabilities = probe_capabilities_connection(&mut transaction)
+            .await
+            .map_err(|_| MigrationError::DatabaseOperation {
                 operation: "capability-probe",
-            }
-        })?;
+            })?;
         let failed_checks = capabilities
             .checks
             .iter()
@@ -392,18 +1079,13 @@ impl CartographDatabase {
             .map(|check| check.id)
             .collect::<Vec<_>>();
         if !failed_checks.is_empty() {
+            let _ = transaction.rollback().await;
             return Err(MigrationError::MissingCapabilities {
                 checks: failed_checks,
             });
         }
-
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| MigrationError::DatabaseOperation { operation: "begin" })?;
         let result = migrate_transaction(&mut transaction, &self.schema).await;
-        match result {
+        let report = match result {
             Ok(report) => {
                 transaction
                     .commit()
@@ -411,7 +1093,7 @@ impl CartographDatabase {
                     .map_err(|_| MigrationError::DatabaseOperation {
                         operation: "commit",
                     })?;
-                Ok(report)
+                report
             }
             Err(error) => {
                 transaction
@@ -420,9 +1102,15 @@ impl CartographDatabase {
                     .map_err(|_| MigrationError::DatabaseOperation {
                         operation: "rollback",
                     })?;
-                Err(error)
+                return Err(error);
             }
-        }
+        };
+        self.maintain_generation_search_relations(statement_timeout)
+            .await
+            .map_err(|_| MigrationError::DatabaseOperation {
+                operation: "search-relation-maintenance",
+            })?;
+        Ok(report)
     }
 }
 
@@ -602,16 +1290,30 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 6] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 20] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
         REFERENCE_EVIDENCE_SCHEMA_VERSION,
         DIGEST_VERSION_SCHEMA_VERSION,
         BULK_RELATION_VALIDATION_SCHEMA_VERSION,
+        V1_IMPORT_RETENTION_SCHEMA_VERSION,
+        SEMANTIC_STORAGE_SCHEMA_VERSION,
+        REFERENCE_MULTIPLICITY_SCHEMA_VERSION,
+        EXACT_LOOKUP_INDEX_SCHEMA_VERSION,
+        GENERATION_SEARCH_RELATIONS_SCHEMA_VERSION,
+        TYPED_SYMBOL_SEMANTICS_SCHEMA_VERSION,
+        AGENT_EVIDENCE_SCHEMA_VERSION,
+        AGENT_SESSION_SCHEMA_VERSION,
+        STRUCTURAL_BRIDGE_SCHEMA_VERSION,
+        MATERIALIZED_SIMILARITY_SCHEMA_VERSION,
+        NATIVE_PARSE_CACHE_SCHEMA_VERSION,
+        SYMBOL_ISSUE_HISTORY_SCHEMA_VERSION,
+        SYMBOL_PAGERANK_SCHEMA_VERSION,
+        SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 6] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 20] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -635,6 +1337,62 @@ mod tests {
         (
             6,
             "75d236412c6c083510b6d7e7a2536ea81f93c79e106f3977661403ee9898e533",
+        ),
+        (
+            7,
+            "09c2053732c77b7b04527729290c6d55de769750a56bfcc7895cfdf429e17915",
+        ),
+        (
+            8,
+            "b80330cccdb261bef4db21948c5ea1cb0965917891d4483b8a35543325c63134",
+        ),
+        (
+            9,
+            "5b6f83886c8d247edd7a594a57ece10510fd612913662e6224118b06156f53a4",
+        ),
+        (
+            10,
+            "e9ba5a57487dd2f8d9c8e903147b2e083d19094d8c4ec289ac459b84e8b7b86a",
+        ),
+        (
+            11,
+            "a899f5923b2659a8b2be52da09b97784a954de8abd72d03a833005f5276d60ef",
+        ),
+        (
+            12,
+            "b4539a68d90dac58c142fd0c6573965a93f70400ac94fa924c872c848db2a50c",
+        ),
+        (
+            13,
+            "6ddfc988c68cf7e88dc70c3291379e3afeceab667916fbbe597ef0fdd988eff8",
+        ),
+        (
+            14,
+            "687d57c314fb32a6a16b6c892b6b04494384e651a575c9342ce0f0d22974168d",
+        ),
+        (
+            15,
+            "78209ee822c0c4cde775d8a23996b7aefab8947ff94c2f639a6bb89deccc91b5",
+        ),
+        (
+            16,
+            "1e4a57e1527e96950cbdcd4511d498d4f0fe65b9ae84b9dfe1f994a5136baa6e",
+        ),
+        (
+            17,
+            "3ee3c429c9835ce4470d4a3c579718b14cb8e0c684a713a9936ffaee7d83544e",
+        ),
+        (
+            18,
+            "6488e6899cbf80b392042173811d094d37fbfdeefdffc092dfb0948f9d455f4c",
+        ),
+        (
+            19,
+            "a4a3450b21f94ce716f2da8a3b29318c23844c786f273b8c518e1bfcd7a277e0",
+        ),
+        (
+            20,
+            "ebd8f4f39844b6552712f6fc312a30767c8b1e4bec600809b4653900eec90ad2",
         ),
     ];
 
@@ -679,10 +1437,7 @@ mod tests {
                 .windows(CHECKSUM_COMPARISON_WINDOW)
                 .all(|pair| pair[0] != pair[1])
         );
-        assert_eq!(
-            LATEST_SCHEMA_VERSION,
-            BULK_RELATION_VALIDATION_SCHEMA_VERSION
-        );
+        assert_eq!(LATEST_SCHEMA_VERSION, SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION);
     }
 
     #[test]

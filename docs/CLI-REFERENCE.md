@@ -1,235 +1,107 @@
-# CLI Reference
+# Native CLI reference
 
-Use `cartograph --help` and `cartograph <command> --help` as the canonical
-runtime reference. This page groups the top-level commands by workflow.
+The installed executable is `cartograph`. Run `cartograph <command> --help` for
+the exact bounds and confirmation phrases in the installed version.
 
-## Setup And Operations
+## Coding commands
 
-```sh
-cartograph install                 # interactive agent setup
-cartograph install --yes --location=local   # one command: MCP config + init + index + git hooks
-cartograph install --yes --location=global  # MCP config only, available in all projects
-cartograph install --yes --location=local --no-hooks
-cartograph install --print-config codex
-cartograph install --command /absolute/path/to/cartograph
-cartograph install-hooks [path]    # manage the git hooks separately
-cartograph install-hooks --remove
-cartograph upgrade                 # check for a newer Cartograph; prints the exact update command (alias: update)
-cartograph upgrade --apply         # apply in place: source-checkout fast-forward, or Bun-global re-pin to the latest tag
-cartograph index [path]            # initialize + structural index + doctor (alias: quickstart)
-cartograph guide                   # compact first-use and daily-workflow guide
-cartograph llm install [path]      # LLM bootstrap: init + install-models + doctor (was: setup)
-cartograph doctor [path]           # diagnose install/storage/LLM state
-cartograph backend status [path]   # managed local llama-server status
-cartograph backend start [path]    # start configured local llama-server tiers
-cartograph backend stop [path]     # stop managed backend processes
-cartograph backend logs [path]     # tail backend logs; add --tier embed|ask|rerank
-cartograph status [path]           # index status and feature readiness
-cartograph status [path] --json    # automation shape: version, index path,
-                                   # last indexed timestamp, counts, rollups
-cartograph host --mode diagnostics # MCP profile/tool and installer target signals
-cartograph host --mode discover    # find .cartograph indexes under a parent path
-cartograph viewer [path]           # local graph viewer (graph / agent trace / live / system)
-cartograph viewer --session <id>   # viewer scoped to one MCP session (one window per agent)
-cartograph serve --mcp             # MCP server over stdio
-cartograph mcp-budget              # MCP startup payload measurement
-cartograph playbook                # tool-selection playbook
-cartograph completions bash        # shell completions: bash, zsh, fish, powershell
+```text
+cartograph index [PROJECT]
+cartograph status [PROJECT]
+cartograph find <QUERY> --by auto|name|path|reference|bm25|hybrid
+cartograph context <TASK> [--exact-name NAME] [--exact-path PATH]
+cartograph entry-points [--bucket routes|cli|cli-commands|mcp-tools|cli-files|public-exports]
+  [--limit 20]
+cartograph graph <SYMBOL_ID> --direction callers|callees|both|impact
+cartograph graph <SYMBOL_ID> --direction path --to <TARGET_SYMBOL_ID>
+  [--edge-kind calls|imports|references|implements|extends|tests|type-of|returns|instantiates|overrides|decorates|field-access|def-use|exports|contains]
+cartograph graph <SYMBOL_ID> --direction similar
+  [--k 5] [--min-score 0.3] [--same-language] [--model-id <UUID>]
+cartograph affected <SYMBOL_ID>
+cartograph show <SYMBOL_ID>
+cartograph review --ref <GIT_REF>
+cartograph doctor [PROJECT]
+cartograph admin scip-export [--out index.scip] [--maximum-rows 5000000]
+cartograph admin scip-import [--in index.scip] [--maximum-rows 10000000]
+  [--maximum-source-bytes 268435456] [--workers 16]
 ```
 
-Supported install target ids: `claude`, `cursor`, `codex`, `copilot`,
-`codebuddy`, `codewhale`, `zed`, `opencode`, `hermes`, `gemini`,
-`antigravity`, `kiro`, `factory`, `rovo`, `qoder`, `bob`, `kimi`, `pi`, and
-`reasonix`.
+Retrieval inputs and result counts are bounded. `context` selects a deterministic
+typed task intent and can use exact anchors, ParadeDB BM25, a ready matching
+semantic model, graph expansion, affected tests, and a separate stale
+working-tree overlay. JSON is the stable automation format; text favors concise
+operator output.
 
-For `--location=local`, generated project config and instruction files are
-added to `.gitignore` because local MCP entries can contain absolute checkout
-paths and personal agent rules. Local MCP server args are pinned with
-`--project-path` where the client config is project-scoped. Claude Code is a
-special case: `~/.claude.json` stores the private project-scoped MCP entry,
-while `.claude/settings.local.json`, `CLAUDE.local.md`, and
-`.claude/skills/cartograph/SKILL.md` stay in the repository worktree as
-gitignored files.
+`scip-export` requires a fresh generation and writes atomically inside the
+project. It emits standard SCIP plus a forward-compatible Cartograph extension
+for every exact edge kind and represented site count. `scip-import` validates a
+bounded project-local artifact, installs it at
+`.cartograph/scip/overlay.scip`, and forces a new generation. Covered files use
+SCIP facts; uncovered files retain native extraction. A failed publication
+restores the prior overlay when the importer still owns the installed bytes.
+The overlay digest participates in freshness, so changing it cannot leave an
+apparently current generation.
 
-Agents with an on-demand guidance surface also get a generated artifact built
-from the same instructions template: Claude Code and Codex CLI receive a
-`cartograph` skill (`skills/cartograph/SKILL.md`, global or project scope) and
-opencode receives a `/cartograph` custom command (`commands/cartograph.md`).
-`cartograph uninstall` removes them along with the MCP entries.
+`entry-points` reads typed structural facts rather than asking BM25 to infer an
+API boundary. It returns stable pages for routes, CLI commands, exported MCP
+tool definitions, conventional CLI source, and exported declarations with no
+in-tree calls/references/type-use. Every page includes its exact pre-limit total
+and truncation flag. V2 includes exported constants, types, enums, traits,
+modules, components, and resources in the public surface in addition to v1's
+function/class categories.
 
-Install completions by loading the generated script in your shell startup file,
-for example `cartograph completions zsh` or `cartograph completions powershell`
-in your PowerShell profile.
+## MCP and agent configuration
 
-When `cartograph` is not resolvable on PATH at install time, the installer
-pins an absolute executable path into each MCP config entry automatically
-(keeping the normal `serve --mcp` args). Use `cartograph install --command
-<path>` to set the path explicitly, e.g. when the MCP host's GUI shell has a
-different PATH than your terminal.
-
-Local installs append managed `post-merge`, `post-checkout`, and
-`post-rewrite` hook blocks that run `cartograph admin sync --quiet` in the
-background; skip with `--no-hooks`. `cartograph install-hooks` manages the
-same blocks separately (existing hook content is preserved, and `--remove`
-deletes only Cartograph's managed block).
-
-Repos whose hooks are owned by a `core.hooksPath` manager are handled: with
-husky, the blocks are appended to the tracked `.husky/<hook>` files its runner
-executes; any other custom `core.hooksPath` directory is written directly; and
-blocks stranded in `.git/hooks` by older installs (where git no longer reads
-them) are cleaned up on the next install. `cartograph doctor` reports hook
-liveness — a warning means blocks exist somewhere git will never execute.
-
-## Admin
-
-```sh
-cartograph admin init [path]       # create .cartograph/
-cartograph admin init -i [path]    # initialize and index
-cartograph admin sync [path]       # incremental update
-cartograph admin index [path]      # full reindex
-cartograph admin biomarkers-refresh [path]  # full findings pass, no re-extract
-cartograph admin storage-migrate   # SQLite <-> PostgreSQL
-cartograph admin unlock            # clear stale lock
-cartograph admin prune-store       # clean old orphaned LLM store rows
-cartograph admin embedding-audit   # model/dimension/ref/artifact report (read-only)
-cartograph admin embedding-cleanup # dry run: unreferenced non-active rows only
-cartograph admin embedding-cleanup --confirm  # apply the protected-row policy
+```text
+cartograph serve --mcp [--profile coding|core|full|read-only|review]
+cartograph install --yes --target codex|claude|cursor --location local
+cartograph uninstall --yes --target codex|claude|cursor --location local
 ```
 
-PostgreSQL 18+ storage flags are available on `llm install` and `admin init`:
+Install/uninstall modifies only project-local agent configuration, preserves
+unrelated entries, and pins the absolute native executable. Restart the host
+after a configuration or binary change.
 
-```sh
-cartograph admin init -i \
-  --database-provider postgres \
-  --database-url "$DATABASE_URL" \
-  --database-schema cartograph \
-  --database-pgvector auto
+## Database lifecycle
+
+```text
+cartograph db start
+cartograph db stop
+cartograph db status
+cartograph db logs
+cartograph db backup <OUTPUT>
+cartograph db restore <ARCHIVE>
+cartograph db upgrade
+cartograph db derived-index
+cartograph db remove
+cartograph db import-v1
+cartograph db prune
 ```
 
-`admin storage-migrate` defaults to a PostgreSQL target when PostgreSQL flags
-are provided. To move an existing PostgreSQL-backed project back to SQLite, run:
+Managed lifecycle is supported on macOS/Linux with local Docker. Windows uses
+external PostgreSQL. Restore, upgrade, derived-index rebuild, remove, v1 import,
+and prune require explicit operation-specific confirmation. See
+[PostgreSQL operations](STORAGE-BACKENDS.md).
+
+## Database selection
+
+External database settings are environment-only:
 
 ```sh
-cartograph admin storage-migrate /path/to/project --database-provider sqlite
+export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
+export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
+export CARTOGRAPH_DATABASE_MAX_CONNECTIONS=8
+export CARTOGRAPH_DATABASE_ACQUIRE_TIMEOUT_MS=5000
 ```
 
-See [Storage Backends](STORAGE-BACKENDS.md).
+The URL is secret and must not be committed or echoed. Without an external URL,
+the project-local managed credential is resolved for a database started by
+`cartograph db start`.
 
-Indexing commands accept `--max-file-size <size>` when generated files or
-large fixtures need a one-off cap change. Values can be bytes (`1048576`) or
-use a binary suffix such as `512kb` or `10mb`. The default remains 5 MiB and
-explicit overrides are capped at 10 MiB. On `admin init`, the value is saved
-as `config.maxFileSize`; on `admin index`, `admin sync`, `admin embed-only`,
-and `sync-if-dirty`, it applies only to that run.
+## Exit and error behavior
 
-## Search And Navigation
-
-```sh
-cartograph find "AuthService" --by name --mode fuzzy
-cartograph find "process.env.API_KEY" --by content
-cartograph graph AuthService --direction callers
-cartograph graph AuthService --direction impact --hops 2
-cartograph export --format mermaid --kind class,method --edge-kind calls --out graph.mmd
-cartograph node AuthService --include-callers --include-tests
-cartograph context "fix login timeout" --format plan
-cartograph context "finish login timeout" --format handoff
-cartograph context "debug current edits" --working-tree live
-cartograph context "debug without history" --local-learning off
-cartograph verify --ref HEAD
-cartograph explore billing routes
-cartograph files src --format tree
-cartograph files src/billing/service.ts --format deps
-cartograph files src/billing/service.ts --format symbols
-cartograph files src/billing --format module
-cartograph entry-points
-cartograph at-range src/auth/service.ts 40 80
-cartograph at-range --diff -          # symbols overlapping a unified diff (stdin)
-cartograph digest                     # "land in a new repo" overview
-```
-
-See [Graph Export Formats](GRAPH-EXPORT-FORMATS.md) for the JSON and
-Cytoscape artifact contracts.
-
-## Review And Risk
-
-```sh
-cartograph review context --diff "$(git diff)"
-cartograph review risk --top-n 10
-cartograph review trust
-cartograph review trust --deep --timeout-ms 60000  # real tier requests + semantic self-retrieval
-cartograph review agent-audit
-cartograph biomarkers --min-severity warning
-cartograph biomarkers --format json   # machine-readable: detail payloads + honesty counts
-cartograph hotspots
-cartograph dead-code
-cartograph deps
-cartograph deps --mode coverage
-cartograph coverage AuthService
-cartograph trace-to-culprits --trace "$STACK_TRACE"
-```
-
-## Session State And Notes
-
-```sh
-cartograph session list
-cartograph session audit
-cartograph session usage
-cartograph session macro-list
-cartograph note list
-```
-
-`session usage` reports aggregate tool-call counts and timing summaries only;
-it does not print raw tool arguments or result bodies.
-
-## Change And Test Selection
-
-```sh
-cartograph affected                      # derive files from git diff HEAD
-cartograph affected src/auth.ts          # explicit files
-git diff --name-only | cartograph affected --stdin
-cartograph affected --include-commands
-cartograph tests-for AuthService
-cartograph compare-to-ref --findings-delta
-cartograph changed-since
-cartograph sync-if-dirty --quiet
-```
-
-`sync-if-dirty` is a compatibility command for hooks that should avoid work on
-clean git trees. Prefer `cartograph admin sync` for normal interactive syncs.
-
-## History And Refactors
-
-```sh
-cartograph blame AuthService
-cartograph history AuthService
-cartograph propose-rename AuthService LoginService
-cartograph imports src/auth
-cartograph similar AuthService
-```
-
-## LLM-Backed Commands
-
-These require configured OpenAI-compatible chat/embedding providers:
-
-```sh
-cartograph llm install          # recommended local stack: models + config + doctor (was: cartograph setup)
-cartograph llm setup            # interactive provider wizard
-cartograph llm smoke --timeout-ms 60000
-cartograph ask "How does auth work?"
-cartograph ask --mode local_chat --prompt "Summarize this report"
-cartograph summaries pending
-cartograph role
-```
-
-Core search, graph, impact, status, affected-tests, biomarkers, and review
-commands do not require an LLM.
-
-## Read-Only SQL
-
-```sh
-cartograph sql --schema
-cartograph sql "SELECT kind, COUNT(*) FROM nodes GROUP BY kind"
-```
-
-`cartograph sql` is intentionally read-only. Use curated commands first; SQL is
-the escape hatch when the higher-level tools cannot compose the query.
+Invalid inputs, missing capabilities, stale/lost lease fences, unavailable
+database/source/Git state, and operation failures return nonzero. Public errors
+omit database URLs, query text, source literals, and absolute project paths.
+Machine consumers should inspect JSON fields and stable MCP error codes rather
+than parse human prose.

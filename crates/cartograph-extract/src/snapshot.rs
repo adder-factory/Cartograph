@@ -42,12 +42,18 @@ pub struct SourceSnapshot {
     file_id: FileId,
     content_hash: ContentDigest,
     byte_size: u64,
+    line_count: u32,
     source: Box<str>,
 }
 
 struct ValidatedSource {
     path: NormalizedPath,
     language: SourceLanguage,
+    byte_size: u64,
+}
+
+struct ValidatedSourcePath {
+    path: NormalizedPath,
     byte_size: u64,
 }
 
@@ -66,18 +72,37 @@ impl StreamedSource {
 }
 
 impl SourceSnapshot {
-    pub(crate) fn supports_path(path: &NormalizedPath) -> bool {
-        classify_path(path).is_some()
-    }
-
     /// Validate path, extension, size, and UTF-8 before any parser is invoked.
     pub fn from_bytes(
         raw_path: &str,
         bytes: &[u8],
         limits: SourceLimits,
     ) -> Result<Self, SnapshotError> {
-        let validated = validate_source(raw_path, bytes.len(), limits)?;
+        Self::from_bytes_with_classifier(raw_path, bytes, limits, classify_source)
+    }
+
+    /// Build a bounded snapshot for an implemented language before production admission.
+    ///
+    /// This bypasses only the native-indexable registry filter; path normalization, exact size,
+    /// UTF-8, hashing, and the canonical v1 path/content classifier remain enforced. Production
+    /// discovery and indexing must use [`Self::from_bytes`].
+    pub fn from_bytes_for_capability_validation(
+        raw_path: &str,
+        bytes: &[u8],
+        limits: SourceLimits,
+    ) -> Result<Self, SnapshotError> {
+        Self::from_bytes_with_classifier(raw_path, bytes, limits, classify_known_source)
+    }
+
+    fn from_bytes_with_classifier(
+        raw_path: &str,
+        bytes: &[u8],
+        limits: SourceLimits,
+        classifier: fn(ValidatedSourcePath, &str) -> Result<ValidatedSource, SnapshotError>,
+    ) -> Result<Self, SnapshotError> {
+        let validated_path = validate_source_path(raw_path, bytes.len(), limits)?;
         let validated_utf8 = str::from_utf8(bytes).map_err(|_| SnapshotError::InvalidUtf8)?;
+        let validated = classifier(validated_path, validated_utf8)?;
         let mut source = String::new();
         source
             .try_reserve(validated_utf8.len())
@@ -96,7 +121,8 @@ impl SourceSnapshot {
         streamed: StreamedSource,
         limits: SourceLimits,
     ) -> Result<Self, SnapshotError> {
-        let validated = validate_source(raw_path, streamed.source.len(), limits)?;
+        let validated_path = validate_source_path(raw_path, streamed.source.len(), limits)?;
+        let validated = classify_source(validated_path, &streamed.source)?;
         Ok(Self::build(
             validated,
             streamed.content_hash,
@@ -106,12 +132,19 @@ impl SourceSnapshot {
 
     fn build(validated: ValidatedSource, content_hash: ContentDigest, source: Box<str>) -> Self {
         let file_id = file_id(&validated.path);
+        let line_count = source
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            .saturating_add(1);
+        let line_count = u32::try_from(line_count).unwrap_or(u32::MAX);
         Self {
             path: validated.path,
             language: validated.language,
             file_id,
             content_hash,
             byte_size: validated.byte_size,
+            line_count,
             source,
         }
     }
@@ -146,10 +179,22 @@ impl SourceSnapshot {
         self.byte_size
     }
 
+    /// Exact one-based source line count, including an empty final line after a newline.
+    #[must_use]
+    pub const fn line_count(&self) -> u32 {
+        self.line_count
+    }
+
     /// Validated UTF-8 source, byte-identical to the hashed input.
     #[must_use]
     pub const fn source(&self) -> &str {
         &self.source
+    }
+
+    /// Consume the snapshot and transfer its validated UTF-8 source allocation.
+    #[must_use]
+    pub fn into_source(self) -> Box<str> {
+        self.source
     }
 }
 
@@ -165,21 +210,42 @@ impl fmt::Debug for SourceSnapshot {
     }
 }
 
-fn validate_source(
+fn validate_source_path(
     raw_path: &str,
     byte_length: usize,
     limits: SourceLimits,
-) -> Result<ValidatedSource, SnapshotError> {
+) -> Result<ValidatedSourcePath, SnapshotError> {
     let path = NormalizedPath::parse(raw_path).map_err(|_| SnapshotError::InvalidPath)?;
-    let language = classify_path(&path).ok_or(SnapshotError::UnsupportedLanguage)?;
     if byte_length > limits.max_source_bytes() {
         return Err(SnapshotError::SourceTooLarge);
     }
     let byte_size = u64::try_from(byte_length).map_err(|_| SnapshotError::SourceTooLarge)?;
+    Ok(ValidatedSourcePath { path, byte_size })
+}
+
+fn classify_source(
+    validated: ValidatedSourcePath,
+    source: &str,
+) -> Result<ValidatedSource, SnapshotError> {
+    let language = SourceLanguage::for_normalized_path_with_source(validated.path.as_str(), source)
+        .ok_or(SnapshotError::UnsupportedLanguage)?;
     Ok(ValidatedSource {
-        path,
+        path: validated.path,
         language,
-        byte_size,
+        byte_size: validated.byte_size,
+    })
+}
+
+fn classify_known_source(
+    validated: ValidatedSourcePath,
+    source: &str,
+) -> Result<ValidatedSource, SnapshotError> {
+    let language = SourceLanguage::detect(validated.path.as_str(), Some(source))
+        .ok_or(SnapshotError::UnsupportedLanguage)?;
+    Ok(ValidatedSource {
+        path: validated.path,
+        language,
+        byte_size: validated.byte_size,
     })
 }
 
@@ -212,7 +278,10 @@ pub fn is_test_source_path(path: &str) -> bool {
     let mut components = path.split('/').peekable();
     while let Some(component) = components.next() {
         if components.peek().is_some()
-            && matches_ignore_ascii_case(component, &["test", "tests", "__tests__"])
+            && matches_ignore_ascii_case(
+                component,
+                &["test", "tests", "__tests__", "spec", "specs", "__specs__"],
+            )
         {
             return true;
         }
@@ -224,10 +293,8 @@ pub fn is_test_source_path(path: &str) -> bool {
 }
 
 fn is_test_filename(language: SourceLanguage, filename: &str) -> bool {
-    let stem = filename
-        .rsplit_once('.')
-        .map_or(filename, |(stem, _)| stem)
-        .to_ascii_lowercase();
+    let raw_stem = filename.rsplit_once('.').map_or(filename, |(stem, _)| stem);
+    let stem = raw_stem.to_ascii_lowercase();
     match language {
         SourceLanguage::TypeScript
         | SourceLanguage::Tsx
@@ -235,7 +302,22 @@ fn is_test_filename(language: SourceLanguage, filename: &str) -> bool {
         | SourceLanguage::Jsx => stem.ends_with(".test") || stem.ends_with(".spec"),
         SourceLanguage::Python => stem.starts_with("test_") || stem.ends_with("_test"),
         SourceLanguage::Go => stem.ends_with("_test"),
-        SourceLanguage::Rust => false,
+        SourceLanguage::Rust => stem.starts_with("test_") || stem.ends_with("_test"),
+        SourceLanguage::Ruby => stem.ends_with("_spec") || stem.ends_with("_test"),
+        SourceLanguage::Java
+        | SourceLanguage::Kotlin
+        | SourceLanguage::CSharp
+        | SourceLanguage::Swift => {
+            raw_stem
+                .strip_suffix("Tests")
+                .or_else(|| raw_stem.strip_suffix("Test"))
+                .is_some_and(|subject| !subject.is_empty())
+                || matches!(language, SourceLanguage::Kotlin | SourceLanguage::Swift)
+                    && raw_stem
+                        .strip_suffix("Spec")
+                        .is_some_and(|subject| !subject.is_empty())
+        }
+        _ => false,
     }
 }
 
@@ -245,22 +327,8 @@ fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
         .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
-fn classify_path(path: &NormalizedPath) -> Option<SourceLanguage> {
-    classify_extension(path.as_str())
-}
-
 fn classify_extension(path: &str) -> Option<SourceLanguage> {
-    let extension = path.rsplit_once('.')?.1.to_ascii_lowercase();
-    match extension.as_str() {
-        "ts" | "mts" | "cts" => Some(SourceLanguage::TypeScript),
-        "tsx" => Some(SourceLanguage::Tsx),
-        "js" | "mjs" | "cjs" | "xsjs" | "xsjslib" => Some(SourceLanguage::JavaScript),
-        "jsx" => Some(SourceLanguage::Jsx),
-        "rs" => Some(SourceLanguage::Rust),
-        "py" | "pyi" => Some(SourceLanguage::Python),
-        "go" => Some(SourceLanguage::Go),
-        _ => None,
-    }
+    SourceLanguage::for_normalized_path(path)
 }
 
 #[cfg(test)]
@@ -296,6 +364,10 @@ mod tests {
         assert!(!is_test_source_path("src/unit.test.md"));
         assert!(!is_test_source_path("src/worker_test.ts"));
         assert!(!is_test_source_path("src/test_worker.ts"));
-        assert!(!is_test_source_path("src/worker_test.rs"));
+        assert!(is_test_source_path("src/worker_test.rs"));
+        assert!(is_test_source_path("spec/service_spec.rb"));
+        assert!(is_test_source_path("src/OrderServiceTest.java"));
+        assert!(is_test_source_path("src/CacheSpec.kt"));
+        assert!(!is_test_source_path("src/Contest.java"));
     }
 }

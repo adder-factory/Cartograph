@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use cartograph_config::DatabaseSchema;
-use sqlx_core::query::query;
-use sqlx_postgres::{PgConnection, PgPool};
+use cartograph_domain::GenerationId;
+use sqlx_core::{query::query, row::Row};
+use sqlx_postgres::{PgConnection, PgPool, PgRow};
 use thiserror::Error;
 
 /// PostgreSQL-backed v2 data plane bound to one validated Cartograph schema.
@@ -23,6 +24,11 @@ impl CartographDatabase {
     #[must_use]
     pub const fn schema(&self) -> &DatabaseSchema {
         &self.schema
+    }
+
+    /// Re-probe the live PostgreSQL 18, ParadeDB, pgvector, and tokenizer contract.
+    pub async fn capability_report(&self) -> Result<crate::CapabilityReport, crate::DatabaseError> {
+        crate::probe_capabilities(&self.pool).await
     }
 
     /// Close every pooled PostgreSQL connection owned by this service.
@@ -78,6 +84,15 @@ pub enum StorageError {
     /// A generation mutation did not hold the current unexpired exact lease token.
     #[error("Cartograph generation mutation lost its exact PostgreSQL lease fence")]
     LeaseFenceLost,
+    /// A read stage's expected publication is no longer the project pointer.
+    #[error("Cartograph current generation changed during bounded retrieval")]
+    CurrentGenerationChanged,
+    /// A generation has no verified immutable BM25 relation.
+    #[error("Cartograph generation search relation is unavailable")]
+    SearchRelationUnavailable,
+    /// A project reached the hard bound for retained generation search relations.
+    #[error("Cartograph project search relation limit is reached")]
+    SearchRelationLimitReached,
 }
 
 pub(crate) fn quoted_schema(schema: &DatabaseSchema) -> String {
@@ -100,4 +115,25 @@ pub(crate) async fn set_local_statement_timeout(
         .await
         .map(|_| ())
         .map_err(|_| ())
+}
+
+pub(crate) fn read_stored_string(
+    row: &PgRow,
+    index: usize,
+    field: &'static str,
+) -> Result<String, StorageError> {
+    row.try_get::<String, _>(index)
+        .map_err(|_| stored_value_error(field))
+}
+
+pub(crate) fn parse_stored_generation_id(
+    row: &PgRow,
+    index: usize,
+) -> Result<GenerationId, StorageError> {
+    let raw = read_stored_string(row, index, "generation_id")?;
+    GenerationId::parse(&raw).map_err(|_| stored_value_error("generation_id"))
+}
+
+pub(crate) const fn stored_value_error(field: &'static str) -> StorageError {
+    StorageError::CorruptStoredValue { field }
 }

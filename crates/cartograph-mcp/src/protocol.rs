@@ -31,6 +31,7 @@ const MAX_INFLIGHT_REQUESTS: usize = 1_024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_METHOD_BYTES: usize = 128;
 const MAX_METADATA_BYTES: usize = 128;
+const MAX_INSTRUCTIONS_BYTES: usize = 16 * 1_024;
 
 /// JSON-RPC request identifier accepted by MCP.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -86,14 +87,48 @@ pub struct ServerLimits {
     request_deadline: Duration,
 }
 
-impl ServerLimits {
-    /// Validate explicit input/output/concurrency/deadline bounds.
+/// Raw resource limits collected before boundary validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerLimitsInput {
+    max_input_bytes: usize,
+    max_output_bytes: usize,
+    max_inflight_requests: usize,
+    request_deadline: Duration,
+}
+
+impl ServerLimitsInput {
+    /// Collect byte and concurrency limits with the standard request deadline.
+    #[must_use]
     pub const fn new(
         max_input_bytes: usize,
         max_output_bytes: usize,
         max_inflight_requests: usize,
-        request_deadline: Duration,
-    ) -> Result<Self, ConfigError> {
+    ) -> Self {
+        Self {
+            max_input_bytes,
+            max_output_bytes,
+            max_inflight_requests,
+            request_deadline: DEFAULT_REQUEST_DEADLINE,
+        }
+    }
+
+    /// Override the wall-clock request deadline before validation.
+    #[must_use]
+    pub const fn with_request_deadline(mut self, request_deadline: Duration) -> Self {
+        self.request_deadline = request_deadline;
+        self
+    }
+}
+
+impl ServerLimits {
+    /// Validate explicit input/output/concurrency/deadline bounds.
+    pub const fn new(input: ServerLimitsInput) -> Result<Self, ConfigError> {
+        let ServerLimitsInput {
+            max_input_bytes,
+            max_output_bytes,
+            max_inflight_requests,
+            request_deadline,
+        } = input;
         if max_input_bytes < MIN_INPUT_BYTES || max_input_bytes > MAX_INPUT_BYTES {
             return Err(ConfigError::InvalidInputLimit);
         }
@@ -155,7 +190,10 @@ impl Default for ServerLimits {
 pub struct ServerConfig {
     metadata: ServerMetadata,
     protocol_version: String,
+    instructions: Option<String>,
     profile: ToolProfile,
+    disabled_tools: BTreeMap<String, ()>,
+    read_only_tools_only: bool,
     limits: ServerLimits,
 }
 
@@ -166,7 +204,10 @@ impl ServerConfig {
         Self {
             metadata,
             protocol_version: DEFAULT_PROTOCOL_VERSION.to_owned(),
+            instructions: None,
             profile,
+            disabled_tools: BTreeMap::new(),
+            read_only_tools_only: false,
             limits,
         }
     }
@@ -189,6 +230,22 @@ impl ServerConfig {
         Ok(self)
     }
 
+    /// Advertise bounded, project-independent guidance in the initialize response.
+    pub fn with_instructions(
+        mut self,
+        instructions: impl Into<String>,
+    ) -> Result<Self, ConfigError> {
+        let instructions = instructions.into();
+        if instructions.trim().is_empty()
+            || instructions.len() > MAX_INSTRUCTIONS_BYTES
+            || instructions.contains('\0')
+        {
+            return Err(ConfigError::InvalidInstructions);
+        }
+        self.instructions = Some(instructions);
+        Ok(self)
+    }
+
     /// Active advertised tool profile.
     #[must_use]
     pub const fn profile(&self) -> ToolProfile {
@@ -199,6 +256,34 @@ impl ServerConfig {
     #[must_use]
     pub const fn limits(&self) -> ServerLimits {
         self.limits
+    }
+
+    /// Remove exact validated tool names from the advertised/callable surface.
+    pub fn with_disabled_tools<I, S>(mut self, names: I) -> Result<Self, ConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            let name = name.into();
+            if name.is_empty()
+                || name.len() > MAX_METHOD_BYTES
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            {
+                return Err(ConfigError::InvalidServerMetadata);
+            }
+            self.disabled_tools.insert(name, ());
+        }
+        Ok(self)
+    }
+
+    /// Advertise only contracts explicitly marked read-only.
+    #[must_use]
+    pub const fn with_read_only_tools_only(mut self, enabled: bool) -> Self {
+        self.read_only_tools_only = enabled;
+        self
     }
 }
 
@@ -243,7 +328,14 @@ impl ProtocolServer {
             if all_names.insert(definition.name().to_owned(), ()).is_some() {
                 return Err(ConfigError::DuplicateToolName);
             }
-            if definition.included_in(config.profile) {
+            if definition.included_in(config.profile)
+                && !config.disabled_tools.contains_key(definition.name())
+                && (!config.read_only_tools_only
+                    || definition
+                        .annotations()
+                        .is_some_and(|annotations| annotations.read_only_hint == Some(true))
+                    || definition.has_read_only_carve_out())
+            {
                 tool_names.insert(definition.name().to_owned(), ());
                 tools.push(definition);
             }
@@ -266,77 +358,81 @@ impl ProtocolServer {
         let channel_capacity = self.config.limits.max_inflight_requests.max(1);
         let (output_sender, output_receiver) = mpsc::channel(channel_capacity);
         let maximum_output = self.config.limits.max_output_bytes;
-        let writer = tokio::spawn(write_responses(output, output_receiver, maximum_output));
-        let active = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut calls = JoinSet::new();
+        let mut writer = tokio::spawn(write_responses(output, output_receiver, maximum_output));
+        let mut session = ConnectionState::new(output_sender);
         let mut reader = BufReader::new(input);
-        let mut phase = SessionPhase::New;
-        let mut terminal_error = None;
+        let outcome = {
+            let messages = self.read_messages(&mut reader, &mut session);
+            tokio::pin!(messages);
+            tokio::select! {
+                terminal_error = &mut messages => ConnectionOutcome::Reader(terminal_error),
+                writer_result = &mut writer => ConnectionOutcome::Writer(join_writer(writer_result)),
+            }
+        };
+        session.shutdown().await;
+        self.handler.shutdown().await;
+        match outcome {
+            ConnectionOutcome::Reader(terminal_error) => {
+                let writer_result = join_writer(writer.await);
+                terminal_error.map_or(writer_result, Err)
+            }
+            ConnectionOutcome::Writer(writer_result) => writer_result,
+        }
+    }
 
+    async fn read_messages<R>(
+        &self,
+        reader: &mut BufReader<R>,
+        session: &mut ConnectionState,
+    ) -> Option<ServeError>
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+    {
         loop {
-            reap_finished(&mut calls);
-            let line =
-                match read_bounded_line(&mut reader, self.config.limits.max_input_bytes).await {
-                    Ok(line) => line,
-                    Err(error) => {
-                        terminal_error = Some(error);
-                        break;
-                    }
-                };
-            match line {
-                BoundedLine::Eof => break,
-                BoundedLine::TooLarge => {
-                    let response = JsonRpcResponse::error(
-                        None,
+            reap_finished(&mut session.calls);
+            let line = match read_bounded_line(reader, self.config.limits.max_input_bytes).await {
+                Ok(line) => line,
+                Err(error) => return Some(error),
+            };
+            match self.handle_line(line, session).await {
+                Ok(ReadDirective::Continue) => {}
+                Ok(ReadDirective::Stop) => return None,
+                Err(error) => return Some(error),
+            }
+        }
+    }
+
+    async fn handle_line(
+        &self,
+        line: BoundedLine,
+        session: &mut ConnectionState,
+    ) -> Result<ReadDirective, ServeError> {
+        match line {
+            BoundedLine::Eof => Ok(ReadDirective::Stop),
+            BoundedLine::TooLarge => {
+                let response = JsonRpcResponse::error(
+                    None,
+                    ErrorSpec::new(
                         ErrorCode::INPUT_TOO_LARGE,
                         "Input message is too large",
                         StableErrorCode::InputTooLarge,
-                    );
-                    if send_response(&output_sender, response).await.is_err() {
-                        terminal_error = Some(ServeError::OutputChannelClosed);
-                        break;
-                    }
-                }
-                BoundedLine::Line(bytes) => {
-                    let Some(message) = parse_message(&bytes) else {
-                        continue;
-                    };
-                    match message {
-                        Ok(message) => {
-                            if self
-                                .dispatch(message, &mut phase, &active, &mut calls, &output_sender)
-                                .await
-                                .is_err()
-                            {
-                                terminal_error = Some(ServeError::OutputChannelClosed);
-                                break;
-                            }
-                        }
-                        Err(fault) => {
-                            if send_response(&output_sender, fault.into_response())
-                                .await
-                                .is_err()
-                            {
-                                terminal_error = Some(ServeError::OutputChannelClosed);
-                                break;
-                            }
-                        }
-                    }
-                }
+                    ),
+                );
+                send_response(&session.output, response).await?;
+                Ok(ReadDirective::Continue)
             }
-        }
-
-        cancel_active(&active).await;
-        while calls.join_next().await.is_some() {}
-        drop(output_sender);
-
-        let writer_result = match writer.await {
-            Ok(result) => result,
-            Err(_) => Err(ServeError::OutputTaskFailed),
-        };
-        match terminal_error {
-            Some(error) => Err(error),
-            None => writer_result,
+            BoundedLine::Line(bytes) => {
+                let Some(message) = parse_message(&bytes) else {
+                    return Ok(ReadDirective::Continue);
+                };
+                match message {
+                    Ok(message) => self.dispatch(message, session).await?,
+                    Err(fault) => {
+                        send_response(&session.output, fault.into_response()).await?;
+                    }
+                }
+                Ok(ReadDirective::Continue)
+            }
         }
     }
 
@@ -348,106 +444,74 @@ impl ProtocolServer {
     async fn dispatch(
         &self,
         message: InboundMessage,
-        phase: &mut SessionPhase,
-        active: &Arc<Mutex<BTreeMap<RequestId, CancellationToken>>>,
-        calls: &mut JoinSet<()>,
-        output: &mpsc::Sender<JsonRpcResponse>,
+        session: &mut ConnectionState,
     ) -> Result<(), ServeError> {
         match message {
-            InboundMessage::Notification { method, params } => {
-                self.dispatch_notification(&method, params, phase, active)
-                    .await;
+            InboundMessage::Notification(notification) => {
+                dispatch_notification(notification, session).await;
                 Ok(())
             }
-            InboundMessage::Request { id, method, params } => match method.as_str() {
-                "initialize" => self.initialize(id, params, phase, output).await,
-                "ping" => {
-                    if !valid_optional_object(&params) {
-                        return send_response(
-                            output,
-                            invalid_params(Some(id), "Invalid ping parameters"),
-                        )
-                        .await;
-                    }
-                    send_response(output, JsonRpcResponse::success(id, json!({}))).await
-                }
-                "tools/list" => self.list_tools(id, params, *phase, output).await,
-                "tools/call" => {
-                    self.call_tool(id, params, *phase, active, calls, output)
-                        .await
-                }
-                _ => {
-                    send_response(
-                        output,
-                        JsonRpcResponse::error(
-                            Some(id),
+            InboundMessage::Request(request) => self.dispatch_request(request, session).await,
+        }
+    }
+
+    async fn dispatch_request(
+        &self,
+        request: InboundRequest,
+        session: &mut ConnectionState,
+    ) -> Result<(), ServeError> {
+        match request.method.as_str() {
+            "initialize" => self.initialize(request, session).await,
+            "ping" => ping(request, session).await,
+            "tools/list" => self.list_tools(request, session).await,
+            "tools/call" => self.call_tool(request, session).await,
+            _ => {
+                send_response(
+                    &session.output,
+                    JsonRpcResponse::error(
+                        Some(request.id),
+                        ErrorSpec::new(
                             ErrorCode::METHOD_NOT_FOUND,
                             "Method not found",
                             StableErrorCode::MethodNotFound,
                         ),
-                    )
-                    .await
-                }
-            },
-        }
-    }
-
-    async fn dispatch_notification(
-        &self,
-        method: &str,
-        params: Option<Value>,
-        phase: &mut SessionPhase,
-        active: &Arc<Mutex<BTreeMap<RequestId, CancellationToken>>>,
-    ) {
-        match method {
-            "notifications/initialized"
-                if *phase == SessionPhase::InitializeResponded
-                    && valid_optional_object(&params) =>
-            {
-                *phase = SessionPhase::Ready;
+                    ),
+                )
+                .await
             }
-            "notifications/cancelled" => {
-                let Some(request_id) = cancellation_request_id(params) else {
-                    return;
-                };
-                if let Some(token) = active.lock().await.get(&request_id).cloned() {
-                    token.cancel();
-                }
-            }
-            _ => {}
         }
     }
 
     async fn initialize(
         &self,
-        id: RequestId,
-        params: Option<Value>,
-        phase: &mut SessionPhase,
-        output: &mpsc::Sender<JsonRpcResponse>,
+        request: InboundRequest,
+        session: &mut ConnectionState,
     ) -> Result<(), ServeError> {
-        if *phase != SessionPhase::New {
+        if session.phase != SessionPhase::New {
             return send_response(
-                output,
+                &session.output,
                 JsonRpcResponse::error(
-                    Some(id),
-                    ErrorCode::INVALID_REQUEST,
-                    "Server is already initialized",
-                    StableErrorCode::AlreadyInitialized,
+                    Some(request.id),
+                    ErrorSpec::new(
+                        ErrorCode::INVALID_REQUEST,
+                        "Server is already initialized",
+                        StableErrorCode::AlreadyInitialized,
+                    ),
                 ),
             )
             .await;
         }
-        let Some(params) = params else {
+        let Some(params) = request.params else {
             return send_response(
-                output,
-                invalid_params(Some(id), "Missing initialize parameters"),
+                &session.output,
+                invalid_params(Some(request.id), "Missing initialize parameters"),
             )
             .await;
         };
         let Ok(parsed) = serde_json::from_value::<InitializeParams>(params) else {
             return send_response(
-                output,
-                invalid_params(Some(id), "Invalid initialize parameters"),
+                &session.output,
+                invalid_params(Some(request.id), "Invalid initialize parameters"),
             )
             .await;
         };
@@ -457,8 +521,8 @@ impl ProtocolServer {
             || parsed.protocol_version.len() > 32
         {
             return send_response(
-                output,
-                invalid_params(Some(id), "Invalid initialize parameters"),
+                &session.output,
+                invalid_params(Some(request.id), "Invalid initialize parameters"),
             )
             .await;
         }
@@ -468,135 +532,126 @@ impl ProtocolServer {
         } else {
             self.config.protocol_version.clone()
         };
-        let result = json!({
+        let mut result = json!({
             "protocolVersion": negotiated,
             "capabilities": { "tools": {} },
             "serverInfo": self.config.metadata,
         });
-        send_response(output, JsonRpcResponse::success(id, result)).await?;
-        *phase = SessionPhase::InitializeResponded;
+        if let Some(instructions) = &self.config.instructions
+            && let Some(object) = result.as_object_mut()
+        {
+            object.insert(
+                "instructions".to_owned(),
+                Value::String(instructions.clone()),
+            );
+        }
+        send_response(
+            &session.output,
+            JsonRpcResponse::success(request.id, result),
+        )
+        .await?;
+        session.phase = SessionPhase::InitializeResponded;
         Ok(())
     }
 
     async fn list_tools(
         &self,
-        id: RequestId,
-        params: Option<Value>,
-        phase: SessionPhase,
-        output: &mpsc::Sender<JsonRpcResponse>,
+        request: InboundRequest,
+        session: &ConnectionState,
     ) -> Result<(), ServeError> {
-        if phase != SessionPhase::Ready {
-            return send_response(output, not_initialized(id)).await;
+        if session.phase != SessionPhase::Ready {
+            return send_response(&session.output, not_initialized(request.id)).await;
         }
-        let cursor = match parse_cursor(params) {
+        let cursor = match parse_cursor(request.params) {
             Ok(cursor) => cursor,
             Err(()) => {
                 return send_response(
-                    output,
-                    invalid_params(Some(id), "Invalid tools/list parameters"),
+                    &session.output,
+                    invalid_params(Some(request.id), "Invalid tools/list parameters"),
                 )
                 .await;
             }
         };
         if cursor.is_some() {
             return send_response(
-                output,
+                &session.output,
                 JsonRpcResponse::error(
-                    Some(id),
-                    ErrorCode::INVALID_PARAMS,
-                    "Pagination cursor is not supported",
-                    StableErrorCode::UnsupportedCursor,
+                    Some(request.id),
+                    ErrorSpec::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Pagination cursor is not supported",
+                        StableErrorCode::UnsupportedCursor,
+                    ),
                 ),
             )
             .await;
         }
         send_response(
-            output,
-            JsonRpcResponse::success(id, json!({ "tools": self.tools.as_ref() })),
+            &session.output,
+            JsonRpcResponse::success(request.id, json!({ "tools": self.tools.as_ref() })),
         )
         .await
     }
 
     async fn call_tool(
         &self,
-        id: RequestId,
-        params: Option<Value>,
-        phase: SessionPhase,
-        active: &Arc<Mutex<BTreeMap<RequestId, CancellationToken>>>,
-        calls: &mut JoinSet<()>,
-        output: &mpsc::Sender<JsonRpcResponse>,
+        request: InboundRequest,
+        session: &mut ConnectionState,
     ) -> Result<(), ServeError> {
-        if phase != SessionPhase::Ready {
-            return send_response(output, not_initialized(id)).await;
+        if session.phase != SessionPhase::Ready {
+            return send_response(&session.output, not_initialized(request.id)).await;
         }
-        let Some(call) = parse_tool_call(params) else {
+        let Some(call) = parse_tool_call(request.params) else {
             return send_response(
-                output,
-                invalid_params(Some(id), "Invalid tools/call parameters"),
+                &session.output,
+                invalid_params(Some(request.id), "Invalid tools/call parameters"),
             )
             .await;
         };
         if !self.tool_names.contains_key(&call.name) {
             return send_response(
-                output,
+                &session.output,
                 JsonRpcResponse::error(
-                    Some(id),
-                    ErrorCode::INVALID_PARAMS,
-                    "Unknown tool",
-                    StableErrorCode::UnknownTool,
+                    Some(request.id),
+                    ErrorSpec::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Unknown tool",
+                        StableErrorCode::UnknownTool,
+                    ),
                 ),
             )
             .await;
         }
 
-        let cancellation = CancellationToken::new();
-        let admission_error = {
-            let mut requests = active.lock().await;
-            if requests.contains_key(&id) {
-                Some((
-                    ErrorCode::DUPLICATE_REQUEST_ID,
-                    "Request ID is already active",
-                    StableErrorCode::DuplicateRequestId,
-                ))
-            } else if requests.len() >= self.config.limits.max_inflight_requests {
-                Some((
-                    ErrorCode::SERVER_BUSY,
-                    "Server request capacity is exhausted",
-                    StableErrorCode::ServerBusy,
-                ))
-            } else {
-                requests.insert(id.clone(), cancellation.clone());
-                None
-            }
+        let cancellation = match session
+            .admit(&request.id, self.config.limits.max_inflight_requests)
+            .await
+        {
+            Ok(cancellation) => cancellation,
+            Err(response) => return send_response(&session.output, response).await,
         };
-        if let Some((code, message, stable_code)) = admission_error {
-            return send_response(
-                output,
-                JsonRpcResponse::error(Some(id), code, message, stable_code),
-            )
-            .await;
-        }
 
         let Some(deadline) = Instant::now().checked_add(self.config.limits.request_deadline) else {
-            active.lock().await.remove(&id);
+            session.active.lock().await.remove(&request.id);
             return send_response(
-                output,
+                &session.output,
                 JsonRpcResponse::error(
-                    Some(id),
-                    ErrorCode::INTERNAL_ERROR,
-                    "Internal error",
-                    StableErrorCode::InternalError,
+                    Some(request.id),
+                    ErrorSpec::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        "Internal error",
+                        StableErrorCode::InternalError,
+                    ),
                 ),
             )
             .await;
         };
-        let handler = self.handler.clone();
-        let output = output.clone();
-        let active = active.clone();
-        calls.spawn(async move {
-            let response = execute_tool(handler, id.clone(), call, cancellation, deadline).await;
-            let _send_result = output.send(response).await;
-            active.lock().await.remove(&id);
+        session.spawn(ToolExecution {
+            handler: self.handler.clone(),
+            id: request.id,
+            call,
+            cancellation,
+            deadline,
         });
         Ok(())
     }
@@ -609,16 +664,144 @@ enum SessionPhase {
     Ready,
 }
 
+enum ReadDirective {
+    Continue,
+    Stop,
+}
+
+enum ConnectionOutcome {
+    Reader(Option<ServeError>),
+    Writer(Result<(), ServeError>),
+}
+
+fn join_writer(
+    result: Result<Result<(), ServeError>, tokio::task::JoinError>,
+) -> Result<(), ServeError> {
+    result.unwrap_or(Err(ServeError::OutputTaskFailed))
+}
+
+struct ConnectionState {
+    phase: SessionPhase,
+    active: Arc<Mutex<BTreeMap<RequestId, CancellationToken>>>,
+    calls: JoinSet<()>,
+    output: mpsc::Sender<JsonRpcResponse>,
+}
+
+impl ConnectionState {
+    fn new(output: mpsc::Sender<JsonRpcResponse>) -> Self {
+        Self {
+            phase: SessionPhase::New,
+            active: Arc::new(Mutex::new(BTreeMap::new())),
+            calls: JoinSet::new(),
+            output,
+        }
+    }
+
+    async fn admit(
+        &self,
+        id: &RequestId,
+        maximum_inflight: usize,
+    ) -> Result<CancellationToken, JsonRpcResponse> {
+        let mut requests = self.active.lock().await;
+        if requests.contains_key(id) {
+            return Err(JsonRpcResponse::error(
+                Some(id.clone()),
+                ErrorSpec::new(
+                    ErrorCode::DUPLICATE_REQUEST_ID,
+                    "Request ID is already active",
+                    StableErrorCode::DuplicateRequestId,
+                ),
+            ));
+        }
+        if requests.len() >= maximum_inflight {
+            return Err(JsonRpcResponse::error(
+                Some(id.clone()),
+                ErrorSpec::new(
+                    ErrorCode::SERVER_BUSY,
+                    "Server request capacity is exhausted",
+                    StableErrorCode::ServerBusy,
+                ),
+            ));
+        }
+        let cancellation = CancellationToken::new();
+        requests.insert(id.clone(), cancellation.clone());
+        Ok(cancellation)
+    }
+
+    fn spawn(&mut self, execution: ToolExecution) {
+        let id = execution.id.clone();
+        let output = self.output.clone();
+        let active = self.active.clone();
+        self.calls.spawn(async move {
+            let response = execute_tool(execution).await;
+            let _send_result = output.send(response).await;
+            active.lock().await.remove(&id);
+        });
+    }
+
+    async fn shutdown(mut self) {
+        cancel_active(&self.active).await;
+        while self.calls.join_next().await.is_some() {}
+    }
+}
+
 enum InboundMessage {
-    Request {
-        id: RequestId,
-        method: String,
-        params: Option<Value>,
-    },
-    Notification {
-        method: String,
-        params: Option<Value>,
-    },
+    Request(InboundRequest),
+    Notification(InboundNotification),
+}
+
+struct InboundRequest {
+    id: RequestId,
+    method: String,
+    params: Option<Value>,
+}
+
+struct InboundNotification {
+    method: String,
+    params: Option<Value>,
+}
+
+struct ToolExecution {
+    handler: Arc<dyn ToolHandler>,
+    id: RequestId,
+    call: ToolCall,
+    cancellation: CancellationToken,
+    deadline: Instant,
+}
+
+async fn dispatch_notification(notification: InboundNotification, session: &mut ConnectionState) {
+    match notification.method.as_str() {
+        "notifications/initialized"
+            if session.phase == SessionPhase::InitializeResponded
+                && valid_optional_object(&notification.params) =>
+        {
+            session.phase = SessionPhase::Ready;
+        }
+        "notifications/cancelled" => {
+            let Some(request_id) = cancellation_request_id(notification.params) else {
+                return;
+            };
+            if let Some(token) = session.active.lock().await.get(&request_id).cloned() {
+                token.cancel();
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn ping(request: InboundRequest, session: &ConnectionState) -> Result<(), ServeError> {
+    if !valid_optional_object(&request.params) {
+        return send_response(
+            &session.output,
+            invalid_params(Some(request.id), "Invalid ping parameters"),
+        )
+        .await;
+    }
+    send_response(
+        &session.output,
+        JsonRpcResponse::success(request.id, json!({})),
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -636,16 +819,31 @@ struct ClientInfo {
     version: String,
 }
 
-struct ProtocolFault {
-    id: Option<RequestId>,
+#[derive(Clone, Copy)]
+struct ErrorSpec {
     code: i64,
     message: &'static str,
     stable_code: StableErrorCode,
 }
 
+impl ErrorSpec {
+    const fn new(code: i64, message: &'static str, stable_code: StableErrorCode) -> Self {
+        Self {
+            code,
+            message,
+            stable_code,
+        }
+    }
+}
+
+struct ProtocolFault {
+    id: Option<RequestId>,
+    error: ErrorSpec,
+}
+
 impl ProtocolFault {
     fn into_response(self) -> JsonRpcResponse {
-        JsonRpcResponse::error(self.id, self.code, self.message, self.stable_code)
+        JsonRpcResponse::error(self.id, self.error)
     }
 }
 
@@ -681,21 +879,16 @@ impl JsonRpcResponse {
         }
     }
 
-    fn error(
-        id: Option<RequestId>,
-        code: i64,
-        message: &'static str,
-        stable_code: StableErrorCode,
-    ) -> Self {
+    fn error(id: Option<RequestId>, error: ErrorSpec) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
             result: None,
             error: Some(JsonRpcError {
-                code,
-                message,
+                code: error.code,
+                message: error.message,
                 data: ErrorData {
-                    code: stable_code.as_str(),
+                    code: error.stable_code.as_str(),
                 },
             }),
         }
@@ -704,20 +897,23 @@ impl JsonRpcResponse {
     pub(crate) fn output_too_large(self) -> Self {
         Self::error(
             self.id,
-            ErrorCode::OUTPUT_TOO_LARGE,
-            "Output message is too large",
-            StableErrorCode::OutputTooLarge,
+            ErrorSpec::new(
+                ErrorCode::OUTPUT_TOO_LARGE,
+                "Output message is too large",
+                StableErrorCode::OutputTooLarge,
+            ),
         )
     }
 }
 
-async fn execute_tool(
-    handler: Arc<dyn ToolHandler>,
-    id: RequestId,
-    call: ToolCall,
-    cancellation: CancellationToken,
-    deadline: Instant,
-) -> JsonRpcResponse {
+async fn execute_tool(execution: ToolExecution) -> JsonRpcResponse {
+    let ToolExecution {
+        handler,
+        id,
+        call,
+        cancellation,
+        deadline,
+    } = execution;
     let context = ToolCallContext::new(cancellation.clone(), deadline);
     let mut worker = tokio::spawn(async move { handler.call(call, context).await });
     tokio::select! {
@@ -727,9 +923,11 @@ async fn execute_tool(
             let _join_result = worker.await;
             JsonRpcResponse::error(
                 Some(id),
-                ErrorCode::REQUEST_CANCELLED,
-                "Request cancelled",
-                StableErrorCode::RequestCancelled,
+                ErrorSpec::new(
+                    ErrorCode::REQUEST_CANCELLED,
+                    "Request cancelled",
+                    StableErrorCode::RequestCancelled,
+                ),
             )
         }
         () = sleep_until(deadline) => {
@@ -738,9 +936,11 @@ async fn execute_tool(
             let _join_result = worker.await;
             JsonRpcResponse::error(
                 Some(id),
-                ErrorCode::REQUEST_TIMEOUT,
-                "Request deadline exceeded",
-                StableErrorCode::RequestTimeout,
+                ErrorSpec::new(
+                    ErrorCode::REQUEST_TIMEOUT,
+                    "Request deadline exceeded",
+                    StableErrorCode::RequestTimeout,
+                ),
             )
         }
         joined = &mut worker => {
@@ -753,9 +953,11 @@ async fn execute_tool(
                 Ok(value) => JsonRpcResponse::success(id, value),
                 Err(_) => JsonRpcResponse::error(
                     Some(id),
-                    ErrorCode::INTERNAL_ERROR,
-                    "Internal error",
-                    StableErrorCode::InternalError,
+                    ErrorSpec::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        "Internal error",
+                        StableErrorCode::InternalError,
+                    ),
                 ),
             }
         }
@@ -771,9 +973,11 @@ fn parse_message(bytes: &[u8]) -> Option<Result<InboundMessage, ProtocolFault>> 
         Err(_) => {
             return Some(Err(ProtocolFault {
                 id: None,
-                code: ErrorCode::PARSE_ERROR,
-                message: "Parse error",
-                stable_code: StableErrorCode::ParseError,
+                error: ErrorSpec::new(
+                    ErrorCode::PARSE_ERROR,
+                    "Parse error",
+                    StableErrorCode::ParseError,
+                ),
             }));
         }
     };
@@ -795,16 +999,16 @@ fn parse_message(bytes: &[u8]) -> Option<Result<InboundMessage, ProtocolFault>> 
         let Some(id) = id else {
             return Some(Err(invalid_request(None)));
         };
-        Some(Ok(InboundMessage::Request {
+        Some(Ok(InboundMessage::Request(InboundRequest {
             id,
             method: method.to_owned(),
             params,
-        }))
+        })))
     } else {
-        Some(Ok(InboundMessage::Notification {
+        Some(Ok(InboundMessage::Notification(InboundNotification {
             method: method.to_owned(),
             params,
-        }))
+        })))
     }
 }
 
@@ -823,27 +1027,33 @@ fn parse_request_id(value: &Value) -> Option<RequestId> {
 fn invalid_request(id: Option<RequestId>) -> ProtocolFault {
     ProtocolFault {
         id,
-        code: ErrorCode::INVALID_REQUEST,
-        message: "Invalid Request",
-        stable_code: StableErrorCode::InvalidRequest,
+        error: ErrorSpec::new(
+            ErrorCode::INVALID_REQUEST,
+            "Invalid Request",
+            StableErrorCode::InvalidRequest,
+        ),
     }
 }
 
 fn invalid_params(id: Option<RequestId>, message: &'static str) -> JsonRpcResponse {
     JsonRpcResponse::error(
         id,
-        ErrorCode::INVALID_PARAMS,
-        message,
-        StableErrorCode::InvalidParams,
+        ErrorSpec::new(
+            ErrorCode::INVALID_PARAMS,
+            message,
+            StableErrorCode::InvalidParams,
+        ),
     )
 }
 
 fn not_initialized(id: RequestId) -> JsonRpcResponse {
     JsonRpcResponse::error(
         Some(id),
-        ErrorCode::SERVER_NOT_INITIALIZED,
-        "Server is not initialized",
-        StableErrorCode::ServerNotInitialized,
+        ErrorSpec::new(
+            ErrorCode::SERVER_NOT_INITIALIZED,
+            "Server is not initialized",
+            StableErrorCode::ServerNotInitialized,
+        ),
     )
 }
 

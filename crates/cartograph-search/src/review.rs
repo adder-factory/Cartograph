@@ -1,6 +1,7 @@
 use crate::{
     AffectedTest, EvidenceItem, GenerationEvidence, IndexFreshness, RetrievalConfidence,
-    ReviewAbstention, ReviewPacket, ReviewTruncation, packet::bound_evidence,
+    ReviewAbstention, ReviewPacket, ReviewTruncation, model::ReviewPacketDetails,
+    packet::bound_evidence,
 };
 use cartograph_domain::NormalizedPath;
 
@@ -15,50 +16,57 @@ pub(crate) struct ReviewAssembly {
     pub(crate) truncation: ReviewTruncation,
 }
 
+struct ReviewClassificationInput<'input> {
+    generation: Option<&'input GenerationEvidence>,
+    freshness: IndexFreshness,
+    changed_file_count: usize,
+    indexed_changed_files: &'input [NormalizedPath],
+}
+
 pub(crate) fn assemble_review_packet(input: ReviewAssembly) -> ReviewPacket {
     let (evidence, evidence_was_truncated) = bound_evidence(input.evidence, input.evidence_limit);
-    let (confidence, abstention) = classify_review(
-        input.generation.as_ref(),
-        input.freshness,
-        input.changed_file_count,
-        &input.indexed_changed_files,
-    );
-    ReviewPacket::new(
-        input.generation,
-        input.freshness,
-        (confidence, abstention),
-        input.indexed_changed_files,
-        evidence,
-        input.affected_tests,
-        input.truncation.with_evidence(evidence_was_truncated),
-    )
+    let (confidence, abstention) = classify_review(ReviewClassificationInput {
+        generation: input.generation.as_ref(),
+        freshness: input.freshness,
+        changed_file_count: input.changed_file_count,
+        indexed_changed_files: &input.indexed_changed_files,
+    });
+    ReviewPacket {
+        details: ReviewPacketDetails {
+            generation: input.generation,
+            freshness: input.freshness,
+            confidence,
+            abstention,
+            indexed_changed_files: input.indexed_changed_files,
+            evidence,
+            affected_tests: input.affected_tests,
+            truncation: input.truncation.with_evidence(evidence_was_truncated),
+        },
+    }
 }
 
 fn classify_review(
-    generation: Option<&GenerationEvidence>,
-    freshness: IndexFreshness,
-    changed_file_count: usize,
-    indexed_changed_files: &[NormalizedPath],
+    input: ReviewClassificationInput<'_>,
 ) -> (RetrievalConfidence, Option<ReviewAbstention>) {
-    if generation.is_none() {
+    if input.generation.is_none() {
         return (
             RetrievalConfidence::None,
             Some(ReviewAbstention::NoCurrentGeneration),
         );
     }
-    if changed_file_count == 0 {
+    if input.changed_file_count == 0 {
         return (
             RetrievalConfidence::None,
             Some(ReviewAbstention::NoChangedFiles),
         );
     }
-    if indexed_changed_files.is_empty() {
+    if input.indexed_changed_files.is_empty() {
         return (
             RetrievalConfidence::None,
             Some(ReviewAbstention::NoIndexedChangedFiles),
         );
     }
-    match freshness {
+    match input.freshness {
         IndexFreshness::Current => (RetrievalConfidence::High, None),
         IndexFreshness::Stale => (RetrievalConfidence::Low, Some(ReviewAbstention::StaleIndex)),
         IndexFreshness::Unknown => (

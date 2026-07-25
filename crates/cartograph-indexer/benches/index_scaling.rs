@@ -55,7 +55,7 @@ const EXPECTED_SOURCE_DIGEST: &str =
 const EXPECTED_FIXTURE_FINGERPRINT: &str =
     "2c02e8357bee04c11d89f383c316077b8eb2228bd4262d2404cb1535885083d9";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "3fcf25b6aef136419808799cc59b4b95ceb3f5014acef35192645242b4dd5d25";
+    "b6b88a0a91b17a75f670cc61694e3034a316a7d9a09756d6ceb42b8514391937";
 const EXPECTED_BM25_DOCUMENT_ID: &str = "30000000-0000-4000-8000-000000000001";
 const EXPECTED_FILES: i64 = 256;
 const EXPECTED_SYMBOLS: i64 = 256;
@@ -840,7 +840,12 @@ async fn bm25_fingerprint(
 ) -> BenchmarkResult<Vec<String>> {
     let hits = database
         .database
-        .search_current_code(SearchQuery::new(database.project.clone(), NEEDLE_QUERY, 5))
+        .search_current_code(SearchQuery::new(
+            database.project.clone(),
+            current.generation_id().clone(),
+            NEEDLE_QUERY,
+            5,
+        ))
         .await
         .map_err(|_| operation("bm25-query"))?;
     let bm25_document_ids = hits
@@ -1021,6 +1026,14 @@ fn build_fact_bundle(
             start_line: 1,
             end_line,
             structural_digest: ContentDigest::from_bytes(*structural_hash.as_bytes()),
+            visibility: None,
+            exported: true,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            declaration_only: false,
+            betweenness_ppb: None,
+            pagerank_ppb: None,
         },
         edge: previous_symbol.clone().map(|target_symbol_id| EdgeInput {
             source_symbol_id: symbol.clone(),
@@ -1028,6 +1041,7 @@ fn build_fact_bundle(
             kind: EdgeKind::Calls,
             confidence: 1.0,
             provenance: "rust-scaling-fixture".to_owned(),
+            site_count: 1,
         }),
         reference: previous_symbol.map(|target_symbol_id| ReferenceInput {
             file_id: file.clone(),
@@ -1039,6 +1053,8 @@ fn build_fact_bundle(
             end_byte: u64::try_from(signature.len()).unwrap_or(u64::MAX),
             confidence: 1.0,
             resolution_provenance: "rust-scaling-fixture".to_owned(),
+            site_count: 1,
+            span_precision: cartograph_db::ReferenceSpanPrecision::Exact,
         }),
         document: SearchDocumentInput {
             document_id: document_id(index).map_err(|_| StageItemFailure)?,
@@ -1142,7 +1158,7 @@ fn validate_fingerprint(actual: &InvariantFingerprint) -> BenchmarkResult<()> {
         });
     }
     require(
-        actual.logical_digest_version == GenerationDigestVersion::V2.database_value(),
+        actual.logical_digest_version == GenerationDigestVersion::CURRENT.database_value(),
         "logical-digest-version",
     )?;
     require(
@@ -1154,7 +1170,7 @@ fn validate_fingerprint(actual: &InvariantFingerprint) -> BenchmarkResult<()> {
 fn committed_invariant_fingerprint() -> InvariantFingerprint {
     InvariantFingerprint {
         logical_digest: EXPECTED_LOGICAL_DIGEST.to_owned(),
-        logical_digest_version: GenerationDigestVersion::V2.database_value(),
+        logical_digest_version: GenerationDigestVersion::CURRENT.database_value(),
         rows: committed_row_counts(),
         bm25_document_ids: vec![EXPECTED_BM25_DOCUMENT_ID.to_owned()],
     }

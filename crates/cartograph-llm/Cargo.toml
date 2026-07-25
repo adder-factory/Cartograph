@@ -1,0 +1,27 @@
+[package]
+name = "cartograph-llm"
+publish = false
+description = "Bounded OpenAI-compatible embedding boundary for Cartograph v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+blake3.workspace = true
+cartograph-domain = { path = "../cartograph-domain" }
+futures-util.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

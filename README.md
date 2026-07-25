@@ -27,14 +27,21 @@ packages that evidence with stable provenance:
 
 - exact symbol, path, and reference lookup;
 - code-aware BM25 over names, implementation identifiers, and documentation;
+- deterministic task-intent routing with intent-specific evidence and graph budgets;
 - callers, callees, imports, references, and reverse impact;
+- standard SCIP export and persistent per-file SCIP overlays with exact typed-edge extensions;
 - affected-test selection;
+- a separately labeled live overlay for matching changed/untracked supported source;
 - working-tree versus Git-ref review packets;
 - generation ID, freshness, confidence, truncation, and explicit abstention;
 - bounded MCP payloads with stable error codes, deadlines, and cancellation.
 
 The result is designed to help an agent decide what to inspect and verify while
 keeping the source checkout—not a model response—the source of truth.
+
+The browser visual-graph viewer is the only v1 capability intentionally removed
+in v2. The typed graph, paths, impact, similarity, and machine-readable
+interchange remain first-class agent capabilities.
 
 ## Requirements
 
@@ -161,8 +168,9 @@ Manual MCP server specification:
 }
 ```
 
-The available MCP profiles are `core`, `read-only`, and `review`. Tool listings
-are deterministic and hidden tools cannot be called through a narrower profile.
+The available MCP profiles are `coding`, `core`, `full`, `read-only`, and
+`review`. Tool listings are deterministic and hidden tools cannot be called
+through a narrower profile.
 
 ## Agent workflow
 
@@ -186,10 +194,19 @@ Core MCP tools:
 | `cartograph_status` | Current generation counts and live-source freshness |
 | `cartograph_find` | Exact name/path/reference or BM25 evidence |
 | `cartograph_context` | Compact task-specific evidence packet |
-| `cartograph_graph` | Callers, callees, or reverse impact |
+| `cartograph_entry_points` | Typed routes, commands, MCP tools, CLI declarations, and public API boundaries |
+| `cartograph_graph` | Callers/callees/impact, exact edge filters, shortest paths, or stored-pgvector symbol neighbors |
 | `cartograph_affected` | Bounded affected-test selection |
 | `cartograph_review` | Git-ref and dirty-worktree review packet |
 | `cartograph_admin` | Explicit index/sync operation |
+
+`cartograph_context` classifies the task as symbol lookup, implementation trace,
+change planning, test selection, error diagnosis, architecture survey, or
+documentation lookup. The chosen intent is returned in the packet and controls
+bounded candidate, traversal, evidence, and affected-test policy. When the
+durable generation is stale, matching changed/untracked supported files can be
+returned as a separate digest- and line-bounded working-tree overlay; live bytes
+are never presented as immutable graph facts.
 
 ## CLI
 
@@ -198,10 +215,13 @@ cartograph index [PROJECT]
 cartograph status [PROJECT]
 cartograph find <QUERY> --by name|path|reference|bm25
 cartograph context <TASK> [--exact-name NAME] [--exact-path PATH]
-cartograph graph <SYMBOL_ID> --direction callers|callees|impact
+cartograph entry-points [--bucket public-exports] [--limit 20]
+cartograph graph <SYMBOL_ID> --direction callers|callees|both|impact
+cartograph graph <SYMBOL_ID> --direction path --to <TARGET_SYMBOL_ID>
+cartograph graph <SYMBOL_ID> --direction similar --k 5 --min-score 0.3
 cartograph affected <SYMBOL_ID>
 cartograph review --ref <GIT_REF>
-cartograph serve --mcp [--profile core|read-only|review]
+cartograph serve --mcp [--profile coding|core|full|read-only|review]
 cartograph doctor [PROJECT]
 cartograph db <COMMAND>
 cartograph install --yes --target codex|claude|cursor
@@ -214,15 +234,18 @@ automation surface.
 
 ## Native language coverage
 
-The stable v2 extractor implements TypeScript, TSX, JavaScript, JSX, Rust,
-Python, and Go as native Rust grammar families. Unsupported extensions do not
-produce a misleading empty graph: discovery excludes them, while explicitly
-requested unsupported files fail with a structured diagnostic.
+The stable v2 registry production-admits all 73 v1.1.33 language modes and all
+163 v1 extensions, plus additive Python `.pyi` support and a native TOML mode
+for 74 total modes. Sixty-one modes use pinned native tree-sitter grammars;
+thirteen mixed-markup, configuration, and domain-specific modes (including
+TOML) use bounded Rust structural scanners. Every admitted mode
+has deterministic facts, cancellation and literal-safety coverage, a locked
+parallel-worker digest, and live PostgreSQL/ParadeDB publication and BM25 proof.
 
-Coverage is intentionally stated by implemented grammar family rather than by
-the much broader v1 list. New languages must add declarations, references,
-resolution behavior, bounded failure handling, and end-to-end graph tests before
-they are advertised.
+Unknown extensions do not produce a misleading empty graph: discovery excludes
+them, while explicitly requested unsupported files fail with a structured
+diagnostic. New languages must add declarations, references, resolution
+behavior, bounded failure handling, and end-to-end graph tests before admission.
 
 See [native extraction](docs/v2/EXTRACTION.md) and the
 [extractor/resolver extension guide](docs/EXTENDING-EXTRACTORS-RESOLVERS.md).
@@ -237,15 +260,103 @@ If the only v1 index is SQLite, either rebuild v2 from source or use v1.1.33 to
 migrate that data to PostgreSQL before running the v2 importer. Keep the v1.1.33
 binary/tag available until validation succeeds.
 
-Use `cartograph db --help` for the exact import command and confirmation
-requirements in the installed release.
+The v1 source and v2 destination must be different schemas in the same
+PostgreSQL database. The destination may already contain a current generation;
+the import publishes a new immutable generation. `CARTOGRAPH_DATABASE_SCHEMA`
+selects the v2 destination; `--source-schema` names the existing v1.1.33
+schema. Take a database-native backup first, quiesce index/sync/hook/rebuild
+writers for this project, then run the non-mutating preflight against the exact
+checkout whose source rows the v1 index represents:
+
+```sh
+export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
+export CARTOGRAPH_DATABASE_SCHEMA='cartograph_v2'
+
+cartograph doctor /absolute/path/to/checkout
+cartograph db import-v1 \
+  --project-path /absolute/path/to/checkout \
+  --source-schema cartograph_v1 \
+  --dry-run \
+  --format json
+```
+
+The dry run verifies the exact v1 schema version, repository/source identity,
+checkout bytes and hashes, row/byte bounds, relations, language support, and
+the complete canonical generation without writing destination rows. Import
+only after that report is clean:
+
+```sh
+cartograph db import-v1 \
+  --project-path /absolute/path/to/checkout \
+  --source-schema cartograph_v1 \
+  --confirm import-v1-postgres \
+  --format json
+```
+
+The importer records durable `staged`, `ready`, `bm25_rebuilt`, and `complete`
+checkpoints. If an interruption reports that the run is resumable, rerun the
+same command with the same database, schemas, and checkout; a changed source or
+inconsistent checkpoint is rejected. Legacy reference multiplicity is retained
+as site counts. V1 rows that cannot prove an exact token span remain explicitly
+coarse instead of receiving invented precision. A legacy SCIP placeholder hash
+proves only its path-derived placeholder identity; the dry run still reads and
+binds the current checkout bytes, but it cannot prove historical SCIP bytes that
+v1 never stored.
+
+If another writer publishes first, the import reports `ConcurrentPublication`,
+atomically fails/releases its stale generation, and preserves the prior current
+generation. Keep writers quiesced and repeat the identical confirmed import;
+the retry resets the failed durable run and reserves a newer generation.
+
+Verify before retiring v1:
+
+```sh
+cartograph status /absolute/path/to/checkout
+cartograph context 'trace the primary request flow' \
+  --project-path /absolute/path/to/checkout
+cartograph db derived-index --project-path /absolute/path/to/checkout
+```
+
+Keep the source schema and backup until counts, retrieval, and application-level
+verification pass. Do not prune generations as part of import validation.
+
+## Bounded generation retention
+
+`db prune` deletes only a bounded batch of failed and old superseded
+generations. It always preserves the current generation, in-progress
+staging/ready work, failed generations referenced by non-complete v1 import
+runs, and the requested number of newest superseded histories.
+The operation uses an exact unexpired migration lease, PostgreSQL advisory
+locks, a transaction, and a final fence recheck before commit.
+
+After a verified backup, retain two superseded generations and delete at most
+100 terminal generations in one invocation:
+
+```sh
+cartograph db prune \
+  --project-path /absolute/path/to/checkout \
+  --keep-superseded 2 \
+  --maximum-deletions 100 \
+  --confirm prune-old-generations \
+  --format json
+```
+
+Inspect the report and rerun explicitly if another bounded batch is desired.
+Pruning is not `VACUUM`, does not repair a derived index, and is never automatic.
 
 ## Parallelism and safety
 
 Indexing uses bounded worker counts selected from 1, 2, 4, 8, or 16 according
-to corpus size and hardware. Workers may parse concurrently, but a deterministic
-reducer produces the same logical digest and ordered retrieval evidence at every
-supported worker count.
+to supported-file count, exact indexed source bytes, caller cap, and hardware.
+Workers may parse concurrently, but a deterministic reducer produces the same
+logical digest and ordered retrieval evidence at every supported worker count.
+
+Coding-task context packets keep broad BM25, semantic, and graph evidence while
+also exposing a typed, bounded `editCandidates` set. Exact anchors take
+precedence; otherwise Cartograph promotes the files with the strongest distinct
+code-aware task-term concentration. Agents can therefore start with likely edit
+sites without losing the wider evidence needed for impact analysis or
+abstention.
 
 The indexer also enforces:
 

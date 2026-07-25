@@ -1,8 +1,10 @@
 # Support Matrix
 
-Cartograph supports 73 language modes. The registry is the source of truth:
-language definitions live in `src/extraction/languages/registry.ts`, and
-framework resolvers live in `src/resolution/frameworks/index.ts`.
+Cartograph v2 supports all 73 v1.1.33 language modes plus native TOML: 74 modes
+total. The source of truth is `cartograph_domain::SourceLanguage::ALL`; native
+extractor strategy lives in `crates/cartograph-extract/src/language.rs`, and
+framework/cross-language enrichment lives in the focused Rust modules beside
+it.
 
 Use this page to decide whether Cartograph can extract useful graph structure
 from a project before you install it. A supported language means files are
@@ -11,7 +13,7 @@ dynamic references, or cross-language bridge edges when Cartograph detects a
 known framework shape.
 
 `Tree-sitter parser-only` means Cartograph recognizes the file, parses it with
-the vendored grammar, emits the file node, and surfaces syntax diagnostics, but
+the statically linked native grammar, emits the file node, and surfaces syntax diagnostics, but
 does not yet extract language-specific symbols from that grammar.
 
 ## Languages
@@ -70,7 +72,7 @@ does not yet extract language-specific symbols from that grammar.
 | PowerShell | `.ps1`, `.psm1`, `.psd1` | Tree-sitter |
 | Prisma | `.prisma` | Tree-sitter |
 | Java Properties | `.properties` | Custom extractor |
-| Python | `.py`, `.pyw` | Tree-sitter |
+| Python | `.py`, `.pyw`, plus additive v2 `.pyi` | Tree-sitter |
 | R | `.r` | Tree-sitter |
 | Regex | `.regex`, `.regexp` | Tree-sitter parser-only |
 | ReScript | `.res`, `.resi` | Tree-sitter |
@@ -81,6 +83,7 @@ does not yet extract language-specific symbols from that grammar.
 | Solidity | `.sol` | Tree-sitter |
 | Svelte | `.svelte` | Custom extractor |
 | Swift | `.swift` | Tree-sitter |
+| TOML | `.toml` (additive v2 mode) | Bounded native structural scanner |
 | TSX | `.tsx` | Tree-sitter |
 | TypeScript | `.ts`, `.mts`, `.cts` | Tree-sitter |
 | Visual Basic 6 | `.bas`, `.frm`, `.ctl`, `.dob`, `.dsr`, `.pag`, `.vbp`, VB6 `.cls` by content | Custom extractor |
@@ -173,16 +176,12 @@ framework, so generic codebases do not pay the full resolver cost.
 
 ## Extending Support
 
-To add a language, start with [Adding A Language](ADDING-A-LANGUAGE.md).
+To add a language, start with [Adding a language](ADDING-A-LANGUAGE.md).
 
 ## Tree-sitter Catalog Notes
 
-Tree-sitter's homepage lists a smaller upstream parser set, while its wiki
-tracks a much larger community parser catalog. Cartograph vendors grammars
-deliberately rather than downloading every community parser at runtime, so the
-support matrix above is the authoritative shipped set.
-
-Agda remains the known upstream-parser gap for the current `web-tree-sitter`
-runtime: `tree-sitter build --wasm` fails because the package's external
-scanner symbols are not available to Wasm parsers. Support should wait for a
-WASM-compatible upstream artifact or a compatible scanner implementation.
+Tree-sitter's homepage and community catalog are not Cartograph's release
+contract. Cartograph pins reviewed native grammar crates deliberately rather
+than downloading parsers at runtime, so the matrix above is the authoritative
+shipped set. A catalog entry is not support until the complete native admission
+and live publication gates pass.

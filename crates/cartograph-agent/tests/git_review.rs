@@ -1,6 +1,12 @@
 use std::{path::Path, process::Command};
 
-use cartograph_agent::{GitChangeKind, ReviewError, ReviewOptions, discover_git_comparison};
+use cartograph_agent::{
+    GitChangeKind, ReviewError, ReviewOptions, SourceCompareOptions, discover_git_blame,
+    discover_git_commit_paths, discover_git_comparison, discover_git_history,
+    discover_git_line_history, discover_git_rename_evidence, discover_source_comparison,
+    trace_git_culprits,
+};
+use cartograph_domain::NormalizedPath;
 
 #[tokio::test]
 async fn compare_to_head_discovers_dirty_tracked_and_untracked_files_deterministically() {
@@ -135,6 +141,128 @@ async fn nested_project_review_excludes_changes_outside_its_root() {
     assert!(comparison.worktree_dirty());
     assert_eq!(comparison.files().len(), 1);
     assert_eq!(comparison.files()[0].path().as_str(), "app.rs");
+}
+
+#[tokio::test]
+async fn history_blame_and_trace_culprits_use_bounded_exact_git_evidence() {
+    let repository = repository_fixture();
+    write(
+        repository.path().join("src/z.rs"),
+        "pub fn z() { println!(\"second\"); }\n",
+    );
+    git(repository.path(), &["add", "src/z.rs"]);
+    git(repository.path(), &["commit", "-m", "second change"]);
+    let path = NormalizedPath::parse("src/z.rs")
+        .unwrap_or_else(|error| panic!("fixture path failed: {error}"));
+
+    let history = discover_git_history(repository.path(), path.clone(), 10)
+        .await
+        .unwrap_or_else(|error| panic!("history failed: {error}"));
+    assert!(!history.commits().is_empty());
+    let line_history = discover_git_line_history(repository.path(), path.clone(), 1, 1, 10)
+        .await
+        .unwrap_or_else(|error| panic!("line history failed: {error}"));
+    assert!(!line_history.commits().is_empty());
+    assert!(!line_history.truncated());
+    let commit_paths = discover_git_commit_paths(
+        repository.path(),
+        &[line_history.commits()[0].commit().to_owned()],
+        20,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("commit paths failed: {error}"));
+    assert_eq!(commit_paths.len(), 1);
+    assert!(
+        commit_paths[0]
+            .paths()
+            .iter()
+            .any(|path| path.as_str() == "src/z.rs")
+    );
+    assert!(!commit_paths[0].truncated());
+    let rename = discover_git_rename_evidence(repository.path(), path.clone())
+        .await
+        .unwrap_or_else(|error| panic!("rename evidence failed: {error}"));
+    assert!(!rename.renamed());
+    assert!(rename.earliest_unix_seconds().is_some());
+    let blame = discover_git_blame(repository.path(), path, 1, 1)
+        .await
+        .unwrap_or_else(|error| panic!("blame failed: {error}"));
+    assert_eq!(blame.len(), 1);
+    let report = trace_git_culprits(repository.path(), "panic at src/z.rs:1:12")
+        .await
+        .unwrap_or_else(|error| panic!("trace culprit lookup failed: {error}"));
+    assert_eq!(report.frames().len(), 1);
+}
+
+#[tokio::test]
+async fn rename_evidence_requires_an_actual_historical_path_change() {
+    let repository = repository_fixture();
+    git(repository.path(), &["mv", "src/z.rs", "src/renamed.rs"]);
+    git(repository.path(), &["commit", "-m", "rename source"]);
+    let path = NormalizedPath::parse("src/renamed.rs")
+        .unwrap_or_else(|error| panic!("renamed fixture path failed: {error}"));
+    let evidence = discover_git_rename_evidence(repository.path(), path)
+        .await
+        .unwrap_or_else(|error| panic!("rename evidence failed: {error}"));
+    assert!(evidence.renamed());
+    assert!(evidence.earliest_unix_seconds().is_some());
+}
+
+#[tokio::test]
+async fn structural_compare_reads_two_refs_without_checking_out_head() {
+    let repository = repository_fixture();
+    write(
+        repository.path().join("src/api.ts"),
+        "export function api(): number { return 1; }\n",
+    );
+    git(repository.path(), &["add", "src/api.ts"]);
+    git(repository.path(), &["commit", "-m", "typescript baseline"]);
+    git(repository.path(), &["switch", "-c", "feature"]);
+    write(
+        repository.path().join("src/api.ts"),
+        "export function danger(): number { return eval('1'); }\n\
+         export function api(): number { return danger(); }\n",
+    );
+    git(repository.path(), &["add", "src/api.ts"]);
+    git(repository.path(), &["commit", "-m", "feature change"]);
+    git(repository.path(), &["switch", "main"]);
+
+    let options = SourceCompareOptions::new("main")
+        .and_then(|options| options.with_head("feature"))
+        .and_then(|options| options.with_path_filter(Some("src/")))
+        .map(|options| {
+            options
+                .with_edges(true)
+                .with_findings(true)
+                .with_findings_delta(true)
+        })
+        .unwrap_or_else(|error| panic!("source compare options failed: {error}"));
+    let report = discover_source_comparison(repository.path(), options)
+        .await
+        .unwrap_or_else(|error| panic!("source comparison failed: {error}"));
+    let report = serde_json::to_value(report)
+        .unwrap_or_else(|error| panic!("source comparison serialization failed: {error}"));
+    assert_eq!(report["comparison"], "main..feature");
+    assert_eq!(report["comparesWorktree"], false);
+    assert_eq!(report["changedBeforeFilter"], 1);
+    assert_eq!(report["changedAfterFilter"], 1);
+    assert_eq!(report["filesAnalyzed"], 1);
+    assert_eq!(report["files"][0]["path"], "src/api.ts");
+    assert!(report["symbolsAdded"].as_u64().unwrap_or_default() >= 1);
+    assert!(report["symbolsModified"].as_u64().unwrap_or_default() >= 1);
+    assert!(report["edgesAdded"].as_u64().unwrap_or_default() >= 1);
+    assert!(report["findingsIntroduced"].as_u64().unwrap_or_default() >= 1);
+    assert!(
+        report["files"][0]["findingsDelta"]["introduced"]
+            .as_array()
+            .is_some_and(|findings| findings
+                .iter()
+                .any(|finding| finding["finding"] == "dynamic_eval"))
+    );
+    let worktree = std::fs::read_to_string(repository.path().join("src/api.ts"))
+        .unwrap_or_else(|error| panic!("worktree read failed: {error}"));
+    assert!(worktree.contains("return 1"));
+    assert!(!worktree.contains("eval"));
 }
 
 fn repository_fixture() -> tempfile::TempDir {

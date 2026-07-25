@@ -1,0 +1,74 @@
+{
+  "baseline": "v1.1.33",
+  "policy": "preserve useful C-family facts while fixing v1 parser ownership and declaration-shape defects",
+  "cases": [
+    {
+      "path": "video.c",
+      "language": "c",
+      "symbols": [
+        {
+          "kind": "function",
+          "name": "AX_VIN_Init",
+          "qualified_name": "AX_VIN_Init",
+          "signature": null,
+          "visibility": null
+        }
+      ],
+      "containments": [],
+      "references": [
+        { "owner": "AX_VIN_Init", "name": "helper", "kind": "calls" }
+      ],
+      "forbidden_symbols": [
+        { "kind": "variable", "name": "AX_S32" },
+        { "kind": "function", "name": "(AX_VOID)" }
+      ]
+    },
+    {
+      "path": "widget.cpp",
+      "language": "cpp",
+      "symbols": [
+        {
+          "kind": "class",
+          "name": "Widget",
+          "qualified_name": "Widget",
+          "signature": null,
+          "visibility": null
+        },
+        {
+          "kind": "import",
+          "name": "worker.h",
+          "qualified_name": "worker.h",
+          "signature": "#include \"worker.h\"",
+          "visibility": null
+        },
+        {
+          "kind": "method",
+          "name": "other",
+          "qualified_name": "Widget::other",
+          "signature": "int ()",
+          "visibility": null
+        },
+        {
+          "kind": "method",
+          "name": "run",
+          "qualified_name": "Widget::run",
+          "signature": "int (int value)",
+          "visibility": "public"
+        }
+      ],
+      "containments": [
+        { "parent": "Widget", "child": "Widget::other" },
+        { "parent": "Widget", "child": "Widget::run" }
+      ],
+      "references": [
+        { "owner": null, "name": "worker.h", "kind": "imports" },
+        { "owner": "Widget", "name": "Base", "kind": "extends" },
+        { "owner": "Widget::other", "name": "run", "kind": "calls" },
+        { "owner": "Widget::run", "name": "helper", "kind": "calls" }
+      ],
+      "forbidden_symbols": [
+        { "kind": "function", "name": "Widget::other" }
+      ]
+    }
+  ]
+}

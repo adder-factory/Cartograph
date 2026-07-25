@@ -1,0 +1,1292 @@
+[
+  {
+    "path": "cartograph",
+    "aliases": [],
+    "options": [
+      "no-color",
+      "version"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph admin",
+    "aliases": [],
+    "options": [],
+    "positionals": []
+  },
+  {
+    "path": "cartograph admin init",
+    "aliases": [],
+    "options": [
+      "database-connection-timeout-seconds",
+      "database-max-connections",
+      "database-pgvector",
+      "database-provider",
+      "database-query-timeout-ms",
+      "database-schema",
+      "database-ssl",
+      "database-url",
+      "index",
+      "max-file-size",
+      "verbose"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin uninit",
+    "aliases": [],
+    "options": [
+      "force"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin index",
+    "aliases": [],
+    "options": [
+      "clear-parse-cache",
+      "force",
+      "max-file-size",
+      "parse-workers",
+      "profile",
+      "quiet",
+      "verbose"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin embed-only",
+    "aliases": [],
+    "options": [
+      "max-file-size",
+      "quiet",
+      "verbose"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin sync",
+    "aliases": [],
+    "options": [
+      "max-file-size",
+      "quiet"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin biomarkers-refresh",
+    "aliases": [],
+    "options": [
+      "quiet"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin summarize",
+    "aliases": [],
+    "options": [
+      "all",
+      "concurrency",
+      "endpoint",
+      "limit",
+      "model",
+      "quiet"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin embed",
+    "aliases": [],
+    "options": [
+      "concurrency",
+      "quiet"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin classify",
+    "aliases": [],
+    "options": [
+      "concurrency",
+      "quiet"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin unlock",
+    "aliases": [],
+    "options": [],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin migrate",
+    "aliases": [],
+    "options": [],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin storage-migrate",
+    "aliases": [],
+    "options": [
+      "database-connection-timeout-seconds",
+      "database-max-connections",
+      "database-pgvector",
+      "database-provider",
+      "database-query-timeout-ms",
+      "database-schema",
+      "database-ssl",
+      "database-url",
+      "force"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin build-similarity-edges",
+    "aliases": [],
+    "options": [
+      "k",
+      "min-score"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin prune-store",
+    "aliases": [],
+    "options": [
+      "max-age-days"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin embedding-audit",
+    "aliases": [],
+    "options": [],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin embedding-cleanup",
+    "aliases": [],
+    "options": [
+      "confirm"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin scip-export",
+    "aliases": [],
+    "options": [
+      "out"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin scip-import",
+    "aliases": [],
+    "options": [
+      "in"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin install-models",
+    "aliases": [],
+    "options": [
+      "dir",
+      "minimal",
+      "project-path",
+      "write-config"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph admin doctor",
+    "aliases": [],
+    "options": [
+      "fix",
+      "json",
+      "no-project-checks",
+      "skip-project-checks"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin llm-plan",
+    "aliases": [],
+    "options": [],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph admin llm-apply",
+    "aliases": [],
+    "options": [
+      "preset",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph admin llm-tune",
+    "aliases": [],
+    "options": [
+      "concurrency",
+      "tier"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph summaries",
+    "aliases": [],
+    "options": [
+      "action"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph summaries pending",
+    "aliases": [],
+    "options": [
+      "limit",
+      "model-hint",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph summaries save",
+    "aliases": [],
+    "options": [
+      "model",
+      "project-path"
+    ],
+    "positionals": [
+      "json-file"
+    ]
+  },
+  {
+    "path": "cartograph review",
+    "aliases": [],
+    "options": [
+      "mode"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph review context",
+    "aliases": [],
+    "options": [
+      "diff",
+      "max-callees-per-symbol",
+      "max-callers-per-symbol",
+      "max-co-change-warnings",
+      "min-co-change-jaccard",
+      "min-diff-magnitude",
+      "project-path"
+    ],
+    "positionals": [
+      "diff-file"
+    ]
+  },
+  {
+    "path": "cartograph review neighbors",
+    "aliases": [],
+    "options": [
+      "files",
+      "k",
+      "no-dedupe-by-name",
+      "project-path",
+      "symbols"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph review risk",
+    "aliases": [],
+    "options": [
+      "coverage-source",
+      "limit",
+      "min-centrality",
+      "path-filter",
+      "project-path",
+      "top-n"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph review agent-audit",
+    "aliases": [],
+    "options": [
+      "min-severity",
+      "per-detector-limit",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph review trust",
+    "aliases": [],
+    "options": [
+      "deep",
+      "project-path",
+      "timeout-ms"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph llm",
+    "aliases": [],
+    "options": [],
+    "positionals": []
+  },
+  {
+    "path": "cartograph llm setup",
+    "aliases": [],
+    "options": [],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph llm smoke",
+    "aliases": [],
+    "options": [
+      "json",
+      "timeout-ms"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph llm install",
+    "aliases": [],
+    "options": [
+      "database-connection-timeout-seconds",
+      "database-max-connections",
+      "database-pgvector",
+      "database-provider",
+      "database-query-timeout-ms",
+      "database-schema",
+      "database-ssl",
+      "database-url",
+      "minimal",
+      "no-models"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph session",
+    "aliases": [],
+    "options": [],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session create",
+    "aliases": [],
+    "options": [
+      "label",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session resume",
+    "aliases": [],
+    "options": [
+      "id",
+      "label",
+      "project-path"
+    ],
+    "positionals": [
+      "id"
+    ]
+  },
+  {
+    "path": "cartograph session audit",
+    "aliases": [],
+    "options": [
+      "id",
+      "label",
+      "project-path"
+    ],
+    "positionals": [
+      "id"
+    ]
+  },
+  {
+    "path": "cartograph session usage",
+    "aliases": [],
+    "options": [
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session list",
+    "aliases": [],
+    "options": [
+      "limit",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session delete",
+    "aliases": [],
+    "options": [
+      "id",
+      "label",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session macro_save",
+    "aliases": [
+      "macro-save"
+    ],
+    "options": [
+      "name",
+      "project-path",
+      "steps"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session macro_run",
+    "aliases": [
+      "macro-run"
+    ],
+    "options": [
+      "args",
+      "name",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session macro_list",
+    "aliases": [
+      "macro-list"
+    ],
+    "options": [
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph session macro_delete",
+    "aliases": [
+      "macro-delete"
+    ],
+    "options": [
+      "name",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph at-range",
+    "aliases": [],
+    "options": [
+      "compact",
+      "diff",
+      "fields",
+      "limit",
+      "low-tokens",
+      "project-path",
+      "ranges"
+    ],
+    "positionals": [
+      "file",
+      "startLine",
+      "endLine"
+    ]
+  },
+  {
+    "path": "cartograph ask",
+    "aliases": [],
+    "options": [
+      "endpoint",
+      "max-tokens",
+      "mode",
+      "model",
+      "project-path",
+      "prompt",
+      "quiet",
+      "retrieve-k",
+      "system"
+    ],
+    "positionals": [
+      "question",
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph status",
+    "aliases": [],
+    "options": [
+      "json",
+      "summary-breakdown",
+      "top-biomarkers",
+      "top-hotspots",
+      "verbose"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph find",
+    "aliases": [],
+    "options": [
+      "allow-stale",
+      "by",
+      "case-sensitive",
+      "compact",
+      "different-language",
+      "fields",
+      "key",
+      "kind",
+      "language",
+      "language-filter",
+      "limit",
+      "low-tokens",
+      "mode",
+      "no-include-tests",
+      "op",
+      "path-filter",
+      "project-path",
+      "query",
+      "same-language",
+      "since",
+      "symbol"
+    ],
+    "positionals": [
+      "query"
+    ]
+  },
+  {
+    "path": "cartograph digest",
+    "aliases": [],
+    "options": [
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph files",
+    "aliases": [],
+    "options": [
+      "dir",
+      "dir-path",
+      "direction",
+      "file",
+      "format",
+      "include-imports",
+      "include-parameters",
+      "json",
+      "kinds",
+      "limit",
+      "line-limit",
+      "line-offset",
+      "low-tokens",
+      "max-depth",
+      "no-metadata",
+      "no-symbols",
+      "pattern",
+      "project-path"
+    ],
+    "positionals": [
+      "target"
+    ]
+  },
+  {
+    "path": "cartograph export",
+    "aliases": [],
+    "options": [
+      "edge-kind",
+      "file",
+      "format",
+      "kind",
+      "language",
+      "limit",
+      "out",
+      "project-path"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph affected",
+    "aliases": [],
+    "options": [
+      "depth",
+      "files",
+      "filter",
+      "include-commands",
+      "include-tests",
+      "json",
+      "project-path",
+      "quiet",
+      "stdin"
+    ],
+    "positionals": [
+      "files"
+    ]
+  },
+  {
+    "path": "cartograph serve",
+    "aliases": [],
+    "options": [
+      "allow-stale-default",
+      "daemon",
+      "daemon-child",
+      "disable-tool",
+      "low-tokens-default",
+      "mcp",
+      "no-daemon",
+      "no-startup-sync",
+      "no-write-tools",
+      "profile",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph mcp-budget",
+    "aliases": [],
+    "options": [
+      "disable-tool",
+      "json",
+      "no-write-tools",
+      "profile",
+      "top"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph install",
+    "aliases": [],
+    "options": [
+      "command",
+      "location",
+      "no-hooks",
+      "no-permissions",
+      "print-config",
+      "target",
+      "yes"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph uninstall",
+    "aliases": [],
+    "options": [
+      "location"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph install-hooks",
+    "aliases": [],
+    "options": [
+      "command",
+      "dry-run",
+      "hooks",
+      "remove"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph trace-to-culprits",
+    "aliases": [],
+    "options": [
+      "limit",
+      "project-path",
+      "trace"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph sync-if-dirty",
+    "aliases": [],
+    "options": [
+      "max-file-size",
+      "quiet"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph playbook",
+    "aliases": [],
+    "options": [],
+    "positionals": []
+  },
+  {
+    "path": "cartograph guide",
+    "aliases": [],
+    "options": [],
+    "positionals": []
+  },
+  {
+    "path": "cartograph index",
+    "aliases": [
+      "quickstart"
+    ],
+    "options": [],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph viewer",
+    "aliases": [],
+    "options": [
+      "no-open",
+      "port",
+      "session"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph backend",
+    "aliases": [],
+    "options": [],
+    "positionals": []
+  },
+  {
+    "path": "cartograph backend status",
+    "aliases": [],
+    "options": [
+      "json"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph backend start",
+    "aliases": [],
+    "options": [
+      "bin",
+      "dry-run",
+      "json"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph backend restart",
+    "aliases": [],
+    "options": [
+      "bin",
+      "dry-run",
+      "force",
+      "json",
+      "tier"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph backend stop",
+    "aliases": [],
+    "options": [
+      "force",
+      "json"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph backend logs",
+    "aliases": [],
+    "options": [
+      "json",
+      "lines",
+      "tier"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph doctor",
+    "aliases": [],
+    "options": [
+      "fix",
+      "json",
+      "no-project-checks",
+      "skip-project-checks"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph upgrade",
+    "aliases": [
+      "update"
+    ],
+    "options": [
+      "apply",
+      "json"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph setup",
+    "aliases": [],
+    "options": [
+      "database-connection-timeout-seconds",
+      "database-max-connections",
+      "database-pgvector",
+      "database-provider",
+      "database-query-timeout-ms",
+      "database-schema",
+      "database-ssl",
+      "database-url",
+      "minimal",
+      "no-models"
+    ],
+    "positionals": [
+      "path"
+    ]
+  },
+  {
+    "path": "cartograph completions",
+    "aliases": [
+      "completion"
+    ],
+    "options": [],
+    "positionals": [
+      "shell"
+    ]
+  },
+  {
+    "path": "cartograph __complete",
+    "aliases": [],
+    "options": [],
+    "positionals": [
+      "words"
+    ]
+  },
+  {
+    "path": "cartograph similar",
+    "aliases": [],
+    "options": [
+      "min-score",
+      "project-path",
+      "same-language",
+      "top-k"
+    ],
+    "positionals": [
+      "symbol"
+    ]
+  },
+  {
+    "path": "cartograph changed-since",
+    "aliases": [],
+    "options": [
+      "project-path",
+      "since"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph verify",
+    "aliases": [],
+    "options": [
+      "depth",
+      "files",
+      "format",
+      "project-path",
+      "ref"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph note",
+    "aliases": [],
+    "options": [
+      "action",
+      "author",
+      "id",
+      "kind",
+      "limit",
+      "project-path",
+      "since",
+      "symbol",
+      "text"
+    ],
+    "positionals": [
+      "action"
+    ]
+  },
+  {
+    "path": "cartograph entry-points",
+    "aliases": [],
+    "options": [
+      "bucket",
+      "limit",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph context",
+    "aliases": [],
+    "options": [
+      "code",
+      "explain",
+      "format",
+      "include-code",
+      "local-learning",
+      "low-tokens",
+      "max-nodes",
+      "no-code",
+      "project-path",
+      "query",
+      "retrieval-mode",
+      "working-tree"
+    ],
+    "positionals": [
+      "task"
+    ]
+  },
+  {
+    "path": "cartograph propose-rename",
+    "aliases": [],
+    "options": [
+      "doc-limit",
+      "limit",
+      "project-path"
+    ],
+    "positionals": [
+      "symbol",
+      "newName"
+    ]
+  },
+  {
+    "path": "cartograph blame",
+    "aliases": [],
+    "options": [
+      "limit",
+      "per-commit-peers",
+      "project-path"
+    ],
+    "positionals": [
+      "symbol"
+    ]
+  },
+  {
+    "path": "cartograph history",
+    "aliases": [],
+    "options": [
+      "limit",
+      "min-count",
+      "project-path"
+    ],
+    "positionals": [
+      "symbol"
+    ]
+  },
+  {
+    "path": "cartograph node",
+    "aliases": [],
+    "options": [
+      "code",
+      "deep",
+      "detail",
+      "include-betweenness",
+      "include-biomarkers",
+      "include-callees",
+      "include-callers",
+      "include-tests",
+      "line-limit",
+      "line-offset",
+      "live-source",
+      "low-tokens",
+      "project-path",
+      "symbol"
+    ],
+    "positionals": [
+      "symbols"
+    ]
+  },
+  {
+    "path": "cartograph compare-to-ref",
+    "aliases": [],
+    "options": [
+      "findings-delta",
+      "head",
+      "include-biomarkers",
+      "include-edges",
+      "no-suppress-line-range-only",
+      "path-filter",
+      "project-path",
+      "ref",
+      "suppress-line-range-only"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph deps",
+    "aliases": [],
+    "options": [
+      "limit",
+      "low-tokens",
+      "mode",
+      "project-path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph biomarkers",
+    "aliases": [],
+    "options": [
+      "biomarker",
+      "exclude-file",
+      "format",
+      "limit",
+      "low-tokens",
+      "max-metric",
+      "min-centrality",
+      "min-metric",
+      "min-severity",
+      "mode",
+      "project-path",
+      "symbol",
+      "symbols"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph hotspots",
+    "aliases": [],
+    "options": [
+      "category",
+      "limit",
+      "min-centrality",
+      "min-commits",
+      "project-path",
+      "recency-days",
+      "sort-by"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph host",
+    "aliases": [],
+    "options": [
+      "include-install-targets",
+      "location",
+      "low-tokens",
+      "max-depth",
+      "mode",
+      "no-include-install-targets",
+      "path"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph dead-code",
+    "aliases": [],
+    "options": [
+      "exclude-fixtures",
+      "include-tests",
+      "limit",
+      "max-candidates",
+      "mode",
+      "no-exclude-fixtures",
+      "project-path",
+      "verdict",
+      "via"
+    ],
+    "positionals": []
+  },
+  {
+    "path": "cartograph imports",
+    "aliases": [],
+    "options": [
+      "dynamic",
+      "exclude-fixtures",
+      "ext-missing",
+      "file",
+      "language",
+      "limit",
+      "low-tokens",
+      "no-exclude-fixtures",
+      "project-path",
+      "source",
+      "target"
+    ],
+    "positionals": [
+      "pathFilter"
+    ]
+  },
+  {
+    "path": "cartograph explore",
+    "aliases": [],
+    "options": [
+      "low-tokens",
+      "max-files",
+      "project-path",
+      "query",
+      "since",
+      "start",
+      "summary"
+    ],
+    "positionals": [
+      "query"
+    ]
+  },
+  {
+    "path": "cartograph tests-for",
+    "aliases": [],
+    "options": [
+      "depth",
+      "files",
+      "filter",
+      "project-path"
+    ],
+    "positionals": [
+      "symbol"
+    ]
+  },
+  {
+    "path": "cartograph role",
+    "aliases": [],
+    "options": [
+      "limit",
+      "project-path",
+      "symbol",
+      "symbols",
+      "via"
+    ],
+    "positionals": [
+      "role"
+    ]
+  },
+  {
+    "path": "cartograph sql",
+    "aliases": [],
+    "options": [
+      "compact",
+      "limit",
+      "project-path",
+      "schema",
+      "tables",
+      "timeout-ms"
+    ],
+    "positionals": [
+      "query"
+    ]
+  },
+  {
+    "path": "cartograph coverage",
+    "aliases": [],
+    "options": [
+      "clear",
+      "include-tests",
+      "kinds",
+      "limit",
+      "max-pct",
+      "min-centrality",
+      "mode",
+      "no-include-tests",
+      "path-filter",
+      "project-path",
+      "report-path",
+      "source",
+      "via"
+    ],
+    "positionals": [
+      "symbol"
+    ]
+  },
+  {
+    "path": "cartograph graph",
+    "aliases": [],
+    "options": [
+      "compact",
+      "direction",
+      "edge-kind",
+      "fields",
+      "hops",
+      "include-roles",
+      "include-tests",
+      "limit",
+      "low-tokens",
+      "max-nodes",
+      "min-confidence",
+      "min-score",
+      "no-compact",
+      "no-include-tests",
+      "project-path",
+      "rank-by",
+      "same-language",
+      "since",
+      "start",
+      "to",
+      "top-k"
+    ],
+    "positionals": [
+      "start"
+    ]
+  }
+]

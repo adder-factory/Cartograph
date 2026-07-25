@@ -6,15 +6,63 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $ReleaseDir = Join-Path $Root 'release'
+$StagingRoot = Join-Path $ReleaseDir '.staging'
 $StageName = "cartograph-$AssetTarget"
-$Stage = Join-Path $ReleaseDir $StageName
+$Stage = Join-Path $StagingRoot $StageName
 $Archive = Join-Path $ReleaseDir "$StageName.zip"
+$Direct = Join-Path $ReleaseDir "$StageName.exe"
 $Binary = Join-Path $Root "target/$Target/release/cartograph.exe"
+
+function Assert-NoPrivateBuildRoots {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $Bytes = [System.IO.File]::ReadAllBytes($Path)
+  $Ascii = [System.Text.Encoding]::ASCII.GetString($Bytes)
+  $Utf16Le = [System.Text.Encoding]::Unicode.GetString($Bytes)
+  $Utf16Be = [System.Text.Encoding]::BigEndianUnicode.GetString($Bytes)
+  $PrivateRoots = @(
+    [PSCustomObject]@{ Label = 'repository root'; Value = $Root },
+    [PSCustomObject]@{ Label = 'GitHub workspace'; Value = $env:GITHUB_WORKSPACE },
+    [PSCustomObject]@{ Label = 'GitHub runner workspace'; Value = $env:RUNNER_WORKSPACE },
+    [PSCustomObject]@{ Label = 'Windows user profile'; Value = $env:USERPROFILE },
+    [PSCustomObject]@{ Label = 'home directory'; Value = $env:HOME },
+    [PSCustomObject]@{ Label = 'Windows user profile root'; Value = 'C:\Users\' },
+    [PSCustomObject]@{ Label = 'Unix user profile root'; Value = '/Users/' },
+    [PSCustomObject]@{ Label = 'GitHub Windows runner root'; Value = 'D:\a\' },
+    [PSCustomObject]@{ Label = 'GitHub Windows runner root'; Value = 'C:\a\' },
+    [PSCustomObject]@{ Label = 'GitHub Unix runner root'; Value = '/home/runner/work/' }
+  )
+
+  foreach ($PrivateRoot in $PrivateRoots) {
+    $Value = [string]$PrivateRoot.Value
+    if ([string]::IsNullOrWhiteSpace($Value)) { continue }
+
+    $Fragments = @(
+      $Value,
+      $Value.Replace('\', '/'),
+      $Value.Replace('/', '\')
+    ) | Select-Object -Unique
+    foreach ($Fragment in $Fragments) {
+      $ContainsFragment =
+        $Ascii.IndexOf($Fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Utf16Le.IndexOf($Fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Utf16Be.IndexOf($Fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+      if ($ContainsFragment) {
+        throw "release binary contains a private build-root fragment ($($PrivateRoot.Label))"
+      }
+    }
+  }
+}
 
 cargo build --locked --release --package cartograph-cli --target $Target
 if ($LASTEXITCODE -ne 0) { throw 'cargo release build failed' }
 
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Stage, $Archive
+# Audit the exact tag-built executable before either published artifact is made.
+# Read all three common encodings because Windows toolchains can retain both
+# narrow and wide path strings in PE files.
+Assert-NoPrivateBuildRoots -Path $Binary
+
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Stage, $Archive, $Direct
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'bin') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'share/cartograph') | Out-Null
 Copy-Item $Binary (Join-Path $Stage 'bin/cartograph.exe')
@@ -59,4 +107,9 @@ if (($Tree -join "`n") -match '(?i)(^|[-_ ])(sqlite|libsqlite)') {
 }
 
 Compress-Archive -Path $Stage -DestinationPath $Archive -Force
-Write-Host "[rust-release] wrote $Archive ($Version)"
+Copy-Item $Binary $Direct
+$DirectVersion = (& $Direct --version).Trim()
+if ($DirectVersion -ne $ExpectedVersion) {
+  throw "direct release binary version mismatch: expected '$ExpectedVersion', got '$DirectVersion'"
+}
+Write-Host "[rust-release] wrote $Archive and $Direct ($Version)"

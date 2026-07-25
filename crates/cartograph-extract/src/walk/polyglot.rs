@@ -118,6 +118,7 @@ pub(super) fn visit_declaration(
         | SourceLanguage::Tsx
         | SourceLanguage::JavaScript
         | SourceLanguage::Jsx => Ok(false),
+        _ => Err(ExtractError::UnsupportedLanguage),
     }
 }
 

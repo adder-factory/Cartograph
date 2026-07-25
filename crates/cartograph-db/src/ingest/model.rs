@@ -2,8 +2,9 @@ use std::mem::size_of;
 
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
-    GenerationDigestVersion, SymbolId,
+    GenerationDigestVersion, SymbolId, Visibility,
 };
+use serde::Serialize;
 use serde_json::Value;
 
 /// One source-file fact staged into an immutable generation.
@@ -46,6 +47,28 @@ pub struct SymbolInput {
     pub end_line: u32,
     /// Digest of the normalized structural representation.
     pub structural_digest: ContentDigest,
+    /// Language-level declaration visibility when the extractor can prove it.
+    pub visibility: Option<Visibility>,
+    /// Whether the declaration is exported from its module or package.
+    pub exported: bool,
+    /// Whether the declaration is the module's default export.
+    pub default_export: bool,
+    /// Whether the declaration is asynchronous.
+    pub async_symbol: bool,
+    /// Whether the declaration is a static member.
+    pub static_member: bool,
+    /// Whether the source contains a declaration without an implementation body.
+    pub declaration_only: bool,
+    /// Sampled directed Brandes betweenness, normalized to parts per billion.
+    ///
+    /// The value is derived from this generation's structural graph and is
+    /// therefore intentionally excluded from the logical generation digest.
+    pub betweenness_ppb: Option<u32>,
+    /// Directed PageRank over calls and references, normalized to parts per billion.
+    ///
+    /// Like betweenness, this is derived from the generation graph and excluded
+    /// from the logical generation digest.
+    pub pagerank_ppb: Option<u32>,
 }
 
 /// One resolved structural graph edge.
@@ -61,6 +84,41 @@ pub struct EdgeInput {
     pub confidence: f32,
     /// Bounded resolver/extractor provenance.
     pub provenance: String,
+    /// Exact number of relation sites represented by this canonical edge.
+    pub site_count: u32,
+}
+
+/// Whether a persisted reference span is an exact token or a bounded legacy anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceSpanPrecision {
+    /// Start/end identify the exact retained source token.
+    Exact,
+    /// Start/end identify a validated point or line anchor, not the normalized name itself.
+    CoarsePoint,
+    /// Start/end conservatively reuse the validated lexical owner span.
+    CoarseOwner,
+}
+
+impl ReferenceSpanPrecision {
+    /// Stable PostgreSQL representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::CoarsePoint => "coarse_point",
+            Self::CoarseOwner => "coarse_owner",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, ()> {
+        match value {
+            "exact" => Ok(Self::Exact),
+            "coarse_point" => Ok(Self::CoarsePoint),
+            "coarse_owner" => Ok(Self::CoarseOwner),
+            _ => Err(()),
+        }
+    }
 }
 
 /// One source span that refers to an optional resolved symbol.
@@ -84,6 +142,10 @@ pub struct ReferenceInput {
     pub confidence: f32,
     /// Bounded resolver provenance, including explicit unresolved outcomes.
     pub resolution_provenance: String,
+    /// Exact number of source sites represented by this retained anchor row.
+    pub site_count: u32,
+    /// Machine-readable precision of the retained source span.
+    pub span_precision: ReferenceSpanPrecision,
 }
 
 /// Search document staged as part of one immutable generation.

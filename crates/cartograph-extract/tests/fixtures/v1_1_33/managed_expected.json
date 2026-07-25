@@ -1,0 +1,85 @@
+{
+  "baseline": "v1.1.33",
+  "captured_from_commit": "041e1859a25e27e867277a2b813ff0786ac2d0eb",
+  "policy": "Every useful v1 Java and C# declaration, containment, and reference must survive after explicit namespace qualification. V2 may add package/namespace symbols, local variables, type references, import bindings, public-export semantics, exact reference sites, cleaner doc comments, receiver-qualified C# calls, and target-kind-deferred C# inheritance, but each delta is asserted by the oracle test.",
+  "cases": [
+    {
+      "path": "OrderService.java",
+      "language": "java",
+      "namespace_prefix": "com.acme.orders::",
+      "symbols": [
+        { "kind": "import", "name": "java.util.List", "qualified_name": "java.util.List", "start_line": 3, "end_line": 3, "start_column": 0, "end_column": 22, "signature": "import java.util.List;", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": null },
+        { "kind": "import", "name": "java.util.Collections.emptyList", "qualified_name": "java.util.Collections.emptyList", "start_line": 4, "end_line": 4, "start_column": 0, "end_column": 46, "signature": "import static java.util.Collections.emptyList;", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": null },
+        { "kind": "import", "name": "java.time", "qualified_name": "java.time", "start_line": 5, "end_line": 5, "start_column": 0, "end_column": 19, "signature": "import java.time.*;", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": null },
+        { "kind": "class", "name": "OrderService", "qualified_name": "OrderService", "start_line": 7, "end_line": 28, "start_column": 0, "end_column": 1, "signature": null, "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "public" },
+        { "kind": "field", "name": "repository", "qualified_name": "OrderService::repository", "start_line": 9, "end_line": 9, "start_column": 29, "end_column": 39, "signature": "Repository repository", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "private" },
+        { "kind": "field", "name": "KIND", "qualified_name": "OrderService::KIND", "start_line": 10, "end_line": 10, "start_column": 31, "end_column": 59, "signature": "String KIND", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": true, "visibility": "public" },
+        { "kind": "method", "name": "OrderService", "qualified_name": "OrderService::OrderService", "start_line": 13, "end_line": 15, "start_column": 4, "end_column": 5, "signature": "(Repository repository)", "docstring": "Creates the service.", "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "public" },
+        { "kind": "method", "name": "find", "qualified_name": "OrderService::find", "start_line": 17, "end_line": 23, "start_column": 4, "end_column": 5, "signature": "List<Order> (String id)", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "public" },
+        { "kind": "method", "name": "add", "qualified_name": "OrderService::add", "start_line": 25, "end_line": 27, "start_column": 4, "end_column": 5, "signature": "int (int left, int right)", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": true, "visibility": "public" }
+      ],
+      "containments": [
+        { "parent": "OrderService", "child": "OrderService::repository" },
+        { "parent": "OrderService", "child": "OrderService::KIND" },
+        { "parent": "OrderService", "child": "OrderService::OrderService" },
+        { "parent": "OrderService", "child": "OrderService::find" },
+        { "parent": "OrderService", "child": "OrderService::add" }
+      ],
+      "references": [
+        { "owner": null, "name": "java.util.List", "kind": "imports", "line": 3, "column": 0 },
+        { "owner": null, "name": "java.util.Collections.emptyList", "kind": "imports", "line": 4, "column": 0 },
+        { "owner": null, "name": "java.time", "kind": "imports", "line": 5, "column": 0 },
+        { "owner": "OrderService", "name": "BaseService", "kind": "extends", "line": 8, "column": 34 },
+        { "owner": "OrderService", "name": "Closeable", "kind": "implements", "line": 8, "column": 57 },
+        { "owner": "OrderService", "name": "Auditable", "kind": "implements", "line": 8, "column": 68 },
+        { "owner": "OrderService", "name": "Deprecated", "kind": "decorates", "line": 7, "column": 0 },
+        { "owner": "OrderService::OrderService", "name": "Repository", "kind": "type_of", "line": 13, "column": 24 },
+        { "owner": "OrderService::OrderService", "name": "repository", "kind": "field_access", "line": 14, "column": 13 },
+        { "owner": "OrderService::find", "name": "List", "kind": "returns", "line": 18, "column": 11 },
+        { "owner": "OrderService::find", "name": "Order", "kind": "returns", "line": 18, "column": 16 },
+        { "owner": "OrderService::find", "name": "Override", "kind": "decorates", "line": 17, "column": 4 },
+        { "owner": "OrderService::find", "name": "Order", "kind": "instantiates", "line": 19, "column": 23 },
+        { "owner": "OrderService::find", "name": "repository.findById", "kind": "calls", "line": 20, "column": 8 },
+        { "owner": "OrderService::find", "name": "repository", "kind": "field_access", "line": 21, "column": 13 }
+      ]
+    },
+    {
+      "path": "OrderService.cs",
+      "language": "csharp",
+      "namespace_prefix": "Acme.Orders::",
+      "symbols": [
+        { "kind": "import", "name": "System", "qualified_name": "System", "start_line": 1, "end_line": 1, "start_column": 0, "end_column": 13, "signature": "using System;", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": null },
+        { "kind": "import", "name": "System.Collections.Generic", "qualified_name": "System.Collections.Generic", "start_line": 2, "end_line": 2, "start_column": 0, "end_column": 33, "signature": "using System.Collections.Generic;", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": null },
+        { "kind": "import", "name": "System.Console", "qualified_name": "System.Console", "start_line": 3, "end_line": 3, "start_column": 0, "end_column": 36, "signature": "using ConsoleAlias = System.Console;", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": null },
+        { "kind": "import", "name": "System.Math", "qualified_name": "System.Math", "start_line": 4, "end_line": 4, "start_column": 0, "end_column": 25, "signature": "using static System.Math;", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": null },
+        { "kind": "class", "name": "OrderService", "qualified_name": "OrderService", "start_line": 8, "end_line": 23, "start_column": 0, "end_column": 1, "signature": null, "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "public" },
+        { "kind": "method", "name": "OrderService", "qualified_name": "OrderService::OrderService", "start_line": 9, "end_line": 9, "start_column": 25, "end_column": 49, "signature": "(IRepository repository)", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "public" },
+        { "kind": "field", "name": "_repository", "qualified_name": "OrderService::_repository", "start_line": 11, "end_line": 11, "start_column": 33, "end_column": 57, "signature": "IRepository _repository", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "private" },
+        { "kind": "property", "name": "Name", "qualified_name": "OrderService::Name", "start_line": 12, "end_line": 12, "start_column": 4, "end_column": 64, "signature": "string Name", "docstring": null, "exported": false, "default_export": false, "async_symbol": false, "static_member": false, "visibility": "public" },
+        { "kind": "method", "name": "GetOrderAsync", "qualified_name": "OrderService::GetOrderAsync", "start_line": 15, "end_line": 22, "start_column": 4, "end_column": 5, "signature": "Task<Order> (string id)", "docstring": "/ <summary>Gets an order.</summary>", "exported": false, "default_export": false, "async_symbol": true, "static_member": false, "visibility": "public" }
+      ],
+      "containments": [
+        { "parent": "OrderService", "child": "OrderService::OrderService" },
+        { "parent": "OrderService", "child": "OrderService::_repository" },
+        { "parent": "OrderService", "child": "OrderService::Name" },
+        { "parent": "OrderService", "child": "OrderService::GetOrderAsync" }
+      ],
+      "references": [
+        { "owner": null, "name": "System", "kind": "imports", "line": 1, "column": 0 },
+        { "owner": null, "name": "System.Collections.Generic", "kind": "imports", "line": 2, "column": 0 },
+        { "owner": null, "name": "System.Console", "kind": "imports", "line": 3, "column": 0 },
+        { "owner": null, "name": "System.Math", "kind": "imports", "line": 4, "column": 0 },
+        { "owner": "OrderService", "name": "BaseService", "kind": "extends", "line": 9, "column": 52 },
+        { "owner": "OrderService", "name": "IDisposable", "kind": "extends", "line": 9, "column": 77 },
+        { "owner": "OrderService", "name": "Serializable", "kind": "decorates", "line": 8, "column": 1 },
+        { "owner": "OrderService::OrderService", "name": "IRepository", "kind": "type_of", "line": 9, "column": 26 },
+        { "owner": "OrderService::GetOrderAsync", "name": "Task", "kind": "returns", "line": 16, "column": 17 },
+        { "owner": "OrderService::GetOrderAsync", "name": "Order", "kind": "returns", "line": 16, "column": 22 },
+        { "owner": "OrderService::GetOrderAsync", "name": "Obsolete", "kind": "decorates", "line": 15, "column": 5 },
+        { "owner": "OrderService::GetOrderAsync", "name": "Order", "kind": "instantiates", "line": 18, "column": 21 },
+        { "owner": "OrderService::GetOrderAsync", "name": "FindById", "kind": "calls", "line": 19, "column": 8 },
+        { "owner": "OrderService::GetOrderAsync", "name": "ConsoleAlias.WriteLine", "kind": "calls", "line": 20, "column": 8 }
+      ]
+    }
+  ]
+}

@@ -11,13 +11,17 @@ use tempfile::NamedTempFile;
 use tokio::time::timeout;
 
 use super::{
-    ManagedBackupReport, ManagedContainerState, ManagedDatabase, ManagedDatabaseError,
-    ManagedDerivedIndexHealth, ManagedDestructiveConfirmation, ManagedDestructiveOperation,
-    ManagedInitialization, ManagedRemoveReport, ManagedRestoreReport, ManagedUpgradeReport,
-    container_state,
+    ManagedBackupReport, ManagedContainerState, ManagedDatabaseArchives, ManagedDatabaseError,
+    ManagedDatabaseMaintenance, ManagedDerivedIndexHealth, ManagedDestructiveConfirmation,
+    ManagedDestructiveOperation, ManagedInitialization, ManagedRemoveReport, ManagedRestoreReport,
+    ManagedUpgradeReport, container_state,
     credentials::DatabaseCredentials,
-    docker::{ContainerCreateSpec, ContainerInspection},
-    initialize_managed_database, validate_configured_port, validate_owned_container,
+    docker::{
+        ContainerArchivePath, ContainerCreateSpec, ContainerInspection, DatabaseArchiveOperation,
+        DatabaseArchiveRequest,
+    },
+    initialize_managed_database, validate_configured_port, validate_destructive_confirmation,
+    validate_owned_container,
 };
 use crate::{CartographDatabase, connect};
 
@@ -27,8 +31,6 @@ const BACKUP_CONTAINER_PATH: &str = "/tmp/cartograph-managed-backup.dump";
 const RESTORE_CONTAINER_PATH: &str = "/tmp/cartograph-managed-restore.dump";
 const ROLLBACK_CONTAINER_PATH: &str = "/tmp/cartograph-managed-rollback.dump";
 const UPGRADE_ROLLBACK_SUFFIX: &str = "-upgrade-rollback";
-const BM25_INDEX_NAME: &str = "search_documents_bm25_idx";
-const BM25_REBUILD_LOCK_NAMESPACE: &str = "cartograph-v2-bm25-rebuild";
 
 #[derive(Clone, Copy)]
 enum OriginalContainerState {
@@ -37,7 +39,7 @@ enum OriginalContainerState {
     Stopped,
 }
 
-impl ManagedDatabase {
+impl ManagedDatabaseArchives<'_> {
     /// Create and atomically persist a verified custom-format PostgreSQL archive.
     pub async fn backup(
         &self,
@@ -45,15 +47,23 @@ impl ManagedDatabase {
     ) -> Result<ManagedBackupReport, ManagedDatabaseError> {
         let destination = destination.as_ref();
         validate_new_backup_destination(destination)?;
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
-        self.require_healthy_owned_container(true).await?;
-        let _credentials = self.credentials.load()?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
+        self.database
+            .maintenance()
+            .require_healthy_owned_container(true)
+            .await?;
+        let _credentials = self.database.credentials.load()?;
 
         let result = self.backup_locked(destination).await;
         let cleanup = self
+            .database
             .docker
-            .remove_container_archive(&self.identity.container_name, BACKUP_CONTAINER_PATH)
+            .archives()
+            .remove_container_archive(
+                &self.database.identity.container_name,
+                BACKUP_CONTAINER_PATH,
+            )
             .await;
         prefer_archive_cleanup(result, cleanup)
     }
@@ -62,14 +72,31 @@ impl ManagedDatabase {
         &self,
         destination: &Path,
     ) -> Result<ManagedBackupReport, ManagedDatabaseError> {
-        self.docker
-            .remove_container_archive(&self.identity.container_name, BACKUP_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .remove_container_archive(
+                &self.database.identity.container_name,
+                BACKUP_CONTAINER_PATH,
+            )
             .await?;
-        self.docker
-            .create_database_archive(&self.identity.container_name, BACKUP_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .database_archive(DatabaseArchiveRequest::new(
+                &self.database.identity.container_name,
+                BACKUP_CONTAINER_PATH,
+                DatabaseArchiveOperation::Create,
+            ))
             .await?;
-        self.docker
-            .verify_database_archive(&self.identity.container_name, BACKUP_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .database_archive(DatabaseArchiveRequest::new(
+                &self.database.identity.container_name,
+                BACKUP_CONTAINER_PATH,
+                DatabaseArchiveOperation::Verify,
+            ))
             .await?;
 
         let parent = destination
@@ -78,10 +105,14 @@ impl ManagedDatabase {
             .ok_or(ManagedDatabaseError::BackupDestination)?;
         let temporary =
             NamedTempFile::new_in(parent).map_err(|_| ManagedDatabaseError::BackupDestination)?;
-        self.docker
+        self.database
+            .docker
+            .archives()
             .copy_from_container(
-                &self.identity.container_name,
-                BACKUP_CONTAINER_PATH,
+                ContainerArchivePath {
+                    name: &self.database.identity.container_name,
+                    path: BACKUP_CONTAINER_PATH,
+                },
                 temporary.path(),
             )
             .await?;
@@ -104,15 +135,19 @@ impl ManagedDatabase {
         source: impl AsRef<Path>,
         confirmation: ManagedDestructiveConfirmation,
     ) -> Result<ManagedRestoreReport, ManagedDatabaseError> {
-        self.validate_destructive_confirmation(
+        validate_destructive_confirmation(
+            self.database,
             &confirmation,
             ManagedDestructiveOperation::Restore,
         )?;
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
-        let staged = stage_restore_archive(source.as_ref(), self.credentials.path())?;
-        self.require_healthy_owned_container(true).await?;
-        let credentials = self.credentials.load()?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
+        let staged = stage_restore_archive(source.as_ref(), self.database.credentials.path())?;
+        self.database
+            .maintenance()
+            .require_healthy_owned_container(true)
+            .await?;
+        let credentials = self.database.credentials.load()?;
 
         let result = self.restore_locked(staged.path(), &credentials).await;
         let cleanup = self.cleanup_restore_archives().await;
@@ -124,29 +159,62 @@ impl ManagedDatabase {
         source: &Path,
         credentials: &DatabaseCredentials,
     ) -> Result<ManagedRestoreReport, ManagedDatabaseError> {
-        self.docker
+        self.database
+            .docker
+            .archives()
             .copy_to_container(
-                &self.identity.container_name,
                 source,
-                RESTORE_CONTAINER_PATH,
+                ContainerArchivePath {
+                    name: &self.database.identity.container_name,
+                    path: RESTORE_CONTAINER_PATH,
+                },
             )
             .await?;
-        self.docker
-            .verify_database_archive(&self.identity.container_name, RESTORE_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .database_archive(DatabaseArchiveRequest::new(
+                &self.database.identity.container_name,
+                RESTORE_CONTAINER_PATH,
+                DatabaseArchiveOperation::Verify,
+            ))
             .await?;
-        self.docker
-            .remove_container_archive(&self.identity.container_name, ROLLBACK_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .remove_container_archive(
+                &self.database.identity.container_name,
+                ROLLBACK_CONTAINER_PATH,
+            )
             .await?;
-        self.docker
-            .create_database_archive(&self.identity.container_name, ROLLBACK_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .database_archive(DatabaseArchiveRequest::new(
+                &self.database.identity.container_name,
+                ROLLBACK_CONTAINER_PATH,
+                DatabaseArchiveOperation::Create,
+            ))
             .await?;
-        self.docker
-            .verify_database_archive(&self.identity.container_name, ROLLBACK_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .database_archive(DatabaseArchiveRequest::new(
+                &self.database.identity.container_name,
+                ROLLBACK_CONTAINER_PATH,
+                DatabaseArchiveOperation::Verify,
+            ))
             .await?;
 
         if self
+            .database
             .docker
-            .restore_database_archive(&self.identity.container_name, RESTORE_CONTAINER_PATH)
+            .archives()
+            .database_archive(DatabaseArchiveRequest::new(
+                &self.database.identity.container_name,
+                RESTORE_CONTAINER_PATH,
+                DatabaseArchiveOperation::Restore,
+            ))
             .await
             .is_err()
         {
@@ -154,7 +222,7 @@ impl ManagedDatabase {
             return Err(ManagedDatabaseError::RestoreFailed);
         }
         match self.verify_restored_database(credentials).await {
-            Ok(initialized) => Ok(restore_report(initialized, &self.schema)),
+            Ok(initialized) => Ok(restore_report(initialized, &self.database.schema)),
             Err(_) => {
                 self.restore_rollback(credentials).await?;
                 Err(ManagedDatabaseError::RestoreVerificationFailed)
@@ -166,8 +234,14 @@ impl ManagedDatabase {
         &self,
         credentials: &DatabaseCredentials,
     ) -> Result<(), ManagedDatabaseError> {
-        self.docker
-            .restore_database_archive(&self.identity.container_name, ROLLBACK_CONTAINER_PATH)
+        self.database
+            .docker
+            .archives()
+            .database_archive(DatabaseArchiveRequest::new(
+                &self.database.identity.container_name,
+                ROLLBACK_CONTAINER_PATH,
+                DatabaseArchiveOperation::Restore,
+            ))
             .await
             .map_err(|_| ManagedDatabaseError::RestoreRollbackFailed)?;
         self.verify_restored_database(credentials)
@@ -180,9 +254,16 @@ impl ManagedDatabase {
         &self,
         credentials: &DatabaseCredentials,
     ) -> Result<ManagedInitialization, ManagedDatabaseError> {
-        let initialized = initialize_managed_database(credentials, self.port, &self.schema).await?;
-        let database = open_managed_database(credentials, self.port, &self.schema).await?;
-        let health = timeout(self.maintenance_timeout, read_bm25_health(&database)).await;
+        let initialized =
+            initialize_managed_database(credentials, self.database.port, &self.database.schema)
+                .await?;
+        let database =
+            open_managed_database(credentials, self.database.port, &self.database.schema).await?;
+        let health = timeout(
+            self.database.timeouts.maintenance,
+            read_bm25_health(&database),
+        )
+        .await;
         database.pool.close().await;
         let health = health.map_err(|_| ManagedDatabaseError::MaintenanceTimeout)??;
         if !health.healthy() {
@@ -193,49 +274,76 @@ impl ManagedDatabase {
 
     async fn cleanup_restore_archives(&self) -> Result<(), ManagedDatabaseError> {
         let restore = self
+            .database
             .docker
-            .remove_container_archive(&self.identity.container_name, RESTORE_CONTAINER_PATH)
+            .archives()
+            .remove_container_archive(
+                &self.database.identity.container_name,
+                RESTORE_CONTAINER_PATH,
+            )
             .await;
         let rollback = self
+            .database
             .docker
-            .remove_container_archive(&self.identity.container_name, ROLLBACK_CONTAINER_PATH)
+            .archives()
+            .remove_container_archive(
+                &self.database.identity.container_name,
+                ROLLBACK_CONTAINER_PATH,
+            )
             .await;
         restore.and(rollback)
     }
+}
 
+impl ManagedDatabaseMaintenance<'_> {
     /// Remove only resources whose labels, project identity, and data mount all match.
     pub async fn remove(
         &self,
         confirmation: ManagedDestructiveConfirmation,
     ) -> Result<ManagedRemoveReport, ManagedDatabaseError> {
-        self.validate_destructive_confirmation(&confirmation, ManagedDestructiveOperation::Remove)?;
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
+        validate_destructive_confirmation(
+            self.database,
+            &confirmation,
+            ManagedDestructiveOperation::Remove,
+        )?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
         let inspection = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?;
         if let Some(inspection) = inspection.as_ref() {
-            validate_owned_container(&self.identity, inspection, false)?;
+            validate_owned_container(&self.database.identity, inspection, false)?;
         }
-        let volume_exists = self.docker.volume_exists_owned(&self.identity).await?;
+        let volume_exists = self
+            .database
+            .docker
+            .volumes()
+            .volume_exists_owned(&self.database.identity)
+            .await?;
         if inspection.is_some() && !volume_exists {
             return Err(ManagedDatabaseError::ManagedVolumeMissing);
         }
-        let credentials_exist = self.credentials.validate_for_removal()?;
+        let credentials_exist = self.database.credentials.validate_for_removal()?;
 
         if inspection.is_some() {
-            self.docker
-                .remove_container(&self.identity.container_name)
+            self.database
+                .docker
+                .containers()
+                .remove_container(&self.database.identity.container_name)
                 .await?;
         }
         if volume_exists {
-            self.docker
-                .remove_volume(&self.identity.volume_name)
+            self.database
+                .docker
+                .volumes()
+                .remove_volume(&self.database.identity.volume_name)
                 .await?;
         }
         let credentials_removed = if credentials_exist {
-            self.credentials.remove()?
+            self.database.credentials.remove()?
         } else {
             false
         };
@@ -252,59 +360,83 @@ impl ManagedDatabase {
         &self,
         confirmation: ManagedDestructiveConfirmation,
     ) -> Result<ManagedUpgradeReport, ManagedDatabaseError> {
-        self.validate_destructive_confirmation(
+        validate_destructive_confirmation(
+            self.database,
             &confirmation,
             ManagedDestructiveOperation::Upgrade,
         )?;
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
         let inspection = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?
             .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
-        validate_owned_container(&self.identity, &inspection, false)?;
-        if !self.docker.volume_exists_owned(&self.identity).await? {
+        validate_owned_container(&self.database.identity, &inspection, false)?;
+        if !self
+            .database
+            .docker
+            .volumes()
+            .volume_exists_owned(&self.database.identity)
+            .await?
+        {
             return Err(ManagedDatabaseError::ManagedVolumeMissing);
         }
-        validate_configured_port(self.port, &inspection)?;
-        let credentials = self.credentials.load()?;
+        validate_configured_port(self.database.port, &inspection)?;
+        let credentials = self.database.credentials.load()?;
         if inspection.image == super::MANAGED_DATABASE_IMAGE {
             let initialized = self
                 .initialize_supported_existing(&inspection, &credentials)
                 .await?;
-            return Ok(upgrade_report(false, initialized, &self.schema));
+            return Ok(upgrade_report(false, initialized, &self.database.schema));
         }
 
         let original_state = original_container_state(&inspection)?;
-        let rollback_name = format!("{}{UPGRADE_ROLLBACK_SUFFIX}", self.identity.container_name);
+        let rollback_name = format!(
+            "{}{UPGRADE_ROLLBACK_SUFFIX}",
+            self.database.identity.container_name
+        );
         if self
+            .database
             .docker
+            .containers()
             .inspect_container(&rollback_name)
             .await?
             .is_some()
         {
             return Err(ManagedDatabaseError::UpgradeRollbackFailed);
         }
-        self.docker
+        self.database
+            .docker
             .ensure_image(super::MANAGED_DATABASE_IMAGE)
             .await?;
         self.quiesce_for_upgrade(original_state).await?;
         if let Err(error) = self
+            .database
             .docker
-            .rename_container(&self.identity.container_name, &rollback_name)
+            .containers()
+            .rename_container(&self.database.identity.container_name, &rollback_name)
             .await
         {
-            self.restore_original_container_state(&self.identity.container_name, original_state)
-                .await?;
+            self.restore_original_container_state(
+                &self.database.identity.container_name,
+                original_state,
+            )
+            .await?;
             return Err(error);
         }
 
         let replacement = self.create_and_initialize_upgrade(&credentials).await;
         match replacement {
             Ok(initialized) => {
-                self.docker.remove_container(&rollback_name).await?;
-                Ok(upgrade_report(true, initialized, &self.schema))
+                self.database
+                    .docker
+                    .containers()
+                    .remove_container(&rollback_name)
+                    .await?;
+                Ok(upgrade_report(true, initialized, &self.database.schema))
             }
             Err(error) => {
                 self.rollback_upgrade(&rollback_name, original_state)
@@ -320,14 +452,23 @@ impl ManagedDatabase {
         credentials: &DatabaseCredentials,
     ) -> Result<ManagedInitialization, ManagedDatabaseError> {
         let state = container_state(inspection);
-        let transition = self.transition_existing_container(state).await?;
+        let transition = self
+            .database
+            .lifecycle()
+            .transition_existing_container(state)
+            .await?;
         match self
+            .database
+            .lifecycle()
             .finish_start(credentials, transition == super::StartTransition::Pause)
             .await
         {
             Ok(initialized) => Ok(initialized),
             Err(error) => {
-                self.rollback_or_fail(transition).await?;
+                self.database
+                    .lifecycle()
+                    .rollback_or_fail(transition)
+                    .await?;
                 Err(error)
             }
         }
@@ -339,18 +480,24 @@ impl ManagedDatabase {
     ) -> Result<(), ManagedDatabaseError> {
         let result = match state {
             OriginalContainerState::Running => {
-                self.docker
-                    .stop_container(&self.identity.container_name)
+                self.database
+                    .docker
+                    .containers()
+                    .stop_container(&self.database.identity.container_name)
                     .await
             }
             OriginalContainerState::Paused => match self
+                .database
                 .docker
-                .unpause_container(&self.identity.container_name)
+                .containers()
+                .unpause_container(&self.database.identity.container_name)
                 .await
             {
                 Ok(()) => {
-                    self.docker
-                        .stop_container(&self.identity.container_name)
+                    self.database
+                        .docker
+                        .containers()
+                        .stop_container(&self.database.identity.container_name)
                         .await
                 }
                 Err(error) => Err(error),
@@ -358,7 +505,7 @@ impl ManagedDatabase {
             OriginalContainerState::Stopped => Ok(()),
         };
         if let Err(error) = result {
-            self.restore_original_container_state(&self.identity.container_name, state)
+            self.restore_original_container_state(&self.database.identity.container_name, state)
                 .await?;
             return Err(error);
         }
@@ -369,20 +516,32 @@ impl ManagedDatabase {
         &self,
         credentials: &DatabaseCredentials,
     ) -> Result<ManagedInitialization, ManagedDatabaseError> {
-        self.docker
+        self.database
+            .docker
+            .containers()
             .create_container(&ContainerCreateSpec {
-                identity: &self.identity,
-                port: self.port,
+                identity: &self.database.identity,
+                port: self.database.port,
                 image: super::MANAGED_DATABASE_IMAGE,
             })
             .await?;
-        self.docker
-            .install_password_file(&self.identity.container_name, self.credentials.path())
+        self.database
+            .docker
+            .containers()
+            .install_password_file(
+                &self.database.identity.container_name,
+                self.database.credentials.path(),
+            )
             .await?;
-        self.docker
-            .start_container(&self.identity.container_name, self.port)
+        self.database
+            .docker
+            .containers()
+            .start_container(&self.database.identity.container_name, self.database.port)
             .await?;
-        self.finish_start(credentials, false).await
+        self.database
+            .lifecycle()
+            .finish_start(credentials, false)
+            .await
     }
 
     async fn rollback_upgrade(
@@ -391,31 +550,39 @@ impl ManagedDatabase {
         state: OriginalContainerState,
     ) -> Result<(), ManagedDatabaseError> {
         if let Some(replacement) = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await
             .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?
         {
-            validate_owned_container(&self.identity, &replacement, true)
+            validate_owned_container(&self.database.identity, &replacement, true)
                 .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
-            self.docker
-                .remove_container(&self.identity.container_name)
+            self.database
+                .docker
+                .containers()
+                .remove_container(&self.database.identity.container_name)
                 .await
                 .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
         }
         let rollback = self
+            .database
             .docker
+            .containers()
             .inspect_container(rollback_name)
             .await
             .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?
             .ok_or(ManagedDatabaseError::UpgradeRollbackFailed)?;
-        validate_owned_container(&self.identity, &rollback, false)
+        validate_owned_container(&self.database.identity, &rollback, false)
             .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
-        self.docker
-            .rename_container(rollback_name, &self.identity.container_name)
+        self.database
+            .docker
+            .containers()
+            .rename_container(rollback_name, &self.database.identity.container_name)
             .await
             .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
-        self.restore_original_container_state(&self.identity.container_name, state)
+        self.restore_original_container_state(&self.database.identity.container_name, state)
             .await
     }
 
@@ -425,12 +592,14 @@ impl ManagedDatabase {
         state: OriginalContainerState,
     ) -> Result<(), ManagedDatabaseError> {
         let inspection = self
+            .database
             .docker
+            .containers()
             .inspect_container(name)
             .await
             .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?
             .ok_or(ManagedDatabaseError::UpgradeRollbackFailed)?;
-        validate_owned_container(&self.identity, &inspection, false)
+        validate_owned_container(&self.database.identity, &inspection, false)
             .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
         let current = original_container_state(&inspection)
             .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
@@ -439,12 +608,16 @@ impl ManagedDatabase {
             | (OriginalContainerState::Paused, OriginalContainerState::Paused)
             | (OriginalContainerState::Stopped, OriginalContainerState::Stopped) => Ok(()),
             (OriginalContainerState::Running, OriginalContainerState::Paused) => self
+                .database
                 .docker
+                .containers()
                 .unpause_container(name)
                 .await
                 .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed),
             (OriginalContainerState::Paused, OriginalContainerState::Running) => self
+                .database
                 .docker
+                .containers()
                 .pause_container(name)
                 .await
                 .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed),
@@ -452,16 +625,22 @@ impl ManagedDatabase {
                 OriginalContainerState::Running | OriginalContainerState::Paused,
                 OriginalContainerState::Stopped,
             ) => {
-                self.docker
-                    .install_password_file(name, self.credentials.path())
+                self.database
+                    .docker
+                    .containers()
+                    .install_password_file(name, self.database.credentials.path())
                     .await
                     .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
-                self.docker
-                    .start_container(name, self.port)
+                self.database
+                    .docker
+                    .containers()
+                    .start_container(name, self.database.port)
                     .await
                     .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
                 if matches!(state, OriginalContainerState::Paused) {
-                    self.docker
+                    self.database
+                        .docker
+                        .containers()
                         .pause_container(name)
                         .await
                         .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
@@ -469,16 +648,22 @@ impl ManagedDatabase {
                 Ok(())
             }
             (OriginalContainerState::Stopped, OriginalContainerState::Running) => self
+                .database
                 .docker
+                .containers()
                 .stop_container(name)
                 .await
                 .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed),
             (OriginalContainerState::Stopped, OriginalContainerState::Paused) => {
-                self.docker
+                self.database
+                    .docker
+                    .containers()
                     .unpause_container(name)
                     .await
                     .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)?;
-                self.docker
+                self.database
+                    .docker
+                    .containers()
                     .stop_container(name)
                     .await
                     .map_err(|_| ManagedDatabaseError::UpgradeRollbackFailed)
@@ -486,37 +671,44 @@ impl ManagedDatabase {
         }
     }
 
-    /// Read the schema-qualified ParadeDB BM25 catalog state without mutation.
+    /// Read aggregate generation-local ParadeDB BM25 catalog health without mutation.
     pub async fn derived_index_health(
         &self,
     ) -> Result<ManagedDerivedIndexHealth, ManagedDatabaseError> {
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
         self.require_healthy_owned_container(true).await?;
-        let credentials = self.credentials.load()?;
-        let database = open_managed_database(&credentials, self.port, &self.schema).await?;
-        let result = timeout(self.maintenance_timeout, read_bm25_health(&database)).await;
+        let credentials = self.database.credentials.load()?;
+        let database =
+            open_managed_database(&credentials, self.database.port, &self.database.schema).await?;
+        let result = timeout(
+            self.database.timeouts.maintenance,
+            read_bm25_health(&database),
+        )
+        .await;
         database.pool.close().await;
         result.map_err(|_| ManagedDatabaseError::MaintenanceTimeout)?
     }
 
-    /// Transactionally rebuild the derived ParadeDB BM25 index and prove its catalog health.
+    /// Repair missing/invalid generation-local BM25 relations and prove aggregate health.
     pub async fn rebuild_derived_indexes(
         &self,
         confirmation: ManagedDestructiveConfirmation,
     ) -> Result<ManagedDerivedIndexHealth, ManagedDatabaseError> {
-        self.validate_destructive_confirmation(
+        validate_destructive_confirmation(
+            self.database,
             &confirmation,
             ManagedDestructiveOperation::RebuildDerivedIndexes,
         )?;
-        self.docker.ensure_available().await?;
-        let _lifecycle_lock = self.credentials.acquire_lifecycle_lock()?;
+        self.database.docker.ensure_available().await?;
+        let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
         self.require_healthy_owned_container(true).await?;
-        let credentials = self.credentials.load()?;
-        let database = open_managed_database(&credentials, self.port, &self.schema).await?;
+        let credentials = self.database.credentials.load()?;
+        let database =
+            open_managed_database(&credentials, self.database.port, &self.database.schema).await?;
         let result = timeout(
-            self.maintenance_timeout,
-            rebuild_bm25_index(&database, self.maintenance_timeout),
+            self.database.timeouts.maintenance,
+            repair_bm25_relations(&database, self.database.timeouts.maintenance),
         )
         .await;
         database.pool.close().await;
@@ -528,13 +720,19 @@ impl ManagedDatabase {
         require_supported_image: bool,
     ) -> Result<ContainerInspection, ManagedDatabaseError> {
         let inspection = self
+            .database
             .docker
-            .inspect_container(&self.identity.container_name)
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
             .await?
             .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
-        validate_owned_container(&self.identity, &inspection, require_supported_image)?;
-        super::verify_volume(&self.docker, &self.identity).await?;
-        validate_configured_port(self.port, &inspection)?;
+        validate_owned_container(
+            &self.database.identity,
+            &inspection,
+            require_supported_image,
+        )?;
+        super::verify_volume(&self.database.docker.volumes(), &self.database.identity).await?;
+        validate_configured_port(self.database.port, &inspection)?;
         if container_state(&inspection) != ManagedContainerState::Healthy {
             return Err(ManagedDatabaseError::DatabaseNotHealthyForMaintenance);
         }
@@ -695,19 +893,57 @@ async fn open_managed_database(
 async fn read_bm25_health(
     database: &CartographDatabase,
 ) -> Result<ManagedDerivedIndexHealth, ManagedDatabaseError> {
-    let row = query(
-        r#"SELECT indexes.indisvalid, indexes.indisready, methods.amname
-            FROM pg_class AS classes
-            JOIN pg_namespace AS namespaces ON namespaces.oid = classes.relnamespace
-            JOIN pg_index AS indexes ON indexes.indexrelid = classes.oid
-            JOIN pg_am AS methods ON methods.oid = classes.relam
-            WHERE namespaces.nspname = $1 AND classes.relname = $2"#,
-    )
-    .bind(database.schema().as_str())
-    .bind(BM25_INDEX_NAME)
-    .fetch_optional(&database.pool)
-    .await
-    .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?;
+    let schema = crate::database::quoted_schema(database.schema());
+    let sql = format!(
+        r#"WITH required AS (
+                SELECT project_id, generation_id
+                FROM {schema}."index_generations"
+                WHERE state IN ('current', 'ready')
+            ), healthy AS (
+                SELECT required.project_id, required.generation_id
+                FROM required
+                INNER JOIN {schema}."generation_search_relations" AS relations
+                  ON relations.project_id = required.project_id
+                 AND relations.generation_id = required.generation_id
+                INNER JOIN pg_catalog.pg_namespace AS namespaces
+                  ON namespaces.nspname = $1
+                INNER JOIN pg_catalog.pg_class AS tables
+                  ON tables.relnamespace = namespaces.oid
+                 AND tables.relname = 'search_g_'
+                     || replace(required.generation_id::text, '-', '')
+                 AND tables.relkind = 'r'
+                 AND tables.relpersistence = 'p'
+                INNER JOIN pg_catalog.pg_class AS index_relations
+                  ON index_relations.relnamespace = namespaces.oid
+                 AND index_relations.relname = tables.relname || '_bm25'
+                INNER JOIN pg_catalog.pg_index AS indexes
+                  ON indexes.indexrelid = index_relations.oid
+                 AND indexes.indrelid = tables.oid
+                 AND indexes.indisvalid
+                 AND indexes.indisready
+                INNER JOIN pg_catalog.pg_am AS methods
+                  ON methods.oid = index_relations.relam
+                 AND methods.amname = 'bm25'
+            ), counts AS (
+                SELECT (SELECT count(*) FROM required) AS required_count,
+                       (SELECT count(*) FROM healthy) AS healthy_count
+            )
+            SELECT to_regclass($2) IS NOT NULL AS present,
+                   required_count = healthy_count AS valid,
+                   required_count = healthy_count AS ready,
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_am WHERE amname = 'bm25')
+                       AS bm25_access_method
+            FROM counts"#
+    );
+    let row = query(AssertSqlSafe(sql))
+        .bind(database.schema().as_str())
+        .bind(format!(
+            "{}.generation_search_relations",
+            database.schema().as_str()
+        ))
+        .fetch_optional(&database.pool)
+        .await
+        .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?;
     decode_bm25_health(row.as_ref())
 }
 
@@ -723,98 +959,40 @@ fn decode_bm25_health(
         });
     };
     Ok(ManagedDerivedIndexHealth {
-        present: true,
-        valid: row
+        present: row
             .try_get::<bool, _>(0)
             .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
-        ready: row
+        valid: row
             .try_get::<bool, _>(1)
             .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
+        ready: row
+            .try_get::<bool, _>(2)
+            .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
         bm25_access_method: row
-            .try_get::<String, _>(2)
-            .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?
-            == "bm25",
+            .try_get::<bool, _>(3)
+            .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
     })
 }
 
-async fn rebuild_bm25_index(
+async fn repair_bm25_relations(
     database: &CartographDatabase,
     statement_timeout: std::time::Duration,
 ) -> Result<ManagedDerivedIndexHealth, ManagedDatabaseError> {
-    let mut transaction = database
-        .pool
-        .begin()
-        .await
-        .map_err(|_| ManagedDatabaseError::DatabaseConnection)?;
-    if crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
-        .await
-        .is_err()
-    {
-        let _ = transaction.rollback().await;
-        return Err(ManagedDatabaseError::MaintenanceTimeout);
-    }
-    let lock_key = format!(
-        "{BM25_REBUILD_LOCK_NAMESPACE}:{}",
-        database.schema().as_str()
-    );
-    if query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(lock_key)
-        .execute(&mut *transaction)
-        .await
-        .is_err()
-    {
-        let _ = transaction.rollback().await;
-        return Err(ManagedDatabaseError::DatabaseCapabilityProbe);
-    }
-    let quoted_schema = crate::database::quoted_schema(database.schema());
-    let drop_statement = format!("DROP INDEX IF EXISTS {quoted_schema}.\"{BM25_INDEX_NAME}\"");
-    let create_statement = crate::migrations::SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE
-        .replace("{schema}", &quoted_schema);
-    let rebuilt = async {
-        query(AssertSqlSafe(drop_statement))
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| ManagedDatabaseError::DerivedIndexUnhealthy)?;
-        query(AssertSqlSafe(create_statement))
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| ManagedDatabaseError::DerivedIndexUnhealthy)?;
-        let health_statement = r#"SELECT indexes.indisvalid, indexes.indisready, methods.amname
-                FROM pg_class AS classes
-                JOIN pg_namespace AS namespaces ON namespaces.oid = classes.relnamespace
-                JOIN pg_index AS indexes ON indexes.indexrelid = classes.oid
-                JOIN pg_am AS methods ON methods.oid = classes.relam
-                WHERE namespaces.nspname = $1 AND classes.relname = $2"#;
-        let row = query(health_statement)
-            .bind(database.schema().as_str())
-            .bind(BM25_INDEX_NAME)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(|_| ManagedDatabaseError::DerivedIndexUnhealthy)?;
-        let health = decode_bm25_health(row.as_ref())?;
-        if !health.healthy() {
-            return Err(ManagedDatabaseError::DerivedIndexUnhealthy);
-        }
-        Ok(health)
-    }
-    .await;
-    let health = match rebuilt {
-        Ok(health) => health,
-        Err(error) => {
-            let _ = transaction.rollback().await;
-            return Err(error);
-        }
-    };
-    transaction
-        .commit()
+    database
+        .maintain_generation_search_relations(Some(statement_timeout))
         .await
         .map_err(|_| ManagedDatabaseError::DerivedIndexUnhealthy)?;
+    let health = read_bm25_health(database).await?;
+    if !health.healthy() {
+        return Err(ManagedDatabaseError::DerivedIndexUnhealthy);
+    }
     Ok(health)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::managed::ManagedDatabase;
 
     const LIVE_SCHEMA: &str = "cartograph_managed_maintenance_test";
     const LIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
@@ -942,104 +1120,259 @@ mod tests {
         let database = live_database(directory.path());
         let _cleanup = live_cleanup(&database, None);
         let started = database
+            .lifecycle()
             .start()
             .await
             .unwrap_or_else(|error| panic!("could not start maintenance database: {error}"));
         assert!(started.capabilities.ready);
 
+        let good_archive = directory.path().join("good.dump");
+        install_marker_and_backup(&database, &good_archive).await;
+        assert_verified_restore(&database, &good_archive).await;
+
+        let incomplete_archive = directory.path().join("missing-derived-index.dump");
+        prepare_incomplete_archive_and_rebuild(&database, &incomplete_archive).await;
+        assert_incomplete_restore_rebuilds(&database, &incomplete_archive).await;
+
+        let incompatible_archive = directory.path().join("invalid-migration-ledger.dump");
+        prepare_incompatible_archive(&database, &incompatible_archive).await;
+        assert_incompatible_restore_rolls_back(&database, &incompatible_archive).await;
+        assert_malformed_restore_is_rejected(&database, directory.path()).await;
+        assert_database_removal(&database).await;
+    }
+
+    async fn install_marker_and_backup(database: &ManagedDatabase, good_archive: &Path) {
         execute_test_sql(
-            &database,
+            database,
             r#"CREATE TABLE "cartograph_managed_maintenance_test"."maintenance_marker" (
                 value text NOT NULL
             )"#,
         )
         .await;
         execute_test_sql(
-            &database,
+            database,
             r#"INSERT INTO "cartograph_managed_maintenance_test"."maintenance_marker" (value)
                 VALUES ('from-backup')"#,
         )
         .await;
-        let good_archive = directory.path().join("good.dump");
+        install_managed_search_fixture(database).await;
         let backup = database
-            .backup(&good_archive)
+            .archives()
+            .backup(good_archive)
             .await
             .unwrap_or_else(|error| panic!("managed backup failed: {error}"));
         assert!(backup.bytes > ARCHIVE_MAGIC_BYTES);
+    }
 
+    async fn install_managed_search_fixture(database: &ManagedDatabase) {
+        const PROJECT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const GENERATION: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        const DOCUMENT: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        const DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
         execute_test_sql(
-            &database,
+            database,
+            format!(
+                r#"INSERT INTO "{LIVE_SCHEMA}"."projects" (
+                        project_id, root_identity, repository_fingerprint
+                    ) VALUES ('{PROJECT}'::uuid, 'managed/maintenance-fixture', '{DIGEST}')"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"INSERT INTO "{LIVE_SCHEMA}"."index_generations" (
+                        project_id, generation_id, generation_sequence,
+                        source_revision, state, worker_count, content_digest,
+                        content_digest_version, ready_at, published_at
+                    ) VALUES (
+                        '{PROJECT}'::uuid, '{GENERATION}'::uuid, 1,
+                        'managed-fixture', 'current', 1, '{DIGEST}', 3,
+                        clock_timestamp(), clock_timestamp()
+                    )"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"UPDATE "{LIVE_SCHEMA}"."projects"
+                    SET current_generation_id = '{GENERATION}'::uuid
+                    WHERE project_id = '{PROJECT}'::uuid"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"INSERT INTO "{LIVE_SCHEMA}"."search_documents" (
+                        project_id, generation_id, document_id, path, language,
+                        document_kind, qualified_name, code, natural_text, metadata
+                    ) VALUES (
+                        '{PROJECT}'::uuid, '{GENERATION}'::uuid, '{DOCUMENT}'::uuid,
+                        'src/managed.rs', 'rust', 'symbol', 'managedFixture',
+                        'fn managed_fixture() {{}}', '', '{{}}'::jsonb
+                    )"#
+            ),
+        )
+        .await;
+        let table = "search_g_bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb";
+        execute_test_sql(
+            database,
+            format!(
+                r#"CREATE TABLE "{LIVE_SCHEMA}"."{table}" AS
+                    SELECT * FROM "{LIVE_SCHEMA}"."search_documents"
+                    WHERE generation_id = '{GENERATION}'::uuid"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"CREATE INDEX "{table}_bm25" ON "{LIVE_SCHEMA}"."{table}"
+                    USING bm25 (
+                        id, project_id, generation_id, document_id, file_id, symbol_id,
+                        path, language, document_kind,
+                        (qualified_name::pdb.source_code), (code::pdb.source_code),
+                        natural_text, metadata
+                    ) WITH (key_field = 'id')"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"INSERT INTO "{LIVE_SCHEMA}"."generation_search_relations" (
+                        project_id, generation_id, document_count, content_digest
+                    ) VALUES ('{PROJECT}'::uuid, '{GENERATION}'::uuid, 1, '{DIGEST}')"#
+            ),
+        )
+        .await;
+    }
+
+    async fn assert_verified_restore(database: &ManagedDatabase, good_archive: &Path) {
+        execute_test_sql(
+            database,
             r#"UPDATE "cartograph_managed_maintenance_test"."maintenance_marker"
                 SET value = 'mutated'"#,
         )
         .await;
         let restored = database
+            .archives()
             .restore(
-                &good_archive,
-                confirmation(&database, ManagedDestructiveOperation::Restore),
+                good_archive,
+                confirmation(database, ManagedDestructiveOperation::Restore),
             )
             .await
             .unwrap_or_else(|error| panic!("verified restore failed: {error}"));
         assert!(restored.capabilities.ready);
-        assert_eq!(read_marker(&database).await, "from-backup");
-        assert!(live_health(&database).await.healthy());
+        assert_eq!(read_marker(database).await, "from-backup");
+        assert!(live_health(database).await.healthy());
+    }
 
+    async fn prepare_incomplete_archive_and_rebuild(
+        database: &ManagedDatabase,
+        incomplete_archive: &Path,
+    ) {
         execute_test_sql(
-            &database,
-            r#"DROP INDEX "cartograph_managed_maintenance_test"."search_documents_bm25_idx""#,
+            database,
+            r#"DROP INDEX "cartograph_managed_maintenance_test".
+                "search_g_bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb_bm25""#,
         )
         .await;
-        assert!(!live_health(&database).await.healthy());
-        let incomplete_archive = directory.path().join("missing-derived-index.dump");
+        assert!(!live_health(database).await.healthy());
         database
-            .backup(&incomplete_archive)
+            .archives()
+            .backup(incomplete_archive)
             .await
             .unwrap_or_else(|error| panic!("could not back up incomplete fixture: {error}"));
         let rebuilt = database
+            .maintenance()
             .rebuild_derived_indexes(confirmation(
-                &database,
+                database,
                 ManagedDestructiveOperation::RebuildDerivedIndexes,
             ))
             .await
             .unwrap_or_else(|error| panic!("derived-index rebuild failed: {error}"));
         assert!(rebuilt.healthy());
+    }
+
+    async fn assert_incomplete_restore_rebuilds(
+        database: &ManagedDatabase,
+        incomplete_archive: &Path,
+    ) {
+        let restored = database
+            .archives()
+            .restore(
+                incomplete_archive,
+                confirmation(database, ManagedDestructiveOperation::Restore),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("incomplete derived-index restore failed: {error}"));
+        assert!(restored.capabilities.ready);
+        assert_eq!(read_marker(database).await, "from-backup");
+        assert!(live_health(database).await.healthy());
+    }
+
+    async fn prepare_incompatible_archive(database: &ManagedDatabase, incompatible_archive: &Path) {
+        let checksum = read_migration_checksum(database, 20).await;
+        let invalid_checksum = "0".repeat(64);
+        update_migration_checksum(database, 20, &invalid_checksum).await;
+        database
+            .archives()
+            .backup(incompatible_archive)
+            .await
+            .unwrap_or_else(|error| panic!("could not back up incompatible fixture: {error}"));
+        update_migration_checksum(database, 20, &checksum).await;
         execute_test_sql(
-            &database,
+            database,
             r#"UPDATE "cartograph_managed_maintenance_test"."maintenance_marker"
                 SET value = 'rollback-protected'"#,
         )
         .await;
+    }
 
+    async fn assert_incompatible_restore_rolls_back(
+        database: &ManagedDatabase,
+        incompatible_archive: &Path,
+    ) {
         let failed_restore = database
+            .archives()
             .restore(
-                &incomplete_archive,
-                confirmation(&database, ManagedDestructiveOperation::Restore),
+                incompatible_archive,
+                confirmation(database, ManagedDestructiveOperation::Restore),
             )
             .await;
-        assert!(matches!(
-            failed_restore,
-            Err(ManagedDatabaseError::RestoreVerificationFailed)
-        ));
-        assert_eq!(read_marker(&database).await, "rollback-protected");
-        assert!(live_health(&database).await.healthy());
+        match failed_restore {
+            Err(ManagedDatabaseError::RestoreVerificationFailed) => {}
+            unexpected => panic!("incompatible archive returned the wrong result: {unexpected:?}"),
+        }
+        assert_eq!(read_marker(database).await, "rollback-protected");
+        assert!(live_health(database).await.healthy());
+    }
 
-        let malformed_archive = directory.path().join("malformed.dump");
+    async fn assert_malformed_restore_is_rejected(database: &ManagedDatabase, directory: &Path) {
+        let malformed_archive = directory.join("malformed.dump");
         fs::write(&malformed_archive, b"PGDMPnot-a-real-custom-archive")
             .unwrap_or_else(|error| panic!("could not write malformed archive: {error}"));
         let malformed_restore = database
+            .archives()
             .restore(
                 &malformed_archive,
-                confirmation(&database, ManagedDestructiveOperation::Restore),
+                confirmation(database, ManagedDestructiveOperation::Restore),
             )
             .await;
         assert!(matches!(
             malformed_restore,
             Err(ManagedDatabaseError::RestoreArchiveInvalid)
         ));
-        assert_eq!(read_marker(&database).await, "rollback-protected");
+        assert_eq!(read_marker(database).await, "rollback-protected");
+    }
 
+    async fn assert_database_removal(database: &ManagedDatabase) {
         let removed = database
-            .remove(confirmation(&database, ManagedDestructiveOperation::Remove))
+            .maintenance()
+            .remove(confirmation(database, ManagedDestructiveOperation::Remove))
             .await
             .unwrap_or_else(|error| panic!("managed removal failed: {error}"));
         assert!(removed.container_removed);
@@ -1047,6 +1380,7 @@ mod tests {
         assert!(removed.credentials_removed);
         assert!(!database.credentials.path().exists());
         let status = database
+            .lifecycle()
             .status()
             .await
             .unwrap_or_else(|error| panic!("could not inspect removed database: {error}"));
@@ -1060,6 +1394,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not create upgrade project: {error}"));
         let database = live_database(directory.path());
         database
+            .lifecycle()
             .start()
             .await
             .unwrap_or_else(|error| panic!("could not start upgrade fixture: {error}"));
@@ -1074,26 +1409,36 @@ mod tests {
             super::super::MANAGED_DATABASE_IMAGE,
             &old_image,
         ]);
+        install_old_image_container(&database, &old_image).await;
+        assert_upgrade_failure_restores_old(&database, directory.path(), &old_image).await;
+        assert_pinned_upgrade_succeeds(&database).await;
+    }
+
+    async fn install_old_image_container(database: &ManagedDatabase, old_image: &str) {
         database
+            .lifecycle()
             .stop()
             .await
             .unwrap_or_else(|error| panic!("could not stop upgrade fixture: {error}"));
         database
             .docker
+            .containers()
             .remove_container(&database.identity.container_name)
             .await
             .unwrap_or_else(|error| panic!("could not replace upgrade fixture: {error}"));
         database
             .docker
+            .containers()
             .create_container(&ContainerCreateSpec {
                 identity: &database.identity,
                 port: database.port,
-                image: &old_image,
+                image: old_image,
             })
             .await
             .unwrap_or_else(|error| panic!("could not create old-image fixture: {error}"));
         database
             .docker
+            .containers()
             .install_password_file(
                 &database.identity.container_name,
                 database.credentials.path(),
@@ -1102,14 +1447,22 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not install old-image password: {error}"));
         database
             .docker
+            .containers()
             .start_container(&database.identity.container_name, database.port)
             .await
             .unwrap_or_else(|error| panic!("could not start old-image fixture: {error}"));
-        wait_for_owned_health(&database, false).await;
+        wait_for_owned_health(database, false).await;
+    }
 
-        let zero_timeout = live_database_with_port(directory.path(), database.port)
+    async fn assert_upgrade_failure_restores_old(
+        database: &ManagedDatabase,
+        directory: &Path,
+        old_image: &str,
+    ) {
+        let zero_timeout = live_database_with_port(directory, database.port)
             .with_startup_timeout(std::time::Duration::ZERO);
         let failed_upgrade = zero_timeout
+            .maintenance()
             .upgrade(confirmation(
                 &zero_timeout,
                 ManagedDestructiveOperation::Upgrade,
@@ -1119,9 +1472,10 @@ mod tests {
             failed_upgrade,
             Err(ManagedDatabaseError::DatabaseStartupTimeout)
         ));
-        wait_for_owned_health(&database, false).await;
+        wait_for_owned_health(database, false).await;
         let rolled_back = database
             .docker
+            .containers()
             .inspect_container(&database.identity.container_name)
             .await
             .unwrap_or_else(|error| panic!("could not inspect rollback container: {error}"))
@@ -1133,22 +1487,24 @@ mod tests {
         );
         let retained_rollback = database
             .docker
+            .containers()
             .inspect_container(&rollback_name)
             .await
             .unwrap_or_else(|error| panic!("could not inspect rollback slot: {error}"));
         assert!(retained_rollback.is_none());
+    }
 
+    async fn assert_pinned_upgrade_succeeds(database: &ManagedDatabase) {
         let upgraded = database
-            .upgrade(confirmation(
-                &database,
-                ManagedDestructiveOperation::Upgrade,
-            ))
+            .maintenance()
+            .upgrade(confirmation(database, ManagedDestructiveOperation::Upgrade))
             .await
             .unwrap_or_else(|error| panic!("pinned-image upgrade failed: {error}"));
         assert!(upgraded.upgraded);
         assert!(upgraded.capabilities.ready);
         let inspection = database
             .docker
+            .containers()
             .inspect_container(&database.identity.container_name)
             .await
             .unwrap_or_else(|error| panic!("could not inspect upgraded container: {error}"))
@@ -1156,7 +1512,8 @@ mod tests {
         assert_eq!(inspection.image, super::super::MANAGED_DATABASE_IMAGE);
 
         database
-            .remove(confirmation(&database, ManagedDestructiveOperation::Remove))
+            .maintenance()
+            .remove(confirmation(database, ManagedDestructiveOperation::Remove))
             .await
             .unwrap_or_else(|error| panic!("could not remove upgrade fixture: {error}"));
     }
@@ -1204,7 +1561,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not confirm destructive operation: {error}"))
     }
 
-    async fn execute_test_sql(database: &ManagedDatabase, statement: &'static str) {
+    async fn execute_test_sql(database: &ManagedDatabase, statement: impl Into<String>) {
         let credentials = database
             .credentials
             .load()
@@ -1212,7 +1569,7 @@ mod tests {
         let connection = open_managed_database(&credentials, database.port, &database.schema)
             .await
             .unwrap_or_else(|error| panic!("could not open maintenance database: {error}"));
-        query(AssertSqlSafe(statement))
+        query(AssertSqlSafe(statement.into()))
             .execute(&connection.pool)
             .await
             .unwrap_or_else(|error| panic!("maintenance fixture statement failed: {error}"));
@@ -1241,8 +1598,55 @@ mod tests {
         value
     }
 
+    async fn read_migration_checksum(database: &ManagedDatabase, version: i64) -> String {
+        let credentials = database
+            .credentials
+            .load()
+            .unwrap_or_else(|error| panic!("could not load ledger credentials: {error}"));
+        let connection = open_managed_database(&credentials, database.port, &database.schema)
+            .await
+            .unwrap_or_else(|error| panic!("could not open ledger database: {error}"));
+        let row = query(
+            r#"SELECT checksum
+                FROM "cartograph_managed_maintenance_test"."schema_migrations"
+                WHERE version = $1"#,
+        )
+        .bind(version)
+        .fetch_one(&connection.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not read migration checksum: {error}"));
+        let checksum = row
+            .try_get::<String, _>(0)
+            .unwrap_or_else(|error| panic!("migration checksum was invalid: {error}"));
+        connection.pool.close().await;
+        checksum
+    }
+
+    async fn update_migration_checksum(database: &ManagedDatabase, version: i64, checksum: &str) {
+        let credentials = database
+            .credentials
+            .load()
+            .unwrap_or_else(|error| panic!("could not load ledger credentials: {error}"));
+        let connection = open_managed_database(&credentials, database.port, &database.schema)
+            .await
+            .unwrap_or_else(|error| panic!("could not open ledger database: {error}"));
+        let updated = query(
+            r#"UPDATE "cartograph_managed_maintenance_test"."schema_migrations"
+                SET checksum = $2
+                WHERE version = $1"#,
+        )
+        .bind(version)
+        .bind(checksum)
+        .execute(&connection.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not update migration checksum: {error}"));
+        assert_eq!(updated.rows_affected(), 1);
+        connection.pool.close().await;
+    }
+
     async fn live_health(database: &ManagedDatabase) -> ManagedDerivedIndexHealth {
         database
+            .maintenance()
             .derived_index_health()
             .await
             .unwrap_or_else(|error| panic!("could not read derived-index health: {error}"))
@@ -1253,6 +1657,7 @@ mod tests {
             loop {
                 let inspection = database
                     .docker
+                    .containers()
                     .inspect_container(&database.identity.container_name)
                     .await
                     .unwrap_or_else(|error| panic!("could not inspect live fixture: {error}"))

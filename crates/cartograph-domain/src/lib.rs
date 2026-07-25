@@ -13,6 +13,8 @@ mod source;
 pub use source::{
     FileParseStatus, InvalidNormalizedPath, InvalidSourceSpan, NormalizedPath, ReferenceKind,
     SourceLanguage, SourcePosition, SourceSpan, SymbolKind, Visibility,
+    callable_signature_is_literal_free, declaration_value_is_search_safe,
+    symbol_signature_is_search_safe, v1_language_registry_digest, v2_language_additions_digest,
 };
 
 const UUID_TEXT_LENGTH: usize = 36;
@@ -31,6 +33,7 @@ const UUID_RFC_VARIANT_PREFIX: u8 = 0x80;
 const UUID_VERSION_MASK: u8 = 0x0f;
 const UUID_VARIANT_MASK: u8 = 0x3f;
 const HEX_DIGITS: &[u8] = b"0123456789abcdef";
+const SOURCE_MANIFEST_DIGEST_DOMAIN: &[u8] = b"cartograph-v2-source-revision-v1";
 
 /// A supplied branded identifier was not a canonicalizable, non-nil UUID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,11 +266,15 @@ pub enum GenerationDigestVersion {
     V1 = 1,
     /// Complete digest including owner, unresolved-name, and resolver provenance evidence.
     V2 = 2,
+    /// Reference-complete digest including exact represented call-site multiplicity.
+    V3 = 3,
+    /// Symbol-semantics-complete digest including visibility and declaration flags.
+    V4 = 4,
 }
 
 impl GenerationDigestVersion {
     /// Current digest contract emitted by this Cartograph v2 binary.
-    pub const CURRENT: Self = Self::V2;
+    pub const CURRENT: Self = Self::V4;
 
     /// Stable PostgreSQL `smallint` representation.
     #[must_use]
@@ -280,6 +287,8 @@ impl GenerationDigestVersion {
         match value {
             1 => Ok(Self::V1),
             2 => Ok(Self::V2),
+            3 => Ok(Self::V3),
+            4 => Ok(Self::V4),
             _ => Err(InvalidGenerationDigestVersion),
         }
     }
@@ -296,6 +305,94 @@ impl fmt::Display for InvalidGenerationDigestVersion {
 }
 
 impl std::error::Error for InvalidGenerationDigestVersion {}
+
+/// Privacy-preserving database identity shared by import and normal project runtime lookup.
+#[must_use]
+pub fn project_root_identity(repository_fingerprint: &ContentDigest) -> String {
+    format!("project:{}", repository_fingerprint.as_str())
+}
+
+/// Ordered, bounded builder for the source-manifest digest used by indexing and freshness.
+pub struct SourceManifestDigestBuilder {
+    hasher: blake3::Hasher,
+    remaining: usize,
+    previous_path: Option<NormalizedPath>,
+}
+
+impl SourceManifestDigestBuilder {
+    /// Begin an exact-size manifest. Entries must be pushed in ascending normalized-path order.
+    pub fn new(files: usize) -> Result<Self, InvalidSourceManifest> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SOURCE_MANIFEST_DIGEST_DOMAIN);
+        hash_manifest_length(&mut hasher, files)?;
+        Ok(Self {
+            hasher,
+            remaining: files,
+            previous_path: None,
+        })
+    }
+
+    /// Add one normalized path and its BLAKE3 content digest.
+    pub fn push(
+        &mut self,
+        path: &NormalizedPath,
+        content_hash: &ContentDigest,
+    ) -> Result<(), InvalidSourceManifest> {
+        if self.remaining == 0
+            || self
+                .previous_path
+                .as_ref()
+                .is_some_and(|previous| previous >= path)
+        {
+            return Err(InvalidSourceManifest);
+        }
+        hash_manifest_text(&mut self.hasher, path.as_str())?;
+        hash_manifest_text(&mut self.hasher, content_hash.as_str())?;
+        self.previous_path = Some(path.clone());
+        self.remaining -= 1;
+        Ok(())
+    }
+
+    /// Finalize only after the declared number of entries was supplied.
+    pub fn finish(self) -> Result<ContentDigest, InvalidSourceManifest> {
+        if self.remaining != 0 {
+            return Err(InvalidSourceManifest);
+        }
+        Ok(ContentDigest::from_bytes(
+            *self.hasher.finalize().as_bytes(),
+        ))
+    }
+}
+
+fn hash_manifest_text(
+    hasher: &mut blake3::Hasher,
+    value: &str,
+) -> Result<(), InvalidSourceManifest> {
+    hash_manifest_length(hasher, value.len())?;
+    hasher.update(value.as_bytes());
+    Ok(())
+}
+
+fn hash_manifest_length(
+    hasher: &mut blake3::Hasher,
+    value: usize,
+) -> Result<(), InvalidSourceManifest> {
+    let length = u64::try_from(value).map_err(|_| InvalidSourceManifest)?;
+    hasher.update(&length.to_le_bytes());
+    Ok(())
+}
+
+/// A source manifest had the wrong count, ordering, or representable length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidSourceManifest;
+
+impl fmt::Display for InvalidSourceManifest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("source manifest must have an exact ordered path and digest set")
+    }
+}
+
+impl std::error::Error for InvalidSourceManifest {}
 
 /// Search-document category used for intent routing and field boosts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,7 +526,8 @@ mod tests {
     use super::{
         BLAKE3_BYTE_LENGTH, BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, EdgeKind, FileId,
         FileParseStatus, GenerationDigestVersion, GenerationId, GenerationState, LeaseId,
-        ProjectId, ProjectOperation, SymbolId, UUID_BYTE_LENGTH,
+        NormalizedPath, ProjectId, ProjectOperation, SourceManifestDigestBuilder, SymbolId,
+        UUID_BYTE_LENGTH, project_root_identity,
     };
 
     const UPPERCASE_UUID: &str = "4EACCC79-2ED5-4E22-8D77-A8E66D13C345";
@@ -437,6 +535,11 @@ mod tests {
     const TEST_DIGEST_BYTE: u8 = 0xab;
     const TEST_UUID_V8_BYTE: u8 = 0x11;
     const EXPECTED_TEST_UUID_V8: &str = "11111111-1111-8111-9111-111111111111";
+    const DIGEST_V1_DATABASE_VALUE: i16 = 1;
+    const DIGEST_V2_DATABASE_VALUE: i16 = 2;
+    const DIGEST_V3_DATABASE_VALUE: i16 = 3;
+    const DIGEST_V4_DATABASE_VALUE: i16 = 4;
+    const UNKNOWN_DIGEST_DATABASE_VALUE: i16 = 5;
 
     #[test]
     fn branded_ids_canonicalize_and_validate_deserialized_values() {
@@ -459,15 +562,48 @@ mod tests {
     fn lifecycle_and_document_kinds_have_stable_database_values() {
         assert_eq!(GenerationState::Staging.as_str(), "staging");
         assert_eq!(GenerationState::Current.as_str(), "current");
-        assert_eq!(GenerationDigestVersion::V1.database_value(), 1);
-        assert_eq!(GenerationDigestVersion::CURRENT.database_value(), 2);
-        assert!(GenerationDigestVersion::from_database_value(3).is_err());
+        assert_eq!(
+            GenerationDigestVersion::V1.database_value(),
+            DIGEST_V1_DATABASE_VALUE
+        );
+        assert_eq!(
+            GenerationDigestVersion::V2.database_value(),
+            DIGEST_V2_DATABASE_VALUE
+        );
+        assert_eq!(
+            GenerationDigestVersion::CURRENT.database_value(),
+            DIGEST_V4_DATABASE_VALUE
+        );
+        assert_eq!(
+            GenerationDigestVersion::from_database_value(DIGEST_V1_DATABASE_VALUE),
+            Ok(GenerationDigestVersion::V1)
+        );
+        assert_eq!(
+            GenerationDigestVersion::from_database_value(DIGEST_V2_DATABASE_VALUE),
+            Ok(GenerationDigestVersion::V2)
+        );
+        assert_eq!(
+            GenerationDigestVersion::from_database_value(DIGEST_V3_DATABASE_VALUE),
+            Ok(GenerationDigestVersion::V3)
+        );
+        assert_eq!(
+            GenerationDigestVersion::from_database_value(DIGEST_V4_DATABASE_VALUE),
+            Ok(GenerationDigestVersion::V4)
+        );
+        assert!(
+            GenerationDigestVersion::from_database_value(UNKNOWN_DIGEST_DATABASE_VALUE).is_err()
+        );
         assert_eq!(DocumentKind::Symbol.as_str(), "symbol");
         assert_eq!(DocumentKind::Documentation.as_str(), "documentation");
         assert_eq!(FileParseStatus::Parsed.as_str(), "parsed");
         assert_eq!(FileParseStatus::Skipped.as_str(), "skipped");
         assert_eq!(EdgeKind::Instantiates.as_str(), "instantiates");
         assert_eq!(EdgeKind::DefUse.as_str(), "def_use");
+        let fingerprint = ContentDigest::from_bytes([TEST_DIGEST_BYTE; BLAKE3_BYTE_LENGTH]);
+        assert_eq!(
+            project_root_identity(&fingerprint),
+            format!("project:{}", fingerprint.as_str())
+        );
     }
 
     #[test]
@@ -481,6 +617,47 @@ mod tests {
             ContentDigest::from_bytes([TEST_DIGEST_BYTE; BLAKE3_BYTE_LENGTH]).as_str(),
             "ab".repeat(BLAKE3_BYTE_LENGTH)
         );
+    }
+
+    #[test]
+    fn source_manifest_digest_is_frozen_exact_sized_and_strictly_ordered() {
+        let a = NormalizedPath::parse("a.rs")
+            .unwrap_or_else(|error| panic!("manifest path failed: {error}"));
+        let b = NormalizedPath::parse("src/b.ts")
+            .unwrap_or_else(|error| panic!("manifest path failed: {error}"));
+        let a_hash = ContentDigest::from_bytes([1; BLAKE3_BYTE_LENGTH]);
+        let b_hash = ContentDigest::from_bytes([2; BLAKE3_BYTE_LENGTH]);
+        let mut complete = SourceManifestDigestBuilder::new(2)
+            .unwrap_or_else(|error| panic!("manifest builder failed: {error}"));
+        assert!(complete.push(&a, &a_hash).is_ok());
+        assert!(complete.push(&b, &b_hash).is_ok());
+        let digest = complete
+            .finish()
+            .unwrap_or_else(|error| panic!("manifest finish failed: {error}"));
+        assert_eq!(
+            digest.as_str(),
+            "dbf7b7a4b06f64d04cce7a209c45bec03b9ceea6909d0bd79f19228d9ad53be9"
+        );
+
+        let mut under = SourceManifestDigestBuilder::new(2)
+            .unwrap_or_else(|error| panic!("manifest builder failed: {error}"));
+        assert!(under.push(&a, &a_hash).is_ok());
+        assert!(under.finish().is_err());
+
+        let mut over = SourceManifestDigestBuilder::new(1)
+            .unwrap_or_else(|error| panic!("manifest builder failed: {error}"));
+        assert!(over.push(&a, &a_hash).is_ok());
+        assert!(over.push(&b, &b_hash).is_err());
+
+        let mut duplicate = SourceManifestDigestBuilder::new(2)
+            .unwrap_or_else(|error| panic!("manifest builder failed: {error}"));
+        assert!(duplicate.push(&a, &a_hash).is_ok());
+        assert!(duplicate.push(&a, &a_hash).is_err());
+
+        let mut out_of_order = SourceManifestDigestBuilder::new(2)
+            .unwrap_or_else(|error| panic!("manifest builder failed: {error}"));
+        assert!(out_of_order.push(&b, &b_hash).is_ok());
+        assert!(out_of_order.push(&a, &a_hash).is_err());
     }
 
     #[test]
