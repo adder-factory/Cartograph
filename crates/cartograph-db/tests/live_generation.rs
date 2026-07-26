@@ -91,6 +91,7 @@ const RECOVERY_WORKERS: u16 = 2;
 const SEARCH_LIMIT: u16 = 10;
 const TEST_LEASE_DURATION: Duration = Duration::from_secs(30);
 const LOCK_ORDER_TIMEOUT: Duration = Duration::from_secs(5);
+const FAILED_SEARCH_BUILD_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCK_OBSERVATION_ATTEMPTS: usize = 100;
 const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
@@ -1265,17 +1266,21 @@ async fn failed_generation_search_build_never_reaches_ready_or_publication() {
                     ..GenerationFacts::default()
                 }),
             ),
-            cartograph_db::PrepareGenerationMutation::new(&fence, INTERACTIVE_STALL_TIMEOUT),
+            cartograph_db::PrepareGenerationMutation::new(&fence, FAILED_SEARCH_BUILD_TIMEOUT),
         )
         .await;
     let staged = match result {
         Err(error) => {
-            assert!(matches!(
-                error.error(),
-                StorageError::DatabaseOperation {
-                    operation: "search-relation-drop"
-                }
-            ));
+            assert!(
+                matches!(
+                    error.error(),
+                    StorageError::DatabaseOperation {
+                        operation: "search-relation-drop"
+                    }
+                ),
+                "blocked search-relation build returned an unexpected error: {:?}",
+                error.error()
+            );
             error.into_parts().0
         }
         Ok(_) => panic!("blocked generation search build unexpectedly became ready"),
