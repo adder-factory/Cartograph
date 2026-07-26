@@ -27,10 +27,14 @@ jobs:
             rust_target: x86_64-unknown-linux-gnu
             asset_target: linux-x64
             shell: bash
+            build_image: rust:1.96.1-bookworm@sha256:d99f7b31f49909348dc59b51f3c95d1efded1701ffb222f095aaab7de3c4abd8
+            runtime_image: debian:12-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
           - os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             asset_target: linux-arm64
             shell: bash
+            build_image: rust:1.96.1-bookworm@sha256:809725748b728a8e1f8621a3c76e49fba8780c16d99ceda20abdb44d32665c30
+            runtime_image: debian:12-slim@sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0
           - os: macos-latest
             rust_target: aarch64-apple-darwin
             asset_target: darwin-arm64
@@ -44,20 +48,32 @@ jobs:
             asset_target: windows-x64
             shell: pwsh
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Resolve pinned Rust toolchain
+        if: ${{ !startsWith(matrix.asset_target, 'linux-') }}
         run: rustup show active-toolchain
 
       - name: Install release target
+        if: ${{ !startsWith(matrix.asset_target, 'linux-') }}
         run: rustup target add ${{ matrix.rust_target }}
 
       - name: Build, audit, and smoke Unix archive
-        if: matrix.shell == 'bash'
+        if: matrix.shell == 'bash' && !startsWith(matrix.asset_target, 'linux-')
         shell: bash
         run: scripts/build-rust-release.sh '${{ matrix.rust_target }}' '${{ matrix.asset_target }}'
+
+      - name: Build and smoke Linux archive on the glibc 2.36 baseline
+        if: startsWith(matrix.asset_target, 'linux-')
+        shell: bash
+        run: >-
+          scripts/build-linux-rust-release.sh
+          '${{ matrix.rust_target }}'
+          '${{ matrix.asset_target }}'
+          '${{ matrix.build_image }}'
+          '${{ matrix.runtime_image }}'
 
       - name: Build, audit, and smoke Windows archive
         if: matrix.shell == 'pwsh'

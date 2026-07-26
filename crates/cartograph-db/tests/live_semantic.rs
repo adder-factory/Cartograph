@@ -741,10 +741,10 @@ async fn migrate(fixture: &Fixture) {
     assert_eq!(
         report.applied_versions,
         [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         ]
     );
-    assert_eq!(report.current_version, 20);
+    assert_eq!(report.current_version, 21);
 }
 
 fn model_registration(fixture: ModelFixture) -> EmbeddingModelRegistration {

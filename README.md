@@ -128,6 +128,10 @@ agent host, make one live MCP request as the separate transport-health check.
 | Linux arm64 / x64 | Yes | Yes, with local Docker | Yes |
 | Windows x64 | Yes | Not enabled | Yes |
 
+Linux release binaries target Debian 12's glibc 2.36 baseline or newer. Every
+Linux archive is built in a pinned Rust/Bookworm container and executed in a
+separate pinned Debian 12 runtime container before publication.
+
 For an external deployment, the database administrator installs PostgreSQL 18,
 `pg_search` 0.23.5, and pgvector and creates both extensions. Load the connection
 URL from the shell or a secret manager rather than a committed file:

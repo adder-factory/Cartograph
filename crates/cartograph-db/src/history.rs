@@ -633,5 +633,12 @@ mod tests {
         assert!(FileCochangeFact::new(b, a.clone(), 2, 0.5).is_err());
         assert!(FileCochangeFact::new(a.clone(), a.clone(), 2, 0.5).is_err());
         assert!(FileCochangeFact::new(a.clone(), a, 0, 1.5).is_err());
+
+        let punctuation = NormalizedPath::parse(".github/workflows/check.ts")
+            .unwrap_or_else(|error| panic!("punctuation path failed: {error}"));
+        let uppercase = NormalizedPath::parse("ACKNOWLEDGEMENTS.ts")
+            .unwrap_or_else(|error| panic!("uppercase path failed: {error}"));
+        assert!(FileCochangeFact::new(punctuation.clone(), uppercase.clone(), 1, 1.0).is_ok());
+        assert!(FileCochangeFact::new(uppercase, punctuation, 1, 1.0).is_err());
     }
 }

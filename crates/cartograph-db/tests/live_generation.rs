@@ -60,8 +60,9 @@ const NATIVE_PARSE_CACHE_MIGRATION_VERSION: i64 = 17;
 const SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION: i64 = 18;
 const SYMBOL_PAGERANK_MIGRATION_VERSION: i64 = 19;
 const SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION: i64 = 20;
-const LATEST_MIGRATION_VERSION: i64 = SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 20] = [
+const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION: i64 = 21;
+const LATEST_MIGRATION_VERSION: i64 = DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 21] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -82,6 +83,7 @@ const EXPECTED_MIGRATIONS: [i64; 20] = [
     SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION,
     SYMBOL_PAGERANK_MIGRATION_VERSION,
     SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
+    DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -106,6 +108,8 @@ const AGENT_EVIDENCE_MIGRATION_CHECKSUM: &str =
     "6ddfc988c68cf7e88dc70c3291379e3afeceab667916fbbe597ef0fdd988eff8";
 const AGENT_SESSION_MIGRATION_CHECKSUM: &str =
     "687d57c314fb32a6a16b6c892b6b04494384e651a575c9342ce0f0d22974168d";
+const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_CHECKSUM: &str =
+    "5cbc965cc09530332f8c320c70aac3b083324a21f78fe6ed8edb23057d6af518";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -114,6 +118,7 @@ static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 async fn migrations_are_idempotent_and_only_published_generations_are_searchable() {
     let (database, pool, schema) = open_isolated_database().await;
     assert_migration_ledger(&database).await;
+    assert_deterministic_cochange_order_migration(&pool, &schema).await;
     let project = register_project(&database).await;
     let current_one = publish_initial_generation(&database, &project).await;
     let ready_older =
@@ -2749,6 +2754,38 @@ async fn assert_agent_session_migration(pool: &sqlx_postgres::PgPool, schema: &s
     .and_then(|row| row.try_get::<i64, _>("table_count"))
     .unwrap_or_else(|error| panic!("could not inspect agent-session tables: {error}"));
     assert_eq!(catalogs, 3);
+}
+
+async fn assert_deterministic_cochange_order_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 21"#
+    );
+    let checksum = query(AssertSqlSafe(ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify cochange-order migration: {error}"));
+    assert_eq!(checksum, DETERMINISTIC_COCHANGE_ORDER_MIGRATION_CHECKSUM);
+
+    let definition = query(
+        r#"SELECT pg_get_constraintdef(constraints.oid) AS definition
+            FROM pg_catalog.pg_constraint AS constraints
+            JOIN pg_catalog.pg_class AS relations
+              ON relations.oid = constraints.conrelid
+            JOIN pg_catalog.pg_namespace AS namespaces
+              ON namespaces.oid = relations.relnamespace
+            WHERE namespaces.nspname = $1
+              AND relations.relname = 'file_cochanges'
+              AND constraints.conname = 'file_cochanges_check'"#,
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<String, _>("definition"))
+    .unwrap_or_else(|error| panic!("could not inspect cochange-order constraint: {error}"));
+    assert!(definition.contains("COLLATE \"C\""), "{definition}");
 }
 
 async fn seed_exact_lookup_scale(

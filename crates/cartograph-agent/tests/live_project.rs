@@ -1351,6 +1351,37 @@ export function partialBeta(input: number, limit: number): number {
             .index(IndexOptions::default())
             .await
             .unwrap_or_else(|error| panic!("dependency fixture index failed: {error}"));
+        let misleading_document_sql = format!(
+            r#"INSERT INTO "{schema}"."search_documents" (
+                    id, project_id, generation_id, document_id, file_id, symbol_id,
+                    path, language, document_kind, qualified_name, code, natural_text, metadata
+                ) OVERRIDING SYSTEM VALUE
+                SELECT -1, symbols.project_id, symbols.generation_id,
+                       '00000000-0000-4000-8000-000000000001'::uuid,
+                       symbols.file_id, symbols.symbol_id, files.normalized_path,
+                       files.language, 'file', 'misleading-file-document', '',
+                       'non-symbol metadata must not override symbol health',
+                       '{{"health":{{"dynamic_eval":0}},"duplicate_detection_enabled":false}}'::jsonb
+                FROM "{schema}"."symbols" AS symbols
+                JOIN "{schema}"."files" AS files
+                  ON files.project_id = symbols.project_id
+                 AND files.generation_id = symbols.generation_id
+                 AND files.file_id = symbols.file_id
+                WHERE symbols.project_id = CAST($1 AS uuid)
+                  AND symbols.generation_id = CAST($2 AS uuid)
+                  AND symbols.qualified_name = 'risky'"#,
+        );
+        let fixture_pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("metadata fixture connection failed: {error}"));
+        let inserted = query(AssertSqlSafe(misleading_document_sql))
+            .bind(indexed.project_id.as_str())
+            .bind(indexed.generation_id.as_str())
+            .execute(&fixture_pool)
+            .await
+            .unwrap_or_else(|error| panic!("misleading metadata fixture failed: {error}"));
+        assert_eq!(inserted.rows_affected(), 1);
+        fixture_pool.close().await;
         let report = runtime
             .audit_javascript_dependencies(&indexed.project_id, ProjectCancellation::new())
             .await
@@ -1647,6 +1678,10 @@ export function partialBeta(input: number, limit: number): number {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
 async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() {
+    const ANCHOR_PATH: &str = ".github/workflows/check.ts";
+    const PARTNER_PATH: &str = "ACKNOWLEDGEMENTS.ts";
+    const THIRD_PATH: &str = "src/c.ts";
+
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
@@ -1657,6 +1692,8 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
     let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     std::fs::create_dir_all(project.path().join("src"))
         .unwrap_or_else(|error| panic!("history source directory failed: {error}"));
+    std::fs::create_dir_all(project.path().join(".github/workflows"))
+        .unwrap_or_else(|error| panic!("history workflow directory failed: {error}"));
     git(project.path(), &["init", "--initial-branch=main"]);
     git(
         project.path(),
@@ -1664,40 +1701,40 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
     );
     git(project.path(), &["config", "user.name", "History Fixture"]);
     std::fs::write(
-        project.path().join("src/a.ts"),
-        "export function a() { return 1; }\n",
+        project.path().join(ANCHOR_PATH),
+        "export function workflowCheck() { return 1; }\n",
     )
     .unwrap_or_else(|error| panic!("history a write failed: {error}"));
     std::fs::write(
-        project.path().join("src/b.ts"),
-        "export function b() { return 1; }\n",
+        project.path().join(PARTNER_PATH),
+        "export function acknowledgements() { return 1; }\n",
     )
     .unwrap_or_else(|error| panic!("history b write failed: {error}"));
-    git(project.path(), &["add", "src/a.ts", "src/b.ts"]);
+    git(project.path(), &["add", ANCHOR_PATH, PARTNER_PATH]);
     git(project.path(), &["commit", "-m", "add a and b"]);
     std::fs::write(
-        project.path().join("src/a.ts"),
-        "export function a() { return 2; }\n",
+        project.path().join(ANCHOR_PATH),
+        "export function workflowCheck() { return 2; }\n",
     )
     .unwrap_or_else(|error| panic!("history a update failed: {error}"));
     std::fs::write(
-        project.path().join("src/b.ts"),
-        "export function b() { return 2; }\n",
+        project.path().join(PARTNER_PATH),
+        "export function acknowledgements() { return 2; }\n",
     )
     .unwrap_or_else(|error| panic!("history b update failed: {error}"));
-    git(project.path(), &["add", "src/a.ts", "src/b.ts"]);
+    git(project.path(), &["add", ANCHOR_PATH, PARTNER_PATH]);
     git(project.path(), &["commit", "-m", "change a and b"]);
     std::fs::write(
-        project.path().join("src/a.ts"),
-        "export function a() { return 3; }\n",
+        project.path().join(ANCHOR_PATH),
+        "export function workflowCheck() { return 3; }\n",
     )
     .unwrap_or_else(|error| panic!("history a second update failed: {error}"));
     std::fs::write(
-        project.path().join("src/c.ts"),
+        project.path().join(THIRD_PATH),
         "export function c() { return 1; }\n",
     )
     .unwrap_or_else(|error| panic!("history c write failed: {error}"));
-    git(project.path(), &["add", "src/a.ts", "src/c.ts"]);
+    git(project.path(), &["add", ANCHOR_PATH, THIRD_PATH]);
     git(project.path(), &["commit", "-m", "change a and add c"]);
 
     let database = async {
@@ -1730,7 +1767,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         assert_eq!(report["cochangesWritten"], 2);
         assert_eq!(report["shallowHistory"], false);
         assert_eq!(report["truncated"], false);
-        let a = cartograph_domain::NormalizedPath::parse("src/a.ts")
+        let a = cartograph_domain::NormalizedPath::parse(ANCHOR_PATH)
             .unwrap_or_else(|error| panic!("history anchor path failed: {error}"));
         let history = runtime
             .database()
@@ -1749,7 +1786,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         let partners = serde_json::to_value(partners)
             .unwrap_or_else(|error| panic!("cochange serialization failed: {error}"));
         assert_eq!(partners.as_array().map(Vec::len), Some(1));
-        assert_eq!(partners[0]["path"], "src/b.ts");
+        assert_eq!(partners[0]["path"], PARTNER_PATH);
         assert_eq!(partners[0]["sharedCommits"], 2);
         assert_eq!(partners[0]["anchorCommits"], 3);
         assert_eq!(partners[0]["partnerCommits"], 2);
@@ -1765,7 +1802,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
             .as_array()
             .into_iter()
             .flatten()
-            .find(|row| row["path"] == "src/a.ts")
+            .find(|row| row["path"] == ANCHOR_PATH)
             .unwrap_or_else(|| panic!("history-composed hotspot for a was missing"));
         assert_eq!(hotspot_a["historyAvailable"], true);
         assert_eq!(hotspot_a["commitCount"], 3);
@@ -1785,7 +1822,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
             .await
             .unwrap_or_else(|error| panic!("maintenance hotspots failed: {error}"));
         assert_eq!(maintenance.len(), 2);
-        assert_eq!(maintenance[0].path(), "src/a.ts");
+        assert_eq!(maintenance[0].path(), ANCHOR_PATH);
         assert!(maintenance.iter().all(|row| row.commit_count() >= 2));
         let grouped_peers = runtime
             .database()
@@ -1795,7 +1832,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
                     vec![
                         GroupedPathInput::new(
                             "commit-wide",
-                            ["src/a.ts", "src/b.ts", "src/c.ts"]
+                            [ANCHOR_PATH, PARTNER_PATH, THIRD_PATH]
                                 .into_iter()
                                 .map(|path| {
                                     NormalizedPath::parse(path).unwrap_or_else(|error| {
@@ -1807,7 +1844,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
                         .unwrap_or_else(|error| panic!("wide peer group failed: {error}")),
                         GroupedPathInput::new(
                             "commit-small",
-                            vec![NormalizedPath::parse("src/b.ts").unwrap_or_else(|error| {
+                            vec![NormalizedPath::parse(PARTNER_PATH).unwrap_or_else(|error| {
                                 panic!("small grouped path failed: {error}")
                             })],
                         )

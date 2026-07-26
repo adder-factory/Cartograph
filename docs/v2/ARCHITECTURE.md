@@ -59,7 +59,7 @@ Before migration or normal work, Cartograph proves:
 - pgvector availability;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns twenty versions. Core relations:
+The append-only migration ledger currently owns twenty-one versions. Core relations:
 
 | Relation | Purpose |
 | --- | --- |

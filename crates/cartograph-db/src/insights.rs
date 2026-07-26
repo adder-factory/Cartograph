@@ -2763,6 +2763,7 @@ fn finding_ctes(schema: &str) -> String {
                     WHERE clone_document.project_id = symbols.project_id
                       AND clone_document.generation_id = symbols.generation_id
                       AND clone_document.symbol_id = symbols.symbol_id
+                      AND clone_document.document_kind = 'symbol'
                     ORDER BY clone_document.id
                     LIMIT 1
                 ) AS clone_shape_match ON true
@@ -2777,6 +2778,7 @@ fn finding_ctes(schema: &str) -> String {
                     WHERE search.project_id = symbols.project_id
                       AND search.generation_id = symbols.generation_id
                       AND search.symbol_id = symbols.symbol_id
+                      AND search.document_kind = 'symbol'
                     ORDER BY search.id
                     LIMIT 1
                 ) AS documents ON true

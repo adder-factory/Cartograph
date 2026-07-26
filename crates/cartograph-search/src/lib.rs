@@ -814,6 +814,80 @@ mod contract_tests {
     }
 
     #[test]
+    fn packet_support_contracts_preserve_empty_states_bounds_and_redaction() {
+        let generation = fixture_generation();
+        assert_eq!(generation.sequence(), 1);
+
+        let clean = WorkingTreeOverlay::clean();
+        assert_eq!(clean.status(), WorkingTreeOverlayStatus::Clean);
+        assert!(clean.files().is_empty());
+        assert!(!clean.truncated());
+
+        let unavailable = WorkingTreeOverlay::unavailable();
+        assert_eq!(unavailable.status(), WorkingTreeOverlayStatus::Unavailable);
+        assert!(unavailable.files().is_empty());
+        assert!(!unavailable.truncated());
+
+        let no_matches = WorkingTreeOverlay::completed(WorkingTreeOverlayInput {
+            changed_file_count: 2,
+            considered_file_count: 1,
+            unreadable_file_count: 1,
+            files: Vec::new(),
+            truncated: true,
+        })
+        .unwrap_or_else(|error| panic!("valid empty overlay failed: {error}"));
+        assert_eq!(no_matches.status(), WorkingTreeOverlayStatus::NoMatches);
+        assert!(no_matches.files().is_empty());
+        assert!(no_matches.truncated());
+
+        let traversal = TraversalBudget::new(2, SAMPLE_NODE_LIMIT)
+            .unwrap_or_else(|error| panic!("review traversal failed: {error}"));
+        let budget = ReviewBudget::new(ReviewBudgetInput {
+            symbols_per_file: 7,
+            root_limit: 3,
+            traversal,
+            evidence_limit: 5,
+            affected_test_limit: 6,
+        })
+        .unwrap_or_else(|error| panic!("review budget failed: {error}"));
+        assert_eq!(budget.symbols_per_file(), 7);
+        assert_eq!(budget.root_limit(), 3);
+        assert_eq!(budget.traversal(), traversal);
+        assert_eq!(budget.evidence_limit(), 5);
+        assert_eq!(budget.affected_test_limit(), 6);
+
+        let path = NormalizedPath::parse("src/private-service.rs")
+            .unwrap_or_else(|error| panic!("review path fixture failed: {error}"));
+        let project = project_id();
+        let request = ReviewRequest::new(
+            Some(project.clone()),
+            [path.clone(), path],
+            ReviewRequestOptions::new(IndexFreshness::Current, budget)
+                .with_changed_files_truncated(true),
+        )
+        .unwrap_or_else(|error| panic!("review request failed: {error}"));
+        assert_eq!(request.project_id(), Some(&project));
+        assert_eq!(request.changed_paths().len(), 1);
+        assert_eq!(request.freshness(), IndexFreshness::Current);
+        assert_eq!(request.budget(), budget);
+        assert!(request.changed_files_truncated());
+        let debug = format!("{request:?}");
+        assert!(debug.contains("<redacted:1>"));
+        assert!(!debug.contains("private-service"));
+
+        let truncation = ReviewTruncation {
+            graph: true,
+            affected_tests: true,
+            evidence: true,
+            ..ReviewTruncation::default()
+        };
+        assert!(truncation.graph());
+        assert!(truncation.affected_tests());
+        assert!(truncation.evidence());
+        assert!(truncation.any());
+    }
+
+    #[test]
     fn intent_budgets_and_packet_provenance_are_typed_and_bounded() {
         let lookup = ContextBudget::for_intent(TaskIntent::SymbolLookup);
         let change = ContextBudget::for_intent(TaskIntent::ChangePlanning);
