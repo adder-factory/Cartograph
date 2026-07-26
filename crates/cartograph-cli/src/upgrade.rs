@@ -11,7 +11,7 @@ use futures_util::StreamExt as _;
 use reqwest::Client;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 use tokio::process::Command;
 
 const REMOTE: &str = "https://github.com/adder-factory/cartograph.git";
@@ -311,7 +311,8 @@ fn install_binary(executable: &Path, bytes: &[u8], version: &str) -> Result<(), 
         .and_then(|()| staged.as_file().sync_all())
         .map_err(|_| "could not write the staged native update".to_owned())?;
     set_executable(staged.as_file())?;
-    verify_staged_binary(staged.path(), version)?;
+    let staged = staged.into_temp_path();
+    verify_staged_binary(staged.as_ref(), version)?;
     replace_executable(staged, executable)
 }
 
@@ -341,15 +342,14 @@ fn set_executable(_file: &fs::File) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn replace_executable(staged: NamedTempFile, executable: &Path) -> Result<(), String> {
+fn replace_executable(staged: TempPath, executable: &Path) -> Result<(), String> {
     staged
         .persist(executable)
-        .map(|_| ())
         .map_err(|_| "could not atomically replace the running executable".to_owned())
 }
 
 #[cfg(windows)]
-fn replace_executable(staged: NamedTempFile, executable: &Path) -> Result<(), String> {
+fn replace_executable(staged: TempPath, executable: &Path) -> Result<(), String> {
     let backup = executable.with_extension("exe.cartograph-old");
     let _ = fs::remove_file(&backup);
     fs::rename(executable, &backup)
