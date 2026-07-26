@@ -180,6 +180,147 @@ async fn migrations_are_idempotent_and_only_published_generations_are_searchable
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn copied_relations_receive_planner_statistics_before_ready() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let copied_relations = [
+        "files",
+        "symbols",
+        "edges",
+        "references",
+        "search_documents",
+    ];
+    for relation in copied_relations {
+        let statement =
+            format!(r#"ALTER TABLE "{schema}"."{relation}" SET (autovacuum_enabled = false)"#,);
+        query(AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("could not disable autoanalyze for {relation}: {error}")
+            });
+    }
+
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let mut analyze_blocker = match pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => panic!("could not begin planner-statistics lock fixture: {error}"),
+    };
+    let lock = format!(r#"LOCK TABLE "{schema}"."files" IN SHARE UPDATE EXCLUSIVE MODE"#,);
+    if let Err(error) = query(AssertSqlSafe(lock))
+        .execute(&mut *analyze_blocker)
+        .await
+    {
+        panic!("could not lock planner-statistics fixture: {error}");
+    }
+
+    let prepare_database = database.clone();
+    let prepare = tokio::spawn(async move {
+        prepare_fenced(
+            &prepare_database,
+            staged,
+            GenerationFacts {
+                documents: vec![document(DocumentFixture {
+                    id: DOCUMENT_ONE,
+                    path: "src/planner_statistics.rs",
+                    qualified_name: "planner_statistics",
+                    code: "fn planner_statistics() {}",
+                })],
+                ..GenerationFacts::default()
+            },
+        )
+        .await
+    });
+    wait_for_planner_statistics_lock(&pool, &schema).await;
+    assert!(
+        !prepare.is_finished(),
+        "generation preparation skipped the contended planner-statistics relation"
+    );
+    if let Err(error) = analyze_blocker.rollback().await {
+        panic!("could not release planner-statistics lock fixture: {error}");
+    }
+    let ready = match tokio::time::timeout(LOCK_ORDER_TIMEOUT, prepare).await {
+        Ok(Ok(Ok(ready))) => ready,
+        Ok(Ok(Err(error))) => panic!("planner-statistics prepare failed: {error}"),
+        Ok(Err(error)) => panic!("planner-statistics prepare task failed: {error}"),
+        Err(_) => panic!("planner-statistics prepare did not resume after lock release"),
+    };
+
+    let rows = query(
+        r#"SELECT relname, last_analyze IS NOT NULL, last_autoanalyze IS NULL
+           FROM pg_stat_user_tables
+           WHERE schemaname = $1
+             AND relname IN ('files', 'symbols', 'edges', 'references', 'search_documents')
+           ORDER BY relname"#,
+    )
+    .bind(&schema)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("could not read copied-relation statistics: {error}"));
+    assert_eq!(rows.len(), copied_relations.len());
+    for row in rows {
+        let relation = row
+            .try_get::<String, _>(0)
+            .unwrap_or_else(|error| panic!("statistics relation was invalid: {error}"));
+        assert!(
+            row.try_get::<bool, _>(1)
+                .unwrap_or_else(|error| panic!("manual analyze state was invalid: {error}")),
+            "{relation} did not receive manual planner statistics"
+        );
+        assert!(
+            row.try_get::<bool, _>(2)
+                .unwrap_or_else(|error| panic!("autoanalyze state was invalid: {error}")),
+            "{relation} was analyzed by autovacuum instead of generation preparation"
+        );
+    }
+    assert!(
+        fail_fenced(&database, RecoverableGeneration::Ready(ready))
+            .await
+            .is_ok()
+    );
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+async fn wait_for_planner_statistics_lock(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let query_pattern = format!("%ANALYZE%{schema}%files%");
+    for _ in 0..LOCK_OBSERVATION_ATTEMPTS {
+        let row = query(
+            r#"SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE pid <> pg_backend_pid()
+                      AND application_name = 'cartograph-v2'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE $1
+                ) AS waiting"#,
+        )
+        .bind(&query_pattern)
+        .fetch_one(pool)
+        .await;
+        if matches!(
+            row.and_then(|row| row.try_get::<bool, _>("waiting")),
+            Ok(true)
+        ) {
+            return;
+        }
+        tokio::time::sleep(LOCK_OBSERVATION_INTERVAL).await;
+    }
+    panic!("generation preparation did not wait for the contended planner-statistics relation");
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
 async fn agent_sessions_trace_usage_and_macros_are_durable() {
     let (database, pool, schema) = open_isolated_database().await;
     assert_migration_ledger(&database).await;

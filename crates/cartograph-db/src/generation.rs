@@ -38,6 +38,28 @@ const RECONCILE_LEASE_ID_COLUMN: usize = 5;
 const RECONCILE_LEASE_UNEXPIRED_COLUMN: usize = 6;
 const RECONCILE_LEASE_GENERATION_COLUMN: usize = 7;
 const GENERATION_LOCK_NAMESPACE: &str = "cartograph-v2-generation";
+const COPIED_RELATION_PLANNER_COLUMNS: [(&str, &str); 5] = [
+    (
+        "files",
+        "project_id, generation_id, file_id, normalized_path",
+    ),
+    (
+        "symbols",
+        "project_id, generation_id, symbol_id, file_id, symbol_kind, structural_digest",
+    ),
+    (
+        "edges",
+        "project_id, generation_id, source_symbol_id, target_symbol_id, edge_kind",
+    ),
+    (
+        "references",
+        "project_id, generation_id, owner_symbol_id, target_symbol_id, reference_kind",
+    ),
+    (
+        "search_documents",
+        "project_id, generation_id, symbol_id, document_kind, id",
+    ),
+];
 
 /// Validated-at-write project registration input.
 pub struct NewProject {
@@ -1412,6 +1434,7 @@ async fn prepare_transaction(
         digest_version,
     )
     .await?;
+    analyze_copied_relations(connection, input.schema).await?;
     lock_generation_fence(connection, input.schema, input.fence).await?;
     validate_generation_state(
         connection,
@@ -1446,6 +1469,21 @@ async fn prepare_transaction(
             actual: "changed concurrently".to_owned(),
             requested: GenerationState::Ready.as_str(),
         });
+    }
+    Ok(())
+}
+
+async fn analyze_copied_relations(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+) -> Result<(), StorageError> {
+    let quoted_schema = crate::database::quoted_schema(schema);
+    for (relation, columns) in COPIED_RELATION_PLANNER_COLUMNS {
+        let statement = format!(r#"ANALYZE {quoted_schema}."{relation}" ({columns})"#,);
+        audited_query(statement)
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| database_error("analyze-copied-relations"))?;
     }
     Ok(())
 }

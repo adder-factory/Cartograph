@@ -142,7 +142,8 @@ retained-worker cleanup.
 ```text
 discover -> read/hash -> parse/extract -> resolve -> optional SCIP overlay -> deterministic reduce
          -> COPY canonical staging rows -> relation/digest validation
-         -> populate generation search table -> build/verify BM25 -> ready
+         -> populate generation search table -> build/verify BM25
+         -> scoped planner statistics -> ready
          -> validate exact relation again -> publish
 ```
 
@@ -152,6 +153,15 @@ table or index build rolls back with the staging transaction and therefore
 cannot reach `ready`. Publication is atomic: it first requires the exact
 generation relation and catalog to remain valid, then one transaction swaps the
 current pointer and supersedes the prior current generation.
+
+After an actual COPY, preparation runs column-targeted `ANALYZE` only on the
+five copied relations before the generation can become ready. The relations
+are visited in one deterministic order, and a contended statistics lock waits
+under the connection/prepare statement deadline instead of being silently
+skipped; timeout or query failure rolls the generation preparation back. This
+prevents immediate status/issue-history reads from racing PostgreSQL's first
+autoanalyze while avoiding the v1 failure mode of database-wide maintenance on
+an unchanged/no-op index.
 
 The public future owns the operation even when a caller cancels/drops it.
 Supervisor tests cover queued/running cancellation, timeouts, slow/hung/panicked
