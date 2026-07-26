@@ -27,16 +27,74 @@ function Assert-OrderedAfter {
 }
 
 $SavedEnvironment = @{}
-foreach ($Name in @('CARGO_ENCODED_RUSTFLAGS', 'RUSTFLAGS', 'CFLAGS', 'CXXFLAGS')) {
+foreach ($Name in @(
+  'CARGO_ENCODED_RUSTFLAGS',
+  'RUSTFLAGS',
+  'CFLAGS',
+  'CXXFLAGS',
+  'CARGO_HOME',
+  'TEMP',
+  'TMP'
+)) {
   $SavedEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name)
 }
 
 Get-RustHostTarget | Out-Null
+$ReleaseBuildRoot = Get-NonPrivateReleaseBuildRoot `
+  -TemporaryPath 'D:\a\_temp' `
+  -AssetTarget 'windows-x64'
+if ($ReleaseBuildRoot -cne 'D:\cartograph-release-build-windows-x64') {
+  throw 'release tool state was not moved outside the private runner tree'
+}
 
 $TestDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "cartograph-path-audit-$([guid]::NewGuid())"
 [System.IO.Directory]::CreateDirectory($TestDirectory) | Out-Null
+$ReleaseBuildEnvironment = $null
 
 try {
+  if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+    $RunnerTemporaryDirectory = $env:RUNNER_TEMP
+    $PolicyPrivateRoots = @(
+      [PSCustomObject]@{
+        Label = 'test runner temporary directory'
+        Value = $RunnerTemporaryDirectory
+      }
+    )
+    $ReleaseBuildEnvironment = Initialize-NonPrivateReleaseBuildEnvironment `
+      -TemporaryPath $RunnerTemporaryDirectory `
+      -AssetTarget 'windows-x64' `
+      -PrivateRoots $PolicyPrivateRoots
+    $ExpectedReleaseBuildRoot = Get-NonPrivateReleaseBuildRoot `
+      -TemporaryPath $RunnerTemporaryDirectory `
+      -AssetTarget 'windows-x64'
+
+    if ($ReleaseBuildEnvironment.Root -cne $ExpectedReleaseBuildRoot -or
+        $env:CARGO_HOME -cne $ReleaseBuildEnvironment.CargoHome -or
+        $env:TEMP -cne $ReleaseBuildEnvironment.TemporaryDirectory -or
+        $env:TMP -cne $ReleaseBuildEnvironment.TemporaryDirectory) {
+      throw 'release environment was not initialized from the non-private root policy'
+    }
+    if (@($ReleaseBuildEnvironment.RemappingRoots | Where-Object { $_ -ceq $ExpectedReleaseBuildRoot }).Count -ne 1 -or
+        @($ReleaseBuildEnvironment.PrivateRoots | Where-Object { $_.Value -ceq $RunnerTemporaryDirectory }).Count -ne 1 -or
+        @($ReleaseBuildEnvironment.PrivateRoots | Where-Object { $_.Value -ceq $ExpectedReleaseBuildRoot }).Count -ne 0) {
+      throw 'release remapping and private-root audit policy diverged'
+    }
+
+    $PolicyFlags = $env:CARGO_ENCODED_RUSTFLAGS -split [char]0x1f
+    foreach ($Spelling in (Get-PrivatePathSpellings -Path $ExpectedReleaseBuildRoot)) {
+      Assert-ContainsExactlyOnce `
+        -Values $PolicyFlags `
+        -Expected "--remap-path-prefix=$Spelling=."
+    }
+    foreach ($CompilerFlags in @($env:CFLAGS, $env:CXXFLAGS)) {
+      foreach ($Spelling in (Get-PrivatePathSpellings -Path $ExpectedReleaseBuildRoot)) {
+        if (-not $CompilerFlags.Contains("/pathmap:$Spelling=.")) {
+          throw 'non-private release build root was not remapped for native compilation'
+        }
+      }
+    }
+  }
+
   $env:CARGO_ENCODED_RUSTFLAGS = '--cfg=preserved_release_flag'
   $env:RUSTFLAGS = $null
   $env:CFLAGS = '/DKEEP_C_FLAG=1'
@@ -138,6 +196,10 @@ try {
 } finally {
   foreach ($Name in $SavedEnvironment.Keys) {
     [Environment]::SetEnvironmentVariable($Name, $SavedEnvironment[$Name])
+  }
+  if ($null -ne $ReleaseBuildEnvironment -and
+      [System.IO.Directory]::Exists($ReleaseBuildEnvironment.Root)) {
+    [System.IO.Directory]::Delete($ReleaseBuildEnvironment.Root, $true)
   }
   if ([System.IO.Directory]::Exists($TestDirectory)) {
     [System.IO.Directory]::Delete($TestDirectory, $true)

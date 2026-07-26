@@ -11,6 +11,54 @@ function Get-RustHostTarget {
   return $HostTarget
 }
 
+function Get-NonPrivateReleaseBuildRoot {
+  param(
+    [Parameter(Mandatory = $true)][string]$TemporaryPath,
+    [Parameter(Mandatory = $true)][string]$AssetTarget
+  )
+
+  $VolumeRoot = [System.IO.Path]::GetPathRoot($TemporaryPath)
+  if ([string]::IsNullOrWhiteSpace($VolumeRoot) -or
+      $AssetTarget -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
+    throw 'could not determine a non-private release build root'
+  }
+  return Join-Path $VolumeRoot "cartograph-release-build-$AssetTarget"
+}
+
+function Initialize-NonPrivateReleaseBuildEnvironment {
+  param(
+    [Parameter(Mandatory = $true)][string]$TemporaryPath,
+    [Parameter(Mandatory = $true)][string]$AssetTarget,
+    [Parameter(Mandatory = $true)][object[]]$PrivateRoots
+  )
+
+  $ReleaseBuildRoot = Get-NonPrivateReleaseBuildRoot `
+    -TemporaryPath $TemporaryPath `
+    -AssetTarget $AssetTarget
+  $CargoHome = Join-Path $ReleaseBuildRoot 'cargo-home'
+  $CompilerTemporaryDirectory = Join-Path $ReleaseBuildRoot 'temp'
+  New-Item -ItemType Directory -Force -Path @($CargoHome, $CompilerTemporaryDirectory) | Out-Null
+  $env:CARGO_HOME = $CargoHome
+  $env:TEMP = $CompilerTemporaryDirectory
+  $env:TMP = $CompilerTemporaryDirectory
+
+  $PrivateValues = @(
+    $PrivateRoots |
+      ForEach-Object { [string]$_.Value } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  )
+  $RemappingRoots = @($PrivateValues + $ReleaseBuildRoot)
+  Set-PrivateBuildPathRemapping -Roots $RemappingRoots
+
+  return [PSCustomObject]@{
+    Root = $ReleaseBuildRoot
+    CargoHome = $CargoHome
+    TemporaryDirectory = $CompilerTemporaryDirectory
+    RemappingRoots = @($RemappingRoots)
+    PrivateRoots = @($PrivateRoots)
+  }
+}
+
 function Add-CargoEncodedRustFlag {
   param([Parameter(Mandatory = $true)][string]$Flag)
 

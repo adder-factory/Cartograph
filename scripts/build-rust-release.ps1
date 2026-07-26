@@ -5,12 +5,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'windows-rust-release-paths.ps1')
+
 $RunnerTemp = $env:RUNNER_TEMP
-if (-not [string]::IsNullOrWhiteSpace($RunnerTemp)) {
-  # Keep registry/build-script sources out of the runner's user profile. The
-  # temporary root is still remapped and audited below.
-  $env:CARGO_HOME = Join-Path $RunnerTemp 'cartograph-cargo-home'
-}
+$OriginalCargoHome = $env:CARGO_HOME
+$OriginalTemporaryDirectory = $env:TEMP
+$OriginalAlternateTemporaryDirectory = $env:TMP
 $env:CARGO_TARGET_DIR = Join-Path $Root 'target'
 $ReleaseDir = Join-Path $Root 'release'
 $StagingRoot = Join-Path $ReleaseDir '.staging'
@@ -20,14 +20,12 @@ $Archive = Join-Path $ReleaseDir "$StageName.zip"
 $Direct = Join-Path $ReleaseDir "$StageName.exe"
 $Binary = Join-Path $env:CARGO_TARGET_DIR 'release/cartograph.exe'
 
-. (Join-Path $PSScriptRoot 'windows-rust-release-paths.ps1')
-
 $HostTarget = Get-RustHostTarget
 if ($HostTarget -cne $Target) {
   throw "Windows release builds must run natively on $Target; runner host is $HostTarget"
 }
 
-$EnvironmentRoots = @(
+$PrivateEnvironmentRoots = @(
   [PSCustomObject]@{ Label = 'repository root'; Value = $Root },
   [PSCustomObject]@{ Label = 'Cargo target directory'; Value = $env:CARGO_TARGET_DIR },
   [PSCustomObject]@{ Label = 'GitHub workspace'; Value = $env:GITHUB_WORKSPACE },
@@ -36,10 +34,10 @@ $EnvironmentRoots = @(
   [PSCustomObject]@{ Label = 'GitHub runner tool cache'; Value = $env:RUNNER_TOOL_CACHE },
   [PSCustomObject]@{ Label = 'Windows user profile'; Value = $env:USERPROFILE },
   [PSCustomObject]@{ Label = 'home directory'; Value = $env:HOME },
-  [PSCustomObject]@{ Label = 'Cargo home'; Value = $env:CARGO_HOME },
+  [PSCustomObject]@{ Label = 'original Cargo home'; Value = $OriginalCargoHome },
   [PSCustomObject]@{ Label = 'Rustup home'; Value = $env:RUSTUP_HOME },
-  [PSCustomObject]@{ Label = 'temporary directory'; Value = $env:TEMP },
-  [PSCustomObject]@{ Label = 'alternate temporary directory'; Value = $env:TMP },
+  [PSCustomObject]@{ Label = 'original temporary directory'; Value = $OriginalTemporaryDirectory },
+  [PSCustomObject]@{ Label = 'original alternate temporary directory'; Value = $OriginalAlternateTemporaryDirectory },
   [PSCustomObject]@{ Label = 'local application data'; Value = $env:LOCALAPPDATA },
   [PSCustomObject]@{ Label = 'roaming application data'; Value = $env:APPDATA }
 )
@@ -54,11 +52,23 @@ $StaticPrivateRoots = @(
 # Passing --target for a native Windows build prevents Cargo from applying
 # CARGO_ENCODED_RUSTFLAGS to host build scripts and proc macros. Build natively
 # so every Rust compiler invocation receives both Windows path spellings.
-Set-PrivateBuildPathRemapping -Roots @(
-  $EnvironmentRoots |
-    ForEach-Object { [string]$_.Value } |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-)
+$AuditedEnvironmentRoots = $PrivateEnvironmentRoots
+if (-not [string]::IsNullOrWhiteSpace($RunnerTemp)) {
+  # Some native/vendor objects retain their registry or compiler scratch root
+  # even after compiler path remapping. Keep those tool-owned paths stable and
+  # outside every user-, repository-, and runner-specific directory.
+  $BuildEnvironment = Initialize-NonPrivateReleaseBuildEnvironment `
+    -TemporaryPath $RunnerTemp `
+    -AssetTarget $AssetTarget `
+    -PrivateRoots $PrivateEnvironmentRoots
+  $AuditedEnvironmentRoots = @($BuildEnvironment.PrivateRoots)
+} else {
+  Set-PrivateBuildPathRemapping -Roots @(
+    $PrivateEnvironmentRoots |
+      ForEach-Object { [string]$_.Value } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  )
+}
 
 cargo build --locked --release --package cartograph-cli
 if ($LASTEXITCODE -ne 0) { throw 'cargo release build failed' }
@@ -66,7 +76,7 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo release build failed' }
 # Audit the exact tag-built executable before either published artifact is made.
 # Read all three common encodings because Windows toolchains can retain both
 # narrow and wide path strings in PE files.
-Assert-NoPrivateBuildRoots -Path $Binary -PrivateRoots @($EnvironmentRoots + $StaticPrivateRoots)
+Assert-NoPrivateBuildRoots -Path $Binary -PrivateRoots @($AuditedEnvironmentRoots + $StaticPrivateRoots)
 
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Stage, $Archive, $Direct
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'bin') | Out-Null
