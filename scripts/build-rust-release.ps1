@@ -61,9 +61,9 @@ if (-not [string]::IsNullOrWhiteSpace($RunnerTemp)) {
     -TemporaryPath $RunnerTemp `
     -AssetTarget $AssetTarget `
     -PrivateRoots $PrivateEnvironmentRoots
-  $AuditedEnvironmentRoots = @($BuildEnvironment.PrivateRoots)
+  $AuditedEnvironmentRoots = @($BuildEnvironment.AuditRoots)
 } else {
-  Set-PrivateBuildPathRemapping -Roots @(
+  Set-ReleaseBuildPathRemapping -Roots @(
     $PrivateEnvironmentRoots |
       ForEach-Object { [string]$_.Value } |
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -76,7 +76,7 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo release build failed' }
 # Audit the exact tag-built executable before either published artifact is made.
 # Read all three common encodings because Windows toolchains can retain both
 # narrow and wide path strings in PE files.
-Assert-NoPrivateBuildRoots -Path $Binary -PrivateRoots @($AuditedEnvironmentRoots + $StaticPrivateRoots)
+Assert-NoReleaseBuildRoots -Path $Binary -Roots @($AuditedEnvironmentRoots + $StaticPrivateRoots)
 
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Stage, $Archive, $Direct
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'bin') | Out-Null
@@ -115,6 +115,15 @@ $ActualFiles = Get-ChildItem -Recurse -File $Stage |
   Sort-Object
 if (Compare-Object $ExpectedFiles $ActualFiles) {
   throw 'release archive allowlist mismatch'
+}
+
+$DocumentationFiles = Get-ChildItem -Recurse -File $Stage |
+  Where-Object { $_.FullName -notlike "$(Join-Path $Stage 'bin')*" }
+foreach ($DocumentationFile in $DocumentationFiles) {
+  $Documentation = [System.IO.File]::ReadAllText($DocumentationFile.FullName)
+  if ($Documentation -match '(?i)postgres(?:ql)?://') {
+    throw 'release documentation contains a database URL'
+  }
 }
 
 $Tree = cargo tree --locked --workspace --all-features -e normal

@@ -48,7 +48,13 @@ function Initialize-NonPrivateReleaseBuildEnvironment {
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
   )
   $RemappingRoots = @($PrivateValues + $ReleaseBuildRoot)
-  Set-PrivateBuildPathRemapping -Roots $RemappingRoots
+  Set-ReleaseBuildPathRemapping -Roots $RemappingRoots
+  $AuditRoots = @($PrivateRoots) + @(
+    [PSCustomObject]@{
+      Label = 'isolated release build root'
+      Value = $ReleaseBuildRoot
+    }
+  )
 
   return [PSCustomObject]@{
     Root = $ReleaseBuildRoot
@@ -56,6 +62,7 @@ function Initialize-NonPrivateReleaseBuildEnvironment {
     TemporaryDirectory = $CompilerTemporaryDirectory
     RemappingRoots = @($RemappingRoots)
     PrivateRoots = @($PrivateRoots)
+    AuditRoots = @($AuditRoots)
   }
 }
 
@@ -81,7 +88,7 @@ function Add-NativeCompilerFlag {
   [Environment]::SetEnvironmentVariable($Name, $Next)
 }
 
-function Get-PrivatePathSpellings {
+function Get-ReleasePathSpellings {
   param([Parameter(Mandatory = $true)][string]$Path)
 
   $Spellings = @()
@@ -101,7 +108,7 @@ function Get-PrivatePathSpellings {
   return $Spellings
 }
 
-function Set-PrivateBuildPathRemapping {
+function Set-ReleaseBuildPathRemapping {
   param([Parameter(Mandatory = $true)][string[]]$Roots)
 
   if ([string]::IsNullOrWhiteSpace($env:CARGO_ENCODED_RUSTFLAGS) -and
@@ -115,17 +122,22 @@ function Set-PrivateBuildPathRemapping {
   $Spellings = @()
   foreach ($Root in $Roots) {
     if ([string]::IsNullOrWhiteSpace($Root)) { continue }
-    foreach ($Spelling in (Get-PrivatePathSpellings -Path $Root)) {
+    foreach ($Spelling in (Get-ReleasePathSpellings -Path $Root)) {
       if ($Spellings -cnotcontains $Spelling) {
         $Spellings += $Spelling
       }
     }
   }
 
+  # /d1trimfile rewrites MSVC __FILE__ literals while /pathmap rewrites debug
+  # records. Both are required: native dependencies can retain source paths in
+  # release executables even when Rust path-prefix remapping is complete.
   foreach ($Spelling in $Spellings) {
     Add-CargoEncodedRustFlag -Flag "--remap-path-prefix=$Spelling=."
     Add-NativeCompilerFlag -Name 'CFLAGS' -Flag "/pathmap:$Spelling=."
     Add-NativeCompilerFlag -Name 'CXXFLAGS' -Flag "/pathmap:$Spelling=."
+    Add-NativeCompilerFlag -Name 'CFLAGS' -Flag "/d1trimfile:$Spelling"
+    Add-NativeCompilerFlag -Name 'CXXFLAGS' -Flag "/d1trimfile:$Spelling"
   }
 
   # rustc cannot rewrite paths that link.exe writes into the PE debug record.
@@ -133,10 +145,10 @@ function Set-PrivateBuildPathRemapping {
   Add-CargoEncodedRustFlag -Flag '-Clink-arg=/PDBALTPATH:%_PDB%'
 }
 
-function Assert-NoPrivateBuildRoots {
+function Assert-NoReleaseBuildRoots {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][object[]]$PrivateRoots
+    [Parameter(Mandatory = $true)][object[]]$Roots
   )
 
   $Bytes = [System.IO.File]::ReadAllBytes($Path)
@@ -146,15 +158,15 @@ function Assert-NoPrivateBuildRoots {
     [PSCustomObject]@{ Label = 'UTF-16BE'; Text = [System.Text.Encoding]::BigEndianUnicode.GetString($Bytes) }
   )
 
-  foreach ($PrivateRoot in $PrivateRoots) {
-    $Value = [string]$PrivateRoot.Value
+  foreach ($Root in $Roots) {
+    $Value = [string]$Root.Value
     if ([string]::IsNullOrWhiteSpace($Value)) { continue }
 
-    foreach ($Fragment in (Get-PrivatePathSpellings -Path $Value)) {
+    foreach ($Fragment in (Get-ReleasePathSpellings -Path $Value)) {
       $PathStyle = if ($Fragment.Contains('/')) { 'forward-slash path' } else { 'backslash path' }
       foreach ($View in $Views) {
         if ($View.Text.IndexOf($Fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-          throw "release binary contains a private build-root fragment ($($PrivateRoot.Label); $($View.Label); $PathStyle)"
+          throw "release binary contains a build-root fragment ($($Root.Label); $($View.Label); $PathStyle)"
         }
       }
     }

@@ -1,88 +1,75 @@
+<div align="center">
+
 # Cartograph
 
-Cartograph is a native code-intelligence server for AI coding agents. It turns a
-checkout into a searchable, generation-safe code graph and exposes compact
-evidence through a CLI and the Model Context Protocol (MCP).
+**Generation-safe code intelligence for AI coding agents.**
 
-Version 2 is a Rust and PostgreSQL architecture:
+Native Rust CLI and MCP server · PostgreSQL 18 · code-aware BM25 · typed code graph
 
-- Rust owns discovery, parsing, resolution, bounded parallel indexing,
-  retrieval, CLI, and MCP.
-- PostgreSQL 18 is the only storage backend.
-- ParadeDB `pg_search` provides code-aware BM25 retrieval.
-- pgvector is a required database capability for the model-scoped semantic
-  retrieval path.
-- Exact lookup, BM25, graph traversal, affected-test selection, review packets,
-  and freshness checks work without an LLM.
+[![Release](https://img.shields.io/github/v/release/adder-factory/cartograph?display_name=tag&sort=semver)](https://github.com/adder-factory/cartograph/releases/latest)
+[![v2 Rust](https://github.com/adder-factory/cartograph/actions/workflows/v2-rust.yml/badge.svg?branch=main)](https://github.com/adder-factory/cartograph/actions/workflows/v2-rust.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2f855a.svg)](LICENSE)
+[![Runtime: Rust](https://img.shields.io/badge/runtime-Rust-b7410e.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
-Cartograph v2 has no SQLite runtime, compatibility mode, optional feature, or
-fallback. A database that fails a hard capability check is rejected instead of
-silently switching engines.
+[Quick start](#quick-start) · [Agent workflow](#agent-workflow) ·
+[Architecture](#architecture) · [Documentation](#documentation)
 
-## Why coding agents use it
+</div>
 
-Raw text search is useful, but it does not explain how a declaration is reached,
-what a change can affect, or which tests are structurally connected. Cartograph
-packages that evidence with stable provenance:
+---
 
-- exact symbol, path, and reference lookup;
-- code-aware BM25 over names, implementation identifiers, and documentation;
-- deterministic task-intent routing with intent-specific evidence and graph budgets;
-- callers, callees, imports, references, and reverse impact;
-- standard SCIP export and persistent per-file SCIP overlays with exact typed-edge extensions;
-- affected-test selection;
-- a separately labeled live overlay for matching changed/untracked supported source;
-- working-tree versus Git-ref review packets;
-- generation ID, freshness, confidence, truncation, and explicit abstention;
-- bounded MCP payloads with stable error codes, deadlines, and cancellation.
+Cartograph turns a source checkout into a searchable, immutable-generation code
+graph. It gives coding agents compact evidence about declarations, references,
+call flow, change impact, affected tests, and source freshness through one native
+CLI and the [Model Context Protocol](https://modelcontextprotocol.io/).
 
-The result is designed to help an agent decide what to inspect and verify while
-keeping the source checkout—not a model response—the source of truth.
+The source checkout remains the source of truth. Every evidence packet carries
+generation provenance, freshness, confidence, truncation, and explicit
+abstention instead of presenting stale or incomplete data as certainty.
 
-The browser visual-graph viewer is the only v1 capability intentionally removed
-in v2. The typed graph, paths, impact, similarity, and machine-readable
-interchange remain first-class agent capabilities.
+> [!IMPORTANT]
+> Cartograph v2 is PostgreSQL-only. It requires PostgreSQL 18, ParadeDB
+> `pg_search` 0.23.5, and pgvector. There is no SQLite runtime, compatibility
+> mode, importer, optional feature, or fallback.
 
-## Requirements
+## What Cartograph gives an agent
 
-- macOS, Linux, or Windows x64 for the Cartograph executable;
-- PostgreSQL 18 with `pg_search` 0.23.5 and pgvector;
-- Docker on macOS/Linux for the managed database experience, or a compatible
-  external PostgreSQL deployment on any supported platform;
-- Git for `cartograph review` and compare-to-ref evidence.
+| Question | Evidence |
+| --- | --- |
+| Where is this declared or referenced? | Exact symbol, path, reference, and identifier lookup |
+| Which code is most relevant? | Code-aware BM25 over names, implementation identifiers, and documentation |
+| What calls this, and what does it call? | Typed callers, callees, imports, references, and shortest paths |
+| What could this change affect? | Bounded reverse impact and structurally connected tests |
+| Is the graph current? | Immutable generation identity and exact supported-source freshness |
+| What changed in the working tree? | Separately labeled live overlay and Git-ref review packets |
+| Is an LLM required? | No for exact, lexical, graph, review, freshness, or affected-test workflows |
 
-The managed database pulls the pinned upstream ParadeDB image. Cartograph does
-not bundle or redistribute PostgreSQL, ParadeDB, pgvector, or a container image.
+Cartograph also supports standard SCIP export, persistent per-file SCIP overlays,
+model-scoped semantic retrieval, generated artifacts with explicit provenance,
+and deterministic task-intent routing.
 
-## Install
+## Quick start
+
+### 1. Install the native executable
 
 macOS and Linux:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+cartograph --version
 ```
 
-PowerShell:
+Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 | iex
+cartograph --version
 ```
 
-The installers download the native archive for the host, verify it against the
+The installers select the native archive for the host, verify it against the
 release `SHA256SUMS`, and place `cartograph` on the user PATH.
 
-Build from source:
-
-```sh
-git clone https://github.com/adder-factory/cartograph.git
-cd cartograph
-cargo build --locked --release -p cartograph-cli
-install -m 0755 target/release/cartograph "$HOME/.local/bin/cartograph"
-```
-
-The repository pins its Rust toolchain in `rust-toolchain.toml`.
-
-## Quick start with the managed database
+### 2. Build the first graph
 
 On macOS or Linux with a local Docker daemon:
 
@@ -92,49 +79,14 @@ cartograph db start --project-path .
 cartograph doctor .
 cartograph index .
 cartograph status .
+cartograph context 'explain the primary request flow' --project-path .
 ```
 
-`db start` creates only project-owned resources, binds PostgreSQL to loopback,
-stores a private generated credential, applies append-only migrations, and
-proves PostgreSQL, ParadeDB, pgvector, preload, BM25, and tokenizer capability.
+`db start` creates project-owned, loopback-only resources and pulls the pinned
+upstream ParadeDB image. `doctor` fails closed unless PostgreSQL, pg_search,
+pgvector, preload, BM25, migrations, and code tokenization all pass.
 
-The lifecycle is explicit:
-
-```sh
-cartograph db status --project-path .
-cartograph db logs --project-path . --tail 200
-cartograph db backup ./cartograph.backup --project-path .
-cartograph db derived-index --project-path .
-cartograph db stop --project-path .
-```
-
-Restore, upgrade, derived-index rebuild, and removal require the exact
-confirmation phrase printed by command help. These operations are bound to the
-canonical project identity and refuse foreign containers or volumes.
-
-## Use an external database
-
-Create `pg_search` and `vector` in a PostgreSQL 18 database, then export a URL:
-
-```sh
-export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
-export CARTOGRAPH_DATABASE_SCHEMA='cartograph'
-
-cartograph doctor /path/to/project
-cartograph index /path/to/project
-```
-
-Optional bounded pool settings:
-
-```sh
-export CARTOGRAPH_DATABASE_MAX_CONNECTIONS=8
-export CARTOGRAPH_DATABASE_ACQUIRE_TIMEOUT_MS=5000
-```
-
-Database URLs are treated as secrets and are redacted from errors and debug
-output. Do not commit them to a project configuration file.
-
-## Connect an AI coding agent
+### 3. Connect a coding agent
 
 Cartograph writes only project-local MCP configuration and pins the absolute
 native executable path:
@@ -150,65 +102,84 @@ cartograph install --yes --target claude --location local --project-path .
 cartograph install --yes --target cursor --location local --project-path .
 ```
 
-Restart the agent host after installation. The MCP process resolves the same
-project-owned managed credential automatically, or inherits
-`CARTOGRAPH_DATABASE_URL` for an external deployment.
+Restart the agent host after registration or a binary upgrade.
 
-Manual MCP server specification:
+### 4. Verify the live integration
 
-```json
-{
-  "command": "/absolute/path/to/cartograph",
-  "args": [
-    "serve",
-    "--mcp",
-    "--project-path",
-    "/absolute/path/to/project"
-  ]
-}
+A setup is ready only after all four signals pass:
+
+1. `cartograph doctor` proves database capabilities.
+2. `cartograph index` publishes one complete generation.
+3. `cartograph status` reports that generation as fresh.
+4. A real `find` or `context` query returns generation-scoped evidence.
+
+A CLI request proves the executable and database path. After restarting an
+agent host, make one live MCP request as the separate transport-health check.
+
+> [!TIP]
+> Prefer agent-assisted setup? Give your coding agent the task in
+> [Agent-assisted installation](docs/AGENT-INSTALL.md).
+
+## Platform and database support
+
+| Host | Native release | Managed local database | External PostgreSQL |
+| --- | ---: | ---: | ---: |
+| macOS arm64 / x64 | Yes | Yes, with local Docker | Yes |
+| Linux arm64 / x64 | Yes | Yes, with local Docker | Yes |
+| Windows x64 | Yes | Not enabled | Yes |
+
+For an external deployment, the database administrator installs PostgreSQL 18,
+`pg_search` 0.23.5, and pgvector and creates both extensions. Load the connection
+URL from the shell or a secret manager rather than a committed file:
+
+```sh
+export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
+# CARTOGRAPH_DATABASE_URL must already be present in the environment.
+
+cartograph doctor /absolute/path/to/project
+cartograph index /absolute/path/to/project
+cartograph status /absolute/path/to/project
 ```
 
-The available MCP profiles are `coding`, `core`, `full`, `read-only`, and
-`review`. Tool listings are deterministic and hidden tools cannot be called
-through a narrower profile.
+Database URLs are secrets. Public errors, debug output, MCP responses, archives,
+and project records are required to omit credentials and absolute checkout
+paths. See [PostgreSQL storage and operations](docs/STORAGE-BACKENDS.md).
 
 ## Agent workflow
 
-A reliable coding loop is:
+A reliable coding loop starts with freshness, narrows with structural evidence,
+and closes with impact-aware verification:
 
 ```sh
 cartograph status .
 cartograph context 'fix authentication token validation' --project-path .
+cartograph find 'validateToken' --by name --project-path .
+cartograph graph <symbol-id> --direction impact --project-path .
+cartograph affected <symbol-id> --project-path .
 cartograph review --ref main --project-path .
-cartograph affected <symbol-uuid> --project-path .
 ```
 
-If status is stale, run `cartograph index .` or let the agent call the bounded
-`cartograph_admin` index action. Re-indexing an unchanged checkout is a no-op;
-changed source publishes a complete new generation atomically.
+If status is stale, run `cartograph index .` or use the bounded MCP admin action.
+Indexing unchanged source is a no-op; changed source publishes a complete new
+generation atomically.
 
-Core MCP tools:
+### Core MCP tools
 
 | Tool | Purpose |
 | --- | --- |
-| `cartograph_status` | Current generation counts and live-source freshness |
-| `cartograph_find` | Exact name/path/reference or BM25 evidence |
-| `cartograph_context` | Compact task-specific evidence packet |
-| `cartograph_entry_points` | Typed routes, commands, MCP tools, CLI declarations, and public API boundaries |
-| `cartograph_graph` | Callers/callees/impact, exact edge filters, shortest paths, or stored-pgvector symbol neighbors |
+| `cartograph_status` | Current generation, counts, capability readiness, and freshness |
+| `cartograph_find` | Exact name/path/reference lookup or code-aware BM25 |
+| `cartograph_context` | Intent-aware evidence, graph context, and edit candidates |
+| `cartograph_entry_points` | Routes, commands, MCP tools, exports, and API boundaries |
+| `cartograph_graph` | Callers, callees, reverse impact, paths, and symbol similarity |
 | `cartograph_affected` | Bounded affected-test selection |
-| `cartograph_review` | Git-ref and dirty-worktree review packet |
-| `cartograph_admin` | Explicit index/sync operation |
+| `cartograph_review` | Git-ref plus staged, unstaged, and untracked evidence |
+| `cartograph_admin` | Explicit index, sync, embedding, and maintenance jobs |
 
-`cartograph_context` classifies the task as symbol lookup, implementation trace,
-change planning, test selection, error diagnosis, architecture survey, or
-documentation lookup. The chosen intent is returned in the packet and controls
-bounded candidate, traversal, evidence, and affected-test policy. When the
-durable generation is stale, matching changed/untracked supported files can be
-returned as a separate digest- and line-bounded working-tree overlay; live bytes
-are never presented as immutable graph facts.
+MCP profiles are `coding`, `core`, `full`, `read-only`, and `review`. Profiles
+have deterministic tool lists; a narrower profile cannot call hidden tools.
 
-## CLI
+### CLI surface
 
 ```text
 cartograph index [PROJECT]
@@ -224,55 +195,97 @@ cartograph review --ref <GIT_REF>
 cartograph serve --mcp [--profile coding|core|full|read-only|review]
 cartograph doctor [PROJECT]
 cartograph db <COMMAND>
-cartograph install --yes --target codex|claude|cursor
-cartograph uninstall --yes --target codex|claude|cursor
+cartograph install --yes --target <HOST>
+cartograph uninstall --yes --target <HOST>
 ```
 
-Every retrieval command supports bounded inputs and JSON output where noted in
-`--help`. Text mode favors concise human diagnostics; JSON is the stable
-automation surface.
+Text output is optimized for concise human diagnostics. JSON is the stable
+automation surface where exposed by command help.
 
-## Native language coverage
+## Architecture
 
-The stable v2 registry production-admits all 73 v1.1.33 language modes and all
-163 v1 extensions, plus additive Python `.pyi` support and a native TOML mode
-for 74 total modes. Sixty-one modes use pinned native tree-sitter grammars;
-thirteen mixed-markup, configuration, and domain-specific modes (including
-TOML) use bounded Rust structural scanners. Every admitted mode
-has deterministic facts, cancellation and literal-safety coverage, a locked
-parallel-worker digest, and live PostgreSQL/ParadeDB publication and BM25 proof.
+```mermaid
+flowchart LR
+    A[Source checkout] --> B[Bounded Rust discovery and parsing]
+    B --> C[Deterministic symbols, references, and edges]
+    C --> D[(PostgreSQL 18 canonical generation)]
+    D --> E[ParadeDB BM25]
+    D --> F[Typed graph and impact]
+    D --> G[Optional pgvector semantic retrieval]
+    E --> H[Evidence packet]
+    F --> H
+    G --> H
+    H --> I[Native CLI]
+    H --> J[MCP server]
+```
 
-Unknown extensions do not produce a misleading empty graph: discovery excludes
-them, while explicitly requested unsupported files fail with a structured
-diagnostic. New languages must add declarations, references, resolution
-behavior, bounded failure handling, and end-to-end graph tests before admission.
+The architecture has a few hard boundaries:
 
-See [native extraction](docs/v2/EXTRACTION.md) and the
-[extractor/resolver extension guide](docs/EXTENDING-EXTRACTORS-RESOLVERS.md).
+- **Native runtime:** Rust owns discovery, parsing, resolution, bounded parallel
+  indexing, retrieval, CLI, and MCP. No Bun, Node.js, or TypeScript runtime is
+  shipped.
+- **One durable store:** PostgreSQL 18 owns canonical project and generation
+  state. ParadeDB BM25 and model-scoped HNSW are rebuildable derived indexes.
+- **Atomic publication:** incomplete or unhealthy generations never become
+  current. Readers query one verified immutable generation.
+- **Deterministic concurrency:** 1, 2, 4, 8, and 16-worker builds reduce to the
+  same logical digest and ordered evidence.
+- **Optional generation:** exact lookup, BM25, graph, review, freshness, and
+  affected tests work without an LLM. Generative output cannot replace
+  structural truth.
 
-## Migration from v1.1.33
+For crate ownership, schemas, leases, retrieval, MCP boundaries, and failure
+semantics, read the [v2 architecture](docs/v2/ARCHITECTURE.md).
 
-V2 can import directly from a v1.1.33 PostgreSQL schema with resumable
-checkpoints, structural validation, and a required derived-index rebuild. It
-never reads a SQLite file.
+## Language support
 
-If the only v1 index is SQLite, either rebuild v2 from source or use v1.1.33 to
-migrate that data to PostgreSQL before running the v2 importer. Keep the v1.1.33
-binary/tag available until validation succeeds.
+The stable registry production-admits 74 language modes and the complete 163
+v1 extension manifest, plus additive Python `.pyi` support. Sixty-one modes use
+pinned native tree-sitter grammars; thirteen mixed-markup, configuration, and
+domain-specific modes use bounded Rust structural scanners.
 
-The v1 source and v2 destination must be different schemas in the same
-PostgreSQL database. The destination may already contain a current generation;
-the import publishes a new immutable generation. `CARTOGRAPH_DATABASE_SCHEMA`
-selects the v2 destination; `--source-schema` names the existing v1.1.33
-schema. Take a database-native backup first, quiesce index/sync/hook/rebuild
-writers for this project, then run the non-mutating preflight against the exact
-checkout whose source rows the v1 index represents:
+Every admitted mode must prove deterministic facts, cancellation, literal
+safety, parallel-worker identity, and live PostgreSQL/ParadeDB publication.
+Unknown extensions are excluded rather than represented as a misleading empty
+graph.
+
+- [Language support matrix](docs/SUPPORT-MATRIX.md)
+- [Native extraction architecture](docs/v2/EXTRACTION.md)
+- [Add or extend a language](docs/EXTENDING-EXTRACTORS-RESOLVERS.md)
+
+## Managed database operations
+
+Common read-only or idempotent lifecycle commands:
 
 ```sh
-export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
-export CARTOGRAPH_DATABASE_SCHEMA='cartograph_v2'
+cartograph db status --project-path .
+cartograph db logs --project-path . --tail 200
+cartograph db derived-index --project-path .
+cartograph db backup ./cartograph.backup --project-path .
+cartograph db stop --project-path .
+```
 
-cartograph doctor /absolute/path/to/checkout
+Restore, upgrade, derived-index rebuild, removal, import, and prune can replace
+or delete state. They require the exact confirmation phrase shown by command
+help and are never implied by a diagnostic request.
+
+Community ParadeDB BM25 is treated as rebuildable local derived data. Shared,
+hosted, replicated, customer-facing, or paying production use requires a
+separate durability and ParadeDB licensing decision.
+
+## Migrating from v1.1.33
+
+V2 imports only from a v1.1.33 PostgreSQL schema. It never opens or inspects a
+SQLite graph.
+
+If the only v1 index is SQLite, either rebuild v2 from the source checkout or
+use the v1.1.33 binary to migrate SQLite to PostgreSQL first. The PostgreSQL v1
+source and v2 destination must be distinct schemas in the same database.
+
+Always back up the database, quiesce project writers, and run the non-mutating
+preflight before the confirmed import:
+
+```sh
 cartograph db import-v1 \
   --project-path /absolute/path/to/checkout \
   --source-schema cartograph_v1 \
@@ -280,129 +293,63 @@ cartograph db import-v1 \
   --format json
 ```
 
-The dry run verifies the exact v1 schema version, repository/source identity,
-checkout bytes and hashes, row/byte bounds, relations, language support, and
-the complete canonical generation without writing destination rows. Import
-only after that report is clean:
+The full resumable workflow, validation rules, and retention constraints are in
+[PostgreSQL storage and operations](docs/STORAGE-BACKENDS.md#import-from-v1133-postgresql).
 
-```sh
-cartograph db import-v1 \
-  --project-path /absolute/path/to/checkout \
-  --source-schema cartograph_v1 \
-  --confirm import-v1-postgres \
-  --format json
-```
+## Security and release guarantees
 
-The importer records durable `staged`, `ready`, `bm25_rebuilt`, and `complete`
-checkpoints. If an interruption reports that the run is resumable, rerun the
-same command with the same database, schemas, and checkout; a changed source or
-inconsistent checkpoint is rejected. Legacy reference multiplicity is retained
-as site counts. V1 rows that cannot prove an exact token span remain explicitly
-coarse instead of receiving invented precision. A legacy SCIP placeholder hash
-proves only its path-derived placeholder identity; the dry run still reads and
-binds the current checkout bytes, but it cannot prove historical SCIP bytes that
-v1 never stored.
+- Inputs, rows, bytes, tasks, output, deadlines, and retries have hard caps.
+- User query text is bound data; dynamic schema identifiers use validated
+  quoting paths.
+- Source reads stay within a canonical project root and reject unsupported,
+  oversized, or non-UTF-8 input.
+- Write operations use PostgreSQL-clock leases, fencing tokens, advisory locks,
+  bounded transactions, and rollback on lost ownership.
+- Release archives contain only the native executable, README, license, and
+  allowlisted third-party notices.
+- Every stable release requires strict Rust gates, live PostgreSQL fault tests,
+  deterministic worker benchmarks, Sonar, independent review, five native
+  archive audits, checksums, provenance, and a signed tag at published `main`.
 
-If another writer publishes first, the import reports `ConcurrentPublication`,
-atomically fails/releases its stale generation, and preserves the prior current
-generation. Keep writers quiesced and repeat the identical confirmed import;
-the retry resets the failed durable run and reserves a newer generation.
+Cartograph does not bundle PostgreSQL, ParadeDB, pgvector, an extension package,
+or a container image. See the [distribution and licensing policy](docs/v2/LICENSING.md).
 
-Verify before retiring v1:
+## Documentation
 
-```sh
-cartograph status /absolute/path/to/checkout
-cartograph context 'trace the primary request flow' \
-  --project-path /absolute/path/to/checkout
-cartograph db derived-index --project-path /absolute/path/to/checkout
-```
-
-Keep the source schema and backup until counts, retrieval, and application-level
-verification pass. Do not prune generations as part of import validation.
-
-## Bounded generation retention
-
-`db prune` deletes only a bounded batch of failed and old superseded
-generations. It always preserves the current generation, in-progress
-staging/ready work, failed generations referenced by non-complete v1 import
-runs, and the requested number of newest superseded histories.
-The operation uses an exact unexpired migration lease, PostgreSQL advisory
-locks, a transaction, and a final fence recheck before commit.
-
-After a verified backup, retain two superseded generations and delete at most
-100 terminal generations in one invocation:
-
-```sh
-cartograph db prune \
-  --project-path /absolute/path/to/checkout \
-  --keep-superseded 2 \
-  --maximum-deletions 100 \
-  --confirm prune-old-generations \
-  --format json
-```
-
-Inspect the report and rerun explicitly if another bounded batch is desired.
-Pruning is not `VACUUM`, does not repair a derived index, and is never automatic.
-
-## Parallelism and safety
-
-Indexing uses bounded worker counts selected from 1, 2, 4, 8, or 16 according
-to supported-file count, exact indexed source bytes, caller cap, and hardware.
-Workers may parse concurrently, but a deterministic reducer produces the same
-logical digest and ordered retrieval evidence at every supported worker count.
-
-Coding-task context packets keep broad BM25, semantic, and graph evidence while
-also exposing a typed, bounded `editCandidates` set. Exact anchors take
-precedence; otherwise Cartograph promotes the files with the strongest distinct
-code-aware task-term concentration. Agents can therefore start with likely edit
-sites without losing the wider evidence needed for impact analysis or
-abstention.
-
-The indexer also enforces:
-
-- task and byte admission limits with no hidden unbounded queue;
-- cancellation polling in discovery, reading, parsing, resolution, validation,
-  and database work;
-- lease fencing and PostgreSQL-clock heartbeats;
-- reaping on success, failure, timeout, cancellation, and caller drop;
-- staged COPY, relation validation, and atomic generation publication;
-- explicit freshness and abstention instead of guessed evidence.
-
-Committed benchmark metadata and raw reports are under
-[`docs/v2/benchmarks`](docs/v2/benchmarks/).
-
-## ParadeDB boundary
-
-The Community ParadeDB image is supported for a local developer/agent database
-whose BM25 index is rebuildable derived state. Shared, hosted, replicated, or
-paying production use requires a separate durability and licensing decision.
-
-Cartograph release archives contain only the MIT-licensed native Cartograph
-binary and project notices. See [the v2 distribution policy](docs/v2/LICENSING.md)
-for the enforced archive boundary and upstream links.
+| Guide | Use it for |
+| --- | --- |
+| [Agent-assisted installation](docs/AGENT-INSTALL.md) | A copy-paste setup task for a coding agent |
+| [CLI reference](docs/CLI-REFERENCE.md) | Commands, flags, JSON output, and exit behavior |
+| [MCP usage](docs/MCP-USAGE.md) | Profiles, tools, transport, and host integration |
+| [Configuration](docs/CONFIGURATION.md) | Database, retrieval, LLM, and bounded runtime settings |
+| [Architecture](docs/v2/ARCHITECTURE.md) | Crate ownership, generations, retrieval, leases, and trust boundaries |
+| [Storage operations](docs/STORAGE-BACKENDS.md) | Managed/external PostgreSQL, migration, recovery, and retention |
+| [Performance tuning](docs/PERF-TUNING.md) | Worker, connection, timeout, and indexing guidance |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Docker, PostgreSQL, pg_search, pgvector, and MCP failures |
+| [Release benchmarks](docs/v2/benchmarks/) | Determinism, scaling, and patch-task evidence |
 
 ## Development
 
+The repository pins its Rust toolchain in `rust-toolchain.toml`.
+
 ```sh
+git clone https://github.com/adder-factory/cartograph.git
+cd cartograph
+cargo build --locked --release -p cartograph-cli
+
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace
 cargo deny --all-features check
 ```
 
-Live PostgreSQL/ParadeDB gates are defined in
-[`v2-rust.yml`](.github/workflows/v2-rust.yml). They cover capability checks,
-migrations, COPY/digest invariants, leases, supervisor fault injection,
-1/2/4/8/16-worker determinism, retrieval, migration, backup/restore, upgrade,
-rollback, and derived-index recovery.
-
-Release tags build and smoke native archives for macOS arm64/x64, Linux
-arm64/x64, and Windows x64, create `SHA256SUMS`, and attach build provenance.
-The release workflow refuses a tag that does not point at the published `main`
-head.
+The complete live PostgreSQL/ParadeDB gate is defined in
+[`v2-rust.yml`](.github/workflows/v2-rust.yml). Release tags rebuild and smoke
+macOS arm64/x64, Linux arm64/x64, and Windows x64 archives before checksums,
+provenance, and immutable publication.
 
 ## License
 
 Cartograph is licensed under the [MIT License](LICENSE). Third-party components
 retain their own licenses; see [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) and the
-ParadeDB boundary above.
+[ParadeDB distribution boundary](docs/v2/LICENSING.md).

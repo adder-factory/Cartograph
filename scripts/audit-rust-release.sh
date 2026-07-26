@@ -22,6 +22,11 @@ if find "$STAGE" -type l -print -quit | grep -q .; then
   exit 1
 fi
 
+if find "$STAGE" -type f ! -path '*/bin/*' -exec grep -aEil 'postgres(ql)?://' {} + | grep -q .; then
+  echo "release documentation contains a database URL" >&2
+  exit 1
+fi
+
 for PRIVATE_FRAGMENT in \
   "$PWD" \
   "${HOME:-}" \

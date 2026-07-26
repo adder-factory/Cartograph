@@ -26,6 +26,19 @@ function Assert-OrderedAfter {
   }
 }
 
+function Assert-NativeFlagExactlyOnce {
+  param(
+    [Parameter(Mandatory = $true)][string]$Value,
+    [Parameter(Mandatory = $true)][string]$Expected
+  )
+
+  $Flags = @($Value -split '\s+' | Where-Object { $_ })
+  $Count = @($Flags | Where-Object { $_ -ceq $Expected }).Count
+  if ($Count -ne 1) {
+    throw "expected one exact native compiler flag for the test path; found $Count"
+  }
+}
+
 $SavedEnvironment = @{}
 foreach ($Name in @(
   'CARGO_ENCODED_RUSTFLAGS',
@@ -76,21 +89,22 @@ try {
     }
     if (@($ReleaseBuildEnvironment.RemappingRoots | Where-Object { $_ -ceq $ExpectedReleaseBuildRoot }).Count -ne 1 -or
         @($ReleaseBuildEnvironment.PrivateRoots | Where-Object { $_.Value -ceq $RunnerTemporaryDirectory }).Count -ne 1 -or
-        @($ReleaseBuildEnvironment.PrivateRoots | Where-Object { $_.Value -ceq $ExpectedReleaseBuildRoot }).Count -ne 0) {
-      throw 'release remapping and private-root audit policy diverged'
+        @($ReleaseBuildEnvironment.PrivateRoots | Where-Object { $_.Value -ceq $ExpectedReleaseBuildRoot }).Count -ne 0 -or
+        @($ReleaseBuildEnvironment.AuditRoots | Where-Object { $_.Value -ceq $RunnerTemporaryDirectory }).Count -ne 1 -or
+        @($ReleaseBuildEnvironment.AuditRoots | Where-Object { $_.Value -ceq $ExpectedReleaseBuildRoot }).Count -ne 1) {
+      throw 'release remapping and complete build-root audit policy diverged'
     }
 
     $PolicyFlags = $env:CARGO_ENCODED_RUSTFLAGS -split [char]0x1f
-    foreach ($Spelling in (Get-PrivatePathSpellings -Path $ExpectedReleaseBuildRoot)) {
+    foreach ($Spelling in (Get-ReleasePathSpellings -Path $ExpectedReleaseBuildRoot)) {
       Assert-ContainsExactlyOnce `
         -Values $PolicyFlags `
         -Expected "--remap-path-prefix=$Spelling=."
     }
     foreach ($CompilerFlags in @($env:CFLAGS, $env:CXXFLAGS)) {
-      foreach ($Spelling in (Get-PrivatePathSpellings -Path $ExpectedReleaseBuildRoot)) {
-        if (-not $CompilerFlags.Contains("/pathmap:$Spelling=.")) {
-          throw 'non-private release build root was not remapped for native compilation'
-        }
+      foreach ($Spelling in (Get-ReleasePathSpellings -Path $ExpectedReleaseBuildRoot)) {
+        Assert-NativeFlagExactlyOnce -Value $CompilerFlags -Expected "/pathmap:$Spelling=."
+        Assert-NativeFlagExactlyOnce -Value $CompilerFlags -Expected "/d1trimfile:$Spelling"
       }
     }
   }
@@ -103,7 +117,7 @@ try {
   $UserRoot = 'C:\Users\build-user'
   $CargoRoot = 'C:\Users\build-user\.cargo'
   $WorkspaceRoot = 'D:\a\cartograph\cartograph'
-  Set-PrivateBuildPathRemapping -Roots @($WorkspaceRoot, $UserRoot, $CargoRoot)
+  Set-ReleaseBuildPathRemapping -Roots @($WorkspaceRoot, $UserRoot, $CargoRoot)
 
   $Flags = $env:CARGO_ENCODED_RUSTFLAGS -split [char]0x1f
   $UserBackslashFlag = '--remap-path-prefix=C:\Users\build-user=.'
@@ -134,26 +148,28 @@ try {
   Assert-OrderedAfter -Values $Flags -Later $CargoForwardFlag -Earlier $UserForwardFlag
 
   foreach ($CompilerFlags in @($env:CFLAGS, $env:CXXFLAGS)) {
-    foreach ($Expected in @(
-      '/pathmap:C:\Users\build-user=.',
-      '/pathmap:C:/Users/build-user=.',
-      '/pathmap:c:\Users\build-user=.',
-      '/pathmap:c:/Users/build-user=.',
-      '/pathmap:C:\Users\build-user\.cargo=.',
-      '/pathmap:C:/Users/build-user/.cargo=.',
-      '/pathmap:c:\Users\build-user\.cargo=.',
-      '/pathmap:c:/Users/build-user/.cargo=.'
-    )) {
-      if (-not $CompilerFlags.Contains($Expected)) {
-        throw 'native compiler path remapping is incomplete'
+    if (-not $CompilerFlags.StartsWith('/DKEEP_C')) {
+      throw 'inherited native compiler flags were not preserved'
+    }
+    foreach ($BuildRoot in @($WorkspaceRoot, $UserRoot, $CargoRoot)) {
+      foreach ($Spelling in (Get-ReleasePathSpellings -Path $BuildRoot)) {
+        Assert-NativeFlagExactlyOnce -Value $CompilerFlags -Expected "/pathmap:$Spelling=."
+        Assert-NativeFlagExactlyOnce -Value $CompilerFlags -Expected "/d1trimfile:$Spelling"
       }
     }
   }
 
-  $PrivateRoots = @(
-    [PSCustomObject]@{ Label = 'test user profile'; Value = $UserRoot }
+  $NativeFlags = $env:CFLAGS -split '\s+'
+  Assert-OrderedAfter `
+    -Values $NativeFlags `
+    -Later "/d1trimfile:$CargoRoot" `
+    -Earlier "/d1trimfile:$UserRoot"
+
+  $ForbiddenRoots = @(
+    [PSCustomObject]@{ Label = 'test user profile'; Value = $UserRoot },
+    [PSCustomObject]@{ Label = 'isolated release build root'; Value = $ReleaseBuildRoot }
   )
-  $PrivateSamples = @(
+  $ForbiddenSamples = @(
     [PSCustomObject]@{
       Name = 'ascii-forward'
       Bytes = [System.Text.Encoding]::ASCII.GetBytes('prefix C:/Users/build-user/source suffix')
@@ -165,34 +181,41 @@ try {
     [PSCustomObject]@{
       Name = 'utf16be-forward'
       Bytes = [System.Text.Encoding]::BigEndianUnicode.GetBytes('prefix C:/Users/build-user/source suffix')
+    },
+    [PSCustomObject]@{
+      Name = 'ascii-isolated-build-root'
+      Bytes = [System.Text.Encoding]::ASCII.GetBytes(
+        'D:\cartograph-release-build-windows-x64\cargo-home\registry\src\aws-lc-sys\aws-lc\crypto\fipsmodule\bn\add.c'
+      )
     }
   )
 
-  foreach ($Sample in $PrivateSamples) {
+  foreach ($Sample in $ForbiddenSamples) {
     $SamplePath = Join-Path $TestDirectory "$($Sample.Name).bin"
     [System.IO.File]::WriteAllBytes($SamplePath, $Sample.Bytes)
     $Rejected = $false
     try {
-      Assert-NoPrivateBuildRoots -Path $SamplePath -PrivateRoots $PrivateRoots
+      Assert-NoReleaseBuildRoots -Path $SamplePath -Roots $ForbiddenRoots
     } catch {
       $Rejected = $true
-      if (-not $_.Exception.Message.StartsWith('release binary contains a private build-root fragment')) {
+      if (-not $_.Exception.Message.StartsWith('release binary contains a build-root fragment')) {
         throw
       }
-      if ($_.Exception.Message.Contains('build-user')) {
-        throw 'private audit diagnostics exposed the matched path'
+      if ($_.Exception.Message.Contains('build-user') -or
+          $_.Exception.Message.Contains('cartograph-release-build')) {
+        throw 'build-root audit diagnostics exposed the matched path'
       }
     }
     if (-not $Rejected) {
-      throw "private audit accepted $($Sample.Name)"
+      throw "build-root audit accepted $($Sample.Name)"
     }
   }
 
   $CleanPath = Join-Path $TestDirectory 'clean.bin'
   [System.IO.File]::WriteAllBytes($CleanPath, [System.Text.Encoding]::UTF8.GetBytes('cartograph release'))
-  Assert-NoPrivateBuildRoots -Path $CleanPath -PrivateRoots $PrivateRoots
+  Assert-NoReleaseBuildRoots -Path $CleanPath -Roots $ForbiddenRoots
 
-  Write-Host '[rust-release] Windows path-remapping and privacy regressions passed'
+  Write-Host '[rust-release] Windows path-remapping and complete build-root regressions passed'
 } finally {
   foreach ($Name in $SavedEnvironment.Keys) {
     [Environment]::SetEnvironmentVariable($Name, $SavedEnvironment[$Name])
