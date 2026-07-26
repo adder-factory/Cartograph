@@ -309,6 +309,7 @@ pub struct OpenAiChatClient {
 
 impl OpenAiChatClient {
     pub fn new(settings: ChatSettings) -> Result<Self, ChatError> {
+        crate::ensure_tls_crypto_provider().map_err(|_| ChatError::ClientUnavailable)?;
         let client = reqwest::Client::builder()
             .connect_timeout(settings.timeout.min(MAXIMUM_CONNECT_TIMEOUT))
             .timeout(settings.timeout)

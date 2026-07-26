@@ -1082,6 +1082,7 @@ pub async fn probe_openai_compatible_endpoint(
     if timeout.is_zero() || timeout > std::time::Duration::from_secs(10) {
         return Err(ProjectLlmConfigError::InvalidTier);
     }
+    crate::ensure_tls_crypto_provider().map_err(|_| ProjectLlmConfigError::InvalidTier)?;
     let mut models_url = Url::parse(endpoint).map_err(|_| ProjectLlmConfigError::InvalidTier)?;
     let path = models_url.path().trim_end_matches('/');
     let base = ["/v1/chat/completions", "/v1/embeddings", "/v1/rerank"]

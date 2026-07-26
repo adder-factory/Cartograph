@@ -140,6 +140,7 @@ pub async fn install_recommended_models(
     options: InstallModelsOptions,
 ) -> Result<InstallModelsReport, InstallModelsError> {
     prepare_directory(&options.directory).await?;
+    crate::ensure_tls_crypto_provider().map_err(|_| InstallModelsError::EndpointUnavailable)?;
     let policy = redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= MAXIMUM_REDIRECTS || attempt.url().scheme() != "https" {
             attempt.stop()
@@ -394,6 +395,11 @@ mod tests {
     const FIXTURE_REQUEST_CHUNK_BYTES: usize = 4 * 1_024;
     const HTTP_HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 
+    fn test_client() -> reqwest::Client {
+        assert_eq!(crate::ensure_tls_crypto_provider(), Ok(()));
+        reqwest::Client::new()
+    }
+
     #[test]
     fn manifest_is_https_unique_and_has_frozen_sha256_values() {
         let mut filenames = RECOMMENDED_MODELS
@@ -426,7 +432,7 @@ mod tests {
         tokio::fs::create_dir(&target)
             .await
             .unwrap_or_else(|error| panic!("unsafe target fixture failed: {error}"));
-        let client = reqwest::Client::new();
+        let client = test_client();
         assert!(matches!(
             install_one(&client, directory.path(), RECOMMENDED_MODELS[0]).await,
             Err(InstallModelsError::UnsafeTarget)
@@ -454,7 +460,7 @@ mod tests {
         };
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("model directory fixture failed: {error}"));
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let downloaded = install_one(&client, directory.path(), model)
             .await
@@ -535,7 +541,7 @@ mod tests {
             };
             assert_eq!(
                 download_to_partial(
-                    &reqwest::Client::new(),
+                    &test_client(),
                     &root.path().join("rejected.gguf.partial"),
                     model,
                 )
@@ -563,7 +569,7 @@ mod tests {
         };
         let partial = root.path().join("checksum.gguf.partial");
         assert_eq!(
-            download_to_partial(&reqwest::Client::new(), &partial, model).await,
+            download_to_partial(&test_client(), &partial, model).await,
             Err(InstallModelsError::ChecksumMismatch)
         );
         assert!(partial.exists());

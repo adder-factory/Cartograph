@@ -38,6 +38,8 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow-workspace = true
 deny = [
+  { crate = "aws-lc-rs", reason = "Cartograph standardizes Rustls on ring to avoid duplicate crypto providers" },
+  { crate = "aws-lc-sys", reason = "Cartograph standardizes Rustls on ring to avoid duplicate crypto providers" },
   { crate = "libsqlite3-sys", reason = "Cartograph v2 is PostgreSQL-only" },
   { crate = "rusqlite", reason = "Cartograph v2 is PostgreSQL-only" },
   { crate = "sqlx-sqlite", reason = "Cartograph v2 is PostgreSQL-only" },

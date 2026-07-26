@@ -127,8 +127,15 @@ foreach ($DocumentationFile in $DocumentationFiles) {
 }
 
 $Tree = cargo tree --locked --workspace --all-features -e normal
-if (($Tree -join "`n") -match '(?i)(^|[-_ ])(sqlite|libsqlite)') {
+$TreeText = $Tree -join "`n"
+if ($TreeText -match '(?i)(^|[-_ ])(sqlite|libsqlite)') {
   throw 'Cartograph v2 release dependency graph contains SQLite'
+}
+if ($TreeText -match 'aws-lc-(?:rs|sys) v[0-9]') {
+  throw 'Cartograph release dependency graph contains the duplicate AWS-LC Rustls provider'
+}
+if ($TreeText -notmatch 'ring v[0-9]') {
+  throw 'Cartograph release dependency graph does not contain the required ring Rustls provider'
 }
 
 Compress-Archive -Path $Stage -DestinationPath $Archive -Force

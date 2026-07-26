@@ -7,6 +7,7 @@ mod model;
 mod models;
 mod project_config;
 mod rerank;
+mod tls;
 
 pub use chat::{
     CHAT_API_KEY_ENV, CHAT_ENDPOINT_ENV, CHAT_MODEL_ENV, ChatCompletion, ChatError, ChatSettings,
@@ -30,3 +31,4 @@ pub use project_config::{
     write_project_llm_configuration, write_project_llm_tiers, write_project_max_file_size,
 };
 pub use rerank::{OpenAiRerankClient, RerankBatch, RerankError, RerankSettings};
+pub use tls::{TlsProviderUnavailable, ensure_tls_crypto_provider};

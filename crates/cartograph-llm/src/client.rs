@@ -30,6 +30,7 @@ impl std::fmt::Debug for OpenAiEmbeddingClient {
 impl OpenAiEmbeddingClient {
     /// Build a redirect-free rustls client with explicit connect/request limits.
     pub fn new(settings: EmbeddingSettings) -> Result<Self, EmbeddingError> {
+        crate::ensure_tls_crypto_provider().map_err(|_| EmbeddingError::ClientUnavailable)?;
         let client = reqwest::Client::builder()
             .connect_timeout(settings.connect_timeout())
             .timeout(settings.request_timeout())

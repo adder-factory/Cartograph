@@ -185,7 +185,7 @@ try {
     [PSCustomObject]@{
       Name = 'ascii-isolated-build-root'
       Bytes = [System.Text.Encoding]::ASCII.GetBytes(
-        'D:\cartograph-release-build-windows-x64\cargo-home\registry\src\aws-lc-sys\aws-lc\crypto\fipsmodule\bn\add.c'
+        'D:\cartograph-release-build-windows-x64\cargo-home\registry\src\ring-0.17.14\crypto\fipsmodule\bn\montgomery.c'
       )
     }
   )

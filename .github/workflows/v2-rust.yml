@@ -60,7 +60,7 @@ jobs:
           command: check
           arguments: --all-features
 
-      - name: No SQLite production dependencies
+      - name: Native dependency shape
         shell: bash
         run: |
           set -euo pipefail
@@ -75,7 +75,16 @@ jobs:
             grep -E '^name = "(sqlx-sqlite|libsqlite3-sys|rusqlite)"$' Cargo.lock >&2
             exit 1
           fi
-          echo 'No SQLite production dependency found.'
+          if grep -Eq 'aws-lc-(rs|sys) v[0-9]' <<<"$tree"; then
+            echo 'Cartograph must not compile the duplicate AWS-LC Rustls provider.' >&2
+            grep -E 'aws-lc-(rs|sys) v[0-9]' <<<"$tree" >&2
+            exit 1
+          fi
+          if ! grep -Eq 'ring v[0-9]' <<<"$tree"; then
+            echo 'Cartograph requires ring as its single Rustls cryptography provider.' >&2
+            exit 1
+          fi
+          echo 'Native dependency graph is PostgreSQL-only and standardized on ring.'
 
       - name: No SQLite runtime source
         shell: bash

@@ -51,8 +51,17 @@ if find "$STAGE" -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o 
   exit 1
 fi
 
-if cargo tree --locked --workspace --all-features -e normal | grep -Eiq '(^|[-_ ])(sqlite|libsqlite)'; then
+DEPENDENCY_TREE="$(cargo tree --locked --workspace --all-features -e normal)"
+if grep -Eiq '(^|[-_ ])(sqlite|libsqlite)' <<<"$DEPENDENCY_TREE"; then
   echo "Cartograph v2 release dependency graph contains SQLite" >&2
+  exit 1
+fi
+if grep -Eq 'aws-lc-(rs|sys) v[0-9]' <<<"$DEPENDENCY_TREE"; then
+  echo "Cartograph release dependency graph contains the duplicate AWS-LC Rustls provider" >&2
+  exit 1
+fi
+if ! grep -Eq 'ring v[0-9]' <<<"$DEPENDENCY_TREE"; then
+  echo "Cartograph release dependency graph does not contain the required ring Rustls provider" >&2
   exit 1
 fi
 
@@ -77,4 +86,4 @@ if git ls-files 'src/**' '__tests__/**' 'bench/**' | grep -q .; then
   exit 1
 fi
 
-echo "[rust-release] archive allowlist, privacy, license, native-runtime, and no-SQLite checks passed"
+echo "[rust-release] archive allowlist, privacy, license, native-runtime, PostgreSQL-only, and ring-only checks passed"

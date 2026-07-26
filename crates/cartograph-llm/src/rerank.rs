@@ -98,6 +98,7 @@ pub struct OpenAiRerankClient {
 
 impl OpenAiRerankClient {
     pub fn new(settings: RerankSettings) -> Result<Self, RerankError> {
+        crate::ensure_tls_crypto_provider().map_err(|_| RerankError::ClientUnavailable)?;
         let client = reqwest::Client::builder()
             .connect_timeout(settings.timeout.min(MAXIMUM_CONNECT_TIMEOUT))
             .timeout(settings.timeout)

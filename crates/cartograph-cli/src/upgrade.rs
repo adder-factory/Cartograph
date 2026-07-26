@@ -242,6 +242,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn http_client() -> Result<Client, String> {
+    cartograph_llm::ensure_tls_crypto_provider()
+        .map_err(|_| "could not initialize the HTTPS client".to_owned())?;
     Client::builder()
         .user_agent(format!("cartograph/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
