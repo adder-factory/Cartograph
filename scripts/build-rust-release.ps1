@@ -5,112 +5,72 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$RunnerTemp = $env:RUNNER_TEMP
+if (-not [string]::IsNullOrWhiteSpace($RunnerTemp)) {
+  # Keep registry/build-script sources out of the runner's user profile. The
+  # temporary root is still remapped and audited below.
+  $env:CARGO_HOME = Join-Path $RunnerTemp 'cartograph-cargo-home'
+}
+$env:CARGO_TARGET_DIR = Join-Path $Root 'target'
 $ReleaseDir = Join-Path $Root 'release'
 $StagingRoot = Join-Path $ReleaseDir '.staging'
 $StageName = "cartograph-$AssetTarget"
 $Stage = Join-Path $StagingRoot $StageName
 $Archive = Join-Path $ReleaseDir "$StageName.zip"
 $Direct = Join-Path $ReleaseDir "$StageName.exe"
-$Binary = Join-Path $Root "target/$Target/release/cartograph.exe"
+$Binary = Join-Path $env:CARGO_TARGET_DIR 'release/cartograph.exe'
 
-# Rust panic locations and vendored C/C++ grammar diagnostics retain source
-# paths unless both toolchains are remapped. The PE audit below verifies that
-# none of these runner-owned roots survive in either published artifact.
-function Add-EncodedRustFlag {
-  param([Parameter(Mandatory = $true)][string]$Flag)
+. (Join-Path $PSScriptRoot 'windows-rust-release-paths.ps1')
 
-  $Separator = [char]0x1f
-  if ([string]::IsNullOrWhiteSpace($env:CARGO_ENCODED_RUSTFLAGS)) {
-    $env:CARGO_ENCODED_RUSTFLAGS = $Flag
-  } else {
-    $env:CARGO_ENCODED_RUSTFLAGS += "$Separator$Flag"
-  }
+$HostLine = @(& rustc -vV | Where-Object { $_ -like 'host: *' } | Select-Object -First 1)
+if ($LASTEXITCODE -ne 0 -or $HostLine.Count -ne 1) {
+  throw 'could not determine the release runner Rust host target'
+}
+$HostTarget = $HostLine[0].Substring('host: '.Length).Trim()
+if ($HostTarget -cne $Target) {
+  throw "Windows release builds must run natively on $Target; runner host is $HostTarget"
 }
 
-function Add-CompilerFlag {
-  param(
-    [Parameter(Mandatory = $true)][string]$Name,
-    [Parameter(Mandatory = $true)][string]$Flag
-  )
+$EnvironmentRoots = @(
+  [PSCustomObject]@{ Label = 'repository root'; Value = $Root },
+  [PSCustomObject]@{ Label = 'Cargo target directory'; Value = $env:CARGO_TARGET_DIR },
+  [PSCustomObject]@{ Label = 'GitHub workspace'; Value = $env:GITHUB_WORKSPACE },
+  [PSCustomObject]@{ Label = 'GitHub runner workspace'; Value = $env:RUNNER_WORKSPACE },
+  [PSCustomObject]@{ Label = 'GitHub runner temporary directory'; Value = $env:RUNNER_TEMP },
+  [PSCustomObject]@{ Label = 'GitHub runner tool cache'; Value = $env:RUNNER_TOOL_CACHE },
+  [PSCustomObject]@{ Label = 'Windows user profile'; Value = $env:USERPROFILE },
+  [PSCustomObject]@{ Label = 'home directory'; Value = $env:HOME },
+  [PSCustomObject]@{ Label = 'Cargo home'; Value = $env:CARGO_HOME },
+  [PSCustomObject]@{ Label = 'Rustup home'; Value = $env:RUSTUP_HOME },
+  [PSCustomObject]@{ Label = 'temporary directory'; Value = $env:TEMP },
+  [PSCustomObject]@{ Label = 'alternate temporary directory'; Value = $env:TMP },
+  [PSCustomObject]@{ Label = 'local application data'; Value = $env:LOCALAPPDATA },
+  [PSCustomObject]@{ Label = 'roaming application data'; Value = $env:APPDATA }
+)
+$StaticPrivateRoots = @(
+  [PSCustomObject]@{ Label = 'Windows user profile root'; Value = 'C:\Users\' },
+  [PSCustomObject]@{ Label = 'Unix user profile root'; Value = '/Users/' },
+  [PSCustomObject]@{ Label = 'GitHub Windows runner root'; Value = 'D:\a\' },
+  [PSCustomObject]@{ Label = 'GitHub Windows runner root'; Value = 'C:\a\' },
+  [PSCustomObject]@{ Label = 'GitHub Unix runner root'; Value = '/home/runner/work/' }
+)
 
-  $Current = [Environment]::GetEnvironmentVariable($Name)
-  $Next = if ([string]::IsNullOrWhiteSpace($Current)) { $Flag } else { "$Current $Flag" }
-  [Environment]::SetEnvironmentVariable($Name, $Next)
-}
+# Passing --target for a native Windows build prevents Cargo from applying
+# CARGO_ENCODED_RUSTFLAGS to host build scripts and proc macros. Build natively
+# so every Rust compiler invocation receives both Windows path spellings.
+Set-PrivateBuildPathRemapping -Roots @(
+  $EnvironmentRoots |
+    ForEach-Object { [string]$_.Value } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
 
-if ([string]::IsNullOrWhiteSpace($env:CARGO_ENCODED_RUSTFLAGS) -and
-    -not [string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
-  foreach ($InheritedFlag in ($env:RUSTFLAGS -split '\s+' | Where-Object { $_ })) {
-    Add-EncodedRustFlag -Flag $InheritedFlag
-  }
-}
-$env:RUSTFLAGS = $null
-
-$RemapRoots = @(
-  $Root,
-  $env:GITHUB_WORKSPACE,
-  $env:RUNNER_WORKSPACE,
-  $env:USERPROFILE,
-  $env:HOME,
-  $env:CARGO_HOME,
-  $env:RUSTUP_HOME
-) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
-foreach ($RemapRoot in $RemapRoots) {
-  Add-EncodedRustFlag -Flag "--remap-path-prefix=$RemapRoot=."
-  Add-CompilerFlag -Name 'CFLAGS' -Flag "/pathmap:$RemapRoot=."
-  Add-CompilerFlag -Name 'CXXFLAGS' -Flag "/pathmap:$RemapRoot=."
-}
-
-function Assert-NoPrivateBuildRoots {
-  param([Parameter(Mandatory = $true)][string]$Path)
-
-  $Bytes = [System.IO.File]::ReadAllBytes($Path)
-  $Ascii = [System.Text.Encoding]::ASCII.GetString($Bytes)
-  $Utf16Le = [System.Text.Encoding]::Unicode.GetString($Bytes)
-  $Utf16Be = [System.Text.Encoding]::BigEndianUnicode.GetString($Bytes)
-  $PrivateRoots = @(
-    [PSCustomObject]@{ Label = 'repository root'; Value = $Root },
-    [PSCustomObject]@{ Label = 'GitHub workspace'; Value = $env:GITHUB_WORKSPACE },
-    [PSCustomObject]@{ Label = 'GitHub runner workspace'; Value = $env:RUNNER_WORKSPACE },
-    [PSCustomObject]@{ Label = 'Windows user profile'; Value = $env:USERPROFILE },
-    [PSCustomObject]@{ Label = 'home directory'; Value = $env:HOME },
-    [PSCustomObject]@{ Label = 'Cargo home'; Value = $env:CARGO_HOME },
-    [PSCustomObject]@{ Label = 'Rustup home'; Value = $env:RUSTUP_HOME },
-    [PSCustomObject]@{ Label = 'Windows user profile root'; Value = 'C:\Users\' },
-    [PSCustomObject]@{ Label = 'Unix user profile root'; Value = '/Users/' },
-    [PSCustomObject]@{ Label = 'GitHub Windows runner root'; Value = 'D:\a\' },
-    [PSCustomObject]@{ Label = 'GitHub Windows runner root'; Value = 'C:\a\' },
-    [PSCustomObject]@{ Label = 'GitHub Unix runner root'; Value = '/home/runner/work/' }
-  )
-
-  foreach ($PrivateRoot in $PrivateRoots) {
-    $Value = [string]$PrivateRoot.Value
-    if ([string]::IsNullOrWhiteSpace($Value)) { continue }
-
-    $Fragments = @(
-      $Value,
-      $Value.Replace('\', '/'),
-      $Value.Replace('/', '\')
-    ) | Select-Object -Unique
-    foreach ($Fragment in $Fragments) {
-      $ContainsFragment =
-        $Ascii.IndexOf($Fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $Utf16Le.IndexOf($Fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $Utf16Be.IndexOf($Fragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-      if ($ContainsFragment) {
-        throw "release binary contains a private build-root fragment ($($PrivateRoot.Label))"
-      }
-    }
-  }
-}
-
-cargo build --locked --release --package cartograph-cli --target $Target
+cargo build --locked --release --package cartograph-cli
 if ($LASTEXITCODE -ne 0) { throw 'cargo release build failed' }
 
 # Audit the exact tag-built executable before either published artifact is made.
 # Read all three common encodings because Windows toolchains can retain both
 # narrow and wide path strings in PE files.
-Assert-NoPrivateBuildRoots -Path $Binary
+Assert-NoPrivateBuildRoots -Path $Binary -PrivateRoots @($EnvironmentRoots + $StaticPrivateRoots)
 
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Stage, $Archive, $Direct
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'bin') | Out-Null

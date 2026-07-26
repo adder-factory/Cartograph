@@ -464,9 +464,13 @@ fn local_endpoint(raw: &str) -> Result<Option<(String, String, u16)>, String> {
     if url.scheme() != "http" {
         return Ok(None);
     }
-    let Some(host) = url.host_str() else {
+    let Some(raw_host) = url.host_str() else {
         return Err("configured LLM endpoint has no host".to_owned());
     };
+    let host = raw_host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(raw_host);
     if !is_loopback(host) {
         return Ok(None);
     }
@@ -721,14 +725,20 @@ fn safe_regular_file(path: &Path) -> bool {
 fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        let expected_pid = pid.to_string();
         ProcessCommand::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .args(["-p", &expected_pid, "-o", "pid=,stat="])
             .stdin(Stdio::null())
             .output()
             .is_ok_and(|output| {
-                output.status.success()
-                    && output.stdout.len() <= 64
-                    && String::from_utf8_lossy(&output.stdout).trim() == pid.to_string()
+                if !output.status.success() || output.stdout.len() > 64 {
+                    return false;
+                }
+                let rendered = String::from_utf8_lossy(&output.stdout);
+                let mut fields = rendered.split_whitespace();
+                fields.next() == Some(expected_pid.as_str())
+                    && fields.next().is_some_and(|state| !state.starts_with('Z'))
+                    && fields.next().is_none()
             })
     }
     #[cfg(windows)]
@@ -1456,5 +1466,271 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--embeddings")
         );
+    }
+
+    #[tokio::test]
+    async fn empty_initialized_project_commands_are_bounded_and_do_not_spawn_processes() {
+        let root = tempdir().unwrap_or_else(|error| panic!("fixture root failed: {error}"));
+        fs::create_dir(root.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
+
+        assert_eq!(
+            run(BackendCommand::Status(StatusArguments {
+                path: root.path().to_path_buf(),
+                json: true,
+            }))
+            .await,
+            Ok(ExitCode::SUCCESS)
+        );
+        assert_eq!(
+            run(BackendCommand::Start(StartArguments {
+                path: root.path().to_path_buf(),
+                binary: "llama-server".to_owned(),
+                dry_run: true,
+                json: false,
+            }))
+            .await,
+            Ok(ExitCode::FAILURE)
+        );
+        assert_eq!(
+            run(BackendCommand::Restart(RestartArguments {
+                path: root.path().to_path_buf(),
+                binary: "llama-server".to_owned(),
+                tier: None,
+                force: false,
+                dry_run: true,
+                json: true,
+            }))
+            .await,
+            Ok(ExitCode::FAILURE)
+        );
+        assert_eq!(
+            run(BackendCommand::Stop(StopArguments {
+                path: root.path().to_path_buf(),
+                force: false,
+                json: true,
+            }))
+            .await,
+            Ok(ExitCode::SUCCESS)
+        );
+        assert_eq!(
+            run(BackendCommand::Logs(LogsArguments {
+                path: root.path().to_path_buf(),
+                tier: None,
+                lines: 20,
+                json: false,
+            }))
+            .await,
+            Ok(ExitCode::SUCCESS)
+        );
+        assert_eq!(
+            run(BackendCommand::Logs(LogsArguments {
+                path: root.path().to_path_buf(),
+                tier: Some(BackendTier::Embed),
+                lines: 20,
+                json: true,
+            }))
+            .await,
+            Ok(ExitCode::FAILURE)
+        );
+        assert!(!root.path().join(".cartograph/backends").exists());
+    }
+
+    #[test]
+    fn state_endpoint_and_argument_boundaries_fail_closed() {
+        let root = tempdir().unwrap_or_else(|error| panic!("fixture root failed: {error}"));
+        assert!(state_paths(root.path()).is_err());
+        fs::create_dir(root.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
+        let paths =
+            state_paths(root.path()).unwrap_or_else(|error| panic!("state paths failed: {error}"));
+        ensure_state_directory(&paths)
+            .unwrap_or_else(|error| panic!("state directory failed: {error}"));
+        assert!(paths.directory.is_dir());
+        assert_eq!(
+            paths.project,
+            fs::canonicalize(root.path()).unwrap_or_default()
+        );
+
+        assert!(validate_binary("").is_err());
+        assert!(validate_binary("bad\nbinary").is_err());
+        assert!(validate_binary(&"b".repeat(4_097)).is_err());
+        assert!(validate_binary("llama-server").is_ok());
+        assert!(has_parallel_flag(&["--parallel=4".to_owned()]));
+        assert!(has_parallel_flag(&["-np".to_owned(), "2".to_owned()]));
+        assert!(!has_parallel_flag(&["--cache-ram".to_owned()]));
+        for rejected in [
+            "--model=other.gguf",
+            "--host",
+            "--embeddings",
+            "--reranking",
+        ] {
+            assert!(validate_passthrough(&[rejected.to_owned()]).is_err());
+        }
+
+        assert_eq!(
+            local_endpoint("http://localhost:8080/v1")
+                .unwrap_or_else(|error| panic!("localhost endpoint failed: {error}")),
+            Some((
+                "http://localhost:8080".to_owned(),
+                "localhost".to_owned(),
+                8080,
+            ))
+        );
+        assert_eq!(
+            local_endpoint("http://[::1]:8081")
+                .unwrap_or_else(|error| panic!("IPv6 endpoint failed: {error}")),
+            Some(("http://[::1]:8081".to_owned(), "::1".to_owned(), 8081))
+        );
+        assert!(
+            local_endpoint("https://localhost:8080")
+                .unwrap_or_else(|error| panic!("HTTPS endpoint failed: {error}"))
+                .is_none()
+        );
+        assert!(
+            local_endpoint("http://example.com:8080")
+                .unwrap_or_else(|error| panic!("remote endpoint failed: {error}"))
+                .is_none()
+        );
+        assert!(local_endpoint("not a URL").is_err());
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("::1"));
+        assert!(!is_loopback("192.0.2.1"));
+        assert_eq!(short_hash("stable"), short_hash("stable"));
+        assert_ne!(short_hash("stable"), short_hash("different"));
+        assert_eq!(BackendTier::Summarize.label(), "summarize");
+        assert_eq!(BackendTier::Local.label(), "local");
+        assert_eq!(BackendTier::Ask.label(), "ask");
+        assert_eq!(BackendTier::Classify.label(), "classify");
+        assert_eq!(BackendTier::Rerank.label(), "rerank");
+    }
+
+    #[tokio::test]
+    async fn pid_state_orphan_recovery_and_log_tail_never_trust_unsafe_files() {
+        let root = tempdir().unwrap_or_else(|error| panic!("fixture root failed: {error}"));
+        let marker = root.path().join(".cartograph");
+        fs::create_dir(&marker).unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
+        let paths =
+            state_paths(root.path()).unwrap_or_else(|error| panic!("state paths failed: {error}"));
+        ensure_state_directory(&paths)
+            .unwrap_or_else(|error| panic!("state directory failed: {error}"));
+        let model = root.path().join("fixture.gguf");
+        fs::write(&model, b"fixture model")
+            .unwrap_or_else(|error| panic!("model fixture failed: {error}"));
+        let log = paths.directory.join("fixture.log");
+        fs::write(&log, b"first\nsecond\nthird\n")
+            .unwrap_or_else(|error| panic!("log fixture failed: {error}"));
+        assert_eq!(
+            tail_log(&log, 2).unwrap_or_else(|error| panic!("log tail failed: {error}")),
+            Some("second\nthird".to_owned())
+        );
+        assert_eq!(tail_log(&paths.directory.join("missing.log"), 2), Ok(None));
+        let unsafe_log = paths.directory.join("unsafe-log");
+        fs::create_dir(&unsafe_log)
+            .unwrap_or_else(|error| panic!("unsafe log fixture failed: {error}"));
+        assert!(tail_log(&unsafe_log, 2).is_err());
+
+        let spec = BackendSpec {
+            id: "fixture".to_owned(),
+            labels: vec!["embed".to_owned()],
+            endpoint: "http://127.0.0.1:65534".to_owned(),
+            model_path: model.clone(),
+            host: "127.0.0.1".to_owned(),
+            port: 65_534,
+            parallel: 2,
+            command: "/usr/bin/false".to_owned(),
+            args: vec!["--port".to_owned(), "65534".to_owned()],
+            externally_managed: false,
+        };
+        let mut row = BackendRow {
+            spec: spec.clone(),
+            origin: BackendOrigin::Config,
+            pid_file_path: paths.directory.join("fixture.json"),
+            log_path: log.clone(),
+            pid_record: None,
+            pid_alive: false,
+            endpoint_reachable: false,
+            model_exists: true,
+            state: BackendState::Stopped,
+            state_error: None,
+            config_drift: false,
+        };
+        assert_eq!(
+            write_pid_record(&row, 0),
+            Err("child process did not report a valid pid".to_owned())
+        );
+        write_pid_record(&row, u32::MAX - 1)
+            .unwrap_or_else(|error| panic!("pid record write failed: {error}"));
+        let record = match read_pid_record(&row.pid_file_path) {
+            PidState::Valid(record) => record,
+            PidState::Missing | PidState::Invalid(_) => panic!("valid pid state was rejected"),
+        };
+        assert!(valid_pid_record(&record));
+        assert!(safe_regular_file(&row.pid_file_path));
+        assert!(matches!(
+            read_pid_record(&paths.directory.join("missing.json")),
+            PidState::Missing
+        ));
+
+        let orphan = orphan_spec("orphan", &record)
+            .unwrap_or_else(|error| panic!("orphan state failed: {error}"));
+        assert_eq!(orphan.id, "orphan");
+        let (orphans, warnings) = discover_orphans(&paths.directory, &BTreeSet::new())
+            .unwrap_or_else(|error| panic!("orphan discovery failed: {error}"));
+        assert_eq!(orphans.len(), 1);
+        assert!(warnings.is_empty());
+
+        row.pid_record = Some(record);
+        assert_eq!(
+            stop_row(&row, false)
+                .await
+                .unwrap_or_else(|error| panic!("stale pid cleanup failed: {error}")),
+            Some(format!("removed stale pid state for {}", u32::MAX - 1))
+        );
+        assert!(!row.pid_file_path.exists());
+        assert!(process_alive(std::process::id()));
+        assert!(!process_alive(u32::MAX));
+        assert!(wait_for_exit(u32::MAX, Duration::from_millis(1)).await);
+
+        fs::write(paths.directory.join("malformed.json"), b"not-json")
+            .unwrap_or_else(|error| panic!("malformed pid fixture failed: {error}"));
+        assert!(matches!(
+            read_pid_record(&paths.directory.join("malformed.json")),
+            PidState::Invalid(message) if message == "state file is malformed"
+        ));
+
+        let mut missing_model = row.clone();
+        missing_model.model_exists = false;
+        missing_model.state = BackendState::MissingModel;
+        assert_eq!(
+            start_skip_reason(&missing_model).as_deref(),
+            Some("configured GGUF model is missing or unsafe")
+        );
+        missing_model.origin = BackendOrigin::Orphan;
+        assert_eq!(
+            start_skip_reason(&missing_model).as_deref(),
+            Some("orphaned state must be reclaimed with backend stop")
+        );
+        let status = BackendStatusReport {
+            project_path: paths.project,
+            state_directory: paths.directory,
+            rows: vec![missing_model],
+            warnings: vec!["fixture warning".to_owned()],
+            unmanaged_reason: None,
+        };
+        assert!(no_usable_backends(&status));
+        render_status(&status, false)
+            .unwrap_or_else(|error| panic!("status rendering failed: {error}"));
+        let logs = BackendLogsReport {
+            status,
+            logs: vec![BackendLogEntry {
+                labels: vec!["embed".to_owned()],
+                path: log,
+                exists: true,
+                content: "third".to_owned(),
+                error: None,
+            }],
+        };
+        render_logs(&logs);
     }
 }

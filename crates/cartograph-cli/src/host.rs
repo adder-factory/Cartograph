@@ -375,4 +375,128 @@ mod tests {
         assert!(report.projects[0].active);
         assert!(!report.truncated);
     }
+
+    #[tokio::test]
+    async fn async_discovery_rejects_invalid_roots_depths_and_cancellation() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        assert_eq!(
+            discover_projects(root.path(), None, 0, ProjectCancellation::new(),).await,
+            Err(HostInspectionError::InvalidOptions)
+        );
+        assert_eq!(
+            discover_projects(
+                root.path(),
+                Some("missing-host-root"),
+                1,
+                ProjectCancellation::new(),
+            )
+            .await,
+            Err(HostInspectionError::RootUnavailable)
+        );
+        let cancellation = ProjectCancellation::new();
+        cancellation.cancel();
+        assert_eq!(
+            discover_projects(root.path(), None, 1, cancellation).await,
+            Err(HostInspectionError::Cancelled)
+        );
+
+        fs::create_dir_all(root.path().join("project/.cartograph"))
+            .unwrap_or_else(|error| panic!("project marker failed: {error}"));
+        fs::write(
+            root.path().join("project/.cartograph/config.json"),
+            br#"{"database":{"provider":"postgresql"}}"#,
+        )
+        .unwrap_or_else(|error| panic!("project config failed: {error}"));
+        let report = discover_projects(
+            root.path(),
+            None,
+            MAX_DISCOVERY_DEPTH,
+            ProjectCancellation::new(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("async discovery failed: {error}"));
+        assert_eq!(report.projects.len(), 1);
+        assert!(report.projects[0].config_present);
+        assert!(report.projects[0].postgres_configured);
+        assert_eq!(
+            report.stats_scope,
+            "active_project_status_is_returned_separately; sibling_database_connections_are_not_opened"
+        );
+    }
+
+    #[test]
+    fn host_config_detection_distinguishes_missing_invalid_and_configured_targets() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let codex = root.path().join("config.toml");
+        let missing = detect_toml("codex", "local", &codex, ".codex/config.toml");
+        assert!(!missing.config_present);
+        assert!(!missing.config_valid);
+        assert!(!missing.cartograph_configured);
+
+        fs::write(&codex, "not = [valid")
+            .unwrap_or_else(|error| panic!("invalid TOML fixture failed: {error}"));
+        let invalid = detect_toml("codex", "local", &codex, ".codex/config.toml");
+        assert!(invalid.config_present);
+        assert!(!invalid.config_valid);
+        assert!(!invalid.cartograph_configured);
+
+        fs::write(
+            &codex,
+            "[mcp_servers.cartograph]\ncommand = '/usr/local/bin/cartograph'\n",
+        )
+        .unwrap_or_else(|error| panic!("valid TOML fixture failed: {error}"));
+        let configured = detect_toml("codex", "local", &codex, ".codex/config.toml");
+        assert!(configured.config_valid);
+        assert!(configured.cartograph_configured);
+        assert!(bounded_text(&codex).is_some());
+
+        let cursor = root.path().join("mcp.json");
+        fs::write(
+            &cursor,
+            br#"{"mcpServers":{"cartograph":{"command":"cartograph"}}}"#,
+        )
+        .unwrap_or_else(|error| panic!("cursor fixture failed: {error}"));
+        let cursor_detection = detect_json(
+            "cursor",
+            "local",
+            &cursor,
+            ".cursor/mcp.json",
+            JsonDetection::TopLevel,
+            root.path(),
+        );
+        assert!(cursor_detection.config_present);
+        assert!(cursor_detection.config_valid);
+        assert!(cursor_detection.cartograph_configured);
+
+        let claude = root.path().join("claude.json");
+        let project_key = root.path().to_string_lossy().into_owned();
+        fs::write(
+            &claude,
+            serde_json::to_vec(&serde_json::json!({
+                "projects": {
+                    (project_key): {
+                        "mcpServers": {"cartograph": {"command": "cartograph"}}
+                    }
+                }
+            }))
+            .unwrap_or_else(|error| panic!("Claude fixture encode failed: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("Claude fixture failed: {error}"));
+        let claude_detection = detect_json(
+            "claude",
+            "local",
+            &claude,
+            "~/.claude.json (project entry)",
+            JsonDetection::ClaudeProject,
+            root.path(),
+        );
+        assert!(claude_detection.config_valid);
+        assert!(claude_detection.cartograph_configured);
+
+        fs::create_dir(root.path().join("not-a-config"))
+            .unwrap_or_else(|error| panic!("unsafe config fixture failed: {error}"));
+        assert!(bounded_text(&root.path().join("not-a-config")).is_none());
+        assert!(bounded_config(&root.path().join("not-a-config")).is_none());
+        assert!(host_home().is_some());
+    }
 }

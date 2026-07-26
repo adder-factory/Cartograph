@@ -1193,6 +1193,20 @@ fn print_json(value: &impl Serialize) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn setup_arguments(path: &Path) -> SetupArguments {
+        SetupArguments {
+            path: path.to_path_buf(),
+            preset: None,
+            tier: None,
+            endpoint: None,
+            model: None,
+            api_key_env: None,
+            minimal: false,
+            yes: false,
+            json: false,
+        }
+    }
+
     fn install_arguments() -> InstallArguments {
         InstallArguments {
             path: PathBuf::from("."),
@@ -1306,5 +1320,136 @@ mod tests {
         arguments.database_provider = Some("postgres".to_owned());
         arguments.database_pgvector = Some("off".to_owned());
         assert!(resolve_install_database_settings(&arguments).is_err());
+    }
+
+    #[test]
+    fn every_setup_preset_has_explicit_inputs_clears_and_custom_field_policy() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let mut arguments = setup_arguments(root.path());
+
+        let (local, local_cleared) = local_inputs_in(root.path(), false)
+            .unwrap_or_else(|error| panic!("local preset failed: {error}"));
+        assert_eq!(local.len(), 6);
+        assert!(local_cleared.is_empty());
+        let (minimal, minimal_cleared) = local_inputs_in(root.path(), true)
+            .unwrap_or_else(|error| panic!("minimal local preset failed: {error}"));
+        assert_eq!(minimal.len(), 4);
+        assert_eq!(
+            minimal_cleared,
+            vec![ProjectLlmTier::Ask, ProjectLlmTier::Reranker]
+        );
+
+        arguments.tier = Some(LlmTierArgument::Chat);
+        arguments.endpoint = Some("https://api.openai.com/v1".to_owned());
+        arguments.model = Some("gpt-fixture".to_owned());
+        arguments.api_key_env = Some("OPENAI_FIXTURE_KEY".to_owned());
+        let (custom, cleared) = setup_inputs(&arguments, SetupPreset::Custom)
+            .unwrap_or_else(|error| panic!("custom preset failed: {error}"));
+        assert_eq!(custom.len(), 1);
+        assert!(cleared.is_empty());
+        assert_eq!(custom[0].tier(), ProjectLlmTier::Summarize);
+        assert!(setup_inputs(&arguments, SetupPreset::LocalLlamaCpp).is_err());
+        assert!(setup_inputs(&arguments, SetupPreset::Ollama).is_err());
+        assert!(setup_inputs(&arguments, SetupPreset::Skip).is_err());
+
+        arguments.tier = None;
+        assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
+        arguments.tier = Some(LlmTierArgument::Embed);
+        arguments.endpoint = None;
+        assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
+        arguments.endpoint = Some("https://api.openai.com".to_owned());
+        arguments.model = None;
+        assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
+        arguments.model = Some("text-embedding-3-small".to_owned());
+        arguments.api_key_env = None;
+        let (cloud, _) = setup_inputs(&arguments, SetupPreset::CloudOpenAi)
+            .unwrap_or_else(|error| panic!("cloud preset failed: {error}"));
+        assert_eq!(cloud[0].tier(), ProjectLlmTier::Embedding);
+
+        arguments.minimal = true;
+        assert!(setup_inputs(&arguments, SetupPreset::CloudOpenAi).is_err());
+        assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
+        arguments.minimal = false;
+        arguments.tier = None;
+        arguments.endpoint = None;
+        arguments.model = None;
+        let (skipped, skipped_clears) = setup_inputs(&arguments, SetupPreset::Skip)
+            .unwrap_or_else(|error| panic!("skip preset failed: {error}"));
+        assert!(skipped.is_empty());
+        assert!(skipped_clears.is_empty());
+
+        for (argument, tier) in [
+            (LlmTierArgument::Local, ProjectLlmTier::Local),
+            (LlmTierArgument::Ask, ProjectLlmTier::Ask),
+            (LlmTierArgument::Classify, ProjectLlmTier::Classify),
+            (LlmTierArgument::Reranker, ProjectLlmTier::Reranker),
+        ] {
+            assert_eq!(ProjectLlmTier::from(argument), tier);
+        }
+    }
+
+    #[test]
+    fn detection_recommendation_and_smoke_rows_keep_required_failures_explicit() {
+        let detected = vec![DetectedEndpoint {
+            endpoint: "http://127.0.0.1:11434".to_owned(),
+            reachable: true,
+            openai_compatible: true,
+            models: vec!["fixture".to_owned()],
+        }];
+        assert_eq!(recommend_preset(&detected), SetupPreset::Ollama);
+        assert_eq!(recommend_preset(&[]), SetupPreset::LocalLlamaCpp);
+        render_detection(&detected, SetupPreset::Ollama);
+
+        let required = missing_row("embedding", true, Instant::now());
+        assert_eq!(required.status, SmokeStatus::Fail);
+        assert!(required.detail.contains("not configured"));
+        let optional = missing_row("ask", false, Instant::now());
+        assert_eq!(optional.status, SmokeStatus::Skip);
+        assert!(optional.detail.contains("fallback"));
+        let ok = ok_row(
+            "summarize",
+            Some("fixture".to_owned()),
+            Some("http://127.0.0.1:8081".to_owned()),
+            Instant::now(),
+            "bounded response".to_owned(),
+        );
+        let failed = failed_row(
+            "rerank",
+            None,
+            None,
+            Instant::now(),
+            "bounded failure".to_owned(),
+        );
+        let report = SmokeReport {
+            overall_status: OverallSmokeStatus::Fail,
+            rows: vec![required, optional, ok, failed],
+            duration_ms: 1,
+        };
+        render_smoke(&report);
+        assert!(elapsed_ms(Instant::now()) <= 1_000);
+    }
+
+    #[tokio::test]
+    async fn skipped_setup_and_unconfigured_smoke_are_noninteractive_and_deterministic() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let mut setup = setup_arguments(root.path());
+        setup.preset = Some(SetupPreset::Skip);
+        setup.json = true;
+        assert_eq!(run(LlmCommand::Setup(setup)).await, Ok(ExitCode::SUCCESS));
+        assert!(!root.path().join(".cartograph/config.json").exists());
+
+        assert_eq!(
+            run(LlmCommand::Smoke(SmokeArguments {
+                path: root.path().to_path_buf(),
+                timeout_ms: 50,
+                json: false,
+            }))
+            .await,
+            Ok(ExitCode::FAILURE)
+        );
+        let unreachable = detect_one("http://127.0.0.1:1").await;
+        assert!(!unreachable.reachable);
+        assert!(!unreachable.openai_compatible);
+        assert!(unreachable.models.is_empty());
     }
 }

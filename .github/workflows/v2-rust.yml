@@ -159,6 +159,10 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
 
+      - name: Windows release path privacy regression
+        shell: pwsh
+        run: scripts/test-windows-rust-release-paths.ps1
+
       - name: Windows all-target, all-feature Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 

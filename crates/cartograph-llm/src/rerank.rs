@@ -280,7 +280,18 @@ fn normalize_scores(scores: &[f32]) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
     use super::*;
+
+    const FIXTURE_REQUEST_BYTES: usize = 64 * 1_024;
+    const FIXTURE_REQUEST_CHUNK_BYTES: usize = 4 * 1_024;
+    const HTTP_HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 
     #[test]
     fn response_is_input_ordered_and_raw_logits_are_normalized() {
@@ -303,5 +314,197 @@ mod tests {
             decode_response(nonfinite, 1, "fixture"),
             Err(RerankError::InvalidResponse)
         );
+    }
+
+    #[test]
+    fn project_configuration_normalizes_the_endpoint_and_redacts_credentials() {
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("reranker project fixture failed: {error}"));
+        std::fs::create_dir(root.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("reranker marker failed: {error}"));
+        assert!(
+            RerankSettings::try_from_project(root.path())
+                .unwrap_or_else(|error| panic!("absent reranker failed: {error}"))
+                .is_none()
+        );
+        std::fs::write(
+            root.path().join(".cartograph/config.json"),
+            br#"{"version":2,"llm":{"enabled":true,"rerankerLlm":{"provider":"openai-compat","endpoint":"http://127.0.0.1:8080/v1","model":"fixture-reranker","apiKey":"private-fixture","timeoutMs":3210}}}"#,
+        )
+        .unwrap_or_else(|error| panic!("reranker config write failed: {error}"));
+        let settings = RerankSettings::try_from_project(root.path())
+            .unwrap_or_else(|error| panic!("reranker config failed: {error}"))
+            .unwrap_or_else(|| panic!("reranker config disappeared"));
+        assert_eq!(
+            settings.endpoint.as_str(),
+            "http://127.0.0.1:8080/v1/rerank"
+        );
+        assert_eq!(settings.model, "fixture-reranker");
+        assert_eq!(settings.timeout, Duration::from_millis(3210));
+        let rendered = format!("{settings:?}");
+        assert!(rendered.contains("fixture-reranker"));
+        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains("private-fixture"));
+    }
+
+    #[tokio::test]
+    async fn http_boundary_sends_bounded_authenticated_request_and_restores_input_order() {
+        let response_body =
+            r#"{"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.2}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        let (endpoint, request) = spawn_http_fixture(response);
+        let settings = RerankSettings {
+            endpoint: Url::parse(&format!("{endpoint}/v1/rerank"))
+                .unwrap_or_else(|error| panic!("reranker endpoint failed: {error}")),
+            model: "fixture-reranker".to_owned(),
+            api_key: Some(SecretString::from("fixture-key")),
+            timeout: Duration::from_secs(2),
+        };
+        let client = OpenAiRerankClient::new(settings)
+            .unwrap_or_else(|error| panic!("reranker client failed: {error}"));
+        let batch = client
+            .rerank("rank this", &["first".to_owned(), "second".to_owned()])
+            .await
+            .unwrap_or_else(|error| panic!("reranker request failed: {error}"));
+        assert_eq!(batch.model(), "fixture-reranker");
+        assert_eq!(batch.scores(), &[0.2, 0.9]);
+
+        let request = request
+            .join()
+            .unwrap_or_else(|_| panic!("reranker HTTP fixture panicked"));
+        let request = String::from_utf8(request)
+            .unwrap_or_else(|error| panic!("reranker request was not UTF-8: {error}"));
+        assert!(request.starts_with("POST /v1/rerank HTTP/1.1\r\n"));
+        assert!(request.contains("authorization: Bearer fixture-key\r\n"));
+        assert!(request.contains("\"model\":\"fixture-reranker\""));
+        assert!(request.contains("\"query\":\"rank this\""));
+        assert!(request.contains("\"documents\":[\"first\",\"second\"]"));
+        assert!(request.contains("\"top_n\":2"));
+    }
+
+    #[tokio::test]
+    async fn request_and_response_limits_fail_before_unbounded_work() {
+        for (query, documents) in [
+            ("", vec!["document".to_owned()]),
+            ("query\0", vec!["document".to_owned()]),
+            ("query", Vec::new()),
+            ("query", vec!["  ".to_owned()]),
+            ("query", vec!["document\0".to_owned()]),
+            (
+                "query",
+                (0..=MAXIMUM_DOCUMENTS)
+                    .map(|index| format!("document-{index}"))
+                    .collect(),
+            ),
+        ] {
+            assert_eq!(
+                validate_input(query, &documents),
+                Err(RerankError::RequestLimit)
+            );
+        }
+        assert_eq!(
+            validate_input(
+                &"q".repeat(MAXIMUM_QUERY_BYTES + 1),
+                &["document".to_owned()]
+            ),
+            Err(RerankError::RequestLimit)
+        );
+        assert_eq!(
+            validate_input("query", &["d".repeat(MAXIMUM_DOCUMENT_BYTES + 1)]),
+            Err(RerankError::RequestLimit)
+        );
+
+        for (status, length, expected) in [
+            (503_u16, 0_usize, RerankError::BackendRejected),
+            (
+                200_u16,
+                MAXIMUM_RESPONSE_BYTES + 1,
+                RerankError::ResponseLimit,
+            ),
+        ] {
+            let response = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+            );
+            let (endpoint, request) = spawn_http_fixture(response);
+            let settings = RerankSettings {
+                endpoint: Url::parse(&format!("{endpoint}/v1/rerank"))
+                    .unwrap_or_else(|error| panic!("reranker endpoint failed: {error}")),
+                model: "fixture-reranker".to_owned(),
+                api_key: None,
+                timeout: Duration::from_secs(2),
+            };
+            let client = OpenAiRerankClient::new(settings)
+                .unwrap_or_else(|error| panic!("reranker client failed: {error}"));
+            assert_eq!(
+                client.rerank("query", &["document".to_owned()]).await,
+                Err(expected)
+            );
+            request
+                .join()
+                .unwrap_or_else(|_| panic!("rejected reranker fixture panicked"));
+        }
+    }
+
+    fn spawn_http_fixture(response: String) -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("reranker fixture bind failed: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("reranker fixture address failed: {error}"));
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .unwrap_or_else(|error| panic!("reranker fixture accept failed: {error}"));
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap_or_else(|error| panic!("reranker fixture timeout failed: {error}"));
+            let request = read_http_request(&mut stream);
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|()| stream.flush())
+                .unwrap_or_else(|error| panic!("reranker fixture response failed: {error}"));
+            request
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; FIXTURE_REQUEST_CHUNK_BYTES];
+        loop {
+            let read = stream
+                .read(&mut chunk)
+                .unwrap_or_else(|error| panic!("reranker fixture read failed: {error}"));
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            assert!(request.len() <= FIXTURE_REQUEST_BYTES);
+            if complete_http_request(&request) {
+                break;
+            }
+        }
+        request
+    }
+
+    fn complete_http_request(request: &[u8]) -> bool {
+        let Some(header_end) = request
+            .windows(HTTP_HEADER_TERMINATOR.len())
+            .position(|window| window == HTTP_HEADER_TERMINATOR)
+        else {
+            return false;
+        };
+        let body_start = header_end + HTTP_HEADER_TERMINATOR.len();
+        let headers = std::str::from_utf8(&request[..header_end]).unwrap_or("");
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        });
+        content_length.is_none_or(|length| request.len() >= body_start.saturating_add(length))
     }
 }

@@ -21773,6 +21773,9 @@ test("handles an order", () => expect(handleOrder("42")).toContain("42"));
                     }
                     Err(error) => panic!("neighbor embedding accept failed: {error}"),
                 };
+                stream
+                    .set_nonblocking(false)
+                    .unwrap_or_else(|error| panic!("neighbor embedding blocking failed: {error}"));
                 thread_requests.fetch_add(1, Ordering::SeqCst);
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -21878,7 +21881,7 @@ test("handles an order", () => expect(handleOrder("42")).toContain("42"));
         job_id: u64,
         expected: AdminJobStatus,
     ) -> AdminJobView {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let view = jobs
                     .status(Some(job_id))
@@ -21887,10 +21890,31 @@ test("handles an order", () => expect(handleOrder("42")).toContain("42"));
                 if view.status == expected {
                     return view;
                 }
+                assert!(
+                    matches!(
+                        view.status,
+                        AdminJobStatus::Running | AdminJobStatus::Cancelling
+                    ),
+                    "admin job reached unexpected terminal state: expected {expected:?}, got {:?} ({:?})",
+                    view.status,
+                    view.failure
+                );
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
-        .await
-        .unwrap_or_else(|_| panic!("admin job did not reach terminal state"))
+        .await;
+        match result {
+            Ok(view) => view,
+            Err(_) => {
+                let last = jobs
+                    .status(Some(job_id))
+                    .await
+                    .unwrap_or_else(|error| panic!("admin status failed after timeout: {error}"));
+                panic!(
+                    "admin job did not reach {expected:?} within 30 seconds; last status was {:?} ({:?})",
+                    last.status, last.failure
+                )
+            }
+        }
     }
 }

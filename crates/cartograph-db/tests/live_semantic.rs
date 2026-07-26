@@ -472,6 +472,120 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB/pgvector test database"]
+async fn retired_embedding_maintenance_is_auditable_dry_run_first_and_model_scoped() {
+    let fixture = open_fixture().await;
+    migrate(&fixture).await;
+    let model_a = model_registration(ModelFixture::A);
+    let model_b = model_registration(ModelFixture::B);
+    let selector_a = model_a.selector();
+    let selector_b = model_b.selector();
+    register_model(&fixture.database, model_a).await;
+    register_model(&fixture.database, model_b).await;
+    fixture
+        .database
+        .ensure_embedding_model_hnsw(&selector_a, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("model A HNSW creation failed: {error}"));
+    fixture
+        .database
+        .ensure_embedding_model_hnsw(&selector_b, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("model B HNSW creation failed: {error}"));
+
+    let project = register_project(&fixture.database).await;
+    let generation = publish_generation(&fixture.database, &project, 20).await;
+    embed_all_pending(&fixture.database, &project, &generation, &selector_a).await;
+    embed_all_pending(&fixture.database, &project, &generation, &selector_b).await;
+    fixture
+        .database
+        .retire_embedding_model(
+            RetireEmbeddingModelRequest::new(
+                selector_a.clone(),
+                selector_b.clone(),
+                STATEMENT_TIMEOUT,
+            )
+            .unwrap_or_else(|error| panic!("retirement request failed: {error}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("model retirement failed: {error}"));
+
+    let before = fixture
+        .database
+        .embedding_storage_audit(&project, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("embedding audit failed: {error}"));
+    assert_eq!(before.active_models, 1);
+    assert_eq!(before.retired_models, 1);
+    assert_eq!(before.current_documents, 3);
+    assert_eq!(before.current_embeddings, 6);
+    assert_eq!(before.historical_embeddings, 0);
+    assert_eq!(before.retired_model_embeddings, 3);
+    assert_eq!(before.model_indexes, 2);
+
+    let dry_run = fixture
+        .database
+        .cleanup_retired_embeddings(&project, false, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("embedding cleanup dry-run failed: {error}"));
+    assert!(dry_run.dry_run);
+    assert_eq!(dry_run.candidate_embeddings, 3);
+    assert_eq!(dry_run.deleted_embeddings, 0);
+    assert_eq!(dry_run.dropped_model_indexes, 0);
+    let after_dry_run = fixture
+        .database
+        .embedding_storage_audit(&project, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("post-dry-run embedding audit failed: {error}"));
+    assert_eq!(after_dry_run, before);
+
+    let applied = fixture
+        .database
+        .cleanup_retired_embeddings(&project, true, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("embedding cleanup failed: {error}"));
+    assert!(!applied.dry_run);
+    assert_eq!(applied.candidate_embeddings, 3);
+    assert_eq!(applied.deleted_embeddings, 3);
+    assert_eq!(applied.dropped_model_indexes, 1);
+
+    let after = fixture
+        .database
+        .embedding_storage_audit(&project, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("post-cleanup embedding audit failed: {error}"));
+    assert_eq!(after.active_models, 1);
+    assert_eq!(after.retired_models, 1);
+    assert_eq!(after.current_documents, 3);
+    assert_eq!(after.current_embeddings, 3);
+    assert_eq!(after.historical_embeddings, 0);
+    assert_eq!(after.retired_model_embeddings, 0);
+    assert_eq!(after.model_indexes, 1);
+    assert!(matches!(
+        fixture
+            .database
+            .embedding_storage_audit(&project, Duration::ZERO)
+            .await,
+        Err(SemanticStorageError::InvalidInput {
+            field: "statement_timeout"
+        })
+    ));
+    assert!(matches!(
+        fixture
+            .database
+            .cleanup_retired_embeddings(&project, false, Duration::ZERO)
+            .await,
+        Err(SemanticStorageError::InvalidInput {
+            field: "statement_timeout"
+        })
+    ));
+
+    drop(fixture.database);
+    drop_schema(&fixture.pool, &fixture.schema).await;
+    fixture.pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB/pgvector test database"]
 async fn filtered_hnsw_scan_is_bounded_index_backed_and_generation_isolated() {
     let fixture = open_fixture().await;
     migrate(&fixture).await;

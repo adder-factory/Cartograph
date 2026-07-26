@@ -379,7 +379,20 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
+    use sha2::{Digest as _, Sha256};
+
     use super::*;
+
+    const FIXTURE_REQUEST_BYTES: usize = 64 * 1_024;
+    const FIXTURE_REQUEST_CHUNK_BYTES: usize = 4 * 1_024;
+    const HTTP_HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 
     #[test]
     fn manifest_is_https_unique_and_has_frozen_sha256_values() {
@@ -418,5 +431,189 @@ mod tests {
             install_one(&client, directory.path(), RECOMMENDED_MODELS[0]).await,
             Err(InstallModelsError::UnsafeTarget)
         ));
+    }
+
+    #[tokio::test]
+    async fn installer_downloads_atomically_then_reuses_only_the_verified_file() {
+        let body = b"fixture model bytes";
+        let checksum = hex_digest(&Sha256::digest(body));
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        let (endpoint, request) = spawn_http_fixture(response);
+        let endpoint = Box::leak(endpoint.into_boxed_str());
+        let checksum = Box::leak(checksum.into_boxed_str());
+        let model = RecommendedModel {
+            filename: "fixture.gguf",
+            url: endpoint,
+            size_bytes: u64::try_from(body.len()).unwrap_or_default(),
+            sha256: checksum,
+            minimal: true,
+        };
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("model directory fixture failed: {error}"));
+        let client = reqwest::Client::new();
+
+        let downloaded = install_one(&client, directory.path(), model)
+            .await
+            .unwrap_or_else(|error| panic!("model download failed: {error}"));
+        let InstallDisposition::Downloaded(downloaded) = downloaded else {
+            panic!("first model installation did not download")
+        };
+        assert_eq!(downloaded.filename, model.filename);
+        assert_eq!(downloaded.size_bytes, model.size_bytes);
+        assert_eq!(
+            tokio::fs::read(directory.path().join(model.filename))
+                .await
+                .unwrap_or_else(|error| panic!("model read failed: {error}")),
+            body
+        );
+        assert!(!directory.path().join("fixture.gguf.partial").exists());
+        let request = request
+            .join()
+            .unwrap_or_else(|_| panic!("model HTTP fixture panicked"));
+        assert!(request.starts_with(b"GET /model.gguf HTTP/1.1\r\n"));
+
+        let skipped = install_one(&client, directory.path(), model)
+            .await
+            .unwrap_or_else(|error| panic!("verified model reuse failed: {error}"));
+        let InstallDisposition::Skipped(skipped) = skipped else {
+            panic!("verified model was downloaded again")
+        };
+        assert_eq!(skipped, downloaded);
+    }
+
+    #[tokio::test]
+    async fn directory_options_and_download_failures_are_bounded_before_publication() {
+        assert!(matches!(
+            InstallModelsOptions::new("", true, 1),
+            Err(InstallModelsError::InvalidOptions)
+        ));
+        assert!(matches!(
+            InstallModelsOptions::new("models", true, 0),
+            Err(InstallModelsError::InvalidOptions)
+        ));
+        assert!(matches!(
+            InstallModelsOptions::new("models", false, MAXIMUM_INSTALL_CONCURRENCY + 1),
+            Err(InstallModelsError::InvalidOptions)
+        ));
+        let root =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("directory fixture failed: {error}"));
+        let created = root.path().join("created/models");
+        prepare_directory(&created)
+            .await
+            .unwrap_or_else(|error| panic!("model directory creation failed: {error}"));
+        prepare_directory(&created)
+            .await
+            .unwrap_or_else(|error| panic!("existing model directory failed: {error}"));
+        let regular_file = root.path().join("not-a-directory");
+        tokio::fs::write(&regular_file, b"fixture")
+            .await
+            .unwrap_or_else(|error| panic!("directory rejection fixture failed: {error}"));
+        assert_eq!(
+            prepare_directory(&regular_file).await,
+            Err(InstallModelsError::DirectoryUnavailable)
+        );
+
+        for (status, declared_length, expected) in [
+            (503_u16, 0_usize, InstallModelsError::BackendRejected),
+            (200_u16, 99_usize, InstallModelsError::SizeMismatch),
+        ] {
+            let response = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+            );
+            let (endpoint, request) = spawn_http_fixture(response);
+            let endpoint = Box::leak(endpoint.into_boxed_str());
+            let model = RecommendedModel {
+                filename: "rejected.gguf",
+                url: endpoint,
+                size_bytes: 3,
+                sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                minimal: true,
+            };
+            assert_eq!(
+                download_to_partial(
+                    &reqwest::Client::new(),
+                    &root.path().join("rejected.gguf.partial"),
+                    model,
+                )
+                .await,
+                Err(expected)
+            );
+            request
+                .join()
+                .unwrap_or_else(|_| panic!("rejected model HTTP fixture panicked"));
+        }
+
+        let body = "bad";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (endpoint, request) = spawn_http_fixture(response);
+        let endpoint = Box::leak(endpoint.into_boxed_str());
+        let model = RecommendedModel {
+            filename: "checksum.gguf",
+            url: endpoint,
+            size_bytes: u64::try_from(body.len()).unwrap_or_default(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            minimal: true,
+        };
+        let partial = root.path().join("checksum.gguf.partial");
+        assert_eq!(
+            download_to_partial(&reqwest::Client::new(), &partial, model).await,
+            Err(InstallModelsError::ChecksumMismatch)
+        );
+        assert!(partial.exists());
+        request
+            .join()
+            .unwrap_or_else(|_| panic!("checksum HTTP fixture panicked"));
+    }
+
+    fn spawn_http_fixture(response: String) -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("model fixture bind failed: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("model fixture address failed: {error}"));
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .unwrap_or_else(|error| panic!("model fixture accept failed: {error}"));
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap_or_else(|error| panic!("model fixture timeout failed: {error}"));
+            let request = read_http_request(&mut stream);
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|()| stream.flush())
+                .unwrap_or_else(|error| panic!("model fixture response failed: {error}"));
+            request
+        });
+        (format!("http://{address}/model.gguf"), handle)
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; FIXTURE_REQUEST_CHUNK_BYTES];
+        loop {
+            let read = stream
+                .read(&mut chunk)
+                .unwrap_or_else(|error| panic!("model fixture read failed: {error}"));
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            assert!(request.len() <= FIXTURE_REQUEST_BYTES);
+            if request
+                .windows(HTTP_HEADER_TERMINATOR.len())
+                .any(|window| window == HTTP_HEADER_TERMINATOR)
+            {
+                break;
+            }
+        }
+        request
     }
 }

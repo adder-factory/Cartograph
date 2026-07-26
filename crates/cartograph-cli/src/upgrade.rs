@@ -456,7 +456,16 @@ fn compare_prerelease(left: &[PrereleasePart], right: &[PrereleasePart]) -> Orde
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
     use super::*;
+
+    const FIXTURE_REQUEST_BYTES: usize = 8 * 1_024;
 
     #[test]
     fn semver_ordering_handles_stable_and_prerelease_tags() {
@@ -477,5 +486,117 @@ mod tests {
             Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned())
         );
         assert!(checksum_for_asset(sums, "cartograph-linux-x64").is_err());
+        let duplicate = [sums.as_slice(), sums.as_slice()].concat();
+        assert!(checksum_for_asset(&duplicate, "cartograph-darwin-arm64").is_err());
+        assert!(checksum_for_asset(b"not utf8: \xff", "cartograph-darwin-arm64").is_err());
+        assert_eq!(
+            sha256_hex(b"cartograph"),
+            "122eee0b90506d8a158a312f2f45814f50cb70d98668ba27289764d98af85141"
+        );
+    }
+
+    #[test]
+    fn report_and_semver_failures_remain_actionable_without_claiming_success() {
+        let report = report_unknown("2.0.0".to_owned(), true, "fixture lookup failed");
+        assert!(!succeeded(&report));
+        let rendered = render(&report);
+        assert!(rendered.contains("fixture lookup failed"));
+        assert!(rendered.contains("Check https://github.com/adder-factory/cartograph/releases"));
+
+        for invalid in ["", "2", "2.0", "2.0.0.1", "two.0.0"] {
+            assert!(parse_version(invalid).is_none(), "accepted {invalid}");
+        }
+        let parse = |value| {
+            parse_version(value).unwrap_or_else(|| panic!("invalid version fixture: {value}"))
+        };
+        assert_eq!(parse("v2.0.0+build.7"), parse("2.0.0"));
+        assert!(parse("2.0.0-alpha") > parse("2.0.0-1"));
+        assert!(parse("2.0.0-alpha.2") > parse("2.0.0-alpha.1"));
+        assert!(parse("2.0.0-alpha.1") > parse("2.0.0-alpha"));
+        assert!(asset_name().is_ok());
+    }
+
+    #[tokio::test]
+    async fn release_download_is_status_content_length_and_stream_bounded() {
+        let (url, request) = spawn_http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata".to_owned(),
+        );
+        let client = http_client().unwrap_or_else(|error| panic!("HTTP client failed: {error}"));
+        assert_eq!(
+            fetch_bounded(&client, &url, 4)
+                .await
+                .unwrap_or_else(|error| panic!("bounded fetch failed: {error}")),
+            b"data"
+        );
+        request
+            .join()
+            .unwrap_or_else(|_| panic!("download fixture panicked"));
+
+        for response in [
+            "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n",
+        ] {
+            let (url, request) = spawn_http_fixture(response.to_owned());
+            assert!(fetch_bounded(&client, &url, 4).await.is_err());
+            request
+                .join()
+                .unwrap_or_else(|_| panic!("rejected download fixture panicked"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_native_update_is_executable_verified_and_atomically_replaced() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("upgrade fixture failed: {error}"));
+        let executable = root.path().join("cartograph");
+        fs::write(&executable, "#!/bin/sh\necho 'cartograph 1.0.0'\n")
+            .unwrap_or_else(|error| panic!("old executable fixture failed: {error}"));
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("old executable chmod failed: {error}"));
+        let replacement = b"#!/bin/sh\necho 'cartograph 9.9.9'\n";
+        install_binary(&executable, replacement, "9.9.9")
+            .unwrap_or_else(|error| panic!("atomic install failed: {error}"));
+        assert_eq!(
+            fs::read(&executable)
+                .unwrap_or_else(|error| panic!("installed executable read failed: {error}")),
+            replacement
+        );
+        assert!(verify_staged_binary(&executable, "9.9.9").is_ok());
+        assert!(verify_staged_binary(&executable, "1.0.0").is_err());
+        let mode = fs::metadata(&executable)
+            .unwrap_or_else(|error| panic!("installed executable metadata failed: {error}"))
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0);
+    }
+
+    fn spawn_http_fixture(response: String) -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("upgrade fixture bind failed: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("upgrade fixture address failed: {error}"));
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .unwrap_or_else(|error| panic!("upgrade fixture accept failed: {error}"));
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap_or_else(|error| panic!("upgrade fixture timeout failed: {error}"));
+            let mut request = vec![0_u8; FIXTURE_REQUEST_BYTES];
+            let read = stream
+                .read(&mut request)
+                .unwrap_or_else(|error| panic!("upgrade fixture read failed: {error}"));
+            request.truncate(read);
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|()| stream.flush())
+                .unwrap_or_else(|error| panic!("upgrade fixture response failed: {error}"));
+            request
+        });
+        (format!("http://{address}/release"), handle)
     }
 }
