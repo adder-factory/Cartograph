@@ -1,3 +1,16 @@
+function Get-RustHostTarget {
+  $HostOutput = @(& rustc --print host-tuple 2>&1)
+  $RustcExitCode = $LASTEXITCODE
+  if ($RustcExitCode -ne 0 -or $HostOutput.Count -ne 1) {
+    throw 'could not determine the release runner Rust host target'
+  }
+  $HostTarget = ([string]$HostOutput[0]).Trim()
+  if ($HostTarget -cnotmatch '^[A-Za-z0-9_]+(?:-[A-Za-z0-9_.]+)+$') {
+    throw 'could not determine the release runner Rust host target'
+  }
+  return $HostTarget
+}
+
 function Add-CargoEncodedRustFlag {
   param([Parameter(Mandatory = $true)][string]$Flag)
 

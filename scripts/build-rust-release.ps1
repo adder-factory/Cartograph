@@ -22,11 +22,7 @@ $Binary = Join-Path $env:CARGO_TARGET_DIR 'release/cartograph.exe'
 
 . (Join-Path $PSScriptRoot 'windows-rust-release-paths.ps1')
 
-$HostLine = @(& rustc -vV | Where-Object { $_ -like 'host: *' } | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or $HostLine.Count -ne 1) {
-  throw 'could not determine the release runner Rust host target'
-}
-$HostTarget = $HostLine[0].Substring('host: '.Length).Trim()
+$HostTarget = Get-RustHostTarget
 if ($HostTarget -cne $Target) {
   throw "Windows release builds must run natively on $Target; runner host is $HostTarget"
 }

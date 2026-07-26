@@ -31,6 +31,8 @@ foreach ($Name in @('CARGO_ENCODED_RUSTFLAGS', 'RUSTFLAGS', 'CFLAGS', 'CXXFLAGS'
   $SavedEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name)
 }
 
+Get-RustHostTarget | Out-Null
+
 $TestDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "cartograph-path-audit-$([guid]::NewGuid())"
 [System.IO.Directory]::CreateDirectory($TestDirectory) | Out-Null
 
