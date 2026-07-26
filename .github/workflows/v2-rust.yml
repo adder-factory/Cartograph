@@ -3,6 +3,9 @@ name: v2 Rust
 on:
   workflow_call:
   push:
+    # Tag pushes are owned by release.yml, which calls this workflow as its gate.
+    branches:
+      - '**'
     paths:
       - Cargo.toml
       - Cargo.lock
