@@ -35,7 +35,10 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-docker run --rm \
+"$ROOT/scripts/pull-pinned-image.sh" "$BUILD_IMAGE"
+"$ROOT/scripts/pull-pinned-image.sh" "$RUNTIME_IMAGE"
+
+docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --volume "$ROOT:/workspace" \
   --workdir /workspace \
@@ -72,7 +75,7 @@ if [[ -z "$VERSION" ]]; then
   exit 1
 fi
 
-docker run --rm \
+docker run --rm --pull never \
   --volume "$ROOT/release:/release:ro" \
   --env CARTOGRAPH_EXPECTED_MACHINE="$EXPECTED_MACHINE" \
   --env CARTOGRAPH_EXPECTED_VERSION="cartograph $VERSION" \

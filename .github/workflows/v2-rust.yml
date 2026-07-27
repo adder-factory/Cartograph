@@ -1,9 +1,10 @@
 name: v2 Rust
 
 on:
-  workflow_call:
+  workflow_dispatch:
   push:
-    # Tag pushes are owned by release.yml, which calls this workflow as its gate.
+    # Tag pushes are owned by release.yml, which verifies this workflow's exact-SHA
+    # main attestation instead of rerunning the complete live suite.
     branches:
       - '**'
     paths:
@@ -14,6 +15,7 @@ on:
       - 'deploy/paradedb/**'
       - 'deny.toml'
       - 'scripts/*rust-release*'
+      - 'scripts/pull-pinned-image.sh'
       - '.github/workflows/v2-rust.yml'
       - '.github/workflows/release.yml'
   pull_request:
@@ -25,6 +27,7 @@ on:
       - 'deploy/paradedb/**'
       - 'deny.toml'
       - 'scripts/*rust-release*'
+      - 'scripts/pull-pinned-image.sh'
       - '.github/workflows/v2-rust.yml'
       - '.github/workflows/release.yml'
 
@@ -46,8 +49,20 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
 
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: v2-ubuntu
+          add-job-id-key: 'false'
+          cache-bin: 'false'
+          cache-workspace-crates: 'true'
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
       - name: Fetch locked dependencies
         run: cargo fetch --locked
+
+      - name: Release workflow contract
+        run: scripts/test-rust-release-workflow.sh
 
       - name: Formatting
         run: cargo fmt --all --check
@@ -173,6 +188,15 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
 
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: v2-windows
+          add-job-id-key: 'false'
+          cache-bin: 'false'
+          cache-workspace-crates: 'true'
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
       - name: Windows release path privacy regression
         shell: pwsh
         run: scripts/test-windows-rust-release-paths.ps1
@@ -198,24 +222,44 @@ jobs:
           debian:12-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 
   paradedb:
-    name: PostgreSQL 18 + ParadeDB + pgvector
+    name: PostgreSQL 18 + ParadeDB + pgvector (${{ matrix.shard }})
     needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - database
+          - runtime
+          - operations
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       CARTOGRAPH_POSTGRES_PASSWORD: cartograph-v2-ci-only
       CARTOGRAPH_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
       CARTOGRAPH_TEST_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
+      CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
 
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: v2-ubuntu
+          add-job-id-key: 'false'
+          cache-bin: 'false'
+          cache-workspace-crates: 'true'
+          save-if: 'false'
+
+      - name: Pull pinned ParadeDB image with bounded retries
+        run: scripts/pull-pinned-image.sh "$CARTOGRAPH_PARADEDB_IMAGE"
+
       - name: Start pinned ParadeDB service on loopback
         id: start_paradedb
         run: >-
-          docker run --detach
+          docker run --detach --pull never
           --name cartograph-v2-ci-postgres
           --env POSTGRES_USER=cartograph
           --env POSTGRES_PASSWORD="$CARTOGRAPH_POSTGRES_PASSWORD"
@@ -225,7 +269,7 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
-          paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d
+          "$CARTOGRAPH_PARADEDB_IMAGE"
 
       - name: Wait for PostgreSQL health
         shell: bash
@@ -264,56 +308,67 @@ jobs:
           fi
 
       - name: Rust database doctor
+        if: matrix.shard == 'database'
         run: |
           cargo run --locked --quiet -p cartograph-cli -- doctor
           cargo run --locked --quiet -p cartograph-cli -- doctor --format json
 
       - name: Live capability integration test
+        if: matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_capabilities -- --ignored --nocapture
 
       - name: Generation-safe schema and BM25 integration test
+        if: matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_generation -- --ignored --nocapture
 
       - name: COPY ingestion and deterministic digest integration test
+        if: matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_ingest -- --ignored --nocapture
 
       - name: Project operation lease integration test
+        if: matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_leases -- --ignored --nocapture
 
       - name: Semantic model, pgvector, HNSW, readiness, and retention integration test
+        if: matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_semantic -- --include-ignored --nocapture --test-threads=1
 
       - name: V1 PostgreSQL import, rollback, resume, and retention integration test
+        if: matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_v1_import_retention -- --ignored --nocapture --test-threads=1
 
       - name: Project purge fencing and physical-relation cleanup integration test
+        if: matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_project_purge -- --ignored --nocapture --test-threads=1
 
       - name: Lease-owned indexer supervisor integration test
+        if: matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-indexer
           --test live_supervisor -- --ignored --nocapture --test-threads=1
 
       - name: Agent runtime index, hybrid retrieval, no-op, freshness, and review integration test
+        if: matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-agent
           --test live_project -- --ignored --nocapture --test-threads=1
 
       - name: Candidate binary self-indexes this repository
+        if: matrix.shard == 'operations'
         env:
           CARTOGRAPH_DATABASE_SCHEMA: cartograph_ci_self_index
         shell: bash
@@ -334,24 +389,29 @@ jobs:
             /tmp/cartograph-self-context.json >/dev/null
 
       - name: Native CLI/MCP summary, role, graph, history, session, and watcher integration tests
+        if: matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-cli
           -- --ignored --nocapture --test-threads=1
 
       - name: Locked native patch-task evaluation and repeatability gate
+        if: matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-agent
           --test patch_task_evaluation -- --include-ignored --nocapture --test-threads=1
 
       - name: Frozen 1/2/4/8/16-worker determinism and scaling benchmark
+        if: matrix.shard == 'operations'
         run: cargo bench --locked -p cartograph-indexer --bench index_scaling
 
       - name: Managed database lifecycle integration test
+        if: matrix.shard == 'operations'
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib
           managed::tests:: -- --ignored --nocapture --test-threads=1
 
       - name: Managed backup, restore, upgrade, rollback, and derived-index test
+        if: matrix.shard == 'operations'
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib
           managed::maintenance::tests:: -- --ignored --nocapture --test-threads=1
@@ -367,3 +427,68 @@ jobs:
       - name: Stop ParadeDB service
         if: always()
         run: docker rm --force --volumes cartograph-v2-ci-postgres 2>/dev/null || true
+
+  attest-main-gate:
+    name: Attest exact-SHA green main gate
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs:
+      - quality
+      - windows-portability
+      - linux-release-portability
+      - paradedb
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Write exact-SHA gate manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gate-attestation
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg workflowRef "$GITHUB_WORKFLOW_REF" \
+            --arg eventName "$GITHUB_EVENT_NAME" \
+            --argjson runId "$GITHUB_RUN_ID" \
+            --argjson runAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              schemaVersion: 1,
+              repository: $repository,
+              sha: $sha,
+              ref: $ref,
+              workflowRef: $workflowRef,
+              eventName: $eventName,
+              runId: $runId,
+              runAttempt: $runAttempt,
+              requiredJobs: [
+                "quality",
+                "windows-portability",
+                "linux-release-portability",
+                "paradedb/database",
+                "paradedb/runtime",
+                "paradedb/operations"
+              ]
+            }' >gate-attestation/v2-main-gate.json
+          jq -e \
+            '.ref == "refs/heads/main" and (.sha | test("^[0-9a-f]{40}$"))' \
+            gate-attestation/v2-main-gate.json >/dev/null
+
+      - name: Attest exact-SHA gate manifest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: gate-attestation/v2-main-gate.json
+
+      - name: Upload exact-SHA gate manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: v2-main-gate-${{ github.sha }}
+          path: gate-attestation/v2-main-gate.json
+          if-no-files-found: error
+          retention-days: 90

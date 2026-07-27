@@ -334,6 +334,8 @@ cargo deny --all-features check
 The live workflow additionally proves PostgreSQL/ParadeDB capabilities,
 migrations, deterministic COPY/publication, leases, fault handling,
 1/2/4/8/16-worker output identity, retrieval, migration, database maintenance,
-and cleanup. Stable releases require independent review, Sonar/static analysis,
-five native archive smokes, checksums, provenance, a signed tag, and a tag SHA
-equal to the published `main` head.
+and cleanup. Its exact-SHA green `main` run emits a GitHub-attested gate
+manifest; the tag workflow verifies that evidence rather than rerunning the
+live suite. Stable releases still require independent review, Sonar/static
+analysis, five native archive smokes, checksums, provenance, a signed tag, and
+a tag SHA equal to the published `main` head.

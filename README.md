@@ -348,8 +348,10 @@ cargo deny --all-features check
 ```
 
 The complete live PostgreSQL/ParadeDB gate is defined in
-[`v2-rust.yml`](.github/workflows/v2-rust.yml). Release tags rebuild and smoke
-macOS arm64/x64, Linux arm64/x64, and Windows x64 archives before checksums,
+[`v2-rust.yml`](.github/workflows/v2-rust.yml). A successful exact-SHA main run
+emits a GitHub-attested gate manifest. Release tags verify that immutable
+evidence instead of rerunning the live suite, then build and smoke macOS
+arm64/x64, Linux arm64/x64, and Windows x64 archives before checksums,
 provenance, and immutable publication.
 
 ## License

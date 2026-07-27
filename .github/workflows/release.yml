@@ -1,6 +1,9 @@
-# Cartograph v2 release pipeline. Every published asset is a native Rust
-# executable; PostgreSQL, ParadeDB, and pgvector are external runtime services
-# and are never bundled in these archives.
+# Cartograph v2 release pipeline. The complete live suite runs once on the exact
+# published main SHA in v2-rust.yml and emits a GitHub-attested gate manifest.
+# This workflow verifies that immutable evidence, then performs only the five
+# release-specific native builds, archive audits, provenance, and publication.
+# PostgreSQL, ParadeDB, and pgvector are external runtime services and are never
+# bundled in these archives.
 name: release
 
 on:
@@ -9,16 +12,139 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
+  attestations: read
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  gate:
-    uses: ./.github/workflows/v2-rust.yml
+  verify-main-gate:
+    name: Verify exact-SHA green main evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
+      actions: read
+      attestations: read
       contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify release candidate is the published main head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          if [[ "$GITHUB_SHA" != "$MAIN_SHA" ]]; then
+            echo "Release candidate must be the published main head ($MAIN_SHA), not $GITHUB_SHA" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="$(
+              sed -n '/^\[workspace\.package\]$/,/^\[/ {
+                s/^version = "\([^"]*\)"$/\1/p
+              }' Cargo.toml | head -n 1
+            )"
+            if [[ -z "$VERSION" || "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+              echo "Release tag $GITHUB_REF_NAME does not match the workspace version v$VERSION" >&2
+              exit 1
+            fi
+            TAG_SHA="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+            if [[ "$TAG_SHA" != "$GITHUB_SHA" ]]; then
+              echo "Release tag resolves to $TAG_SHA, not workflow SHA $GITHUB_SHA" >&2
+              exit 1
+            fi
+          elif [[ "$GITHUB_REF" != 'refs/heads/main' ]]; then
+            echo 'Manual release validation must run from main.' >&2
+            exit 1
+          fi
+
+      - name: Resolve successful exact-SHA main gate
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          runs="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/v2-rust.yml/runs?branch=main&status=completed&per_page=100"
+          )"
+          run_id="$(
+            jq -r --arg sha "$GITHUB_SHA" '
+              [
+                .workflow_runs[]
+                | select(
+                    .head_sha == $sha
+                    and .head_branch == "main"
+                    and (.event == "push" or .event == "workflow_dispatch")
+                    and .conclusion == "success"
+                  )
+              ]
+              | sort_by(.run_number, .run_attempt)
+              | last
+              | .id // empty
+            ' <<<"$runs"
+          )"
+          if [[ -z "$run_id" ]]; then
+            echo "No successful v2 Rust main gate exists for exact SHA $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "run_id=$run_id" >>"$GITHUB_OUTPUT"
+          echo "Using exact-SHA main gate run $run_id"
+
+      - name: Download exact-SHA gate manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: v2-main-gate-${{ github.sha }}
+          path: gate-attestation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.resolve.outputs.run_id }}
+
+      - name: Verify gate provenance and manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GATE_RUN_ID: ${{ steps.resolve.outputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest='gate-attestation/v2-main-gate.json'
+          gh attestation verify "$manifest" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/v2-rust.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref refs/heads/main \
+            --deny-self-hosted-runners >/dev/null
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$GITHUB_SHA" \
+            --argjson runId "$GATE_RUN_ID" '
+              .schemaVersion == 1
+              and .repository == $repository
+              and .sha == $sha
+              and .ref == "refs/heads/main"
+              and (.eventName == "push" or .eventName == "workflow_dispatch")
+              and .runId == $runId
+              and .requiredJobs == [
+                "quality",
+                "windows-portability",
+                "linux-release-portability",
+                "paradedb/database",
+                "paradedb/runtime",
+                "paradedb/operations"
+              ]
+            ' "$manifest" >/dev/null
+          echo "Verified exact-SHA green main evidence from run $GATE_RUN_ID"
 
   build:
-    needs: gate
+    needs: verify-main-gate
     strategy:
       fail-fast: false
       matrix:
@@ -27,26 +153,31 @@ jobs:
             rust_target: x86_64-unknown-linux-gnu
             asset_target: linux-x64
             shell: bash
+            cache_key: unused-linux-x64
             build_image: rust:1.96.1-bookworm@sha256:d99f7b31f49909348dc59b51f3c95d1efded1701ffb222f095aaab7de3c4abd8
             runtime_image: debian:12-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
           - os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             asset_target: linux-arm64
             shell: bash
+            cache_key: unused-linux-arm64
             build_image: rust:1.96.1-bookworm@sha256:809725748b728a8e1f8621a3c76e49fba8780c16d99ceda20abdb44d32665c30
             runtime_image: debian:12-slim@sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0
           - os: macos-latest
             rust_target: aarch64-apple-darwin
             asset_target: darwin-arm64
             shell: bash
+            cache_key: release-darwin-arm64
           - os: macos-latest
             rust_target: x86_64-apple-darwin
             asset_target: darwin-x64
             shell: bash
+            cache_key: release-darwin-x64
           - os: windows-latest
             rust_target: x86_64-pc-windows-msvc
             asset_target: windows-x64
             shell: pwsh
+            cache_key: v2-windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -59,6 +190,15 @@ jobs:
       - name: Install release target
         if: ${{ !startsWith(matrix.asset_target, 'linux-') }}
         run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Restore Rust dependency cache
+        if: ${{ !startsWith(matrix.asset_target, 'linux-') }}
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ${{ matrix.cache_key }}
+          add-job-id-key: 'false'
+          cache-bin: 'false'
+          cache-workspace-crates: 'true'
 
       - name: Build, audit, and smoke Unix archive
         if: matrix.shell == 'bash' && !startsWith(matrix.asset_target, 'linux-')
@@ -87,7 +227,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs:
+      - verify-main-gate
+      - build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
