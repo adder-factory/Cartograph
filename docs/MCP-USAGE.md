@@ -17,6 +17,11 @@ cartograph install --yes --target claude --location local --project-path .
 cartograph install --yes --target cursor --location local --project-path .
 ```
 
+When the managed database uses a non-default loopback port, add
+`--managed-database-port <PORT>` to the install command. The generated stdio
+command carries that port directly; no host-specific environment table is
+required.
+
 Manual server definition:
 
 ```json
@@ -26,10 +31,15 @@ Manual server definition:
     "serve",
     "--mcp",
     "--project-path",
-    "/absolute/path/to/project"
+    "/absolute/path/to/project",
+    "--managed-database-port",
+    "55435"
   ]
 }
 ```
+
+Omit the final two arguments when the project uses the default port `55432` or
+external PostgreSQL through `CARTOGRAPH_DATABASE_URL`.
 
 Restart the host after installation. An already-open host is not assumed to
 hot-reload an upgraded MCP process.

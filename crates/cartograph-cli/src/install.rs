@@ -148,6 +148,7 @@ pub(crate) struct InstallRequest {
     location: InstallLocation,
     home: PathBuf,
     command_override: Option<String>,
+    managed_database_port: Option<u16>,
     permissions: bool,
     use_environment: bool,
 }
@@ -182,6 +183,7 @@ impl InstallRequest {
             location,
             home,
             command_override,
+            managed_database_port: None,
             permissions,
             use_environment: true,
         })
@@ -209,6 +211,11 @@ impl InstallRequest {
         config.path.exists() || config.path.parent().is_some_and(|parent| parent.exists())
     }
 
+    pub(crate) const fn with_managed_database_port(mut self, port: u16) -> Self {
+        self.managed_database_port = Some(port);
+        self
+    }
+
     fn command(&self) -> &str {
         self.command_override.as_deref().unwrap_or(&self.executable)
     }
@@ -222,6 +229,10 @@ impl InstallRequest {
         if self.local() {
             args.push("--project-path".to_owned());
             args.push(path_text(&self.project_root)?.to_owned());
+            if let Some(port) = self.managed_database_port {
+                args.push("--managed-database-port".to_owned());
+                args.push(port.to_string());
+            }
         }
         Ok(args)
     }
@@ -1874,6 +1885,39 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn local_managed_port_is_a_portable_server_argument() {
+        let project = tempfile::tempdir().unwrap_or_else(|error| panic!("project failed: {error}"));
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("home failed: {error}"));
+        let executable = fake_executable(project.path());
+        for target in [
+            InstallTarget::Codex,
+            InstallTarget::Claude,
+            InstallTarget::Kimi,
+        ] {
+            let request = request(
+                project.path(),
+                home.path(),
+                &executable,
+                target,
+                InstallLocation::Local,
+            )
+            .with_managed_database_port(55_435);
+            let arguments = request
+                .server_args()
+                .unwrap_or_else(|error| panic!("{} arguments failed: {error}", target.label()));
+            assert_eq!(
+                arguments[arguments.len() - 2..],
+                ["--managed-database-port", "55435"]
+            );
+            let rendered = print_config(&request)
+                .unwrap_or_else(|error| panic!("{} print failed: {error}", target.label()));
+            assert!(rendered.contains("--managed-database-port"));
+            assert!(rendered.contains("55435"));
+            assert!(!rendered.contains("CARTOGRAPH_DATABASE_URL"));
         }
     }
 

@@ -53,14 +53,16 @@ function/class categories.
 ## MCP and agent configuration
 
 ```text
-cartograph serve --mcp [--profile coding|core|full|read-only|review]
-cartograph install --yes --target codex|claude|cursor --location local
+cartograph serve --mcp [--managed-database-port PORT] [--profile coding|core|full|read-only|review]
+cartograph install --yes --target codex|claude|cursor --location local [--managed-database-port PORT]
 cartograph uninstall --yes --target codex|claude|cursor --location local
 ```
 
 Install/uninstall modifies only project-local agent configuration, preserves
-unrelated entries, and pins the absolute native executable. Restart the host
-after a configuration or binary change.
+unrelated entries, and pins the absolute native executable. For a non-default
+managed port, the installer also pins the non-secret loopback port in the
+portable server arguments. Restart the host after a configuration or binary
+change.
 
 ## Database lifecycle
 

@@ -1130,6 +1130,10 @@ fn scan_route_statement(
         while let Some(relative) = statement[cursor..].find(marker) {
             let marker_start = cursor + relative;
             let after_marker = marker_start + marker.len();
+            if !route_marker_has_identifier_boundary(statement, marker_start, marker) {
+                cursor = after_marker;
+                continue;
+            }
             let Some(quoted) = quoted_after(statement, after_marker) else {
                 cursor = after_marker;
                 continue;
@@ -1398,6 +1402,27 @@ fn php_identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+fn route_marker_has_identifier_boundary(
+    statement: &str,
+    marker_start: usize,
+    marker: &str,
+) -> bool {
+    let Some(first) = marker.chars().next() else {
+        return false;
+    };
+    if !route_identifier_continue(first) || marker_start == 0 {
+        return true;
+    }
+    statement[..marker_start]
+        .chars()
+        .next_back()
+        .is_none_or(|previous| !route_identifier_continue(previous))
+}
+
+fn route_identifier_continue(character: char) -> bool {
+    character == '_' || character == '$' || character.is_alphanumeric()
 }
 
 fn scan_on_route(

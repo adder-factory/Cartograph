@@ -294,9 +294,13 @@ Choose another loopback port consistently:
 ```sh
 cartograph db start --project-path . --port 55433
 export CARTOGRAPH_MANAGED_DATABASE_PORT=55433
+cartograph install --yes --target <host> --location local \
+  --project-path . --managed-database-port 55433
 ```
 
-The MCP process must inherit the same port variable.
+The environment variable selects the port for direct CLI commands. The
+installer pins the same non-secret port in the MCP server arguments, so the
+agent host does not need host-specific environment configuration.
 
 ### Project has no index
 

@@ -102,6 +102,11 @@ cartograph install --yes --target claude --location local --project-path .
 cartograph install --yes --target cursor --location local --project-path .
 ```
 
+If the default managed database port is occupied, pass the selected port to
+both `db start --port <PORT>` and `install --managed-database-port <PORT>`.
+The installer writes that non-secret loopback port into the portable `serve`
+arguments for the selected host.
+
 Restart the agent host after registration or a binary upgrade.
 
 ### 4. Verify the live integration

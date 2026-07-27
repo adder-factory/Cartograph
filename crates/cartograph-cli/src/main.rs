@@ -518,6 +518,9 @@ enum Command {
         /// Existing project root to expose through the MCP server.
         #[arg(long, default_value = ".")]
         project_path: PathBuf,
+        /// Loopback port for this project's managed PostgreSQL database.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+        managed_database_port: Option<u16>,
         /// Use non-interactive defaults: global, auto-detected targets, permissions enabled.
         #[arg(short = 'y', long)]
         yes: bool,
@@ -560,6 +563,9 @@ enum Command {
         /// Existing project root exposed to this MCP process.
         #[arg(short = 'p', long, default_value = ".")]
         project_path: PathBuf,
+        /// Loopback port for this project's managed PostgreSQL database.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+        managed_database_port: Option<u16>,
         /// Advertised MCP tool profile.
         #[arg(long, value_enum, default_value_t = McpProfile::Core)]
         profile: McpProfile,
@@ -979,12 +985,14 @@ struct IndexArguments {
     workers: Option<u16>,
     force: bool,
     format: OutputFormat,
+    managed_database_port: Option<u16>,
 }
 
 struct AgentInstallArguments {
     target: Option<String>,
     location: InstallLocation,
     project_path: PathBuf,
+    managed_database_port: Option<u16>,
     yes: bool,
     permissions: bool,
     hooks: bool,
@@ -997,6 +1005,7 @@ struct AgentInstallArguments {
 struct McpServeArguments {
     mcp: bool,
     project_path: PathBuf,
+    managed_database_port: Option<u16>,
     profile: McpProfile,
     daemon: bool,
     no_daemon: bool,
@@ -1161,6 +1170,7 @@ async fn run_index_command(command: Command) -> Result<ExitCode, String> {
                 workers,
                 force,
                 format,
+                managed_database_port: None,
             })
             .await
         }
@@ -1394,6 +1404,7 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             target,
             location,
             project_path,
+            managed_database_port,
             yes,
             no_permissions,
             no_hooks,
@@ -1405,6 +1416,7 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
                 target,
                 location,
                 project_path,
+                managed_database_port,
                 yes,
                 permissions: !no_permissions,
                 hooks: !no_hooks,
@@ -1425,6 +1437,7 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
                 target,
                 location,
                 project_path,
+                managed_database_port: None,
                 yes: true,
                 permissions: false,
                 hooks: false,
@@ -1438,6 +1451,7 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
         Command::Serve {
             mcp,
             project_path,
+            managed_database_port,
             profile,
             daemon,
             no_daemon,
@@ -1451,6 +1465,7 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             run_mcp_server(McpServeArguments {
                 mcp,
                 project_path,
+                managed_database_port,
                 profile,
                 daemon,
                 no_daemon,
@@ -2041,8 +2056,27 @@ async fn open_runtime(project_path: &PathBuf) -> Result<ProjectRuntime, String> 
 }
 
 fn resolve_database_settings(project_path: &PathBuf) -> Result<DatabaseSettings, String> {
+    resolve_database_settings_with_port(project_path, None)
+}
+
+fn resolve_database_settings_with_port(
+    project_path: &PathBuf,
+    managed_database_port: Option<u16>,
+) -> Result<DatabaseSettings, String> {
     if env::var_os(DATABASE_URL_ENV).is_some() {
         return DatabaseSettings::from_env().map_err(|error| error.to_string());
+    }
+    let port = resolve_managed_database_port(managed_database_port)?;
+    ManagedDatabase::new(project_path, port)
+        .and_then(|database| database.connection_settings())
+        .map_err(|error| format!("{error}; run `cartograph db start --project-path <path>` first"))
+}
+
+fn resolve_managed_database_port(explicit: Option<u16>) -> Result<u16, String> {
+    if let Some(port) = explicit {
+        return (port > 0).then_some(port).ok_or_else(|| {
+            "managed database port must be an integer between 1 and 65535".to_owned()
+        });
     }
     let port = match env::var(MANAGED_DATABASE_PORT_ENV) {
         Ok(raw) => raw
@@ -2051,17 +2085,13 @@ fn resolve_database_settings(project_path: &PathBuf) -> Result<DatabaseSettings,
             .filter(|value| *value > 0)
             .ok_or_else(|| {
                 format!("{MANAGED_DATABASE_PORT_ENV} must be an integer between 1 and 65535")
-            })?,
-        Err(env::VarError::NotPresent) => DEFAULT_MANAGED_DATABASE_PORT,
-        Err(env::VarError::NotUnicode(_)) => {
-            return Err(format!(
-                "{MANAGED_DATABASE_PORT_ENV} must be an integer between 1 and 65535"
-            ));
-        }
-    };
-    ManagedDatabase::new(project_path, port)
-        .and_then(|database| database.connection_settings())
-        .map_err(|error| format!("{error}; run `cartograph db start --project-path <path>` first"))
+            }),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_MANAGED_DATABASE_PORT),
+        Err(env::VarError::NotUnicode(_)) => Err(format!(
+            "{MANAGED_DATABASE_PORT_ENV} must be an integer between 1 and 65535"
+        )),
+    }?;
+    Ok(port)
 }
 
 async fn current_project(runtime: &ProjectRuntime) -> Result<(ProjectId, IndexFreshness), String> {
@@ -2192,6 +2222,7 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
         target,
         location,
         project_path,
+        managed_database_port,
         yes,
         permissions,
         hooks,
@@ -2203,6 +2234,14 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
     let executable = env::current_exe()
         .map_err(|_| "could not resolve the current Cartograph executable".to_owned())?;
     let location = AgentInstallLocation::from(location);
+    let managed_database_port = if !remove
+        && location == AgentInstallLocation::Local
+        && env::var_os(DATABASE_URL_ENV).is_none()
+    {
+        Some(resolve_managed_database_port(managed_database_port)?)
+    } else {
+        None
+    };
     if let Some(target) = print_config {
         if remove {
             return Err("--print-config is only available for install".to_owned());
@@ -2217,6 +2256,10 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
             permissions,
         )
         .map_err(|error| error.to_string())?;
+        let request = match managed_database_port {
+            Some(port) => request.with_managed_database_port(port),
+            None => request,
+        };
         print!(
             "{}",
             install::print_config(&request).map_err(|error| error.to_string())?
@@ -2259,6 +2302,10 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
             permissions,
         )
         .map_err(|error| error.to_string())?;
+        let request = match managed_database_port {
+            Some(port) => request.with_managed_database_port(port),
+            None => request,
+        };
         let report = if remove {
             install::uninstall(&request)
         } else {
@@ -2273,7 +2320,7 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
         if env::var_os(DATABASE_URL_ENV).is_none() {
             run_database_start(DatabaseStartArguments {
                 project_path: project_path.clone(),
-                port: DEFAULT_MANAGED_DATABASE_PORT,
+                port: managed_database_port.unwrap_or(DEFAULT_MANAGED_DATABASE_PORT),
                 wait_seconds: 90,
                 format,
             })
@@ -2284,6 +2331,7 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
             workers: None,
             force: false,
             format,
+            managed_database_port,
         })
         .await?;
     }
@@ -2448,6 +2496,7 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
     let McpServeArguments {
         mcp,
         project_path,
+        managed_database_port,
         profile,
         daemon: _daemon,
         no_daemon: _no_daemon,
@@ -2462,7 +2511,12 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
         return Err("serve requires --mcp; Cartograph v2 uses stdio MCP transport".to_owned());
     }
     let read_only_mode = no_write_tools || profile == McpProfile::ReadOnly;
-    let settings = resolve_database_settings(&project_path)?;
+    let managed_database_port = if env::var_os(DATABASE_URL_ENV).is_some() {
+        managed_database_port.unwrap_or(DEFAULT_MANAGED_DATABASE_PORT)
+    } else {
+        resolve_managed_database_port(managed_database_port)?
+    };
+    let settings = resolve_database_settings_with_port(&project_path, Some(managed_database_port))?;
     let runtime = ProjectRuntime::connect(&project_path, &settings)
         .await
         .map_err(|error| error.to_string())?;
@@ -2475,6 +2529,7 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
     let runtime = Arc::new(runtime);
     let handler = CartographMcpHandler::new(runtime)
         .map_err(|error| error.to_string())?
+        .with_managed_database_port(managed_database_port)
         .with_defaults(HandlerDefaults {
             allow_stale: allow_stale_default,
             low_tokens: low_tokens_default,
@@ -2520,8 +2575,9 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
         workers,
         force,
         format,
+        managed_database_port,
     } = arguments;
-    let settings = resolve_database_settings(&project_path)?;
+    let settings = resolve_database_settings_with_port(&project_path, managed_database_port)?;
     let runtime = ProjectRuntime::connect(&project_path, &settings)
         .await
         .map_err(|error| error.to_string())?;
@@ -3963,6 +4019,8 @@ mod tests {
             "--mcp",
             "--project-path",
             "workspace",
+            "--managed-database-port",
+            "55435",
             "--profile",
             "read-only",
         ])
@@ -3971,10 +4029,77 @@ mod tests {
             serve.command,
             Command::Serve {
                 mcp: true,
+                managed_database_port: Some(55_435),
                 profile: McpProfile::ReadOnly,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn managed_database_port_resolution_accepts_explicit_values_and_rejects_zero() {
+        assert_eq!(resolve_managed_database_port(Some(55_435)), Ok(55_435));
+        assert!(resolve_managed_database_port(Some(0)).is_err());
+    }
+
+    #[test]
+    fn explicit_managed_database_port_keeps_missing_credentials_actionable() {
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("could not create managed port fixture: {error}"));
+        let result =
+            resolve_database_settings_with_port(&directory.path().to_path_buf(), Some(55_435));
+        let error = match result {
+            Ok(_) => panic!("missing managed credentials unexpectedly resolved"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("cartograph db start --project-path <path>"));
+    }
+
+    #[tokio::test]
+    async fn serve_dispatch_preserves_managed_port_before_transport_validation() {
+        let result = run_operator_command(Command::Serve {
+            mcp: false,
+            project_path: PathBuf::from("workspace"),
+            managed_database_port: Some(55_435),
+            profile: McpProfile::Core,
+            daemon: false,
+            no_daemon: false,
+            daemon_child: false,
+            no_write_tools: false,
+            allow_stale_default: false,
+            low_tokens_default: false,
+            disable_tool: Vec::new(),
+            no_startup_sync: true,
+        })
+        .await;
+
+        assert_eq!(
+            result,
+            Err("serve requires --mcp; Cartograph v2 uses stdio MCP transport".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_print_config_accepts_an_explicit_managed_port() {
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("could not create install fixture: {error}"));
+        let result = run_agent_install(AgentInstallArguments {
+            target: None,
+            location: InstallLocation::Local,
+            project_path: directory.path().to_path_buf(),
+            managed_database_port: Some(55_435),
+            yes: true,
+            permissions: false,
+            hooks: false,
+            command: None,
+            print_config: Some("codex".to_owned()),
+            format: OutputFormat::Json,
+            remove: false,
+        })
+        .await;
+
+        assert!(matches!(result, Ok(code) if code == ExitCode::SUCCESS));
     }
 
     #[test]
@@ -4104,12 +4229,15 @@ mod tests {
             "local",
             "--project-path",
             "workspace",
+            "--managed-database-port",
+            "55435",
         ])
         .unwrap_or_else(|error| panic!("install CLI did not parse: {error}"));
         assert!(matches!(
             install.command,
             Command::Install {
                 target: Some(ref target),
+                managed_database_port: Some(55_435),
                 yes: true,
                 ..
             } if target == "codex"

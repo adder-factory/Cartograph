@@ -1977,18 +1977,6 @@ fn remove_admin_state_directory(root: &Path) -> Result<bool, ProjectError> {
     Ok(true)
 }
 
-fn managed_database_port() -> Result<u16, ToolError> {
-    match std::env::var("CARTOGRAPH_MANAGED_DATABASE_PORT") {
-        Ok(value) => value
-            .parse::<u16>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(invalid_arguments),
-        Err(std::env::VarError::NotPresent) => Ok(cartograph_db::DEFAULT_MANAGED_DATABASE_PORT),
-        Err(std::env::VarError::NotUnicode(_)) => Err(invalid_arguments()),
-    }
-}
-
 #[cfg(unix)]
 fn set_private_state_directory_permissions(path: &Path) -> Result<(), ToolError> {
     use std::os::unix::fs::PermissionsExt;
@@ -2158,6 +2146,7 @@ pub struct CartographMcpHandler {
     session_trace: Arc<SessionTrace>,
     cursor_cache: Arc<CursorCache>,
     project_cache: Arc<ProjectRuntimeCache>,
+    managed_database_port: u16,
     defaults: HandlerDefaults,
 }
 
@@ -2187,6 +2176,7 @@ impl CartographMcpHandler {
             }),
             cursor_cache: Arc::new(CursorCache::new()),
             project_cache,
+            managed_database_port: cartograph_db::DEFAULT_MANAGED_DATABASE_PORT,
             defaults: HandlerDefaults {
                 trace_calls: true,
                 ..HandlerDefaults::default()
@@ -2197,6 +2187,12 @@ impl CartographMcpHandler {
     #[must_use]
     pub const fn with_defaults(mut self, defaults: HandlerDefaults) -> Self {
         self.defaults = defaults;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_managed_database_port(mut self, port: u16) -> Self {
+        self.managed_database_port = port;
         self
     }
 
@@ -2220,6 +2216,7 @@ impl CartographMcpHandler {
             session_trace: self.session_trace.clone(),
             cursor_cache: self.cursor_cache.clone(),
             project_cache: self.project_cache.clone(),
+            managed_database_port: self.managed_database_port,
             defaults: self.defaults,
         }
     }
@@ -10281,7 +10278,7 @@ impl CartographMcpHandler {
         let managed_credentials = target_root
             .join(".cartograph/v2/postgres.password")
             .is_file();
-        let managed_port = managed_database_port()?;
+        let managed_port = self.managed_database_port;
         let job = self
             .admin_jobs
             .start(AdminJobRequest {

@@ -232,20 +232,82 @@ pub(super) fn capture_invocation(
     if module_system::is_static_commonjs_binding_call(builder, node) {
         return Ok(());
     }
-    let reference_node = match invocation {
-        InvocationKind::Call => target,
-        InvocationKind::Construction => node,
+    let (name_node, reference_node) = match invocation {
+        InvocationKind::Call
+            if matches!(
+                builder.context.snapshot.language(),
+                SourceLanguage::TypeScript
+                    | SourceLanguage::Tsx
+                    | SourceLanguage::JavaScript
+                    | SourceLanguage::Jsx
+            ) =>
+        {
+            let Some(name) = normalized_javascript_call_target(target, 0) else {
+                return Ok(());
+            };
+            (name, name)
+        }
+        InvocationKind::Call => (target, target),
+        InvocationKind::Construction => (target, node),
     };
     let owner = builder.owners.last().cloned();
     push_node_reference(
         builder,
         NodeReference {
             owner,
-            name: target,
+            name: name_node,
             kind: reference_kind,
             span: reference_node,
         },
     )
+}
+
+fn normalized_javascript_call_target(target: Node<'_>, depth: usize) -> Option<Node<'_>> {
+    if depth > 64 {
+        return None;
+    }
+    match target.kind() {
+        "identifier" | "property_identifier" | "private_property_identifier" | "this" | "super" => {
+            Some(target)
+        }
+        "member_expression" if static_javascript_member_chain(target, 0) => Some(target),
+        "member_expression" => target.child_by_field_name("property").and_then(|property| {
+            normalized_javascript_call_target(property, depth.saturating_add(1))
+        }),
+        "parenthesized_expression" => {
+            let mut children = named_children(target);
+            let child = children.next()?;
+            if children.next().is_some() {
+                return None;
+            }
+            normalized_javascript_call_target(child, depth.saturating_add(1))
+        }
+        // The inner call already records its statically known target. The value it returns is
+        // dynamically callable, while arrow/function IIFEs have no stable declaration target.
+        "call_expression" | "arrow_function" | "function_expression" => None,
+        _ => None,
+    }
+}
+
+fn static_javascript_member_chain(node: Node<'_>, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    match node.kind() {
+        "identifier" | "property_identifier" | "private_property_identifier" | "this" | "super" => {
+            true
+        }
+        "member_expression" => {
+            node.child_by_field_name("object").is_some_and(|object| {
+                static_javascript_member_chain(object, depth.saturating_add(1))
+            }) && node
+                .child_by_field_name("property")
+                .is_some_and(|property| {
+                    static_javascript_member_chain(property, depth.saturating_add(1))
+                })
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn capture_jsx_reference(

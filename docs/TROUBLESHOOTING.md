@@ -36,9 +36,11 @@ or process. Re-run the project-local installer from the working shell:
 
 ```sh
 cartograph install --yes --target <codex|claude|cursor> --location local \
-  --project-path /absolute/path/to/project
+  --project-path /absolute/path/to/project \
+  --managed-database-port <PORT>
 ```
 
+Omit `--managed-database-port` when the project uses the default `55432`.
 Restart the host. An open session is not assumed to hot-register a replaced MCP
 server. CLI success proves the native/database control path, not the old MCP
 transport.

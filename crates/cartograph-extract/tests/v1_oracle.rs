@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind, Visibility};
 use cartograph_extract::{
     ExtractError, ExtractedFile, ImportBindingKind, NativeExtractor, SnapshotError, SourceLimits,
-    SourceSnapshot,
+    SourceSnapshot, native_extraction_reservation, native_output_limit,
 };
 use serde::Deserialize;
 
@@ -482,6 +482,75 @@ fn body_search_text_is_bounded_identifier_only_and_literal_safe() {
     assert!(!execute.body_search_text.contains(SECRET));
     assert!(execute.body_search_text.len() <= BODY_SEARCH_MAX_BYTES);
     assert!(execute.body_search_truncated);
+}
+
+#[test]
+fn javascript_chained_calls_and_iifes_keep_bounded_static_targets() {
+    let fields = (0..320)
+        .map(|index| format!("field_{index}: {index},"))
+        .collect::<String>();
+    let iife_padding = "x".repeat(5 * 1024);
+    let source = format!(
+        "const schema = base.extend({{{fields}}}).transform((value) => value).parse(input);\n\
+         export async function run(handler: () => void) {{\n\
+           console.log(schema);\n\
+           (handler)();\n\
+           (async () => {{/*{iife_padding}*/}})();\n\
+         }}\n"
+    );
+    let file = extract("src/chained.ts", &source);
+    let calls = file
+        .references
+        .iter()
+        .filter(|reference| reference.kind == ReferenceKind::Calls)
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "base.extend",
+        "transform",
+        "parse",
+        "console.log",
+        "handler",
+    ] {
+        assert!(
+            calls.iter().any(|reference| reference.name == expected),
+            "missing bounded call target {expected}: {calls:?}"
+        );
+    }
+    assert!(calls.iter().all(|reference| reference.name.len() <= 64));
+    for reference in calls {
+        let start = usize::try_from(reference.span.start_byte())
+            .unwrap_or_else(|error| panic!("call start overflowed: {error}"));
+        let end = usize::try_from(reference.span.end_byte())
+            .unwrap_or_else(|error| panic!("call end overflowed: {error}"));
+        assert_eq!(&source[start..end], reference.name);
+    }
+}
+
+#[test]
+fn dense_schema_facts_fit_below_the_parser_memory_reservation() {
+    let fields = (0..320)
+        .map(|index| format!("field_{index}: z.string(),"))
+        .collect::<String>();
+    let source = format!("export const schema = z.object({{{fields}}});\n");
+    let file = extract("src/dense-schema.ts", &source);
+    let retained = file.modeled_retained_bytes();
+    let source_bytes = u64::try_from(source.len())
+        .unwrap_or_else(|error| panic!("source length overflowed: {error}"));
+    let output_limit = native_output_limit(source_bytes)
+        .unwrap_or_else(|| panic!("dense schema output limit overflowed"));
+    let parser_reservation = native_extraction_reservation(source_bytes)
+        .unwrap_or_else(|| panic!("dense schema parser reservation overflowed"));
+
+    assert!(retained <= output_limit, "{retained} > {output_limit}");
+    assert!(output_limit < parser_reservation);
+    assert!(
+        file.references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::Calls)
+            .count()
+            >= 320
+    );
 }
 
 #[test]

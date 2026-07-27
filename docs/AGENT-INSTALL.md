@@ -95,8 +95,11 @@ cartograph install --yes --target cursor --location local --project-path .
 ```
 
 It pins the absolute native executable, writes project-local MCP configuration,
-and can install managed Git hooks. Use `--no-hooks` to omit hook changes. Run
-`cartograph install-hooks --remove` to remove only Cartograph-owned blocks.
+and can install managed Git hooks. If the managed database uses a non-default
+port, add `--managed-database-port <PORT>`; the generated server arguments pin
+that non-secret loopback port for every host format. Use `--no-hooks` to omit
+hook changes. Run `cartograph install-hooks --remove` to remove only
+Cartograph-owned blocks.
 
 Restart the host after registration or binary replacement. A shell `status`
 call validates the CLI/database path; it does not prove that an already-running

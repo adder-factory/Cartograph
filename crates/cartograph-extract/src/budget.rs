@@ -9,7 +9,9 @@ const PARSER_RESERVATION_MULTIPLIER: u64 = 32;
 const MINIMUM_PARSER_RESERVATION_BYTES: u64 = 1024 * 1024;
 const READ_RESERVATION_MULTIPLIER: u64 = 2;
 const MINIMUM_READ_RESERVATION_BYTES: u64 = 128 * 1024;
-const OUTPUT_LIMIT_MULTIPLIER: u64 = 8;
+// Dense schemas can emit several bounded graph facts per source token. Keep the retained-output
+// ceiling below the independent 32x parser reservation while admitting real 12-13x corpora.
+const OUTPUT_LIMIT_MULTIPLIER: u64 = 16;
 const MINIMUM_OUTPUT_LIMIT_BYTES: u64 = 256 * 1024;
 const MINIMUM_FACT_LIMIT: u64 = 1024;
 const MINIMUM_STRING_LIMIT_BYTES: u64 = 4096;

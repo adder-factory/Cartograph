@@ -217,6 +217,29 @@ router.use(authMiddleware);
 }
 
 #[test]
+fn framework_route_markers_do_not_match_identifier_suffixes() {
+    let extracted = extract(
+        "src/workspace-files.test.ts",
+        r#"
+import { Router } from '@example/router';
+test('omitted path uses realpath(".")', async () => {
+  const resolved = await realpath(".");
+  return resolved;
+});
+"#,
+        SourceLanguage::TypeScript,
+    );
+    assert!(
+        extracted
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != SymbolKind::Route),
+        "realpath invented a framework route: {:?}",
+        extracted.symbols
+    );
+}
+
+#[test]
 fn framework_routes_cover_hono_on_and_fastify_object_forms() {
     let extracted = extract(
         "src/server.ts",
