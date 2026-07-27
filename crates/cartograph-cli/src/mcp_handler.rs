@@ -16853,91 +16853,126 @@ fn parse_since_milliseconds(value: Option<&Value>) -> Result<Option<u64>, ToolEr
 }
 
 fn parse_iso8601_milliseconds(value: &str) -> Option<u64> {
+    let (year, month, day) = parse_iso8601_date(value)?;
+    let time = parse_iso8601_time(value)?;
+    let days = days_from_civil(i32::try_from(year).ok()?, month, day);
+    let seconds = i128::from(days)
+        .checked_mul(86_400)?
+        .checked_add(i128::from(time.hour) * 3_600)?
+        .checked_add(i128::from(time.minute) * 60)?
+        .checked_add(i128::from(time.second))?
+        .checked_sub(i128::from(time.offset_seconds))?;
+    if seconds < 0 {
+        return None;
+    }
+    let milliseconds = seconds
+        .checked_mul(1_000)?
+        .checked_add(i128::from(time.fraction_milliseconds))?;
+    u64::try_from(milliseconds).ok()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Iso8601Time {
+    hour: u32,
+    minute: u32,
+    second: u32,
+    fraction_milliseconds: u32,
+    offset_seconds: i64,
+}
+
+fn parse_iso8601_date(value: &str) -> Option<(u32, u32, u32)> {
     if !value.is_ascii() || value.len() < 10 {
         return None;
     }
     let year = parse_ascii_u32(value.get(0..4)?)?;
     let month = parse_ascii_u32(value.get(5..7)?)?;
     let day = parse_ascii_u32(value.get(8..10)?)?;
-    if value.as_bytes().get(4) != Some(&b'-')
-        || value.as_bytes().get(7) != Some(&b'-')
-        || year > i32::MAX as u32
-        || month == 0
-        || month > 12
-        || day == 0
-        || day > days_in_month(year, month)
+    (value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+        && year <= i32::MAX as u32
+        && (1..=12).contains(&month)
+        && (1..=days_in_month(year, month)).contains(&day))
+    .then_some((year, month, day))
+}
+
+fn parse_iso8601_time(value: &str) -> Option<Iso8601Time> {
+    if value.len() == 10 {
+        return Some(Iso8601Time::default());
+    }
+    if !matches!(value.as_bytes().get(10), Some(b'T' | b't')) || value.len() < 19 {
+        return None;
+    }
+    let hour = parse_ascii_u32(value.get(11..13)?)?;
+    let minute = parse_ascii_u32(value.get(14..16)?)?;
+    let second = parse_ascii_u32(value.get(17..19)?)?;
+    if value.as_bytes().get(13) != Some(&b':')
+        || value.as_bytes().get(16) != Some(&b':')
+        || hour > 23
+        || minute > 59
+        || second > 59
     {
         return None;
     }
-    let mut hour = 0_u32;
-    let mut minute = 0_u32;
-    let mut second = 0_u32;
-    let mut fraction_ms = 0_u32;
-    let mut offset_seconds = 0_i64;
-    if value.len() > 10 {
-        if !matches!(value.as_bytes().get(10), Some(b'T' | b't')) || value.len() < 19 {
-            return None;
-        }
-        hour = parse_ascii_u32(value.get(11..13)?)?;
-        minute = parse_ascii_u32(value.get(14..16)?)?;
-        second = parse_ascii_u32(value.get(17..19)?)?;
-        if value.as_bytes().get(13) != Some(&b':')
-            || value.as_bytes().get(16) != Some(&b':')
-            || hour > 23
-            || minute > 59
-            || second > 59
-        {
-            return None;
-        }
-        let bytes = value.as_bytes();
-        let mut cursor = 19_usize;
-        if bytes.get(cursor) == Some(&b'.') {
-            cursor = cursor.saturating_add(1);
-            let fraction_start = cursor;
-            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-                cursor = cursor.saturating_add(1);
-            }
-            if cursor == fraction_start {
-                return None;
-            }
-            let fraction = &bytes[fraction_start..cursor];
-            fraction_ms = u32::from(fraction[0] - b'0') * 100
-                + fraction
-                    .get(1)
-                    .map_or(0, |digit| u32::from(*digit - b'0') * 10)
-                + fraction.get(2).map_or(0, |digit| u32::from(*digit - b'0'));
-        }
-        match bytes.get(cursor).copied() {
-            Some(b'Z' | b'z') if cursor.saturating_add(1) == bytes.len() => {}
-            Some(sign @ (b'+' | b'-')) if cursor.saturating_add(6) == bytes.len() => {
-                let offset_hour = parse_ascii_u32(value.get(cursor + 1..cursor + 3)?)?;
-                let offset_minute = parse_ascii_u32(value.get(cursor + 4..cursor + 6)?)?;
-                if bytes.get(cursor + 3) != Some(&b':') || offset_hour > 23 || offset_minute > 59 {
-                    return None;
-                }
-                let magnitude = i64::from(offset_hour)
-                    .checked_mul(3_600)?
-                    .checked_add(i64::from(offset_minute).checked_mul(60)?)?;
-                offset_seconds = if sign == b'+' { magnitude } else { -magnitude };
-            }
-            None => {}
-            _ => return None,
-        }
+    let (fraction_milliseconds, cursor) = parse_iso8601_fraction(value.as_bytes(), 19)?;
+    let offset_seconds = parse_iso8601_offset(value, cursor)?;
+    Some(Iso8601Time {
+        hour,
+        minute,
+        second,
+        fraction_milliseconds,
+        offset_seconds,
+    })
+}
+
+fn parse_iso8601_fraction(bytes: &[u8], cursor: usize) -> Option<(u32, usize)> {
+    if bytes.get(cursor) != Some(&b'.') {
+        return Some((0, cursor));
     }
-    let days = days_from_civil(i32::try_from(year).ok()?, month, day);
-    let seconds = i128::from(days)
-        .checked_mul(86_400)?
-        .checked_add(i128::from(hour) * 3_600)?
-        .checked_add(i128::from(minute) * 60)?
-        .checked_add(i128::from(second))?
-        .checked_sub(i128::from(offset_seconds))?;
-    if seconds < 0 {
+    let fraction_start = cursor.checked_add(1)?;
+    let fraction_digits = bytes
+        .get(fraction_start..)?
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if fraction_digits == 0 {
         return None;
     }
-    let milliseconds = seconds
-        .checked_mul(1_000)?
-        .checked_add(i128::from(fraction_ms))?;
-    u64::try_from(milliseconds).ok()
+    let fraction_end = fraction_start.checked_add(fraction_digits)?;
+    let fraction = bytes.get(fraction_start..fraction_end)?;
+    let milliseconds = u32::from(fraction[0] - b'0') * 100
+        + fraction
+            .get(1)
+            .map_or(0, |digit| u32::from(*digit - b'0') * 10)
+        + fraction.get(2).map_or(0, |digit| u32::from(*digit - b'0'));
+    Some((milliseconds, fraction_end))
+}
+
+fn parse_iso8601_offset(value: &str, cursor: usize) -> Option<i64> {
+    match value.as_bytes().get(cursor).copied() {
+        Some(b'Z' | b'z') if cursor.checked_add(1)? == value.len() => Some(0),
+        Some(sign @ (b'+' | b'-')) => parse_iso8601_numeric_offset(value, cursor, sign),
+        None => Some(0),
+        _ => None,
+    }
+}
+
+fn parse_iso8601_numeric_offset(value: &str, cursor: usize, sign: u8) -> Option<i64> {
+    let offset_hour_start = cursor.checked_add(1)?;
+    let offset_separator = cursor.checked_add(3)?;
+    let offset_minute_start = cursor.checked_add(4)?;
+    let offset_end = cursor.checked_add(6)?;
+    if offset_end != value.len() || value.as_bytes().get(offset_separator) != Some(&b':') {
+        return None;
+    }
+    let offset_hour = parse_ascii_u32(value.get(offset_hour_start..offset_separator)?)?;
+    let offset_minute = parse_ascii_u32(value.get(offset_minute_start..offset_end)?)?;
+    if offset_hour > 23 || offset_minute > 59 {
+        return None;
+    }
+    let magnitude = i64::from(offset_hour)
+        .checked_mul(3_600)?
+        .checked_add(i64::from(offset_minute).checked_mul(60)?)?;
+    Some(if sign == b'+' { magnitude } else { -magnitude })
 }
 
 fn parse_ascii_u32(value: &str) -> Option<u32> {
@@ -18735,18 +18770,26 @@ mod tests {
 
     #[test]
     fn changed_since_parses_unix_and_iso_thresholds_without_timezone_ambiguity() {
-        assert_eq!(parse_iso8601_milliseconds("1970-01-01"), Some(0));
-        assert_eq!(parse_iso8601_milliseconds("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(
-            parse_iso8601_milliseconds("1970-01-01T01:00:00.123+01:00"),
-            Some(123)
-        );
-        assert_eq!(
-            parse_iso8601_milliseconds("2024-01-01T00:00:00Z"),
-            Some(1_704_067_200_000)
-        );
-        assert_eq!(parse_iso8601_milliseconds("2023-02-29T00:00:00Z"), None);
-        assert_eq!(parse_iso8601_milliseconds("not-a-date"), None);
+        for (value, expected) in [
+            ("1970-01-01", Some(0)),
+            ("1970-01-01T00:00:00", Some(0)),
+            ("1970-01-01T00:00:00Z", Some(0)),
+            ("1970-01-01T00:00:00.1Z", Some(100)),
+            ("1970-01-01T00:00:00.12Z", Some(120)),
+            ("1970-01-01T00:00:00.1239Z", Some(123)),
+            ("1970-01-01T01:00:00.123+01:00", Some(123)),
+            ("1970-01-01T00:00:00-01:00", Some(3_600_000)),
+            ("2024-01-01T00:00:00Z", Some(1_704_067_200_000)),
+            ("1969-12-31T23:59:59Z", None),
+            ("2023-02-29T00:00:00Z", None),
+            ("1970-01-01T24:00:00Z", None),
+            ("1970-01-01T00:00:00.", None),
+            ("1970-01-01T00:00:00+24:00", None),
+            ("1970-01-01T00:00:00Zextra", None),
+            ("not-a-date", None),
+        ] {
+            assert_eq!(parse_iso8601_milliseconds(value), expected, "{value}");
+        }
         assert_eq!(
             parse_since_milliseconds(Some(&json!("1704067200000"))),
             Ok(Some(1_704_067_200_000))
