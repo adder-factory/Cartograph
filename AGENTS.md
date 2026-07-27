@@ -254,8 +254,12 @@ If a user needs data that exists only in a v1 SQLite index, give two choices:
 
 Do not install SQLite tooling into v2 to shorten this workflow.
 
-Generation cleanup is separate and never implicit. After backup and import
-verification, a bounded example is:
+Every successful index/no-op reconciliation attempts a small automatic bounded
+cleanup: it keeps the two newest superseded generations, terminalizes failed
+pre-lease work, and can collect staging rows only after they have been unleased
+for at least ten minutes. Import-referenced staging/failed generations and all
+ready/current work remain protected. After backup and import verification, an
+explicit larger bounded batch is:
 
 ```sh
 cartograph db prune \
@@ -266,9 +270,9 @@ cartograph db prune \
   --format json
 ```
 
-This preserves the current generation, active staging/ready work, and the two
-newest superseded generations. Inspect each report before requesting another
-batch.
+This preserves the current generation, recent or leased staging work, all ready
+work, incomplete import recovery state, and the two newest superseded
+generations. Inspect each report before requesting another batch.
 
 ## Common failures
 

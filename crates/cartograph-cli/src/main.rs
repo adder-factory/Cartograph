@@ -18,11 +18,11 @@ use cartograph_agent::{
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{
     CapabilityReport, CartographDatabase, CheckStatus, DEFAULT_MANAGED_DATABASE_PORT,
-    GenerationRetentionPolicy, GenerationRetentionRequest, GenerationValidationLimits, LeaseOwner,
-    LeaseRequest, LeaseTarget, ManagedContainerState, ManagedDatabase, ManagedDatabaseStatus,
-    ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedStartReport,
-    V1PostgresImportExecution, V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource,
-    V1PostgresSourceRevision,
+    GenerationRetentionPolicy, GenerationRetentionRequest, GenerationStorageSummary,
+    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, ManagedContainerState,
+    ManagedDatabase, ManagedDatabaseStatus, ManagedDestructiveConfirmation,
+    ManagedDestructiveOperation, ManagedStartReport, V1PostgresImportExecution,
+    V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
 };
 use cartograph_domain::{
     EdgeKind, ModelId, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage, SymbolId,
@@ -641,7 +641,7 @@ enum DatabaseCommand {
     DerivedIndex(DatabaseDerivedIndexArguments),
     /// Validate or resume a PostgreSQL-only v1.1.33 schema import.
     ImportV1(V1ImportArguments),
-    /// Delete a bounded batch of failed and old superseded generations.
+    /// Delete a bounded batch of stale staging, failed, and old superseded generations.
     Prune(PruneArguments),
 }
 
@@ -1058,7 +1058,7 @@ struct PruneArguments {
     /// Number of newest superseded generations that must be retained.
     #[arg(long, default_value_t = 2)]
     keep_superseded: u32,
-    /// Maximum terminal generations deleted in one transaction.
+    /// Maximum generations deleted in one transaction.
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=10000))]
     maximum_deletions: u32,
     /// Exact acknowledgement: prune-old-generations.
@@ -2778,6 +2778,28 @@ fn render_status_text(value: &Value) {
     } else {
         println!("Project has no published generation; run `cartograph index`.");
     }
+    if let Some(generations) = value
+        .pointer("/project/snapshot/generation_storage")
+        .and_then(Value::as_object)
+    {
+        let staging = status_count(generations, "staging");
+        let ready = status_count(generations, "ready");
+        let current = status_count(generations, "current");
+        let superseded = status_count(generations, "superseded");
+        let failed = status_count(generations, "failed");
+        let retained_bytes = status_count(generations, "estimated_retained_bytes");
+        println!(
+            "Retained generations: {staging} staging, {ready} ready, {current} current, \
+             {superseded} superseded, {failed} failed; estimated {}",
+            render_byte_count(retained_bytes)
+        );
+        if generation_storage_needs_attention(staging, ready, superseded, failed, retained_bytes) {
+            println!(
+                "WARNING: generation retention needs attention; run `cartograph index` to trigger \
+                 automatic bounded cleanup, then inspect `cartograph db prune --help` if the backlog remains."
+            );
+        }
+    }
     if let Some(state) = value
         .pointer("/featureReadiness/state")
         .and_then(Value::as_str)
@@ -2796,6 +2818,35 @@ fn render_status_text(value: &Value) {
         println!("Inline rollups: {hotspots} hotspots, {biomarkers} biomarkers");
     }
     println!("Graph queries: retained; browser visualizer: intentionally removed");
+}
+
+fn status_count(values: &Map<String, Value>, field: &str) -> u64 {
+    values.get(field).and_then(Value::as_u64).unwrap_or(0)
+}
+
+const fn generation_storage_needs_attention(
+    staging: u64,
+    ready: u64,
+    superseded: u64,
+    failed: u64,
+    retained_bytes: u64,
+) -> bool {
+    const RETAINED_BYTE_WARNING: u64 = 4 * 1_024 * 1_024 * 1_024;
+    staging > 1
+        || ready > 1
+        || superseded > 34
+        || failed > 32
+        || retained_bytes > RETAINED_BYTE_WARNING
+}
+
+fn render_byte_count(bytes: u64) -> String {
+    const MEBIBYTE: u64 = 1_024 * 1_024;
+    const GIBIBYTE: u64 = 1_024 * MEBIBYTE;
+    if bytes >= GIBIBYTE {
+        format!("{} GiB ({} bytes)", bytes / GIBIBYTE, bytes)
+    } else {
+        format!("{} MiB ({} bytes)", bytes / MEBIBYTE, bytes)
+    }
 }
 
 async fn run_embed(
@@ -3587,7 +3638,13 @@ async fn check_project_index(
             return;
         }
     };
-    match runtime.status().await {
+    let status = runtime.status().await;
+    if let Ok(status) = &status
+        && let Some(snapshot) = &status.snapshot
+    {
+        check_generation_storage(snapshot.generation_storage, checks);
+    }
+    match status {
         Ok(status)
             if status
                 .snapshot
@@ -3617,6 +3674,34 @@ async fn check_project_index(
         )),
     }
     runtime.close().await;
+}
+
+fn check_generation_storage(storage: GenerationStorageSummary, checks: &mut Vec<DoctorCheck>) {
+    let message = format!(
+        "Retained generations: {} staging, {} ready, {} current, {} superseded, {} failed; \
+         estimated {}.",
+        storage.staging,
+        storage.ready,
+        storage.current,
+        storage.superseded,
+        storage.failed,
+        render_byte_count(storage.estimated_retained_bytes)
+    );
+    if generation_storage_needs_attention(
+        storage.staging,
+        storage.ready,
+        storage.superseded,
+        storage.failed,
+        storage.estimated_retained_bytes,
+    ) {
+        checks.push(doctor_warn(
+            "generation-retention",
+            message,
+            "Run `cartograph index` to trigger automatic bounded cleanup; if the backlog remains, inspect `cartograph db prune --help` and database free space.".to_owned(),
+        ));
+    } else {
+        checks.push(doctor_pass("generation-retention", message));
+    }
 }
 
 async fn check_llm_configuration(project_path: &Path, checks: &mut Vec<DoctorCheck>) {
@@ -3965,6 +4050,68 @@ mod tests {
         assert!(rendered.contains("✗ database-postgres-18"));
         assert!(rendered.contains("Fix: Upgrade PostgreSQL."));
         assert!(rendered.contains("is not ready"));
+    }
+
+    #[test]
+    fn generation_retention_warning_matches_automatic_cleanup_bounds() {
+        const FOUR_GIBIBYTES: u64 = 4 * 1_024 * 1_024 * 1_024;
+
+        assert!(!generation_storage_needs_attention(
+            1,
+            1,
+            34,
+            32,
+            FOUR_GIBIBYTES
+        ));
+        for warning in [
+            generation_storage_needs_attention(2, 1, 34, 32, FOUR_GIBIBYTES),
+            generation_storage_needs_attention(1, 2, 34, 32, FOUR_GIBIBYTES),
+            generation_storage_needs_attention(1, 1, 35, 32, FOUR_GIBIBYTES),
+            generation_storage_needs_attention(1, 1, 34, 33, FOUR_GIBIBYTES),
+            generation_storage_needs_attention(1, 1, 34, 32, FOUR_GIBIBYTES + 1),
+        ] {
+            assert!(warning);
+        }
+    }
+
+    #[test]
+    fn doctor_generation_retention_check_is_actionable_and_byte_exact() {
+        let mut healthy_checks = Vec::new();
+        check_generation_storage(
+            GenerationStorageSummary {
+                current: 1,
+                estimated_retained_bytes: 1_024 * 1_024,
+                ..GenerationStorageSummary::default()
+            },
+            &mut healthy_checks,
+        );
+        assert_eq!(healthy_checks.len(), 1);
+        assert_eq!(healthy_checks[0].id, "generation-retention");
+        assert_eq!(healthy_checks[0].status, DoctorStatus::Pass);
+        assert!(healthy_checks[0].message.contains("1 MiB (1048576 bytes)"));
+        assert!(healthy_checks[0].remediation.is_none());
+
+        let mut warning_checks = Vec::new();
+        check_generation_storage(
+            GenerationStorageSummary {
+                staging: 2,
+                current: 1,
+                estimated_retained_bytes: 5 * 1_024 * 1_024 * 1_024,
+                ..GenerationStorageSummary::default()
+            },
+            &mut warning_checks,
+        );
+        assert_eq!(warning_checks.len(), 1);
+        assert_eq!(warning_checks[0].id, "generation-retention");
+        assert_eq!(warning_checks[0].status, DoctorStatus::Warn);
+        assert!(warning_checks[0].message.contains("2 staging"));
+        assert!(warning_checks[0].message.contains("5 GiB"));
+        assert!(
+            warning_checks[0]
+                .remediation
+                .as_deref()
+                .is_some_and(|message| message.contains("cartograph db prune --help"))
+        );
     }
 
     #[test]
