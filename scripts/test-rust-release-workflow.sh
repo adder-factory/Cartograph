@@ -25,6 +25,10 @@ done
 if grep -Fq 'uses: ./.github/workflows/v2-rust.yml' "$RELEASE"; then
   fail 'tag workflow still reruns the full validation workflow'
 fi
+grep -Fq "tags: ['v*']" "$RELEASE" || fail 'release workflow tag trigger is missing'
+if grep -Eq '^[[:space:]]{2}workflow_dispatch:' "$RELEASE"; then
+  fail 'release workflow manual dispatch duplicates the tag-specific native builds'
+fi
 grep -Fq 'verify-main-gate:' "$RELEASE" || fail 'release main-gate verification job is missing'
 grep -Fq 'gh attestation verify' "$RELEASE" || fail 'release does not verify main-gate provenance'
 grep -Fq -- '--source-ref refs/heads/main' "$RELEASE" || fail 'release does not bind evidence to main'

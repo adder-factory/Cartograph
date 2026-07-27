@@ -1,7 +1,8 @@
-# Cartograph v2 release pipeline. The complete live suite runs once on the exact
-# published main SHA in v2-rust.yml and emits a GitHub-attested gate manifest.
-# This workflow verifies that immutable evidence, then performs only the five
-# release-specific native builds, archive audits, provenance, and publication.
+# Cartograph v2 tag-only release pipeline. The complete live suite runs once on
+# the exact published main SHA in v2-rust.yml and emits a GitHub-attested gate
+# manifest. This workflow verifies that immutable evidence, then performs only
+# the five release-specific native builds, archive audits, provenance, and
+# publication.
 # PostgreSQL, ParadeDB, and pgvector are external runtime services and are never
 # bundled in these archives.
 name: release
@@ -9,7 +10,6 @@ name: release
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   actions: read
