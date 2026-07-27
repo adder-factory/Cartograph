@@ -735,6 +735,80 @@ impl CartographDatabase {
         })
     }
 
+    /// Terminalize an exact staging generation only when no live lease owns it.
+    ///
+    /// This closes the pre-supervisor failure window where durable staging was
+    /// created before a runtime could acquire the project write lease. The
+    /// project advisory lock serializes the check with lease acquisition, while
+    /// the exact generation predicate keeps current, ready, and terminal state
+    /// immutable. The boolean is true only when this call changed the row.
+    pub async fn fail_unleased_staging_generation_bounded(
+        &self,
+        request: GenerationRecoveryRequest<'_>,
+        statement_timeout: Duration,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("fail-unleased-staging-begin"))?;
+        if crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+            .await
+            .is_err()
+        {
+            return match transaction.rollback().await {
+                Ok(()) => Err(StorageError::InvalidInput {
+                    field: "statement_timeout",
+                }),
+                Err(_) => Err(database_error("fail-unleased-staging-rollback")),
+            };
+        }
+        let lock = query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(project_lock_key(&self.schema, request.project_id))
+            .execute(&mut *transaction)
+            .await;
+        if lock.is_err() {
+            return match transaction.rollback().await {
+                Ok(()) => Err(database_error("fail-unleased-staging-lock")),
+                Err(_) => Err(database_error("fail-unleased-staging-rollback")),
+            };
+        }
+        let schema = crate::database::quoted_schema(&self.schema);
+        let sql = format!(
+            r#"UPDATE {schema}."index_generations" AS generations
+                SET state = 'failed'
+                WHERE generations.project_id = CAST($1 AS uuid)
+                  AND generations.generation_id = CAST($2 AS uuid)
+                  AND generations.state = 'staging'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM {schema}."project_operation_leases" AS leases
+                      WHERE leases.project_id = generations.project_id
+                        AND leases.generation_id = generations.generation_id
+                        AND leases.expires_at > clock_timestamp()
+                  )"#
+        );
+        let updated = audited_query(sql)
+            .bind(request.project_id.as_str())
+            .bind(request.generation_id.as_str())
+            .execute(&mut *transaction)
+            .await;
+        let updated = match updated {
+            Ok(updated) => updated.rows_affected() == 1,
+            Err(_) => {
+                return match transaction.rollback().await {
+                    Ok(()) => Err(database_error("fail-unleased-staging")),
+                    Err(_) => Err(database_error("fail-unleased-staging-rollback")),
+                };
+            }
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("fail-unleased-staging-commit"))?;
+        Ok(updated)
+    }
+
     /// Deterministically reduce and atomically COPY all fact tables before
     /// moving the consumed generation token to `ready`.
     pub async fn prepare_generation(
@@ -1616,21 +1690,25 @@ async fn publish_transaction(
     connection: &mut PgConnection,
     input: PublishTransactionInput<'_>,
 ) -> Result<(), StorageError> {
-    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "cartograph-v2-publish:{}:{}",
-            input.schema.as_str(),
-            input.generation.project_id()
-        ))
-        .execute(&mut *connection)
-        .await
-        .map_err(|_| database_error("publish-lock"))?;
-    let quoted_schema = crate::database::quoted_schema(input.schema);
     let generation = input.generation;
     let fence = input.fence;
     if !fence_matches_generation(fence, generation.project_id(), generation.generation_id()) {
         return Err(StorageError::LeaseFenceLost);
     }
+    // Publication, retention, purge, and lease acquisition all serialize on
+    // the project operation lock first. Taking publication before operation
+    // creates an ABBA deadlock with retention's operation -> publication order.
+    lock_project_mutation(connection, input.schema, generation.project_id()).await?;
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "cartograph-v2-publish:{}:{}",
+            input.schema.as_str(),
+            generation.project_id()
+        ))
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("publish-lock"))?;
+    let quoted_schema = crate::database::quoted_schema(input.schema);
     lock_generation_fence(connection, input.schema, fence).await?;
     validate_generation_state(
         connection,
@@ -1956,11 +2034,7 @@ async fn lock_generation_mutation(
         .target()
         .generation_id()
         .ok_or(StorageError::LeaseFenceLost)?;
-    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(project_lock_key(schema, fence.target().project_id()))
-        .execute(&mut *connection)
-        .await
-        .map_err(|_| database_error("lock-generation-operation"))?;
+    lock_project_mutation(connection, schema, fence.target().project_id()).await?;
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "{GENERATION_LOCK_NAMESPACE}:{}:{}:{}",
@@ -1971,6 +2045,19 @@ async fn lock_generation_mutation(
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("lock-generation-identity"))?;
+    Ok(())
+}
+
+async fn lock_project_mutation(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    project_id: &ProjectId,
+) -> Result<(), StorageError> {
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(project_lock_key(schema, project_id))
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("lock-generation-operation"))?;
     Ok(())
 }
 

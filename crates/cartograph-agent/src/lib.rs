@@ -16,8 +16,10 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, GenerationContents, HistoryRefreshReport, IssueHistoryRefreshReport,
-    NewGeneration, NewProject, ProjectSnapshot, StagedGeneration,
+    CartographDatabase, GenerationContents, GenerationRecoveryRequest, GenerationRetentionPolicy,
+    GenerationRetentionReport, GenerationRetentionRequest, HistoryRefreshReport,
+    IssueHistoryRefreshReport, LeaseError, LeaseRequest, LeaseTarget, NewGeneration, NewProject,
+    ProjectSnapshot, StagedGeneration,
 };
 use cartograph_domain::{
     ContentDigest, NormalizedPath, ProjectId, ProjectOperation, SourceManifestDigestBuilder,
@@ -163,6 +165,13 @@ const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(10);
 const DEFAULT_COPY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_STAGING_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const AUTOMATIC_RETENTION_KEEP_SUPERSEDED: u32 = 2;
+const AUTOMATIC_RETENTION_MAXIMUM_DELETIONS: u32 = 32;
+const AUTOMATIC_RETENTION_LEASE_DURATION: Duration = Duration::from_secs(2 * 60);
+const AUTOMATIC_RETENTION_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+const AUTOMATIC_RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
+const AUTOMATIC_RETENTION_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 const OVERSIZED_SOURCE_DIGEST_DOMAIN: &[u8] = b"cartograph-v2-oversized-source-v1";
 
 /// User-controlled bounds for one full source index.
@@ -350,6 +359,23 @@ pub struct IndexReport {
     pub issue_history: IssueHistoryIndexStatus,
     /// Exact native timing evidence, present only when explicitly requested.
     pub profile: Option<IndexProfile>,
+    /// Bounded post-index generation retention outcome.
+    pub retention: GenerationRetentionStatus,
+}
+
+/// Automatic bounded generation-retention outcome attached to every successful index request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GenerationRetentionStatus {
+    /// A bounded cleanup transaction committed under an exact migration lease.
+    Completed { report: GenerationRetentionReport },
+    /// Cleanup committed, but releasing its bounded lease could not be confirmed.
+    CompletedWithWarning {
+        report: GenerationRetentionReport,
+        warning: &'static str,
+    },
+    /// Cleanup was safely deferred because another writer won or storage was unavailable.
+    Deferred { reason: &'static str },
 }
 
 /// Monotonic phase timing evidence for one index/no-op request.
@@ -710,6 +736,7 @@ impl ProjectRuntime {
             if let Some(profile) = report.profile.as_mut() {
                 profile.preparation_millis = preparation_millis;
             }
+            report.retention = self.maintain_generation_retention(&report.project_id).await;
             Ok::<_, ProjectError>(report)
         };
         let history = async {
@@ -877,6 +904,9 @@ impl ProjectRuntime {
                     reason: "not_attempted",
                 },
                 profile: options.profile.then(IndexProfile::default),
+                retention: GenerationRetentionStatus::Deferred {
+                    reason: "not_attempted",
+                },
             })));
         }
 
@@ -914,6 +944,32 @@ impl ProjectRuntime {
     }
 
     async fn publish_index(
+        &self,
+        pending: PendingIndex,
+        cancellation: ProjectCancellation,
+        profile_requested: bool,
+    ) -> Result<IndexReport, ProjectError> {
+        let project_id = pending.project_id.clone();
+        let generation_id = pending.generation_id.clone();
+        let result = self
+            .publish_index_inner(pending, cancellation, profile_requested)
+            .await;
+        if result.is_err()
+            && self
+                .database
+                .fail_unleased_staging_generation_bounded(
+                    GenerationRecoveryRequest::new(&project_id, &generation_id),
+                    DEFAULT_STAGING_CLEANUP_TIMEOUT,
+                )
+                .await
+                .is_err()
+        {
+            return Err(ProjectError::IndexCleanupFailed);
+        }
+        result
+    }
+
+    async fn publish_index_inner(
         &self,
         pending: PendingIndex,
         cancellation: ProjectCancellation,
@@ -1006,7 +1062,70 @@ impl ProjectRuntime {
                 pipeline_stages: supervisor_status.stage_timings().to_vec(),
                 ..IndexProfile::default()
             }),
+            retention: GenerationRetentionStatus::Deferred {
+                reason: "not_attempted",
+            },
         })
+    }
+
+    async fn maintain_generation_retention(
+        &self,
+        project_id: &ProjectId,
+    ) -> GenerationRetentionStatus {
+        let policy = match GenerationRetentionPolicy::new(
+            AUTOMATIC_RETENTION_KEEP_SUPERSEDED,
+            AUTOMATIC_RETENTION_MAXIMUM_DELETIONS,
+        ) {
+            Ok(policy) => policy,
+            Err(_) => {
+                return GenerationRetentionStatus::Deferred {
+                    reason: "invalid_policy",
+                };
+            }
+        };
+        let target = LeaseTarget::new(project_id.clone(), ProjectOperation::Migration, None);
+        let lease = match self
+            .database
+            .acquire_lease_bounded(
+                LeaseRequest::new(target, process_owner(), AUTOMATIC_RETENTION_LEASE_DURATION),
+                AUTOMATIC_RETENTION_ACQUIRE_TIMEOUT,
+            )
+            .await
+        {
+            Ok(lease) => lease,
+            Err(LeaseError::Busy) => {
+                return GenerationRetentionStatus::Deferred {
+                    reason: "project_busy",
+                };
+            }
+            Err(_) => {
+                return GenerationRetentionStatus::Deferred {
+                    reason: "lease_unavailable",
+                };
+            }
+        };
+        let report = self
+            .database
+            .cleanup_generations(GenerationRetentionRequest::new(
+                policy,
+                &lease.fence(),
+                AUTOMATIC_RETENTION_STATEMENT_TIMEOUT,
+            ))
+            .await;
+        let released = self
+            .database
+            .release_lease_bounded(&lease, AUTOMATIC_RETENTION_RELEASE_TIMEOUT)
+            .await;
+        match (report, released) {
+            (Ok(report), Ok(())) => GenerationRetentionStatus::Completed { report },
+            (Ok(report), Err(_)) => GenerationRetentionStatus::CompletedWithWarning {
+                report,
+                warning: "lease_release_unavailable",
+            },
+            (Err(_), _) => GenerationRetentionStatus::Deferred {
+                reason: "cleanup_unavailable",
+            },
+        }
     }
 
     /// Close all PostgreSQL connections owned by this project runtime.
@@ -1612,6 +1731,9 @@ pub enum ProjectError {
     /// A bounded extraction/COPY/publication stage failed.
     #[error("Cartograph index operation failed; the previous generation remains visible")]
     IndexFailed,
+    /// A failed pre-publication generation could not be terminalized safely.
+    #[error("Cartograph index cleanup failed; inspect generation retention before retrying")]
+    IndexCleanupFailed,
     /// Persistent SCIP bytes were missing, unsafe, changed while read, or exceeded bounds.
     #[error("Cartograph SCIP overlay is invalid or unsafe")]
     ScipOverlayInvalid,
@@ -1644,6 +1766,33 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_release_warning_preserves_the_committed_cleanup_report() {
+        let status = GenerationRetentionStatus::CompletedWithWarning {
+            report: GenerationRetentionReport {
+                staging_removed: 1,
+                superseded_removed: 2,
+                failed_removed: 3,
+                embeddings_removed: 4,
+                current_preserved: 1,
+                superseded_preserved: 2,
+                failed_remaining: 0,
+                staging_remaining: 0,
+                cascade_rows_removed: 20,
+                search_relations_removed: 2,
+                search_relation_bytes_removed: 1_024,
+            },
+            warning: "lease_release_unavailable",
+        };
+        let value = serde_json::to_value(status)
+            .unwrap_or_else(|error| panic!("retention status serialization failed: {error}"));
+
+        assert_eq!(value["state"], "completed_with_warning");
+        assert_eq!(value["warning"], "lease_release_unavailable");
+        assert_eq!(value["report"]["failed_removed"], 3);
+        assert_eq!(value["report"]["search_relation_bytes_removed"], 1_024);
+    }
 
     #[test]
     fn worker_selector_is_corpus_aware_bounded_and_monotonic() {

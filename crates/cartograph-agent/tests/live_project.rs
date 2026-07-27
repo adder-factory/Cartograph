@@ -9,22 +9,25 @@ use std::{
 
 use cartograph_agent::{
     DeadCodeJudgeOptions, DeadCodeVerdict, DiffReviewOptions, EmbeddingClientRequest,
-    EmbeddingOptions, FileDriftOptions, FileSourceOptions, FileSourceRequest, HistoryIndexOptions,
-    ImportAuditError, ImportAuditOptions, ImportAuditSource, ImportAuditTarget, IndexOptions,
-    LcovLoadOptions, ProjectCancellation, ProjectRuntime, RenamePlanError, RenamePlanOptions,
-    RetrievalClientRequest, RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest,
-    ScipImportRequest, SourceContextOptions, SourceContextRequest, SourceSearchOptions,
-    TestEvidenceOptions, WorkingTreeOverlayRequest, judge_dead_code_candidates,
+    EmbeddingOptions, FileDriftOptions, FileSourceOptions, FileSourceRequest,
+    GenerationRetentionStatus, HistoryIndexOptions, ImportAuditError, ImportAuditOptions,
+    ImportAuditSource, ImportAuditTarget, IndexOptions, LcovLoadOptions, ProjectCancellation,
+    ProjectError, ProjectRuntime, RenamePlanError, RenamePlanOptions, RetrievalClientRequest,
+    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportRequest,
+    SourceContextOptions, SourceContextRequest, SourceSearchOptions, TestEvidenceOptions,
+    WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     DeadCodeQuery, ExactTextLookup, FileDependencyDirection, FileDependencyQuery, FileSurfaceQuery,
-    GroupedPathInput, GroupedSymbolQuery, IssueAttributionKind, NativeParseCacheKey, SearchQuery,
-    SemanticStorageError, StructuralFindingGroupQuery, StructuralFindingQuery,
-    StructuralFindingSeverity, StructuralHotspotCategory, StructuralHotspotQuery,
-    StructuralHotspotSort, SymbolCoverageQuery,
+    GroupedPathInput, GroupedSymbolQuery, IssueAttributionKind, LeaseOwner, LeaseRequest,
+    LeaseTarget, NativeParseCacheKey, SearchQuery, SemanticStorageError,
+    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
+    StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort, SymbolCoverageQuery,
 };
-use cartograph_domain::{ContentDigest, EdgeKind, NormalizedPath, SourceLanguage};
+use cartograph_domain::{
+    ContentDigest, EdgeKind, NormalizedPath, ProjectOperation, SourceLanguage,
+};
 use cartograph_extract::native_extractor_contract_digest;
 use cartograph_llm::{ChatSettings, EmbeddingSettings, OpenAiChatClient, OpenAiEmbeddingClient};
 use cartograph_scip::{decode_scip_index, encode_scip_index};
@@ -33,9 +36,124 @@ use cartograph_search::{
     RetrievalConfidence, RetrievalError, RetrievalExecution, ReviewAbstention, SearchMode,
     SemanticReadiness, SimilarRequest, TraversalBudget, WorkingTreeOverlayStatus,
 };
-use sqlx_core::{query::query, sql_str::AssertSqlSafe};
+use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention() {
+    let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
+        panic!("live project test database is not configured");
+    };
+    let schema = unique_schema();
+    let settings = DatabaseSettings::parse(&url, Some("12"), Some("10000"))
+        .and_then(|value| value.with_schema(&schema))
+        .unwrap_or_else(|error| panic!("multi-runtime settings failed: {error}"));
+    let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    std::fs::write(
+        project.path().join("service.ts"),
+        "export function boundedWatcher(): number { return 73; }\n",
+    )
+    .unwrap_or_else(|error| panic!("multi-runtime source fixture failed: {error}"));
+
+    let result = async {
+        let coordinator = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("coordinator runtime connect failed: {error}"));
+        let project_id = coordinator
+            .register_agent_state_project()
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime project registration failed: {error}"));
+        let blocker = coordinator
+            .database()
+            .acquire_lease(LeaseRequest::new(
+                LeaseTarget::new(project_id.clone(), ProjectOperation::Migration, None),
+                LeaseOwner::new(process::id(), "multi-runtime-index-blocker"),
+                Duration::from_secs(60),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime blocker lease failed: {error}"));
+
+        let options = IndexOptions::default()
+            .with_force(true)
+            .with_history_refresh(false);
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let runtime = ProjectRuntime::connect(project.path(), &settings)
+                .await
+                .unwrap_or_else(|error| panic!("contending runtime connect failed: {error}"));
+            tasks.push(tokio::spawn(async move {
+                let indexed = runtime.index(options).await;
+                (runtime, indexed)
+            }));
+        }
+        let mut contenders = Vec::new();
+        for task in tasks {
+            let (runtime, indexed) = task
+                .await
+                .unwrap_or_else(|error| panic!("contending runtime task failed: {error}"));
+            assert_eq!(indexed, Err(ProjectError::IndexFailed));
+            contenders.push(runtime);
+        }
+        let counts_sql = format!(
+            r#"SELECT
+                    count(*) FILTER (WHERE state = 'staging')::bigint AS staging,
+                    count(*) FILTER (WHERE state = 'failed')::bigint AS failed
+                FROM "{schema}"."index_generations"
+                WHERE project_id = CAST($1 AS uuid)"#
+        );
+        let pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime count connection failed: {error}"));
+        let counts = query(AssertSqlSafe(counts_sql.clone()))
+            .bind(project_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime generation count failed: {error}"));
+        assert_eq!(counts.try_get::<i64, _>("staging").ok(), Some(0));
+        assert_eq!(counts.try_get::<i64, _>("failed").ok(), Some(4));
+
+        coordinator
+            .database()
+            .release_lease(&blocker)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime blocker lease did not release: {error}"));
+        let published = coordinator
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime recovery index failed: {error}"));
+        assert!(published.published);
+        assert!(matches!(
+            published.retention,
+            GenerationRetentionStatus::Completed { report }
+                if report.failed_removed == 4 && report.staging_remaining == 0
+        ));
+        let status = coordinator
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime status failed: {error}"));
+        let storage = status
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.generation_storage)
+            .unwrap_or_else(|| panic!("multi-runtime storage summary was missing"));
+        assert_eq!(storage.staging, 0);
+        assert_eq!(storage.failed, 0);
+        assert_eq!(storage.current, 1);
+        assert!(storage.estimated_retained_bytes > 0);
+
+        for runtime in contenders {
+            runtime.close().await;
+        }
+        coordinator.close().await;
+        pool.close().await;
+    }
+    .await;
+
+    drop_schema(&settings, &schema).await;
+    result
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]

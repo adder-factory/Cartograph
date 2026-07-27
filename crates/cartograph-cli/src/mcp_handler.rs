@@ -1355,6 +1355,7 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
             AdminJobFailure::InvalidOptions
         }
         ProjectError::IndexFailed
+        | ProjectError::IndexCleanupFailed
         | ProjectError::RetrievalOperationFailed
         | ProjectError::RequestCancelled => AdminJobFailure::OperationFailed,
     }
@@ -9916,6 +9917,7 @@ impl CartographMcpHandler {
         )?;
         let policy = GenerationRetentionPolicy::new(keep, maximum).map_err(internal_error)?;
         let cancellation = ProjectCancellation::new();
+        let operation_cancellation = cancellation.clone();
         let runtime = self.runtime.clone();
         let job = self
             .admin_jobs
@@ -9934,15 +9936,17 @@ impl CartographMcpHandler {
                         .await
                         .map_err(|_| ProjectError::IndexFailed)?;
                     let fence = lease.fence();
-                    let cleanup = runtime
-                        .database()
-                        .cleanup_generations(GenerationRetentionRequest::new(
-                            policy,
-                            &fence,
-                            ADMIN_MAINTENANCE_TIMEOUT,
-                        ))
-                        .await
-                        .map_err(|_| ProjectError::IndexFailed);
+                    let cleanup = run_cancellable_admin_maintenance(
+                        &operation_cancellation,
+                        runtime
+                            .database()
+                            .cleanup_generations(GenerationRetentionRequest::new(
+                                policy,
+                                &fence,
+                                ADMIN_MAINTENANCE_TIMEOUT,
+                            )),
+                    )
+                    .await;
                     let release = runtime.database().release_lease(&lease).await;
                     let report = cleanup?;
                     release.map_err(|_| ProjectError::IndexFailed)?;
@@ -10386,6 +10390,17 @@ impl CartographMcpHandler {
             })
             .await?;
         json_result(&job)
+    }
+}
+
+async fn run_cancellable_admin_maintenance<Output, Error>(
+    cancellation: &ProjectCancellation,
+    operation: impl Future<Output = Result<Output, Error>>,
+) -> Result<Output, ProjectError> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(ProjectError::RequestCancelled),
+        result = operation => result.map_err(|_| ProjectError::IndexFailed),
     }
 }
 
@@ -17723,7 +17738,8 @@ fn project_error(error: ProjectError) -> ToolError {
         | ProjectError::BeginGenerationFailed
         | ProjectError::SourceScanFailed
         | ProjectError::StatusFailed
-        | ProjectError::IndexFailed => ToolError::internal(),
+        | ProjectError::IndexFailed
+        | ProjectError::IndexCleanupFailed => ToolError::internal(),
     }
 }
 
@@ -20790,6 +20806,35 @@ pub fn target(value: u32) -> u32 {
         let terminal =
             wait_for_admin_status(&jobs, started.job_id, AdminJobStatus::Cancelled).await;
         assert_eq!(terminal.status, AdminJobStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancellable_admin_maintenance_drops_blocked_database_work() {
+        let cancellation = ProjectCancellation::new();
+        let operation_cancellation = cancellation.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let drop_flag = DropFlag(dropped.clone());
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            run_cancellable_admin_maintenance(&operation_cancellation, async move {
+                let _drop_flag = drop_flag;
+                let _ = started_sender.send(());
+                std::future::pending::<Result<(), ()>>().await
+            })
+            .await
+        });
+
+        started_receiver
+            .await
+            .unwrap_or_else(|_| panic!("maintenance operation did not start"));
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap_or_else(|_| panic!("cancelled maintenance operation did not stop"))
+            .unwrap_or_else(|error| panic!("maintenance cancellation task failed: {error}"));
+
+        assert!(matches!(result, Err(ProjectError::RequestCancelled)));
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

@@ -12,12 +12,13 @@ use cartograph_db::{
     CurrentGeneration, CurrentGraphLookup, CurrentSourceRangeLookup, CurrentSymbolSetLookup,
     DerivedStorePrunePolicy, DerivedStorePruneRequest, EdgeInput, ExactTextLookup,
     FailGenerationError, FailedGeneration, FileInput, GenerationContents, GenerationFacts,
-    GenerationRecoveryRequest, GenerationValidationError, GenerationValidationLimits,
-    GraphDirection, LeaseOwner, LeaseRequest, LeaseTarget, McpMacroStep, McpToolCallInput,
-    MigrationError, NewAgentArtifact, NewGeneration, NewMcpMacro, NewMcpSession, NewProject,
-    PrepareGenerationError, ProjectLease, PublishGenerationError, ReadOnlySqlRequest,
-    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
-    StorageError, SummaryCandidatePolicy, SymbolInput, validate_generation_facts,
+    GenerationRecoveryRequest, GenerationRetentionPolicy, GenerationRetentionRequest,
+    GenerationValidationError, GenerationValidationLimits, GraphDirection, LeaseOwner,
+    LeaseRequest, LeaseTarget, McpMacroStep, McpToolCallInput, MigrationError, NewAgentArtifact,
+    NewGeneration, NewMcpMacro, NewMcpSession, NewProject, PrepareGenerationError, ProjectLease,
+    PublishGenerationError, ReadOnlySqlRequest, ReadyGeneration, RecoverableGeneration,
+    ReferenceInput, SearchDocumentInput, SearchQuery, StorageError, SummaryCandidatePolicy,
+    SymbolInput, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
@@ -113,6 +114,136 @@ const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_CHECKSUM: &str =
     "5cbc965cc09530332f8c320c70aac3b083324a21f78fe6ed8edb23057d6af518";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn unleased_staging_cleanup_is_exact_lease_safe_and_retention_collects_stale_rows() {
+    let (database, pool, schema) = open_isolated_database().await;
+    database
+        .migrate()
+        .await
+        .unwrap_or_else(|error| panic!("staging cleanup fixture migration failed: {error}"));
+    let project = register_project(&database).await;
+
+    let abandoned = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let abandoned_id = abandoned.generation_id().clone();
+    assert!(
+        database
+            .fail_unleased_staging_generation_bounded(
+                GenerationRecoveryRequest::new(&project, &abandoned_id),
+                LOCK_ORDER_TIMEOUT,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("unleased staging cleanup failed: {error}"))
+    );
+    assert!(
+        !database
+            .fail_unleased_staging_generation_bounded(
+                GenerationRecoveryRequest::new(&project, &abandoned_id),
+                LOCK_ORDER_TIMEOUT,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("idempotent staging cleanup failed: {error}"))
+    );
+    assert_state(
+        &database,
+        StateExpectation::new(&project, &abandoned_id, GenerationState::Failed),
+    )
+    .await;
+
+    let leased = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_TWO,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let leased_id = leased.generation_id().clone();
+    let exact_lease = acquire_generation_lease(&database, &project, &leased_id).await;
+    assert!(
+        !database
+            .fail_unleased_staging_generation_bounded(
+                GenerationRecoveryRequest::new(&project, &leased_id),
+                LOCK_ORDER_TIMEOUT,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("lease-safe staging cleanup failed: {error}"))
+    );
+    assert_state(
+        &database,
+        StateExpectation::new(&project, &leased_id, GenerationState::Staging),
+    )
+    .await;
+    database
+        .release_lease(&exact_lease)
+        .await
+        .unwrap_or_else(|error| panic!("exact staging lease did not release: {error}"));
+
+    let recent = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_THREE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let recent_id = recent.generation_id().clone();
+    let age_sql = format!(
+        r#"UPDATE "{schema}"."index_generations"
+            SET started_at = clock_timestamp() - interval '2 minutes'
+            WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)"#
+    );
+    query(AssertSqlSafe(age_sql))
+        .bind(project.as_str())
+        .bind(leased_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("stale staging fixture could not be aged: {error}"));
+    let retention_lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "stale-staging-retention"),
+            TEST_LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("stale staging retention lease failed: {error}"));
+    let retention = database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            GenerationRetentionPolicy::new(2, 10)
+                .and_then(|policy| policy.with_stale_staging_age(Duration::from_secs(60)))
+                .unwrap_or_else(|error| panic!("stale staging policy failed: {error}")),
+            &retention_lease.fence(),
+            LOCK_ORDER_TIMEOUT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("stale staging retention failed: {error}"));
+    assert_eq!(retention.staging_removed, 1);
+    assert_eq!(retention.staging_remaining, 1);
+    assert_state(
+        &database,
+        StateExpectation::new(&project, &recent_id, GenerationState::Staging),
+    )
+    .await;
+    database
+        .release_lease(&retention_lease)
+        .await
+        .unwrap_or_else(|error| panic!("stale staging retention lease did not release: {error}"));
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
@@ -1496,6 +1627,173 @@ async fn concurrent_prepare_and_cleanup_share_one_pre_copy_lock_order() {
     drop(database);
     drop_schema(&pool, &schema).await;
     pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn stale_publish_and_post_index_retention_share_one_lock_order() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let generation_id = staged.generation_id().clone();
+    let target = LeaseTarget::new(
+        project.clone(),
+        ProjectOperation::Index,
+        Some(generation_id.clone()),
+    );
+    let stale_lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    let stale_fence = stale_lease.fence();
+    let ready = database
+        .prepare_generation(
+            GenerationContents::new(staged, canonical(GenerationFacts::default())),
+            &stale_fence,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("stale publication fixture did not become ready: {error}"));
+    expire_generation_lease(&pool, &schema, &target).await;
+    let retention_lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "post-index-lock-order"),
+            TEST_LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("post-index retention lease failed: {error}"));
+
+    let project_key = format!("cartograph-v2-operation:{schema}:{project}");
+    let publication_key = format!("cartograph-v2-publish:{schema}:{project}");
+    let mut project_blocker = pool
+        .acquire()
+        .await
+        .unwrap_or_else(|error| panic!("project lock-order blocker connection failed: {error}"));
+    query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&project_key)
+        .execute(&mut *project_blocker)
+        .await
+        .unwrap_or_else(|error| panic!("project lock-order blocker failed: {error}"));
+    assert_eq!(
+        advisory_waiter_count(&pool, &project_key).await,
+        0,
+        "project lock-order fixture started with an unexpected waiter"
+    );
+    let publish_database = database.clone();
+    let publish = tokio::spawn(async move {
+        publish_database
+            .publish_generation(ready, &stale_fence)
+            .await
+    });
+    wait_for_advisory_waiters(&pool, &project_key, 1, "stale publication").await;
+
+    let publication_available = query("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+        .bind(&publication_key)
+        .fetch_one(&mut *project_blocker)
+        .await
+        .and_then(|row| row.try_get::<bool, _>(0))
+        .unwrap_or_else(|error| panic!("publication lock-order probe failed: {error}"));
+    assert!(
+        publication_available,
+        "publication acquired its advisory lock before the project operation lock"
+    );
+
+    let retention_database = database.clone();
+    let retention_fence = retention_lease.fence();
+    let retention = tokio::spawn(async move {
+        retention_database
+            .cleanup_generations(GenerationRetentionRequest::new(
+                GenerationRetentionPolicy::new(2, 10)
+                    .unwrap_or_else(|error| panic!("post-index retention policy failed: {error}")),
+                &retention_fence,
+                LOCK_ORDER_TIMEOUT,
+            ))
+            .await
+    });
+    wait_for_advisory_waiters(&pool, &project_key, 2, "post-index retention").await;
+    query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&project_key)
+        .execute(&mut *project_blocker)
+        .await
+        .unwrap_or_else(|error| panic!("project lock-order blocker did not release: {error}"));
+    query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&publication_key)
+        .execute(&mut *project_blocker)
+        .await
+        .unwrap_or_else(|error| panic!("publication lock-order probe did not release: {error}"));
+
+    let joined = tokio::time::timeout(LOCK_ORDER_TIMEOUT, async {
+        tokio::join!(publish, retention)
+    })
+    .await
+    .unwrap_or_else(|_| panic!("stale publication and retention deadlocked"));
+    let publish = match joined.0 {
+        Ok(publish) => publish,
+        Err(error) => panic!("stale publication task failed: {error}"),
+    };
+    assert!(matches!(
+        publish,
+        Err(error) if *error.error() == StorageError::LeaseFenceLost
+    ));
+    joined
+        .1
+        .unwrap_or_else(|error| panic!("post-index retention task failed: {error}"))
+        .unwrap_or_else(|error| panic!("post-index retention failed: {error}"));
+    database
+        .release_lease(&retention_lease)
+        .await
+        .unwrap_or_else(|error| panic!("post-index retention lease did not release: {error}"));
+
+    drop(project_blocker);
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+async fn advisory_waiter_count(pool: &sqlx_postgres::PgPool, lock_key: &str) -> i64 {
+    query(
+        r#"WITH lock_identity AS (
+                SELECT pg_catalog.hashtextextended($1, 0) AS value
+            )
+            SELECT count(*)::bigint
+            FROM pg_catalog.pg_locks, lock_identity
+            WHERE locktype = 'advisory'
+              AND database = (
+                  SELECT oid FROM pg_catalog.pg_database
+                  WHERE datname = current_database()
+              )
+              AND classid::bigint = ((lock_identity.value >> 32) & 4294967295)
+              AND objid::bigint = (lock_identity.value & 4294967295)
+              AND objsubid = 1
+              AND NOT granted"#,
+    )
+    .bind(lock_key)
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<i64, _>(0))
+    .unwrap_or_else(|error| panic!("could not count advisory waiters: {error}"))
+}
+
+async fn wait_for_advisory_waiters(
+    pool: &sqlx_postgres::PgPool,
+    lock_key: &str,
+    expected: i64,
+    operation: &str,
+) {
+    for _ in 0..LOCK_OBSERVATION_ATTEMPTS {
+        if advisory_waiter_count(pool, lock_key).await >= expected {
+            return;
+        }
+        tokio::time::sleep(LOCK_OBSERVATION_INTERVAL).await;
+    }
+    let observed = advisory_waiter_count(pool, lock_key).await;
+    panic!("expected {expected} {operation} advisory waiters, observed {observed}");
 }
 
 async fn install_copy_barrier(pool: &sqlx_postgres::PgPool, schema: &str, barrier_key: &str) {

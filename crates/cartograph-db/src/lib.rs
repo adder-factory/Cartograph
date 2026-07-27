@@ -117,8 +117,8 @@ pub use parse_cache::{
     NativeParseCacheRecord, NativeParseCacheWrite,
 };
 pub use project::{
-    GenerationCounts, ProjectCurrentGeneration, ProjectPurgeError, ProjectPurgeReport,
-    ProjectSnapshot,
+    GenerationCounts, GenerationStorageSummary, ProjectCurrentGeneration, ProjectPurgeError,
+    ProjectPurgeReport, ProjectSnapshot,
 };
 pub use qualified::{
     QualifiedCentralityComparator, QualifiedSymbolHit, QualifiedSymbolPage, QualifiedSymbolQuery,

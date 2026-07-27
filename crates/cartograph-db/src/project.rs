@@ -91,6 +91,35 @@ pub struct GenerationCounts {
     pub documents: i64,
 }
 
+/// Project-wide generation retention counts and a conservative physical-size estimate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GenerationStorageSummary {
+    /// Generations staged but not yet prepared.
+    pub staging: u64,
+    /// Prepared generations awaiting publication or recovery.
+    pub ready: u64,
+    /// Visible generations; valid project state is zero or one.
+    pub current: u64,
+    /// Historical generations replaced by a newer publication.
+    pub superseded: u64,
+    /// Terminal failed generations awaiting bounded cleanup.
+    pub failed: u64,
+    /// Sum of source byte sizes represented by all retained generations.
+    pub source_bytes: u64,
+    /// Exact physical bytes occupied by generation-scoped search tables and indexes.
+    pub search_relation_bytes: u64,
+    /// Conservative lower-bound estimate: source bytes plus search-relation bytes.
+    pub estimated_retained_bytes: u64,
+}
+
+impl GenerationStorageSummary {
+    /// Total durable generation rows retained for the project.
+    #[must_use]
+    pub const fn generations(self) -> u64 {
+        self.staging + self.ready + self.current + self.superseded + self.failed
+    }
+}
+
 /// Durable metadata for one project's visible generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProjectCurrentGeneration {
@@ -115,6 +144,8 @@ pub struct ProjectSnapshot {
     pub project_id: ProjectId,
     /// The currently visible generation, absent before first publication.
     pub current: Option<ProjectCurrentGeneration>,
+    /// Project-wide generation retention and storage pressure evidence.
+    pub generation_storage: GenerationStorageSummary,
 }
 
 impl CartographDatabase {
@@ -159,7 +190,69 @@ impl CartographDatabase {
             .fetch_optional(&self.pool)
             .await
             .map_err(|_| database_error("project-status"))?;
-        row.as_ref().map(decode_snapshot).transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut snapshot = decode_snapshot(&row)?;
+        snapshot.generation_storage = self
+            .generation_storage_summary(&snapshot.project_id)
+            .await?;
+        Ok(Some(snapshot))
+    }
+
+    /// Count all retained generation states and estimate their dominant physical bytes.
+    pub async fn generation_storage_summary(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<GenerationStorageSummary, StorageError> {
+        let schema = crate::database::quoted_schema(&self.schema);
+        let statement = format!(
+            r#"SELECT
+                    count(*) FILTER (WHERE state = 'staging')::bigint AS staging,
+                    count(*) FILTER (WHERE state = 'ready')::bigint AS ready,
+                    count(*) FILTER (WHERE state = 'current')::bigint AS current,
+                    count(*) FILTER (WHERE state = 'superseded')::bigint AS superseded,
+                    count(*) FILTER (WHERE state = 'failed')::bigint AS failed,
+                    COALESCE((
+                        SELECT sum(files.byte_size)::bigint
+                        FROM {schema}."files" AS files
+                        WHERE files.project_id = CAST($1 AS uuid)
+                    ), 0)::bigint AS source_bytes,
+                    COALESCE((
+                        SELECT sum(pg_total_relation_size(tables.oid))::bigint
+                        FROM {schema}."generation_search_relations" AS relations
+                        INNER JOIN pg_catalog.pg_namespace AS namespaces
+                          ON namespaces.nspname = $2
+                        INNER JOIN pg_catalog.pg_class AS tables
+                          ON tables.relnamespace = namespaces.oid
+                         AND tables.relname = 'search_g_'
+                             || replace(relations.generation_id::text, '-', '')
+                        WHERE relations.project_id = CAST($1 AS uuid)
+                    ), 0)::bigint AS search_relation_bytes
+                FROM {schema}."index_generations"
+                WHERE project_id = CAST($1 AS uuid)"#
+        );
+        let row = query(AssertSqlSafe(statement))
+            .bind(project_id.as_str())
+            .bind(self.schema.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| database_error("generation-storage-summary"))?;
+        let source_bytes = read_named_nonnegative(&row, "source_bytes")?;
+        let search_relation_bytes = read_named_nonnegative(&row, "search_relation_bytes")?;
+        let estimated_retained_bytes = source_bytes
+            .checked_add(search_relation_bytes)
+            .ok_or_else(|| corrupt("estimated_retained_bytes"))?;
+        Ok(GenerationStorageSummary {
+            staging: read_named_nonnegative(&row, "staging")?,
+            ready: read_named_nonnegative(&row, "ready")?,
+            current: read_named_nonnegative(&row, "current")?,
+            superseded: read_named_nonnegative(&row, "superseded")?,
+            failed: read_named_nonnegative(&row, "failed")?,
+            source_bytes,
+            search_relation_bytes,
+            estimated_retained_bytes,
+        })
     }
 
     /// Remove one project and every generation-scoped physical BM25 relation.
@@ -444,7 +537,18 @@ fn decode_snapshot(row: &sqlx_postgres::PgRow) -> Result<ProjectSnapshot, Storag
     Ok(ProjectSnapshot {
         project_id,
         current,
+        generation_storage: GenerationStorageSummary::default(),
     })
+}
+
+fn read_named_nonnegative(
+    row: &sqlx_postgres::PgRow,
+    field: &'static str,
+) -> Result<u64, StorageError> {
+    row.try_get::<i64, _>(field)
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| corrupt(field))
 }
 
 fn read_nonnegative(
