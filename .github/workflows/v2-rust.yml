@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
   push:
     # Tag pushes are owned by release.yml, which verifies this workflow's exact-SHA
-    # main attestation instead of rerunning the complete live suite.
+    # main attestation instead of rerunning the complete live suite. Feature
+    # branches are covered by pull_request below, avoiding duplicate PR gates.
     branches:
-      - '**'
+      - main
     paths:
       - Cargo.toml
       - Cargo.lock

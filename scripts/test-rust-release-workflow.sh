@@ -17,6 +17,15 @@ grep -Fq 'actions/attest-build-provenance@' "$VALIDATION" || fail 'main-gate pro
 # GitHub evaluates this expression; the local contract test needs the literal bytes.
 # shellcheck disable=SC2016
 grep -Fq 'v2-main-gate-${{ github.sha }}' "$VALIDATION" || fail 'main-gate artifact is not SHA-bound'
+grep -Eq '^  pull_request:$' "$VALIDATION" || fail 'pull-request validation trigger is missing'
+push_branches="$(awk '
+  /^  push:$/ { in_push = 1; next }
+  in_push && /^    branches:$/ { in_branches = 1; next }
+  in_push && in_branches && /^    [[:alnum:]_-]+:$/ { exit }
+  in_push && /^  [[:alnum:]_-]+:$/ { exit }
+  in_push && in_branches { print }
+' "$VALIDATION" | sed '/^[[:space:]]*$/d')"
+[[ "$push_branches" == '      - main' ]] || fail 'push validation must be scoped only to main'
 grep -Fq 'strategy:' "$VALIDATION" || fail 'live PostgreSQL shards are missing'
 for shard in database runtime operations; do
   grep -Fq -- "- $shard" "$VALIDATION" || fail "live shard $shard is missing"
