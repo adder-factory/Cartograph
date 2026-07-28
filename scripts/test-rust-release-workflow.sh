@@ -43,6 +43,10 @@ grep -Fq 'gh attestation verify' "$RELEASE" || fail 'release does not verify mai
 grep -Fq -- '--source-ref refs/heads/main' "$RELEASE" || fail 'release does not bind evidence to main'
 grep -Fq 'needs: verify-main-gate' "$RELEASE" || fail 'release builds do not depend on exact main evidence'
 grep -Fq 'scripts/pull-pinned-image.sh' "$VALIDATION" || fail 'ParadeDB pulls do not use bounded retries'
+grep -Fq 'PostgreSQL init process complete; ready for start up.' "$VALIDATION" || \
+  fail 'ParadeDB readiness can accept the temporary bootstrap server'
+grep -Fq -- "--command 'SELECT 1;'" "$VALIDATION" || \
+  fail 'ParadeDB readiness does not prove a live SQL connection'
 grep -Fq "cache-workspace-crates: 'true'" "$VALIDATION" || fail 'live shards do not reuse the compiled workspace'
 
 unpinned_actions="$({

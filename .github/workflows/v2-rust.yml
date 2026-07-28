@@ -272,23 +272,31 @@ jobs:
           --health-retries 30
           "$CARTOGRAPH_PARADEDB_IMAGE"
 
-      - name: Wait for PostgreSQL health
+      - name: Wait for completed PostgreSQL bootstrap and health
         shell: bash
         run: |
           set -euo pipefail
           for _ in $(seq 1 45); do
-            status="$(docker inspect --format '{{.State.Health.Status}}' cartograph-v2-ci-postgres)"
-            if [[ "$status" == healthy ]]; then
-              exit 0
-            fi
-            if [[ "$status" == unhealthy ]]; then
+            state="$(docker inspect --format '{{.State.Status}}' cartograph-v2-ci-postgres)"
+            if [[ "$state" != running ]]; then
               docker logs --tail 200 cartograph-v2-ci-postgres >&2
+              echo "ParadeDB container stopped during bootstrap: $state" >&2
               exit 1
+            fi
+            status="$(docker inspect --format '{{.State.Health.Status}}' cartograph-v2-ci-postgres)"
+            if docker logs cartograph-v2-ci-postgres 2>&1 \
+                | grep -Fq 'PostgreSQL init process complete; ready for start up.' \
+              && [[ "$status" == healthy ]] \
+              && docker exec cartograph-v2-ci-postgres \
+                psql --username cartograph --dbname cartograph \
+                  --set ON_ERROR_STOP=1 --tuples-only \
+                  --command 'SELECT 1;' >/dev/null 2>&1; then
+              exit 0
             fi
             sleep 2
           done
           docker logs --tail 200 cartograph-v2-ci-postgres >&2
-          echo 'Timed out waiting for ParadeDB health.' >&2
+          echo 'Timed out waiting for completed ParadeDB bootstrap and health.' >&2
           exit 1
 
       - name: Initialize required extensions
