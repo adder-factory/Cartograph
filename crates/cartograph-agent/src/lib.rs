@@ -385,6 +385,11 @@ pub struct IndexReport {
 pub enum GenerationRetentionStatus {
     /// A bounded cleanup transaction committed under an exact migration lease.
     Completed { report: GenerationRetentionReport },
+    /// Cleanup committed, but releasing its bounded lease could not be confirmed.
+    CompletedWithWarning {
+        report: GenerationRetentionReport,
+        warning: &'static str,
+    },
     /// Cleanup was safely deferred because another writer won or storage was unavailable.
     Deferred { reason: &'static str },
 }
@@ -834,8 +839,9 @@ async fn maintain_generation_retention(
         .await;
     match (report, released) {
         (Ok(report), Ok(())) => GenerationRetentionStatus::Completed { report },
-        (Ok(_), Err(_)) => GenerationRetentionStatus::Deferred {
-            reason: "lease_release_unavailable",
+        (Ok(report), Err(_)) => GenerationRetentionStatus::CompletedWithWarning {
+            report,
+            warning: "lease_release_unavailable",
         },
         (Err(_), _) => GenerationRetentionStatus::Deferred {
             reason: "cleanup_unavailable",
@@ -1966,6 +1972,33 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_release_warning_preserves_the_committed_cleanup_report() {
+        let status = GenerationRetentionStatus::CompletedWithWarning {
+            report: GenerationRetentionReport {
+                staging_removed: 1,
+                superseded_removed: 2,
+                failed_removed: 3,
+                embeddings_removed: 4,
+                current_preserved: 1,
+                superseded_preserved: 2,
+                failed_remaining: 0,
+                staging_remaining: 0,
+                cascade_rows_removed: 20,
+                search_relations_removed: 2,
+                search_relation_bytes_removed: 1_024,
+            },
+            warning: "lease_release_unavailable",
+        };
+        let value = serde_json::to_value(status)
+            .unwrap_or_else(|error| panic!("retention status serialization failed: {error}"));
+
+        assert_eq!(value["state"], "completed_with_warning");
+        assert_eq!(value["warning"], "lease_release_unavailable");
+        assert_eq!(value["report"]["failed_removed"], 3);
+        assert_eq!(value["report"]["search_relation_bytes_removed"], 1_024);
+    }
 
     #[test]
     fn worker_selector_is_corpus_aware_bounded_and_monotonic() {

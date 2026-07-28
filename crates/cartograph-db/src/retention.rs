@@ -413,9 +413,19 @@ async fn bound_candidate_work(
     context: &RetentionContext<'_>,
     candidates: Vec<RetentionCandidate>,
 ) -> Result<BoundedCandidateWork, GenerationRetentionError> {
-    let mut bounded = BoundedCandidateWork::default();
+    let mut candidate_work = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let work = load_candidate_work(connection, context, candidate).await?;
+        candidate_work.push(load_candidate_work(connection, context, candidate).await?);
+    }
+    select_bounded_candidate_work(context.policy, candidate_work)
+}
+
+fn select_bounded_candidate_work(
+    policy: GenerationRetentionPolicy,
+    candidates: impl IntoIterator<Item = CandidateWork>,
+) -> Result<BoundedCandidateWork, GenerationRetentionError> {
+    let mut bounded = BoundedCandidateWork::default();
+    for work in candidates {
         let cascade_rows = bounded
             .cascade_rows
             .checked_add(work.cascade_rows)
@@ -424,10 +434,10 @@ async fn bound_candidate_work(
             .search_relation_bytes
             .checked_add(work.search_relation_bytes)
             .ok_or_else(|| database_error("candidate-byte-budget"))?;
-        if cascade_rows > context.policy.maximum_cascade_rows
-            || search_relation_bytes > context.policy.maximum_search_relation_bytes
+        if cascade_rows > policy.maximum_cascade_rows
+            || search_relation_bytes > policy.maximum_search_relation_bytes
         {
-            break;
+            continue;
         }
         bounded.cascade_rows = cascade_rows;
         bounded.search_relation_bytes = search_relation_bytes;
@@ -707,9 +717,12 @@ const fn database_error(operation: &'static str) -> GenerationRetentionError {
 mod tests {
     use std::time::Duration;
 
+    use cartograph_domain::GenerationId;
+
     use super::{
-        DEFAULT_STALE_STAGING_AGE, GenerationRetentionError, GenerationRetentionPolicy,
-        INVALID_DELETE_BATCH, MAXIMUM_DELETE_BATCH, MAXIMUM_STALE_STAGING_AGE,
+        CandidateWork, DEFAULT_STALE_STAGING_AGE, GenerationRetentionError,
+        GenerationRetentionPolicy, INVALID_DELETE_BATCH, MAXIMUM_DELETE_BATCH,
+        MAXIMUM_STALE_STAGING_AGE, RetentionCandidate, select_bounded_candidate_work,
     };
 
     const TEST_RETAINED_SUPERSEDED: u32 = 2;
@@ -751,5 +764,42 @@ mod tests {
             policy.with_stale_staging_age(Duration::from_secs(60)),
             Ok(updated) if updated.stale_staging_age() == Duration::from_secs(60)
         ));
+    }
+
+    #[test]
+    fn oversized_oldest_candidate_does_not_starve_smaller_later_work() {
+        let policy = GenerationRetentionPolicy::new(0, 3)
+            .and_then(|policy| policy.with_work_limits(10, 100, 3))
+            .unwrap_or_else(|error| panic!("retention test policy failed: {error}"));
+        let oversized = candidate_work("00000000-0000-0000-0000-000000000001", 11, 1);
+        let smaller = candidate_work("00000000-0000-0000-0000-000000000002", 4, 20);
+
+        let selected = select_bounded_candidate_work(policy, [oversized, smaller])
+            .unwrap_or_else(|error| panic!("candidate selection failed: {error}"));
+
+        assert_eq!(selected.candidates.len(), 1);
+        assert_eq!(
+            selected.candidates[0].candidate.generation_id.as_str(),
+            "00000000-0000-0000-0000-000000000002"
+        );
+        assert_eq!(selected.cascade_rows, 4);
+        assert_eq!(selected.search_relation_bytes, 20);
+        assert_eq!(selected.search_relations, 1);
+    }
+
+    fn candidate_work(
+        generation_id: &str,
+        cascade_rows: u64,
+        relation_bytes: u64,
+    ) -> CandidateWork {
+        CandidateWork {
+            candidate: RetentionCandidate {
+                generation_id: GenerationId::parse(generation_id)
+                    .unwrap_or_else(|error| panic!("test generation id failed: {error}")),
+            },
+            cascade_rows,
+            search_relation_bytes: relation_bytes,
+            search_relation_present: true,
+        }
     }
 }

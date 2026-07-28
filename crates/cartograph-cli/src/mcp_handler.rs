@@ -11170,6 +11170,7 @@ impl AdminLifecycleTools<'_> {
         )?;
         let policy = GenerationRetentionPolicy::new(keep, maximum).map_err(internal_error)?;
         let cancellation = ProjectCancellation::new();
+        let operation_cancellation = cancellation.clone();
         let runtime = self.runtime.clone();
         let job = self
             .admin_jobs
@@ -11188,15 +11189,17 @@ impl AdminLifecycleTools<'_> {
                         .await
                         .map_err(|_| ProjectError::IndexFailed)?;
                     let fence = lease.fence();
-                    let cleanup = runtime
-                        .database()
-                        .cleanup_generations(GenerationRetentionRequest::new(
-                            policy,
-                            &fence,
-                            ADMIN_MAINTENANCE_TIMEOUT,
-                        ))
-                        .await
-                        .map_err(|_| ProjectError::IndexFailed);
+                    let cleanup = run_cancellable_admin_maintenance(
+                        &operation_cancellation,
+                        runtime
+                            .database()
+                            .cleanup_generations(GenerationRetentionRequest::new(
+                                policy,
+                                &fence,
+                                ADMIN_MAINTENANCE_TIMEOUT,
+                            )),
+                    )
+                    .await;
                     let release = runtime.database().release_lease(&lease).await;
                     let report = cleanup?;
                     release.map_err(|_| ProjectError::IndexFailed)?;
@@ -11646,6 +11649,17 @@ impl AdminAnalysisTools<'_> {
             })
             .await?;
         json_result(&job)
+    }
+}
+
+async fn run_cancellable_admin_maintenance<Output, Error>(
+    cancellation: &ProjectCancellation,
+    operation: impl Future<Output = Result<Output, Error>>,
+) -> Result<Output, ProjectError> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(ProjectError::RequestCancelled),
+        result = operation => result.map_err(|_| ProjectError::IndexFailed),
     }
 }
 
@@ -23620,29 +23634,36 @@ mod tests {
 
     #[test]
     fn changed_since_parses_unix_and_iso_thresholds_without_timezone_ambiguity() {
-        assert_eq!(parse_iso8601_milliseconds("1970-01-01"), Some(0));
-        assert_eq!(parse_iso8601_milliseconds("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(
-            parse_iso8601_milliseconds("1970-01-01T01:00:00.123+01:00"),
-            Some(TEST_FRACTION_MILLISECONDS)
-        );
-        assert_eq!(
-            parse_iso8601_milliseconds("2024-01-01T00:00:00Z"),
-            Some(TEST_2024_NEW_YEAR_MILLISECONDS)
-        );
-        assert_eq!(parse_iso8601_milliseconds("2023-02-29T00:00:00Z"), None);
-        assert_eq!(parse_iso8601_milliseconds("not-a-date"), None);
-        assert!(parse_iso8601_milliseconds("2000-02-29T23:59:59.999999Z").is_some());
-        for invalid in [
-            "1900-02-29T00:00:00Z",
-            "1970-01-01T00:00:00.",
-            "1970-01-01T00:00:00+24:00",
-            "1970-01-01T00:00:00+01:60",
-            "1970-01-01T00:00:00Zsuffix",
-            "1970-01-01T00:00:00é",
+        for (value, expected) in [
+            ("1970-01-01", Some(0)),
+            ("1970-01-01T00:00:00", Some(0)),
+            ("1970-01-01T00:00:00Z", Some(0)),
+            ("1970-01-01T00:00:00.1Z", Some(100)),
+            ("1970-01-01T00:00:00.12Z", Some(120)),
+            ("1970-01-01T00:00:00.1239Z", Some(123)),
+            (
+                "1970-01-01T01:00:00.123+01:00",
+                Some(TEST_FRACTION_MILLISECONDS),
+            ),
+            ("1970-01-01T00:00:00-01:00", Some(3_600_000)),
+            (
+                "2024-01-01T00:00:00Z",
+                Some(TEST_2024_NEW_YEAR_MILLISECONDS),
+            ),
+            ("1969-12-31T23:59:59Z", None),
+            ("2023-02-29T00:00:00Z", None),
+            ("1900-02-29T00:00:00Z", None),
+            ("1970-01-01T24:00:00Z", None),
+            ("1970-01-01T00:00:00.", None),
+            ("1970-01-01T00:00:00+24:00", None),
+            ("1970-01-01T00:00:00+01:60", None),
+            ("1970-01-01T00:00:00Zextra", None),
+            ("1970-01-01T00:00:00é", None),
+            ("not-a-date", None),
         ] {
-            assert_eq!(parse_iso8601_milliseconds(invalid), None, "{invalid}");
+            assert_eq!(parse_iso8601_milliseconds(value), expected, "{value}");
         }
+        assert!(parse_iso8601_milliseconds("2000-02-29T23:59:59.999999Z").is_some());
         assert_eq!(
             parse_since_milliseconds(Some(&json!("1704067200000"))),
             Ok(Some(TEST_2024_NEW_YEAR_MILLISECONDS))
@@ -25714,6 +25735,35 @@ pub fn target(value: u32) -> u32 {
         let terminal =
             wait_for_admin_status(&jobs, started.job_id, AdminJobStatus::Cancelled).await;
         assert_eq!(terminal.status, AdminJobStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancellable_admin_maintenance_drops_blocked_database_work() {
+        let cancellation = ProjectCancellation::new();
+        let operation_cancellation = cancellation.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let drop_flag = DropFlag(dropped.clone());
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            run_cancellable_admin_maintenance(&operation_cancellation, async move {
+                let _drop_flag = drop_flag;
+                let _ = started_sender.send(());
+                std::future::pending::<Result<(), ()>>().await
+            })
+            .await
+        });
+
+        started_receiver
+            .await
+            .unwrap_or_else(|_| panic!("maintenance operation did not start"));
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap_or_else(|_| panic!("cancelled maintenance operation did not stop"))
+            .unwrap_or_else(|error| panic!("maintenance cancellation task failed: {error}"));
+
+        assert!(matches!(result, Err(ProjectError::RequestCancelled)));
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

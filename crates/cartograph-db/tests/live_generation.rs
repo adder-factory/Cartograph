@@ -1683,14 +1683,18 @@ async fn stale_publish_and_post_index_retention_share_one_lock_order() {
         .execute(&mut *project_blocker)
         .await
         .unwrap_or_else(|error| panic!("project lock-order blocker failed: {error}"));
-    let baseline_waiters = advisory_waiter_count(&pool).await;
+    assert_eq!(
+        advisory_waiter_count(&pool, &project_key).await,
+        0,
+        "project lock-order fixture started with an unexpected waiter"
+    );
     let publish_database = database.clone();
     let publish = tokio::spawn(async move {
         publish_database
             .publish_generation(ready, &stale_fence)
             .await
     });
-    wait_for_advisory_waiter(&pool, baseline_waiters, "stale publication").await;
+    wait_for_advisory_waiters(&pool, &project_key, 1, "stale publication").await;
 
     let publication_available = query("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
         .bind(&publication_key)
@@ -1715,7 +1719,7 @@ async fn stale_publish_and_post_index_retention_share_one_lock_order() {
             ))
             .await
     });
-    wait_for_advisory_waiter(&pool, baseline_waiters + 1, "post-index retention").await;
+    wait_for_advisory_waiters(&pool, &project_key, 2, "post-index retention").await;
     query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
         .bind(&project_key)
         .execute(&mut *project_blocker)
@@ -1755,26 +1759,44 @@ async fn stale_publish_and_post_index_retention_share_one_lock_order() {
     pool.close().await;
 }
 
-async fn advisory_waiter_count(pool: &sqlx_postgres::PgPool) -> i64 {
+async fn advisory_waiter_count(pool: &sqlx_postgres::PgPool, lock_key: &str) -> i64 {
     query(
-        r#"SELECT count(*)::bigint
-            FROM pg_catalog.pg_locks
-            WHERE locktype = 'advisory' AND NOT granted"#,
+        r#"WITH lock_identity AS (
+                SELECT pg_catalog.hashtextextended($1, 0) AS value
+            )
+            SELECT count(*)::bigint
+            FROM pg_catalog.pg_locks, lock_identity
+            WHERE locktype = 'advisory'
+              AND database = (
+                  SELECT oid FROM pg_catalog.pg_database
+                  WHERE datname = current_database()
+              )
+              AND classid::bigint = ((lock_identity.value >> 32) & 4294967295)
+              AND objid::bigint = (lock_identity.value & 4294967295)
+              AND objsubid = 1
+              AND NOT granted"#,
     )
+    .bind(lock_key)
     .fetch_one(pool)
     .await
     .and_then(|row| row.try_get::<i64, _>(0))
     .unwrap_or_else(|error| panic!("could not count advisory waiters: {error}"))
 }
 
-async fn wait_for_advisory_waiter(pool: &sqlx_postgres::PgPool, prior: i64, operation: &str) {
+async fn wait_for_advisory_waiters(
+    pool: &sqlx_postgres::PgPool,
+    lock_key: &str,
+    expected: i64,
+    operation: &str,
+) {
     for _ in 0..LOCK_OBSERVATION_ATTEMPTS {
-        if advisory_waiter_count(pool).await > prior {
+        if advisory_waiter_count(pool, lock_key).await >= expected {
             return;
         }
         tokio::time::sleep(LOCK_OBSERVATION_INTERVAL).await;
     }
-    panic!("expected {operation} advisory waiter was not observed");
+    let observed = advisory_waiter_count(pool, lock_key).await;
+    panic!("expected {expected} {operation} advisory waiters, observed {observed}");
 }
 
 async fn install_copy_barrier(pool: &sqlx_postgres::PgPool, schema: &str, barrier_key: &str) {
