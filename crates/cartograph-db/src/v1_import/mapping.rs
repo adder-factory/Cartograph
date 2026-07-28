@@ -14,7 +14,7 @@ pub(super) fn require_source_count(
     }
 }
 
-pub(super) struct FactMapping<'a> {
+struct FactMapping<'a> {
     source: &'a SourceSnapshot,
     file_ids: BTreeMap<String, FileId>,
     symbol_ids: BTreeMap<String, SymbolId>,
@@ -131,10 +131,7 @@ pub(super) fn map_source_facts(
 }
 
 impl<'a> FactMapping<'a> {
-    pub(super) fn new(
-        source: &'a SourceSnapshot,
-        deadline: Instant,
-    ) -> Result<Self, V1PostgresImportError> {
+    fn new(source: &'a SourceSnapshot, deadline: Instant) -> Result<Self, V1PostgresImportError> {
         let file_ids = source
             .files
             .keys()
@@ -350,7 +347,7 @@ fn map_file_document(
     })
 }
 
-pub(super) fn map_edge_fact(
+fn map_edge_fact(
     mapping: &FactMapping<'_>,
     edge: &SourceEdge,
 ) -> Result<EdgeInput, V1PostgresImportError> {
@@ -404,7 +401,7 @@ fn map_reference_facts(
     )
 }
 
-pub(super) fn map_edge_reference_facts(
+fn map_edge_reference_facts(
     mapping: &FactMapping<'_>,
     edge: &SourceEdge,
 ) -> Result<Vec<ReferenceInput>, V1PostgresImportError> {
@@ -681,7 +678,7 @@ fn imported_provenance(value: &str) -> String {
     format!("{LEGACY_PROVENANCE}:{value}")
 }
 
-pub(super) fn source_span(
+fn source_span(
     file: &SourceFile,
     node: &SourceNode,
 ) -> Result<(usize, usize), V1PostgresImportError> {
@@ -717,7 +714,7 @@ pub(super) fn source_span(
 }
 
 #[cfg(test)]
-pub(super) fn source_position(
+fn source_position(
     file: &SourceFile,
     line: u32,
     column: u32,
@@ -929,34 +926,8 @@ fn next_character_end(source: &str, start: usize) -> Result<usize, V1PostgresImp
         .ok_or_else(|| invalid_source("reference_span"))
 }
 
-pub(super) fn line_starts(source: &str) -> Result<Vec<u32>, V1PostgresImportError> {
-    let line_count = source
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        .checked_add(1)
-        .ok_or(V1PostgresImportError::SourceLimit)?;
-    let mut starts = Vec::new();
-    starts
-        .try_reserve_exact(line_count)
-        .map_err(|_| V1PostgresImportError::SourceLimit)?;
-    starts.push(0);
-    for (index, byte) in source.bytes().enumerate() {
-        if byte == b'\n' {
-            starts.push(
-                u32::try_from(index.saturating_add(1))
-                    .map_err(|_| V1PostgresImportError::SourceLimit)?,
-            );
-        }
-    }
-    Ok(starts)
-}
-
 fn parse_edge_kind(raw: &str) -> Result<EdgeKind, V1PostgresImportError> {
-    IMPORTED_EDGE_KINDS
-        .iter()
-        .find_map(|(name, kind)| (*name == raw).then_some(*kind))
-        .ok_or_else(|| invalid_source("edge_kind"))
+    EdgeKind::parse(raw).ok_or_else(|| invalid_source("edge_kind"))
 }
 
 fn confidence(raw: Option<&str>) -> Result<f32, V1PostgresImportError> {

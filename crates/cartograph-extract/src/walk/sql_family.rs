@@ -9,41 +9,76 @@ use tree_sitter::Node;
 use crate::{
     ExtractError, ExtractedReference,
     walk::{
-        ExtractionBuilder, PendingSymbol,
+        AstVisitBudget, ExtractionBuilder, PendingSymbol,
         syntax::{named_children, span_for},
     },
 };
 
 const MAX_SCAN_DEPTH: usize = 128;
-const MAX_SCAN_VISITS: usize = 500_000;
 const MAX_RELATIONS_PER_DECLARATION: usize = 4_096;
 
 #[derive(Default)]
 struct ScanBudget {
-    visits: usize,
+    visits: AstVisitBudget<MAX_SCAN_DEPTH>,
 }
 
-impl ScanBudget {
-    fn observe(
-        &mut self,
-        builder: &mut ExtractionBuilder<'_, '_>,
-        depth: usize,
-    ) -> Result<(), ExtractError> {
-        if depth > MAX_SCAN_DEPTH {
-            return Err(ExtractError::NestingLimit);
+struct RelationScanInput<'tree, 'scan> {
+    node: Node<'tree>,
+    owner: &'scan SymbolId,
+    depth: usize,
+    budget: &'scan mut ScanBudget,
+    seen: &'scan mut BTreeSet<String>,
+}
+
+#[derive(Clone, Copy)]
+enum RelationScanKind {
+    ForeignKeys,
+    Query,
+}
+
+struct RelationEmission<'tree, 'owner> {
+    root: Node<'tree>,
+    owner: &'owner SymbolId,
+    kind: RelationScanKind,
+}
+
+impl<'tree, 'owner> RelationEmission<'tree, 'owner> {
+    const fn foreign_keys(root: Node<'tree>, owner: &'owner SymbolId) -> Self {
+        Self {
+            root,
+            owner,
+            kind: RelationScanKind::ForeignKeys,
         }
-        self.visits = self
-            .visits
-            .checked_add(1)
-            .ok_or(ExtractError::OutputLimit)?;
-        if self.visits > MAX_SCAN_VISITS {
-            return Err(ExtractError::OutputLimit);
-        }
-        if self.visits.is_multiple_of(256) {
-            builder.context.ensure_active()?;
-        }
-        Ok(())
     }
+
+    const fn query(root: Node<'tree>, owner: &'owner SymbolId) -> Self {
+        Self {
+            root,
+            owner,
+            kind: RelationScanKind::Query,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LabeledSignatureInput<'text> {
+    label: &'text str,
+    name: &'text str,
+    suffix: Option<&'text str>,
+}
+
+struct RelationInput<'tree, 'reference> {
+    owner: &'reference SymbolId,
+    node: Node<'tree>,
+    name: String,
+    kind: ReferenceKind,
+}
+
+#[derive(Clone, Copy)]
+struct OwnerScopeInput<'scope> {
+    owner: &'scope SymbolId,
+    kind: SymbolKind,
+    name: &'scope str,
 }
 
 pub(super) fn visit_declaration(
@@ -68,13 +103,6 @@ pub(super) fn visit_declaration(
         }
         _ => Ok(false),
     }
-}
-
-pub(super) fn capture_usage(
-    _builder: &mut ExtractionBuilder<'_, '_>,
-    _node: Node<'_>,
-) -> Result<(), ExtractError> {
-    Ok(())
 }
 
 fn is_create_declaration(kind: &str) -> bool {
@@ -116,7 +144,14 @@ fn emit_table(
         return Ok(());
     };
     let label = if view { "CREATE VIEW" } else { "CREATE TABLE" };
-    let signature = labeled_signature(builder, label, &name, None)?;
+    let signature = labeled_signature(
+        builder,
+        LabeledSignatureInput {
+            label,
+            name: &name,
+            suffix: None,
+        },
+    )?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::Table,
         name: name.clone(),
@@ -134,17 +169,23 @@ fn emit_table(
     })?;
     if view {
         if let Some(query) = direct_child(node, "create_query") {
-            emit_query_relations(builder, query, &owner)?;
+            emit_relations(builder, RelationEmission::query(query, &owner))?;
         }
         return Ok(());
     }
     let Some(columns) = direct_child(node, "column_definitions") else {
         return Ok(());
     };
-    with_owner(builder, &owner, SymbolKind::Table, &name, |builder| {
-        emit_columns(builder, columns)
-    })?;
-    emit_foreign_keys(builder, columns, &owner)
+    with_owner(
+        builder,
+        OwnerScopeInput {
+            owner: &owner,
+            kind: SymbolKind::Table,
+            name: &name,
+        },
+        |builder| emit_columns(builder, columns),
+    )?;
+    emit_relations(builder, RelationEmission::foreign_keys(columns, &owner))
 }
 
 fn emit_columns(
@@ -196,82 +237,107 @@ fn emit_columns(
     Ok(())
 }
 
-fn emit_foreign_keys(
+fn emit_relations(
     builder: &mut ExtractionBuilder<'_, '_>,
-    root: Node<'_>,
-    owner: &SymbolId,
+    input: RelationEmission<'_, '_>,
 ) -> Result<(), ExtractError> {
     let mut budget = ScanBudget::default();
     let mut seen = BTreeSet::new();
-    scan_foreign_keys(builder, root, owner, 0, &mut budget, &mut seen)
+    let scan = RelationScanInput {
+        node: input.root,
+        owner: input.owner,
+        depth: 0,
+        budget: &mut budget,
+        seen: &mut seen,
+    };
+    match input.kind {
+        RelationScanKind::ForeignKeys => scan_foreign_keys(builder, scan),
+        RelationScanKind::Query => scan_query_relations(builder, scan),
+    }
 }
 
 fn scan_foreign_keys(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    depth: usize,
-    budget: &mut ScanBudget,
-    seen: &mut BTreeSet<String>,
+    input: RelationScanInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    budget.observe(builder, depth)?;
+    input.budget.visits.observe(builder, input.depth)?;
     let mut references_next = false;
-    for child in named_children(node) {
+    for child in named_children(input.node) {
         if child.kind() == "keyword_references" {
             references_next = true;
             continue;
         }
         if references_next && child.kind() == "object_reference" {
             if let Some(name) = qualified_name(builder, child)?
-                && seen.insert(name.clone())
+                && input.seen.insert(name.clone())
             {
-                if seen.len() > MAX_RELATIONS_PER_DECLARATION {
+                if input.seen.len() > MAX_RELATIONS_PER_DECLARATION {
                     return Err(ExtractError::OutputLimit);
                 }
-                emit_relation(builder, owner, child, name, ReferenceKind::References)?;
+                emit_relation(
+                    builder,
+                    RelationInput {
+                        owner: input.owner,
+                        node: child,
+                        name,
+                        kind: ReferenceKind::References,
+                    },
+                )?;
             }
             references_next = false;
             continue;
         }
-        scan_foreign_keys(builder, child, owner, depth.saturating_add(1), budget, seen)?;
+        scan_foreign_keys(
+            builder,
+            RelationScanInput {
+                node: child,
+                owner: input.owner,
+                depth: input.depth.saturating_add(1),
+                budget: &mut *input.budget,
+                seen: &mut *input.seen,
+            },
+        )?;
     }
     Ok(())
 }
 
-fn emit_query_relations(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    root: Node<'_>,
-    owner: &SymbolId,
-) -> Result<(), ExtractError> {
-    let mut budget = ScanBudget::default();
-    let mut seen = BTreeSet::new();
-    scan_query_relations(builder, root, owner, 0, &mut budget, &mut seen)
-}
-
 fn scan_query_relations(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    depth: usize,
-    budget: &mut ScanBudget,
-    seen: &mut BTreeSet<String>,
+    input: RelationScanInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    budget.observe(builder, depth)?;
-    if node.kind() == "relation"
-        && let Some(reference) = direct_child(node, "object_reference")
+    input.budget.visits.observe(builder, input.depth)?;
+    if input.node.kind() == "relation"
+        && let Some(reference) = direct_child(input.node, "object_reference")
         && let Some(name) = qualified_name(builder, reference)?
     {
         let identity = name.to_ascii_lowercase();
-        if seen.insert(identity) {
-            if seen.len() > MAX_RELATIONS_PER_DECLARATION {
+        if input.seen.insert(identity) {
+            if input.seen.len() > MAX_RELATIONS_PER_DECLARATION {
                 return Err(ExtractError::OutputLimit);
             }
-            emit_relation(builder, owner, reference, name, ReferenceKind::References)?;
+            emit_relation(
+                builder,
+                RelationInput {
+                    owner: input.owner,
+                    node: reference,
+                    name,
+                    kind: ReferenceKind::References,
+                },
+            )?;
         }
         return Ok(());
     }
-    for child in named_children(node) {
-        scan_query_relations(builder, child, owner, depth.saturating_add(1), budget, seen)?;
+    for child in named_children(input.node) {
+        scan_query_relations(
+            builder,
+            RelationScanInput {
+                node: child,
+                owner: input.owner,
+                depth: input.depth.saturating_add(1),
+                budget: &mut *input.budget,
+                seen: &mut *input.seen,
+            },
+        )?;
     }
     Ok(())
 }
@@ -289,7 +355,14 @@ fn emit_function(
     let arguments = direct_child(node, "function_arguments")
         .map(|arguments| builder.context.text(arguments).trim())
         .filter(|arguments| callable_signature_is_literal_free(arguments));
-    let signature = labeled_signature(builder, "CREATE FUNCTION", &name, arguments)?;
+    let signature = labeled_signature(
+        builder,
+        LabeledSignatureInput {
+            label: "CREATE FUNCTION",
+            name: &name,
+            suffix: arguments,
+        },
+    )?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::Function,
         name,
@@ -306,7 +379,7 @@ fn emit_function(
         visibility: None,
     })?;
     if let Some(body) = direct_child(node, "function_body") {
-        emit_query_relations(builder, body, &owner)?;
+        emit_relations(builder, RelationEmission::query(body, &owner))?;
     }
     Ok(())
 }
@@ -323,7 +396,14 @@ fn emit_trigger(
     let Some(name) = qualified_name(builder, name_node)? else {
         return Ok(());
     };
-    let signature = labeled_signature(builder, "CREATE TRIGGER", &name, None)?;
+    let signature = labeled_signature(
+        builder,
+        LabeledSignatureInput {
+            label: "CREATE TRIGGER",
+            name: &name,
+            suffix: None,
+        },
+    )?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::Function,
         name,
@@ -344,10 +424,12 @@ fn emit_trigger(
     {
         emit_relation(
             builder,
-            &owner,
-            target,
-            target_name,
-            ReferenceKind::References,
+            RelationInput {
+                owner: &owner,
+                node: target,
+                name: target_name,
+                kind: ReferenceKind::References,
+            },
         )?;
     }
     if let Some(function) = object_reference_after(node, "keyword_execute")
@@ -355,10 +437,12 @@ fn emit_trigger(
     {
         emit_relation(
             builder,
-            &owner,
-            function,
-            function_name,
-            ReferenceKind::Calls,
+            RelationInput {
+                owner: &owner,
+                node: function,
+                name: function_name,
+                kind: ReferenceKind::Calls,
+            },
         )?;
     }
     Ok(())
@@ -377,7 +461,14 @@ fn emit_type(builder: &mut ExtractionBuilder<'_, '_>, node: Node<'_>) -> Result<
     } else {
         SymbolKind::TypeAlias
     };
-    let signature = labeled_signature(builder, "CREATE TYPE", &name, None)?;
+    let signature = labeled_signature(
+        builder,
+        LabeledSignatureInput {
+            label: "CREATE TYPE",
+            name: &name,
+            suffix: None,
+        },
+    )?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind,
         name: name.clone(),
@@ -395,14 +486,26 @@ fn emit_type(builder: &mut ExtractionBuilder<'_, '_>, node: Node<'_>) -> Result<
     })?;
     if enum_type {
         if let Some(elements) = direct_child(node, "enum_elements") {
-            with_owner(builder, &owner, kind, &name, |builder| {
-                emit_enum_members(builder, elements)
-            })?;
+            with_owner(
+                builder,
+                OwnerScopeInput {
+                    owner: &owner,
+                    kind,
+                    name: &name,
+                },
+                |builder| emit_enum_members(builder, elements),
+            )?;
         }
     } else if let Some(columns) = direct_child(node, "column_definitions") {
-        with_owner(builder, &owner, kind, &name, |builder| {
-            emit_columns(builder, columns)
-        })?;
+        with_owner(
+            builder,
+            OwnerScopeInput {
+                owner: &owner,
+                kind,
+                name: &name,
+            },
+            |builder| emit_columns(builder, columns),
+        )?;
     }
     Ok(())
 }
@@ -451,7 +554,14 @@ fn emit_schema(
         return Ok(());
     };
     let name = normalized_identifier(builder, identifier)?;
-    let signature = labeled_signature(builder, "CREATE SCHEMA", &name, None)?;
+    let signature = labeled_signature(
+        builder,
+        LabeledSignatureInput {
+            label: "CREATE SCHEMA",
+            name: &name,
+            suffix: None,
+        },
+    )?;
     builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::Namespace,
         name,
@@ -592,14 +702,13 @@ fn descendant_identifier(node: Node<'_>, depth: usize) -> Option<Node<'_>> {
 
 fn labeled_signature(
     builder: &ExtractionBuilder<'_, '_>,
-    label: &str,
-    name: &str,
-    suffix: Option<&str>,
+    input: LabeledSignatureInput<'_>,
 ) -> Result<String, ExtractError> {
-    let suffix = suffix.unwrap_or_default();
-    let length = label
+    let suffix = input.suffix.unwrap_or_default();
+    let length = input
+        .label
         .len()
-        .checked_add(name.len())
+        .checked_add(input.name.len())
         .and_then(|length| length.checked_add(suffix.len()))
         .and_then(|length| length.checked_add(1))
         .ok_or(ExtractError::OutputLimit)?;
@@ -607,40 +716,37 @@ fn labeled_signature(
     signature
         .try_reserve(length)
         .map_err(|_| ExtractError::OutputLimit)?;
-    signature.push_str(label);
+    signature.push_str(input.label);
     signature.push(' ');
-    signature.push_str(name);
+    signature.push_str(input.name);
     signature.push_str(suffix);
     builder.context.copy_text(&signature)
 }
 
 fn emit_relation(
     builder: &mut ExtractionBuilder<'_, '_>,
-    owner: &SymbolId,
-    node: Node<'_>,
-    name: String,
-    kind: ReferenceKind,
+    input: RelationInput<'_, '_>,
 ) -> Result<(), ExtractError> {
     builder.emit_reference(ExtractedReference {
-        owner: Some(owner.clone()),
-        name,
+        owner: Some(input.owner.clone()),
+        name: input.name,
         resolution_name: None,
-        kind,
-        span: span_for(node)?,
+        kind: input.kind,
+        span: span_for(input.node)?,
     })
 }
 
 fn with_owner<T>(
     builder: &mut ExtractionBuilder<'_, '_>,
-    owner: &SymbolId,
-    kind: SymbolKind,
-    name: &str,
+    input: OwnerScopeInput<'_>,
     action: impl FnOnce(&mut ExtractionBuilder<'_, '_>) -> Result<T, ExtractError>,
 ) -> Result<T, ExtractError> {
-    builder.owners.push(owner.clone());
-    builder.native_owner_kinds.push(kind);
+    builder.owners.push(input.owner.clone());
+    builder.native_owner_kinds.push(input.kind);
     builder.native_visibilities.push(None);
-    builder.qualifiers.push(builder.context.copy_text(name)?);
+    builder
+        .qualifiers
+        .push(builder.context.copy_text(input.name)?);
     let result = action(builder);
     builder.qualifiers.pop();
     builder.native_visibilities.pop();

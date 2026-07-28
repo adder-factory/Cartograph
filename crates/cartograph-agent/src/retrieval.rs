@@ -8,9 +8,10 @@ use cartograph_db::{
 use cartograph_domain::{GenerationId, NormalizedPath, ProjectId, SourceLanguage};
 use cartograph_llm::{EmbeddingSettings, OpenAiEmbeddingClient};
 use cartograph_search::{
-    ChannelCandidate, ChannelResults, DeterministicRetriever, HybridSearchInput,
-    HybridSearchPacket, LexicalQuery, RetrievalChannel, RetrievalChannels, RetrievalDocument,
-    RetrievalError, SearchMode, SemanticReadiness, fuse_search,
+    ChannelCandidate, ChannelResults, DeterministicRetriever, GenerationLexicalRequest,
+    HybridSearchInput, HybridSearchPacket, LexicalQuery, RetrievalChannel, RetrievalChannels,
+    RetrievalDocument, RetrievalDocumentInput, RetrievalError, SearchMode, SemanticReadiness,
+    fuse_search,
 };
 
 use crate::{ProjectCancellation, ProjectError, ProjectRuntime};
@@ -225,13 +226,13 @@ impl ProjectRuntime {
         } = input;
         for attempt in 0..GENERATION_ATTEMPTS {
             match self
-                .prepare_retrieval_attempt(
-                    &project_id,
-                    &query,
+                .prepare_retrieval_attempt(RetrievalAttemptRequest {
+                    project_id: &project_id,
+                    query: &query,
                     options,
-                    &semantic_client,
-                    &cancellation,
-                )
+                    semantic_client: &semantic_client,
+                    cancellation: &cancellation,
+                })
                 .await
             {
                 Err(RetrievalStageError::GenerationChanged) if attempt == 0 => continue,
@@ -244,12 +245,15 @@ impl ProjectRuntime {
 
     async fn prepare_retrieval_attempt(
         &self,
-        project_id: &ProjectId,
-        query: &str,
-        options: RetrievalOptions,
-        semantic_client: &SemanticClientState,
-        cancellation: &ProjectCancellation,
+        input: RetrievalAttemptRequest<'_>,
     ) -> Result<PreparedRetrieval, RetrievalStageError> {
+        let RetrievalAttemptRequest {
+            project_id,
+            query,
+            options,
+            semantic_client,
+            cancellation,
+        } = input;
         let generation = self
             .database()
             .current_generation_record(project_id)
@@ -376,6 +380,14 @@ struct RetrievalExecutionRequest {
     cancellation: ProjectCancellation,
 }
 
+struct RetrievalAttemptRequest<'a> {
+    project_id: &'a ProjectId,
+    query: &'a str,
+    options: RetrievalOptions,
+    semantic_client: &'a SemanticClientState,
+    cancellation: &'a ProjectCancellation,
+}
+
 struct LexicalChannelRequest {
     retriever: DeterministicRetriever,
     project_id: ProjectId,
@@ -424,11 +436,11 @@ async fn lexical_channel(
     tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(RetrievalStageError::RequestCancelled),
-        result = retriever.lexical_channel_for_generation(
+        result = retriever.lexical_channel_for_generation(GenerationLexicalRequest::new(
             project_id,
             expected_generation_id,
             query,
-        ) => {
+        )) => {
             result.map_err(retrieval_stage_error)
         },
     }
@@ -565,13 +577,13 @@ fn semantic_candidate(
         NormalizedPath::parse(hit.path()).map_err(|_| ProjectError::RetrievalOperationFailed)?;
     let language = SourceLanguage::from_stable_str(hit.language())
         .ok_or(ProjectError::RetrievalOperationFailed)?;
-    let mut document = RetrievalDocument::new(
-        hit.document_id().clone(),
-        hit.generation_id().clone(),
+    let mut document = RetrievalDocument::new(RetrievalDocumentInput {
+        document_id: hit.document_id().clone(),
+        generation_id: hit.generation_id().clone(),
         path,
         language,
-        hit.document_kind(),
-    );
+        document_kind: hit.document_kind(),
+    });
     if let Some(file_id) = hit.file_id() {
         document = document.with_file_id(file_id.clone());
     }

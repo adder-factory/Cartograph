@@ -182,8 +182,11 @@ cartograph db derived-index --project-path /absolute/path/to/checkout
 
 ## Bounded retention
 
-Generation pruning is explicit and separate from import, backup, `VACUUM`, and
-derived-index recovery. After a verified backup:
+Successful index and no-op reconciliation requests perform an automatic cleanup
+with a 32-generation transaction cap while preserving the two newest
+superseded generations. This keeps routine watcher churn bounded. Explicit
+pruning remains separate from import, backup, `VACUUM`, and derived-index
+recovery and is available for larger audited batches after a verified backup:
 
 ```sh
 cartograph db prune \
@@ -194,11 +197,12 @@ cartograph db prune \
   --format json
 ```
 
-One invocation deletes at most the requested batch of failed and old
-superseded generations. It always preserves the current generation,
-staging/ready work, failed generations referenced by non-complete v1 import
-runs, and the newest configured superseded histories. The import-run exception
-preserves the exact failed state needed for concurrent-publication recovery.
+One invocation deletes at most the requested batch of stale unleased staging,
+failed, and old superseded generations. Staging must be at least ten minutes old
+by default. It always preserves the current generation, recent or leased
+staging, all ready work, staging/failed generations referenced by non-complete
+v1 import runs, and the newest configured superseded histories. The import-run
+exception preserves the exact state needed for concurrent-publication recovery.
 The transaction also enforces independent canonical/cascade-row,
 generation-relation-byte, and DDL-relation caps. Defaults admit at most five
 million cascade rows, 8 GiB of generation search relations, and 64 relation
@@ -207,7 +211,10 @@ selected terminal generation it accounts work first, drops the physical search
 table (including its BM25 index), deletes canonical rows by cascade, and reports
 the exact admitted rows, relations, and bytes. It acquires publication/retention
 locks and rechecks the exact live migration lease after deletion before commit.
-Inspect the report and request another batch explicitly if needed.
+Status and doctor expose generation-state counts plus a conservative retained
+byte estimate (source bytes plus physical generation search tables/indexes).
+Inspect the report and request another explicit batch if automatic cleanup does
+not drain an existing backlog.
 
 ## Distribution boundary
 

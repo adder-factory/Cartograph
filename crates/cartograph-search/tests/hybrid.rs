@@ -1,8 +1,8 @@
 use cartograph_domain::{DocumentId, DocumentKind, GenerationId, NormalizedPath, SourceLanguage};
 use cartograph_search::{
     ChannelCandidate, ChannelResults, HybridSearchInput, LexicalComponent, RetrievalAbstention,
-    RetrievalChannel, RetrievalDocument, RetrievalExecution, RetrievalFallback, SearchMode,
-    SemanticReadiness, fuse_search,
+    RetrievalChannel, RetrievalDocument, RetrievalDocumentInput, RetrievalExecution,
+    RetrievalFallback, SearchMode, SemanticReadiness, fuse_search,
 };
 
 const RESULT_LIMIT: u16 = 20;
@@ -398,13 +398,13 @@ fn document_in_generation(id: &str, path: &str, generation_id: GenerationId) -> 
         .unwrap_or_else(|error| panic!("document id fixture failed: {error}"));
     let path = NormalizedPath::parse(path)
         .unwrap_or_else(|error| panic!("document path fixture failed: {error}"));
-    RetrievalDocument::new(
+    RetrievalDocument::new(RetrievalDocumentInput {
         document_id,
         generation_id,
         path,
-        SourceLanguage::Rust,
-        DocumentKind::Symbol,
-    )
+        language: SourceLanguage::Rust,
+        document_kind: DocumentKind::Symbol,
+    })
     .with_qualified_name(format!("symbol_{id}"))
     .unwrap_or_else(|error| panic!("qualified name fixture failed: {error}"))
 }

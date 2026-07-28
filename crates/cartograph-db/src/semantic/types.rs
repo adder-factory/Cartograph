@@ -6,7 +6,7 @@ use cartograph_domain::{
 use serde::Serialize;
 use thiserror::Error;
 
-pub(crate) const MAXIMUM_MODEL_DIMENSION: usize = 2_000;
+const MAXIMUM_MODEL_DIMENSION: usize = 2_000;
 const MAXIMUM_PROVIDER_BYTES: usize = 128;
 const MAXIMUM_MODEL_NAME_BYTES: usize = 256;
 const MAXIMUM_EMBEDDING_BATCH: usize = 128;
@@ -803,13 +803,21 @@ pub struct SimilarSymbolsResult {
     truncated: bool,
 }
 
+pub(super) struct SimilarSymbolsResultInput {
+    pub(super) model: EmbeddingModelSelector,
+    pub(super) source_symbol_id: SymbolId,
+    pub(super) hits: Vec<SimilarSymbolHit>,
+    pub(super) truncated: bool,
+}
+
 impl SimilarSymbolsResult {
-    pub(crate) const fn new(
-        model: EmbeddingModelSelector,
-        source_symbol_id: SymbolId,
-        hits: Vec<SimilarSymbolHit>,
-        truncated: bool,
-    ) -> Self {
+    pub(super) fn new(input: SimilarSymbolsResultInput) -> Self {
+        let SimilarSymbolsResultInput {
+            model,
+            source_symbol_id,
+            hits,
+            truncated,
+        } = input;
         Self {
             model,
             source_symbol_id,
@@ -986,7 +994,7 @@ pub(crate) fn validate_timeout(timeout: Duration) -> Result<(), SemanticStorageE
     }
 }
 
-pub(crate) fn validate_vector(vector: &[f32]) -> Result<(), SemanticStorageError> {
+fn validate_vector(vector: &[f32]) -> Result<(), SemanticStorageError> {
     if vector.is_empty()
         || vector.len() > MAXIMUM_MODEL_DIMENSION
         || vector.iter().any(|value| !value.is_finite())

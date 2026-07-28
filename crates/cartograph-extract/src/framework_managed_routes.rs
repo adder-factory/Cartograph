@@ -1,6 +1,12 @@
 use cartograph_domain::{SourceLanguage, SymbolKind};
 
-use crate::{ExtractError, framework::FrameworkBuilder};
+use crate::{
+    ExtractError,
+    framework::{
+        DelimiterInput, FrameworkBuilder, FrameworkRouteInput, join_route_paths,
+        matching_delimiter, quoted_literal_after, skip_ascii_whitespace,
+    },
+};
 
 const MAX_ANNOTATION_BYTES: usize = 4_096;
 const MAX_ROUTE_BYTES: usize = 1_024;
@@ -48,7 +54,7 @@ fn scan_spring(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(
             let Some(mapping) = spring_mapping(method_context) else {
                 continue;
             };
-            let Some(path) = join_path(base, mapping.argument.value_or_empty()) else {
+            let Some(path) = join_route_paths(base, mapping.argument.value_or_empty()) else {
                 continue;
             };
             let (name_start, name_end) = symbol_name_span(source, &method);
@@ -57,14 +63,14 @@ fn scan_spring(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(
                 .span()
                 .or_else(|| class_mapping.as_ref().and_then(AnnotationArgument::span))
                 .unwrap_or((name_start, name_end));
-            builder.add_route(
-                mapping.method,
-                &path,
+            builder.add_route(FrameworkRouteInput {
+                method: mapping.method,
+                path: &path,
                 start,
                 end,
-                false,
-                Some((&method.name, name_start, name_end)),
-            )?;
+                command: false,
+                handler: Some((&method.name, name_start, name_end)),
+            })?;
         }
     }
     Ok(())
@@ -122,7 +128,7 @@ fn scan_aspnet(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(
                 } else {
                     (base.as_str(), subpath.as_str())
                 };
-            let Some(path) = join_path(effective_base, effective_subpath) else {
+            let Some(path) = join_route_paths(effective_base, effective_subpath) else {
                 continue;
             };
             let (name_start, name_end) = symbol_name_span(source, &method);
@@ -130,14 +136,14 @@ fn scan_aspnet(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(
                 .span()
                 .or_else(|| class_route.span())
                 .unwrap_or((name_start, name_end));
-            builder.add_route(
-                http.method,
-                &path,
+            builder.add_route(FrameworkRouteInput {
+                method: http.method,
+                path: &path,
                 start,
                 end,
-                false,
-                Some((&method.name, name_start, name_end)),
-            )?;
+                command: false,
+                handler: Some((&method.name, name_start, name_end)),
+            })?;
         }
     }
     Ok(())
@@ -275,12 +281,14 @@ fn annotation_argument<'source>(
             if text.as_bytes().get(after) != Some(&b'(') {
                 return Some(AnnotationArgument::Empty);
             }
-            let close = matching_delimiter(text, after, b'(', b')')?;
+            let close = matching_delimiter(DelimiterInput::parentheses(text, after))?;
             let argument = &text[after + 1..close];
             if argument.trim().is_empty() {
                 return Some(AnnotationArgument::Empty);
             }
-            if let Some(quoted) = first_quoted(argument, slice.offset + after + 1) {
+            if let Some(quoted) = quoted_literal_after(argument, 0)
+                .map(|quoted| quoted.with_offset(slice.offset + after + 1))
+            {
                 return Some(AnnotationArgument::Literal {
                     value: quoted.value,
                     start: quoted.start,
@@ -291,39 +299,6 @@ fn annotation_argument<'source>(
                 return Some(AnnotationArgument::Dynamic);
             }
         }
-    }
-    None
-}
-
-struct Quoted<'source> {
-    value: &'source str,
-    start: usize,
-    end: usize,
-}
-
-fn first_quoted(value: &str, offset: usize) -> Option<Quoted<'_>> {
-    let mut cursor = 0_usize;
-    while cursor < value.len() && !matches!(value.as_bytes()[cursor], b'\'' | b'"') {
-        cursor += 1;
-    }
-    let quote = *value.as_bytes().get(cursor)?;
-    let start = cursor + 1;
-    cursor = start;
-    let mut escaped = false;
-    while cursor < value.len() {
-        let byte = value.as_bytes()[cursor];
-        if escaped {
-            escaped = false;
-        } else if byte == b'\\' {
-            escaped = true;
-        } else if byte == quote {
-            return Some(Quoted {
-                value: &value[start..cursor],
-                start: offset + start,
-                end: offset + cursor,
-            });
-        }
-        cursor += 1;
     }
     None
 }
@@ -411,67 +386,6 @@ fn replace_route_token(value: &str, token: &str, replacement: &str) -> Option<St
     Some(output)
 }
 
-fn join_path(base: &str, subpath: &str) -> Option<String> {
-    if base.len().saturating_add(subpath.len()) > MAX_ROUTE_BYTES {
-        return None;
-    }
-    let mut path = String::new();
-    path.try_reserve(base.len().saturating_add(subpath.len()).saturating_add(1))
-        .ok()?;
-    for segment in base.split('/').chain(subpath.split('/')) {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        path.push('/');
-        path.push_str(segment);
-    }
-    if path.is_empty() {
-        path.push('/');
-    }
-    Some(path)
-}
-
 fn identifier_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
-}
-
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Option<usize> {
-    let mut depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in value.as_bytes().iter().copied().enumerate().skip(open) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-        } else if byte == opening {
-            depth = depth.saturating_add(1);
-        } else if byte == closing {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
 }

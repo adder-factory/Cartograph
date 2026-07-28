@@ -9,7 +9,8 @@ use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use crate::{
     CartographDatabase, CurrentSymbolRecord, StorageError,
     retrieval::{
-        begin_bounded_read, commit_bounded_read, decode_symbol, require_expected_current_generation,
+        CurrentGenerationLookup, begin_bounded_read, commit_bounded_read, decode_symbol,
+        require_expected_current_generation,
     },
     search_relation::require_generation_search_relation,
 };
@@ -81,15 +82,10 @@ pub struct QualifiedSymbolQuery<'a> {
 impl<'a> QualifiedSymbolQuery<'a> {
     /// Bind a parsed query to one immutable published generation.
     #[must_use]
-    pub const fn new(
-        project_id: &'a ProjectId,
-        expected_generation_id: &'a GenerationId,
-        text: &'a str,
-        limit: u16,
-    ) -> Self {
+    pub const fn new(generation: CurrentGenerationLookup<'a>, text: &'a str, limit: u16) -> Self {
         Self {
-            project_id,
-            expected_generation_id,
+            project_id: generation.project_id(),
+            expected_generation_id: generation.expected_generation_id(),
             text,
             kinds: &[],
             languages: &[],
@@ -272,8 +268,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            input.project_id,
-            input.expected_generation_id,
+            CurrentGenerationLookup::new(input.project_id, input.expected_generation_id),
         )
         .await?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -285,8 +280,7 @@ impl CartographDatabase {
             let relation = require_generation_search_relation(
                 &mut transaction,
                 &self.schema,
-                input.project_id,
-                input.expected_generation_id,
+                CurrentGenerationLookup::new(input.project_id, input.expected_generation_id),
             )
             .await?;
             (
@@ -313,13 +307,13 @@ impl CartographDatabase {
                 "symbols.pagerank DESC NULLS LAST, {exact_name_rank} lexical_score DESC NULLS LAST, symbols.simple_name, files.normalized_path, symbols.start_line, symbols.symbol_id"
             ),
         };
-        let sql = qualified_symbol_sql(
-            &schema,
-            &document_join,
+        let sql = qualified_symbol_sql(QualifiedSymbolSql {
+            schema: &schema,
+            document_join: &document_join,
             text_predicate,
             lexical_score,
-            &primary_order,
-        );
+            primary_order: &primary_order,
+        });
         let (centrality_operator, centrality_threshold) = input
             .centrality
             .map_or((None, None), |(operator, threshold)| {
@@ -353,13 +347,23 @@ impl CartographDatabase {
     }
 }
 
-fn qualified_symbol_sql(
-    schema: &str,
-    document_join: &str,
-    text_predicate: &str,
-    lexical_score: &str,
-    primary_order: &str,
-) -> String {
+#[derive(Clone, Copy, Debug)]
+struct QualifiedSymbolSql<'a> {
+    schema: &'a str,
+    document_join: &'a str,
+    text_predicate: &'a str,
+    lexical_score: &'a str,
+    primary_order: &'a str,
+}
+
+fn qualified_symbol_sql(input: QualifiedSymbolSql<'_>) -> String {
+    let QualifiedSymbolSql {
+        schema,
+        document_join,
+        text_predicate,
+        lexical_score,
+        primary_order,
+    } = input;
     format!(
         r#"SELECT symbols.generation_id::text, symbols.symbol_id::text,
                    symbols.file_id::text, files.normalized_path, files.language,
@@ -482,53 +486,122 @@ fn qualified_symbol_sql(
 }
 
 fn validate_query(input: &QualifiedSymbolQuery<'_>) -> Result<(), StorageError> {
-    if input.text.len() > MAXIMUM_QUERY_BYTES || input.text.contains('\0') {
-        return Err(invalid("query"));
-    }
-    if !(1..=MAXIMUM_RESULT_LIMIT).contains(&input.limit) {
-        return Err(invalid("limit"));
-    }
-    for (field, values) in [
-        ("kinds", input.kinds),
-        ("languages", input.languages),
-        ("path_prefixes", input.path_prefixes),
-        ("path_filters", input.path_filters),
-        ("name_filters", input.name_filters),
-        ("signature_filters", input.signature_filters),
-        ("callers_of", input.callers_of),
-        ("callees_of", input.callees_of),
-        ("depends_on", input.depends_on),
-    ] {
-        if values.len() > MAXIMUM_FILTER_VALUES
-            || values.iter().any(|value| {
-                value.is_empty() || value.len() > MAXIMUM_FILTER_BYTES || value.contains('\0')
-            })
-        {
-            return Err(invalid(field));
-        }
-    }
-    if input
-        .centrality
-        .is_some_and(|(_, threshold)| !threshold.is_finite() || threshold < 0.0)
-    {
-        return Err(invalid("centrality"));
-    }
-    if input.text.is_empty()
-        && input.kinds.is_empty()
-        && input.languages.is_empty()
-        && input.path_prefixes.is_empty()
-        && input.path_filters.is_empty()
-        && input.name_filters.is_empty()
-        && input.signature_filters.is_empty()
-        && input.callers_of.is_empty()
-        && input.callees_of.is_empty()
-        && input.depends_on.is_empty()
-        && input.centrality.is_none()
-        && !input.scan_all
-    {
+    validate_query_text(input.text)?;
+    validate_query_limit(input.limit)?;
+    validate_primary_filters(input)?;
+    validate_text_filters(input)?;
+    validate_graph_filters(input)?;
+    validate_centrality(input.centrality)?;
+    if !query_has_constraint(input) {
         return Err(invalid("query"));
     }
     Ok(())
+}
+
+fn validate_query_text(text: &str) -> Result<(), StorageError> {
+    if text.len() > MAXIMUM_QUERY_BYTES || text.contains('\0') {
+        return Err(invalid("query"));
+    }
+    Ok(())
+}
+
+fn validate_query_limit(limit: u16) -> Result<(), StorageError> {
+    if !(1..=MAXIMUM_RESULT_LIMIT).contains(&limit) {
+        return Err(invalid("limit"));
+    }
+    Ok(())
+}
+
+fn validate_primary_filters(input: &QualifiedSymbolQuery<'_>) -> Result<(), StorageError> {
+    validate_filter_group([
+        ("kinds", input.kinds),
+        ("languages", input.languages),
+        ("path_prefixes", input.path_prefixes),
+    ])
+}
+
+fn validate_text_filters(input: &QualifiedSymbolQuery<'_>) -> Result<(), StorageError> {
+    validate_filter_group([
+        ("path_filters", input.path_filters),
+        ("name_filters", input.name_filters),
+        ("signature_filters", input.signature_filters),
+    ])
+}
+
+fn validate_graph_filters(input: &QualifiedSymbolQuery<'_>) -> Result<(), StorageError> {
+    validate_filter_group([
+        ("callers_of", input.callers_of),
+        ("callees_of", input.callees_of),
+        ("depends_on", input.depends_on),
+    ])
+}
+
+fn validate_centrality(
+    centrality: Option<(QualifiedCentralityComparator, f64)>,
+) -> Result<(), StorageError> {
+    if centrality.is_some_and(|(_, threshold)| !threshold.is_finite() || threshold < 0.0) {
+        return Err(invalid("centrality"));
+    }
+    Ok(())
+}
+
+fn validate_filter_group<const COUNT: usize>(
+    filters: [(&'static str, &[String]); COUNT],
+) -> Result<(), StorageError> {
+    for (field, values) in filters {
+        if invalid_filter_values(values) {
+            return Err(invalid(field));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_filter_values(values: &[String]) -> bool {
+    if values.len() > MAXIMUM_FILTER_VALUES {
+        return true;
+    }
+    values
+        .iter()
+        .any(|value| value.is_empty() || value.len() > MAXIMUM_FILTER_BYTES || value.contains('\0'))
+}
+
+fn query_has_constraint(input: &QualifiedSymbolQuery<'_>) -> bool {
+    has_primary_query_constraint(input)
+        || has_text_filter_constraint(input)
+        || has_graph_filter_constraint(input)
+}
+
+fn has_primary_query_constraint(input: &QualifiedSymbolQuery<'_>) -> bool {
+    [
+        !input.text.is_empty(),
+        !input.kinds.is_empty(),
+        !input.languages.is_empty(),
+        !input.path_prefixes.is_empty(),
+    ]
+    .into_iter()
+    .any(std::convert::identity)
+}
+
+fn has_text_filter_constraint(input: &QualifiedSymbolQuery<'_>) -> bool {
+    [
+        !input.path_filters.is_empty(),
+        !input.name_filters.is_empty(),
+        !input.signature_filters.is_empty(),
+    ]
+    .into_iter()
+    .any(std::convert::identity)
+}
+
+fn has_graph_filter_constraint(input: &QualifiedSymbolQuery<'_>) -> bool {
+    [
+        !input.callers_of.is_empty(),
+        !input.callees_of.is_empty(),
+        !input.depends_on.is_empty(),
+        input.centrality.is_some(),
+        input.scan_all,
+    ]
+    .into_iter()
+    .any(std::convert::identity)
 }
 
 fn decode_page(rows: &[sqlx_postgres::PgRow]) -> Result<QualifiedSymbolPage, StorageError> {
@@ -591,21 +664,19 @@ mod tests {
     fn query_validation_requires_bounded_text_or_a_real_filter() {
         let project = project_id();
         let generation = generation_id();
+        let generation = CurrentGenerationLookup::new(&project, &generation);
         assert_eq!(
-            validate_query(&QualifiedSymbolQuery::new(&project, &generation, "", 10)),
+            validate_query(&QualifiedSymbolQuery::new(generation, "", 10)),
             Err(StorageError::InvalidInput { field: "query" })
         );
         let kinds = vec!["function".to_owned()];
         assert!(
-            validate_query(
-                &QualifiedSymbolQuery::new(&project, &generation, "", 10).with_kinds(&kinds)
-            )
-            .is_ok()
+            validate_query(&QualifiedSymbolQuery::new(generation, "", 10).with_kinds(&kinds))
+                .is_ok()
         );
         assert_eq!(
             validate_query(&QualifiedSymbolQuery::new(
-                &project,
-                &generation,
+                generation,
                 &"x".repeat(MAXIMUM_QUERY_BYTES + 1),
                 10,
             )),
@@ -615,13 +686,13 @@ mod tests {
 
     #[test]
     fn generated_sql_pushes_every_filter_before_limit() {
-        let sql = qualified_symbol_sql(
-            "\"cartograph\"",
-            "INNER JOIN docs",
-            "AND documents.qualified_name ||| $15",
-            "pdb.score(documents.id)::double precision",
-            "lexical_score DESC",
-        );
+        let sql = qualified_symbol_sql(QualifiedSymbolSql {
+            schema: "\"cartograph\"",
+            document_join: "INNER JOIN docs",
+            text_predicate: "AND documents.qualified_name ||| $15",
+            lexical_score: "pdb.score(documents.id)::double precision",
+            primary_order: "lexical_score DESC",
+        });
         let limit = sql.find("LIMIT $14").unwrap_or(0);
         for predicate in [
             "symbols.symbol_kind",

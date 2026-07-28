@@ -76,6 +76,14 @@ secret or source-literal dump.
 Resolution runs after extraction. It prefers exact module/path and qualified
 scope evidence and keeps ambiguous or dynamic cases unresolved.
 
+Unresolved evidence remains typed by provenance. In particular, Rust macro
+invocations that would require expansion, dynamic receiver/member access,
+language intrinsics, and explicit non-local imports remain targetless rather
+than being guessed as project declarations. Static embedded-SQL references
+resolve to indexed SQL tables when available and otherwise retain typed
+external-schema read/write/DDL provenance. Project-actionable unresolved
+pressure is computed separately from those expected language boundaries.
+
 Implemented language-level behavior includes:
 
 - relative TypeScript/JavaScript module specifiers and common extension/index

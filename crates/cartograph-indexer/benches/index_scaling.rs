@@ -9,11 +9,11 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, EdgeInput, FileInput,
-    GenerationContents, GenerationFacts, GenerationValidationLimits, LeaseOwner, LeaseTarget,
-    MANAGED_DATABASE_IMAGE, NewGeneration, NewProject, PrepareGenerationMetrics, ReadyGeneration,
-    ReferenceInput, SearchDocumentInput, SearchQuery, StagedGeneration, SymbolInput,
-    probe_capabilities, validate_generation_facts,
+    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, CurrentGenerationLookup,
+    EdgeInput, FileInput, GenerationContents, GenerationFacts, GenerationValidationLimits,
+    LeaseOwner, LeaseTarget, MANAGED_DATABASE_IMAGE, NewGeneration, NewProject,
+    PrepareGenerationMetrics, ReadyGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
+    StagedGeneration, SymbolInput, probe_capabilities, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
@@ -841,8 +841,7 @@ async fn bm25_fingerprint(
     let hits = database
         .database
         .search_current_code(SearchQuery::new(
-            database.project.clone(),
-            current.generation_id().clone(),
+            CurrentGenerationLookup::new(&database.project, current.generation_id()),
             NEEDLE_QUERY,
             5,
         ))

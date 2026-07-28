@@ -1,5 +1,8 @@
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind, Visibility};
-use cartograph_extract::{ExtractedFile, NativeExtractor, SourceLimits, SourceSnapshot};
+use cartograph_extract::{
+    DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractedFile, ImportBindingKind, NativeExtractor,
+    RUST_MACRO_RESOLUTION_PREFIX, SourceLimits, SourceSnapshot,
+};
 
 const SOURCE_LIMIT_BYTES: usize = 256 * 1024;
 
@@ -15,6 +18,10 @@ pub struct Worker {
 impl Worker {
     pub fn run(&self) -> u32 {
         helper(self.value)
+    }
+
+    pub fn schedule(&self, first: u32, second: u32, third: u32, fourth: u32) {
+        let _ = (first, second, third, fourth);
     }
 }
 
@@ -43,6 +50,8 @@ pub trait Runnable {
     assert_eq!(file.language, SourceLanguage::Rust);
     assert_eq!(worker.kind, SymbolKind::Struct);
     assert_eq!(run.kind, SymbolKind::Method);
+    assert_eq!(run.health.parameter_count, 0);
+    assert_eq!(symbol(&file, "Worker::schedule").health.parameter_count, 4);
     assert_eq!(helper.kind, SymbolKind::Function);
     assert!(worker.exported && run.exported && helper.exported);
     let private_helper = symbol(&file, "private_helper");
@@ -53,6 +62,11 @@ pub trait Runnable {
     assert_eq!(helper.visibility, Some(Visibility::Public));
     assert!(!symbol(&file, "sync_with_async_block").async_symbol);
     assert!(symbol(&file, "async_helper").async_symbol);
+    assert!(file.symbols.iter().any(|entry| {
+        entry.kind == SymbolKind::Parameter
+            && entry.name == "value"
+            && entry.qualified_name == "helper::value"
+    }));
     assert!(
         file.containments
             .iter()
@@ -88,6 +102,294 @@ pub trait Runnable {
         file.containments
             .iter()
             .any(|edge| edge.parent == runnable.id && edge.child == execute.id)
+    );
+}
+
+#[test]
+fn rust_extracts_references_from_constant_initializers() {
+    let file = extract(
+        "src/pending.rs",
+        r#"
+pub(crate) struct TransactionCompletion;
+
+impl TransactionCompletion {
+    pub(crate) const fn new() -> Self { Self }
+}
+
+pub(crate) const COMPLETION: TransactionCompletion = TransactionCompletion::new();
+"#,
+    );
+    let completion = symbol(&file, "COMPLETION");
+    assert!(file.references.iter().any(|reference| {
+        reference.owner.as_ref() == Some(&completion.id)
+            && reference.name == "TransactionCompletion::new"
+            && reference.kind == ReferenceKind::Calls
+    }));
+}
+
+#[test]
+fn rust_marks_inline_test_scopes_as_test_symbols() {
+    let file = extract(
+        "src/lib.rs",
+        r#"
+fn production() {}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn exact_case() { production(); }
+
+    fn fixture_helper() {}
+}
+"#,
+    );
+    assert!(!symbol(&file, "production").test_symbol);
+    for qualified_name in [
+        "contract_tests",
+        "contract_tests::exact_case",
+        "contract_tests::fixture_helper",
+    ] {
+        assert!(
+            symbol(&file, qualified_name).test_symbol,
+            "{qualified_name}"
+        );
+    }
+}
+
+#[test]
+fn rust_extracts_grouped_module_bindings_with_full_paths_and_aliases() {
+    let file = extract(
+        "src/native.rs",
+        r#"
+use crate::{nested::{helpers as selected, tools}, tags};
+use external_crate::{Remote, remote_tools};
+use super::*;
+
+pub fn run() {
+    tags::extract();
+    selected::prepare();
+    let callback = selected::prepare;
+    tools::scan();
+    worker.finish();
+    worker.try_get::<bool, _>();
+    assert!(true);
+}
+"#,
+    );
+
+    for (module_specifier, local_name) in [
+        ("crate::nested::helpers", "selected"),
+        ("crate::nested::tools", "tools"),
+        ("crate::tags", "tags"),
+    ] {
+        assert!(file.import_bindings.iter().any(|binding| {
+            binding.kind == ImportBindingKind::Namespace
+                && binding.module_specifier == module_specifier
+                && binding.imported_name == "*"
+                && binding.local_name == local_name
+        }));
+        assert!(file.references.iter().any(|reference| {
+            reference.owner.is_none()
+                && reference.name == local_name
+                && reference.kind == ReferenceKind::References
+        }));
+    }
+    assert!(
+        file.import_bindings.iter().any(|binding| {
+            binding.kind == ImportBindingKind::Namespace
+                && binding.module_specifier == "super::*"
+                && binding.local_name == "*"
+        }),
+        "{:?}",
+        file.import_bindings
+    );
+    for (module_specifier, local_name) in [
+        ("external_crate::Remote", "Remote"),
+        ("external_crate::remote_tools", "remote_tools"),
+    ] {
+        assert!(file.import_bindings.iter().any(|binding| {
+            binding.kind == ImportBindingKind::Namespace
+                && binding.module_specifier == module_specifier
+                && binding.local_name == local_name
+        }));
+        assert!(file.references.iter().any(|reference| {
+            reference.owner.is_none()
+                && reference.name == local_name
+                && reference.kind == ReferenceKind::References
+        }));
+    }
+    assert!(file.references.iter().any(|reference| {
+        reference.name == "selected::prepare" && reference.kind == ReferenceKind::References
+    }));
+    let receiver_call = file
+        .references
+        .iter()
+        .find(|reference| reference.name == "worker.finish")
+        .unwrap_or_else(|| {
+            panic!(
+                "Rust receiver call was not extracted: {:?}",
+                file.references
+            )
+        });
+    let expected_resolution = format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}finish");
+    assert_eq!(
+        receiver_call.resolution_name.as_deref(),
+        Some(expected_resolution.as_str())
+    );
+    let generic_receiver_call = file
+        .references
+        .iter()
+        .find(|reference| reference.name == "worker.try_get::<bool, _>")
+        .unwrap_or_else(|| {
+            panic!(
+                "generic Rust receiver call was not extracted: {:?}",
+                file.references
+            )
+        });
+    let expected_generic_resolution = format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}try_get");
+    assert_eq!(
+        generic_receiver_call.resolution_name.as_deref(),
+        Some(expected_generic_resolution.as_str())
+    );
+    let macro_call = file
+        .references
+        .iter()
+        .find(|reference| reference.name == "assert")
+        .unwrap_or_else(|| panic!("Rust macro call was not extracted: {:?}", file.references));
+    let expected_macro = format!("{RUST_MACRO_RESOLUTION_PREFIX}assert");
+    assert_eq!(
+        macro_call.resolution_name.as_deref(),
+        Some(expected_macro.as_str())
+    );
+
+    let nested_module = extract(
+        "src/walk.rs",
+        "mod references;\npub fn visit() { references::capture_usage(); }\n",
+    );
+    assert!(nested_module.import_bindings.iter().any(|binding| {
+        binding.kind == ImportBindingKind::Namespace
+            && binding.module_specifier == "./walk/references"
+            && binding.local_name == "references"
+    }));
+}
+
+#[test]
+fn rust_extracts_qualified_calls_inside_macro_token_trees() {
+    let source = r#"
+fn run() {
+    print!("{}", upgrade::render(&report));
+    println!("{}", report.location());
+    tokio::select! {
+        joined = worker => ToolResult :: from_error(error),
+    }
+    print!("fake::call(");
+}
+"#;
+    let file = extract("src/main.rs", source);
+    for name in ["upgrade::render", "ToolResult::from_error"] {
+        let reference = file
+            .references
+            .iter()
+            .find(|reference| reference.name == name && reference.kind == ReferenceKind::Calls)
+            .unwrap_or_else(|| panic!("missing macro-contained call {name}"));
+        let start = usize::try_from(reference.span.start_byte())
+            .unwrap_or_else(|_| panic!("invalid start"));
+        let end =
+            usize::try_from(reference.span.end_byte()).unwrap_or_else(|_| panic!("invalid end"));
+        assert_eq!(
+            source
+                .get(start..end)
+                .unwrap_or_else(|| panic!("invalid span"))
+                .split_whitespace()
+                .collect::<String>(),
+            name,
+        );
+    }
+    let receiver = file
+        .references
+        .iter()
+        .find(|reference| {
+            reference.name == "report.location" && reference.kind == ReferenceKind::Calls
+        })
+        .unwrap_or_else(|| panic!("missing macro-contained receiver call"));
+    let expected_receiver_resolution = format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}location");
+    assert_eq!(
+        receiver.resolution_name.as_deref(),
+        Some(expected_receiver_resolution.as_str())
+    );
+    assert!(
+        !file
+            .references
+            .iter()
+            .any(|reference| reference.name == "fake::call")
+    );
+}
+
+#[test]
+fn javascript_chained_member_calls_keep_dynamic_dispatch_resolution() {
+    let file = extract(
+        "src/schema.ts",
+        r#"
+export function schema(z: any) {
+    return z.object({}).describe("public schema").optional();
+}
+"#,
+    );
+    let owner = symbol(&file, "schema");
+    for name in ["describe", "optional"] {
+        let reference = file
+            .references
+            .iter()
+            .find(|reference| {
+                reference.owner.as_ref() == Some(&owner.id)
+                    && reference.name == name
+                    && reference.kind == ReferenceKind::Calls
+            })
+            .unwrap_or_else(|| panic!("missing chained call {name}: {:?}", file.references));
+        let expected = format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}{name}");
+        assert_eq!(
+            reference.resolution_name.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+}
+
+#[test]
+fn javascript_binding_patterns_emit_lexical_symbols() {
+    let file = extract(
+        "src/bindings.ts",
+        r#"
+export function run(
+    { phaseCtx, nested: { count: counter } }: Input,
+    [errors]: Error[][],
+    onProgress?: (value: number) => void,
+) {
+    const { formatOnly, newStructHash: structHash } = decide();
+    onProgress?.(counter);
+    return [phaseCtx, errors, formatOnly, structHash];
+}
+"#,
+    );
+    for parameter in ["phaseCtx", "counter", "errors", "onProgress"] {
+        assert_eq!(
+            symbol(&file, &format!("run::{parameter}")).kind,
+            SymbolKind::Parameter,
+            "{parameter}"
+        );
+    }
+    for variable in ["formatOnly", "structHash"] {
+        assert_eq!(
+            symbol(&file, &format!("run::{variable}")).kind,
+            SymbolKind::Constant,
+            "{variable}"
+        );
+    }
+    assert!(
+        file.symbols
+            .iter()
+            .all(|entry| entry.qualified_name != "run::newStructHash")
     );
 }
 
@@ -470,6 +772,63 @@ export function empty() {}
 }
 
 #[test]
+fn sequential_await_loop_health_is_limited_to_javascript_for_of_bodies() {
+    let javascript = extract(
+        "src/loops.ts",
+        r#"
+export async function sequential(items: string[]) {
+  for (const item of items) { await consume(item); }
+}
+export async function objectKeys(items: Record<string, string>) {
+  for (const key in items) { await consume(key); }
+}
+export async function asyncStream(items: AsyncIterable<string>) {
+  for await (const item of items) { consume(item); }
+}
+export async function callbackOnly(items: string[]) {
+  for (const item of items) {
+    items.map(async (value) => await consume(value));
+  }
+}
+export async function nested(items: string[][]) {
+  for (const group of items) {
+    for (const item of group) { await consume(item); }
+  }
+}
+"#,
+    );
+    assert_eq!(
+        symbol(&javascript, "sequential")
+            .health
+            .sequential_await_loops,
+        1
+    );
+    for name in ["objectKeys", "asyncStream", "callbackOnly"] {
+        assert_eq!(
+            symbol(&javascript, name).health.sequential_await_loops,
+            0,
+            "unexpected sequential-await signal for {name}"
+        );
+    }
+    assert_eq!(
+        symbol(&javascript, "nested").health.sequential_await_loops,
+        1
+    );
+
+    let rust = extract(
+        "src/loops.rs",
+        r#"
+async fn bounded(items: Vec<Item>) {
+    for item in items {
+        item.consume().await;
+    }
+}
+"#,
+    );
+    assert_eq!(symbol(&rust, "bounded").health.sequential_await_loops, 0);
+}
+
+#[test]
 fn symbol_health_retains_literal_and_sensitive_signals_without_retaining_literals() {
     let file = extract(
         "src/config.ts",
@@ -503,6 +862,142 @@ export function buildEndpoint(host: string) {
     assert_eq!(retry_count.health.stale_doc_numbers, 1);
     assert!(retry_count.signature.is_none());
     assert!(!format!("{:?}", retry_count.health).contains("RETRY_COUNT"));
+}
+
+#[test]
+fn symbol_health_collapses_multiline_literals_for_code_line_metrics() {
+    let payload = "SELECT value FROM records;\n".repeat(150);
+    let source = format!("fn literal_heavy() -> &'static str {{\n    r#\"{payload}\"#\n}}\n");
+    let file = extract("src/literal_heavy.rs", &source);
+    let literal_heavy = symbol(&file, "literal_heavy");
+    assert!(literal_heavy.span.end_line() > 100);
+    assert!(literal_heavy.health.code_lines < 10);
+}
+
+#[test]
+fn symbol_health_normalizes_typed_numeric_literals_before_magic_number_scoring() {
+    let file = extract(
+        "src/numbers.rs",
+        r#"
+fn benign() {
+    let _values = [0_u8, 1_u16, 2_u32, 0x0_u64, 0b1_usize, 0o2_i32];
+}
+
+fn meaningful() {
+    let _value = 3_u8;
+}
+"#,
+    );
+    assert_eq!(symbol(&file, "benign").health.magic_numbers, 0);
+    assert_eq!(symbol(&file, "meaningful").health.magic_numbers, 1);
+}
+
+#[test]
+fn symbol_health_keeps_else_if_ladders_flat_but_counts_true_nesting() {
+    let rust = extract(
+        "src/branches.rs",
+        r#"
+fn ladder(value: u8) -> u8 {
+    if value == 0 { 0 }
+    else if value == 1 { 1 }
+    else if value == 2 { 2 }
+    else { 3 }
+}
+
+fn nested(value: u8) -> u8 {
+    if value == 0 {
+        0
+    } else {
+        if value == 1 { 1 } else { 2 }
+    }
+}
+"#,
+    );
+    assert_eq!(symbol(&rust, "ladder").health.max_nesting, 1);
+    assert_eq!(symbol(&rust, "ladder").health.cyclomatic, 4);
+    assert_eq!(symbol(&rust, "nested").health.max_nesting, 2);
+
+    let python = extract(
+        "src/branches.py",
+        r#"
+def ladder(value):
+    if value == 0:
+        return 0
+    elif value == 1:
+        return 1
+    elif value == 2:
+        return 2
+    return 3
+"#,
+    );
+    assert_eq!(symbol(&python, "ladder").health.max_nesting, 1);
+    assert_eq!(symbol(&python, "ladder").health.cyclomatic, 4);
+}
+
+#[test]
+fn symbol_health_excludes_language_level_receiver_parameters() {
+    let typescript = extract(
+        "src/receivers.ts",
+        r#"
+interface Context {}
+function bound(this: Context, first: string, second: string, third: string, fourth: string) {}
+"#,
+    );
+    assert_eq!(symbol(&typescript, "bound").health.parameter_count, 4);
+
+    let python = extract(
+        "src/receivers.py",
+        r#"
+class Worker:
+    def run(self, first, second, third, fourth):
+        return first
+
+    @classmethod
+    def create(cls, first, second, third, fourth):
+        return cls()
+"#,
+    );
+    assert_eq!(symbol(&python, "Worker::run").health.parameter_count, 4);
+    assert_eq!(symbol(&python, "Worker::create").health.parameter_count, 4);
+}
+
+#[test]
+fn health_markers_distinguish_detector_vocabulary_from_source_evidence() {
+    let file = extract(
+        "src/detectors.ts",
+        r#"
+export function vocabulary() {
+  const incomplete = ["TODO", "FIXME", "XXX", "HACK", "not implemented"];
+  const sensitive = ["secret", "token", "password", "client_secret", "sign", "key"];
+  return incomplete.concat(sensitive);
+}
+
+export function unfinished() {
+  // TODO: replace the placeholder
+  throw new Error("not implemented");
+}
+
+export function literalLeak() {
+  return "AKIA1234567890ABCDEF";
+}
+
+export function classifyToken(token: string, parsed: { signature: string }) {
+  const [key, value] = token.split(":");
+  return key === "sig" ? parsed.signature : value;
+}
+
+export function signPayload(payload: string, secretKey: string) {
+  return sign(payload, secretKey);
+}
+"#,
+    );
+    let vocabulary = symbol(&file, "vocabulary");
+    assert_eq!(vocabulary.health.incomplete_markers, 0);
+    assert_eq!(vocabulary.health.secrets_score, 0);
+    assert_eq!(symbol(&file, "unfinished").health.incomplete_markers, 2);
+    assert!(symbol(&file, "literalLeak").health.secrets_score >= 60);
+    assert!(symbol(&file, "classifyToken").health.secrets_score < 50);
+    assert!(symbol(&file, "signPayload").health.secrets_score >= 50);
 }
 
 #[test]

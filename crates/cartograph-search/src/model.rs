@@ -657,9 +657,7 @@ impl TraversalRequest {
 
     /// Drop structural edges whose extractor confidence is below this exact threshold.
     pub fn with_minimum_confidence(mut self, minimum: f32) -> Result<Self, RetrievalError> {
-        if !minimum.is_finite() || !(0.0..=1.0).contains(&minimum) {
-            return Err(invalid("minimum_confidence"));
-        }
+        validate_minimum_confidence(minimum)?;
         self.minimum_confidence = minimum;
         Ok(self)
     }
@@ -707,6 +705,14 @@ pub struct GraphPathRequest {
     budget: TraversalBudget,
     edge_kind: Option<EdgeKind>,
     minimum_confidence: f32,
+}
+
+/// Exact endpoints, project, and work budget for one shortest-path request.
+pub struct GraphPathRequestInput {
+    pub project_id: ProjectId,
+    pub start: SymbolId,
+    pub target: SymbolId,
+    pub budget: TraversalBudget,
 }
 
 /// Model-scoped stored-vector neighbor request for one exact source symbol.
@@ -791,12 +797,13 @@ impl SimilarRequest {
 impl GraphPathRequest {
     /// Bind exact endpoints to one bounded, generation-fenced search.
     #[must_use]
-    pub const fn new(
-        project_id: ProjectId,
-        start: SymbolId,
-        target: SymbolId,
-        budget: TraversalBudget,
-    ) -> Self {
+    pub fn new(input: GraphPathRequestInput) -> Self {
+        let GraphPathRequestInput {
+            project_id,
+            start,
+            target,
+            budget,
+        } = input;
         Self {
             project_id,
             start,
@@ -816,9 +823,7 @@ impl GraphPathRequest {
 
     /// Drop path candidates below an exact extractor-confidence threshold.
     pub fn with_minimum_confidence(mut self, minimum: f32) -> Result<Self, RetrievalError> {
-        if !minimum.is_finite() || !(0.0..=1.0).contains(&minimum) {
-            return Err(invalid("minimum_confidence"));
-        }
+        validate_minimum_confidence(minimum)?;
         self.minimum_confidence = minimum;
         Ok(self)
     }
@@ -1013,14 +1018,23 @@ pub struct SourceRangeQuery {
     limit: u16,
 }
 
+/// Exact path, inclusive line range, and result bound for one source lookup.
+pub struct SourceRangeQueryInput {
+    pub path: NormalizedPath,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub limit: u16,
+}
+
 impl SourceRangeQuery {
     /// Validate an inclusive range and bounded result count before database work.
-    pub fn new(
-        path: NormalizedPath,
-        start_line: u32,
-        end_line: u32,
-        limit: u16,
-    ) -> Result<Self, RetrievalError> {
+    pub fn new(input: SourceRangeQueryInput) -> Result<Self, RetrievalError> {
+        let SourceRangeQueryInput {
+            path,
+            start_line,
+            end_line,
+            limit,
+        } = input;
         let line_count = end_line.saturating_sub(start_line).saturating_add(1);
         if start_line == 0 || end_line < start_line || line_count > MAX_SOURCE_RANGE_LINES {
             return Err(invalid("source_range"));
@@ -1272,13 +1286,21 @@ pub struct GraphPathResult {
     truncated: bool,
 }
 
+pub(crate) struct GraphPathResultInput {
+    pub(crate) start: SymbolId,
+    pub(crate) target: SymbolId,
+    pub(crate) path: Option<Vec<GraphPathStep>>,
+    pub(crate) truncated: bool,
+}
+
 impl GraphPathResult {
-    pub(crate) const fn new(
-        start: SymbolId,
-        target: SymbolId,
-        path: Option<Vec<GraphPathStep>>,
-        truncated: bool,
-    ) -> Self {
+    pub(crate) fn new(input: GraphPathResultInput) -> Self {
+        let GraphPathResultInput {
+            start,
+            target,
+            path,
+            truncated,
+        } = input;
         Self {
             start,
             target,
@@ -2162,7 +2184,7 @@ pub use packets::{
     WorkingTreeEvidence, WorkingTreeEvidenceInput, WorkingTreeOverlay, WorkingTreeOverlayInput,
     WorkingTreeOverlayStatus,
 };
-pub(crate) use packets::{ContextPacketDetails, ReviewPacketDetails};
+pub(crate) use packets::{ContextPacketDetails, EditCandidateInput, ReviewPacketDetails};
 
 fn validate_query(query: String) -> Result<String, RetrievalError> {
     let query = query.trim().to_owned();
@@ -2230,6 +2252,14 @@ const fn validate_packet_limits(
         return Err(invalid("affected_test_limit"));
     }
     Ok(())
+}
+
+fn validate_minimum_confidence(minimum: f32) -> Result<(), RetrievalError> {
+    if minimum.is_finite() && (0.0..=1.0).contains(&minimum) {
+        Ok(())
+    } else {
+        Err(invalid("minimum_confidence"))
+    }
 }
 
 const fn invalid(field: &'static str) -> RetrievalError {

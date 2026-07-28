@@ -8,34 +8,157 @@ use std::{
 };
 
 use cartograph_agent::{
-    DeadCodeJudgeOptions, DeadCodeVerdict, DiffReviewOptions, EmbeddingClientRequest,
-    EmbeddingOptions, FileDriftOptions, FileSourceOptions, FileSourceRequest, HistoryIndexOptions,
-    ImportAuditError, ImportAuditOptions, ImportAuditSource, ImportAuditTarget, IndexOptions,
-    LcovLoadOptions, ProjectCancellation, ProjectRuntime, RenamePlanError, RenamePlanOptions,
-    RetrievalClientRequest, RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest,
+    DeadCodeJudgeOptions, DeadCodeJudgeRequest, DeadCodeVerdict, DiffReviewInput,
+    DiffReviewOptions, EmbeddingClientRequest, EmbeddingOptions, FileDriftOptions,
+    FileSourceOptions, FileSourceRequest, GenerationRetentionStatus, HistoryIndexOptions,
+    ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
+    IndexOptions, LcovLoadOptions, ProjectCancellation, ProjectError, ProjectRuntime,
+    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalClientRequest,
+    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportLimits,
     ScipImportRequest, SourceContextOptions, SourceContextRequest, SourceSearchOptions,
     TestEvidenceOptions, WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    DeadCodeQuery, ExactTextLookup, FileDependencyDirection, FileDependencyQuery, FileSurfaceQuery,
-    GroupedPathInput, GroupedSymbolQuery, IssueAttributionKind, NativeParseCacheKey, SearchQuery,
-    SemanticStorageError, StructuralFindingGroupQuery, StructuralFindingQuery,
-    StructuralFindingSeverity, StructuralHotspotCategory, StructuralHotspotQuery,
-    StructuralHotspotSort, SymbolCoverageQuery,
+    CurrentGenerationLookup, DeadCodeQuery, ExactTextLookup, FileCochangeQuery,
+    FileDependencyDirection, FileDependencyQuery, FileHistoryQuery, FileSurfaceQuery,
+    FileTestImpactQuery, GroupedPathInput, GroupedSymbolQuery, InterchangeSnapshotRequest,
+    IssueAttributionKind, IssueCommitSymbolPeerQuery, LeaseOwner, LeaseRequest, LeaseTarget,
+    NativeParseCacheKey, NativeParseCacheKeyInput, SearchQuery, SemanticStorageError,
+    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
+    StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort, SymbolCoverageQuery,
+    SymbolIssuePeerQuery, SymbolIssueQuery,
 };
-use cartograph_domain::{ContentDigest, EdgeKind, NormalizedPath, SourceLanguage};
+use cartograph_domain::{
+    ContentDigest, EdgeKind, NormalizedPath, ProjectOperation, SourceLanguage,
+};
 use cartograph_extract::native_extractor_contract_digest;
 use cartograph_llm::{ChatSettings, EmbeddingSettings, OpenAiChatClient, OpenAiEmbeddingClient};
 use cartograph_scip::{decode_scip_index, encode_scip_index};
 use cartograph_search::{
-    DeterministicRetriever, EntryPointBucket, EntryPointsQuery, GraphPathRequest, IndexFreshness,
-    RetrievalConfidence, RetrievalError, RetrievalExecution, ReviewAbstention, SearchMode,
-    SemanticReadiness, SimilarRequest, TraversalBudget, WorkingTreeOverlayStatus,
+    DeterministicRetriever, EntryPointBucket, EntryPointsQuery, GraphPathRequest,
+    GraphPathRequestInput, IndexFreshness, RetrievalConfidence, RetrievalError, RetrievalExecution,
+    ReviewAbstention, SearchMode, SemanticReadiness, SimilarRequest, TraversalBudget,
+    WorkingTreeOverlayStatus,
 };
-use sqlx_core::{query::query, sql_str::AssertSqlSafe};
+use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention() {
+    let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
+        panic!("live project test database is not configured");
+    };
+    let schema = unique_schema();
+    let settings = DatabaseSettings::parse(&url, Some("12"), Some("10000"))
+        .and_then(|value| value.with_schema(&schema))
+        .unwrap_or_else(|error| panic!("multi-runtime settings failed: {error}"));
+    let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    std::fs::write(
+        project.path().join("service.ts"),
+        "export function boundedWatcher(): number { return 73; }\n",
+    )
+    .unwrap_or_else(|error| panic!("multi-runtime source fixture failed: {error}"));
+
+    let result = async {
+        let coordinator = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("coordinator runtime connect failed: {error}"));
+        let project_id = coordinator
+            .register_agent_state_project()
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime project registration failed: {error}"));
+        let blocker = coordinator
+            .database()
+            .acquire_lease(LeaseRequest::new(
+                LeaseTarget::new(project_id.clone(), ProjectOperation::Migration, None),
+                LeaseOwner::new(process::id(), "multi-runtime-index-blocker"),
+                Duration::from_secs(60),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime blocker lease failed: {error}"));
+
+        let options = IndexOptions::default()
+            .with_force(true)
+            .with_history_refresh(false);
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let runtime = ProjectRuntime::connect(project.path(), &settings)
+                .await
+                .unwrap_or_else(|error| panic!("contending runtime connect failed: {error}"));
+            tasks.push(tokio::spawn(async move {
+                let indexed = runtime.index(options).await;
+                (runtime, indexed)
+            }));
+        }
+        let mut contenders = Vec::new();
+        for task in tasks {
+            let (runtime, indexed) = task
+                .await
+                .unwrap_or_else(|error| panic!("contending runtime task failed: {error}"));
+            assert_eq!(indexed, Err(ProjectError::IndexFailed));
+            contenders.push(runtime);
+        }
+        let counts_sql = format!(
+            r#"SELECT
+                    count(*) FILTER (WHERE state = 'staging')::bigint AS staging,
+                    count(*) FILTER (WHERE state = 'failed')::bigint AS failed
+                FROM "{schema}"."index_generations"
+                WHERE project_id = CAST($1 AS uuid)"#
+        );
+        let pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime count connection failed: {error}"));
+        let counts = query(AssertSqlSafe(counts_sql.clone()))
+            .bind(project_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime generation count failed: {error}"));
+        assert_eq!(counts.try_get::<i64, _>("staging").ok(), Some(0));
+        assert_eq!(counts.try_get::<i64, _>("failed").ok(), Some(4));
+
+        coordinator
+            .database()
+            .release_lease(&blocker)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime blocker lease did not release: {error}"));
+        let published = coordinator
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime recovery index failed: {error}"));
+        assert!(published.published);
+        assert!(matches!(
+            published.retention,
+            GenerationRetentionStatus::Completed { report }
+                if report.failed_removed == 4 && report.staging_remaining == 0
+        ));
+        let status = coordinator
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("multi-runtime status failed: {error}"));
+        let storage = status
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.generation_storage)
+            .unwrap_or_else(|| panic!("multi-runtime storage summary was missing"));
+        assert_eq!(storage.staging, 0);
+        assert_eq!(storage.failed, 0);
+        assert_eq!(storage.current, 1);
+        assert!(storage.estimated_retained_bytes > 0);
+
+        for runtime in contenders {
+            runtime.close().await;
+        }
+        coordinator.close().await;
+        pool.close().await;
+    }
+    .await;
+
+    drop_schema(&settings, &schema).await;
+    result
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
@@ -94,14 +217,14 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
         let service_path = NormalizedPath::parse("src/service.ts")
             .unwrap_or_else(|error| panic!("service cache path failed: {error}"));
         let service_hash = ContentDigest::from_bytes(*blake3::hash(&service_bytes).as_bytes());
-        let exact_key = NativeParseCacheKey::new(
-            first.project_id.clone(),
-            native_extractor_contract_digest(),
-            service_path.clone(),
-            SourceLanguage::TypeScript,
-            service_hash.clone(),
-            u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
-        );
+        let exact_key = NativeParseCacheKey::new(NativeParseCacheKeyInput {
+            project_id: first.project_id.clone(),
+            extractor_contract_digest: native_extractor_contract_digest(),
+            path: service_path.clone(),
+            language: SourceLanguage::TypeScript,
+            content_hash: service_hash.clone(),
+            source_bytes: u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
+        });
         assert!(
             runtime
                 .database()
@@ -110,14 +233,17 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
                 .unwrap_or_else(|error| panic!("exact cache lookup failed: {error}"))
                 .is_some()
         );
-        let changed_contract_key = NativeParseCacheKey::new(
-            first.project_id.clone(),
-            ContentDigest::from_bytes(*blake3::hash(b"changed-extractor-contract").as_bytes()),
-            service_path,
-            SourceLanguage::TypeScript,
-            service_hash,
-            u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
-        );
+        let changed_contract_key = NativeParseCacheKey::new(NativeParseCacheKeyInput {
+            project_id: first.project_id.clone(),
+            extractor_contract_digest: ContentDigest::from_bytes(*blake3::hash(
+                b"changed-extractor-contract",
+            )
+            .as_bytes()),
+            path: service_path,
+            language: SourceLanguage::TypeScript,
+            content_hash: service_hash,
+            source_bytes: u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
+        });
         assert!(
             runtime
                 .database()
@@ -221,7 +347,11 @@ async fn assert_complete_checkout_call(
 ) {
     let snapshot = runtime
         .database()
-        .current_interchange_snapshot(project_id, 10_000, Duration::from_secs(30))
+        .current_interchange_snapshot(InterchangeSnapshotRequest {
+            project_id,
+            maximum_rows: 10_000,
+            statement_timeout: Duration::from_secs(30),
+        })
         .await
         .unwrap_or_else(|error| panic!("incremental graph snapshot failed: {error}"));
     let caller = snapshot
@@ -280,8 +410,7 @@ export function verifyJwtSignature(token: string): boolean {
             .database()
             .search_current_names_fuzzy(
                 SearchQuery::new(
-                    indexed.project_id.clone(),
-                    indexed.generation_id.clone(),
+                    CurrentGenerationLookup::new(&indexed.project_id, &indexed.generation_id),
                     "verfyJwtSignatre",
                     10,
                 ),
@@ -381,8 +510,12 @@ async fn scip_export_and_persistent_partial_import_preserve_exact_graph_and_unco
 
         let imported = runtime
             .import_scip_with_cancellation(
-                ScipImportRequest::new("partial.scip", 1024 * 1024, 10_000, 4)
-                    .unwrap_or_else(|error| panic!("SCIP import request failed: {error}")),
+                ScipImportRequest::new(
+                    "partial.scip",
+                    ScipImportLimits::new(1024 * 1024, 10_000, 4)
+                        .unwrap_or_else(|error| panic!("SCIP import limits failed: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("SCIP import request failed: {error}")),
                 ProjectCancellation::new(),
             )
             .await
@@ -399,11 +532,11 @@ async fn scip_export_and_persistent_partial_import_preserve_exact_graph_and_unco
         assert!(overlay.exact_typed_edges > 0);
         let snapshot = runtime
             .database()
-            .current_interchange_snapshot(
-                &imported.index.project_id,
-                10_000,
-                Duration::from_secs(30),
-            )
+            .current_interchange_snapshot(InterchangeSnapshotRequest {
+                project_id: &imported.index.project_id,
+                maximum_rows: 10_000,
+                statement_timeout: Duration::from_secs(30),
+            })
             .await
             .unwrap_or_else(|error| panic!("SCIP current snapshot failed: {error}"));
         assert_eq!(snapshot.files.len(), 2);
@@ -489,8 +622,7 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
         let hits = runtime
             .database()
             .search_current_code(SearchQuery::new(
-                first.project_id.clone(),
-                first.generation_id.clone(),
+                CurrentGenerationLookup::new(&first.project_id, &first.generation_id),
                 "verify jwt signature",
                 5,
             ))
@@ -684,12 +816,12 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
             .unwrap_or_else(|error| panic!("graph path budget failed: {error}"));
         let calls_path = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize.clone(),
-                    parse.clone(),
-                    path_budget,
-                )
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize.clone(),
+                    target: parse.clone(),
+                    budget: path_budget,
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -715,12 +847,12 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
 
         let filtered_out = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize.clone(),
-                    parse.clone(),
-                    path_budget,
-                )
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize.clone(),
+                    target: parse.clone(),
+                    budget: path_budget,
+                })
                 .with_edge_kind(EdgeKind::Imports),
             )
             .await
@@ -730,13 +862,13 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
 
         let depth_limited = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize.clone(),
-                    parse.clone(),
-                    TraversalBudget::new(1, 20)
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize.clone(),
+                    target: parse.clone(),
+                    budget: TraversalBudget::new(1, 20)
                         .unwrap_or_else(|error| panic!("depth path budget failed: {error}")),
-                )
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -746,13 +878,13 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
 
         let node_limited = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize,
-                    parse,
-                    TraversalBudget::new(4, 1)
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize,
+                    target: parse,
+                    budget: TraversalBudget::new(4, 1)
                         .unwrap_or_else(|error| panic!("node path budget failed: {error}")),
-                )
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -778,8 +910,8 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
             .await
             .unwrap_or_else(|error| panic!("embedding sweep failed: {error}"));
         assert!(embedded.readiness().ready());
-        assert_eq!(embedded.readiness().documents(), 4);
-        assert_eq!(embedded.readiness().embedded(), 4);
+        assert_eq!(embedded.readiness().documents(), 7);
+        assert_eq!(embedded.readiness().embedded(), 7);
         let similar = retriever
             .similar(
                 &SimilarRequest::new(first.project_id.clone(), symbol_id.clone(), 2)
@@ -803,7 +935,7 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
                 .iter()
                 .all(|hit| hit.symbol().symbol_id() != Some(&symbol_id))
         );
-        assert!(!similar.truncated());
+        assert!(similar.truncated());
         let model_a_id = similar.model().model_id().clone();
         let hybrid = runtime
             .search_with_client(RetrievalClientRequest::new(
@@ -938,11 +1070,11 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
         );
         let supplied_diff = "diff --git a/auth.ts b/auth.ts\n--- a/auth.ts\n+++ b/auth.ts\n@@ -1,3 +1 @@\n-export function parseToken(token: string): boolean { return token.length > 0; }\n-export function verifyJwtSignature(token: string): boolean { return parseToken(token); }\n-export function authorizeRequest(token: string): boolean { return verifyJwtSignature(token); }\n+export function rejectExpiredJwt(token: string): boolean { return token.length === 0; }\n";
         let diff_review = runtime
-            .review_diff_with_cancellation(
+            .review_diff_with_cancellation(DiffReviewInput::new(
                 supplied_diff,
                 DiffReviewOptions::default(),
                 ProjectCancellation::new(),
-            )
+            ))
             .await
             .unwrap_or_else(|error| panic!("supplied-diff review failed: {error}"));
         let diff_review = serde_json::to_value(diff_review)
@@ -1066,8 +1198,10 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             runtime
                 .database()
                 .exact_current_references_by_name(ExactTextLookup::new(
-                    &disabled.project_id,
-                    &disabled.generation_id,
+                    CurrentGenerationLookup::new(
+                        &disabled.project_id,
+                        &disabled.generation_id,
+                    ),
                     "target",
                     10,
                 ))
@@ -1079,8 +1213,7 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             runtime
                 .database()
                 .search_current_intent(SearchQuery::new(
-                    disabled.project_id.clone(),
-                    disabled.generation_id.clone(),
+                    CurrentGenerationLookup::new(&disabled.project_id, &disabled.generation_id),
                     "sensitive implementation notes",
                     10,
                 ))
@@ -1091,13 +1224,13 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
         let retriever = DeterministicRetriever::new(runtime.database().clone());
         let path = retriever
             .path(
-                &GraphPathRequest::new(
-                    disabled.project_id.clone(),
-                    caller,
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: disabled.project_id.clone(),
+                    start: caller,
                     target,
-                    TraversalBudget::new(2, 10)
+                    budget: TraversalBudget::new(2, 10)
                         .unwrap_or_else(|error| panic!("graph policy budget failed: {error}")),
-                )
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -1146,8 +1279,7 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             !runtime
                 .database()
                 .exact_current_references_by_name(ExactTextLookup::new(
-                    &enabled.project_id,
-                    &enabled.generation_id,
+                    CurrentGenerationLookup::new(&enabled.project_id, &enabled.generation_id),
                     "target",
                     10,
                 ))
@@ -1159,8 +1291,7 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             !runtime
                 .database()
                 .search_current_intent(SearchQuery::new(
-                    enabled.project_id.clone(),
-                    enabled.generation_id.clone(),
+                    CurrentGenerationLookup::new(&enabled.project_id, &enabled.generation_id),
                     "sensitive implementation notes",
                     10,
                 ))
@@ -1539,13 +1670,13 @@ export function partialBeta(input: number, limit: number): number {
                 .unwrap_or_else(|error| panic!("chat settings failed: {error}")),
         )
         .unwrap_or_else(|error| panic!("chat client failed: {error}"));
-        let judged = judge_dead_code_candidates(
-            &chat,
-            vec![abandoned],
-            DeadCodeJudgeOptions::new(1)
+        let judged = judge_dead_code_candidates(DeadCodeJudgeRequest {
+            client: &chat,
+            candidates: vec![abandoned],
+            options: DeadCodeJudgeOptions::new(1)
                 .unwrap_or_else(|error| panic!("judge options failed: {error}")),
-            ProjectCancellation::new(),
-        )
+            cancellation: ProjectCancellation::new(),
+        })
         .await
         .unwrap_or_else(|error| panic!("dead-code judge failed: {error}"));
         assert_eq!(judged.results().len(), 1);
@@ -1771,7 +1902,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
             .unwrap_or_else(|error| panic!("history anchor path failed: {error}"));
         let history = runtime
             .database()
-            .current_file_history(&indexed.project_id, Some(&a), 0, 10)
+            .current_file_history(FileHistoryQuery::new(&indexed.project_id, 10).for_path(&a))
             .await
             .unwrap_or_else(|error| panic!("history rows failed: {error}"));
         let history = serde_json::to_value(history)
@@ -1780,7 +1911,9 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         assert_eq!(history[0]["authorCount"], 1);
         let partners = runtime
             .database()
-            .current_file_cochanges(&indexed.project_id, &a, 2, 10)
+            .current_file_cochanges(
+                FileCochangeQuery::new(&indexed.project_id, &a, 10).with_minimum_commits(2),
+            )
             .await
             .unwrap_or_else(|error| panic!("cochange rows failed: {error}"));
         let partners = serde_json::to_value(partners)
@@ -1886,7 +2019,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         assert!(
             runtime
                 .database()
-                .current_file_history(&indexed.project_id, None, 0, 10)
+                .current_file_history(FileHistoryQuery::new(&indexed.project_id, 10))
                 .await
                 .unwrap_or_else(|error| panic!("disabled history query failed: {error}"))
                 .is_empty()
@@ -1894,7 +2027,9 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         assert!(
             runtime
                 .database()
-                .current_file_cochanges(&indexed.project_id, &a, 1, 10)
+                .current_file_cochanges(
+                    FileCochangeQuery::new(&indexed.project_id, &a, 10).with_minimum_commits(1),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("disabled cochange query failed: {error}"))
                 .is_empty()
@@ -1995,7 +2130,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         .await;
         let alpha_issues = runtime
             .database()
-            .current_symbol_issues(&indexed.project_id, &alpha, 50)
+            .current_symbol_issues(SymbolIssueQuery {
+                project_id: &indexed.project_id,
+                symbol_id: &alpha,
+                limit: 50,
+            })
             .await
             .unwrap_or_else(|error| panic!("alpha issue read failed: {error}"));
         assert_eq!(
@@ -2012,7 +2151,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         );
         let added = runtime
             .database()
-            .current_symbol_issues(&indexed.project_id, &brand_new, 50)
+            .current_symbol_issues(SymbolIssueQuery {
+                project_id: &indexed.project_id,
+                symbol_id: &brand_new,
+                limit: 50,
+            })
             .await
             .unwrap_or_else(|error| panic!("added issue read failed: {error}"));
         assert!(added.iter().any(|issue| {
@@ -2020,7 +2163,12 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         }));
         let peers = runtime
             .database()
-            .current_symbol_issue_peers(&indexed.project_id, &alpha, 2, 10)
+            .current_symbol_issue_peers(SymbolIssuePeerQuery {
+                project_id: &indexed.project_id,
+                symbol_id: &alpha,
+                minimum_shared: 2,
+                limit: 10,
+            })
             .await
             .unwrap_or_else(|error| panic!("issue peer read failed: {error}"));
         assert_eq!(peers.len(), 1);
@@ -2029,12 +2177,12 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         assert_eq!(peers[0].shared_commits.len(), 2);
         let commit_groups = runtime
             .database()
-            .current_issue_commit_symbol_peers(
-                &indexed.project_id,
-                &alpha,
-                &peers[0].shared_commits,
-                10,
-            )
+            .current_issue_commit_symbol_peers(IssueCommitSymbolPeerQuery {
+                project_id: &indexed.project_id,
+                excluded_symbol_id: &alpha,
+                commits: &peers[0].shared_commits,
+                per_commit_limit: 10,
+            })
             .await
             .unwrap_or_else(|error| panic!("issue commit peer read failed: {error}"));
         assert_eq!(commit_groups.len(), 2);
@@ -2063,7 +2211,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         assert_ne!(refreshed.generation_id, indexed.generation_id);
         let current_alpha_issues = runtime
             .database()
-            .current_symbol_issues(&refreshed.project_id, &alpha, 50)
+            .current_symbol_issues(SymbolIssueQuery {
+                project_id: &refreshed.project_id,
+                symbol_id: &alpha,
+                limit: 50,
+            })
             .await
             .unwrap_or_else(|error| panic!("refreshed alpha issue read failed: {error}"));
         assert!(
@@ -2074,7 +2226,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         assert!(
             runtime
                 .database()
-                .current_symbol_issues(&refreshed.project_id, &brand_new, 50)
+                .current_symbol_issues(SymbolIssueQuery {
+                    project_id: &refreshed.project_id,
+                    symbol_id: &brand_new,
+                    limit: 50,
+                })
                 .await
                 .unwrap_or_else(|error| panic!("removed symbol issue read failed: {error}"))
                 .is_empty()
@@ -2189,11 +2345,11 @@ async fn import_audit_classifies_and_filters_complete_fresh_evidence() {
             .await
             .unwrap_or_else(|error| panic!("import fixture index failed: {error}"));
         let report = runtime
-            .audit_imports(
+            .audit_imports(ImportAuditRequest::new(
                 indexed.project_id.clone(),
                 ImportAuditOptions::default().with_source(ImportAuditSource::All),
                 ProjectCancellation::new(),
-            )
+            ))
             .await
             .unwrap_or_else(|error| panic!("import audit failed: {error}"));
         let report = serde_json::to_value(report)
@@ -2238,11 +2394,11 @@ async fn import_audit_classifies_and_filters_complete_fresh_evidence() {
             .and_then(|options| options.with_language(Some("TypeScript")))
             .unwrap_or_else(|error| panic!("import filters failed: {error}"));
         let filtered = runtime
-            .audit_imports(
+            .audit_imports(ImportAuditRequest::new(
                 indexed.project_id.clone(),
                 filtered_options,
                 ProjectCancellation::new(),
-            )
+            ))
             .await
             .unwrap_or_else(|error| panic!("filtered import audit failed: {error}"));
         let filtered = serde_json::to_value(filtered)
@@ -2253,11 +2409,11 @@ async fn import_audit_classifies_and_filters_complete_fresh_evidence() {
         std::fs::write(project.path().join("src/direct.ts"), "export default 2;\n")
             .unwrap_or_else(|error| panic!("stale import fixture failed: {error}"));
         let stale = runtime
-            .audit_imports(
+            .audit_imports(ImportAuditRequest::new(
                 indexed.project_id,
                 ImportAuditOptions::default(),
                 ProjectCancellation::new(),
-            )
+            ))
             .await;
         assert_eq!(stale, Err(ImportAuditError::SourceChanged));
         runtime.close().await;
@@ -2319,13 +2475,13 @@ async fn rename_plan_combines_exact_references_and_attributed_textual_mentions()
             .pop()
             .unwrap_or_else(|| panic!("rename definition was missing"));
         let plan = runtime
-            .plan_rename(
-                indexed.project_id.clone(),
+            .plan_rename(RenamePlanRequest {
+                project_id: indexed.project_id.clone(),
                 definition,
-                RenamePlanOptions::new(500, 30)
+                options: RenamePlanOptions::new(500, 30)
                     .unwrap_or_else(|error| panic!("rename options failed: {error}")),
-                ProjectCancellation::new(),
-            )
+                cancellation: ProjectCancellation::new(),
+            })
             .await
             .unwrap_or_else(|error| panic!("rename plan failed: {error}"));
         let plan = serde_json::to_value(plan)
@@ -2375,13 +2531,13 @@ async fn rename_plan_combines_exact_references_and_attributed_textual_mentions()
             .pop()
             .unwrap_or_else(|| panic!("stale definition was missing"));
         let stale = runtime
-            .plan_rename(
-                indexed.project_id,
-                stale_definition,
-                RenamePlanOptions::new(500, 30)
+            .plan_rename(RenamePlanRequest {
+                project_id: indexed.project_id,
+                definition: stale_definition,
+                options: RenamePlanOptions::new(500, 30)
                     .unwrap_or_else(|error| panic!("stale rename options failed: {error}")),
-                ProjectCancellation::new(),
-            )
+                cancellation: ProjectCancellation::new(),
+            })
             .await;
         assert_eq!(stale, Err(RenamePlanError::SourceChanged));
         runtime.close().await;
@@ -2436,8 +2592,7 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
         let title_hits = runtime
             .database()
             .search_current_code(SearchQuery::new(
-                indexed.project_id.clone(),
-                indexed.generation_id.clone(),
+                CurrentGenerationLookup::new(&indexed.project_id, &indexed.generation_id),
                 "returns leaf value",
                 10,
             ))
@@ -2456,7 +2611,13 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
             .unwrap_or_else(|error| panic!("missing path fixture failed: {error}"));
         let impact = runtime
             .database()
-            .current_file_test_impact(&indexed.project_id, &[leaf.clone(), missing], 5, 40, None)
+            .current_file_test_impact(FileTestImpactQuery {
+                project_id: &indexed.project_id,
+                paths: &[leaf.clone(), missing],
+                max_depth: 5,
+                limit: 40,
+                test_path_regex: None,
+            })
             .await
             .unwrap_or_else(|error| panic!("test-impact query failed: {error}"))
             .unwrap_or_else(|| panic!("test-impact generation was missing"));
@@ -2497,7 +2658,13 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
 
         let filtered = runtime
             .database()
-            .current_file_test_impact(&indexed.project_id, &[leaf], 5, 40, Some(".*\\.spec\\.ts"))
+            .current_file_test_impact(FileTestImpactQuery {
+                project_id: &indexed.project_id,
+                paths: &[leaf],
+                max_depth: 5,
+                limit: 40,
+                test_path_regex: Some(".*\\.spec\\.ts"),
+            })
             .await
             .unwrap_or_else(|error| panic!("filtered test-impact query failed: {error}"))
             .unwrap_or_else(|| panic!("filtered test-impact generation was missing"));
@@ -2638,7 +2805,11 @@ async fn profiled_index_skips_oversized_sources_without_weakening_the_published_
         }
         let graph = runtime
             .database()
-            .current_interchange_snapshot(&first.project_id, 100, Duration::from_secs(30))
+            .current_interchange_snapshot(InterchangeSnapshotRequest {
+                project_id: &first.project_id,
+                maximum_rows: 100,
+                statement_timeout: Duration::from_secs(30),
+            })
             .await
             .unwrap_or_else(|error| panic!("profile graph snapshot failed: {error}"));
         assert_eq!(graph.files.len(), 1);
@@ -2685,8 +2856,7 @@ async fn exact_symbol_id(
     let matches = runtime
         .database()
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            project_id,
-            generation_id,
+            CurrentGenerationLookup::new(project_id, generation_id),
             qualified_name,
             10,
         ))

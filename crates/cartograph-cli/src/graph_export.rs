@@ -5,7 +5,9 @@ use std::{
     time::Duration,
 };
 
-use cartograph_db::{CartographDatabase, InterchangeEdge, InterchangeSnapshot};
+use cartograph_db::{
+    CartographDatabase, InterchangeEdge, InterchangeSnapshot, InterchangeSnapshotRequest,
+};
 use cartograph_domain::ProjectId;
 use clap::ValueEnum;
 use serde::Serialize;
@@ -14,7 +16,7 @@ const DEFAULT_MAXIMUM_ROWS: u64 = 5_000_000;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 pub(super) const DEFAULT_NODE_LIMIT: u16 = 1_000;
-pub(super) const MAXIMUM_NODE_LIMIT: u16 = 50_000;
+const MAXIMUM_NODE_LIMIT: u16 = 50_000;
 
 const NODE_KINDS: &[&str] = &[
     "file",
@@ -203,17 +205,21 @@ pub(super) async fn run_graph_export(
     let languages = parse_unrestricted_filter(request.languages.as_deref());
     let file_prefix = request.file_prefix.as_deref().map(normalize_prefix);
     let raw = database
-        .current_interchange_snapshot(&request.project_id, DEFAULT_MAXIMUM_ROWS, SNAPSHOT_TIMEOUT)
+        .current_interchange_snapshot(InterchangeSnapshotRequest {
+            project_id: &request.project_id,
+            maximum_rows: DEFAULT_MAXIMUM_ROWS,
+            statement_timeout: SNAPSHOT_TIMEOUT,
+        })
         .await
         .map_err(|error| error.to_string())?;
-    let snapshot = build_snapshot(
+    let snapshot = build_snapshot(GraphSnapshotInput {
         raw,
-        request.limit,
+        limit: request.limit,
         kinds,
         edge_kinds,
         languages,
         file_prefix,
-    );
+    });
     let artifact = format_snapshot(&snapshot, request.format)?;
     if let Some(output) = request.output {
         write_artifact(&output, artifact.as_bytes())?;
@@ -228,14 +234,24 @@ pub(super) async fn run_graph_export(
     }
 }
 
-fn build_snapshot(
+struct GraphSnapshotInput {
     raw: InterchangeSnapshot,
     limit: u16,
     kinds: Vec<String>,
     edge_kinds: Vec<String>,
     languages: Vec<String>,
     file_prefix: Option<String>,
-) -> GraphExportSnapshot {
+}
+
+fn build_snapshot(input: GraphSnapshotInput) -> GraphExportSnapshot {
+    let GraphSnapshotInput {
+        raw,
+        limit,
+        kinds,
+        edge_kinds,
+        languages,
+        file_prefix,
+    } = input;
     let kind_filter = nonempty_set(&kinds);
     let edge_filter = nonempty_set(&edge_kinds);
     let language_filter = nonempty_set(&languages);
@@ -609,14 +625,14 @@ mod tests {
             }],
             references: Vec::new(),
         };
-        let snapshot = build_snapshot(
+        let snapshot = build_snapshot(GraphSnapshotInput {
             raw,
-            2,
-            vec!["function".to_owned()],
-            vec!["calls".to_owned()],
-            vec!["rust".to_owned()],
-            Some("src/".to_owned()),
-        );
+            limit: 2,
+            kinds: vec!["function".to_owned()],
+            edge_kinds: vec!["calls".to_owned()],
+            languages: vec!["rust".to_owned()],
+            file_prefix: Some("src/".to_owned()),
+        });
         assert_eq!(snapshot.stats.exported_nodes, 2);
         assert_eq!(snapshot.stats.exported_edges, 1);
         assert!(format_dot(&snapshot).contains("digraph cartograph"));

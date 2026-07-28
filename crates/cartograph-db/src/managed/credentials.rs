@@ -14,7 +14,7 @@ use super::ManagedDatabaseError;
 
 const DATABASE_USER: &str = "cartograph";
 const DATABASE_NAME: &str = "cartograph";
-const GENERATED_PASSWORD_BYTES: usize = 32;
+const GENERATED_CREDENTIAL_BYTES: usize = 32;
 const MAX_CREDENTIAL_BYTES: u64 = 128;
 #[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
@@ -39,7 +39,7 @@ pub(super) struct LifecycleLock {
 }
 
 pub(super) struct DatabaseCredentials {
-    password: SecretString,
+    value: SecretString,
 }
 
 impl CredentialStore {
@@ -87,7 +87,7 @@ impl CredentialStore {
             NamedTempFile::new_in(parent).map_err(|_| ManagedDatabaseError::CredentialWrite)?;
         set_private_permissions(temporary.as_file(), temporary.path())?;
         temporary
-            .write_all(credentials.render_password().as_bytes())
+            .write_all(credentials.render_value().as_bytes())
             .map_err(|_| ManagedDatabaseError::CredentialWrite)?;
         temporary
             .as_file()
@@ -172,29 +172,29 @@ impl CredentialStore {
 
 impl DatabaseCredentials {
     fn generate() -> Result<Self, ManagedDatabaseError> {
-        let mut random = [0_u8; GENERATED_PASSWORD_BYTES];
+        let mut random = [0_u8; GENERATED_CREDENTIAL_BYTES];
         getrandom::fill(&mut random).map_err(|_| ManagedDatabaseError::CredentialRandom)?;
-        let mut password = String::with_capacity(GENERATED_PASSWORD_BYTES * 2);
+        let mut credential = String::with_capacity(GENERATED_CREDENTIAL_BYTES * 2);
         for byte in random {
-            password.push_str(&format!("{byte:02x}"));
+            credential.push_str(&format!("{byte:02x}"));
         }
         Ok(Self {
-            password: SecretString::from(password),
+            value: SecretString::from(credential),
         })
     }
 
     fn parse(contents: &str) -> Result<Self, ManagedDatabaseError> {
-        let password = contents.strip_suffix('\n').unwrap_or(contents);
-        if password.len() < 24
-            || password.contains(['\r', '\n'])
-            || !password
+        let credential = contents.strip_suffix('\n').unwrap_or(contents);
+        if credential.len() < 24
+            || credential.contains(['\r', '\n'])
+            || !credential
                 .chars()
                 .all(|character| character.is_ascii_hexdigit())
         {
             return Err(ManagedDatabaseError::CredentialFormat);
         }
         Ok(Self {
-            password: SecretString::from(password.to_owned()),
+            value: SecretString::from(credential.to_owned()),
         })
     }
 
@@ -203,17 +203,21 @@ impl DatabaseCredentials {
             .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
         url.set_username(DATABASE_USER)
             .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
-        url.set_password(Some(self.password.expose_secret()))
-            .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
+        set_url_credential(&mut url, self.value.expose_secret())?;
         url.set_port(Some(port))
             .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
         url.set_path(DATABASE_NAME);
         Ok(SecretString::from(url.to_string()))
     }
 
-    fn render_password(&self) -> String {
-        format!("{}\n", self.password.expose_secret())
+    fn render_value(&self) -> String {
+        format!("{}\n", self.value.expose_secret())
     }
+}
+
+fn set_url_credential(url: &mut url::Url, credential: &str) -> Result<(), ManagedDatabaseError> {
+    url.set_password(Some(credential))
+        .map_err(|_| ManagedDatabaseError::CredentialFormat)
 }
 
 fn reject_symlink(path: &Path) -> Result<(), ManagedDatabaseError> {

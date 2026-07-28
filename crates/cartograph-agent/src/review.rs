@@ -303,7 +303,7 @@ pub async fn discover_git_comparison(
     }
 
     let repository = run_git(&root, &["rev-parse", "--is-inside-work-tree"]).await?;
-    if !repository.success || trim_ascii(&repository.stdout) != b"true" {
+    if !repository.success || crate::trim_ascii_bytes(&repository.stdout) != b"true" {
         return Err(ReviewError::NotGitRepository);
     }
 
@@ -397,16 +397,39 @@ pub(super) struct GitOutput {
     pub(super) stdout: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct GitCommandBounds {
+    maximum_output_bytes: usize,
+    command_timeout: Duration,
+}
+
+impl GitCommandBounds {
+    pub(super) const fn new(maximum_output_bytes: usize, command_timeout: Duration) -> Self {
+        Self {
+            maximum_output_bytes,
+            command_timeout,
+        }
+    }
+}
+
 pub(super) async fn run_git(root: &Path, arguments: &[&str]) -> Result<GitOutput, ReviewError> {
-    run_git_bounded(root, arguments, MAX_GIT_OUTPUT_BYTES, GIT_COMMAND_TIMEOUT).await
+    run_git_bounded(
+        root,
+        arguments,
+        GitCommandBounds::new(MAX_GIT_OUTPUT_BYTES, GIT_COMMAND_TIMEOUT),
+    )
+    .await
 }
 
 pub(super) async fn run_git_bounded(
     root: &Path,
     arguments: &[&str],
-    maximum_output_bytes: usize,
-    command_timeout: Duration,
+    bounds: GitCommandBounds,
 ) -> Result<GitOutput, ReviewError> {
+    let GitCommandBounds {
+        maximum_output_bytes,
+        command_timeout,
+    } = bounds;
     if maximum_output_bytes == 0
         || maximum_output_bytes > HARD_MAX_GIT_OUTPUT_BYTES
         || command_timeout.is_zero()
@@ -490,8 +513,8 @@ async fn terminate(child: &mut Child) {
 }
 
 fn parse_commit(output: &[u8]) -> Result<String, ReviewError> {
-    let text =
-        std::str::from_utf8(trim_ascii(output)).map_err(|_| ReviewError::GitOutputInvalid)?;
+    let text = std::str::from_utf8(crate::trim_ascii_bytes(output))
+        .map_err(|_| ReviewError::GitOutputInvalid)?;
     let valid = matches!(text.len(), 40 | 64) && text.bytes().all(|byte| byte.is_ascii_hexdigit());
     if valid {
         Ok(text.to_ascii_lowercase())
@@ -558,18 +581,6 @@ fn parse_path(raw: &[u8]) -> Result<NormalizedPath, ReviewError> {
         return Err(ReviewError::GitOutputInvalid);
     }
     NormalizedPath::parse(path).map_err(|_| ReviewError::GitOutputInvalid)
-}
-
-fn trim_ascii(output: &[u8]) -> &[u8] {
-    let start = output
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(output.len());
-    let end = output
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map_or(start, |index| index + 1);
-    &output[start..end]
 }
 
 pub(super) fn valid_git_ref(reference: &str) -> bool {

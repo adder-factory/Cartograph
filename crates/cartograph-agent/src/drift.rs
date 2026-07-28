@@ -129,8 +129,11 @@ impl ProjectRuntime {
         let worker_cancellation = cancellation.clone();
         let scan = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            scan_file_drift(&root, fingerprints, options, || {
-                worker_cancellation.is_cancelled()
+            scan_file_drift(DriftScanRequest {
+                root: &root,
+                fingerprints,
+                options,
+                cancelled: || worker_cancellation.is_cancelled(),
             })
         })
         .await
@@ -223,15 +226,23 @@ impl PathBucket {
     }
 }
 
-fn scan_file_drift<Cancel>(
-    root: &std::path::Path,
+struct DriftScanRequest<'a, Cancel> {
+    root: &'a std::path::Path,
     fingerprints: Vec<IndexedFileFingerprint>,
     options: FileDriftOptions,
-    mut cancelled: Cancel,
-) -> Result<DriftScan, FileDriftError>
+    cancelled: Cancel,
+}
+
+fn scan_file_drift<Cancel>(input: DriftScanRequest<'_, Cancel>) -> Result<DriftScan, FileDriftError>
 where
     Cancel: FnMut() -> bool,
 {
+    let DriftScanRequest {
+        root,
+        fingerprints,
+        options,
+        mut cancelled,
+    } = input;
     let source_root = SourceRoot::open(root).map_err(|_| FileDriftError::SourceUnavailable)?;
     let discovery = discovery_limits().map_err(|_| FileDriftError::SourceUnavailable)?;
     let read_limits = source_limits().map_err(|_| FileDriftError::SourceUnavailable)?;

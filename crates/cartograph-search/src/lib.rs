@@ -10,12 +10,12 @@ mod review;
 mod traversal;
 
 pub use cartograph_db::{EntryPointBucket, SimilarSymbolHit, SimilarSymbolsResult};
-pub use engine::DeterministicRetriever;
+pub use engine::{DeterministicRetriever, FuzzyNameRequest, GenerationLexicalRequest};
 pub use hybrid::{
     ChannelCandidate, ChannelContribution, ChannelResults, FusedSearchItem, HybridSearchInput,
     HybridSearchPacket, LexicalComponent, RetrievalAbstention, RetrievalChannel, RetrievalChannels,
-    RetrievalDocument, RetrievalExecution, RetrievalFallback, SearchMode, SemanticReadiness,
-    fuse_search,
+    RetrievalDocument, RetrievalDocumentInput, RetrievalExecution, RetrievalFallback, SearchMode,
+    SemanticReadiness, fuse_search,
 };
 pub use intent::{ContextGraphDirection, TaskIntent};
 pub use model::{
@@ -24,11 +24,12 @@ pub use model::{
     ContextBudgetInput, ContextPacket, ContextRequest, ContextRequestOptions, EditCandidate,
     EditCandidateBasis, EditCandidateSet, EntryPointsQuery, EntryPointsResult, EvidenceItem,
     EvidenceReason, ExactPathQuery, ExactPathResult, ExactTextQuery, FileInventoryQuery,
-    FileInventoryResult, GenerationEvidence, GraphEvidence, GraphPathRequest, GraphPathResult,
-    GraphPathStep, IndexFreshness, LexicalQuery, ReferenceEvidence, ReferenceSpanPrecision,
-    RetrievalConfidence, RetrievalError, ReviewAbstention, ReviewBudget, ReviewBudgetInput,
-    ReviewPacket, ReviewRequest, ReviewRequestOptions, ReviewTruncation, SimilarRequest,
-    SourceRangeQuery, SourceRangeResult, TraversalBudget, TraversalDirection, TraversalHop,
+    FileInventoryResult, GenerationEvidence, GraphEvidence, GraphPathRequest,
+    GraphPathRequestInput, GraphPathResult, GraphPathStep, IndexFreshness, LexicalQuery,
+    ReferenceEvidence, ReferenceSpanPrecision, RetrievalConfidence, RetrievalError,
+    ReviewAbstention, ReviewBudget, ReviewBudgetInput, ReviewPacket, ReviewRequest,
+    ReviewRequestOptions, ReviewTruncation, SimilarRequest, SourceRangeQuery,
+    SourceRangeQueryInput, SourceRangeResult, TraversalBudget, TraversalDirection, TraversalHop,
     TraversalNode, TraversalRequest, TraversalResult, WORKING_TREE_OVERLAY_MAXIMUM_EXCERPT_BYTES,
     WORKING_TREE_OVERLAY_MAXIMUM_FILES, WORKING_TREE_OVERLAY_MAXIMUM_RESULTS,
     WORKING_TREE_OVERLAY_MAXIMUM_SOURCE_BYTES, WorkingTreeChangeKind, WorkingTreeEvidence,
@@ -1025,10 +1026,18 @@ mod contract_tests {
         assert_eq!(entry_points.bucket(), Some(EntryPointBucket::PublicExports));
         let path = NormalizedPath::parse("src/service.rs")
             .unwrap_or_else(|error| panic!("range path fixture failed: {error}"));
-        assert!(SourceRangeQuery::new(path.clone(), 0, 1, 20).is_err());
-        assert!(SourceRangeQuery::new(path.clone(), 2, 1, 20).is_err());
-        assert!(SourceRangeQuery::new(path.clone(), 1, 100_001, 20).is_err());
-        assert!(SourceRangeQuery::new(path.clone(), 1, 1, 0).is_err());
-        assert!(SourceRangeQuery::new(path, 1, 1, 200).is_ok());
+        let query = |path, start_line, end_line, limit| {
+            SourceRangeQuery::new(SourceRangeQueryInput {
+                path,
+                start_line,
+                end_line,
+                limit,
+            })
+        };
+        assert!(query(path.clone(), 0, 1, 20).is_err());
+        assert!(query(path.clone(), 2, 1, 20).is_err());
+        assert!(query(path.clone(), 1, 100_001, 20).is_err());
+        assert!(query(path.clone(), 1, 1, 0).is_err());
+        assert!(query(path, 1, 1, 200).is_ok());
     }
 }

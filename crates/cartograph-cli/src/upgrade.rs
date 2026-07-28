@@ -16,11 +16,15 @@ use tokio::process::Command;
 
 const REMOTE: &str = "https://github.com/adder-factory/cartograph.git";
 const RELEASE_BASE: &str = "https://github.com/adder-factory/cartograph/releases/download";
+const RELEASES_URL: &str = "https://github.com/adder-factory/cartograph/releases";
 const LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/adder-factory/cartograph/releases/latest";
 const MAXIMUM_TAG_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAXIMUM_CHECKSUM_BYTES: usize = 1024 * 1024;
 const MAXIMUM_BINARY_BYTES: usize = 200 * 1024 * 1024;
+const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+const HIGH_NIBBLE_SHIFT: u8 = 4;
+const LOW_NIBBLE_MASK: u8 = 0x0f;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,9 +160,7 @@ fn report_unknown(current: String, apply: bool, reason: &str) -> UpgradeReport {
         apply_requested: apply,
         applied: false,
         message: format!("Could not resolve the latest Cartograph release: {reason}."),
-        next_steps: vec![
-            "Check https://github.com/adder-factory/cartograph/releases manually.".to_owned(),
-        ],
+        next_steps: vec![format!("Check {RELEASES_URL} manually.")],
     }
 }
 
@@ -231,12 +233,15 @@ async fn apply_release(version: &str) -> Result<PathBuf, String> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(digest.len() * 2);
     for byte in digest {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        output.push(char::from(
+            LOWER_HEX_DIGITS[usize::from(byte >> HIGH_NIBBLE_SHIFT)],
+        ));
+        output.push(char::from(
+            LOWER_HEX_DIGITS[usize::from(byte & LOW_NIBBLE_MASK)],
+        ));
     }
     output
 }
@@ -503,7 +508,7 @@ mod tests {
         assert!(!succeeded(&report));
         let rendered = render(&report);
         assert!(rendered.contains("fixture lookup failed"));
-        assert!(rendered.contains("Check https://github.com/adder-factory/cartograph/releases"));
+        assert!(rendered.contains(RELEASES_URL));
 
         for invalid in ["", "2", "2.0", "2.0.0.1", "two.0.0"] {
             assert!(parse_version(invalid).is_none(), "accepted {invalid}");

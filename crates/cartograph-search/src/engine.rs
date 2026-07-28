@@ -5,10 +5,10 @@ use std::{
 
 use cartograph_db::{
     CartographDatabase, CurrentEntryPointsLookup, CurrentFileLookup, CurrentFileSymbolsLookup,
-    CurrentFilesLookup, CurrentGraphLookup, CurrentReferenceRecord, CurrentSourceRangeLookup,
-    CurrentSymbolRecord, CurrentSymbolSetLookup, EntryPointBucket, ExactTextLookup, GraphDirection,
-    SearchComponent, SearchHit, SearchQuery, SemanticStorageError, SimilarSymbolsInput,
-    SimilarSymbolsRequest, SimilarSymbolsResult,
+    CurrentFilesLookup, CurrentGenerationLookup, CurrentGraphLookup, CurrentReferenceRecord,
+    CurrentSourceRangeLookup, CurrentSymbolRecord, CurrentSymbolSetLookup, EntryPointBucket,
+    ExactTextLookup, GraphDirection, SearchComponent, SearchHit, SearchQuery, SemanticStorageError,
+    SimilarSymbolsInput, SimilarSymbolsRequest, SimilarSymbolsResult, SourceLineRange,
 };
 use cartograph_domain::{
     DocumentKind, EdgeKind, FileId, GenerationId, NormalizedPath, ProjectId, SourceLanguage,
@@ -21,13 +21,13 @@ use crate::{
     EntryPointsQuery, EntryPointsResult, EvidenceItem, EvidenceReason, ExactPathQuery,
     ExactPathResult, ExactTextQuery, FileInventoryQuery, FileInventoryResult, GenerationEvidence,
     GraphPathRequest, GraphPathResult, GraphPathStep, HybridSearchInput, LexicalComponent,
-    LexicalQuery, RetrievalChannel, RetrievalChannels, RetrievalDocument, RetrievalError,
-    ReviewPacket, ReviewRequest, ReviewTruncation, SearchMode, SemanticReadiness, SimilarRequest,
-    SourceRangeQuery, SourceRangeResult, TaskIntent, TraversalDirection, TraversalHop,
-    TraversalNode, TraversalRequest, TraversalResult, fuse_search,
+    LexicalQuery, RetrievalChannel, RetrievalChannels, RetrievalDocument, RetrievalDocumentInput,
+    RetrievalError, ReviewPacket, ReviewRequest, ReviewTruncation, SearchMode, SemanticReadiness,
+    SimilarRequest, SourceRangeQuery, SourceRangeResult, TaskIntent, TraversalDirection,
+    TraversalHop, TraversalNode, TraversalRequest, TraversalResult, fuse_search,
     model::{
-        evidence_from_file, evidence_from_fused_item, evidence_from_reference,
-        evidence_from_symbol, evidence_from_traversal_node,
+        GraphPathResultInput, evidence_from_file, evidence_from_fused_item,
+        evidence_from_reference, evidence_from_symbol, evidence_from_traversal_node,
     },
     packet::{PacketAssembly, assemble_packet},
     review::{ReviewAssembly, assemble_review_packet},
@@ -58,6 +58,121 @@ pub struct DeterministicRetriever {
     database: CartographDatabase,
 }
 
+struct ExactGenerationQuery<'project, Query> {
+    project_id: &'project ProjectId,
+    expected_generation_id: &'project GenerationId,
+    query: Query,
+}
+
+struct LexicalAtInput<'query> {
+    project_id: ProjectId,
+    expected_generation_id: GenerationId,
+    query: &'query LexicalQuery,
+}
+
+trait ExactTextRecordLookup {
+    type Record;
+
+    async fn lookup(
+        database: &CartographDatabase,
+        lookup: ExactTextLookup<'_>,
+    ) -> Result<Vec<Self::Record>, cartograph_db::StorageError>;
+}
+
+struct ExactSymbolLookup;
+
+impl ExactTextRecordLookup for ExactSymbolLookup {
+    type Record = CurrentSymbolRecord;
+
+    async fn lookup(
+        database: &CartographDatabase,
+        lookup: ExactTextLookup<'_>,
+    ) -> Result<Vec<Self::Record>, cartograph_db::StorageError> {
+        database.exact_current_symbols_by_name(lookup).await
+    }
+}
+
+struct ExactReferenceLookup;
+
+impl ExactTextRecordLookup for ExactReferenceLookup {
+    type Record = CurrentReferenceRecord;
+
+    async fn lookup(
+        database: &CartographDatabase,
+        lookup: ExactTextLookup<'_>,
+    ) -> Result<Vec<Self::Record>, cartograph_db::StorageError> {
+        database.exact_current_references_by_name(lookup).await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NamedSearchFlavor {
+    Name,
+    Intent,
+}
+
+struct NamedSearchRequest {
+    project_id: ProjectId,
+    query: LexicalQuery,
+    flavor: NamedSearchFlavor,
+}
+
+impl NamedSearchRequest {
+    const fn new(project_id: ProjectId, query: LexicalQuery, flavor: NamedSearchFlavor) -> Self {
+        Self {
+            project_id,
+            query,
+            flavor,
+        }
+    }
+}
+
+/// Current-generation fuzzy name query with an explicit edit distance.
+pub struct FuzzyNameRequest {
+    project_id: ProjectId,
+    query: LexicalQuery,
+    edit_distance: u8,
+}
+
+impl FuzzyNameRequest {
+    #[must_use]
+    pub const fn new(project_id: ProjectId, query: LexicalQuery, edit_distance: u8) -> Self {
+        Self {
+            project_id,
+            query,
+            edit_distance,
+        }
+    }
+}
+
+/// BM25 channel query fenced to one caller-observed generation.
+pub struct GenerationLexicalRequest {
+    project_id: ProjectId,
+    expected_generation_id: GenerationId,
+    query: LexicalQuery,
+}
+
+impl GenerationLexicalRequest {
+    #[must_use]
+    pub const fn new(
+        project_id: ProjectId,
+        expected_generation_id: GenerationId,
+        query: LexicalQuery,
+    ) -> Self {
+        Self {
+            project_id,
+            expected_generation_id,
+            query,
+        }
+    }
+}
+
+struct TraversalRetryInput<'request> {
+    request: &'request TraversalRequest,
+    kind: TraversalKind,
+    direction: TraversalDirection,
+}
+
 impl DeterministicRetriever {
     /// Bind deterministic retrieval to an established database handle.
     #[must_use]
@@ -71,28 +186,14 @@ impl DeterministicRetriever {
         project_id: &ProjectId,
         query: ExactTextQuery<'_>,
     ) -> Result<Vec<CurrentSymbolRecord>, RetrievalError> {
-        let Some(generation) = self.database.current_generation_record(project_id).await? else {
-            return Ok(Vec::new());
-        };
-        self.exact_name_at(project_id, generation.generation_id(), query)
-            .await
+        exact_current_records::<ExactSymbolLookup>(&self.database, project_id, query).await
     }
 
     async fn exact_name_at(
         &self,
-        project_id: &ProjectId,
-        expected_generation_id: &GenerationId,
-        query: ExactTextQuery<'_>,
+        input: ExactGenerationQuery<'_, ExactTextQuery<'_>>,
     ) -> Result<Vec<CurrentSymbolRecord>, RetrievalError> {
-        self.database
-            .exact_current_symbols_by_name(ExactTextLookup::new(
-                project_id,
-                expected_generation_id,
-                query.value(),
-                query.limit(),
-            ))
-            .await
-            .map_err(Into::into)
+        exact_records_at::<ExactSymbolLookup>(&self.database, input).await
     }
 
     /// Exact canonical-path lookup with source-ordered declarations.
@@ -104,22 +205,24 @@ impl DeterministicRetriever {
         let Some(generation) = self.database.current_generation_record(project_id).await? else {
             return Ok(None);
         };
-        self.exact_path_at(project_id, generation.generation_id(), query)
-            .await
+        self.exact_path_at(ExactGenerationQuery {
+            project_id,
+            expected_generation_id: generation.generation_id(),
+            query,
+        })
+        .await
     }
 
     async fn exact_path_at(
         &self,
-        project_id: &ProjectId,
-        expected_generation_id: &GenerationId,
-        query: ExactPathQuery<'_>,
+        input: ExactGenerationQuery<'_, ExactPathQuery<'_>>,
     ) -> Result<Option<ExactPathResult>, RetrievalError> {
         let Some(file) = self
             .database
             .exact_current_file_by_path(CurrentFileLookup::new(
-                project_id,
-                expected_generation_id,
-                query.path(),
+                input.project_id,
+                input.expected_generation_id,
+                input.query.path(),
             ))
             .await?
         else {
@@ -128,10 +231,9 @@ impl DeterministicRetriever {
         let symbols = self
             .database
             .current_symbols_by_file(CurrentFileSymbolsLookup::new(
-                project_id,
-                expected_generation_id,
+                CurrentGenerationLookup::new(input.project_id, input.expected_generation_id),
                 file.file_id(),
-                query.symbol_limit(),
+                input.query.symbol_limit(),
             ))
             .await?;
         Ok(Some(ExactPathResult::new(file, symbols)))
@@ -143,22 +245,7 @@ impl DeterministicRetriever {
         project_id: &ProjectId,
         query: &FileInventoryQuery,
     ) -> Result<FileInventoryResult, RetrievalError> {
-        let Some(generation) = self.database.current_generation_record(project_id).await? else {
-            return Ok(FileInventoryResult::new(Vec::new(), false));
-        };
-        let fetch_limit = query.limit().saturating_add(1);
-        let mut request =
-            CurrentFilesLookup::new(project_id, generation.generation_id(), fetch_limit);
-        if let Some(directory) = query.directory() {
-            request = request.within_directory(directory);
-        }
-        if let Some(language) = query.language() {
-            request = request.with_language(language);
-        }
-        let mut files = self.database.current_files(request).await?;
-        let truncated = files.len() > usize::from(query.limit());
-        files.truncate(usize::from(query.limit()));
-        Ok(FileInventoryResult::new(files, truncated))
+        retrieve_files(&self.database, project_id, query).await
     }
 
     /// Discover typed routes, commands, MCP tools, CLI declarations, and public API boundaries.
@@ -167,45 +254,7 @@ impl DeterministicRetriever {
         project_id: &ProjectId,
         query: EntryPointsQuery,
     ) -> Result<EntryPointsResult, RetrievalError> {
-        for attempt in 0..GENERATION_ATTEMPTS {
-            let Some(generation) = self.database.current_generation_record(project_id).await?
-            else {
-                return Ok(EntryPointsResult::new(None, Vec::new()));
-            };
-            let selected = query.bucket();
-            let mut pages = Vec::with_capacity(if selected.is_some() { 1 } else { 5 });
-            let mut retry = false;
-            for bucket in EntryPointBucket::ALL {
-                if selected.is_some_and(|selected| selected != bucket) {
-                    continue;
-                }
-                let page = self
-                    .database
-                    .current_entry_points(CurrentEntryPointsLookup::new(
-                        project_id,
-                        generation.generation_id(),
-                        bucket,
-                        query.limit(),
-                    ))
-                    .await;
-                match page {
-                    Err(error) if attempt == 0 && is_generation_changed_storage(&error) => {
-                        retry = true;
-                        break;
-                    }
-                    Err(error) => return Err(error.into()),
-                    Ok(page) => pages.push(page),
-                }
-            }
-            if retry {
-                continue;
-            }
-            return Ok(EntryPointsResult::new(
-                Some(generation.generation_id().clone()),
-                pages,
-            ));
-        }
-        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+        retrieve_entry_points(&self.database, project_id, query).await
     }
 
     /// Resolve the smallest current-generation symbols overlapping one exact source range.
@@ -214,47 +263,7 @@ impl DeterministicRetriever {
         project_id: &ProjectId,
         query: &SourceRangeQuery,
     ) -> Result<Option<SourceRangeResult>, RetrievalError> {
-        for attempt in 0..GENERATION_ATTEMPTS {
-            let Some(generation) = self.database.current_generation_record(project_id).await?
-            else {
-                return Ok(None);
-            };
-            let file = self
-                .database
-                .exact_current_file_by_path(CurrentFileLookup::new(
-                    project_id,
-                    generation.generation_id(),
-                    query.path(),
-                ))
-                .await;
-            let file = match file {
-                Err(error) if attempt == 0 && is_generation_changed_storage(&error) => continue,
-                Err(error) => return Err(error.into()),
-                Ok(None) => return Ok(None),
-                Ok(Some(file)) => file,
-            };
-            let fetch_limit = query.limit().saturating_add(1);
-            let symbols = self
-                .database
-                .current_symbols_at_range(CurrentSourceRangeLookup::new(
-                    project_id,
-                    generation.generation_id(),
-                    query.path(),
-                    query.start_line(),
-                    query.end_line(),
-                    fetch_limit,
-                ))
-                .await;
-            let mut symbols = match symbols {
-                Err(error) if attempt == 0 && is_generation_changed_storage(&error) => continue,
-                Err(error) => return Err(error.into()),
-                Ok(symbols) => symbols,
-            };
-            let truncated = symbols.len() > usize::from(query.limit());
-            symbols.truncate(usize::from(query.limit()));
-            return Ok(Some(SourceRangeResult::new(file, symbols, truncated)));
-        }
-        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+        retrieve_symbols_at_range(&self.database, project_id, query).await
     }
 
     /// Find a bounded shortest outgoing dependency path under one generation fence.
@@ -262,25 +271,7 @@ impl DeterministicRetriever {
         &self,
         request: &GraphPathRequest,
     ) -> Result<GraphPathResult, RetrievalError> {
-        for attempt in 0..GENERATION_ATTEMPTS {
-            let Some(generation) = self
-                .database
-                .current_generation_record(request.project_id())
-                .await?
-            else {
-                return Ok(GraphPathResult::new(
-                    request.start().clone(),
-                    request.target().clone(),
-                    None,
-                    false,
-                ));
-            };
-            match run_graph_path(&self.database, request, generation.generation_id()).await {
-                Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
-                result => return result,
-            }
-        }
-        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+        retrieve_graph_path(&self.database, request).await
     }
 
     /// Find model-scoped symbol neighbors from a stored current-generation vector.
@@ -288,33 +279,7 @@ impl DeterministicRetriever {
         &self,
         request: &SimilarRequest,
     ) -> Result<SimilarSymbolsResult, RetrievalError> {
-        for attempt in 0..GENERATION_ATTEMPTS {
-            let generation = self
-                .database
-                .current_generation_record(request.project_id())
-                .await?
-                .ok_or(SemanticStorageError::CurrentGenerationUnavailable)?;
-            let database_request = SimilarSymbolsRequest::new(SimilarSymbolsInput {
-                project_id: request.project_id().clone(),
-                expected_generation_id: generation.generation_id().clone(),
-                source_symbol_id: request.source_symbol_id().clone(),
-                model_id: request.model_id().cloned(),
-                limit: request.limit(),
-                minimum_score: request.minimum_score(),
-                same_language: request.same_language(),
-                statement_timeout: SEMANTIC_READ_TIMEOUT,
-            })?;
-            match self
-                .database
-                .similar_current_symbols(database_request)
-                .await
-            {
-                Err(SemanticStorageError::CurrentGenerationChanged) if attempt == 0 => continue,
-                Err(error) => return Err(error.into()),
-                Ok(result) => return Ok(result),
-            }
-        }
-        Err(SemanticStorageError::CurrentGenerationChanged.into())
+        retrieve_similar_symbols(&self.database, request).await
     }
 
     /// Exact source-reference lookup, including unresolved reference evidence.
@@ -323,28 +288,14 @@ impl DeterministicRetriever {
         project_id: &ProjectId,
         query: ExactTextQuery<'_>,
     ) -> Result<Vec<CurrentReferenceRecord>, RetrievalError> {
-        let Some(generation) = self.database.current_generation_record(project_id).await? else {
-            return Ok(Vec::new());
-        };
-        self.exact_reference_at(project_id, generation.generation_id(), query)
-            .await
+        exact_current_records::<ExactReferenceLookup>(&self.database, project_id, query).await
     }
 
     async fn exact_reference_at(
         &self,
-        project_id: &ProjectId,
-        expected_generation_id: &GenerationId,
-        query: ExactTextQuery<'_>,
+        input: ExactGenerationQuery<'_, ExactTextQuery<'_>>,
     ) -> Result<Vec<CurrentReferenceRecord>, RetrievalError> {
-        self.database
-            .exact_current_references_by_name(ExactTextLookup::new(
-                project_id,
-                expected_generation_id,
-                query.value(),
-                query.limit(),
-            ))
-            .await
-            .map_err(Into::into)
+        exact_records_at::<ExactReferenceLookup>(&self.database, input).await
     }
 
     /// Current-generation ParadeDB BM25 with ordered field provenance.
@@ -356,29 +307,34 @@ impl DeterministicRetriever {
         let Some(generation) = self.database.current_generation_record(&project_id).await? else {
             return Ok(Vec::new());
         };
-        self.bm25_at(project_id, generation.generation_id().clone(), &query)
-            .await
+        self.bm25_at(LexicalAtInput {
+            project_id,
+            expected_generation_id: generation.generation_id().clone(),
+            query: &query,
+        })
+        .await
     }
 
     /// Current-generation ParadeDB fuzzy name search with explicit edit distance.
     pub async fn fuzzy_name(
         &self,
-        project_id: ProjectId,
-        query: LexicalQuery,
-        edit_distance: u8,
+        request: FuzzyNameRequest,
     ) -> Result<Vec<SearchHit>, RetrievalError> {
-        let Some(generation) = self.database.current_generation_record(&project_id).await? else {
+        let Some(generation) = self
+            .database
+            .current_generation_record(&request.project_id)
+            .await?
+        else {
             return Ok(Vec::new());
         };
         self.database
             .search_current_names_fuzzy(
                 SearchQuery::new(
-                    project_id,
-                    generation.generation_id().clone(),
-                    query.query(),
-                    query.limit(),
+                    CurrentGenerationLookup::new(&request.project_id, generation.generation_id()),
+                    request.query.query(),
+                    request.query.limit(),
                 ),
-                edit_distance,
+                request.edit_distance,
             )
             .await
             .map_err(Into::into)
@@ -390,18 +346,11 @@ impl DeterministicRetriever {
         project_id: ProjectId,
         query: LexicalQuery,
     ) -> Result<Vec<SearchHit>, RetrievalError> {
-        let Some(generation) = self.database.current_generation_record(&project_id).await? else {
-            return Ok(Vec::new());
-        };
-        self.database
-            .search_current_names(SearchQuery::new(
-                project_id,
-                generation.generation_id().clone(),
-                query.query(),
-                query.limit(),
-            ))
-            .await
-            .map_err(Into::into)
+        retrieve_named_hits(
+            &self.database,
+            NamedSearchRequest::new(project_id, query, NamedSearchFlavor::Name),
+        )
+        .await
     }
 
     /// Current-generation ParadeDB natural-language intent search.
@@ -410,32 +359,19 @@ impl DeterministicRetriever {
         project_id: ProjectId,
         query: LexicalQuery,
     ) -> Result<Vec<SearchHit>, RetrievalError> {
-        let Some(generation) = self.database.current_generation_record(&project_id).await? else {
-            return Ok(Vec::new());
-        };
-        self.database
-            .search_current_intent(SearchQuery::new(
-                project_id,
-                generation.generation_id().clone(),
-                query.query(),
-                query.limit(),
-            ))
-            .await
-            .map_err(Into::into)
+        retrieve_named_hits(
+            &self.database,
+            NamedSearchRequest::new(project_id, query, NamedSearchFlavor::Intent),
+        )
+        .await
     }
 
-    async fn bm25_at(
-        &self,
-        project_id: ProjectId,
-        expected_generation_id: GenerationId,
-        query: &LexicalQuery,
-    ) -> Result<Vec<SearchHit>, RetrievalError> {
+    async fn bm25_at(&self, input: LexicalAtInput<'_>) -> Result<Vec<SearchHit>, RetrievalError> {
         self.database
             .search_current_code(SearchQuery::new(
-                project_id,
-                expected_generation_id,
-                query.query(),
-                query.limit(),
+                CurrentGenerationLookup::new(&input.project_id, &input.expected_generation_id),
+                input.query.query(),
+                input.query.limit(),
             ))
             .await
             .map_err(Into::into)
@@ -454,12 +390,14 @@ impl DeterministicRetriever {
     /// Adapt BM25 results while fencing the read to one caller-observed generation.
     pub async fn lexical_channel_for_generation(
         &self,
-        project_id: ProjectId,
-        expected_generation_id: GenerationId,
-        query: LexicalQuery,
+        request: GenerationLexicalRequest,
     ) -> Result<ChannelResults, RetrievalError> {
         let hits = self
-            .bm25_at(project_id, expected_generation_id, &query)
+            .bm25_at(LexicalAtInput {
+                project_id: request.project_id,
+                expected_generation_id: request.expected_generation_id,
+                query: &request.query,
+            })
             .await?;
         lexical_results(&hits)
     }
@@ -469,8 +407,12 @@ impl DeterministicRetriever {
         &self,
         request: &TraversalRequest,
     ) -> Result<TraversalResult, RetrievalError> {
-        self.traverse_with_retry(request, TraversalKind::Calls, TraversalDirection::Incoming)
-            .await
+        self.traverse_with_retry(TraversalRetryInput {
+            request,
+            kind: TraversalKind::Calls,
+            direction: TraversalDirection::Incoming,
+        })
+        .await
     }
 
     /// Follow outgoing `calls` edges to discover bounded callees.
@@ -478,8 +420,12 @@ impl DeterministicRetriever {
         &self,
         request: &TraversalRequest,
     ) -> Result<TraversalResult, RetrievalError> {
-        self.traverse_with_retry(request, TraversalKind::Calls, TraversalDirection::Outgoing)
-            .await
+        self.traverse_with_retry(TraversalRetryInput {
+            request,
+            kind: TraversalKind::Calls,
+            direction: TraversalDirection::Outgoing,
+        })
+        .await
     }
 
     /// Follow incoming and outgoing dependency edges under one generation fence.
@@ -487,40 +433,7 @@ impl DeterministicRetriever {
         &self,
         request: &TraversalRequest,
     ) -> Result<BidirectionalTraversalResult, RetrievalError> {
-        for attempt in 0..GENERATION_ATTEMPTS {
-            let Some(generation) = self
-                .database
-                .current_generation_record(request.project_id())
-                .await?
-            else {
-                return Ok(BidirectionalTraversalResult::new(
-                    empty_traversal(request, TraversalDirection::Incoming),
-                    empty_traversal(request, TraversalDirection::Outgoing),
-                ));
-            };
-            let traversals = tokio::try_join!(
-                self.traverse_at(
-                    request,
-                    generation.generation_id(),
-                    TraversalKind::Impact,
-                    TraversalDirection::Incoming,
-                ),
-                self.traverse_at(
-                    request,
-                    generation.generation_id(),
-                    TraversalKind::Impact,
-                    TraversalDirection::Outgoing,
-                ),
-            );
-            match traversals {
-                Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
-                Err(error) => return Err(error),
-                Ok((incoming, outgoing)) => {
-                    return Ok(BidirectionalTraversalResult::new(incoming, outgoing));
-                }
-            }
-        }
-        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+        retrieve_bidirectional_traversal(&self.database, request).await
     }
 
     /// Follow incoming dependency relations to estimate a bounded impact cone.
@@ -528,8 +441,12 @@ impl DeterministicRetriever {
         &self,
         request: &TraversalRequest,
     ) -> Result<TraversalResult, RetrievalError> {
-        self.traverse_with_retry(request, TraversalKind::Impact, TraversalDirection::Incoming)
-            .await
+        self.traverse_with_retry(TraversalRetryInput {
+            request,
+            kind: TraversalKind::Impact,
+            direction: TraversalDirection::Incoming,
+        })
+        .await
     }
 
     /// Discover test files/symbols in a bounded reverse impact cone.
@@ -538,17 +455,7 @@ impl DeterministicRetriever {
         request: &TraversalRequest,
         limit: u16,
     ) -> Result<AffectedTestsResult, RetrievalError> {
-        if limit == 0 || limit > 500 {
-            return Err(RetrievalError::InvalidInput {
-                field: "affected_test_limit",
-            });
-        }
-        let impact = self.impact(request).await?;
-        let (tests, output_was_truncated) = affected_tests_from_traversal(&impact, limit);
-        Ok(AffectedTestsResult::new(
-            tests,
-            impact.truncated() || output_was_truncated,
-        ))
+        retrieve_affected_tests(self, request, limit).await
     }
 
     /// Assemble compact exact, BM25, graph, and affected-test evidence without
@@ -580,45 +487,321 @@ impl DeterministicRetriever {
 
     async fn traverse_with_retry(
         &self,
-        request: &TraversalRequest,
-        kind: TraversalKind,
-        direction: TraversalDirection,
+        input: TraversalRetryInput<'_>,
     ) -> Result<TraversalResult, RetrievalError> {
-        for attempt in 0..GENERATION_ATTEMPTS {
-            let Some(generation) = self
-                .database
-                .current_generation_record(request.project_id())
-                .await?
-            else {
-                return Ok(empty_traversal(request, direction));
-            };
-            match self
-                .traverse_at(request, generation.generation_id(), kind, direction)
-                .await
-            {
-                Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
-                result => return result,
+        retrieve_traversal_with_retry(&self.database, input).await
+    }
+}
+
+async fn exact_current_records<Lookup>(
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+    query: ExactTextQuery<'_>,
+) -> Result<Vec<Lookup::Record>, RetrievalError>
+where
+    Lookup: ExactTextRecordLookup,
+{
+    let Some(generation) = database.current_generation_record(project_id).await? else {
+        return Ok(Vec::new());
+    };
+    exact_records_at::<Lookup>(
+        database,
+        ExactGenerationQuery {
+            project_id,
+            expected_generation_id: generation.generation_id(),
+            query,
+        },
+    )
+    .await
+}
+
+async fn exact_records_at<Lookup>(
+    database: &CartographDatabase,
+    input: ExactGenerationQuery<'_, ExactTextQuery<'_>>,
+) -> Result<Vec<Lookup::Record>, RetrievalError>
+where
+    Lookup: ExactTextRecordLookup,
+{
+    Lookup::lookup(
+        database,
+        ExactTextLookup::new(
+            CurrentGenerationLookup::new(input.project_id, input.expected_generation_id),
+            input.query.value(),
+            input.query.limit(),
+        ),
+    )
+    .await
+    .map_err(Into::into)
+}
+
+async fn retrieve_named_hits(
+    database: &CartographDatabase,
+    request: NamedSearchRequest,
+) -> Result<Vec<SearchHit>, RetrievalError> {
+    let Some(generation) = database
+        .current_generation_record(&request.project_id)
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    let query = SearchQuery::new(
+        CurrentGenerationLookup::new(&request.project_id, generation.generation_id()),
+        request.query.query(),
+        request.query.limit(),
+    );
+    match request.flavor {
+        NamedSearchFlavor::Name => database.search_current_names(query).await,
+        NamedSearchFlavor::Intent => database.search_current_intent(query).await,
+    }
+    .map_err(Into::into)
+}
+
+async fn retrieve_files(
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+    query: &FileInventoryQuery,
+) -> Result<FileInventoryResult, RetrievalError> {
+    let Some(generation) = database.current_generation_record(project_id).await? else {
+        return Ok(FileInventoryResult::new(Vec::new(), false));
+    };
+    let fetch_limit = query.limit().saturating_add(1);
+    let mut request = CurrentFilesLookup::new(project_id, generation.generation_id(), fetch_limit);
+    if let Some(directory) = query.directory() {
+        request = request.within_directory(directory);
+    }
+    if let Some(language) = query.language() {
+        request = request.with_language(language);
+    }
+    let mut files = database.current_files(request).await?;
+    let truncated = files.len() > usize::from(query.limit());
+    files.truncate(usize::from(query.limit()));
+    Ok(FileInventoryResult::new(files, truncated))
+}
+
+async fn retrieve_entry_points(
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+    query: EntryPointsQuery,
+) -> Result<EntryPointsResult, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        let Some(generation) = database.current_generation_record(project_id).await? else {
+            return Ok(EntryPointsResult::new(None, Vec::new()));
+        };
+        let selected = query.bucket();
+        let mut pages = Vec::with_capacity(if selected.is_some() { 1 } else { 5 });
+        let mut retry = false;
+        for bucket in EntryPointBucket::ALL {
+            if selected.is_some_and(|selected| selected != bucket) {
+                continue;
+            }
+            let page = database
+                .current_entry_points(CurrentEntryPointsLookup::new(
+                    CurrentGenerationLookup::new(project_id, generation.generation_id()),
+                    bucket,
+                    query.limit(),
+                ))
+                .await;
+            match page {
+                Err(error) if attempt == 0 && is_generation_changed_storage(&error) => {
+                    retry = true;
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+                Ok(page) => pages.push(page),
             }
         }
-        Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+        if retry {
+            continue;
+        }
+        return Ok(EntryPointsResult::new(
+            Some(generation.generation_id().clone()),
+            pages,
+        ));
     }
+    Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+}
 
-    async fn traverse_at(
-        &self,
-        request: &TraversalRequest,
-        expected_generation_id: &GenerationId,
-        kind: TraversalKind,
-        direction: TraversalDirection,
-    ) -> Result<TraversalResult, RetrievalError> {
-        run_traversal(
-            &self.database,
-            request,
-            expected_generation_id,
-            kind,
-            direction,
+async fn retrieve_symbols_at_range(
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+    query: &SourceRangeQuery,
+) -> Result<Option<SourceRangeResult>, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        let Some(generation) = database.current_generation_record(project_id).await? else {
+            return Ok(None);
+        };
+        let file = database
+            .exact_current_file_by_path(CurrentFileLookup::new(
+                project_id,
+                generation.generation_id(),
+                query.path(),
+            ))
+            .await;
+        let file = match file {
+            Err(error) if attempt == 0 && is_generation_changed_storage(&error) => continue,
+            Err(error) => return Err(error.into()),
+            Ok(None) => return Ok(None),
+            Ok(Some(file)) => file,
+        };
+        let fetch_limit = query.limit().saturating_add(1);
+        let symbols = database
+            .current_symbols_at_range(CurrentSourceRangeLookup::new(
+                CurrentGenerationLookup::new(project_id, generation.generation_id()),
+                SourceLineRange::new(query.path(), query.start_line(), query.end_line()),
+                fetch_limit,
+            ))
+            .await;
+        let mut symbols = match symbols {
+            Err(error) if attempt == 0 && is_generation_changed_storage(&error) => continue,
+            Err(error) => return Err(error.into()),
+            Ok(symbols) => symbols,
+        };
+        let truncated = symbols.len() > usize::from(query.limit());
+        symbols.truncate(usize::from(query.limit()));
+        return Ok(Some(SourceRangeResult::new(file, symbols, truncated)));
+    }
+    Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+}
+
+async fn retrieve_graph_path(
+    database: &CartographDatabase,
+    request: &GraphPathRequest,
+) -> Result<GraphPathResult, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        let Some(generation) = database
+            .current_generation_record(request.project_id())
+            .await?
+        else {
+            return Ok(GraphPathResult::new(GraphPathResultInput {
+                start: request.start().clone(),
+                target: request.target().clone(),
+                path: None,
+                truncated: false,
+            }));
+        };
+        match run_graph_path(database, request, generation.generation_id()).await {
+            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            result => return result,
+        }
+    }
+    Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+}
+
+async fn retrieve_similar_symbols(
+    database: &CartographDatabase,
+    request: &SimilarRequest,
+) -> Result<SimilarSymbolsResult, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        let generation = database
+            .current_generation_record(request.project_id())
+            .await?
+            .ok_or(SemanticStorageError::CurrentGenerationUnavailable)?;
+        let database_request = SimilarSymbolsRequest::new(SimilarSymbolsInput {
+            project_id: request.project_id().clone(),
+            expected_generation_id: generation.generation_id().clone(),
+            source_symbol_id: request.source_symbol_id().clone(),
+            model_id: request.model_id().cloned(),
+            limit: request.limit(),
+            minimum_score: request.minimum_score(),
+            same_language: request.same_language(),
+            statement_timeout: SEMANTIC_READ_TIMEOUT,
+        })?;
+        match database.similar_current_symbols(database_request).await {
+            Err(SemanticStorageError::CurrentGenerationChanged) if attempt == 0 => continue,
+            Err(error) => return Err(error.into()),
+            Ok(result) => return Ok(result),
+        }
+    }
+    Err(SemanticStorageError::CurrentGenerationChanged.into())
+}
+
+async fn retrieve_bidirectional_traversal(
+    database: &CartographDatabase,
+    request: &TraversalRequest,
+) -> Result<BidirectionalTraversalResult, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        let Some(generation) = database
+            .current_generation_record(request.project_id())
+            .await?
+        else {
+            return Ok(BidirectionalTraversalResult::new(
+                empty_traversal(request, TraversalDirection::Incoming),
+                empty_traversal(request, TraversalDirection::Outgoing),
+            ));
+        };
+        let traversals = tokio::try_join!(
+            run_traversal(
+                database,
+                TraversalExecution {
+                    request,
+                    expected_generation_id: generation.generation_id(),
+                    plan: traversal_plan(TraversalKind::Impact, TraversalDirection::Incoming),
+                },
+            ),
+            run_traversal(
+                database,
+                TraversalExecution {
+                    request,
+                    expected_generation_id: generation.generation_id(),
+                    plan: traversal_plan(TraversalKind::Impact, TraversalDirection::Outgoing),
+                },
+            ),
+        );
+        match traversals {
+            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            Err(error) => return Err(error),
+            Ok((incoming, outgoing)) => {
+                return Ok(BidirectionalTraversalResult::new(incoming, outgoing));
+            }
+        }
+    }
+    Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
+}
+
+async fn retrieve_affected_tests(
+    retriever: &DeterministicRetriever,
+    request: &TraversalRequest,
+    limit: u16,
+) -> Result<AffectedTestsResult, RetrievalError> {
+    if limit == 0 || limit > 500 {
+        return Err(RetrievalError::InvalidInput {
+            field: "affected_test_limit",
+        });
+    }
+    let impact = retriever.impact(request).await?;
+    let (tests, output_was_truncated) = affected_tests_from_traversal(&impact, limit);
+    Ok(AffectedTestsResult::new(
+        tests,
+        impact.truncated() || output_was_truncated,
+    ))
+}
+
+async fn retrieve_traversal_with_retry(
+    database: &CartographDatabase,
+    input: TraversalRetryInput<'_>,
+) -> Result<TraversalResult, RetrievalError> {
+    for attempt in 0..GENERATION_ATTEMPTS {
+        let Some(generation) = database
+            .current_generation_record(input.request.project_id())
+            .await?
+        else {
+            return Ok(empty_traversal(input.request, input.direction));
+        };
+        match run_traversal(
+            database,
+            TraversalExecution {
+                request: input.request,
+                expected_generation_id: generation.generation_id(),
+                plan: traversal_plan(input.kind, input.direction),
+            },
         )
         .await
+        {
+            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            result => return result,
+        }
     }
+    Err(cartograph_db::StorageError::CurrentGenerationChanged.into())
 }
 
 fn empty_traversal(request: &TraversalRequest, direction: TraversalDirection) -> TraversalResult {
@@ -720,6 +903,46 @@ struct TraversalPlan {
     database_direction: GraphDirection,
 }
 
+#[derive(Clone, Copy)]
+struct TraversalExecution<'request, 'generation> {
+    request: &'request TraversalRequest,
+    expected_generation_id: &'generation GenerationId,
+    plan: TraversalPlan,
+}
+
+struct TraversalHydrationInput<'request, 'generation> {
+    execution: TraversalExecution<'request, 'generation>,
+    discovery: GraphDiscovery,
+}
+
+struct GraphPathHydrationInput<'request, 'generation> {
+    request: &'request GraphPathRequest,
+    expected_generation_id: &'generation GenerationId,
+    path: Vec<(SymbolId, Option<GraphArc>)>,
+    truncated: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ContextGenerationInput<'request, 'generation> {
+    request: &'request ContextRequest,
+    expected_generation_id: &'generation GenerationId,
+}
+
+#[derive(Clone, Copy)]
+struct ContextTraversalsInput<'request, 'generation> {
+    request: &'request TraversalRequest,
+    expected_generation_id: &'generation GenerationId,
+    kind: TraversalKind,
+    direction: ContextGraphDirection,
+}
+
+#[derive(Clone, Copy)]
+struct ReviewGenerationInput<'request, 'generation> {
+    project_id: &'request ProjectId,
+    expected_generation_id: &'generation GenerationId,
+    request: &'request ReviewRequest,
+}
+
 struct GraphDiscovery {
     direction: TraversalDirection,
     discoveries: BTreeMap<SymbolId, (u8, GraphArc)>,
@@ -748,13 +971,13 @@ fn lexical_candidate(hit: &SearchHit, index: usize) -> Result<ChannelCandidate, 
             field: "candidate_language",
         })?;
     let document_kind = parse_document_kind(hit.document_kind())?;
-    let mut document = RetrievalDocument::new(
-        hit.document_id().clone(),
-        hit.generation_id().clone(),
+    let mut document = RetrievalDocument::new(RetrievalDocumentInput {
+        document_id: hit.document_id().clone(),
+        generation_id: hit.generation_id().clone(),
         path,
         language,
         document_kind,
-    );
+    });
     if let Some(file_id) = hit.file_id() {
         document = document.with_file_id(file_id.clone());
     }
@@ -807,10 +1030,12 @@ async fn run_graph_path(
     if request.start() == request.target() {
         return hydrate_graph_path(
             database,
-            request,
-            expected_generation_id,
-            vec![(request.start().clone(), None)],
-            false,
+            GraphPathHydrationInput {
+                request,
+                expected_generation_id,
+                path: vec![(request.start().clone(), None)],
+                truncated: false,
+            },
         )
         .await;
     }
@@ -824,8 +1049,7 @@ async fn run_graph_path(
         let edges = database
             .current_graph_edges(
                 CurrentGraphLookup::new(
-                    request.project_id(),
-                    expected_generation_id,
+                    CurrentGenerationLookup::new(request.project_id(), expected_generation_id),
                     &frontier,
                     GraphDirection::Outgoing,
                 )
@@ -859,8 +1083,16 @@ async fn run_graph_path(
         record_path_parents(&expansion, &mut visited, &mut parents);
         if visited.contains(request.target()) {
             let path = reconstruct_graph_path(request, &parents)?;
-            return hydrate_graph_path(database, request, expected_generation_id, path, truncated)
-                .await;
+            return hydrate_graph_path(
+                database,
+                GraphPathHydrationInput {
+                    request,
+                    expected_generation_id,
+                    path,
+                    truncated,
+                },
+            )
+            .await;
         }
         frontier = expansion.next;
         if frontier.is_empty() {
@@ -870,12 +1102,12 @@ async fn run_graph_path(
             truncated = true;
         }
     }
-    Ok(GraphPathResult::new(
-        request.start().clone(),
-        request.target().clone(),
-        None,
+    Ok(GraphPathResult::new(GraphPathResultInput {
+        start: request.start().clone(),
+        target: request.target().clone(),
+        path: None,
         truncated,
-    ))
+    }))
 }
 
 async fn require_graph_path_endpoints(
@@ -946,19 +1178,17 @@ fn reconstruct_graph_path(
 
 async fn hydrate_graph_path(
     database: &CartographDatabase,
-    request: &GraphPathRequest,
-    expected_generation_id: &GenerationId,
-    path: Vec<(SymbolId, Option<GraphArc>)>,
-    truncated: bool,
+    input: GraphPathHydrationInput<'_, '_>,
 ) -> Result<GraphPathResult, RetrievalError> {
-    let ids = path
+    let ids = input
+        .path
         .iter()
         .map(|(symbol_id, _)| symbol_id.clone())
         .collect::<Vec<_>>();
     let symbols = database
         .current_symbols_by_ids(CurrentSymbolSetLookup::new(
-            request.project_id(),
-            expected_generation_id,
+            input.request.project_id(),
+            input.expected_generation_id,
             &ids,
         ))
         .await?;
@@ -966,8 +1196,8 @@ async fn hydrate_graph_path(
         .into_iter()
         .map(|symbol| (symbol.symbol_id().clone(), symbol))
         .collect::<BTreeMap<_, _>>();
-    let mut steps = Vec::with_capacity(path.len());
-    for (symbol_id, arc) in path {
+    let mut steps = Vec::with_capacity(input.path.len());
+    for (symbol_id, arc) in input.path {
         let symbol =
             symbols
                 .remove(&symbol_id)
@@ -977,29 +1207,27 @@ async fn hydrate_graph_path(
         let via = arc.map(|arc| traversal_hop(TraversalDirection::Outgoing, arc));
         steps.push(GraphPathStep::new(symbol, via));
     }
-    Ok(GraphPathResult::new(
-        request.start().clone(),
-        request.target().clone(),
-        Some(steps),
-        truncated,
-    ))
+    Ok(GraphPathResult::new(GraphPathResultInput {
+        start: input.request.start().clone(),
+        target: input.request.target().clone(),
+        path: Some(steps),
+        truncated: input.truncated,
+    }))
 }
 
 async fn run_traversal(
     database: &CartographDatabase,
-    request: &TraversalRequest,
-    expected_generation_id: &GenerationId,
-    kind: TraversalKind,
-    direction: TraversalDirection,
+    execution: TraversalExecution<'_, '_>,
 ) -> Result<TraversalResult, RetrievalError> {
-    let discovery = discover_graph(
+    let discovery = discover_graph(database, execution).await?;
+    hydrate_traversal(
         database,
-        request,
-        expected_generation_id,
-        traversal_plan(kind, direction),
+        TraversalHydrationInput {
+            execution,
+            discovery,
+        },
     )
-    .await?;
-    hydrate_traversal(database, request, expected_generation_id, discovery).await
+    .await
 }
 
 const fn traversal_plan(kind: TraversalKind, direction: TraversalDirection) -> TraversalPlan {
@@ -1016,10 +1244,10 @@ const fn traversal_plan(kind: TraversalKind, direction: TraversalDirection) -> T
 
 async fn discover_graph(
     database: &CartographDatabase,
-    request: &TraversalRequest,
-    expected_generation_id: &GenerationId,
-    plan: TraversalPlan,
+    execution: TraversalExecution<'_, '_>,
 ) -> Result<GraphDiscovery, RetrievalError> {
+    let request = execution.request;
+    let plan = execution.plan;
     let budget = request.budget();
     let mut visited = request.roots().iter().cloned().collect::<BTreeSet<_>>();
     let mut frontier = request.roots().to_vec();
@@ -1029,8 +1257,10 @@ async fn discover_graph(
         let edges = database
             .current_graph_edges(
                 CurrentGraphLookup::new(
-                    request.project_id(),
-                    expected_generation_id,
+                    CurrentGenerationLookup::new(
+                        request.project_id(),
+                        execution.expected_generation_id,
+                    ),
                     &frontier,
                     plan.database_direction,
                 )
@@ -1095,15 +1325,18 @@ fn record_discoveries(
 
 async fn hydrate_traversal(
     database: &CartographDatabase,
-    request: &TraversalRequest,
-    expected_generation_id: &GenerationId,
-    mut discovery: GraphDiscovery,
+    mut input: TraversalHydrationInput<'_, '_>,
 ) -> Result<TraversalResult, RetrievalError> {
-    let ids = discovery.discoveries.keys().cloned().collect::<Vec<_>>();
+    let ids = input
+        .discovery
+        .discoveries
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     let symbols = database
         .current_symbols_by_ids(CurrentSymbolSetLookup::new(
-            request.project_id(),
-            expected_generation_id,
+            input.execution.request.project_id(),
+            input.execution.expected_generation_id,
             &ids,
         ))
         .await?;
@@ -1111,24 +1344,24 @@ async fn hydrate_traversal(
         .into_iter()
         .map(|symbol| (symbol.symbol_id().clone(), symbol))
         .collect::<BTreeMap<_, _>>();
-    let mut nodes = Vec::with_capacity(discovery.discoveries.len());
-    for (symbol_id, (depth, arc)) in discovery.discoveries {
+    let mut nodes = Vec::with_capacity(input.discovery.discoveries.len());
+    for (symbol_id, (depth, arc)) in input.discovery.discoveries {
         let Some(symbol) = symbols.remove(&symbol_id) else {
-            discovery.truncated = true;
+            input.discovery.truncated = true;
             continue;
         };
         nodes.push(TraversalNode::new(
             symbol,
             depth,
-            traversal_hop(discovery.direction, arc),
+            traversal_hop(input.discovery.direction, arc),
         ));
     }
     nodes.sort_by(traversal_node_order);
     Ok(TraversalResult {
-        direction: discovery.direction,
-        roots: request.roots().to_vec(),
+        direction: input.discovery.direction,
+        roots: input.execution.request.roots().to_vec(),
         nodes,
-        truncated: discovery.truncated,
+        truncated: input.discovery.truncated,
     })
 }
 
@@ -1189,14 +1422,13 @@ async fn build_context_packet(
         return Ok(assemble_packet(empty_context_assembly(request, retrieval)));
     };
     let mut state = ContextBuildState::default();
-    collect_anchor_evidence(retriever, request, generation.generation_id(), &mut state).await?;
-    let channels = resolve_context_channels(
-        retriever,
+    let generation_input = ContextGenerationInput {
         request,
-        generation.generation_id(),
-        precomputed_channels,
-    )
-    .await?;
+        expected_generation_id: generation.generation_id(),
+    };
+    collect_anchor_evidence(retriever, generation_input, &mut state).await?;
+    let channels =
+        resolve_context_channels(retriever, generation_input, precomputed_channels).await?;
     let include_semantic = context_uses_semantic(request);
     validate_channel_generation(&channels, generation.generation_id(), include_semantic)?;
     let retrieval = fuse_search(
@@ -1209,13 +1441,7 @@ async fn build_context_packet(
     )?;
     collect_retrieval_evidence(&retrieval, &mut state);
     let direct_tests = if context_selects_tests(request.intent()) {
-        collect_direct_tests(
-            retriever,
-            request,
-            generation.generation_id(),
-            &state.evidence,
-        )
-        .await?
+        collect_direct_tests(retriever, generation_input, &state.evidence).await?
     } else {
         DirectTestResult::default()
     };
@@ -1278,17 +1504,20 @@ fn empty_context_retrieval(
 
 async fn collect_anchor_evidence(
     retriever: &DeterministicRetriever,
-    request: &ContextRequest,
-    expected_generation_id: &GenerationId,
+    input: ContextGenerationInput<'_, '_>,
     state: &mut ContextBuildState,
 ) -> Result<(), RetrievalError> {
-    let exact_limit = request.budget().exact_limit();
-    for anchor in request.anchors() {
+    let exact_limit = input.request.budget().exact_limit();
+    for anchor in input.request.anchors() {
         match anchor {
             ContextAnchor::ExactName(name) => {
                 let query = ExactTextQuery::new(name, exact_limit)?;
                 for symbol in retriever
-                    .exact_name_at(request.project_id(), expected_generation_id, query)
+                    .exact_name_at(ExactGenerationQuery {
+                        project_id: input.request.project_id(),
+                        expected_generation_id: input.expected_generation_id,
+                        query,
+                    })
                     .await?
                 {
                     state.roots.insert(symbol.symbol_id().clone());
@@ -1300,7 +1529,11 @@ async fn collect_anchor_evidence(
             ContextAnchor::ExactPath(path) => {
                 let query = ExactPathQuery::new(path, exact_limit)?;
                 if let Some(result) = retriever
-                    .exact_path_at(request.project_id(), expected_generation_id, query)
+                    .exact_path_at(ExactGenerationQuery {
+                        project_id: input.request.project_id(),
+                        expected_generation_id: input.expected_generation_id,
+                        query,
+                    })
                     .await?
                 {
                     collect_exact_path_evidence(&result, state);
@@ -1309,7 +1542,11 @@ async fn collect_anchor_evidence(
             ContextAnchor::ExactReference(name) => {
                 let query = ExactTextQuery::new(name, exact_limit)?;
                 for reference in retriever
-                    .exact_reference_at(request.project_id(), expected_generation_id, query)
+                    .exact_reference_at(ExactGenerationQuery {
+                        project_id: input.request.project_id(),
+                        expected_generation_id: input.expected_generation_id,
+                        query,
+                    })
                     .await?
                 {
                     collect_reference_evidence(&reference, state);
@@ -1345,20 +1582,22 @@ fn collect_reference_evidence(reference: &CurrentReferenceRecord, state: &mut Co
 
 async fn resolve_context_channels(
     retriever: &DeterministicRetriever,
-    request: &ContextRequest,
-    expected_generation_id: &GenerationId,
+    input: ContextGenerationInput<'_, '_>,
     precomputed: Option<RetrievalChannels>,
 ) -> Result<RetrievalChannels, RetrievalError> {
     if let Some(channels) = precomputed {
         return Ok(channels);
     }
-    let query = LexicalQuery::new(request.query(), request.budget().candidate_limit())?;
+    let query = LexicalQuery::new(
+        input.request.query(),
+        input.request.budget().candidate_limit(),
+    )?;
     let lexical = retriever
-        .lexical_channel_for_generation(
-            request.project_id().clone(),
-            expected_generation_id.clone(),
+        .lexical_channel_for_generation(GenerationLexicalRequest::new(
+            input.request.project_id().clone(),
+            input.expected_generation_id.clone(),
             query,
-        )
+        ))
         .await?;
     RetrievalChannels::new().with_channel(lexical)
 }
@@ -1414,11 +1653,10 @@ fn bound_context_roots(mut roots: Vec<SymbolId>) -> (Vec<SymbolId>, bool) {
 
 async fn collect_direct_tests(
     retriever: &DeterministicRetriever,
-    request: &ContextRequest,
-    expected_generation_id: &GenerationId,
+    input: ContextGenerationInput<'_, '_>,
     evidence: &[EvidenceItem],
 ) -> Result<DirectTestResult, RetrievalError> {
-    let limit = request.budget().affected_test_limit();
+    let limit = input.request.budget().affected_test_limit();
     let (candidates, candidates_were_truncated) = direct_test_candidates(evidence, limit);
     let symbol_ids = candidates
         .iter()
@@ -1430,8 +1668,8 @@ async fn collect_direct_tests(
     let symbols = retriever
         .database
         .current_symbols_by_ids(CurrentSymbolSetLookup::new(
-            request.project_id(),
-            expected_generation_id,
+            input.request.project_id(),
+            input.expected_generation_id,
             &symbol_ids,
         ))
         .await?
@@ -1447,8 +1685,10 @@ async fn collect_direct_tests(
             DirectTestCandidate::File(file_id) => retriever
                 .database
                 .current_symbols_by_file(CurrentFileSymbolsLookup::new(
-                    request.project_id(),
-                    expected_generation_id,
+                    CurrentGenerationLookup::new(
+                        input.request.project_id(),
+                        input.expected_generation_id,
+                    ),
                     &file_id,
                     1,
                 ))
@@ -1538,10 +1778,12 @@ async fn expand_context_graph(
     )?;
     let traversals = context_traversals(
         retriever,
-        &traversal_request,
-        input.expected_generation_id,
-        kind,
-        graph_direction,
+        ContextTraversalsInput {
+            request: &traversal_request,
+            expected_generation_id: input.expected_generation_id,
+            kind,
+            direction: graph_direction,
+        },
     )
     .await?;
     let traversal_was_truncated = traversals.iter().any(TraversalResult::truncated);
@@ -1594,18 +1836,21 @@ fn merge_affected_tests(
 
 async fn context_traversals(
     retriever: &DeterministicRetriever,
-    request: &TraversalRequest,
-    expected_generation_id: &GenerationId,
-    kind: TraversalKind,
-    direction: ContextGraphDirection,
+    input: ContextTraversalsInput<'_, '_>,
 ) -> Result<Vec<TraversalResult>, RetrievalError> {
-    let directions = context_directions(direction);
+    let directions = context_directions(input.direction);
     let mut traversals = Vec::with_capacity(directions.len());
     for direction in directions.iter().copied() {
         traversals.push(
-            retriever
-                .traverse_at(request, expected_generation_id, kind, direction)
-                .await?,
+            run_traversal(
+                &retriever.database,
+                TraversalExecution {
+                    request: input.request,
+                    expected_generation_id: input.expected_generation_id,
+                    plan: traversal_plan(input.kind, direction),
+                },
+            )
+            .await?,
         );
     }
     Ok(traversals)
@@ -1705,9 +1950,15 @@ async fn build_review_packet(
     let Some(generation) = generation else {
         return Ok(assemble_review_packet(empty_review_assembly(request)));
     };
-    let mut state =
-        collect_changed_file_evidence(retriever, project_id, generation.generation_id(), request)
-            .await?;
+    let mut state = collect_changed_file_evidence(
+        retriever,
+        ReviewGenerationInput {
+            project_id,
+            expected_generation_id: generation.generation_id(),
+            request,
+        },
+    )
+    .await?;
     let roots = std::mem::take(&mut state.roots).into_iter().collect();
     let graph = expand_review_graph(
         retriever,
@@ -1759,16 +2010,18 @@ fn empty_review_assembly(request: &ReviewRequest) -> ReviewAssembly {
 
 async fn collect_changed_file_evidence(
     retriever: &DeterministicRetriever,
-    project_id: &ProjectId,
-    expected_generation_id: &GenerationId,
-    request: &ReviewRequest,
+    input: ReviewGenerationInput<'_, '_>,
 ) -> Result<ReviewBuildState, RetrievalError> {
     let mut state = ReviewBuildState::default();
-    let budget = request.budget();
-    for path in request.changed_paths() {
+    let budget = input.request.budget();
+    for path in input.request.changed_paths() {
         let query = ExactPathQuery::new(path, budget.symbols_per_file())?;
         let Some(result) = retriever
-            .exact_path_at(project_id, expected_generation_id, query)
+            .exact_path_at(ExactGenerationQuery {
+                project_id: input.project_id,
+                expected_generation_id: input.expected_generation_id,
+                query,
+            })
             .await?
         else {
             continue;
@@ -1813,14 +2066,15 @@ async fn expand_review_graph(
     let budget = input.request.budget();
     let traversal_request =
         TraversalRequest::new(input.project_id.clone(), input.roots, budget.traversal())?;
-    let impact = retriever
-        .traverse_at(
-            &traversal_request,
-            input.expected_generation_id,
-            TraversalKind::Impact,
-            TraversalDirection::Incoming,
-        )
-        .await?;
+    let impact = run_traversal(
+        &retriever.database,
+        TraversalExecution {
+            request: &traversal_request,
+            expected_generation_id: input.expected_generation_id,
+            plan: traversal_plan(TraversalKind::Impact, TraversalDirection::Incoming),
+        },
+    )
+    .await?;
     input
         .evidence
         .extend(impact.nodes().iter().map(evidence_from_traversal_node));
@@ -2001,13 +2255,13 @@ mod tests {
         let start = symbol_id(1);
         let middle = symbol_id(2);
         let target = symbol_id(3);
-        let request = GraphPathRequest::new(
-            project_id(),
-            start.clone(),
-            target.clone(),
-            TraversalBudget::new(4, 20)
+        let request = GraphPathRequest::new(crate::GraphPathRequestInput {
+            project_id: project_id(),
+            start: start.clone(),
+            target: target.clone(),
+            budget: TraversalBudget::new(4, 20)
                 .unwrap_or_else(|error| panic!("path budget failed: {error}")),
-        );
+        });
         let first = GraphArc::fixture(GraphArcFixture {
             source: start.clone(),
             target: middle.clone(),

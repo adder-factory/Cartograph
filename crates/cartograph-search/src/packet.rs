@@ -5,7 +5,8 @@ use crate::{
     EditCandidateBasis, EditCandidateSet, EvidenceItem, EvidenceReason, GenerationEvidence,
     HybridSearchPacket, IndexFreshness, RetrievalConfidence, TaskIntent, WorkingTreeOverlay,
     model::{
-        ContextPacketDetails, evidence_key, evidence_priority, evidence_start_line, merge_evidence,
+        ContextPacketDetails, EditCandidateInput, evidence_key, evidence_priority,
+        evidence_start_line, merge_evidence,
     },
     traversal::is_test_path,
 };
@@ -138,17 +139,17 @@ fn finish_edit_candidates(
     let mut candidates = candidates
         .into_iter()
         .map(|(path, candidate)| {
-            EditCandidate::new(
+            EditCandidate::new(EditCandidateInput {
                 path,
                 basis,
-                candidate.matched_term_count,
-                candidate.best_rank,
-                candidate
+                matched_term_count: candidate.matched_term_count,
+                best_rank: candidate.best_rank,
+                qualified_names: candidate
                     .qualified_names
                     .into_iter()
                     .take(MAX_EDIT_CANDIDATE_NAMES)
                     .collect(),
-            )
+            })
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {

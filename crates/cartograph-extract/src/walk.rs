@@ -42,6 +42,37 @@ use syntax::{
 };
 
 const MAX_AST_DEPTH: usize = 256;
+const MAX_BOUNDED_AST_VISITS: usize = 500_000;
+const AST_VISIT_CANCELLATION_INTERVAL: usize = 256;
+const MAX_SAFE_SIGNATURE_BYTES: usize = 512;
+
+#[derive(Default)]
+struct AstVisitBudget<const MAXIMUM_DEPTH: usize> {
+    visits: usize,
+}
+
+impl<const MAXIMUM_DEPTH: usize> AstVisitBudget<MAXIMUM_DEPTH> {
+    fn observe(
+        &mut self,
+        builder: &mut ExtractionBuilder<'_, '_>,
+        depth: usize,
+    ) -> Result<(), ExtractError> {
+        if depth > MAXIMUM_DEPTH {
+            return Err(ExtractError::NestingLimit);
+        }
+        self.visits = self
+            .visits
+            .checked_add(1)
+            .ok_or(ExtractError::OutputLimit)?;
+        if self.visits > MAX_BOUNDED_AST_VISITS {
+            return Err(ExtractError::OutputLimit);
+        }
+        if self.visits.is_multiple_of(AST_VISIT_CANCELLATION_INTERVAL) {
+            builder.context.ensure_active()?;
+        }
+        Ok(())
+    }
+}
 
 pub(crate) struct WalkInput<'tree> {
     root: Node<'tree>,
@@ -92,12 +123,7 @@ pub(crate) fn extract(
             .reserve_fact(diagnostic_budget_bytes(), std::iter::empty())?;
     }
     let output_limit = builder.context.budget.output_limit();
-    let has_inline_tests = has_inline_tests(
-        snapshot.language(),
-        input.root,
-        snapshot.source(),
-        builder.context.cancelled,
-    )?;
+    let has_inline_tests = has_inline_tests(&mut builder, input.root)?;
     let file = ExtractedFile {
         file_id: snapshot.file_id().clone(),
         path: snapshot.path().clone(),
@@ -122,44 +148,96 @@ pub(crate) fn extract(
 }
 
 fn has_inline_tests(
-    language: SourceLanguage,
+    builder: &mut ExtractionBuilder<'_, '_>,
     root: Node<'_>,
-    source: &str,
-    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<bool, ExtractError> {
-    if language != SourceLanguage::Rust {
+    if builder.context.snapshot.language() != SourceLanguage::Rust {
         return Ok(false);
     }
     for node in syntax::descendants_including_root(root) {
-        if cancelled() {
+        if (builder.context.cancelled)() {
             return Err(ExtractError::Cancelled);
         }
         if node.kind() != "attribute_item" || !rust_attribute_precedes_function(node) {
             continue;
         }
-        let attribute = source
-            .get(node.start_byte()..node.end_byte())
-            .ok_or(ExtractError::InvalidSpan)?;
-        let mut compact = String::new();
-        compact
-            .try_reserve(attribute.len())
-            .map_err(|_| ExtractError::OutputLimit)?;
-        compact.extend(
-            attribute
-                .chars()
-                .filter(|character| !character.is_whitespace()),
-        );
-        if matches!(compact.as_str(), "#[test]" | "#[rstest]")
-            || compact.starts_with("#[tokio::test")
-            || compact.starts_with("#[async_std::test")
-            || compact.starts_with("#[actix_rt::test")
-            || compact.starts_with("#[test_case")
-            || compact.starts_with("#[rstest(")
-        {
+        let compact = compact_rust_attribute(builder.context.source(), node)?;
+        if rust_attribute_marks_test(&compact) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn compact_rust_attribute(source: &str, node: Node<'_>) -> Result<String, ExtractError> {
+    let attribute = source
+        .get(node.start_byte()..node.end_byte())
+        .ok_or(ExtractError::InvalidSpan)?;
+    let mut compact = String::new();
+    compact
+        .try_reserve(attribute.len())
+        .map_err(|_| ExtractError::OutputLimit)?;
+    compact.extend(
+        attribute
+            .chars()
+            .filter(|character| !character.is_whitespace()),
+    );
+    Ok(compact)
+}
+
+fn rust_attribute_marks_test(compact: &str) -> bool {
+    matches!(compact, "#[test]" | "#[rstest]")
+        || compact.starts_with("#[tokio::test")
+        || compact.starts_with("#[async_std::test")
+        || compact.starts_with("#[actix_rt::test")
+        || compact.starts_with("#[test_case")
+        || compact.starts_with("#[rstest(")
+        || compact.starts_with("#[cfg(") && compact.contains("test")
+}
+
+fn rust_symbol_is_test_owned(
+    language: SourceLanguage,
+    node: Node<'_>,
+    source: &str,
+) -> Result<bool, ExtractError> {
+    if language != SourceLanguage::Rust {
+        return Ok(false);
+    }
+    let mut current = Some(node);
+    for _ in 0..=MAX_AST_DEPTH {
+        let Some(candidate) = current else {
+            return Ok(false);
+        };
+        if candidate.kind() == "mod_item"
+            && candidate
+                .child_by_field_name("name")
+                .and_then(|name| source.get(name.start_byte()..name.end_byte()))
+                .is_some_and(rust_test_module_name)
+        {
+            return Ok(true);
+        }
+        let mut sibling = candidate.prev_named_sibling();
+        for _ in 0..16 {
+            let Some(attribute) = sibling else {
+                break;
+            };
+            if attribute.kind() != "attribute_item" {
+                break;
+            }
+            if rust_attribute_marks_test(&compact_rust_attribute(source, attribute)?) {
+                return Ok(true);
+            }
+            sibling = attribute.prev_named_sibling();
+        }
+        current = candidate.parent();
+    }
+    Err(ExtractError::NestingLimit)
+}
+
+fn rust_test_module_name(name: &str) -> bool {
+    matches!(name, "test" | "tests" | "test_support" | "contract_tests")
+        || name.starts_with("test_")
+        || name.ends_with("_tests")
 }
 
 fn rust_attribute_precedes_function(node: Node<'_>) -> bool {
@@ -189,6 +267,27 @@ struct ExtractionBuilder<'source, 'cancel> {
     explicit_exports: BTreeSet<String>,
     explicit_default_exports: BTreeSet<String>,
     commonjs_shadowing: module_system::CommonJsShadowing,
+}
+
+fn owner_for_node(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> Option<SymbolId> {
+    let start = u64::try_from(node.start_byte()).ok()?;
+    let end = u64::try_from(node.end_byte()).ok()?;
+    builder
+        .facts
+        .symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.span.start_byte() <= start
+                && end <= symbol.span.end_byte()
+                && !matches!(symbol.kind, SymbolKind::File | SymbolKind::Import)
+        })
+        .min_by_key(|symbol| {
+            symbol
+                .span
+                .end_byte()
+                .saturating_sub(symbol.span.start_byte())
+        })
+        .map(|symbol| symbol.id.clone())
 }
 
 struct ExtractionContext<'source, 'cancel> {
@@ -221,11 +320,497 @@ struct PendingSymbol<'tree> {
     visibility: Option<Visibility>,
 }
 
+impl<'tree> PendingSymbol<'tree> {
+    fn namespace(node: Node<'tree>, name: String) -> Self {
+        Self {
+            kind: SymbolKind::Namespace,
+            name,
+            span_node: node,
+            structural_node: node,
+            doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
+            signature: None,
+            exported: true,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            visibility: None,
+        }
+    }
+}
+
+fn current_owner_kind_in(builder: &ExtractionBuilder<'_, '_>, allowed: &[SymbolKind]) -> bool {
+    builder
+        .native_owner_kinds
+        .last()
+        .is_some_and(|kind| allowed.contains(kind))
+}
+
+fn safe_assignment_signature(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    value: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    let raw = builder.context.text(value).trim();
+    let signature_length = raw.len().checked_add(2).ok_or(ExtractError::OutputLimit)?;
+    if signature_length > MAX_SAFE_SIGNATURE_BYTES || !declaration_value_is_search_safe(raw) {
+        return Ok(None);
+    }
+    builder
+        .context
+        .budget
+        .ensure_string_length(signature_length)?;
+    let mut signature = String::new();
+    signature
+        .try_reserve(signature_length)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    signature.push_str("= ");
+    signature.push_str(raw);
+    Ok(Some(signature))
+}
+
+struct JoinedSignature<'text> {
+    left: &'text str,
+    separator: char,
+    right: &'text str,
+}
+
+impl<'text> JoinedSignature<'text> {
+    const fn words(left: &'text str, right: &'text str) -> Self {
+        Self {
+            left,
+            separator: ' ',
+            right,
+        }
+    }
+
+    const fn dotted(left: &'text str, right: &'text str) -> Self {
+        Self {
+            left,
+            separator: '.',
+            right,
+        }
+    }
+}
+
+fn joined_signature(
+    builder: &ExtractionBuilder<'_, '_>,
+    input: JoinedSignature<'_>,
+) -> Result<String, ExtractError> {
+    let length = input
+        .left
+        .len()
+        .checked_add(input.right.len())
+        .and_then(|length| length.checked_add(1))
+        .ok_or(ExtractError::OutputLimit)?;
+    let mut signature = String::new();
+    signature
+        .try_reserve(length)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    signature.push_str(input.left);
+    signature.push(input.separator);
+    signature.push_str(input.right);
+    builder.context.copy_text(&signature)
+}
+
+#[derive(Clone, Copy)]
+struct SingleChildUnwrap {
+    terminal: for<'tree> fn(Node<'tree>) -> bool,
+    wrappers: &'static [&'static str],
+}
+
+impl SingleChildUnwrap {
+    const fn new(
+        terminal: for<'tree> fn(Node<'tree>) -> bool,
+        wrappers: &'static [&'static str],
+    ) -> Self {
+        Self { terminal, wrappers }
+    }
+}
+
+fn unwrap_single_child<'tree>(
+    node: Node<'tree>,
+    depth: usize,
+    rule: SingleChildUnwrap,
+) -> Option<Node<'tree>> {
+    if depth > 8 {
+        return None;
+    }
+    if (rule.terminal)(node) {
+        return Some(node);
+    }
+    if rule.wrappers.contains(&node.kind()) {
+        let mut children = named_children(node);
+        let child = children.next()?;
+        if children.next().is_none() {
+            return unwrap_single_child(child, depth.saturating_add(1), rule);
+        }
+    }
+    None
+}
+
+fn with_root_scope<Output>(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    operation: impl FnOnce(&mut ExtractionBuilder<'_, '_>) -> Output,
+) -> Output {
+    let owners = std::mem::take(&mut builder.owners);
+    let owner_kinds = std::mem::take(&mut builder.native_owner_kinds);
+    let visibilities = std::mem::take(&mut builder.native_visibilities);
+    let qualifiers = std::mem::take(&mut builder.qualifiers);
+    let output = operation(builder);
+    builder.owners = owners;
+    builder.native_owner_kinds = owner_kinds;
+    builder.native_visibilities = visibilities;
+    builder.qualifiers = qualifiers;
+    output
+}
+
+#[derive(Clone, Copy)]
+enum ChildReferenceKind {
+    CCall,
+    ManagedConstruction,
+}
+
+fn capture_child_reference(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    kind: ChildReferenceKind,
+) -> Result<(), ExtractError> {
+    let (field, reference_kind) = match kind {
+        ChildReferenceKind::CCall => ("function", ReferenceKind::Calls),
+        ChildReferenceKind::ManagedConstruction => ("type", ReferenceKind::Instantiates),
+    };
+    let Some(target) = node.child_by_field_name(field) else {
+        return Ok(());
+    };
+    let name = match kind {
+        ChildReferenceKind::CCall => c_family::safe_call_target(builder, target)?,
+        ChildReferenceKind::ManagedConstruction => {
+            managed_family::managed_outer_type_name(builder, target)?
+        }
+    };
+    let Some(name) = name else {
+        return Ok(());
+    };
+    references::push_reference(
+        builder,
+        PendingReference {
+            owner: builder.owners.last().cloned(),
+            name,
+            kind: reference_kind,
+            node: target,
+        },
+    )
+}
+
 pub(super) struct PendingReference<'tree> {
     owner: Option<SymbolId>,
     name: String,
     kind: ReferenceKind,
     node: Node<'tree>,
+}
+
+#[derive(Clone, Copy)]
+enum ExtractionFamily {
+    Shell,
+    C,
+    Managed,
+    JvmDynamic,
+    GraphQl,
+    Prisma,
+    Sql,
+    Generic,
+    Polyglot,
+    JavaScript,
+    Unsupported,
+}
+
+const SHELL_LANGUAGES: &[SourceLanguage] = &[
+    SourceLanguage::Bash,
+    SourceLanguage::Fish,
+    SourceLanguage::PowerShell,
+    SourceLanguage::Zsh,
+];
+const C_LANGUAGES: &[SourceLanguage] = &[
+    SourceLanguage::C,
+    SourceLanguage::Cpp,
+    SourceLanguage::Cuda,
+    SourceLanguage::Glsl,
+    SourceLanguage::Hlsl,
+];
+const MANAGED_LANGUAGES: &[SourceLanguage] = &[SourceLanguage::Java, SourceLanguage::CSharp];
+const JVM_DYNAMIC_LANGUAGES: &[SourceLanguage] = &[
+    SourceLanguage::Kotlin,
+    SourceLanguage::Scala,
+    SourceLanguage::Groovy,
+];
+const GENERIC_LANGUAGES: &[SourceLanguage] = &[
+    SourceLanguage::Abap,
+    SourceLanguage::Apex,
+    SourceLanguage::ArkTs,
+    SourceLanguage::Astro,
+    SourceLanguage::Clojure,
+    SourceLanguage::CommonLisp,
+    SourceLanguage::Dart,
+    SourceLanguage::FSharp,
+    SourceLanguage::Hcl,
+    SourceLanguage::Html,
+    SourceLanguage::Khn,
+    SourceLanguage::Lean,
+    SourceLanguage::Lua,
+    SourceLanguage::Luau,
+    SourceLanguage::Nix,
+    SourceLanguage::ObjectiveC,
+    SourceLanguage::Pascal,
+    SourceLanguage::Php,
+    SourceLanguage::R,
+    SourceLanguage::ReScript,
+    SourceLanguage::Ruby,
+    SourceLanguage::Solidity,
+    SourceLanguage::Swift,
+    SourceLanguage::VbNet,
+    SourceLanguage::Yaml,
+];
+const POLYGLOT_LANGUAGES: &[SourceLanguage] = &[
+    SourceLanguage::Rust,
+    SourceLanguage::Python,
+    SourceLanguage::Go,
+];
+const JAVASCRIPT_LANGUAGES: &[SourceLanguage] = &[
+    SourceLanguage::TypeScript,
+    SourceLanguage::Tsx,
+    SourceLanguage::JavaScript,
+    SourceLanguage::Jsx,
+];
+
+fn extraction_family(language: SourceLanguage) -> ExtractionFamily {
+    if SHELL_LANGUAGES.contains(&language) {
+        ExtractionFamily::Shell
+    } else if C_LANGUAGES.contains(&language) {
+        ExtractionFamily::C
+    } else if MANAGED_LANGUAGES.contains(&language) {
+        ExtractionFamily::Managed
+    } else if JVM_DYNAMIC_LANGUAGES.contains(&language) {
+        ExtractionFamily::JvmDynamic
+    } else if GENERIC_LANGUAGES.contains(&language) {
+        ExtractionFamily::Generic
+    } else if POLYGLOT_LANGUAGES.contains(&language) {
+        ExtractionFamily::Polyglot
+    } else if JAVASCRIPT_LANGUAGES.contains(&language) {
+        ExtractionFamily::JavaScript
+    } else {
+        match language {
+            SourceLanguage::GraphQl => ExtractionFamily::GraphQl,
+            SourceLanguage::Prisma => ExtractionFamily::Prisma,
+            SourceLanguage::Sql => ExtractionFamily::Sql,
+            _ => ExtractionFamily::Unsupported,
+        }
+    }
+}
+
+fn visit_javascript_declaration(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    match node.kind() {
+        "interface_declaration" | "class_declaration" | "abstract_class_declaration" => {
+            builder.visit_container(node, depth)?;
+        }
+        "function_declaration"
+        | "generator_function_declaration"
+        | "function_signature"
+        | "method_definition"
+        | "method_signature"
+        | "abstract_method_signature" => builder.visit_callable(node, depth)?,
+        "lexical_declaration" | "variable_declaration" => builder.visit_bindings(node, depth)?,
+        "import_statement" => declarations::visit_import(builder, node)?,
+        "export_statement" => declarations::visit_export(builder, node, depth)?,
+        "type_alias_declaration" => declarations::visit_type_alias(builder, node, depth)?,
+        "enum_declaration" => declarations::visit_enum(builder, node)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn visit_javascript_usage(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    module_system::capture_commonjs_assignment(builder, node)?;
+    match node.kind() {
+        "call_expression" => {
+            if !module_system::capture_dynamic_import(builder, node)? {
+                references::capture_invocation(builder, node, references::InvocationKind::Call)?;
+            }
+        }
+        "new_expression" => {
+            references::capture_invocation(builder, node, references::InvocationKind::Construction)?
+        }
+        "jsx_opening_element" | "jsx_self_closing_element" => {
+            references::capture_jsx_reference(builder, node)?;
+        }
+        "member_expression" => references::capture_field_access(builder, node)?,
+        _ => {}
+    }
+    builder.visit_named_children(node, depth)
+}
+
+#[derive(Clone, Copy)]
+struct JavaScriptBindingVisit<'tree> {
+    declaration: Node<'tree>,
+    declarator: Node<'tree>,
+    depth: usize,
+    constant: bool,
+}
+
+#[derive(Clone, Copy)]
+struct JavaScriptBindingValue<'tree, 'context> {
+    value: Node<'tree>,
+    callable: Option<Node<'tree>>,
+    id: &'context SymbolId,
+    name: &'context str,
+    depth: usize,
+}
+
+#[derive(Clone, Copy)]
+struct DestructuredBindingVisit<'tree> {
+    binding: JavaScriptBindingVisit<'tree>,
+    name_node: Node<'tree>,
+    value: Option<Node<'tree>>,
+    static_module_binding: bool,
+}
+
+fn javascript_binding_kind(component: bool, callable: bool, constant: bool) -> SymbolKind {
+    if component {
+        SymbolKind::Component
+    } else if callable {
+        SymbolKind::Function
+    } else if constant {
+        SymbolKind::Constant
+    } else {
+        SymbolKind::Variable
+    }
+}
+
+fn javascript_binding_signature(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    callable: Option<Node<'_>>,
+    value: Option<Node<'_>>,
+) -> Result<Option<String>, ExtractError> {
+    if let Some(callable_node) = callable {
+        builder.context.callable_signature(callable_node)
+    } else if let Some(value_node) = value {
+        builder.context.assignment_signature(value_node)
+    } else {
+        Ok(None)
+    }
+}
+
+fn visit_destructured_javascript_binding(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: DestructuredBindingVisit<'_>,
+) -> Result<(), ExtractError> {
+    if input.static_module_binding {
+        return Ok(());
+    }
+    let kind = if input.binding.constant {
+        SymbolKind::Constant
+    } else {
+        SymbolKind::Variable
+    };
+    builder.emit_javascript_binding_tree(input.name_node, kind)?;
+    if let Some(value_node) = input.value {
+        builder.visit(value_node, input.binding.depth.saturating_add(1))?;
+    }
+    Ok(())
+}
+
+fn visit_javascript_binding_value(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: JavaScriptBindingValue<'_, '_>,
+) -> Result<(), ExtractError> {
+    builder.owners.push(input.id.clone());
+    builder.qualifiers.push(input.name.to_owned());
+    if let Some(callable_node) = input.callable {
+        builder.emit_javascript_callable_parameters(callable_node)?;
+    }
+    let visit_node = input
+        .callable
+        .and_then(|callable_node| callable_node.child_by_field_name("body"))
+        .unwrap_or(input.value);
+    builder.visit(visit_node, input.depth.saturating_add(1))?;
+    builder.qualifiers.pop();
+    builder.owners.pop();
+    Ok(())
+}
+
+fn visit_javascript_binding(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: JavaScriptBindingVisit<'_>,
+) -> Result<(), ExtractError> {
+    builder.context.ensure_active()?;
+    let Some(name_node) = input.declarator.child_by_field_name("name") else {
+        return Ok(());
+    };
+    let value = input.declarator.child_by_field_name("value");
+    let static_module_binding = module_system::is_static_module_binding_value(builder, value);
+    module_system::capture_commonjs_require(builder, name_node, value)?;
+    module_system::capture_dynamic_import_binding(builder, name_node, value)?;
+    if !matches!(name_node.kind(), "identifier" | "property_identifier") {
+        return visit_destructured_javascript_binding(
+            builder,
+            DestructuredBindingVisit {
+                binding: input,
+                name_node,
+                value,
+                static_module_binding,
+            },
+        );
+    }
+    let name = builder.context.owned_text(name_node)?;
+    let callable =
+        value.filter(|value| matches!(value.kind(), "arrow_function" | "function_expression"));
+    let symbol_node = callable.unwrap_or(input.declarator);
+    let component = callable.is_some()
+        && starts_uppercase(&name)
+        && contains_jsx(symbol_node, builder.context.cancelled)?;
+    let (exported, default_export) = export_flags(symbol_node);
+    let pending = PendingSymbol {
+        kind: javascript_binding_kind(component, callable.is_some(), input.constant),
+        name: name.clone(),
+        span_node: symbol_node,
+        structural_node: symbol_node,
+        doc_anchor: input.declaration,
+        body_node: value,
+        declaration_only: false,
+        signature: javascript_binding_signature(builder, callable, value)?,
+        exported,
+        default_export,
+        async_symbol: callable.is_some_and(|entry| has_child_kind(entry, "async")),
+        static_member: false,
+        visibility: None,
+    };
+    let id = builder.emit_symbol(pending)?;
+    if callable.is_some() {
+        references::capture_callable_types(builder, symbol_node, &id)?;
+    } else {
+        references::capture_type_nodes(builder, input.declarator, &id)?;
+    }
+    if let Some(value) = value {
+        visit_javascript_binding_value(
+            builder,
+            JavaScriptBindingValue {
+                value,
+                callable,
+                id: &id,
+                name: &name,
+                depth: input.depth,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
@@ -260,186 +845,55 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     }
 
     fn visit_declaration(&mut self, node: Node<'_>, depth: usize) -> Result<bool, ExtractError> {
-        match self.context.snapshot.language() {
-            SourceLanguage::Bash
-            | SourceLanguage::Fish
-            | SourceLanguage::PowerShell
-            | SourceLanguage::Zsh => return shell_family::visit_declaration(self, node, depth),
-            SourceLanguage::C
-            | SourceLanguage::Cpp
-            | SourceLanguage::Cuda
-            | SourceLanguage::Glsl
-            | SourceLanguage::Hlsl => return c_family::visit_declaration(self, node, depth),
-            SourceLanguage::Java | SourceLanguage::CSharp => {
-                return managed_family::visit_declaration(self, node, depth);
+        match extraction_family(self.context.snapshot.language()) {
+            ExtractionFamily::Shell => shell_family::visit_declaration(self, node, depth),
+            ExtractionFamily::C => c_family::visit_declaration(self, node, depth),
+            ExtractionFamily::Managed => managed_family::visit_declaration(self, node, depth),
+            ExtractionFamily::JvmDynamic => {
+                jvm_dynamic_family::visit_declaration(self, node, depth)
             }
-            SourceLanguage::Kotlin | SourceLanguage::Scala | SourceLanguage::Groovy => {
-                return jvm_dynamic_family::visit_declaration(self, node, depth);
-            }
-            SourceLanguage::GraphQl => {
-                return graphql_family::visit_declaration(self, node, depth);
-            }
-            SourceLanguage::Prisma => {
-                return prisma_family::visit_declaration(self, node, depth);
-            }
-            SourceLanguage::Sql => {
-                return sql_family::visit_declaration(self, node, depth);
-            }
-            SourceLanguage::Abap
-            | SourceLanguage::Apex
-            | SourceLanguage::ArkTs
-            | SourceLanguage::Astro
-            | SourceLanguage::Clojure
-            | SourceLanguage::CommonLisp
-            | SourceLanguage::Dart
-            | SourceLanguage::FSharp
-            | SourceLanguage::Hcl
-            | SourceLanguage::Html
-            | SourceLanguage::Khn
-            | SourceLanguage::Lean
-            | SourceLanguage::Lua
-            | SourceLanguage::Luau
-            | SourceLanguage::Nix
-            | SourceLanguage::ObjectiveC
-            | SourceLanguage::Pascal
-            | SourceLanguage::Php
-            | SourceLanguage::R
-            | SourceLanguage::ReScript
-            | SourceLanguage::Ruby
-            | SourceLanguage::Solidity
-            | SourceLanguage::Swift
-            | SourceLanguage::VbNet
-            | SourceLanguage::Yaml => {
-                return generic_family::visit_declaration(self, node, depth);
-            }
-            SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
-                return polyglot::visit_declaration(self, node, depth);
-            }
-            SourceLanguage::TypeScript
-            | SourceLanguage::Tsx
-            | SourceLanguage::JavaScript
-            | SourceLanguage::Jsx => {}
-            _ => return Err(ExtractError::UnsupportedLanguage),
+            ExtractionFamily::GraphQl => graphql_family::visit_declaration(self, node, depth),
+            ExtractionFamily::Prisma => prisma_family::visit_declaration(self, node, depth),
+            ExtractionFamily::Sql => sql_family::visit_declaration(self, node, depth),
+            ExtractionFamily::Generic => generic_family::visit_declaration(self, node, depth),
+            ExtractionFamily::Polyglot => polyglot::visit_declaration(self, node, depth),
+            ExtractionFamily::JavaScript => visit_javascript_declaration(self, node, depth),
+            ExtractionFamily::Unsupported => Err(ExtractError::UnsupportedLanguage),
         }
-        match node.kind() {
-            "interface_declaration" | "class_declaration" | "abstract_class_declaration" => {
-                self.visit_container(node, depth)?;
-            }
-            "function_declaration"
-            | "generator_function_declaration"
-            | "function_signature"
-            | "method_definition"
-            | "method_signature"
-            | "abstract_method_signature" => {
-                self.visit_callable(node, depth)?;
-            }
-            "lexical_declaration" | "variable_declaration" => {
-                self.visit_bindings(node, depth)?;
-            }
-            "import_statement" => declarations::visit_import(self, node)?,
-            "export_statement" => declarations::visit_export(self, node, depth)?,
-            "type_alias_declaration" => declarations::visit_type_alias(self, node, depth)?,
-            "enum_declaration" => declarations::visit_enum(self, node)?,
-            _ => return Ok(false),
-        }
-        Ok(true)
     }
 
     fn visit_usage(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
-        match self.context.snapshot.language() {
-            SourceLanguage::Bash
-            | SourceLanguage::Fish
-            | SourceLanguage::PowerShell
-            | SourceLanguage::Zsh => {
+        match extraction_family(self.context.snapshot.language()) {
+            ExtractionFamily::Shell => {
                 shell_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
+                self.visit_named_children(node, depth)
             }
-            SourceLanguage::C
-            | SourceLanguage::Cpp
-            | SourceLanguage::Cuda
-            | SourceLanguage::Glsl
-            | SourceLanguage::Hlsl => {
+            ExtractionFamily::C => {
                 c_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
+                self.visit_named_children(node, depth)
             }
-            SourceLanguage::Java | SourceLanguage::CSharp => {
+            ExtractionFamily::Managed => {
                 managed_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
+                self.visit_named_children(node, depth)
             }
-            SourceLanguage::Kotlin | SourceLanguage::Scala | SourceLanguage::Groovy => {
+            ExtractionFamily::JvmDynamic => {
                 jvm_dynamic_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
+                self.visit_named_children(node, depth)
             }
-            SourceLanguage::GraphQl => {
-                graphql_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
+            ExtractionFamily::GraphQl | ExtractionFamily::Prisma | ExtractionFamily::Sql => {
+                self.visit_named_children(node, depth)
             }
-            SourceLanguage::Prisma => {
-                prisma_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
-            }
-            SourceLanguage::Sql => {
-                sql_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
-            }
-            SourceLanguage::Abap
-            | SourceLanguage::Apex
-            | SourceLanguage::ArkTs
-            | SourceLanguage::Astro
-            | SourceLanguage::Clojure
-            | SourceLanguage::CommonLisp
-            | SourceLanguage::Dart
-            | SourceLanguage::FSharp
-            | SourceLanguage::Hcl
-            | SourceLanguage::Html
-            | SourceLanguage::Khn
-            | SourceLanguage::Lean
-            | SourceLanguage::Lua
-            | SourceLanguage::Luau
-            | SourceLanguage::Nix
-            | SourceLanguage::ObjectiveC
-            | SourceLanguage::Pascal
-            | SourceLanguage::Php
-            | SourceLanguage::R
-            | SourceLanguage::ReScript
-            | SourceLanguage::Ruby
-            | SourceLanguage::Solidity
-            | SourceLanguage::Swift
-            | SourceLanguage::VbNet
-            | SourceLanguage::Yaml => {
+            ExtractionFamily::Generic => {
                 generic_family::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
+                self.visit_named_children(node, depth)
             }
-            SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
+            ExtractionFamily::Polyglot => {
                 polyglot::capture_usage(self, node)?;
-                return self.visit_named_children(node, depth);
+                self.visit_named_children(node, depth)
             }
-            SourceLanguage::TypeScript
-            | SourceLanguage::Tsx
-            | SourceLanguage::JavaScript
-            | SourceLanguage::Jsx => {
-                module_system::capture_commonjs_assignment(self, node)?;
-            }
-            _ => return Err(ExtractError::UnsupportedLanguage),
+            ExtractionFamily::JavaScript => visit_javascript_usage(self, node, depth),
+            ExtractionFamily::Unsupported => Err(ExtractError::UnsupportedLanguage),
         }
-        match node.kind() {
-            "call_expression" => {
-                if !module_system::capture_dynamic_import(self, node)? {
-                    references::capture_invocation(self, node, references::InvocationKind::Call)?;
-                }
-            }
-            "new_expression" => references::capture_invocation(
-                self,
-                node,
-                references::InvocationKind::Construction,
-            )?,
-            "jsx_opening_element" | "jsx_self_closing_element" => {
-                references::capture_jsx_reference(self, node)?;
-            }
-            "member_expression" => references::capture_field_access(self, node)?,
-            _ => {}
-        }
-        self.visit_named_children(node, depth)
     }
 
     fn visit_named_children(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
@@ -532,6 +986,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         references::capture_callable_types(self, node, &id)?;
         self.owners.push(id);
         self.qualifiers.push(name);
+        self.emit_javascript_callable_parameters(node)?;
         if let Some(body) = body {
             self.visit(body, depth.saturating_add(1))?;
         }
@@ -542,75 +997,84 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
 
     fn visit_bindings(&mut self, declaration: Node<'_>, depth: usize) -> Result<(), ExtractError> {
         let constant = has_child_kind(declaration, "const");
-        for declarator in named_children(declaration) {
-            self.context.ensure_active()?;
-            if declarator.kind() != "variable_declarator" {
-                continue;
+        for declarator in
+            named_children(declaration).filter(|node| node.kind() == "variable_declarator")
+        {
+            visit_javascript_binding(
+                self,
+                JavaScriptBindingVisit {
+                    declaration,
+                    declarator,
+                    depth,
+                    constant,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn emit_javascript_callable_parameters(
+        &mut self,
+        callable: Node<'_>,
+    ) -> Result<(), ExtractError> {
+        let parameters = callable
+            .child_by_field_name("parameters")
+            .or_else(|| callable.child_by_field_name("parameter"));
+        if let Some(parameters) = parameters {
+            self.emit_javascript_binding_tree(parameters, SymbolKind::Parameter)?;
+        }
+        Ok(())
+    }
+
+    fn emit_javascript_binding_tree(
+        &mut self,
+        node: Node<'_>,
+        kind: SymbolKind,
+    ) -> Result<(), ExtractError> {
+        self.context.ensure_active()?;
+        match node.kind() {
+            "identifier" | "shorthand_property_identifier_pattern" => {
+                let name = self.context.owned_text(node)?;
+                self.emit_symbol(PendingSymbol {
+                    kind,
+                    name,
+                    span_node: node,
+                    structural_node: node,
+                    doc_anchor: node,
+                    body_node: None,
+                    declaration_only: false,
+                    signature: None,
+                    exported: false,
+                    default_export: false,
+                    async_symbol: false,
+                    static_member: false,
+                    visibility: None,
+                })?;
             }
-            let Some(name_node) = declarator.child_by_field_name("name") else {
-                continue;
-            };
-            let value = declarator.child_by_field_name("value");
-            module_system::capture_commonjs_require(self, name_node, value)?;
-            module_system::capture_dynamic_import_binding(self, name_node, value)?;
-            if !matches!(name_node.kind(), "identifier" | "property_identifier") {
-                continue;
+            "required_parameter" | "optional_parameter" => {
+                if let Some(binding) = node
+                    .child_by_field_name("name")
+                    .or_else(|| node.child_by_field_name("pattern"))
+                {
+                    self.emit_javascript_binding_tree(binding, kind)?;
+                }
             }
-            let name = self.context.owned_text(name_node)?;
-            let callable = value
-                .filter(|value| matches!(value.kind(), "arrow_function" | "function_expression"));
-            let symbol_node = callable.unwrap_or(declarator);
-            let component = callable.is_some()
-                && starts_uppercase(&name)
-                && contains_jsx(symbol_node, self.context.cancelled)?;
-            let kind = if component {
-                SymbolKind::Component
-            } else if callable.is_some() {
-                SymbolKind::Function
-            } else if constant {
-                SymbolKind::Constant
-            } else {
-                SymbolKind::Variable
-            };
-            let (exported, default_export) = export_flags(symbol_node);
-            let signature = if let Some(callable_node) = callable {
-                self.context.callable_signature(callable_node)?
-            } else if let Some(value_node) = value {
-                self.context.assignment_signature(value_node)?
-            } else {
-                None
-            };
-            let pending = PendingSymbol {
-                kind,
-                name: name.clone(),
-                span_node: symbol_node,
-                structural_node: symbol_node,
-                doc_anchor: declaration,
-                body_node: value,
-                declaration_only: false,
-                signature,
-                exported,
-                default_export,
-                async_symbol: callable.is_some_and(|entry| has_child_kind(entry, "async")),
-                static_member: false,
-                visibility: None,
-            };
-            let id = self.emit_symbol(pending)?;
-            if callable.is_some() {
-                references::capture_callable_types(self, symbol_node, &id)?;
-            } else {
-                references::capture_type_nodes(self, declarator, &id)?;
+            "pair_pattern" => {
+                if let Some(value) = node.child_by_field_name("value") {
+                    self.emit_javascript_binding_tree(value, kind)?;
+                }
             }
-            if let Some(value_node) = value {
-                self.owners.push(id);
-                self.qualifiers.push(name);
-                let visit_node = callable
-                    .and_then(|callable_node| callable_node.child_by_field_name("body"))
-                    .unwrap_or(value_node);
-                self.visit(visit_node, depth.saturating_add(1))?;
-                self.qualifiers.pop();
-                self.owners.pop();
+            "assignment_pattern" | "object_assignment_pattern" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    self.emit_javascript_binding_tree(left, kind)?;
+                }
             }
+            "formal_parameters" | "object_pattern" | "array_pattern" | "rest_pattern" => {
+                for child in named_children(node) {
+                    self.emit_javascript_binding_tree(child, kind)?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -687,6 +1151,11 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             body_search_truncated: body_search.truncated,
             health,
             declaration_only: pending.declaration_only,
+            test_symbol: rust_symbol_is_test_owned(
+                self.context.snapshot.language(),
+                pending.structural_node,
+                self.context.snapshot.source(),
+            )?,
             exported: pending.exported || explicit_export || explicit_default,
             default_export: pending.default_export || explicit_default,
             async_symbol: pending.async_symbol,

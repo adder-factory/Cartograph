@@ -190,6 +190,22 @@ pub(super) fn capture_dynamic_import_binding(
     Ok(())
 }
 
+pub(super) fn is_static_module_binding_value(
+    builder: &ExtractionBuilder<'_, '_>,
+    value: Option<Node<'_>>,
+) -> bool {
+    if !is_javascript_family(builder.context.snapshot.language()) {
+        return false;
+    }
+    let commonjs = !builder.commonjs_shadowing.require
+        && value
+            .and_then(commonjs_require_shape)
+            .is_some_and(|(call, _)| commonjs_require_source(builder, call).is_some());
+    commonjs
+        || dynamic_import_binding_shape(value)
+            .is_some_and(|(call, _)| dynamic_import_source(builder, call).is_some())
+}
+
 fn dynamic_import_binding_shape(value: Option<Node<'_>>) -> Option<(Node<'_>, Option<Node<'_>>)> {
     let mut node = value?;
     for _ in 0..8 {
@@ -631,10 +647,13 @@ pub(super) fn emit_export_alias(
 
 pub(super) fn emit_namespace_reexport(
     builder: &mut ExtractionBuilder<'_, '_>,
-    namespace_node: Node<'_>,
-    public_node: Node<'_>,
-    module_specifier: String,
+    input: NamespaceReexportInput<'_>,
 ) -> Result<(), ExtractError> {
+    let NamespaceReexportInput {
+        namespace_node,
+        public_node,
+        module_specifier,
+    } = input;
     let public_name = builder.context.owned_unquoted_text(public_node)?;
     let alias = ExportAlias {
         public_name: public_name.clone(),
@@ -651,6 +670,26 @@ pub(super) fn emit_namespace_reexport(
         local_name: public_name,
         span: span_for(public_node)?,
     })
+}
+
+pub(super) struct NamespaceReexportInput<'tree> {
+    namespace_node: Node<'tree>,
+    public_node: Node<'tree>,
+    module_specifier: String,
+}
+
+impl<'tree> NamespaceReexportInput<'tree> {
+    pub(super) const fn new(
+        namespace_node: Node<'tree>,
+        public_node: Node<'tree>,
+        module_specifier: String,
+    ) -> Self {
+        Self {
+            namespace_node,
+            public_node,
+            module_specifier,
+        }
+    }
 }
 
 fn emit_export_alias_symbol(

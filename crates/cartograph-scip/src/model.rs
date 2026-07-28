@@ -13,6 +13,47 @@ pub(crate) const MAXIMUM_OCCURRENCES: usize = 10_000_000;
 pub(crate) const MAXIMUM_RELATIONSHIPS: usize = 10_000_000;
 pub(crate) const MAXIMUM_STRING_BYTES: usize = 65_536;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub(crate) enum ScipSymbolKind {
+    Unspecified = 0,
+    Class = 7,
+    Constant = 8,
+    Constructor = 9,
+    Enum = 11,
+    EnumMember = 12,
+    Field = 15,
+    File = 16,
+    Function = 17,
+    Getter = 18,
+    Interface = 21,
+    Macro = 25,
+    Method = 26,
+    Module = 29,
+    Namespace = 30,
+    Object = 33,
+    Package = 35,
+    Parameter = 37,
+    Property = 41,
+    Protocol = 42,
+    SelfParameter = 44,
+    Setter = 45,
+    Struct = 49,
+    Trait = 53,
+    Type = 54,
+    TypeAlias = 55,
+    TypeParameter = 58,
+    Variable = 61,
+    AbstractMethod = 66,
+    Accessor = 72,
+    SingletonMethod = 76,
+    StaticDataMember = 77,
+    StaticField = 79,
+    StaticMethod = 80,
+    StaticProperty = 81,
+    StaticVariable = 82,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScipRelationship {
     pub symbol: String,

@@ -18,6 +18,9 @@ const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAXIMUM_REDIRECTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
+const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+const HIGH_NIBBLE_SHIFT: u8 = 4;
+const LOW_NIBBLE_MASK: u8 = 0x0f;
 
 #[derive(Clone, Copy)]
 struct RecommendedModel {
@@ -369,11 +372,14 @@ fn installed(model: RecommendedModel) -> InstalledModel {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        output.push(char::from(
+            LOWER_HEX_DIGITS[usize::from(byte >> HIGH_NIBBLE_SHIFT)],
+        ));
+        output.push(char::from(
+            LOWER_HEX_DIGITS[usize::from(byte & LOW_NIBBLE_MASK)],
+        ));
     }
     output
 }

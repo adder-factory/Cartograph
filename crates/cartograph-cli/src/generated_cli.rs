@@ -114,6 +114,20 @@ enum PropertyKind {
     JsonObject,
 }
 
+#[derive(Clone, Copy)]
+struct ArgumentConfiguration<'property> {
+    property: &'property Value,
+    kind: PropertyKind,
+    positional: bool,
+}
+
+struct CompatibilityContext<'context> {
+    spec: &'context GeneratedSpec,
+    matches: &'context ArgMatches,
+    project_path: &'context mut PathBuf,
+    arguments: &'context mut Map<String, Value>,
+}
+
 pub(super) fn parse() -> Result<ParsedCli, ParseFailure> {
     parse_from(std::env::args_os())
 }
@@ -257,7 +271,14 @@ fn command_for_tool(
                 .action(ArgAction::Set)
                 .conflicts_with("clearParseCacheLanguage")
         } else {
-            configure_argument(argument, property, kind, is_positional.is_some())?
+            configure_argument(
+                argument,
+                ArgumentConfiguration {
+                    property,
+                    kind,
+                    positional: is_positional.is_some(),
+                },
+            )?
         };
         argument = apply_v1_short_alias(&spec.command_name, name, argument);
         command = command.arg(argument);
@@ -273,6 +294,12 @@ fn apply_v1_short_alias(command: &str, name: &str, argument: Arg) -> Arg {
         ("affected", "depth") | ("graph", "direction") => argument.short('d'),
         ("affected", "filter") | ("context", "format") => argument.short('f'),
         ("context", "maxNodes") => argument.short('n'),
+        _ => apply_v1_admin_and_graph_alias(command, name, argument),
+    }
+}
+
+fn apply_v1_admin_and_graph_alias(command: &str, name: &str, argument: Arg) -> Arg {
+    match (command, name) {
         ("graph", "edgeKind") => argument.short('e'),
         ("graph", "k") => argument.short('k').visible_alias("top-k"),
         ("admin", "force") => argument.short('f'),
@@ -286,20 +313,38 @@ fn apply_v1_short_alias(command: &str, name: &str, argument: Arg) -> Arg {
 }
 
 fn add_compatibility_arguments(
+    command: clap::Command,
+    spec: &GeneratedSpec,
+    properties: &Map<String, Value>,
+) -> Result<clap::Command, String> {
+    let command = add_compatibility_positional_alias(command, spec, properties)?;
+    Ok(add_command_compatibility_arguments(
+        command,
+        spec.command_name.as_str(),
+    ))
+}
+
+const COMPATIBILITY_POSITIONAL_ALIASES: [(&str, &str, &str); 9] = [
+    ("summaries", "action", "action"),
+    ("note", "action", "action"),
+    ("review", "mode", "mode"),
+    ("find", "query", "query"),
+    ("explore", "query", "query"),
+    ("graph", "start", "start"),
+    ("imports", "pathFilter", "file"),
+    ("ask", "question", "question"),
+    ("trace-to-culprits", "trace", "trace"),
+];
+
+fn add_compatibility_positional_alias(
     mut command: clap::Command,
     spec: &GeneratedSpec,
     properties: &Map<String, Value>,
 ) -> Result<clap::Command, String> {
-    let positional_alias = match spec.command_name.as_str() {
-        "summaries" | "note" => Some(("action", "action")),
-        "review" => Some(("mode", "mode")),
-        "find" | "explore" => Some(("query", "query")),
-        "graph" => Some(("start", "start")),
-        "imports" => Some(("pathFilter", "file")),
-        "ask" => Some(("question", "question")),
-        "trace-to-culprits" => Some(("trace", "trace")),
-        _ => None,
-    };
+    let positional_alias = COMPATIBILITY_POSITIONAL_ALIASES
+        .iter()
+        .find(|(candidate, ..)| *candidate == spec.command_name)
+        .map(|(_, property, long)| (*property, *long));
     if let Some((property_name, long)) = positional_alias
         && let Some(property) = properties.get(property_name)
     {
@@ -309,170 +354,197 @@ fn add_compatibility_arguments(
                 .long(long)
                 .help(format!("Compatibility alias for {property_name}."))
                 .conflicts_with(property_name),
-            property,
-            kind,
-            false,
+            ArgumentConfiguration {
+                property,
+                kind,
+                positional: false,
+            },
         )?;
         if spec.command_name == "explore" {
             argument = argument.visible_alias("start");
         }
         command = command.arg(argument);
     }
-    match spec.command_name.as_str() {
-        "ask" => {
-            command = command
-                .arg(
-                    Arg::new(COMPAT_ASK_PATH)
-                        .index(2)
-                        .value_hint(ValueHint::DirPath)
-                        .help("Compatibility project-path positional."),
-                )
-                .arg(
-                    Arg::new(COMPAT_QUIET)
-                        .short('q')
-                        .long("quiet")
-                        .action(ArgAction::SetTrue)
-                        .help("Print only the answer text."),
-                );
-        }
-        "affected" => {
-            command = command
-                .arg(
-                    Arg::new(COMPAT_FILES)
-                        .long("files")
-                        .num_args(1..)
-                        .action(ArgAction::Append)
-                        .conflicts_with("files")
-                        .conflicts_with(COMPAT_STDIN)
-                        .help("Compatibility alias for positional changed files."),
-                )
-                .arg(
-                    Arg::new(COMPAT_STDIN)
-                        .long("stdin")
-                        .action(ArgAction::SetTrue)
-                        .conflicts_with("files")
-                        .help("Read one changed file per line from stdin."),
-                )
-                .arg(
-                    Arg::new(COMPAT_INCLUDE_TESTS)
-                        .long("include-tests")
-                        .action(ArgAction::SetTrue)
-                        .help("Accepted for v1 CLI compatibility; affected tests are always included."),
-                )
-                .arg(json_argument())
-                .arg(quiet_argument("Print only affected test paths."));
-        }
-        "files" => {
-            command = command
-                .arg(
-                    Arg::new(COMPAT_FILES_TARGET)
-                        .index(1)
-                        .help("Directory or file target selected by --format."),
-                )
-                .arg(
-                    Arg::new(COMPAT_NO_SYMBOLS)
-                        .long("no-symbols")
-                        .action(ArgAction::SetTrue)
-                        .conflicts_with("symbols"),
-                )
-                .arg(
-                    Arg::new(COMPAT_NO_METADATA)
-                        .long("no-metadata")
-                        .action(ArgAction::SetTrue)
-                        .conflicts_with_all(["metadata", "includeMetadata"]),
-                )
-                .arg(json_argument());
-        }
-        "context" => {
-            command = command.arg(
-                Arg::new(COMPAT_NO_CODE)
-                    .long("no-code")
-                    .action(ArgAction::SetTrue)
-                    .conflicts_with_all(["code", "includeCode"]),
-            );
-        }
-        "graph" => {
-            command = command
-                .arg(
-                    Arg::new(COMPAT_NO_COMPACT)
-                        .long("no-compact")
-                        .action(ArgAction::SetTrue)
-                        .conflicts_with("compact"),
-                )
-                .arg(
-                    Arg::new(COMPAT_NO_INCLUDE_TESTS)
-                        .long("no-include-tests")
-                        .action(ArgAction::SetTrue)
-                        .conflicts_with("includeTests"),
-                );
-        }
-        "compare-to-ref" => {
-            command = command.arg(positive_default_argument(
-                "suppress-line-range-only",
-                "suppressLineRangeOnly",
-            ));
-        }
-        "host" => {
-            command = command.arg(positive_default_argument(
-                "include-install-targets",
-                "includeInstallTargets",
-            ));
-        }
-        "dead-code" | "imports" => {
-            command = command.arg(positive_default_argument(
-                "exclude-fixtures",
-                "excludeFixtures",
-            ));
-        }
-        "coverage" => {
-            command = command.arg(positive_default_argument("include-tests", "includeTests"));
-        }
-        "admin" => {
-            command = command
-                .arg(
-                    Arg::new(COMPAT_SECOND_POSITIONAL)
-                        .index(2)
-                        .value_hint(ValueHint::DirPath)
-                        .help("Compatibility project path for the selected admin action."),
-                )
-                .arg(
-                    Arg::new(COMPAT_ALL)
-                        .long("all")
-                        .action(ArgAction::SetTrue)
-                        .help("Summarize every eligible symbol without a pass cap."),
-                )
-                .arg(json_argument())
-                .arg(quiet_argument("Suppress successful command output."));
-        }
-        "review" => {
-            command = command.arg(
-                Arg::new(COMPAT_SECOND_POSITIONAL)
-                    .index(2)
-                    .value_hint(ValueHint::FilePath)
-                    .conflicts_with("diff")
-                    .help("Compatibility unified-diff file for review context."),
-            );
-        }
-        "session" => {
-            command = command.arg(
-                Arg::new(COMPAT_SECOND_POSITIONAL)
-                    .index(2)
-                    .conflicts_with("id")
-                    .help("Compatibility session id for resume or audit."),
-            );
-        }
-        "summaries" => {
-            command = command.arg(
-                Arg::new(COMPAT_SECOND_POSITIONAL)
-                    .index(2)
-                    .value_hint(ValueHint::FilePath)
-                    .conflicts_with("items")
-                    .help("Compatibility JSON input file for summaries save."),
-            );
-        }
-        _ => {}
-    }
     Ok(command)
+}
+
+fn add_command_compatibility_arguments(
+    command: clap::Command,
+    command_name: &str,
+) -> clap::Command {
+    match command_name {
+        "ask" => add_ask_compatibility_arguments(command),
+        "affected" => add_affected_compatibility_arguments(command),
+        "files" => add_files_compatibility_arguments(command),
+        "context" => add_context_compatibility_arguments(command),
+        "graph" => add_graph_compatibility_arguments(command),
+        "compare-to-ref" => command.arg(positive_default_argument(
+            "suppress-line-range-only",
+            "suppressLineRangeOnly",
+        )),
+        _ => add_secondary_compatibility_arguments(command, command_name),
+    }
+}
+
+fn add_secondary_compatibility_arguments(
+    command: clap::Command,
+    command_name: &str,
+) -> clap::Command {
+    match command_name {
+        "host" => command.arg(positive_default_argument(
+            "include-install-targets",
+            "includeInstallTargets",
+        )),
+        "dead-code" | "imports" => command.arg(positive_default_argument(
+            "exclude-fixtures",
+            "excludeFixtures",
+        )),
+        "coverage" => command.arg(positive_default_argument("include-tests", "includeTests")),
+        "admin" => add_admin_compatibility_arguments(command),
+        "review" => add_review_compatibility_arguments(command),
+        "session" => add_session_compatibility_arguments(command),
+        "summaries" => add_summaries_compatibility_arguments(command),
+        _ => command,
+    }
+}
+
+fn add_ask_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command
+        .arg(
+            Arg::new(COMPAT_ASK_PATH)
+                .index(2)
+                .value_hint(ValueHint::DirPath)
+                .help("Compatibility project-path positional."),
+        )
+        .arg(
+            Arg::new(COMPAT_QUIET)
+                .short('q')
+                .long("quiet")
+                .action(ArgAction::SetTrue)
+                .help("Print only the answer text."),
+        )
+}
+
+fn add_affected_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command
+        .arg(
+            Arg::new(COMPAT_FILES)
+                .long("files")
+                .num_args(1..)
+                .action(ArgAction::Append)
+                .conflicts_with("files")
+                .conflicts_with(COMPAT_STDIN)
+                .help("Compatibility alias for positional changed files."),
+        )
+        .arg(
+            Arg::new(COMPAT_STDIN)
+                .long("stdin")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("files")
+                .help("Read one changed file per line from stdin."),
+        )
+        .arg(
+            Arg::new(COMPAT_INCLUDE_TESTS)
+                .long("include-tests")
+                .action(ArgAction::SetTrue)
+                .help("Accepted for v1 CLI compatibility; affected tests are always included."),
+        )
+        .arg(json_argument())
+        .arg(quiet_argument("Print only affected test paths."))
+}
+
+fn add_files_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command
+        .arg(
+            Arg::new(COMPAT_FILES_TARGET)
+                .index(1)
+                .help("Directory or file target selected by --format."),
+        )
+        .arg(
+            Arg::new(COMPAT_NO_SYMBOLS)
+                .long("no-symbols")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("symbols"),
+        )
+        .arg(
+            Arg::new(COMPAT_NO_METADATA)
+                .long("no-metadata")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["metadata", "includeMetadata"]),
+        )
+        .arg(json_argument())
+}
+
+fn add_context_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command.arg(
+        Arg::new(COMPAT_NO_CODE)
+            .long("no-code")
+            .action(ArgAction::SetTrue)
+            .conflicts_with_all(["code", "includeCode"]),
+    )
+}
+
+fn add_graph_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command
+        .arg(
+            Arg::new(COMPAT_NO_COMPACT)
+                .long("no-compact")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("compact"),
+        )
+        .arg(
+            Arg::new(COMPAT_NO_INCLUDE_TESTS)
+                .long("no-include-tests")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("includeTests"),
+        )
+}
+
+fn add_admin_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command
+        .arg(
+            Arg::new(COMPAT_SECOND_POSITIONAL)
+                .index(2)
+                .value_hint(ValueHint::DirPath)
+                .help("Compatibility project path for the selected admin action."),
+        )
+        .arg(
+            Arg::new(COMPAT_ALL)
+                .long("all")
+                .action(ArgAction::SetTrue)
+                .help("Summarize every eligible symbol without a pass cap."),
+        )
+        .arg(json_argument())
+        .arg(quiet_argument("Suppress successful command output."))
+}
+
+fn add_review_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command.arg(
+        Arg::new(COMPAT_SECOND_POSITIONAL)
+            .index(2)
+            .value_hint(ValueHint::FilePath)
+            .conflicts_with("diff")
+            .help("Compatibility unified-diff file for review context."),
+    )
+}
+
+fn add_session_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command.arg(
+        Arg::new(COMPAT_SECOND_POSITIONAL)
+            .index(2)
+            .conflicts_with("id")
+            .help("Compatibility session id for resume or audit."),
+    )
+}
+
+fn add_summaries_compatibility_arguments(command: clap::Command) -> clap::Command {
+    command.arg(
+        Arg::new(COMPAT_SECOND_POSITIONAL)
+            .index(2)
+            .value_hint(ValueHint::FilePath)
+            .conflicts_with("items")
+            .help("Compatibility JSON input file for summaries save."),
+    )
 }
 
 fn positive_default_argument(long: &'static str, property: &'static str) -> Arg {
@@ -507,30 +579,34 @@ struct PositionalMode {
     joined_or_variadic: bool,
 }
 
+const SPECIAL_POSITIONAL_FIELDS: [(&str, &str, bool, bool); 16] = [
+    ("node", "symbols", false, true),
+    ("context", "task", false, false),
+    ("graph", "start", false, false),
+    ("explore", "query", true, true),
+    ("find", "query", false, true),
+    ("blame", "symbol", false, false),
+    ("history", "symbol", false, false),
+    ("imports", "pathFilter", false, false),
+    ("tests-for", "symbol", false, false),
+    ("role", "role", false, false),
+    ("sql", "query", false, false),
+    ("coverage", "symbol", false, false),
+    ("review", "mode", false, false),
+    ("ask", "question", false, false),
+    ("affected", "files", false, true),
+    ("trace-to-culprits", "trace", false, false),
+];
+
 fn positional_fields(
     command: &str,
     properties: &Map<String, Value>,
     required: &[String],
 ) -> BTreeMap<String, PositionalMode> {
-    let special = match command {
-        "node" => Some(("symbols", false, true)),
-        "context" => Some(("task", false, false)),
-        "graph" => Some(("start", false, false)),
-        "explore" => Some(("query", true, true)),
-        "find" => Some(("query", false, true)),
-        "blame" => Some(("symbol", false, false)),
-        "history" => Some(("symbol", false, false)),
-        "imports" => Some(("pathFilter", false, false)),
-        "tests-for" => Some(("symbol", false, false)),
-        "role" => Some(("role", false, false)),
-        "sql" => Some(("query", false, false)),
-        "coverage" => Some(("symbol", false, false)),
-        "review" => Some(("mode", false, false)),
-        "ask" => Some(("question", false, false)),
-        "affected" => Some(("files", false, true)),
-        "trace-to-culprits" => Some(("trace", false, false)),
-        _ => None,
-    };
+    let special = SPECIAL_POSITIONAL_FIELDS
+        .iter()
+        .find(|(candidate, ..)| *candidate == command)
+        .map(|(_, name, required, joined)| (*name, *required, *joined));
     let mut result = BTreeMap::new();
     let mut next_index = 1_usize;
     if command == "at-range" {
@@ -589,19 +665,19 @@ fn positional_fields(
 
 fn configure_argument(
     mut argument: Arg,
-    property: &Value,
-    kind: PropertyKind,
-    positional: bool,
+    configuration: ArgumentConfiguration<'_>,
 ) -> Result<Arg, String> {
-    match kind {
+    match configuration.kind {
         PropertyKind::Boolean => {
-            argument = if property.get("default") == Some(&Value::Bool(true)) && !positional {
+            argument = if configuration.property.get("default") == Some(&Value::Bool(true))
+                && !configuration.positional
+            {
                 argument.action(ArgAction::SetFalse)
             } else {
                 argument.action(ArgAction::SetTrue)
             };
         }
-        PropertyKind::StringArray if positional => {
+        PropertyKind::StringArray if configuration.positional => {
             argument = argument.num_args(1..).action(ArgAction::Append);
         }
         PropertyKind::StringArray => {
@@ -611,7 +687,7 @@ fn configure_argument(
             argument = argument.num_args(1).action(ArgAction::Set);
         }
     }
-    if let Some(values) = property.get("enum").and_then(Value::as_array) {
+    if let Some(values) = configuration.property.get("enum").and_then(Value::as_array) {
         let values = values
             .iter()
             .filter_map(Value::as_str)
@@ -632,6 +708,106 @@ fn configure_argument(
     Ok(argument)
 }
 
+struct InvocationArgumentInput<'input> {
+    spec: &'input GeneratedSpec,
+    matches: &'input ArgMatches,
+    required: &'input [String],
+    positional: &'input BTreeMap<String, PositionalMode>,
+    name: &'input str,
+    property: &'input Value,
+}
+
+fn invocation_argument_supplied(input: &InvocationArgumentInput<'_>) -> bool {
+    let value_source = input.matches.value_source(input.name);
+    value_source.is_some()
+        && (value_source != Some(clap::parser::ValueSource::DefaultValue)
+            || input.required.iter().any(|name| name == input.name))
+}
+
+fn append_clear_parse_cache_argument(
+    arguments: &mut Map<String, Value>,
+    input: &InvocationArgumentInput<'_>,
+) -> Result<bool, String> {
+    if input.spec.command_name != "admin" || input.name != "clearParseCache" {
+        return Ok(false);
+    }
+    let raw = input
+        .matches
+        .get_one::<String>(input.name)
+        .ok_or_else(|| "--clear-parse-cache value was unavailable".to_owned())?;
+    arguments.insert(input.name.to_owned(), Value::Bool(true));
+    if raw != CLEAR_PARSE_CACHE_SENTINEL {
+        arguments.insert(
+            "clearParseCacheLanguage".to_owned(),
+            Value::String(raw.clone()),
+        );
+    }
+    Ok(true)
+}
+
+fn string_array_match_value(input: &InvocationArgumentInput<'_>) -> Option<Value> {
+    input.matches.get_many::<String>(input.name).map(|values| {
+        let values = values.cloned().collect::<Vec<_>>();
+        if input
+            .positional
+            .get(input.name)
+            .is_some_and(|mode| mode.joined_or_variadic)
+            && input.name == "query"
+        {
+            Value::String(values.join(" "))
+        } else {
+            Value::Array(values.into_iter().map(Value::String).collect())
+        }
+    })
+}
+
+fn invocation_argument_value(input: &InvocationArgumentInput<'_>) -> Result<Option<Value>, String> {
+    let kind = property_kind(input.property)?;
+    match kind {
+        PropertyKind::Boolean => Ok(input
+            .matches
+            .get_one::<bool>(input.name)
+            .copied()
+            .map(Value::Bool)),
+        PropertyKind::StringArray => Ok(string_array_match_value(input)),
+        PropertyKind::Integer => input
+            .matches
+            .get_one::<String>(input.name)
+            .map(|raw| parse_integer(input.name, raw))
+            .transpose(),
+        PropertyKind::Number => input
+            .matches
+            .get_one::<String>(input.name)
+            .map(|raw| parse_number(input.name, raw))
+            .transpose(),
+        PropertyKind::JsonArray | PropertyKind::JsonObject => input
+            .matches
+            .get_one::<String>(input.name)
+            .map(|raw| parse_json(input.name, raw, kind))
+            .transpose(),
+        PropertyKind::String => Ok(input
+            .matches
+            .get_one::<String>(input.name)
+            .map(|raw| Value::String(canonical_string_value(input.property, raw)))),
+    }
+}
+
+fn append_invocation_argument(
+    arguments: &mut Map<String, Value>,
+    input: InvocationArgumentInput<'_>,
+) -> Result<(), String> {
+    if !invocation_argument_supplied(&input) {
+        return Ok(());
+    }
+    if append_clear_parse_cache_argument(arguments, &input)? {
+        return Ok(());
+    }
+    if let Some(value) = invocation_argument_value(&input)? {
+        arguments.insert(input.name.to_owned(), value);
+    }
+    Ok(())
+}
+
 fn invocation_from_matches(
     spec: &GeneratedSpec,
     matches: &ArgMatches,
@@ -648,63 +824,24 @@ fn invocation_from_matches(
         if name == "projectPath" {
             continue;
         }
-        let value_source = matches.value_source(name);
-        if value_source.is_none()
-            || (value_source == Some(clap::parser::ValueSource::DefaultValue)
-                && !required.contains(name))
-        {
-            continue;
-        }
-        if spec.command_name == "admin" && name == "clearParseCache" {
-            let raw = matches
-                .get_one::<String>(name)
-                .ok_or_else(|| "--clear-parse-cache value was unavailable".to_owned())?;
-            arguments.insert(name.clone(), Value::Bool(true));
-            if raw != CLEAR_PARSE_CACHE_SENTINEL {
-                arguments.insert(
-                    "clearParseCacheLanguage".to_owned(),
-                    Value::String(raw.clone()),
-                );
-            }
-            continue;
-        }
-        let kind = property_kind(property)?;
-        let value = match kind {
-            PropertyKind::Boolean => matches.get_one::<bool>(name).copied().map(Value::Bool),
-            PropertyKind::StringArray => matches.get_many::<String>(name).map(|values| {
-                let values = values.cloned().collect::<Vec<_>>();
-                if positional
-                    .get(name.as_str())
-                    .is_some_and(|mode| mode.joined_or_variadic)
-                    && name == "query"
-                {
-                    Value::String(values.join(" "))
-                } else {
-                    Value::Array(values.into_iter().map(Value::String).collect())
-                }
-            }),
-            PropertyKind::Integer => matches
-                .get_one::<String>(name)
-                .map(|raw| parse_integer(name, raw))
-                .transpose()?,
-            PropertyKind::Number => matches
-                .get_one::<String>(name)
-                .map(|raw| parse_number(name, raw))
-                .transpose()?,
-            PropertyKind::JsonArray | PropertyKind::JsonObject => matches
-                .get_one::<String>(name)
-                .map(|raw| parse_json(name, raw, kind))
-                .transpose()?,
-            PropertyKind::String => matches
-                .get_one::<String>(name)
-                .map(|raw| Value::String(canonical_string_value(property, raw))),
-        };
-        if let Some(value) = value {
-            arguments.insert(name.clone(), value);
-        }
+        append_invocation_argument(
+            &mut arguments,
+            InvocationArgumentInput {
+                spec,
+                matches,
+                required: &required,
+                positional: &positional,
+                name,
+                property,
+            },
+        )?;
     }
-    let render_mode =
-        apply_compatibility_matches(spec, matches, &mut project_path, &mut arguments)?;
+    let render_mode = apply_compatibility_matches(CompatibilityContext {
+        spec,
+        matches,
+        project_path: &mut project_path,
+        arguments: &mut arguments,
+    })?;
     Ok(GeneratedToolInvocation {
         tool_name: spec.tool_name.clone(),
         project_path,
@@ -714,12 +851,21 @@ fn invocation_from_matches(
 }
 
 fn apply_compatibility_matches(
-    spec: &GeneratedSpec,
-    matches: &ArgMatches,
-    project_path: &mut PathBuf,
-    arguments: &mut Map<String, Value>,
+    mut context: CompatibilityContext<'_>,
 ) -> Result<CliRenderMode, String> {
-    let alias_property = match spec.command_name.as_str() {
+    apply_positional_compatibility(&mut context)?;
+    apply_input_compatibility(context.spec, context.matches, context.arguments)?;
+    apply_boolean_compatibility(context.spec, context.matches, context.arguments)?;
+    apply_family_compatibility(&mut context)?;
+    Ok(compatibility_render_mode(
+        context.spec,
+        context.matches,
+        context.arguments,
+    ))
+}
+
+fn apply_positional_compatibility(context: &mut CompatibilityContext<'_>) -> Result<(), String> {
+    let alias_property = match context.spec.command_name.as_str() {
         "summaries" | "note" => Some("action"),
         "review" => Some("mode"),
         "find" | "explore" => Some("query"),
@@ -730,19 +876,27 @@ fn apply_compatibility_matches(
         _ => None,
     };
     if let Some(property) = alias_property
-        && let Some(value) = matches.get_one::<String>(COMPAT_ALIAS_VALUE)
+        && let Some(value) = context.matches.get_one::<String>(COMPAT_ALIAS_VALUE)
     {
-        let schema = schema_properties(&spec.schema)?
+        let schema = schema_properties(&context.spec.schema)?
             .get(property)
             .ok_or_else(|| "compatibility alias schema disappeared".to_owned())?;
-        arguments.insert(
+        context.arguments.insert(
             property.to_owned(),
             Value::String(canonical_string_value(schema, value)),
         );
     }
-    if let Some(path) = compatibility_one(matches, COMPAT_ASK_PATH) {
-        *project_path = PathBuf::from(path);
+    if let Some(path) = compatibility_one(context.matches, COMPAT_ASK_PATH) {
+        *context.project_path = PathBuf::from(path);
     }
+    apply_files_target(context.matches, context.arguments)?;
+    Ok(())
+}
+
+fn apply_files_target(
+    matches: &ArgMatches,
+    arguments: &mut Map<String, Value>,
+) -> Result<(), String> {
     if let Some(target) = compatibility_one(matches, COMPAT_FILES_TARGET) {
         let format = arguments
             .get("format")
@@ -761,6 +915,14 @@ fn apply_compatibility_matches(
         }
         arguments.insert(field.to_owned(), Value::String(target.clone()));
     }
+    Ok(())
+}
+
+fn apply_input_compatibility(
+    spec: &GeneratedSpec,
+    matches: &ArgMatches,
+    arguments: &mut Map<String, Value>,
+) -> Result<(), String> {
     if let Some(files) = matches.try_get_many::<String>(COMPAT_FILES).ok().flatten() {
         arguments.insert(
             "files".to_owned(),
@@ -780,20 +942,26 @@ fn apply_compatibility_matches(
     {
         arguments.insert("prompt".to_owned(), question);
     }
-    if compatibility_flag(matches, COMPAT_NO_CODE) {
-        arguments.insert("code".to_owned(), Value::Bool(false));
-    }
-    if compatibility_flag(matches, COMPAT_NO_COMPACT) {
-        arguments.insert("compact".to_owned(), Value::Bool(false));
-    }
-    if compatibility_flag(matches, COMPAT_NO_INCLUDE_TESTS) {
-        arguments.insert("includeTests".to_owned(), Value::Bool(false));
-    }
-    if compatibility_flag(matches, COMPAT_NO_METADATA) {
-        arguments.insert("includeMetadata".to_owned(), Value::Bool(false));
-    }
-    if compatibility_flag(matches, COMPAT_NO_SYMBOLS) {
-        arguments.insert("symbols".to_owned(), Value::Bool(false));
+    Ok(())
+}
+
+fn apply_boolean_compatibility(
+    spec: &GeneratedSpec,
+    matches: &ArgMatches,
+    arguments: &mut Map<String, Value>,
+) -> Result<(), String> {
+    const NEGATED_FLAGS: [(&str, &str); 5] = [
+        (COMPAT_NO_CODE, "code"),
+        (COMPAT_NO_COMPACT, "compact"),
+        (COMPAT_NO_INCLUDE_TESTS, "includeTests"),
+        (COMPAT_NO_METADATA, "includeMetadata"),
+        (COMPAT_NO_SYMBOLS, "symbols"),
+    ];
+
+    for (flag, property) in NEGATED_FLAGS {
+        if compatibility_flag(matches, flag) {
+            arguments.insert(property.to_owned(), Value::Bool(false));
+        }
     }
     if compatibility_flag(matches, COMPAT_POSITIVE_DEFAULT) {
         let property = match spec.command_name.as_str() {
@@ -805,8 +973,15 @@ fn apply_compatibility_matches(
         };
         arguments.insert(property.to_owned(), Value::Bool(true));
     }
-    apply_family_compatibility(spec, matches, project_path, arguments)?;
-    let render_mode = if compatibility_flag(matches, COMPAT_JSON) {
+    Ok(())
+}
+
+fn compatibility_render_mode(
+    spec: &GeneratedSpec,
+    matches: &ArgMatches,
+    arguments: &Map<String, Value>,
+) -> CliRenderMode {
+    if compatibility_flag(matches, COMPAT_JSON) {
         CliRenderMode::Json
     } else if compatibility_flag(matches, COMPAT_QUIET)
         && spec.command_name == "admin"
@@ -821,8 +996,7 @@ fn apply_compatibility_matches(
         CliRenderMode::Suppress
     } else {
         CliRenderMode::Standard
-    };
-    Ok(render_mode)
+    }
 }
 
 fn canonical_string_value(property: &Value, raw: &str) -> String {
@@ -837,63 +1011,61 @@ fn canonical_string_value(property: &Value, raw: &str) -> String {
         .to_owned()
 }
 
-fn apply_family_compatibility(
-    spec: &GeneratedSpec,
-    matches: &ArgMatches,
-    project_path: &mut PathBuf,
-    arguments: &mut Map<String, Value>,
-) -> Result<(), String> {
-    let second = compatibility_one(matches, COMPAT_SECOND_POSITIONAL);
-    match spec.command_name.as_str() {
-        "admin" => apply_admin_compatibility(matches, second, project_path, arguments),
-        "review" => apply_review_compatibility(second, arguments),
-        "session" => apply_session_compatibility(second, arguments),
-        "summaries" => apply_summaries_compatibility(second, arguments),
+fn apply_family_compatibility(context: &mut CompatibilityContext<'_>) -> Result<(), String> {
+    let second = compatibility_one(context.matches, COMPAT_SECOND_POSITIONAL).cloned();
+    match context.spec.command_name.as_str() {
+        "admin" => apply_admin_compatibility(context, second.as_ref()),
+        "review" => apply_review_compatibility(second.as_ref(), context.arguments),
+        "session" => apply_session_compatibility(second.as_ref(), context.arguments),
+        "summaries" => apply_summaries_compatibility(second.as_ref(), context.arguments),
         _ => Ok(()),
     }
 }
 
 fn apply_admin_compatibility(
-    matches: &ArgMatches,
+    context: &mut CompatibilityContext<'_>,
     second: Option<&String>,
-    project_path: &mut PathBuf,
-    arguments: &mut Map<String, Value>,
 ) -> Result<(), String> {
-    let action = arguments
+    let action = context
+        .arguments
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "admin action is required".to_owned())?
         .to_owned();
     if let Some(path) = second {
         if matches!(action.as_str(), "init" | "uninit") {
-            if arguments.contains_key("path") {
+            if context.arguments.contains_key("path") {
                 return Err("admin project positional conflicts with --path".to_owned());
             }
-            arguments.insert(
+            context.arguments.insert(
                 "path".to_owned(),
                 Value::String(absolute_cli_path(path)?.to_string_lossy().into_owned()),
             );
         } else {
-            *project_path = PathBuf::from(path);
+            *context.project_path = PathBuf::from(path);
         }
     }
     if matches!(action.as_str(), "init" | "uninit")
-        && let Some(path) = arguments.get("path").and_then(Value::as_str)
+        && let Some(path) = context.arguments.get("path").and_then(Value::as_str)
         && !PathBuf::from(path).is_absolute()
     {
-        arguments.insert(
+        context.arguments.insert(
             "path".to_owned(),
             Value::String(absolute_cli_path(path)?.to_string_lossy().into_owned()),
         );
     }
-    if compatibility_flag(matches, COMPAT_ALL) {
+    if compatibility_flag(context.matches, COMPAT_ALL) {
         if action != "summarize" {
             return Err("--all is supported only by admin summarize".to_owned());
         }
-        if arguments.contains_key("limit") || arguments.contains_key("summarizeLimit") {
+        if context.arguments.contains_key("limit")
+            || context.arguments.contains_key("summarizeLimit")
+        {
             return Err("admin summarize accepts --all or --limit, not both".to_owned());
         }
-        arguments.insert("summarizeLimit".to_owned(), Value::from(-1));
+        context
+            .arguments
+            .insert("summarizeLimit".to_owned(), Value::from(-1));
     }
     Ok(())
 }
@@ -1384,6 +1556,8 @@ fn render_quiet_affected(result: &ToolResult) -> bool {
 mod tests {
     use super::*;
 
+    const ASK_ENDPOINT: &str = "http://127.0.0.1:8082";
+
     #[test]
     fn every_non_status_tool_has_a_generated_public_command() {
         let definitions = mcp_handler::tool_definitions()
@@ -1604,7 +1778,7 @@ mod tests {
             "--model",
             "candidate",
             "--endpoint",
-            "http://127.0.0.1:8082",
+            ASK_ENDPOINT,
             "--quiet",
         ])
         .unwrap_or_else(|error| panic!("ask compatibility parse failed: {error}"));

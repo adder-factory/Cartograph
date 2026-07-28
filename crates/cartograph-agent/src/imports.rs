@@ -7,7 +7,9 @@ use std::{
 
 use cartograph_db::ImportInsight;
 use cartograph_domain::{ContentDigest, ProjectId, SourceLanguage, SourceManifestDigestBuilder};
-use cartograph_extract::{SourceDiscoveryOptions, SourceReadOptions, SourceRoot};
+use cartograph_extract::{
+    DiscoveredSource, SourceDiscoveryOptions, SourceLimits, SourceReadOptions, SourceRoot,
+};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -223,6 +225,28 @@ pub struct ImportAuditReport {
     hits: Vec<ImportHit>,
 }
 
+/// Project identity, filters, and cooperative cancellation for one import audit.
+pub struct ImportAuditRequest {
+    project_id: ProjectId,
+    options: ImportAuditOptions,
+    cancellation: ProjectCancellation,
+}
+
+impl ImportAuditRequest {
+    #[must_use]
+    pub const fn new(
+        project_id: ProjectId,
+        options: ImportAuditOptions,
+        cancellation: ProjectCancellation,
+    ) -> Self {
+        Self {
+            project_id,
+            options,
+            cancellation,
+        }
+    }
+}
+
 /// Credential-safe import audit failure.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ImportAuditError {
@@ -244,14 +268,16 @@ impl ProjectRuntime {
     /// Audit every bounded current-generation import before applying response filters.
     pub async fn audit_imports(
         &self,
-        project_id: ProjectId,
-        options: ImportAuditOptions,
-        cancellation: ProjectCancellation,
+        request: ImportAuditRequest,
     ) -> Result<ImportAuditReport, ImportAuditError> {
         let scanned = self
-            .scan_imports_checked(&project_id, options.source, cancellation)
+            .scan_imports_checked(ImportScanInput {
+                project_id: &request.project_id,
+                source: request.options.source,
+                cancellation: request.cancellation,
+            })
             .await?;
-        Ok(build_report(scanned, &options))
+        Ok(build_report(scanned, &request.options))
     }
 
     pub(crate) async fn complete_static_import_hits(
@@ -259,16 +285,18 @@ impl ProjectRuntime {
         project_id: &ProjectId,
         cancellation: ProjectCancellation,
     ) -> Result<Vec<ImportHit>, ImportAuditError> {
-        self.scan_imports_checked(project_id, ImportAuditSource::Static, cancellation)
-            .await
-            .map(|scanned| scanned.hits)
+        self.scan_imports_checked(ImportScanInput {
+            project_id,
+            source: ImportAuditSource::Static,
+            cancellation,
+        })
+        .await
+        .map(|scanned| scanned.hits)
     }
 
     async fn scan_imports_checked(
         &self,
-        project_id: &ProjectId,
-        source: ImportAuditSource,
-        cancellation: ProjectCancellation,
+        input: ImportScanInput<'_>,
     ) -> Result<ScannedImports, ImportAuditError> {
         let before = self
             .database()
@@ -280,42 +308,47 @@ impl ProjectRuntime {
             .current
             .as_ref()
             .ok_or(ImportAuditError::SourceChanged)?;
-        if before.project_id != *project_id {
+        if before.project_id != *input.project_id {
             return Err(ImportAuditError::SourceChanged);
         }
-        let imports = if source.includes_static() {
+        let imports = if input.source.includes_static() {
             self.database()
-                .current_import_evidence(project_id)
+                .current_import_evidence(input.project_id)
                 .await
                 .map_err(|_| ImportAuditError::StorageUnavailable)?
         } else {
             Vec::new()
         };
-        if cancellation.is_cancelled() {
+        if input.cancellation.is_cancelled() {
             return Err(ImportAuditError::Cancelled);
         }
         let permit = tokio::select! {
             biased;
-            () = cancellation.cancelled() => return Err(ImportAuditError::Cancelled),
+            () = input.cancellation.cancelled() => return Err(ImportAuditError::Cancelled),
             result = self.source_scan_permits.clone().acquire_owned() => {
                 result.map_err(|_| ImportAuditError::SourceUnavailable)?
             }
         };
         let root = self.root.clone();
-        let worker_cancellation = cancellation.clone();
+        let worker_cancellation = input.cancellation.clone();
         let mut scanned = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            scan_import_corpus(&root, imports, source, || {
-                worker_cancellation.is_cancelled()
-            })
+            scan_import_corpus(
+                ImportCorpusInput {
+                    root: &root,
+                    imports,
+                    source_filter: input.source,
+                },
+                || worker_cancellation.is_cancelled(),
+            )
         })
         .await
         .map_err(|_| ImportAuditError::SourceUnavailable)??;
-        if cancellation.is_cancelled() {
+        if input.cancellation.is_cancelled() {
             return Err(ImportAuditError::Cancelled);
         }
         let observed = self
-            .scan_source(None, cancellation.clone())
+            .scan_source(None, input.cancellation.clone())
             .await
             .map_err(|_| ImportAuditError::SourceUnavailable)?;
         if observed.digest.as_str() != current.source_revision {
@@ -346,42 +379,128 @@ struct ScannedImports {
     hits: Vec<ImportHit>,
 }
 
-fn scan_import_corpus<Cancel>(
-    root: &Path,
+fn finish_import_scan(
+    digest: SourceManifestDigestBuilder,
+    mut hits: Vec<ImportHit>,
+) -> Result<ScannedImports, ImportAuditError> {
+    hits.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then_with(|| left.line.cmp(&right.line))
+            .then_with(|| left.origin.cmp(&right.origin))
+            .then_with(|| left.specifier.cmp(&right.specifier))
+    });
+    Ok(ScannedImports {
+        source_revision: digest
+            .finish()
+            .map_err(|_| ImportAuditError::SourceUnavailable)?,
+        hits,
+    })
+}
+
+struct ImportScanInput<'scan> {
+    project_id: &'scan ProjectId,
+    source: ImportAuditSource,
+    cancellation: ProjectCancellation,
+}
+
+struct ImportCorpusInput<'corpus> {
+    root: &'corpus Path,
     imports: Vec<ImportInsight>,
     source_filter: ImportAuditSource,
-    mut cancelled: Cancel,
-) -> Result<ScannedImports, ImportAuditError>
+}
+
+struct PreparedImportCorpus<'corpus> {
+    root: &'corpus Path,
+    source_root: SourceRoot,
+    files: Vec<DiscoveredSource>,
+    read_limits: SourceLimits,
+    known_paths: BTreeSet<String>,
+    go_module: Option<String>,
+    imports_by_path: BTreeMap<String, Vec<ImportInsight>>,
+    digest: SourceManifestDigestBuilder,
+    source_filter: ImportAuditSource,
+}
+
+struct StaticHitInput<'hit> {
+    known_paths: &'hit BTreeSet<String>,
+    go_module: Option<&'hit str>,
+    aliases: Option<&'hit TsAliases>,
+    snapshot: &'hit cartograph_extract::SourceSnapshot,
+    import: ImportInsight,
+}
+
+#[derive(Clone, Copy)]
+struct LiteralSegment {
+    start: usize,
+    end: usize,
+    start_line: u32,
+    quote: u8,
+}
+
+fn prepare_import_corpus<'corpus, Cancel>(
+    input: ImportCorpusInput<'corpus>,
+    cancelled: &mut Cancel,
+) -> Result<PreparedImportCorpus<'corpus>, ImportAuditError>
 where
     Cancel: FnMut() -> bool,
 {
-    let source_policy =
-        crate::project_source_policy(root).map_err(|_| ImportAuditError::SourceUnavailable)?;
+    let source_policy = crate::project_source_policy(input.root)
+        .map_err(|_| ImportAuditError::SourceUnavailable)?;
     let maximum_source_bytes = source_policy
         .maximum_file_bytes
         .unwrap_or(crate::DEFAULT_MAX_SOURCE_BYTES);
-    let source_root = SourceRoot::open_with_policy(root, source_policy.discovery)
+    let source_root = SourceRoot::open_with_policy(input.root, source_policy.discovery)
         .map_err(|_| ImportAuditError::SourceUnavailable)?;
     let discovery = discovery_limits().map_err(|_| ImportAuditError::SourceUnavailable)?;
     let read_limits = crate::source_limits_with_max(maximum_source_bytes)
         .map_err(|_| ImportAuditError::SourceUnavailable)?;
     let files = source_root
-        .discover_with_cancellation(SourceDiscoveryOptions::new(discovery, &mut cancelled))
+        .discover_with_cancellation(SourceDiscoveryOptions::new(discovery, cancelled))
         .map_err(map_source_error)?;
     let known_paths = files
         .iter()
         .map(|file| file.path().as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    let go_module = read_go_module(root);
-    let mut imports_by_path = BTreeMap::<String, Vec<ImportInsight>>::new();
-    for import in imports {
+    let mut imports_by_path = BTreeMap::new();
+    for import in input.imports {
         imports_by_path
             .entry(import.path().to_owned())
-            .or_default()
+            .or_insert_with(Vec::new)
             .push(import);
     }
-    let mut digest = SourceManifestDigestBuilder::new(files.len())
-        .map_err(|_| ImportAuditError::SourceUnavailable)?;
+    Ok(PreparedImportCorpus {
+        root: input.root,
+        digest: SourceManifestDigestBuilder::new(files.len())
+            .map_err(|_| ImportAuditError::SourceUnavailable)?,
+        source_root,
+        files,
+        read_limits,
+        known_paths,
+        go_module: read_go_module(input.root),
+        imports_by_path,
+        source_filter: input.source_filter,
+    })
+}
+
+fn scan_import_corpus<Cancel>(
+    input: ImportCorpusInput<'_>,
+    mut cancelled: Cancel,
+) -> Result<ScannedImports, ImportAuditError>
+where
+    Cancel: FnMut() -> bool,
+{
+    let PreparedImportCorpus {
+        root,
+        source_root,
+        files,
+        read_limits,
+        known_paths,
+        go_module,
+        mut imports_by_path,
+        mut digest,
+        source_filter,
+    } = prepare_import_corpus(input, &mut cancelled)?;
     let mut hits = Vec::new();
     for file in &files {
         if cancelled() {
@@ -405,13 +524,13 @@ where
             for import in file_imports {
                 push_bounded(
                     &mut hits,
-                    static_hit(
-                        &known_paths,
-                        go_module.as_deref(),
-                        aliases.as_ref(),
-                        &snapshot,
+                    static_hit(StaticHitInput {
+                        known_paths: &known_paths,
+                        go_module: go_module.as_deref(),
+                        aliases: aliases.as_ref(),
+                        snapshot: &snapshot,
                         import,
-                    )?,
+                    })?,
                 )?;
             }
         }
@@ -428,32 +547,16 @@ where
     if !imports_by_path.is_empty() {
         return Err(ImportAuditError::SourceChanged);
     }
-    hits.sort_by(|left, right| {
-        left.file
-            .cmp(&right.file)
-            .then_with(|| left.line.cmp(&right.line))
-            .then_with(|| left.origin.cmp(&right.origin))
-            .then_with(|| left.specifier.cmp(&right.specifier))
-    });
-    Ok(ScannedImports {
-        source_revision: digest
-            .finish()
-            .map_err(|_| ImportAuditError::SourceUnavailable)?,
-        hits,
-    })
+    finish_import_scan(digest, hits)
 }
 
-fn static_hit(
-    known_paths: &BTreeSet<String>,
-    go_module: Option<&str>,
-    aliases: Option<&TsAliases>,
-    snapshot: &cartograph_extract::SourceSnapshot,
-    import: ImportInsight,
-) -> Result<ImportHit, ImportAuditError> {
+fn static_hit(input: StaticHitInput<'_>) -> Result<ImportHit, ImportAuditError> {
     let start =
-        usize::try_from(import.start_byte()).map_err(|_| ImportAuditError::SourceChanged)?;
-    let end = usize::try_from(import.end_byte()).map_err(|_| ImportAuditError::SourceChanged)?;
-    let signature = snapshot
+        usize::try_from(input.import.start_byte()).map_err(|_| ImportAuditError::SourceChanged)?;
+    let end =
+        usize::try_from(input.import.end_byte()).map_err(|_| ImportAuditError::SourceChanged)?;
+    let signature = input
+        .snapshot
         .source()
         .get(start..end)
         .ok_or(ImportAuditError::SourceChanged)?
@@ -461,7 +564,7 @@ fn static_hit(
     let (signature, signature_truncated) = bounded_signature(signature);
     let dynamic = is_dynamic_import_signature(&signature);
     let c_include_style = if matches!(
-        snapshot.language(),
+        input.snapshot.language(),
         SourceLanguage::C | SourceLanguage::Cpp | SourceLanguage::Cuda
     ) {
         if signature.contains('"') {
@@ -473,32 +576,32 @@ fn static_hit(
         None
     };
     let classification = classify_import(ClassifyRequest {
-        known_paths,
-        importing_path: snapshot.path().as_str(),
-        language: snapshot.language(),
-        specifier: import.module_specifier(),
-        go_module,
+        known_paths: input.known_paths,
+        importing_path: input.snapshot.path().as_str(),
+        language: input.snapshot.language(),
+        specifier: input.import.module_specifier(),
+        go_module: input.go_module,
         c_include_style,
-        aliases,
+        aliases: input.aliases,
     });
-    let line = one_based_line(snapshot.source(), start)?;
+    let line = one_based_line(input.snapshot.source(), start)?;
     Ok(ImportHit {
-        symbol_id: Some(import.evidence_symbol_id().to_owned()),
-        file: snapshot.path().as_str().to_owned(),
+        symbol_id: Some(input.import.evidence_symbol_id().to_owned()),
+        file: input.snapshot.path().as_str().to_owned(),
         line,
-        specifier: import.module_specifier().to_owned(),
+        specifier: input.import.module_specifier().to_owned(),
         signature,
         signature_truncated,
         target: classification.target,
         target_path: classification.target_path,
-        graph_target_path: import.target_path().map(str::to_owned),
+        graph_target_path: input.import.target_path().map(str::to_owned),
         extension_missing: classification.extension_missing,
         dynamic,
         origin: ImportOrigin::Static,
-        language: import.language().to_ascii_lowercase(),
-        confidence: Some(import.confidence()),
-        provenance: Some(import.provenance().to_owned()),
-        represented_sites: import.site_count(),
+        language: input.import.language().to_ascii_lowercase(),
+        confidence: Some(input.import.confidence()),
+        provenance: Some(input.import.provenance().to_owned()),
+        represented_sites: input.import.site_count(),
     })
 }
 
@@ -900,48 +1003,90 @@ fn read_small_file(path: &Path) -> Option<String> {
 }
 
 fn strip_json_comments(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut output = Vec::with_capacity(source.len());
-    let mut index = 0_usize;
-    let mut quote = None;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(active) = quote {
-            output.push(byte);
-            if byte == b'\\' && index + 1 < bytes.len() {
-                index += 1;
-                output.push(bytes[index]);
-            } else if byte == active {
-                quote = None;
-            }
-            index += 1;
-            continue;
+    JsonCommentStripper::new(source).finish()
+}
+
+struct JsonCommentStripper<'source> {
+    source: &'source str,
+    output: Vec<u8>,
+    index: usize,
+    quote: Option<u8>,
+}
+
+impl<'source> JsonCommentStripper<'source> {
+    fn new(source: &'source str) -> Self {
+        Self {
+            source,
+            output: Vec::with_capacity(source.len()),
+            index: 0,
+            quote: None,
+        }
+    }
+
+    fn finish(mut self) -> String {
+        while self.index < self.source.len() {
+            self.copy_next();
+        }
+        String::from_utf8(self.output).unwrap_or_else(|_| self.source.to_owned())
+    }
+
+    fn copy_next(&mut self) {
+        let bytes = self.source.as_bytes();
+        let byte = bytes[self.index];
+        if self.copy_quoted_byte(bytes, byte) {
+            return;
         }
         if matches!(byte, b'"' | b'\'') {
-            quote = Some(byte);
-            output.push(byte);
-            index += 1;
-            continue;
+            self.quote = Some(byte);
+            self.output.push(byte);
+            self.index += 1;
+            return;
         }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            index += 2;
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
+        if self.skip_comment(bytes, byte) {
+            return;
         }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index += 2;
-            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
-                index += 1;
-            }
-            index = (index + 2).min(bytes.len());
-            continue;
-        }
-        output.push(byte);
-        index += 1;
+        self.output.push(byte);
+        self.index += 1;
     }
-    String::from_utf8(output).unwrap_or_else(|_| source.to_owned())
+
+    fn copy_quoted_byte(&mut self, bytes: &[u8], byte: u8) -> bool {
+        let Some(active) = self.quote else {
+            return false;
+        };
+        self.output.push(byte);
+        if byte == b'\\' && self.index + 1 < bytes.len() {
+            self.index += 1;
+            self.output.push(bytes[self.index]);
+        } else if byte == active {
+            self.quote = None;
+        }
+        self.index += 1;
+        true
+    }
+
+    fn skip_comment(&mut self, bytes: &[u8], byte: u8) -> bool {
+        if byte != b'/' {
+            return false;
+        }
+        if bytes.get(self.index + 1) == Some(&b'/') {
+            self.index += 2;
+            while self.index < bytes.len() && bytes[self.index] != b'\n' {
+                self.index += 1;
+            }
+            return true;
+        }
+        if bytes.get(self.index + 1) != Some(&b'*') {
+            return false;
+        }
+        self.index += 2;
+        while self.index + 1 < bytes.len()
+            && !(bytes[self.index] == b'*' && bytes[self.index + 1] == b'/')
+        {
+            self.index += 1;
+        }
+        self.index = (self.index + 2).min(bytes.len());
+        true
+    }
 }
 
 fn scan_literal_imports(
@@ -1018,11 +1163,21 @@ impl<'a> LiteralScanner<'a> {
             if byte == b'\\' {
                 self.advance(2);
             } else if byte == quote {
-                self.emit_segment(segment_start, self.index, segment_line, quote)?;
+                self.emit_segment(LiteralSegment {
+                    start: segment_start,
+                    end: self.index,
+                    start_line: segment_line,
+                    quote,
+                })?;
                 self.advance(1);
                 return Ok(());
             } else if quote == b'`' && byte == b'$' && self.peek(1) == Some(b'{') {
-                self.emit_segment(segment_start, self.index, segment_line, quote)?;
+                self.emit_segment(LiteralSegment {
+                    start: segment_start,
+                    end: self.index,
+                    start_line: segment_line,
+                    quote,
+                })?;
                 self.advance(2);
                 self.drain_template_expression()?;
                 segment_start = self.index;
@@ -1031,7 +1186,12 @@ impl<'a> LiteralScanner<'a> {
                 self.advance(1);
             }
         }
-        self.emit_segment(segment_start, self.index, segment_line, quote)
+        self.emit_segment(LiteralSegment {
+            start: segment_start,
+            end: self.index,
+            start_line: segment_line,
+            quote,
+        })
     }
 
     fn drain_template_expression(&mut self) -> Result<(), ImportAuditError> {
@@ -1053,14 +1213,8 @@ impl<'a> LiteralScanner<'a> {
         Ok(())
     }
 
-    fn emit_segment(
-        &mut self,
-        start: usize,
-        end: usize,
-        start_line: u32,
-        quote: u8,
-    ) -> Result<(), ImportAuditError> {
-        let Some(segment) = self.source.get(start..end) else {
+    fn emit_segment(&mut self, input: LiteralSegment) -> Result<(), ImportAuditError> {
+        let Some(segment) = self.source.get(input.start..input.end) else {
             return Err(ImportAuditError::SourceUnavailable);
         };
         for pattern in literal_patterns()? {
@@ -1072,7 +1226,7 @@ impl<'a> LiteralScanner<'a> {
                     continue;
                 };
                 let preceding = &segment[..full.start()];
-                let line = start_line.saturating_add(
+                let line = input.start_line.saturating_add(
                     u32::try_from(preceding.bytes().filter(|byte| *byte == b'\n').count())
                         .unwrap_or(u32::MAX),
                 );
@@ -1103,7 +1257,7 @@ impl<'a> LiteralScanner<'a> {
                     origin: ImportOrigin::Literal,
                     language: self.language.to_owned(),
                     confidence: None,
-                    provenance: Some(if quote == b'`' {
+                    provenance: Some(if input.quote == b'`' {
                         "literal-template-scan".to_owned()
                     } else {
                         "literal-string-scan".to_owned()
@@ -1307,6 +1461,10 @@ fn map_source_error<Error>(_error: Error) -> ImportAuditError {
 mod tests {
     use super::*;
 
+    const JSON_URL_FIXTURE: &str =
+        r#"{"compilerOptions":{"baseUrl":"https://example.test"}} // comment"#;
+    const EXAMPLE_TEST_URL: &str = "https://example.test";
+
     #[test]
     fn classifier_distinguishes_file_directory_bare_and_missing() {
         let paths = ["src/file.ts", "src/dir/index.ts", "src/typed.ts"]
@@ -1356,12 +1514,10 @@ const regex = /require\('fake'\)/;
 
     #[test]
     fn json_comment_stripper_preserves_comment_tokens_inside_strings() {
-        let stripped = strip_json_comments(
-            r#"{"compilerOptions":{"baseUrl":"https://example.test"}} // comment"#,
-        );
+        let stripped = strip_json_comments(JSON_URL_FIXTURE);
         let parsed: Value = serde_json::from_str(&stripped)
             .unwrap_or_else(|error| panic!("stripped JSON failed: {error}"));
-        assert_eq!(parsed["compilerOptions"]["baseUrl"], "https://example.test");
+        assert_eq!(parsed["compilerOptions"]["baseUrl"], EXAMPLE_TEST_URL);
     }
 
     #[test]

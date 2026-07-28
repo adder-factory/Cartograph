@@ -3,11 +3,11 @@ use std::{collections::BTreeMap, time::Duration};
 use cartograph_domain::{ContentDigest, GenerationId, NormalizedPath, ProjectId, SymbolId};
 use serde::Serialize;
 use serde_json::Value;
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{column::ColumnIndex, row::Row};
 
 use crate::{
     CartographDatabase, StorageError,
-    database::{quoted_schema, set_local_statement_timeout},
+    database::{PgQuery, RowReadRequest, quoted_schema, read_rows},
 };
 
 const DEFAULT_INSIGHT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -610,6 +610,15 @@ pub struct FileTestImpactResult {
     tests_truncated: bool,
 }
 
+/// Bounded reverse dependency traversal from exact current-generation files.
+pub struct FileTestImpactQuery<'a> {
+    pub project_id: &'a ProjectId,
+    pub paths: &'a [NormalizedPath],
+    pub max_depth: u8,
+    pub limit: u16,
+    pub test_path_regex: Option<&'a str>,
+}
+
 /// One current-generation path and exact indexed source digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1052,7 +1061,7 @@ impl CartographDatabase {
                     WHERE search.project_id = symbols.project_id
                       AND search.generation_id = symbols.generation_id
                       AND search.symbol_id = symbols.symbol_id
-                      AND search.document_kind = 'symbol'
+                      AND search.document_kind IN ('symbol', 'test')
                     ORDER BY search.id
                     LIMIT 1
                 ) AS documents ON true
@@ -1428,12 +1437,12 @@ impl CartographDatabase {
             group.total = nonnegative_u64(&row, 1)?;
             group.peers.push(GroupedSymbolPeer {
                 symbol_id: text(&row, 2)?,
-                path: text(&row, 3)?,
-                language: text(&row, 4)?,
-                symbol_kind: text(&row, 5)?,
-                qualified_name: text(&row, 6)?,
-                start_line: positive_u32(&row, 7)?,
-                end_line: positive_u32(&row, 8)?,
+                path: text(&row, GROUPED_SYMBOL_PATH_COLUMN)?,
+                language: text(&row, GROUPED_SYMBOL_LANGUAGE_COLUMN)?,
+                symbol_kind: text(&row, GROUPED_SYMBOL_KIND_COLUMN)?,
+                qualified_name: text(&row, GROUPED_SYMBOL_QUALIFIED_NAME_COLUMN)?,
+                start_line: positive_u32(&row, GROUPED_SYMBOL_START_LINE_COLUMN)?,
+                end_line: positive_u32(&row, GROUPED_SYMBOL_END_LINE_COLUMN)?,
             });
         }
         Ok(order
@@ -1466,18 +1475,18 @@ impl CartographDatabase {
                     FROM {schema}."projects"
                     WHERE project_id = CAST($1 AS uuid)
                 )
-                SELECT files.normalized_path,
-                       files.language,
-                       refs.owner_symbol_id::text,
-                       refs.reference_name,
-                       refs.target_symbol_id::text,
-                       target_files.normalized_path,
-                       refs.start_byte,
-                       refs.end_byte,
-                       refs.confidence,
-                       refs.resolution_provenance,
-                       refs.site_count,
-                       file_symbols.symbol_id::text
+                SELECT files.normalized_path AS path,
+                       files.language AS language,
+                       refs.owner_symbol_id::text AS owner_symbol_id,
+                       refs.reference_name AS module_specifier,
+                       refs.target_symbol_id::text AS target_symbol_id,
+                       target_files.normalized_path AS target_path,
+                       refs.start_byte AS start_byte,
+                       refs.end_byte AS end_byte,
+                       refs.confidence AS confidence,
+                       refs.resolution_provenance AS provenance,
+                       refs.site_count AS site_count,
+                       file_symbols.symbol_id::text AS source_file_symbol_id
                 FROM {schema}."references" AS refs
                 JOIN current ON current.generation_id = refs.generation_id
                 JOIN {schema}."files" AS files
@@ -1525,18 +1534,18 @@ impl CartographDatabase {
                     FROM {schema}."projects"
                     WHERE project_id = CAST($1 AS uuid)
                 )
-                SELECT files.normalized_path,
-                       files.language,
-                       refs.owner_symbol_id::text,
-                       refs.reference_name,
-                       refs.target_symbol_id::text,
-                       target_files.normalized_path,
-                       refs.start_byte,
-                       refs.end_byte,
-                       refs.confidence,
-                       refs.resolution_provenance,
-                       refs.site_count,
-                       file_symbols.symbol_id::text
+                SELECT files.normalized_path AS path,
+                       files.language AS language,
+                       refs.owner_symbol_id::text AS owner_symbol_id,
+                       refs.reference_name AS module_specifier,
+                       refs.target_symbol_id::text AS target_symbol_id,
+                       target_files.normalized_path AS target_path,
+                       refs.start_byte AS start_byte,
+                       refs.end_byte AS end_byte,
+                       refs.confidence AS confidence,
+                       refs.resolution_provenance AS provenance,
+                       refs.site_count AS site_count,
+                       file_symbols.symbol_id::text AS source_file_symbol_id
                 FROM {schema}."references" AS refs
                 JOIN current ON current.generation_id = refs.generation_id
                 JOIN {schema}."files" AS files
@@ -1832,12 +1841,15 @@ impl CartographDatabase {
     /// calls are not lost behind a synthetic file node.
     pub async fn current_file_test_impact(
         &self,
-        project_id: &ProjectId,
-        paths: &[NormalizedPath],
-        max_depth: u8,
-        limit: u16,
-        test_path_regex: Option<&str>,
+        input: FileTestImpactQuery<'_>,
     ) -> Result<Option<FileTestImpactResult>, StorageError> {
+        let FileTestImpactQuery {
+            project_id,
+            paths,
+            max_depth,
+            limit,
+            test_path_regex,
+        } = input;
         if paths.is_empty() || paths.len() > MAX_TEST_IMPACT_INPUTS {
             return Err(StorageError::InvalidInput {
                 field: "test_impact_paths",
@@ -2072,9 +2084,10 @@ impl CartographDatabase {
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r#"{}
-                SELECT symbol_id::text, path, qualified_name, finding, severity,
+                SELECT symbol_id::text AS symbol_id, path, qualified_name, finding, severity,
                        start_line, end_line, metric_name, metric,
-                       degree_centrality, outgoing::bigint, unresolved::bigint, detail::text
+                       degree_centrality, outgoing::bigint AS outgoing_edges,
+                       unresolved::bigint AS unresolved_references, detail::text AS detail
                 FROM findings
                 WHERE ($3::text IS NULL OR finding = $3)
                   AND CASE severity
@@ -2234,10 +2247,11 @@ impl CartographDatabase {
                           OR path ~* '(^|/)(bench(es|marks?)?|scripts?|examples?|samples?|demos?)(/|$)'
                       ))
                 )
-                SELECT symbol_id::text, path, qualified_name, finding, severity,
+                SELECT symbol_id::text AS symbol_id, path, qualified_name, finding, severity,
                        start_line, end_line, metric_name, metric,
-                       degree_centrality, outgoing::bigint, unresolved::bigint,
-                       detail::text, detector_total
+                       degree_centrality, outgoing::bigint AS outgoing_edges,
+                       unresolved::bigint AS unresolved_references,
+                       detail::text AS detail, detector_total
                 FROM ranked
                 WHERE detector_rank <= $5
                 ORDER BY finding, detector_rank, path, start_line, symbol_id"#,
@@ -2264,7 +2278,10 @@ impl CartographDatabase {
             .collect::<BTreeMap<_, _>>();
         let mut findings = Vec::with_capacity(rows.len());
         for row in rows {
-            counts.insert(text(&row, 3)?, nonnegative_u64(&row, 13)?);
+            counts.insert(
+                text(&row, "finding")?,
+                nonnegative_u64(&row, "detector_total")?,
+            );
             findings.push(decode_finding(row)?);
         }
         Ok(StructuralFindingGroup { findings, counts })
@@ -2287,21 +2304,27 @@ impl CartographDatabase {
                     SELECT finding, COUNT(*)::bigint AS count
                     FROM findings GROUP BY finding
                 )
-                SELECT (SELECT COUNT(*)::bigint FROM base),
-                       totals.total, totals.info, totals.warning, totals.error,
-                       COALESCE((SELECT count FROM by_kind WHERE finding = 'large_method'), 0),
-                       COALESCE((SELECT count FROM by_kind WHERE finding = 'high_fan_out'), 0),
-                       COALESCE((SELECT count FROM by_kind WHERE finding = 'unresolved_reference_pressure'), 0),
+                SELECT (SELECT COUNT(*)::bigint FROM base) AS analyzed_symbols,
+                       totals.total AS total_findings,
+                       totals.info AS info_findings,
+                       totals.warning AS warning_findings,
+                       totals.error AS error_findings,
+                       COALESCE((SELECT count FROM by_kind WHERE finding = 'large_method'), 0)
+                           AS very_long_symbols,
+                       COALESCE((SELECT count FROM by_kind WHERE finding = 'high_fan_out'), 0)
+                           AS high_fan_out_symbols,
+                       COALESCE((SELECT count FROM by_kind WHERE finding = 'unresolved_reference_pressure'), 0)
+                           AS unresolved_reference_pressure,
                        GREATEST(
                            0.0,
                            100.0 - (
                                totals.error * 4.0 + totals.warning * 2.0 + totals.info
                            ) * 100.0 / GREATEST((SELECT COUNT(*) FROM base), 1)
-                       )::real,
+                       )::real AS code_health_score,
                        COALESCE((
                            SELECT jsonb_object_agg(finding, count ORDER BY finding)::text
                            FROM by_kind
-                       ), '{{}}')
+                       ), '{{}}') AS by_finding
                 FROM totals"#,
             finding_ctes(&schema),
         );
@@ -2318,42 +2341,14 @@ impl CartographDatabase {
         decode_finding_stats(&row)
     }
 
-    async fn bounded_rows<'query, Bind>(
+    async fn bounded_rows<'query>(
         &self,
         statement: String,
-        bind: Bind,
+        bind: impl FnOnce(PgQuery<'query>) -> PgQuery<'query>,
         operation: &'static str,
-    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError>
-    where
-        Bind: FnOnce(
-            sqlx_core::query::Query<'query, sqlx_postgres::Postgres, sqlx_postgres::PgArguments>,
-        ) -> sqlx_core::query::Query<
-            'query,
-            sqlx_postgres::Postgres,
-            sqlx_postgres::PgArguments,
-        >,
-    {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| database_error(operation))?;
-        query("SET TRANSACTION READ ONLY")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        set_local_statement_timeout(&mut transaction, DEFAULT_INSIGHT_TIMEOUT)
-            .await
-            .map_err(|_| database_error(operation))?;
-        let rows = bind(query(AssertSqlSafe(statement)))
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| database_error(operation))?;
-        Ok(rows)
+    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError> {
+        let request = RowReadRequest::new(statement, operation, DEFAULT_INSIGHT_TIMEOUT);
+        read_rows(self, request, bind).await
     }
 }
 
@@ -2363,10 +2358,26 @@ fn finding_ctes(schema: &str) -> String {
                 SELECT current_generation_id AS generation_id
                 FROM {schema}."projects"
                 WHERE project_id = CAST($1 AS uuid)
+            ), code_documents AS MATERIALIZED (
+                SELECT DISTINCT ON (documents.symbol_id)
+                       documents.symbol_id,
+                       documents.metadata,
+                       documents.document_kind
+                FROM {schema}."search_documents" AS documents
+                JOIN current ON current.generation_id = documents.generation_id
+                WHERE documents.project_id = CAST($1 AS uuid)
+                  AND documents.symbol_id IS NOT NULL
+                  AND documents.document_kind IN ('symbol', 'test')
+                ORDER BY documents.symbol_id,
+                         CASE WHEN documents.document_kind = 'test' THEN 0 ELSE 1 END,
+                         documents.id
             ), population AS (
                 SELECT GREATEST(COUNT(*) - 1, 1)::double precision AS possible_peers
                 FROM {schema}."symbols" AS symbols
                 JOIN current ON current.generation_id = symbols.generation_id
+                JOIN code_documents AS population_document
+                  ON population_document.symbol_id = symbols.symbol_id
+                 AND population_document.document_kind = 'symbol'
                 WHERE symbols.project_id = CAST($1 AS uuid)
                   AND symbols.symbol_kind NOT IN ('file', 'import', 'parameter')
             ), previous AS (
@@ -2378,11 +2389,12 @@ fn finding_ctes(schema: &str) -> String {
                 LIMIT 1
             ), outgoing AS (
                 SELECT edges.source_symbol_id AS symbol_id,
-                       SUM(edges.site_count)::bigint AS sites
+                       COUNT(DISTINCT edges.target_symbol_id)::bigint AS dependencies
                 FROM {schema}."edges" AS edges
                 JOIN current ON current.generation_id = edges.generation_id
                 WHERE edges.project_id = CAST($1 AS uuid)
                   AND edges.edge_kind <> 'contains'
+                  AND edges.target_symbol_id <> edges.source_symbol_id
                 GROUP BY edges.source_symbol_id
             ), unresolved AS (
                 SELECT refs.owner_symbol_id AS symbol_id,
@@ -2392,7 +2404,48 @@ fn finding_ctes(schema: &str) -> String {
                 WHERE refs.project_id = CAST($1 AS uuid)
                   AND refs.target_symbol_id IS NULL
                   AND refs.owner_symbol_id IS NOT NULL
+                  AND refs.resolution_provenance NOT IN (
+                        'native-dynamic-unresolved',
+                        'native-member-unresolved',
+                        'native-rust-external',
+                        'native-rust-intrinsic',
+                        'native-rust-macro-unexpanded',
+                        'native-external-reference',
+                        'native-javascript-intrinsic',
+                        'native-shell-command',
+                        'native-manifest-reference'
+                      )
+                  AND refs.resolution_provenance NOT LIKE
+                      'native-embedded-sql-%-unresolved'
                 GROUP BY refs.owner_symbol_id
+            ), dynamic_method_calls AS (
+                SELECT refs.file_id,
+                       regexp_replace(
+                           refs.reference_name,
+                           E'^.*\\.([A-Za-z_][A-Za-z0-9_]*)(::[^.]*)?$',
+                           E'\\1'
+                       ) AS simple_name,
+                       SUM(refs.site_count)::bigint AS sites
+                FROM {schema}."references" AS refs
+                JOIN current ON current.generation_id = refs.generation_id
+                WHERE refs.project_id = CAST($1 AS uuid)
+                  AND refs.target_symbol_id IS NULL
+                  AND refs.reference_kind = 'calls'
+                  AND refs.resolution_provenance = 'native-dynamic-unresolved'
+                GROUP BY refs.file_id, simple_name
+            ), potential_method_incoming AS (
+                SELECT methods.symbol_id,
+                       SUM(dynamic_method_calls.sites)::bigint AS sites
+                FROM {schema}."symbols" AS methods
+                JOIN current ON current.generation_id = methods.generation_id
+                JOIN dynamic_method_calls
+                  ON dynamic_method_calls.simple_name = methods.simple_name
+                 AND dynamic_method_calls.file_id <> methods.file_id
+                WHERE methods.project_id = CAST($1 AS uuid)
+                  AND methods.symbol_kind = 'method'
+                  AND methods.exported
+                  AND methods.visibility = 'internal'
+                GROUP BY methods.symbol_id
             ), incoming AS (
                 SELECT edges.target_symbol_id AS symbol_id,
                        SUM(edges.site_count)::bigint AS sites,
@@ -2414,10 +2467,22 @@ fn finding_ctes(schema: &str) -> String {
                 GROUP BY edges.target_symbol_id
             ), members AS (
                 SELECT parent.symbol_id,
-                       COUNT(child.symbol_id)::bigint AS members,
                        COUNT(child.symbol_id) FILTER (
                            WHERE child.symbol_kind IN ('function', 'method')
-                       )::bigint AS methods
+                             AND child_documents.id IS NOT NULL
+                             AND COALESCE(
+                                   (child_documents.metadata #>> ARRAY['health','code_lines'])::double precision,
+                                   0.0
+                                 ) >= 5.0
+                       )::bigint AS behavioral_methods,
+                       COUNT(child.symbol_id) FILTER (
+                           WHERE child.symbol_kind IN ('function', 'method')
+                             AND child_documents.id IS NOT NULL
+                             AND COALESCE(
+                                   (child_documents.metadata #>> ARRAY['health','cyclomatic'])::double precision,
+                                   0.0
+                                 ) >= 3.0
+                       )::bigint AS complex_methods
                 FROM {schema}."symbols" AS parent
                 JOIN current ON current.generation_id = parent.generation_id
                 LEFT JOIN {schema}."edges" AS containment
@@ -2429,6 +2494,11 @@ fn finding_ctes(schema: &str) -> String {
                   ON child.project_id = containment.project_id
                  AND child.generation_id = containment.generation_id
                  AND child.symbol_id = containment.target_symbol_id
+                LEFT JOIN {schema}."search_documents" AS child_documents
+                  ON child_documents.project_id = child.project_id
+                 AND child_documents.generation_id = child.generation_id
+                 AND child_documents.symbol_id = child.symbol_id
+                 AND child_documents.document_kind = 'symbol'
                 WHERE parent.project_id = CAST($1 AS uuid)
                 GROUP BY parent.symbol_id
             ), production_clone_symbols AS (
@@ -2632,6 +2702,8 @@ fn finding_ctes(schema: &str) -> String {
                        symbols.start_line, symbols.end_line,
                        symbols.end_line - symbols.start_line + 1 AS lines,
                        symbols.exported, symbols.default_export,
+                       COALESCE(symbols.visibility = 'public', false) AS declared_external_api,
+                       documents.document_kind = 'test' AS test_source,
                        (
                            (
                                files.normalized_path ~ '(^|/)routes/.*\.[jt]sx?$'
@@ -2684,11 +2756,14 @@ fn finding_ctes(schema: &str) -> String {
                            COALESCE(incoming.sites, 0)::double precision
                            / population.possible_peers
                        ) AS degree_centrality,
-                       COALESCE(outgoing.sites, 0)::bigint AS outgoing,
+                       COALESCE(outgoing.dependencies, 0)::bigint AS outgoing,
                        COALESCE(unresolved.sites, 0)::bigint AS unresolved,
-                       COALESCE(incoming.external_edges, 0)::bigint AS external_incoming,
-                       COALESCE(members.members, 0)::bigint AS members,
-                       COALESCE(members.methods, 0)::bigint AS methods,
+                       (
+                           COALESCE(incoming.external_edges, 0)
+                           + COALESCE(potential_method_incoming.sites, 0)
+                       )::bigint AS external_incoming,
+                       COALESCE(members.behavioral_methods, 0)::bigint AS behavioral_methods,
+                       COALESCE(members.complex_methods, 0)::bigint AS complex_methods,
                        COALESCE(duplicates.copies, 0)::bigint AS duplicate_copies,
                        COALESCE(clone_shape_match.copies, 0)::bigint AS clone_shape_copies,
                        COALESCE(
@@ -2719,6 +2794,13 @@ fn finding_ctes(schema: &str) -> String {
                        prior_symbols.published_at AS prior_published_at,
                        ranked_coverage.coverage_fraction,
                        ranked_coverage.centrality_percentile,
+                       COALESCE(
+                           NULLIF(
+                               (documents.metadata #>> ARRAY['health','code_lines'])::double precision,
+                               0.0
+                           ),
+                           symbols.end_line - symbols.start_line + 1
+                       ) AS code_lines,
                        COALESCE((documents.metadata #>> ARRAY['health','parameter_count'])::double precision, 0.0) AS parameter_count,
                        COALESCE((documents.metadata #>> ARRAY['health','cyclomatic'])::double precision, 0.0) AS cyclomatic,
                        COALESCE((documents.metadata #>> ARRAY['health','max_nesting'])::double precision, 0.0) AS max_nesting,
@@ -2752,6 +2834,8 @@ fn finding_ctes(schema: &str) -> String {
                 LEFT JOIN outgoing ON outgoing.symbol_id = symbols.symbol_id
                 LEFT JOIN unresolved ON unresolved.symbol_id = symbols.symbol_id
                 LEFT JOIN incoming ON incoming.symbol_id = symbols.symbol_id
+                LEFT JOIN potential_method_incoming
+                  ON potential_method_incoming.symbol_id = symbols.symbol_id
                 LEFT JOIN members ON members.symbol_id = symbols.symbol_id
                 LEFT JOIN duplicates ON duplicates.structural_digest = symbols.structural_digest
                 LEFT JOIN LATERAL (
@@ -2772,16 +2856,9 @@ fn finding_ctes(schema: &str) -> String {
                 LEFT JOIN prior_symbols ON prior_symbols.symbol_id = symbols.symbol_id
                 LEFT JOIN ranked_coverage ON ranked_coverage.symbol_id = symbols.symbol_id
                 CROSS JOIN population
-                LEFT JOIN LATERAL (
-                    SELECT search.metadata
-                    FROM {schema}."search_documents" AS search
-                    WHERE search.project_id = symbols.project_id
-                      AND search.generation_id = symbols.generation_id
-                      AND search.symbol_id = symbols.symbol_id
-                      AND search.document_kind = 'symbol'
-                    ORDER BY search.id
-                    LIMIT 1
-                ) AS documents ON true
+                JOIN code_documents AS documents
+                  ON documents.symbol_id = symbols.symbol_id
+                 AND documents.document_kind = 'symbol'
                 WHERE symbols.project_id = CAST($1 AS uuid)
                   AND symbols.symbol_kind NOT IN ('file', 'import', 'parameter')
             ), findings AS (
@@ -2919,23 +2996,23 @@ fn finding_ctes(schema: &str) -> String {
                 FROM base
                 CROSS JOIN LATERAL (
                     VALUES
-                      ('large_method'::text, 'lines'::text, base.lines::double precision, 100.0, 100.0, 200.0, base.symbol_kind IN ('function','method','component')),
+                      ('large_method'::text, 'lines'::text, base.code_lines, 100.0, 100.0, 200.0, base.symbol_kind IN ('function','method','component')),
                       ('complex_method', 'cyclomatic', base.cyclomatic, 15.0, 15.0, 25.0, base.symbol_kind IN ('function','method','component')),
                       ('nested_complexity', 'max_nesting', base.max_nesting, 5.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component')),
                       ('complex_conditional', 'conditional_operands', base.max_conditional_operands, 6.0, 6.0, 8.0, base.symbol_kind IN ('function','method','component')),
                       ('long_parameter_list', 'parameters', base.parameter_count, 4.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component')),
-                      ('brain_method', 'composite_risk', (base.lines / 100.0) * (base.cyclomatic / 10.0) * GREATEST(1.0, base.max_nesting / 3.0) * GREATEST(1.0, base.max_conditional_operands / 4.0), 5.0, 10.0, 20.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 50 AND base.cyclomatic >= 8),
+                      ('brain_method', 'composite_risk', (base.code_lines / 100.0) * (base.cyclomatic / 10.0) * GREATEST(1.0, base.max_nesting / 3.0) * GREATEST(1.0, base.max_conditional_operands / 4.0), 5.0, 10.0, 20.0, base.symbol_kind IN ('function','method','component') AND base.code_lines >= 50 AND base.cyclomatic >= 8),
                       ('magic_number', 'occurrences', base.magic_numbers, 3.0, 5.0, 8.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
                       ('hardcoded_url', 'occurrences', base.hardcoded_urls, 1.0, 2.0, 3.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
                       ('recently_grew', 'growth_percent', base.lines::double precision * 100.0 / GREATEST(base.prior_lines, 1), 150.0, 200.0, 300.0, base.symbol_kind IN ('function','method','component') AND base.prior_lines >= 20 AND base.lines > base.prior_lines * 1.5 AND base.prior_published_at >= clock_timestamp() - interval '30 days'),
                       ('stale_doc', 'disjoint_documented_numbers', base.stale_doc_numbers, 1.0, 999.0, 999.0, base.symbol_kind = 'constant'),
                       ('secrets_handling', 'confidence_percent', base.secrets_score, 50.0, 50.0, 70.0, base.symbol_kind IN ('function','method','component')),
-                      ('god_class', 'members', base.members::double precision, 15.0, 40.0, 60.0, base.symbol_kind IN ('class','struct','module') AND base.methods > 0),
+                      ('god_class', 'behavioral_methods', base.behavioral_methods::double precision, 15.0, 40.0, 60.0, base.symbol_kind IN ('class','struct','module') AND base.complex_methods >= 5),
                       ('feature_envy', 'foreign_field_accesses', base.feature_envy_atfd::double precision, 6.0, 12.0, 999.0, base.symbol_kind = 'method' AND base.feature_envy_fdp <= 2 AND base.local_attribute_access < (1.0 / 3.0)),
-                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.framework_convention_export),
+                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.framework_convention_export AND NOT base.declared_external_api AND NOT base.test_source),
                       ('low_coverage', 'uncovered_percent', (1.0 - COALESCE(base.coverage_fraction, 1.0)) * 100.0, 50.0, 50.0, 80.0, base.symbol_kind IN ('function','method','component') AND base.coverage_fraction <= 0.5 AND base.centrality_percentile >= 0.9),
                       ('duplicate_code', CASE WHEN base.duplicate_copies > 1 THEN 'exact_copies' WHEN base.clone_shape_copies > 1 THEN 'normalized_shape_copies' WHEN base.partial_clone_peers > 0 THEN 'partial_clone_peers' ELSE 'semantic_clone_peers' END, CASE WHEN base.duplicate_copies > 1 THEN base.duplicate_copies WHEN base.clone_shape_copies > 1 THEN base.clone_shape_copies WHEN base.partial_clone_peers > 0 THEN base.partial_clone_peers ELSE base.semantic_clone_peers END::double precision, CASE WHEN base.duplicate_copies > 1 OR base.clone_shape_copies > 1 THEN 2.0 ELSE 1.0 END, CASE WHEN base.duplicate_copies > 1 THEN 2.0 ELSE 999.0 END, 999.0, base.symbol_kind IN ('function','method','component') AND ((base.duplicate_copies > 1 AND base.lines >= 6) OR (base.clone_shape_copies > 1 AND base.lines >= 12) OR (base.partial_clone_peers > 0 AND base.lines >= 12) OR (base.semantic_clone_peers > 0 AND base.lines >= 6))),
-                      ('high_fan_out', 'outgoing_sites', base.outgoing::double precision, 25.0, 50.0, 100.0, true),
+                      ('high_fan_out', 'outgoing_dependencies', base.outgoing::double precision, 25.0, 50.0, 100.0, base.symbol_kind IN ('function','method','component','class','struct','module')),
                       ('unresolved_reference_pressure', 'unresolved_sites', base.unresolved::double precision, 15.0, 40.0, 100.0, true),
                       ('accidental_quadratic', 'occurrences', base.accidental_quadratic, 1.0, 1.0, 5.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
                       ('empty_catch', 'occurrences', base.empty_catches, 1.0, 1.0, 3.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
@@ -2992,27 +3069,42 @@ fn database_error(operation: &'static str) -> StorageError {
     StorageError::DatabaseOperation { operation }
 }
 
-fn text(row: &sqlx_postgres::PgRow, index: usize) -> Result<String, StorageError> {
+fn text<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<String, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })
 }
 
-fn optional_text(row: &sqlx_postgres::PgRow, index: usize) -> Result<Option<String>, StorageError> {
+fn optional_text<Index>(
+    row: &sqlx_postgres::PgRow,
+    index: Index,
+) -> Result<Option<String>, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })
 }
 
-fn nonnegative_u64(row: &sqlx_postgres::PgRow, index: usize) -> Result<u64, StorageError> {
+fn nonnegative_u64<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<u64, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     let value = row
         .try_get::<i64, _>(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
     u64::try_from(value).map_err(|_| StorageError::CorruptStoredValue { field: "insight" })
 }
 
-fn optional_nonnegative_u64(
+fn optional_nonnegative_u64<Index>(
     row: &sqlx_postgres::PgRow,
-    index: usize,
-) -> Result<Option<u64>, StorageError> {
+    index: Index,
+) -> Result<Option<u64>, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get::<Option<i64>, _>(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?
         .map(u64::try_from)
@@ -3020,14 +3112,20 @@ fn optional_nonnegative_u64(
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })
 }
 
-fn fraction(row: &sqlx_postgres::PgRow, index: usize) -> Result<f64, StorageError> {
+fn fraction<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<f64, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get::<f64, _>(index)
         .ok()
         .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
         .ok_or(StorageError::CorruptStoredValue { field: "insight" })
 }
 
-fn positive_u32(row: &sqlx_postgres::PgRow, index: usize) -> Result<u32, StorageError> {
+fn positive_u32<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<u32, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     let value = row
         .try_get::<i32, _>(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
@@ -3037,77 +3135,212 @@ fn positive_u32(row: &sqlx_postgres::PgRow, index: usize) -> Result<u32, Storage
         .ok_or(StorageError::CorruptStoredValue { field: "insight" })
 }
 
-fn nonnegative_u8(row: &sqlx_postgres::PgRow, index: usize) -> Result<u8, StorageError> {
+fn nonnegative_u8<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<u8, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     let value = row
         .try_get::<i32, _>(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
     u8::try_from(value).map_err(|_| StorageError::CorruptStoredValue { field: "insight" })
 }
 
+const GROUPED_SYMBOL_PATH_COLUMN: usize = 3;
+const GROUPED_SYMBOL_LANGUAGE_COLUMN: usize = 4;
+const GROUPED_SYMBOL_KIND_COLUMN: usize = 5;
+const GROUPED_SYMBOL_QUALIFIED_NAME_COLUMN: usize = 6;
+const GROUPED_SYMBOL_START_LINE_COLUMN: usize = 7;
+const GROUPED_SYMBOL_END_LINE_COLUMN: usize = 8;
+const DEAD_CODE_SYMBOL_KIND_COLUMN: usize = 3;
+const DEAD_CODE_QUALIFIED_NAME_COLUMN: usize = 4;
+const DEAD_CODE_START_LINE_COLUMN: usize = 5;
+const DEAD_CODE_INCOMING_COLUMN: usize = 6;
+const DEAD_CODE_OUTGOING_COLUMN: usize = 7;
+const DEAD_CODE_SAFE_CODE_COLUMN: usize = 8;
+const DEAD_CODE_INTERFACE_RISK_COLUMN: usize = 9;
+const DEPENDENCY_COVERAGE_RESOLVED_COLUMN: usize = 3;
+const DEPENDENCY_COVERAGE_UNRESOLVED_COLUMN: usize = 4;
+const DEPENDENCY_COVERAGE_SITES_COLUMN: usize = 5;
+const RENAME_END_BYTE_COLUMN: usize = 3;
+const RENAME_REFERENCE_KIND_COLUMN: usize = 4;
+const RENAME_CONFIDENCE_COLUMN: usize = 5;
+const RENAME_PROVENANCE_COLUMN: usize = 6;
+const FILE_IMPACT_AFFECTED_TEST_COUNT_COLUMN: usize = 3;
+const FILE_IMPACT_REACHED_BARREL_COUNT_COLUMN: usize = 4;
+const FILE_IMPACT_REACHED_BARRELS_COLUMN: usize = 5;
+const FILE_IMPACT_TEST_PATH_COLUMN: usize = 6;
+const FILE_IMPACT_TEST_DISTANCE_COLUMN: usize = 7;
+const COVERAGE_SYMBOL_KIND_COLUMN: usize = 3;
+const COVERAGE_DIRECT_TEST_FILES_COLUMN: usize = 4;
+const COVERAGE_INCOMING_EDGES_COLUMN: usize = 5;
+
 fn decode_dead_code(row: sqlx_postgres::PgRow) -> Result<DeadCodeCandidate, StorageError> {
     Ok(DeadCodeCandidate {
         symbol_id: text(&row, 0)?,
         path: text(&row, 1)?,
         language: text(&row, 2)?,
-        symbol_kind: text(&row, 3)?,
-        qualified_name: text(&row, 4)?,
-        start_line: positive_u32(&row, 5)?,
-        incoming_edges: nonnegative_u64(&row, 6)?,
-        outgoing_edges: nonnegative_u64(&row, 7)?,
-        safe_code: text(&row, 8)?,
+        symbol_kind: text(&row, DEAD_CODE_SYMBOL_KIND_COLUMN)?,
+        qualified_name: text(&row, DEAD_CODE_QUALIFIED_NAME_COLUMN)?,
+        start_line: positive_u32(&row, DEAD_CODE_START_LINE_COLUMN)?,
+        incoming_edges: nonnegative_u64(&row, DEAD_CODE_INCOMING_COLUMN)?,
+        outgoing_edges: nonnegative_u64(&row, DEAD_CODE_OUTGOING_COLUMN)?,
+        safe_code: text(&row, DEAD_CODE_SAFE_CODE_COLUMN)?,
         interface_dispatch_risk: row
-            .try_get(9)
+            .try_get(DEAD_CODE_INTERFACE_RISK_COLUMN)
             .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?,
         reason: "no_incoming_structural_evidence",
     })
 }
 
+struct HotspotStructureFields {
+    path: String,
+    language: String,
+    symbols: u64,
+    incoming_edges: u64,
+    outgoing_edges: u64,
+    unresolved_references: u64,
+    routes: u64,
+    structural_risk: u64,
+}
+
+struct HotspotHistoryFields {
+    commit_count: u64,
+    author_count: u64,
+    insertions: u64,
+    deletions: u64,
+    last_touched_at: Option<String>,
+    last_touched_unix_seconds: Option<u64>,
+    history_available: bool,
+    composite_risk: u64,
+}
+
+struct HotspotScoreFields {
+    centrality: f64,
+    structural_pressure: f64,
+    churn_score: f64,
+    risk_score: f64,
+    maintenance_score: f64,
+    brittle_score: f64,
+    external_dependents: u64,
+}
+
 fn decode_hotspot(row: sqlx_postgres::PgRow) -> Result<StructuralHotspot, StorageError> {
+    let HotspotStructureFields {
+        path,
+        language,
+        symbols,
+        incoming_edges,
+        outgoing_edges,
+        unresolved_references,
+        routes,
+        structural_risk,
+    } = decode_hotspot_structure(&row)?;
+    let HotspotHistoryFields {
+        commit_count,
+        author_count,
+        insertions,
+        deletions,
+        last_touched_at,
+        last_touched_unix_seconds,
+        history_available,
+        composite_risk,
+    } = decode_hotspot_history(&row)?;
+    let HotspotScoreFields {
+        centrality,
+        structural_pressure,
+        churn_score,
+        risk_score,
+        maintenance_score,
+        brittle_score,
+        external_dependents,
+    } = decode_hotspot_scores(&row)?;
     Ok(StructuralHotspot {
-        path: text(&row, 0)?,
-        language: text(&row, 1)?,
-        symbols: nonnegative_u64(&row, 2)?,
-        incoming_edges: nonnegative_u64(&row, 3)?,
-        outgoing_edges: nonnegative_u64(&row, 4)?,
-        unresolved_references: nonnegative_u64(&row, 5)?,
-        routes: nonnegative_u64(&row, 6)?,
-        structural_risk: nonnegative_u64(&row, 7)?,
-        commit_count: nonnegative_u64(&row, 8)?,
-        author_count: nonnegative_u64(&row, 9)?,
-        insertions: nonnegative_u64(&row, 10)?,
-        deletions: nonnegative_u64(&row, 11)?,
-        last_touched_at: optional_text(&row, 12)?,
-        last_touched_unix_seconds: optional_nonnegative_u64(&row, 13)?,
+        path,
+        language,
+        symbols,
+        incoming_edges,
+        outgoing_edges,
+        unresolved_references,
+        routes,
+        structural_risk,
+        commit_count,
+        author_count,
+        insertions,
+        deletions,
+        last_touched_at,
+        last_touched_unix_seconds,
+        history_available,
+        composite_risk,
+        centrality,
+        structural_pressure,
+        churn_score,
+        risk_score,
+        maintenance_score,
+        brittle_score,
+        external_dependents,
+    })
+}
+
+fn decode_hotspot_structure(
+    row: &sqlx_postgres::PgRow,
+) -> Result<HotspotStructureFields, StorageError> {
+    Ok(HotspotStructureFields {
+        path: text(row, "normalized_path")?,
+        language: text(row, "language")?,
+        symbols: nonnegative_u64(row, "symbols")?,
+        incoming_edges: nonnegative_u64(row, "incoming_edges")?,
+        outgoing_edges: nonnegative_u64(row, "outgoing_edges")?,
+        unresolved_references: nonnegative_u64(row, "unresolved_references")?,
+        routes: nonnegative_u64(row, "routes")?,
+        structural_risk: nonnegative_u64(row, "structural_risk")?,
+    })
+}
+
+fn decode_hotspot_history(
+    row: &sqlx_postgres::PgRow,
+) -> Result<HotspotHistoryFields, StorageError> {
+    Ok(HotspotHistoryFields {
+        commit_count: nonnegative_u64(row, "commit_count")?,
+        author_count: nonnegative_u64(row, "author_count")?,
+        insertions: nonnegative_u64(row, "insertions")?,
+        deletions: nonnegative_u64(row, "deletions")?,
+        last_touched_at: optional_text(row, "last_touched_at")?,
+        last_touched_unix_seconds: optional_nonnegative_u64(row, "last_touched_unix_seconds")?,
         history_available: row
-            .try_get(14)
+            .try_get("history_available")
             .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?,
-        composite_risk: nonnegative_u64(&row, 15)?,
-        centrality: fraction(&row, 16)?,
-        structural_pressure: fraction(&row, 17)?,
-        churn_score: fraction(&row, 18)?,
-        risk_score: fraction(&row, 19)?,
-        maintenance_score: fraction(&row, 20)?,
-        brittle_score: fraction(&row, 21)?,
-        external_dependents: nonnegative_u64(&row, 22)?,
+        composite_risk: nonnegative_u64(row, "composite_risk")?,
+    })
+}
+
+fn decode_hotspot_scores(row: &sqlx_postgres::PgRow) -> Result<HotspotScoreFields, StorageError> {
+    Ok(HotspotScoreFields {
+        centrality: fraction(row, "centrality")?,
+        structural_pressure: fraction(row, "structural_pressure")?,
+        churn_score: fraction(row, "churn_score")?,
+        risk_score: fraction(row, "risk_score")?,
+        maintenance_score: fraction(row, "maintenance_score")?,
+        brittle_score: fraction(row, "brittle_score")?,
+        external_dependents: nonnegative_u64(row, "external_dependents")?,
     })
 }
 
 fn decode_import(row: sqlx_postgres::PgRow) -> Result<ImportInsight, StorageError> {
     Ok(ImportInsight {
-        path: text(&row, 0)?,
-        language: text(&row, 1)?,
-        owner_symbol_id: optional_text(&row, 2)?,
-        module_specifier: text(&row, 3)?,
-        target_symbol_id: optional_text(&row, 4)?,
-        target_path: optional_text(&row, 5)?,
-        start_byte: nonnegative_u64(&row, 6)?,
-        end_byte: nonnegative_u64(&row, 7)?,
+        path: text(&row, "path")?,
+        language: text(&row, "language")?,
+        owner_symbol_id: optional_text(&row, "owner_symbol_id")?,
+        module_specifier: text(&row, "module_specifier")?,
+        target_symbol_id: optional_text(&row, "target_symbol_id")?,
+        target_path: optional_text(&row, "target_path")?,
+        start_byte: nonnegative_u64(&row, "start_byte")?,
+        end_byte: nonnegative_u64(&row, "end_byte")?,
         confidence: row
-            .try_get(8)
+            .try_get("confidence")
             .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?,
-        provenance: text(&row, 9)?,
-        site_count: nonnegative_u64(&row, 10)?,
-        source_file_symbol_id: text(&row, 11)?,
+        provenance: text(&row, "provenance")?,
+        site_count: nonnegative_u64(&row, "site_count")?,
+        source_file_symbol_id: text(&row, "source_file_symbol_id")?,
     })
 }
 
@@ -3127,9 +3360,9 @@ fn decode_dependency_coverage(
         language: text(&row, 0)?,
         reference_kind: text(&row, 1)?,
         references: nonnegative_u64(&row, 2)?,
-        resolved: nonnegative_u64(&row, 3)?,
-        unresolved: nonnegative_u64(&row, 4)?,
-        represented_sites: nonnegative_u64(&row, 5)?,
+        resolved: nonnegative_u64(&row, DEPENDENCY_COVERAGE_RESOLVED_COLUMN)?,
+        unresolved: nonnegative_u64(&row, DEPENDENCY_COVERAGE_UNRESOLVED_COLUMN)?,
+        represented_sites: nonnegative_u64(&row, DEPENDENCY_COVERAGE_SITES_COLUMN)?,
     })
 }
 
@@ -3138,12 +3371,12 @@ fn decode_rename_site(row: sqlx_postgres::PgRow) -> Result<RenameReferenceSite, 
         path: text(&row, 0)?,
         owner_symbol_id: optional_text(&row, 1)?,
         start_byte: nonnegative_u64(&row, 2)?,
-        end_byte: nonnegative_u64(&row, 3)?,
-        reference_kind: text(&row, 4)?,
+        end_byte: nonnegative_u64(&row, RENAME_END_BYTE_COLUMN)?,
+        reference_kind: text(&row, RENAME_REFERENCE_KIND_COLUMN)?,
         confidence: row
-            .try_get(5)
+            .try_get(RENAME_CONFIDENCE_COLUMN)
             .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?,
-        provenance: text(&row, 6)?,
+        provenance: text(&row, RENAME_PROVENANCE_COLUMN)?,
     })
 }
 
@@ -3171,22 +3404,22 @@ fn decode_file_test_impact(
         .try_get::<Vec<String>, _>(1)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
     let dependent_file_count = nonnegative_u64(first, 2)?;
-    let affected_test_file_count = nonnegative_u64(first, 3)?;
-    let reached_barrel_count = nonnegative_u64(first, 4)?;
+    let affected_test_file_count = nonnegative_u64(first, FILE_IMPACT_AFFECTED_TEST_COUNT_COLUMN)?;
+    let reached_barrel_count = nonnegative_u64(first, FILE_IMPACT_REACHED_BARREL_COUNT_COLUMN)?;
     let reached_barrels = first
-        .try_get::<Vec<String>, _>(5)
+        .try_get::<Vec<String>, _>(FILE_IMPACT_REACHED_BARRELS_COLUMN)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
     let mut tests = Vec::new();
     for row in rows {
-        let path = optional_text(&row, 6)?;
+        let path = optional_text(&row, FILE_IMPACT_TEST_PATH_COLUMN)?;
         let distance = row
-            .try_get::<Option<i32>, _>(7)
+            .try_get::<Option<i32>, _>(FILE_IMPACT_TEST_DISTANCE_COLUMN)
             .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
         match (path, distance) {
             (None, None) => {}
             (Some(path), Some(_)) => tests.push(FileTestImpact {
                 path,
-                distance: nonnegative_u8(&row, 7)?,
+                distance: nonnegative_u8(&row, FILE_IMPACT_TEST_DISTANCE_COLUMN)?,
                 reason: "current_generation_dependency_graph",
             }),
             _ => return Err(StorageError::CorruptStoredValue { field: "insight" }),
@@ -3212,27 +3445,29 @@ fn decode_coverage(row: sqlx_postgres::PgRow) -> Result<StructuralCoverageRow, S
         symbol_id: text(&row, 0)?,
         path: text(&row, 1)?,
         qualified_name: text(&row, 2)?,
-        symbol_kind: text(&row, 3)?,
-        direct_test_files: nonnegative_u64(&row, 4)?,
-        incoming_edges: nonnegative_u64(&row, 5)?,
+        symbol_kind: text(&row, COVERAGE_SYMBOL_KIND_COLUMN)?,
+        direct_test_files: nonnegative_u64(&row, COVERAGE_DIRECT_TEST_FILES_COLUMN)?,
+        incoming_edges: nonnegative_u64(&row, COVERAGE_INCOMING_EDGES_COLUMN)?,
     })
 }
 
 fn decode_finding(row: sqlx_postgres::PgRow) -> Result<StructuralFinding, StorageError> {
     Ok(StructuralFinding {
-        symbol_id: text(&row, 0)?,
-        path: text(&row, 1)?,
-        qualified_name: text(&row, 2)?,
-        finding: text(&row, 3)?,
-        severity: text(&row, 4)?,
-        start_line: positive_u32(&row, 5)?,
-        end_line: positive_u32(&row, 6)?,
-        metric_name: text(&row, 7)?,
-        metric: row.try_get(8).map_err(|_| corrupt_insight())?,
-        degree_centrality: row.try_get(9).map_err(|_| corrupt_insight())?,
-        outgoing_edges: nonnegative_u64(&row, 10)?,
-        unresolved_references: nonnegative_u64(&row, 11)?,
-        detail: optional_text(&row, 12)?
+        symbol_id: text(&row, "symbol_id")?,
+        path: text(&row, "path")?,
+        qualified_name: text(&row, "qualified_name")?,
+        finding: text(&row, "finding")?,
+        severity: text(&row, "severity")?,
+        start_line: positive_u32(&row, "start_line")?,
+        end_line: positive_u32(&row, "end_line")?,
+        metric_name: text(&row, "metric_name")?,
+        metric: row.try_get("metric").map_err(|_| corrupt_insight())?,
+        degree_centrality: row
+            .try_get("degree_centrality")
+            .map_err(|_| corrupt_insight())?,
+        outgoing_edges: nonnegative_u64(&row, "outgoing_edges")?,
+        unresolved_references: nonnegative_u64(&row, "unresolved_references")?,
+        detail: optional_text(&row, "detail")?
             .map(|detail| serde_json::from_str(&detail))
             .transpose()
             .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?,
@@ -3242,12 +3477,12 @@ fn decode_finding(row: sqlx_postgres::PgRow) -> Result<StructuralFinding, Storag
 fn decode_finding_stats(
     row: &sqlx_postgres::PgRow,
 ) -> Result<StructuralFindingStats, StorageError> {
-    let analyzed_symbols = nonnegative_u64(row, 0)?;
-    let total_findings = nonnegative_u64(row, 1)?;
-    let info_findings = nonnegative_u64(row, 2)?;
-    let warning_findings = nonnegative_u64(row, 3)?;
-    let error_findings = nonnegative_u64(row, 4)?;
-    let by_finding = serde_json::from_str::<BTreeMap<String, u64>>(&text(row, 9)?)
+    let analyzed_symbols = nonnegative_u64(row, "analyzed_symbols")?;
+    let total_findings = nonnegative_u64(row, "total_findings")?;
+    let info_findings = nonnegative_u64(row, "info_findings")?;
+    let warning_findings = nonnegative_u64(row, "warning_findings")?;
+    let error_findings = nonnegative_u64(row, "error_findings")?;
+    let by_finding = serde_json::from_str::<BTreeMap<String, u64>>(&text(row, "by_finding")?)
         .map_err(|_| corrupt_insight())?;
     let finding_sum = by_finding
         .values()
@@ -3262,10 +3497,12 @@ fn decode_finding_stats(
         info_findings,
         warning_findings,
         error_findings,
-        very_long_symbols: nonnegative_u64(row, 5)?,
-        high_fan_out_symbols: nonnegative_u64(row, 6)?,
-        unresolved_reference_pressure: nonnegative_u64(row, 7)?,
-        code_health_score: row.try_get(8).map_err(|_| corrupt_insight())?,
+        very_long_symbols: nonnegative_u64(row, "very_long_symbols")?,
+        high_fan_out_symbols: nonnegative_u64(row, "high_fan_out_symbols")?,
+        unresolved_reference_pressure: nonnegative_u64(row, "unresolved_reference_pressure")?,
+        code_health_score: row
+            .try_get("code_health_score")
+            .map_err(|_| corrupt_insight())?,
         by_finding,
     })
 }

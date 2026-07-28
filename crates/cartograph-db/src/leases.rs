@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use cartograph_domain::{GenerationId, LeaseId, ProjectId, ProjectOperation};
 use serde::Serialize;
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{query::query, row::Row};
 use sqlx_postgres::{PgConnection, PgRow};
 use thiserror::Error;
 
-use crate::CartographDatabase;
+use crate::{CartographDatabase, database::audited_query};
 
-pub(crate) const LEASE_LOCK_NAMESPACE: &str = "cartograph-v2-operation";
+const LEASE_LOCK_NAMESPACE: &str = "cartograph-v2-operation";
 const MIN_LEASE_DURATION: Duration = Duration::from_secs(1);
 const MAX_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 const MAX_PROCESS_START_BYTES: usize = 256;
@@ -930,14 +930,6 @@ fn read_nonempty_string(
     } else {
         Ok(value)
     }
-}
-
-fn audited_query(
-    sql: String,
-) -> sqlx_core::query::Query<'static, sqlx_postgres::Postgres, sqlx_postgres::PgArguments> {
-    // Dynamic content is limited to a conservatively validated DatabaseSchema
-    // and is always double-quoted before insertion into the audited SQL.
-    query(AssertSqlSafe(sql))
 }
 
 const fn database_error(operation: &'static str) -> LeaseError {

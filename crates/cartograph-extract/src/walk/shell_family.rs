@@ -1,13 +1,12 @@
 use cartograph_domain::{
     ReferenceKind, SourceLanguage, SymbolKind, callable_signature_is_literal_free,
-    declaration_value_is_search_safe,
 };
 use tree_sitter::Node;
 
 use crate::ExtractError;
 
 use super::{
-    ExtractionBuilder, PendingReference, PendingSymbol, references,
+    ExtractionBuilder, PendingReference, PendingSymbol, references, safe_assignment_signature,
     syntax::{descendants_including_root, named_children},
 };
 
@@ -125,7 +124,7 @@ fn visit_bash_assignment(
         SymbolKind::Variable
     };
     let signature = if let Some(value) = node.child_by_field_name("value") {
-        safe_value_signature(builder, value)?
+        safe_assignment_signature(builder, value)?
     } else {
         None
     };
@@ -246,7 +245,7 @@ fn visit_fish_set(
         return Ok(());
     };
     let signature = value_node
-        .map(|value| safe_value_signature(builder, value))
+        .map(|value| safe_assignment_signature(builder, value))
         .transpose()?
         .flatten();
     emit_leaf(
@@ -275,19 +274,51 @@ fn visit_powershell_declaration(
 ) -> Result<bool, ExtractError> {
     match node.kind() {
         "class_statement" => {
-            visit_powershell_scope(builder, node, depth, "simple_name", SymbolKind::Class)?;
+            visit_powershell_scope(
+                builder,
+                PowerShellScope {
+                    node,
+                    depth,
+                    name_kind: "simple_name",
+                    kind: SymbolKind::Class,
+                },
+            )?;
             Ok(true)
         }
         "function_statement" => {
-            visit_powershell_scope(builder, node, depth, "function_name", SymbolKind::Function)?;
+            visit_powershell_scope(
+                builder,
+                PowerShellScope {
+                    node,
+                    depth,
+                    name_kind: "function_name",
+                    kind: SymbolKind::Function,
+                },
+            )?;
             Ok(true)
         }
         "class_method_definition" => {
-            visit_powershell_scope(builder, node, depth, "simple_name", SymbolKind::Method)?;
+            visit_powershell_scope(
+                builder,
+                PowerShellScope {
+                    node,
+                    depth,
+                    name_kind: "simple_name",
+                    kind: SymbolKind::Method,
+                },
+            )?;
             Ok(true)
         }
         "enum_statement" => {
-            visit_powershell_scope(builder, node, depth, "simple_name", SymbolKind::Enum)?;
+            visit_powershell_scope(
+                builder,
+                PowerShellScope {
+                    node,
+                    depth,
+                    name_kind: "simple_name",
+                    kind: SymbolKind::Enum,
+                },
+            )?;
             Ok(true)
         }
         "class_property_definition" => {
@@ -295,7 +326,14 @@ fn visit_powershell_declaration(
             Ok(true)
         }
         "enum_member" => {
-            visit_powershell_leaf(builder, node, "simple_name", SymbolKind::EnumMember)?;
+            visit_powershell_leaf(
+                builder,
+                PowerShellLeaf {
+                    node,
+                    name_kind: "simple_name",
+                    kind: SymbolKind::EnumMember,
+                },
+            )?;
             Ok(true)
         }
         "assignment_expression" if builder.native_owner_kinds.is_empty() => {
@@ -317,23 +355,28 @@ fn visit_powershell_declaration(
     }
 }
 
+struct PowerShellScope<'tree> {
+    node: Node<'tree>,
+    depth: usize,
+    name_kind: &'static str,
+    kind: SymbolKind,
+}
+
 fn visit_powershell_scope(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    name_kind: &str,
-    kind: SymbolKind,
+    input: PowerShellScope<'_>,
 ) -> Result<(), ExtractError> {
-    let Some(name_node) = named_children(node).find(|child| child.kind() == name_kind) else {
-        return builder.visit_named_children(node, depth);
+    let Some(name_node) = named_children(input.node).find(|child| child.kind() == input.name_kind)
+    else {
+        return builder.visit_named_children(input.node, input.depth);
     };
     let name = powershell_name(builder, name_node)?;
     visit_scoped_symbol(
         builder,
         ScopedSymbol {
-            node,
-            depth,
-            kind,
+            node: input.node,
+            depth: input.depth,
+            kind: input.kind,
             name,
             signature: None,
             body: None,
@@ -354,20 +397,43 @@ fn visit_powershell_field(
         .transpose()?
         .flatten();
     let name = powershell_name(builder, variable)?;
-    emit_named_leaf(builder, node, SymbolKind::Field, name, signature, false)
+    emit_named_leaf(
+        builder,
+        NamedLeafSymbol {
+            node,
+            kind: SymbolKind::Field,
+            name,
+            signature,
+            exported: false,
+        },
+    )
+}
+
+struct PowerShellLeaf<'tree> {
+    node: Node<'tree>,
+    name_kind: &'static str,
+    kind: SymbolKind,
 }
 
 fn visit_powershell_leaf(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    name_kind: &str,
-    kind: SymbolKind,
+    input: PowerShellLeaf<'_>,
 ) -> Result<(), ExtractError> {
-    let Some(name_node) = named_children(node).find(|child| child.kind() == name_kind) else {
+    let Some(name_node) = named_children(input.node).find(|child| child.kind() == input.name_kind)
+    else {
         return Ok(());
     };
     let name = powershell_name(builder, name_node)?;
-    emit_named_leaf(builder, node, kind, name, None, false)
+    emit_named_leaf(
+        builder,
+        NamedLeafSymbol {
+            node: input.node,
+            kind: input.kind,
+            name,
+            signature: None,
+            exported: false,
+        },
+    )
 }
 
 fn visit_powershell_assignment(
@@ -386,10 +452,19 @@ fn visit_powershell_assignment(
     let name = powershell_name(builder, variable)?;
     let signature = node
         .child_by_field_name("value")
-        .map(|value| safe_value_signature(builder, value))
+        .map(|value| safe_assignment_signature(builder, value))
         .transpose()?
         .flatten();
-    emit_named_leaf(builder, node, SymbolKind::Variable, name, signature, false)
+    emit_named_leaf(
+        builder,
+        NamedLeafSymbol {
+            node,
+            kind: SymbolKind::Variable,
+            name,
+            signature,
+            exported: false,
+        },
+    )
 }
 
 fn visit_powershell_using(
@@ -408,7 +483,14 @@ fn visit_powershell_using(
             return Ok(());
         };
         let module_name = builder.context.copy_text(path)?;
-        return emit_import(builder, node, node, module_name);
+        return emit_import(
+            builder,
+            ImportSymbol {
+                node,
+                span_node: node,
+                name: module_name,
+            },
+        );
     }
     Ok(())
 }
@@ -424,24 +506,35 @@ fn visit_shell_source(
         return Ok(());
     };
     let module_name = builder.context.copy_text(path)?;
-    emit_import(builder, node, argument, module_name)
+    emit_import(
+        builder,
+        ImportSymbol {
+            node,
+            span_node: argument,
+            name: module_name,
+        },
+    )
+}
+
+struct ImportSymbol<'tree> {
+    node: Node<'tree>,
+    span_node: Node<'tree>,
+    name: String,
 }
 
 fn emit_import(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    span_node: Node<'_>,
-    name: String,
+    input: ImportSymbol<'_>,
 ) -> Result<(), ExtractError> {
     let signature = builder
         .context
-        .copy_text(builder.context.text(node).trim())?;
+        .copy_text(builder.context.text(input.node).trim())?;
     let pending = PendingSymbol {
         kind: SymbolKind::Import,
-        name: name.clone(),
-        span_node: node,
-        structural_node: node,
-        doc_anchor: node,
+        name: input.name.clone(),
+        span_node: input.node,
+        structural_node: input.node,
+        doc_anchor: input.node,
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
@@ -456,9 +549,9 @@ fn emit_import(
         builder,
         PendingReference {
             owner: None,
-            name,
+            name: input.name,
             kind: ReferenceKind::Imports,
-            node: span_node,
+            node: input.span_node,
         },
     )
 }
@@ -521,35 +614,41 @@ fn emit_leaf(
     let name = builder.context.owned_text(input.name_node)?;
     emit_named_leaf(
         builder,
-        input.node,
-        input.kind,
-        name,
-        input.signature,
-        input.exported,
+        NamedLeafSymbol {
+            node: input.node,
+            kind: input.kind,
+            name,
+            signature: input.signature,
+            exported: input.exported,
+        },
     )
 }
 
-fn emit_named_leaf(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
+struct NamedLeafSymbol<'tree> {
+    node: Node<'tree>,
     kind: SymbolKind,
     name: String,
     signature: Option<String>,
     exported: bool,
+}
+
+fn emit_named_leaf(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: NamedLeafSymbol<'_>,
 ) -> Result<(), ExtractError> {
-    if name.is_empty() {
+    if input.name.is_empty() {
         return Ok(());
     }
     let pending = PendingSymbol {
-        kind,
-        name,
-        span_node: node,
-        structural_node: node,
-        doc_anchor: node,
+        kind: input.kind,
+        name: input.name,
+        span_node: input.node,
+        structural_node: input.node,
+        doc_anchor: input.node,
         body_node: None,
         declaration_only: false,
-        signature,
-        exported,
+        signature: input.signature,
+        exported: input.exported,
         default_export: false,
         async_symbol: false,
         static_member: false,
@@ -696,30 +795,6 @@ fn safe_function_signature(
         return Ok(None);
     }
     builder.context.copy_text(raw).map(Some)
-}
-
-fn safe_value_signature(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    value: Node<'_>,
-) -> Result<Option<String>, ExtractError> {
-    let raw = builder.context.text(value).trim();
-    let Some(signature_length) = raw.len().checked_add(2) else {
-        return Err(ExtractError::OutputLimit);
-    };
-    if signature_length > MAX_SIGNATURE_BYTES || !declaration_value_is_search_safe(raw) {
-        return Ok(None);
-    }
-    builder
-        .context
-        .budget
-        .ensure_string_length(signature_length)?;
-    let mut signature = String::new();
-    signature
-        .try_reserve(signature_length)
-        .map_err(|_| ExtractError::OutputLimit)?;
-    signature.push_str("= ");
-    signature.push_str(raw);
-    Ok(Some(signature))
 }
 
 fn safe_type_signature(

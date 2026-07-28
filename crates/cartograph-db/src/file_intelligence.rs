@@ -2,11 +2,11 @@ use std::{collections::BTreeMap, time::Duration};
 
 use cartograph_domain::{NormalizedPath, ProjectId, SourceLanguage};
 use serde::Serialize;
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::row::Row;
 
 use crate::{
     CartographDatabase, StorageError,
-    database::{quoted_schema, set_local_statement_timeout},
+    database::{PgQuery, RowReadRequest, quoted_schema, read_rows},
 };
 
 const FILE_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -444,16 +444,17 @@ impl CartographDatabase {
                 "language" => languages.push(FileLanguageAggregate {
                     language: text(row, 1)?,
                     files: nonnegative_u64(row, 2)?,
-                    symbols: nonnegative_u64(row, 3)?,
-                    bytes: nonnegative_u64(row, 4)?,
+                    symbols: nonnegative_u64(row, FILE_AGGREGATE_SYMBOLS_COLUMN)?,
+                    bytes: nonnegative_u64(row, FILE_AGGREGATE_BYTES_COLUMN)?,
                 }),
                 "directory" => {
-                    total_directories = nonnegative_u64(row, 5)?;
+                    total_directories =
+                        nonnegative_u64(row, FILE_AGGREGATE_DIRECTORY_TOTAL_COLUMN)?;
                     directories.push(FileDirectoryAggregate {
                         path: text(row, 1)?,
                         files: nonnegative_u64(row, 2)?,
-                        symbols: nonnegative_u64(row, 3)?,
-                        bytes: nonnegative_u64(row, 4)?,
+                        symbols: nonnegative_u64(row, FILE_AGGREGATE_SYMBOLS_COLUMN)?,
+                        bytes: nonnegative_u64(row, FILE_AGGREGATE_BYTES_COLUMN)?,
                     });
                 }
                 _ => return Err(corrupt("file_aggregate_kind")),
@@ -597,42 +598,14 @@ impl CartographDatabase {
         })
     }
 
-    async fn file_rows<'query, Bind>(
+    async fn file_rows<'query>(
         &self,
         statement: String,
-        bind: Bind,
+        bind: impl FnOnce(PgQuery<'query>) -> PgQuery<'query>,
         operation: &'static str,
-    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError>
-    where
-        Bind: FnOnce(
-            sqlx_core::query::Query<'query, sqlx_postgres::Postgres, sqlx_postgres::PgArguments>,
-        ) -> sqlx_core::query::Query<
-            'query,
-            sqlx_postgres::Postgres,
-            sqlx_postgres::PgArguments,
-        >,
-    {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| database_error(operation))?;
-        query("SET TRANSACTION READ ONLY")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        set_local_statement_timeout(&mut transaction, FILE_QUERY_TIMEOUT)
-            .await
-            .map_err(|_| database_error(operation))?;
-        let rows = bind(query(AssertSqlSafe(statement)))
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| database_error(operation))?;
-        Ok(rows)
+    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError> {
+        let request = RowReadRequest::new(statement, operation, FILE_QUERY_TIMEOUT);
+        read_rows(self, request, bind).await
     }
 }
 
@@ -646,15 +619,22 @@ fn decode_file_surface(row: &sqlx_postgres::PgRow) -> Result<FileSurfaceRow, Sto
     })
 }
 
+const FILE_AGGREGATE_SYMBOLS_COLUMN: usize = 3;
+const FILE_AGGREGATE_BYTES_COLUMN: usize = 4;
+const FILE_AGGREGATE_DIRECTORY_TOTAL_COLUMN: usize = 5;
+const FILE_DEPENDENCY_EDGE_COUNT_COLUMN: usize = 3;
+const FILE_DEPENDENCY_SITE_COUNT_COLUMN: usize = 4;
+const FILE_DEPENDENCY_EDGE_KINDS_COLUMN: usize = 5;
+
 fn decode_file_dependency(row: &sqlx_postgres::PgRow) -> Result<FileDependencyRow, StorageError> {
     Ok(FileDependencyRow {
         direction: text(row, 0)?,
         path: text(row, 1)?,
         language: text(row, 2)?,
-        edge_count: nonnegative_u64(row, 3)?,
-        site_count: nonnegative_u64(row, 4)?,
+        edge_count: nonnegative_u64(row, FILE_DEPENDENCY_EDGE_COUNT_COLUMN)?,
+        site_count: nonnegative_u64(row, FILE_DEPENDENCY_SITE_COUNT_COLUMN)?,
         edge_kinds: row
-            .try_get(5)
+            .try_get(FILE_DEPENDENCY_EDGE_KINDS_COLUMN)
             .map_err(|_| corrupt("file_dependency_kinds"))?,
     })
 }
@@ -680,10 +660,6 @@ fn nonnegative_u64(row: &sqlx_postgres::PgRow, index: usize) -> Result<u64, Stor
 
 const fn corrupt(field: &'static str) -> StorageError {
     StorageError::CorruptStoredValue { field }
-}
-
-const fn database_error(operation: &'static str) -> StorageError {
-    StorageError::DatabaseOperation { operation }
 }
 
 #[cfg(test)]

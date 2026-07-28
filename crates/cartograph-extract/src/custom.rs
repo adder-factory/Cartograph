@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_domain::{
-    ContentDigest, FileParseStatus, ReferenceKind, SourceLanguage, SourcePosition, SourceSpan,
-    SymbolId, SymbolKind, Visibility,
+    ContentDigest, FileParseStatus, ReferenceKind, SourceLanguage, SourceSpan, SymbolId,
+    SymbolKind, Visibility,
 };
 use serde_json::Value;
 
@@ -14,6 +14,7 @@ use crate::{
         reference_budget_bytes, symbol_budget_bytes,
     },
     identity::SymbolIdentity,
+    source_lines::{LineMap, SourceByteRange, physical_lines},
 };
 
 const CUSTOM_DIGEST_CONTEXT: &str = "cartograph.v2.custom-structural-digest.2026-07-24";
@@ -54,6 +55,146 @@ struct SymbolOptions {
     static_member: bool,
     visibility: Option<Visibility>,
     parent: Option<SymbolId>,
+}
+
+struct CustomSymbolInput<'name> {
+    kind: SymbolKind,
+    name: &'name str,
+    qualified_name: String,
+    start: usize,
+    end: usize,
+    options: SymbolOptions,
+}
+
+impl<'name> CustomSymbolInput<'name> {
+    fn new(kind: SymbolKind, name: &'name str, qualified_name: String) -> Self {
+        Self {
+            kind,
+            name,
+            qualified_name,
+            start: 0,
+            end: 0,
+            options: SymbolOptions::default(),
+        }
+    }
+
+    const fn at(mut self, start: usize, end: usize) -> Self {
+        self.start = start;
+        self.end = end;
+        self
+    }
+
+    fn with_options(mut self, options: SymbolOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+struct CustomReferenceInput<'name> {
+    owner: Option<SymbolId>,
+    name: &'name str,
+    resolution_name: Option<&'name str>,
+    kind: ReferenceKind,
+    start: usize,
+    end: usize,
+}
+
+impl<'name> CustomReferenceInput<'name> {
+    fn new(owner: Option<SymbolId>, name: &'name str, kind: ReferenceKind) -> Self {
+        Self {
+            owner,
+            name,
+            resolution_name: None,
+            kind,
+            start: 0,
+            end: 0,
+        }
+    }
+
+    const fn with_resolution(mut self, resolution_name: &'name str) -> Self {
+        self.resolution_name = Some(resolution_name);
+        self
+    }
+
+    const fn at(mut self, start: usize, end: usize) -> Self {
+        self.start = start;
+        self.end = end;
+        self
+    }
+}
+
+struct CustomImportInput<'name> {
+    owner: Option<SymbolId>,
+    module: &'name str,
+    imported: &'name str,
+    local: &'name str,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SourceSliceInput<'source> {
+    value: &'source str,
+    start: usize,
+    end: usize,
+}
+
+struct OwnedRangeInput {
+    owner: SymbolId,
+    start: usize,
+    end: usize,
+}
+
+struct OwnedSourceInput<'source> {
+    owner: SymbolId,
+    source: &'source str,
+    offset: usize,
+}
+
+struct MybatisMapperInput<'source> {
+    tags: &'source [MarkupTag<'source>],
+    namespace: &'source str,
+    namespace_offset: usize,
+}
+
+struct MybatisBodyInput<'source> {
+    owner: SymbolId,
+    namespace: &'source str,
+    statement: &'source str,
+    start: usize,
+    end: usize,
+}
+
+struct OsirisDeclarationInput<'source> {
+    goal: SymbolId,
+    line: &'source str,
+    raw_line: &'source str,
+    line_start: usize,
+}
+
+impl<'name> CustomImportInput<'name> {
+    fn new(owner: Option<SymbolId>, module: &'name str) -> Self {
+        Self {
+            owner,
+            module,
+            imported: module,
+            local: module,
+            start: 0,
+            end: 0,
+        }
+    }
+
+    const fn binding(mut self, imported: &'name str, local: &'name str) -> Self {
+        self.imported = imported;
+        self.local = local;
+        self
+    }
+
+    const fn at(mut self, start: usize, end: usize) -> Self {
+        self.start = start;
+        self.end = end;
+        self
+    }
 }
 
 struct CustomBuilder<'source, 'cancel> {
@@ -103,18 +244,19 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
     }
 
     fn span(&self, start: usize, end: usize) -> Result<SourceSpan, ExtractError> {
-        self.lines.span(start, end, self.source().len())
+        self.lines
+            .span(SourceByteRange::new(start, end, self.source().len()))
     }
 
-    fn add_symbol(
-        &mut self,
-        kind: SymbolKind,
-        name: &str,
-        qualified_name: String,
-        start: usize,
-        end: usize,
-        options: SymbolOptions,
-    ) -> Result<SymbolId, ExtractError> {
+    fn add_symbol(&mut self, input: CustomSymbolInput<'_>) -> Result<SymbolId, ExtractError> {
+        let CustomSymbolInput {
+            kind,
+            name,
+            qualified_name,
+            start,
+            end,
+            options,
+        } = input;
         if name.is_empty() || qualified_name.is_empty() {
             return Err(ExtractError::InvalidSpan);
         }
@@ -135,6 +277,7 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
             body_search_truncated: false,
             health: crate::SymbolHealthMetrics::default(),
             declaration_only: options.declaration_only,
+            test_symbol: false,
             exported: options.exported,
             default_export: options.default_export,
             async_symbol: options.async_symbol,
@@ -166,26 +309,22 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
         Ok(id)
     }
 
-    fn add_reference(
-        &mut self,
-        owner: Option<SymbolId>,
-        name: &str,
-        kind: ReferenceKind,
-        start: usize,
-        end: usize,
-    ) -> Result<(), ExtractError> {
-        self.add_reference_with_resolution(owner, name, None, kind, start, end)
+    fn add_reference(&mut self, input: CustomReferenceInput<'_>) -> Result<(), ExtractError> {
+        self.add_reference_with_resolution(input)
     }
 
     fn add_reference_with_resolution(
         &mut self,
-        owner: Option<SymbolId>,
-        name: &str,
-        resolution_name: Option<&str>,
-        kind: ReferenceKind,
-        start: usize,
-        end: usize,
+        input: CustomReferenceInput<'_>,
     ) -> Result<(), ExtractError> {
+        let CustomReferenceInput {
+            owner,
+            name,
+            resolution_name,
+            kind,
+            start,
+            end,
+        } = input;
         let Some(name) = normalize_reference(name) else {
             return Ok(());
         };
@@ -208,16 +347,18 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
         Ok(())
     }
 
-    fn add_import(
-        &mut self,
-        owner: Option<SymbolId>,
-        module: &str,
-        imported: &str,
-        local: &str,
-        start: usize,
-        end: usize,
-    ) -> Result<(), ExtractError> {
-        self.add_reference(owner, module, ReferenceKind::Imports, start, end)?;
+    fn add_import(&mut self, input: CustomImportInput<'_>) -> Result<(), ExtractError> {
+        let CustomImportInput {
+            owner,
+            module,
+            imported,
+            local,
+            start,
+            end,
+        } = input;
+        self.add_reference(
+            CustomReferenceInput::new(owner, module, ReferenceKind::Imports).at(start, end),
+        )?;
         let binding = ExtractedImportBinding {
             kind: ImportBindingKind::Named,
             module_specifier: bounded_string(module)?,
@@ -260,55 +401,6 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
             return Err(ExtractError::OutputLimit);
         }
         Ok(file)
-    }
-}
-
-struct LineMap {
-    starts: Vec<usize>,
-}
-
-impl LineMap {
-    fn new(source: &str) -> Result<Self, ExtractError> {
-        let line_count = source
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            .saturating_add(1);
-        let mut starts = Vec::new();
-        starts
-            .try_reserve_exact(line_count)
-            .map_err(|_| ExtractError::OutputLimit)?;
-        starts.push(0);
-        for (index, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
-                starts.push(index.saturating_add(1));
-            }
-        }
-        Ok(Self { starts })
-    }
-
-    fn span(
-        &self,
-        start: usize,
-        end: usize,
-        source_len: usize,
-    ) -> Result<SourceSpan, ExtractError> {
-        if start >= end || end > source_len {
-            return Err(ExtractError::InvalidSpan);
-        }
-        let start = self.position(start)?;
-        let end = self.position(end)?;
-        SourceSpan::new(start, end).map_err(|_| ExtractError::InvalidSpan)
-    }
-
-    fn position(&self, byte: usize) -> Result<SourcePosition, ExtractError> {
-        let line_index = self.starts.partition_point(|start| *start <= byte) - 1;
-        let line =
-            u32::try_from(line_index.saturating_add(1)).map_err(|_| ExtractError::InvalidSpan)?;
-        let column = u32::try_from(byte.saturating_sub(self.starts[line_index]))
-            .map_err(|_| ExtractError::InvalidSpan)?;
-        let byte = u64::try_from(byte).map_err(|_| ExtractError::InvalidSpan)?;
-        SourcePosition::new(byte, line, column).map_err(|_| ExtractError::InvalidSpan)
     }
 }
 
@@ -467,48 +559,35 @@ fn quoted_values(value: &str) -> Vec<(usize, &str)> {
     output
 }
 
-fn line_ranges(source: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut offset = 0_usize;
-    source.split_inclusive('\n').map(move |raw| {
-        let start = offset;
-        offset = offset.saturating_add(raw.len());
-        let line = raw
-            .strip_suffix('\n')
-            .unwrap_or(raw)
-            .strip_suffix('\r')
-            .unwrap_or_else(|| raw.strip_suffix('\n').unwrap_or(raw));
-        (start, line)
-    })
-}
-
 fn extract_properties(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> {
     let source = builder.source();
-    for (line_start, line) in line_ranges(source) {
+    for (line_start, line) in physical_lines(source) {
         builder.check_cancelled()?;
         let Some((key_start, key_end, key)) = properties_key(line) else {
             continue;
         };
         let owner = builder.add_symbol(
-            SymbolKind::Constant,
-            &key,
-            key.clone(),
-            line_start + key_start,
-            line_start + key_end,
-            SymbolOptions {
-                body_search_text: key.clone(),
-                exported: true,
-                visibility: Some(Visibility::Public),
-                ..SymbolOptions::default()
-            },
+            CustomSymbolInput::new(SymbolKind::Constant, &key, key.clone())
+                .at(line_start + key_start, line_start + key_end)
+                .with_options(SymbolOptions {
+                    body_search_text: key.clone(),
+                    exported: true,
+                    visibility: Some(Visibility::Public),
+                    ..SymbolOptions::default()
+                }),
         )?;
         let value = &line[key_end..];
         for (offset, reference) in interpolation_references(value) {
             builder.add_reference(
-                Some(owner.clone()),
-                reference,
-                ReferenceKind::References,
-                line_start + key_end + offset,
-                line_start + key_end + offset + reference.len(),
+                CustomReferenceInput::new(
+                    Some(owner.clone()),
+                    reference,
+                    ReferenceKind::References,
+                )
+                .at(
+                    line_start + key_end + offset,
+                    line_start + key_end + offset + reference.len(),
+                ),
             )?;
         }
     }
@@ -594,7 +673,14 @@ fn extract_liquid(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractErro
         let close = open + 2 + close_relative + 2;
         let raw = source[open + 2..close - 2]
             .trim_matches(|character: char| character.is_whitespace() || character == '-');
-        extract_liquid_tag(builder, raw, open, close)?;
+        extract_liquid_tag(
+            builder,
+            SourceSliceInput {
+                value: raw,
+                start: open,
+                end: close,
+            },
+        )?;
         cursor = close;
     }
     extract_liquid_output_references(builder)
@@ -602,10 +688,13 @@ fn extract_liquid(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractErro
 
 fn extract_liquid_tag(
     builder: &mut CustomBuilder<'_, '_>,
-    raw: &str,
-    start: usize,
-    end: usize,
+    input: SourceSliceInput<'_>,
 ) -> Result<(), ExtractError> {
+    let SourceSliceInput {
+        value: raw,
+        start,
+        end,
+    } = input;
     let Some((_, command)) = first_identifier(raw) else {
         return Ok(());
     };
@@ -626,22 +715,24 @@ fn extract_liquid_tag(
             };
             let module = format!("{folder}/{partner}.liquid");
             let qualified = format!("{}::{command}:{partner}", builder.path());
+            let kind = if command == "section" {
+                SymbolKind::Component
+            } else {
+                SymbolKind::Import
+            };
             let id = builder.add_symbol(
-                if command == "section" {
-                    SymbolKind::Component
-                } else {
-                    SymbolKind::Import
-                },
-                partner,
-                qualified,
-                start,
-                end,
-                SymbolOptions {
-                    body_search_text: format!("{command} {partner}"),
-                    ..SymbolOptions::default()
-                },
+                CustomSymbolInput::new(kind, partner, qualified)
+                    .at(start, end)
+                    .with_options(SymbolOptions {
+                        body_search_text: format!("{command} {partner}"),
+                        ..SymbolOptions::default()
+                    }),
             )?;
-            builder.add_import(Some(id), &module, partner, partner, start, end)?;
+            builder.add_import(
+                CustomImportInput::new(Some(id), &module)
+                    .binding(partner, partner)
+                    .at(start, end),
+            )?;
         }
         "assign" | "capture" => {
             let Some((_, name)) = first_identifier(remainder) else {
@@ -649,15 +740,12 @@ fn extract_liquid_tag(
             };
             let qualified = format!("{}::{name}", builder.path());
             builder.add_symbol(
-                SymbolKind::Variable,
-                name,
-                qualified,
-                start,
-                end,
-                SymbolOptions {
-                    body_search_text: format!("{command} {name}"),
-                    ..SymbolOptions::default()
-                },
+                CustomSymbolInput::new(SymbolKind::Variable, name, qualified)
+                    .at(start, end)
+                    .with_options(SymbolOptions {
+                        body_search_text: format!("{command} {name}"),
+                        ..SymbolOptions::default()
+                    }),
             )?;
         }
         "block" => {
@@ -665,28 +753,30 @@ fn extract_liquid_tag(
                 return Ok(());
             };
             builder.add_symbol(
-                SymbolKind::Component,
-                name,
-                format!("{}::block:{name}", builder.path()),
-                start,
-                end,
-                SymbolOptions {
+                CustomSymbolInput::new(
+                    SymbolKind::Component,
+                    name,
+                    format!("{}::block:{name}", builder.path()),
+                )
+                .at(start, end)
+                .with_options(SymbolOptions {
                     body_search_text: format!("block {name}"),
                     ..SymbolOptions::default()
-                },
+                }),
             )?;
         }
         "schema" => {
             builder.add_symbol(
-                SymbolKind::Resource,
-                "schema",
-                format!("{}::schema", builder.path()),
-                start,
-                end,
-                SymbolOptions {
+                CustomSymbolInput::new(
+                    SymbolKind::Resource,
+                    "schema",
+                    format!("{}::schema", builder.path()),
+                )
+                .at(start, end)
+                .with_options(SymbolOptions {
                     body_search_text: "schema".to_owned(),
                     ..SymbolOptions::default()
-                },
+                }),
             )?;
         }
         _ => {}
@@ -713,11 +803,8 @@ fn extract_liquid_output_references(
             }
             let start = open + 2 + relative_offset;
             builder.add_reference(
-                None,
-                name,
-                ReferenceKind::References,
-                start,
-                start + name.len(),
+                CustomReferenceInput::new(None, name, ReferenceKind::References)
+                    .at(start, start + name.len()),
             )?;
         }
         cursor = close + 2;
@@ -800,48 +887,90 @@ fn markup_tags(source: &str) -> Vec<MarkupTag<'_>> {
 }
 
 fn tag_attribute<'source>(tag: MarkupTag<'source>, key: &str) -> Option<(usize, &'source str)> {
-    let bytes = tag.raw.as_bytes();
     let mut cursor = 0;
-    while cursor < bytes.len() {
-        while cursor < bytes.len() && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b'/')
-        {
-            cursor += 1;
+    while let Some(attribute) = next_markup_attribute(tag.raw, &mut cursor) {
+        if attribute.name.eq_ignore_ascii_case(key) {
+            return Some((
+                tag.start + 1 + attribute.value_start,
+                &tag.raw[attribute.value_start..attribute.value_end],
+            ));
         }
-        let name_start = cursor;
-        while cursor < bytes.len()
-            && (is_identifier_body(bytes[cursor])
-                || matches!(bytes[cursor], b':' | b'.' | b'-' | b'@'))
-        {
-            cursor += 1;
-        }
-        if name_start == cursor {
-            cursor += 1;
+    }
+    None
+}
+
+struct MarkupAttribute<'source> {
+    name: &'source str,
+    value_start: usize,
+    value_end: usize,
+}
+
+fn next_markup_attribute_name<'source>(
+    raw: &'source str,
+    cursor: &mut usize,
+) -> Option<&'source str> {
+    let bytes = raw.as_bytes();
+    while *cursor < bytes.len() && (bytes[*cursor].is_ascii_whitespace() || bytes[*cursor] == b'/')
+    {
+        *cursor += 1;
+    }
+    let name_start = *cursor;
+    while *cursor < bytes.len()
+        && (is_identifier_body(bytes[*cursor])
+            || matches!(bytes[*cursor], b':' | b'.' | b'-' | b'@'))
+    {
+        *cursor += 1;
+    }
+    if name_start == *cursor {
+        *cursor = cursor.saturating_add(1);
+        None
+    } else {
+        Some(&raw[name_start..*cursor])
+    }
+}
+
+fn next_markup_attribute_value(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
+    while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
+        *cursor += 1;
+    }
+    if *cursor >= bytes.len() || bytes[*cursor] != b'=' {
+        return None;
+    }
+    *cursor += 1;
+    while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
+        *cursor += 1;
+    }
+    let quote = bytes.get(*cursor).copied();
+    if !matches!(quote, Some(b'\'' | b'"')) {
+        return None;
+    }
+    *cursor += 1;
+    let value_start = *cursor;
+    while *cursor < bytes.len() && Some(bytes[*cursor]) != quote {
+        *cursor += 1;
+    }
+    let value_end = *cursor;
+    *cursor = cursor.saturating_add(1);
+    Some((value_start, value_end))
+}
+
+fn next_markup_attribute<'source>(
+    raw: &'source str,
+    cursor: &mut usize,
+) -> Option<MarkupAttribute<'source>> {
+    let bytes = raw.as_bytes();
+    while *cursor < bytes.len() {
+        let Some(name) = next_markup_attribute_name(raw, cursor) else {
             continue;
-        }
-        let name = &tag.raw[name_start..cursor];
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        if cursor >= bytes.len() || bytes[cursor] != b'=' {
+        };
+        let Some((value_start, value_end)) = next_markup_attribute_value(bytes, cursor) else {
             continue;
-        }
-        cursor += 1;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        let quote = bytes.get(cursor).copied();
-        if !matches!(quote, Some(b'\'' | b'"')) {
-            continue;
-        }
-        cursor += 1;
-        let value_start = cursor;
-        while cursor < bytes.len() && Some(bytes[cursor]) != quote {
-            cursor += 1;
-        }
-        if name.eq_ignore_ascii_case(key) {
-            return Some((tag.start + 1 + value_start, &tag.raw[value_start..cursor]));
-        }
-        cursor = cursor.saturating_add(1);
+        };
+        return Some(MarkupAttribute {
+            name,
+            value_start,
+            value_end,
+        });
     }
     None
 }
@@ -883,18 +1012,19 @@ fn extract_component_file(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Ext
         .map_or(builder.source().len(), |index| index.saturating_add(1))
         .max(1);
     let component = builder.add_symbol(
-        SymbolKind::Component,
-        &component_name,
-        component_name.clone(),
-        0,
-        component_span_end,
-        SymbolOptions {
+        CustomSymbolInput::new(
+            SymbolKind::Component,
+            &component_name,
+            component_name.clone(),
+        )
+        .at(0, component_span_end)
+        .with_options(SymbolOptions {
             body_search_text: format!("component {component_name}"),
             exported: true,
             default_export: true,
             visibility: Some(Visibility::Public),
             ..SymbolOptions::default()
-        },
+        }),
     )?;
     let source = builder.source();
     let tags = markup_tags(source);
@@ -905,16 +1035,24 @@ fn extract_component_file(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Ext
             let script_end = find_matching_close(&tags, index)
                 .map_or(source.len(), |(_, close_start)| close_start);
             if script_start < script_end {
-                extract_embedded_script(builder, component.clone(), script_start, script_end)?;
+                extract_embedded_script(
+                    builder,
+                    OwnedRangeInput {
+                        owner: component.clone(),
+                        start: script_start,
+                        end: script_end,
+                    },
+                )?;
             }
         }
         if !tag.closing && starts_uppercase_ascii(tag.name) {
             builder.add_reference(
-                Some(component.clone()),
-                tag.name,
-                ReferenceKind::References,
-                tag.start + 1,
-                tag.start + 1 + tag.name.len(),
+                CustomReferenceInput::new(
+                    Some(component.clone()),
+                    tag.name,
+                    ReferenceKind::References,
+                )
+                .at(tag.start + 1, tag.start + 1 + tag.name.len()),
             )?;
         }
         if !tag.closing {
@@ -941,97 +1079,188 @@ fn component_non_template_ranges(tags: &[MarkupTag<'_>]) -> Vec<std::ops::Range<
 
 fn extract_embedded_script(
     builder: &mut CustomBuilder<'_, '_>,
-    component: SymbolId,
-    start: usize,
-    end: usize,
+    input: OwnedRangeInput,
 ) -> Result<(), ExtractError> {
     let source = builder.source();
-    for (line_relative, line) in line_ranges(&source[start..end]) {
+    for (line_relative, line) in physical_lines(&source[input.start..input.end]) {
         builder.check_cancelled()?;
-        let absolute = start + line_relative;
-        let clean = mask_literals_and_comments(line);
-        let trimmed = clean.trim_start();
-        let indent = clean.len().saturating_sub(trimmed.len());
-        let original_trimmed = line.trim_start();
-        if let Some(import) = parse_script_import(original_trimmed) {
-            let name_start = absolute + indent + import.local_offset;
-            if framework_virtual_module(builder.snapshot.language(), import.module) {
-                let module_start = absolute + import.module_offset;
-                builder.add_symbol(
-                    SymbolKind::Resource,
-                    import.module,
-                    format!(
-                        "{}::framework-module::{}",
-                        basename_stem(builder.path()),
-                        import.module
-                    ),
-                    module_start,
-                    module_start + import.module.len(),
-                    SymbolOptions {
-                        body_search_text: format!("framework virtual module {}", import.module),
-                        parent: Some(component.clone()),
-                        ..SymbolOptions::default()
-                    },
-                )?;
-            }
-            let symbol = builder.add_symbol(
-                SymbolKind::Import,
-                import.local,
-                format!("{}::{}", basename_stem(builder.path()), import.local),
-                name_start,
-                name_start + import.local.len(),
-                SymbolOptions {
-                    body_search_text: format!("import {}", import.local),
-                    parent: Some(component.clone()),
-                    ..SymbolOptions::default()
-                },
-            )?;
-            builder.add_import(
-                Some(symbol),
-                import.module,
-                import.imported,
-                import.local,
-                absolute + import.module_offset,
-                absolute + import.module_offset + import.module.len(),
-            )?;
+        scan_embedded_script_line(
+            builder,
+            EmbeddedScriptLine {
+                owner: &input.owner,
+                absolute: input.start + line_relative,
+                source: line,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct EmbeddedScriptLine<'source> {
+    owner: &'source SymbolId,
+    absolute: usize,
+    source: &'source str,
+}
+
+fn scan_embedded_script_line(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: EmbeddedScriptLine<'_>,
+) -> Result<(), ExtractError> {
+    let clean = mask_literals_and_comments(input.source);
+    let trimmed = clean.trim_start();
+    let indent = clean.len().saturating_sub(trimmed.len());
+    if let Some(import) = parse_script_import(input.source.trim_start()) {
+        add_embedded_script_import(
+            builder,
+            EmbeddedScriptImport {
+                line: input,
+                import,
+                indent,
+            },
+        )?;
+        return Ok(());
+    }
+    if let Some(declaration) = parse_script_declaration(trimmed) {
+        add_embedded_script_declaration(
+            builder,
+            EmbeddedScriptDeclaration {
+                line: input,
+                declaration,
+                indent,
+            },
+        )?;
+    }
+    add_embedded_script_calls(
+        builder,
+        EmbeddedScriptCallScan {
+            line: input,
+            clean: &clean,
+            trimmed,
+        },
+    )?;
+    if builder.snapshot.language() == SourceLanguage::Svelte {
+        extract_svelte_store_references(
+            builder,
+            OwnedSourceInput {
+                owner: input.owner.clone(),
+                source: &clean,
+                offset: input.absolute,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+struct EmbeddedScriptImport<'source> {
+    line: EmbeddedScriptLine<'source>,
+    import: ScriptImport<'source>,
+    indent: usize,
+}
+
+fn add_embedded_script_import(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: EmbeddedScriptImport<'_>,
+) -> Result<(), ExtractError> {
+    let name_start = input.line.absolute + input.indent + input.import.local_offset;
+    if framework_virtual_module(builder.snapshot.language(), input.import.module) {
+        let module_start = input.line.absolute + input.import.module_offset;
+        builder.add_symbol(
+            CustomSymbolInput::new(
+                SymbolKind::Resource,
+                input.import.module,
+                format!(
+                    "{}::framework-module::{}",
+                    basename_stem(builder.path()),
+                    input.import.module
+                ),
+            )
+            .at(module_start, module_start + input.import.module.len())
+            .with_options(SymbolOptions {
+                body_search_text: format!("framework virtual module {}", input.import.module),
+                parent: Some(input.line.owner.clone()),
+                ..SymbolOptions::default()
+            }),
+        )?;
+    }
+    let symbol = builder.add_symbol(
+        CustomSymbolInput::new(
+            SymbolKind::Import,
+            input.import.local,
+            format!("{}::{}", basename_stem(builder.path()), input.import.local),
+        )
+        .at(name_start, name_start + input.import.local.len())
+        .with_options(SymbolOptions {
+            body_search_text: format!("import {}", input.import.local),
+            parent: Some(input.line.owner.clone()),
+            ..SymbolOptions::default()
+        }),
+    )?;
+    builder.add_import(
+        CustomImportInput::new(Some(symbol), input.import.module)
+            .binding(input.import.imported, input.import.local)
+            .at(
+                input.line.absolute + input.import.module_offset,
+                input.line.absolute + input.import.module_offset + input.import.module.len(),
+            ),
+    )
+}
+
+struct EmbeddedScriptDeclaration<'source> {
+    line: EmbeddedScriptLine<'source>,
+    declaration: ScriptDeclaration<'source>,
+    indent: usize,
+}
+
+fn add_embedded_script_declaration(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: EmbeddedScriptDeclaration<'_>,
+) -> Result<(), ExtractError> {
+    let name_start = input.line.absolute + input.indent + input.declaration.name_offset;
+    let kind = input.declaration.kind;
+    builder.add_symbol(
+        CustomSymbolInput::new(
+            kind,
+            input.declaration.name,
+            format!(
+                "{}::{}",
+                basename_stem(builder.path()),
+                input.declaration.name
+            ),
+        )
+        .at(name_start, name_start + input.declaration.name.len())
+        .with_options(SymbolOptions {
+            body_search_text: format!("{} {}", kind.as_str(), input.declaration.name),
+            exported: input.declaration.exported,
+            default_export: input.declaration.default_export,
+            async_symbol: input.declaration.async_symbol,
+            visibility: input.declaration.exported.then_some(Visibility::Public),
+            parent: Some(input.line.owner.clone()),
+            ..SymbolOptions::default()
+        }),
+    )?;
+    Ok(())
+}
+
+struct EmbeddedScriptCallScan<'line, 'clean> {
+    line: EmbeddedScriptLine<'line>,
+    clean: &'clean str,
+    trimmed: &'clean str,
+}
+
+fn add_embedded_script_calls(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: EmbeddedScriptCallScan<'_, '_>,
+) -> Result<(), ExtractError> {
+    for (relative, call) in function_like_names(input.clean) {
+        if script_call_skip(call) || declaration_name_on_line(input.trimmed, call) {
             continue;
         }
-        if let Some(declaration) = parse_script_declaration(trimmed) {
-            let name_start = absolute + indent + declaration.name_offset;
-            let kind = declaration.kind;
-            builder.add_symbol(
-                kind,
-                declaration.name,
-                format!("{}::{}", basename_stem(builder.path()), declaration.name),
-                name_start,
-                name_start + declaration.name.len(),
-                SymbolOptions {
-                    body_search_text: format!("{} {}", kind.as_str(), declaration.name),
-                    exported: declaration.exported,
-                    default_export: declaration.default_export,
-                    async_symbol: declaration.async_symbol,
-                    visibility: declaration.exported.then_some(Visibility::Public),
-                    parent: Some(component.clone()),
-                    ..SymbolOptions::default()
-                },
-            )?;
-        }
-        for (relative, call) in function_like_names(&clean) {
-            if script_call_skip(call) || declaration_name_on_line(trimmed, call) {
-                continue;
-            }
-            let call_start = absolute + relative;
-            builder.add_reference(
-                Some(component.clone()),
-                call,
-                ReferenceKind::Calls,
-                call_start,
-                call_start + call.len(),
-            )?;
-        }
-        if builder.snapshot.language() == SourceLanguage::Svelte {
-            extract_svelte_store_references(builder, component.clone(), &clean, absolute)?;
-        }
+        let call_start = input.line.absolute + relative;
+        builder.add_reference(
+            CustomReferenceInput::new(Some(input.line.owner.clone()), call, ReferenceKind::Calls)
+                .at(call_start, call_start + call.len()),
+        )?;
     }
     Ok(())
 }
@@ -1211,30 +1440,32 @@ fn function_like_names(value: &str) -> Vec<(usize, &str)> {
         .collect()
 }
 
+const SCRIPT_CALL_SKIP_NAMES: &[&str] = &[
+    "if",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "function",
+    "defineProps",
+    "defineEmits",
+    "defineExpose",
+    "defineOptions",
+    "defineModel",
+    "defineSlots",
+    "withDefaults",
+    "$props",
+    "$state",
+    "$derived",
+    "$effect",
+    "$bindable",
+    "$inspect",
+    "$host",
+    "$snippet",
+];
+
 fn script_call_skip(name: &str) -> bool {
-    matches!(
-        name,
-        "if" | "for"
-            | "while"
-            | "switch"
-            | "catch"
-            | "function"
-            | "defineProps"
-            | "defineEmits"
-            | "defineExpose"
-            | "defineOptions"
-            | "defineModel"
-            | "defineSlots"
-            | "withDefaults"
-            | "$props"
-            | "$state"
-            | "$derived"
-            | "$effect"
-            | "$bindable"
-            | "$inspect"
-            | "$host"
-            | "$snippet"
-    )
+    SCRIPT_CALL_SKIP_NAMES.contains(&name)
 }
 
 fn declaration_name_on_line(line: &str, name: &str) -> bool {
@@ -1261,11 +1492,8 @@ fn extract_template_attribute_calls(
             }
             let start = offset + relative;
             builder.add_reference(
-                Some(owner.clone()),
-                name,
-                ReferenceKind::Calls,
-                start,
-                start + name.len(),
+                CustomReferenceInput::new(Some(owner.clone()), name, ReferenceKind::Calls)
+                    .at(start, start + name.len()),
             )?;
         }
         if calls.is_empty()
@@ -1274,11 +1502,8 @@ fn extract_template_attribute_calls(
         {
             let start = offset + relative;
             builder.add_reference(
-                Some(owner.clone()),
-                name,
-                ReferenceKind::Calls,
-                start,
-                start + name.len(),
+                CustomReferenceInput::new(Some(owner.clone()), name, ReferenceKind::Calls)
+                    .at(start, start + name.len()),
             )?;
         }
     }
@@ -1316,9 +1541,11 @@ fn extract_template_expression_calls(
             if builder.snapshot.language() == SourceLanguage::Svelte {
                 extract_svelte_store_references(
                     builder,
-                    owner.clone(),
-                    &mask_literals_and_comments(expression),
-                    content_start,
+                    OwnedSourceInput {
+                        owner: owner.clone(),
+                        source: &mask_literals_and_comments(expression),
+                        offset: content_start,
+                    },
                 )?;
             }
             for (relative_offset, name) in function_like_names(expression) {
@@ -1327,11 +1554,8 @@ fn extract_template_expression_calls(
                 }
                 let start = content_start + relative_offset;
                 builder.add_reference(
-                    Some(owner.clone()),
-                    name,
-                    ReferenceKind::Calls,
-                    start,
-                    start + name.len(),
+                    CustomReferenceInput::new(Some(owner.clone()), name, ReferenceKind::Calls)
+                        .at(start, start + name.len()),
                 )?;
             }
         }
@@ -1342,11 +1566,9 @@ fn extract_template_expression_calls(
 
 fn extract_svelte_store_references(
     builder: &mut CustomBuilder<'_, '_>,
-    owner: SymbolId,
-    source: &str,
-    source_offset: usize,
+    input: OwnedSourceInput<'_>,
 ) -> Result<(), ExtractError> {
-    let bytes = source.as_bytes();
+    let bytes = input.source.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
         if bytes[cursor] != b'$'
@@ -1363,7 +1585,7 @@ fn extract_svelte_store_references(
         while cursor < bytes.len() && is_identifier_body(bytes[cursor]) {
             cursor = cursor.saturating_add(1);
         }
-        let source_name = &source[start..cursor];
+        let source_name = &input.source[start..cursor];
         if matches!(
             source_name,
             "$state"
@@ -1378,20 +1600,49 @@ fn extract_svelte_store_references(
             continue;
         }
         builder.add_reference_with_resolution(
-            Some(owner.clone()),
-            source_name,
-            Some(&source_name[1..]),
-            ReferenceKind::References,
-            source_offset + start,
-            source_offset + cursor,
+            CustomReferenceInput::new(
+                Some(input.owner.clone()),
+                source_name,
+                ReferenceKind::References,
+            )
+            .with_resolution(&source_name[1..])
+            .at(input.offset + start, input.offset + cursor),
         )?;
     }
     Ok(())
 }
 
 fn extract_salesforce_markup(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> {
-    if builder.source().is_empty() {
+    let Some(context) = initialize_salesforce_markup(builder)? else {
         return Ok(());
+    };
+    let source = builder.source();
+    for tag in markup_tags(source) {
+        builder.check_cancelled()?;
+        if !tag.closing {
+            scan_salesforce_tag(builder, &context, tag)?;
+        }
+    }
+    extract_salesforce_expression_refs(
+        builder,
+        OwnedSourceInput {
+            owner: context.component,
+            source,
+            offset: 0,
+        },
+    )
+}
+
+struct SalesforceMarkupContext {
+    name: String,
+    component: SymbolId,
+}
+
+fn initialize_salesforce_markup(
+    builder: &mut CustomBuilder<'_, '_>,
+) -> Result<Option<SalesforceMarkupContext>, ExtractError> {
+    if builder.source().is_empty() {
+        return Ok(None);
     }
     let language = builder.snapshot.language();
     let name = basename_stem(builder.path()).to_owned();
@@ -1413,109 +1664,127 @@ fn extract_salesforce_markup(builder: &mut CustomBuilder<'_, '_>) -> Result<(), 
         .map_or(builder.source().len(), |index| index.saturating_add(1))
         .max(1);
     let component = builder.add_symbol(
-        component_kind,
-        &name,
-        name.clone(),
-        0,
-        end,
-        SymbolOptions {
-            body_search_text: format!("salesforce {} {name}", language.as_str()),
-            exported: true,
-            visibility: Some(Visibility::Public),
-            ..SymbolOptions::default()
-        },
+        CustomSymbolInput::new(component_kind, &name, name.clone())
+            .at(0, end)
+            .with_options(SymbolOptions {
+                body_search_text: format!("salesforce {} {name}", language.as_str()),
+                exported: true,
+                visibility: Some(Visibility::Public),
+                ..SymbolOptions::default()
+            }),
     )?;
     if language == SourceLanguage::Visualforce && extension.eq_ignore_ascii_case("page") {
         let route = format!("/apex/{name}");
         builder.add_symbol(
-            SymbolKind::Route,
-            &route,
-            route.clone(),
-            0,
-            end,
-            SymbolOptions {
-                body_search_text: format!("route {route}"),
-                exported: true,
-                visibility: Some(Visibility::Public),
-                parent: Some(component.clone()),
-                ..SymbolOptions::default()
-            },
-        )?;
-    }
-    let source = builder.source();
-    for tag in markup_tags(source) {
-        builder.check_cancelled()?;
-        if tag.closing {
-            continue;
-        }
-        if tag.name.eq_ignore_ascii_case("aura:attribute") {
-            let Some((name_offset, field_name)) = tag_attribute(tag, "name") else {
-                continue;
-            };
-            let field = builder.add_symbol(
-                SymbolKind::Field,
-                field_name,
-                format!("{name}::{field_name}"),
-                name_offset,
-                name_offset + field_name.len(),
-                SymbolOptions {
-                    body_search_text: format!("field {field_name}"),
+            CustomSymbolInput::new(SymbolKind::Route, &route, route.clone())
+                .at(0, end)
+                .with_options(SymbolOptions {
+                    body_search_text: format!("route {route}"),
+                    exported: true,
+                    visibility: Some(Visibility::Public),
                     parent: Some(component.clone()),
                     ..SymbolOptions::default()
-                },
-            )?;
-            if let Some((type_offset, type_name)) = tag_attribute(tag, "type") {
-                let reference = type_name.trim_end_matches("[]");
-                if is_qualified_name(reference) {
-                    builder.add_reference(
-                        Some(field),
-                        reference,
-                        ReferenceKind::TypeOf,
-                        type_offset,
-                        type_offset + reference.len(),
-                    )?;
-                }
-            }
-        }
-        if tag.name.len() > 2
-            && tag
-                .name
-                .get(..2)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("c:"))
-        {
-            let raw_name = &tag.name[2..];
-            let reference = salesforce_component_name(raw_name);
+                }),
+        )?;
+    }
+    Ok(Some(SalesforceMarkupContext { name, component }))
+}
+
+fn scan_salesforce_tag(
+    builder: &mut CustomBuilder<'_, '_>,
+    context: &SalesforceMarkupContext,
+    tag: MarkupTag<'_>,
+) -> Result<(), ExtractError> {
+    scan_salesforce_attribute(builder, context, &tag)?;
+    scan_salesforce_component_reference(builder, context, &tag)?;
+    scan_salesforce_controller_references(builder, context, &tag)
+}
+
+fn scan_salesforce_attribute(
+    builder: &mut CustomBuilder<'_, '_>,
+    context: &SalesforceMarkupContext,
+    tag: &MarkupTag<'_>,
+) -> Result<(), ExtractError> {
+    if !tag.name.eq_ignore_ascii_case("aura:attribute") {
+        return Ok(());
+    }
+    let Some((name_offset, field_name)) = tag_attribute(*tag, "name") else {
+        return Ok(());
+    };
+    let field = builder.add_symbol(
+        CustomSymbolInput::new(
+            SymbolKind::Field,
+            field_name,
+            format!("{}::{field_name}", context.name),
+        )
+        .at(name_offset, name_offset + field_name.len())
+        .with_options(SymbolOptions {
+            body_search_text: format!("field {field_name}"),
+            parent: Some(context.component.clone()),
+            ..SymbolOptions::default()
+        }),
+    )?;
+    if let Some((type_offset, type_name)) = tag_attribute(*tag, "type") {
+        let reference = type_name.trim_end_matches("[]");
+        if is_qualified_name(reference) {
             builder.add_reference(
-                Some(component.clone()),
-                &reference,
-                ReferenceKind::References,
-                tag.start + 3,
-                tag.start + 3 + raw_name.len(),
+                CustomReferenceInput::new(Some(field), reference, ReferenceKind::TypeOf)
+                    .at(type_offset, type_offset + reference.len()),
             )?;
-        }
-        for key in ["controller", "extensions"] {
-            let Some((offset, value)) = tag_attribute(tag, key) else {
-                continue;
-            };
-            for candidate in value
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-            {
-                if is_qualified_name(candidate) {
-                    let relative = value.find(candidate).unwrap_or(0);
-                    builder.add_reference(
-                        Some(component.clone()),
-                        candidate,
-                        ReferenceKind::References,
-                        offset + relative,
-                        offset + relative + candidate.len(),
-                    )?;
-                }
-            }
         }
     }
-    extract_salesforce_expression_refs(builder, component, source, 0)
+    Ok(())
+}
+
+fn scan_salesforce_component_reference(
+    builder: &mut CustomBuilder<'_, '_>,
+    context: &SalesforceMarkupContext,
+    tag: &MarkupTag<'_>,
+) -> Result<(), ExtractError> {
+    let Some(raw_name) = tag
+        .name
+        .get(2..)
+        .filter(|_| tag.name[..2].eq_ignore_ascii_case("c:"))
+    else {
+        return Ok(());
+    };
+    let reference = salesforce_component_name(raw_name);
+    builder.add_reference(
+        CustomReferenceInput::new(
+            Some(context.component.clone()),
+            &reference,
+            ReferenceKind::References,
+        )
+        .at(tag.start + 3, tag.start + 3 + raw_name.len()),
+    )
+}
+
+fn scan_salesforce_controller_references(
+    builder: &mut CustomBuilder<'_, '_>,
+    context: &SalesforceMarkupContext,
+    tag: &MarkupTag<'_>,
+) -> Result<(), ExtractError> {
+    for key in ["controller", "extensions"] {
+        let Some((offset, value)) = tag_attribute(*tag, key) else {
+            continue;
+        };
+        for candidate in value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty() && is_qualified_name(item))
+        {
+            let relative = value.find(candidate).unwrap_or(0);
+            builder.add_reference(
+                CustomReferenceInput::new(
+                    Some(context.component.clone()),
+                    candidate,
+                    ReferenceKind::References,
+                )
+                .at(offset + relative, offset + relative + candidate.len()),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn salesforce_component_name(raw: &str) -> String {
@@ -1532,33 +1801,29 @@ fn salesforce_component_name(raw: &str) -> String {
 
 fn extract_salesforce_expression_refs(
     builder: &mut CustomBuilder<'_, '_>,
-    owner: SymbolId,
-    source: &str,
-    base: usize,
+    input: OwnedSourceInput<'_>,
 ) -> Result<(), ExtractError> {
     let mut cursor = 0;
-    while let Some(relative) = source[cursor..].find("{!") {
+    while let Some(relative) = input.source[cursor..].find("{!") {
         let open = cursor + relative;
-        let Some(close_relative) = source[open + 2..].find('}') else {
+        let Some(close_relative) = input.source[open + 2..].find('}') else {
             break;
         };
         let close = open + 2 + close_relative;
-        let expression = source[open + 2..close].trim();
+        let expression = input.source[open + 2..close].trim();
         let expression_leading =
-            source[open + 2..close].len() - source[open + 2..close].trim_start().len();
+            input.source[open + 2..close].len() - input.source[open + 2..close].trim_start().len();
         let candidate = expression
             .strip_prefix("c.")
             .or_else(|| expression.strip_prefix("controller."))
             .unwrap_or(expression);
         if let Some((relative_name, name)) = first_identifier(candidate) {
             let candidate_start = expression.find(candidate).unwrap_or(0);
-            let start = base + open + 2 + expression_leading + candidate_start + relative_name;
+            let start =
+                input.offset + open + 2 + expression_leading + candidate_start + relative_name;
             builder.add_reference(
-                Some(owner.clone()),
-                name,
-                ReferenceKind::Calls,
-                start,
-                start + name.len(),
+                CustomReferenceInput::new(Some(input.owner.clone()), name, ReferenceKind::Calls)
+                    .at(start, start + name.len()),
             )?;
         }
         cursor = close + 1;
@@ -1589,6 +1854,38 @@ fn extract_vb6(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> 
         return extract_vb6_project(builder);
     }
     let source = builder.source();
+    let mut state = initialize_vb6_container(builder, source)?;
+    for (line_start, raw_line) in physical_lines(source) {
+        builder.check_cancelled()?;
+        scan_vb6_line(
+            builder,
+            &mut state,
+            VbSourceLine {
+                start: line_start,
+                raw: raw_line,
+                text: vb6_strip_comment(raw_line).trim(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+struct VbScanState {
+    container_kind: SymbolKind,
+    scopes: Vec<VbScope>,
+}
+
+#[derive(Clone, Copy)]
+struct VbSourceLine<'source> {
+    start: usize,
+    raw: &'source str,
+    text: &'source str,
+}
+
+fn initialize_vb6_container(
+    builder: &mut CustomBuilder<'_, '_>,
+    source: &str,
+) -> Result<VbScanState, ExtractError> {
     let (container_name, container_offset) =
         vb6_container_name(source).unwrap_or_else(|| (basename_stem(builder.path()).to_owned(), 0));
     let extension = builder.path().rsplit('.').next().unwrap_or_default();
@@ -1603,99 +1900,117 @@ fn extract_vb6(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> 
         .min(source.len())
         .max(1);
     let container = builder.add_symbol(
-        container_kind,
-        &container_name,
-        container_name.clone(),
-        container_offset.min(container_end - 1),
-        container_end,
-        SymbolOptions {
-            body_search_text: format!("{} {container_name}", container_kind.as_str()),
-            exported: true,
-            visibility: Some(Visibility::Public),
-            ..SymbolOptions::default()
-        },
+        CustomSymbolInput::new(container_kind, &container_name, container_name.clone())
+            .at(container_offset.min(container_end - 1), container_end)
+            .with_options(SymbolOptions {
+                body_search_text: format!("{} {container_name}", container_kind.as_str()),
+                exported: true,
+                visibility: Some(Visibility::Public),
+                ..SymbolOptions::default()
+            }),
     )?;
-    let mut scopes = vec![VbScope {
-        id: container,
-        qualified_name: container_name,
-        block: VbBlock::Container,
-    }];
-    for (line_start, raw_line) in line_ranges(source) {
-        builder.check_cancelled()?;
-        let line = vb6_strip_comment(raw_line).trim();
-        if line.is_empty()
-            || line.to_ascii_lowercase().starts_with("attribute vb_")
-            || line.to_ascii_lowercase().starts_with("version ")
-        {
-            continue;
-        }
-        if let Some(block) = vb6_end_block(line) {
-            while scopes.len() > 1 {
-                if scopes.pop().is_some_and(|scope| scope.block == block) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if let Some(declaration) =
-            vb6_declaration(line, scopes.last().map(|scope| scope.block), container_kind)
-        {
-            let offset = raw_line.find(declaration.name).unwrap_or(0);
-            let start = line_start + offset;
-            let parent = scopes.last().cloned();
-            let qualified = parent.as_ref().map_or_else(
-                || declaration.name.to_owned(),
-                |scope| format!("{}::{}", scope.qualified_name, declaration.name),
-            );
-            let id = builder.add_symbol(
-                declaration.kind,
-                declaration.name,
-                qualified.clone(),
-                start,
-                start + declaration.name.len(),
-                SymbolOptions {
-                    body_search_text: format!("{} {}", declaration.kind.as_str(), declaration.name),
-                    exported: declaration.visibility == Some(Visibility::Public),
-                    visibility: declaration.visibility,
-                    static_member: declaration.static_member,
-                    parent: parent.map(|scope| scope.id),
-                    ..SymbolOptions::default()
-                },
-            )?;
-            if let Some(block) = declaration.block {
-                scopes.push(VbScope {
-                    id,
-                    qualified_name: qualified,
-                    block,
-                });
-            }
-            continue;
-        }
-        let Some(routine) = scopes
-            .iter()
-            .rev()
-            .find(|scope| scope.block == VbBlock::Routine)
-            .cloned()
-        else {
-            continue;
-        };
-        if let Some((offset, name)) = vb6_call(line) {
-            let raw_offset = raw_line.find(line).unwrap_or(0) + offset;
-            builder.add_reference(
-                Some(routine.id),
-                name,
-                ReferenceKind::Calls,
-                line_start + raw_offset,
-                line_start + raw_offset + name.len(),
-            )?;
-        }
+    Ok(VbScanState {
+        container_kind,
+        scopes: vec![VbScope {
+            id: container,
+            qualified_name: container_name,
+            block: VbBlock::Container,
+        }],
+    })
+}
+
+fn scan_vb6_line(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut VbScanState,
+    line: VbSourceLine<'_>,
+) -> Result<(), ExtractError> {
+    let lower = line.text.to_ascii_lowercase();
+    if line.text.is_empty() || lower.starts_with("attribute vb_") || lower.starts_with("version ") {
+        return Ok(());
+    }
+    if let Some(block) = vb6_end_block(line.text) {
+        close_vb6_scope(&mut state.scopes, block);
+        return Ok(());
+    }
+    if let Some(declaration) = vb6_declaration(
+        line.text,
+        state.scopes.last().map(|scope| scope.block),
+        state.container_kind,
+    ) {
+        add_vb6_declaration(builder, state, ParsedVbDeclaration { line, declaration })?;
+        return Ok(());
+    }
+    let Some(routine) = state
+        .scopes
+        .iter()
+        .rev()
+        .find(|scope| scope.block == VbBlock::Routine)
+    else {
+        return Ok(());
+    };
+    if let Some((offset, name)) = vb6_call(line.text) {
+        let raw_offset = line.raw.find(line.text).unwrap_or(0) + offset;
+        builder.add_reference(
+            CustomReferenceInput::new(Some(routine.id.clone()), name, ReferenceKind::Calls).at(
+                line.start + raw_offset,
+                line.start + raw_offset + name.len(),
+            ),
+        )?;
     }
     Ok(())
 }
 
+fn close_vb6_scope(scopes: &mut Vec<VbScope>, block: VbBlock) {
+    while scopes.len() > 1 {
+        if scopes.pop().is_some_and(|scope| scope.block == block) {
+            break;
+        }
+    }
+}
+
+fn add_vb6_declaration(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut VbScanState,
+    input: ParsedVbDeclaration<'_>,
+) -> Result<(), ExtractError> {
+    let ParsedVbDeclaration { line, declaration } = input;
+    let offset = line.raw.find(declaration.name).unwrap_or(0);
+    let start = line.start + offset;
+    let parent = state.scopes.last().cloned();
+    let qualified = parent.as_ref().map_or_else(
+        || declaration.name.to_owned(),
+        |scope| format!("{}::{}", scope.qualified_name, declaration.name),
+    );
+    let id = builder.add_symbol(
+        CustomSymbolInput::new(declaration.kind, declaration.name, qualified.clone())
+            .at(start, start + declaration.name.len())
+            .with_options(SymbolOptions {
+                body_search_text: format!("{} {}", declaration.kind.as_str(), declaration.name),
+                exported: declaration.visibility == Some(Visibility::Public),
+                visibility: declaration.visibility,
+                static_member: declaration.static_member,
+                parent: parent.map(|scope| scope.id),
+                ..SymbolOptions::default()
+            }),
+    )?;
+    if let Some(block) = declaration.block {
+        state.scopes.push(VbScope {
+            id,
+            qualified_name: qualified,
+            block,
+        });
+    }
+    Ok(())
+}
+
+struct ParsedVbDeclaration<'source> {
+    line: VbSourceLine<'source>,
+    declaration: VbDeclaration<'source>,
+}
+
 fn extract_vb6_project(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> {
     let source = builder.source();
-    for (line_start, raw_line) in line_ranges(source) {
+    for (line_start, raw_line) in physical_lines(source) {
         let line = raw_line.trim();
         let Some(separator) = line.find('=') else {
             continue;
@@ -1719,30 +2034,28 @@ fn extract_vb6_project(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Extrac
         }
         let offset = raw_line.find(name).unwrap_or(0);
         let id = builder.add_symbol(
-            SymbolKind::Import,
-            name,
-            format!("{}::{name}", builder.path()),
-            line_start + offset,
-            line_start + offset + name.len(),
-            SymbolOptions {
+            CustomSymbolInput::new(
+                SymbolKind::Import,
+                name,
+                format!("{}::{name}", builder.path()),
+            )
+            .at(line_start + offset, line_start + offset + name.len())
+            .with_options(SymbolOptions {
                 body_search_text: format!("import {name}"),
                 ..SymbolOptions::default()
-            },
+            }),
         )?;
         builder.add_import(
-            Some(id),
-            value,
-            name,
-            name,
-            line_start + offset,
-            line_start + offset + name.len(),
+            CustomImportInput::new(Some(id), value)
+                .binding(name, name)
+                .at(line_start + offset, line_start + offset + name.len()),
         )?;
     }
     Ok(())
 }
 
 fn vb6_container_name(source: &str) -> Option<(String, usize)> {
-    for (line_start, line) in line_ranges(source) {
+    for (line_start, line) in physical_lines(source) {
         let trimmed = line.trim();
         if trimmed
             .to_ascii_lowercase()
@@ -1790,80 +2103,99 @@ fn vb6_declaration(
     if static_member {
         index += 1;
     }
-    let keyword = tokens.get(index)?.1;
-    let lower = keyword.to_ascii_lowercase();
+    vb6_keyword_declaration(VbDeclarationContext {
+        tokens,
+        index,
+        parent,
+        container_kind,
+        visibility,
+        static_member,
+    })
+}
+
+struct VbDeclarationContext<'source> {
+    tokens: Vec<(usize, &'source str)>,
+    index: usize,
+    parent: Option<VbBlock>,
+    container_kind: SymbolKind,
+    visibility: Option<Visibility>,
+    static_member: bool,
+}
+
+fn vb6_keyword_declaration(context: VbDeclarationContext<'_>) -> Option<VbDeclaration<'_>> {
+    let lower = context.tokens.get(context.index)?.1.to_ascii_lowercase();
     match lower.as_str() {
         "sub" | "function" => Some(VbDeclaration {
-            kind: if container_kind == SymbolKind::Module {
+            kind: if context.container_kind == SymbolKind::Module {
                 SymbolKind::Function
             } else {
                 SymbolKind::Method
             },
-            name: tokens.get(index + 1)?.1,
+            name: context.tokens.get(context.index + 1)?.1,
             block: Some(VbBlock::Routine),
-            visibility,
-            static_member,
+            visibility: context.visibility,
+            static_member: context.static_member,
         }),
         "property" => Some(VbDeclaration {
             kind: SymbolKind::Property,
-            name: tokens.get(index + 2)?.1,
+            name: context.tokens.get(context.index + 2)?.1,
             block: Some(VbBlock::Routine),
-            visibility,
-            static_member,
+            visibility: context.visibility,
+            static_member: context.static_member,
         }),
         "type" => Some(VbDeclaration {
             kind: SymbolKind::Struct,
-            name: tokens.get(index + 1)?.1,
+            name: context.tokens.get(context.index + 1)?.1,
             block: Some(VbBlock::Struct),
-            visibility,
-            static_member,
+            visibility: context.visibility,
+            static_member: context.static_member,
         }),
         "enum" => Some(VbDeclaration {
             kind: SymbolKind::Enum,
-            name: tokens.get(index + 1)?.1,
+            name: context.tokens.get(context.index + 1)?.1,
             block: Some(VbBlock::Enum),
-            visibility,
-            static_member,
+            visibility: context.visibility,
+            static_member: context.static_member,
         }),
         "const" => Some(VbDeclaration {
             kind: SymbolKind::Constant,
-            name: tokens.get(index + 1)?.1,
+            name: context.tokens.get(context.index + 1)?.1,
             block: None,
-            visibility,
-            static_member,
+            visibility: context.visibility,
+            static_member: context.static_member,
         }),
         "dim" | "public" | "private" | "friend" => Some(VbDeclaration {
-            kind: if parent == Some(VbBlock::Routine) {
+            kind: if context.parent == Some(VbBlock::Routine) {
                 SymbolKind::Variable
             } else {
                 SymbolKind::Field
             },
-            name: tokens.get(index + 1)?.1,
+            name: context.tokens.get(context.index + 1)?.1,
             block: None,
-            visibility,
-            static_member,
+            visibility: context.visibility,
+            static_member: context.static_member,
         }),
-        _ if visibility.is_some() => Some(VbDeclaration {
-            kind: if parent == Some(VbBlock::Routine) {
+        _ if context.visibility.is_some() => Some(VbDeclaration {
+            kind: if context.parent == Some(VbBlock::Routine) {
                 SymbolKind::Variable
             } else {
                 SymbolKind::Field
             },
-            name: tokens.get(index)?.1,
+            name: context.tokens.get(context.index)?.1,
             block: None,
-            visibility,
-            static_member,
+            visibility: context.visibility,
+            static_member: context.static_member,
         }),
-        _ if parent == Some(VbBlock::Enum) => Some(VbDeclaration {
+        _ if context.parent == Some(VbBlock::Enum) => Some(VbDeclaration {
             kind: SymbolKind::EnumMember,
-            name: tokens.get(index)?.1,
+            name: context.tokens.get(context.index)?.1,
             block: None,
             visibility: None,
             static_member: false,
         }),
-        _ if parent == Some(VbBlock::Struct) => Some(VbDeclaration {
+        _ if context.parent == Some(VbBlock::Struct) => Some(VbDeclaration {
             kind: SymbolKind::Field,
-            name: tokens.get(index)?.1,
+            name: context.tokens.get(context.index)?.1,
             block: None,
             visibility: None,
             static_member: false,
@@ -1933,7 +2265,14 @@ fn extract_xml(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> 
         .find(|(_, tag)| !tag.closing && tag_name_eq(*tag, "mapper"))
         && let Some((namespace_offset, namespace)) = tag_attribute(mapper, "namespace")
     {
-        return extract_mybatis_mapper(builder, &tags, namespace, namespace_offset);
+        return extract_mybatis_mapper(
+            builder,
+            MybatisMapperInput {
+                tags: &tags,
+                namespace,
+                namespace_offset,
+            },
+        );
     }
     if tags
         .iter()
@@ -1949,119 +2288,202 @@ fn extract_xml(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> 
 
 fn extract_mybatis_mapper(
     builder: &mut CustomBuilder<'_, '_>,
-    tags: &[MarkupTag<'_>],
-    namespace: &str,
-    namespace_offset: usize,
+    input: MybatisMapperInput<'_>,
 ) -> Result<(), ExtractError> {
-    let simple_namespace = namespace.rsplit('.').next().unwrap_or(namespace);
+    let simple_namespace = input
+        .namespace
+        .rsplit('.')
+        .next()
+        .unwrap_or(input.namespace);
     let module = builder.add_symbol(
-        SymbolKind::Namespace,
-        simple_namespace,
-        namespace.to_owned(),
-        namespace_offset,
-        namespace_offset + namespace.len(),
-        SymbolOptions {
+        CustomSymbolInput::new(
+            SymbolKind::Namespace,
+            simple_namespace,
+            input.namespace.to_owned(),
+        )
+        .at(
+            input.namespace_offset,
+            input.namespace_offset + input.namespace.len(),
+        )
+        .with_options(SymbolOptions {
             body_search_text: format!("mybatis mapper {simple_namespace}"),
             exported: true,
             visibility: Some(Visibility::Public),
             ..SymbolOptions::default()
-        },
+        }),
     )?;
-    for (index, tag) in tags.iter().copied().enumerate() {
+    let state = MybatisMapperState {
+        tags: input.tags,
+        namespace: simple_namespace,
+        module,
+    };
+    for (index, tag) in input.tags.iter().copied().enumerate() {
         builder.check_cancelled()?;
-        if tag.closing {
-            continue;
-        }
-        let is_statement =
-            matches_ignore_ascii_case(tag.name, &["select", "insert", "update", "delete", "sql"]);
-        let is_mapping = matches_ignore_ascii_case(tag.name, &["resultMap", "parameterMap"]);
-        if !is_statement && !is_mapping {
-            continue;
-        }
-        let Some((id_offset, id)) = tag_attribute(tag, "id") else {
-            continue;
-        };
-        if !is_qualified_name(id) {
-            continue;
-        }
-        let qualified = format!("{simple_namespace}::{id}");
-        let owner = builder.add_symbol(
-            if is_statement {
-                SymbolKind::Method
-            } else {
-                SymbolKind::TypeAlias
-            },
-            id,
-            qualified.clone(),
-            id_offset,
-            id_offset + id.len(),
-            SymbolOptions {
-                body_search_text: format!("mybatis {} {id}", tag.name),
+        scan_mybatis_mapper_tag(builder, &state, IndexedMarkupTag { index, tag })?;
+    }
+    Ok(())
+}
+
+struct MybatisMapperState<'source> {
+    tags: &'source [MarkupTag<'source>],
+    namespace: &'source str,
+    module: SymbolId,
+}
+
+#[derive(Clone, Copy)]
+struct IndexedMarkupTag<'source> {
+    index: usize,
+    tag: MarkupTag<'source>,
+}
+
+fn scan_mybatis_mapper_tag(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &MybatisMapperState<'_>,
+    input: IndexedMarkupTag<'_>,
+) -> Result<(), ExtractError> {
+    if input.tag.closing {
+        return Ok(());
+    }
+    let is_statement = matches_ignore_ascii_case(
+        input.tag.name,
+        &["select", "insert", "update", "delete", "sql"],
+    );
+    let is_mapping = matches_ignore_ascii_case(input.tag.name, &["resultMap", "parameterMap"]);
+    if !is_statement && !is_mapping {
+        return Ok(());
+    }
+    let Some((id_offset, id)) = tag_attribute(input.tag, "id") else {
+        return Ok(());
+    };
+    if !is_qualified_name(id) {
+        return Ok(());
+    }
+    let kind = if is_statement {
+        SymbolKind::Method
+    } else {
+        SymbolKind::TypeAlias
+    };
+    let owner = builder.add_symbol(
+        CustomSymbolInput::new(kind, id, format!("{}::{id}", state.namespace))
+            .at(id_offset, id_offset + id.len())
+            .with_options(SymbolOptions {
+                body_search_text: format!("mybatis {} {id}", input.tag.name),
                 exported: is_statement,
                 visibility: is_statement.then_some(Visibility::Public),
-                parent: Some(module.clone()),
+                parent: Some(state.module.clone()),
                 ..SymbolOptions::default()
-            },
-        )?;
-        if is_mapping && let Some((offset, target)) = tag_attribute(tag, "type") {
-            builder.add_reference(
-                Some(owner.clone()),
+            }),
+    )?;
+    add_mybatis_tag_references(
+        builder,
+        MybatisTagReferenceInput {
+            state,
+            tag: input,
+            owner: &owner,
+            statement: id,
+            is_mapping,
+        },
+    )?;
+    Ok(())
+}
+
+struct MybatisTagReferenceInput<'source, 'owner> {
+    state: &'owner MybatisMapperState<'source>,
+    tag: IndexedMarkupTag<'source>,
+    owner: &'owner SymbolId,
+    statement: &'source str,
+    is_mapping: bool,
+}
+
+fn add_mybatis_tag_references(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: MybatisTagReferenceInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    add_mybatis_type_reference(builder, &input)?;
+    add_mybatis_named_references(builder, &input)?;
+    add_mybatis_body_reference(builder, input)
+}
+
+fn add_mybatis_type_reference(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: &MybatisTagReferenceInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    if input.is_mapping
+        && let Some((offset, target)) = tag_attribute(input.tag.tag, "type")
+    {
+        builder.add_reference(
+            CustomReferenceInput::new(
+                Some(input.owner.clone()),
                 target.rsplit('.').next().unwrap_or(target),
                 ReferenceKind::TypeOf,
-                offset,
-                offset + target.len(),
-            )?;
-        }
-        for key in ["resultMap", "parameterMap", "extends"] {
-            if let Some((offset, value)) = tag_attribute(tag, key) {
-                let reference = mybatis_qualified_reference(simple_namespace, value);
-                builder.add_reference(
-                    Some(owner.clone()),
+            )
+            .at(offset, offset + target.len()),
+        )?;
+    }
+    Ok(())
+}
+
+fn add_mybatis_named_references(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: &MybatisTagReferenceInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    for key in ["resultMap", "parameterMap", "extends"] {
+        if let Some((offset, value)) = tag_attribute(input.tag.tag, key) {
+            let reference = mybatis_qualified_reference(input.state.namespace, value);
+            builder.add_reference(
+                CustomReferenceInput::new(
+                    Some(input.owner.clone()),
                     &reference,
                     ReferenceKind::References,
-                    offset,
-                    offset + value.len(),
-                )?;
-            }
+                )
+                .at(offset, offset + value.len()),
+            )?;
         }
-        if let Some((_, body_end)) = find_matching_close(tags, index) {
-            let body_start = tag.end;
-            if body_start < body_end {
-                extract_mybatis_body_refs(
-                    builder,
-                    owner,
-                    simple_namespace,
-                    id,
-                    body_start,
-                    body_end,
-                )?;
-            }
-        }
+    }
+    Ok(())
+}
+
+fn add_mybatis_body_reference(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: MybatisTagReferenceInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    let Some((_, body_end)) = find_matching_close(input.state.tags, input.tag.index) else {
+        return Ok(());
+    };
+    let body_start = input.tag.tag.end;
+    if body_start < body_end {
+        extract_mybatis_body_refs(
+            builder,
+            MybatisBodyInput {
+                owner: input.owner.clone(),
+                namespace: input.state.namespace,
+                statement: input.statement,
+                start: body_start,
+                end: body_end,
+            },
+        )?;
     }
     Ok(())
 }
 
 fn extract_mybatis_body_refs(
     builder: &mut CustomBuilder<'_, '_>,
-    owner: SymbolId,
-    namespace: &str,
-    statement: &str,
-    start: usize,
-    end: usize,
+    input: MybatisBodyInput<'_>,
 ) -> Result<(), ExtractError> {
-    let body = &builder.source()[start..end];
+    let body = &builder.source()[input.start..input.end];
     for tag in markup_tags(body) {
         if tag.closing || !tag_name_eq(tag, "include") {
             continue;
         }
         if let Some((offset, refid)) = tag_attribute(tag, "refid") {
-            let reference = mybatis_qualified_reference(namespace, refid);
+            let reference = mybatis_qualified_reference(input.namespace, refid);
             builder.add_reference(
-                Some(owner.clone()),
-                &reference,
-                ReferenceKind::References,
-                start + offset,
-                start + offset + refid.len(),
+                CustomReferenceInput::new(
+                    Some(input.owner.clone()),
+                    &reference,
+                    ReferenceKind::References,
+                )
+                .at(input.start + offset, input.start + offset + refid.len()),
             )?;
         }
     }
@@ -2081,13 +2503,14 @@ fn extract_mybatis_body_refs(
         let parameter = raw.split('.').next().unwrap_or_default().trim();
         if is_qualified_name(parameter) && seen.insert(parameter.to_owned()) {
             let leading = raw.len() - raw.trim_start().len();
-            let parameter_start = start + content_start + leading;
+            let parameter_start = input.start + content_start + leading;
             builder.add_reference(
-                Some(owner.clone()),
-                &format!("{namespace}::{statement}::{parameter}"),
-                ReferenceKind::References,
-                parameter_start,
-                parameter_start + parameter.len(),
+                CustomReferenceInput::new(
+                    Some(input.owner.clone()),
+                    &format!("{}::{}::{parameter}", input.namespace, input.statement),
+                    ReferenceKind::References,
+                )
+                .at(parameter_start, parameter_start + parameter.len()),
             )?;
         }
         cursor = close + 1;
@@ -2118,36 +2541,35 @@ fn extract_mybatis_config(
             if let Some((offset, class)) = tag_attribute(tag, "class") {
                 let name = class.rsplit('.').next().unwrap_or(class);
                 builder.add_reference(
-                    None,
-                    name,
-                    ReferenceKind::References,
-                    offset,
-                    offset + class.len(),
+                    CustomReferenceInput::new(None, name, ReferenceKind::References)
+                        .at(offset, offset + class.len()),
                 )?;
             }
         } else if tag_name_eq(tag, "typeAlias")
             && let Some((offset, alias)) = tag_attribute(tag, "alias")
         {
             builder.add_symbol(
-                SymbolKind::TypeAlias,
-                alias,
-                format!("{}::{alias}", builder.path()),
-                offset,
-                offset + alias.len(),
-                SymbolOptions {
+                CustomSymbolInput::new(
+                    SymbolKind::TypeAlias,
+                    alias,
+                    format!("{}::{alias}", builder.path()),
+                )
+                .at(offset, offset + alias.len())
+                .with_options(SymbolOptions {
                     body_search_text: format!("mybatis type alias {alias}"),
                     exported: true,
                     visibility: Some(Visibility::Public),
                     ..SymbolOptions::default()
-                },
+                }),
             )?;
             if let Some((type_offset, target)) = tag_attribute(tag, "type") {
                 builder.add_reference(
-                    None,
-                    target.rsplit('.').next().unwrap_or(target),
-                    ReferenceKind::TypeOf,
-                    type_offset,
-                    type_offset + target.len(),
+                    CustomReferenceInput::new(
+                        None,
+                        target.rsplit('.').next().unwrap_or(target),
+                        ReferenceKind::TypeOf,
+                    )
+                    .at(type_offset, type_offset + target.len()),
                 )?;
             }
         }
@@ -2163,109 +2585,148 @@ fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
 
 fn extract_anubis(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> {
     let source = builder.source();
-    let mut root: Option<(SymbolId, String)> = None;
-    let mut behavior: Option<(SymbolId, String)> = None;
-    for (line_start, raw_line) in line_ranges(source) {
+    let mut state = AnubisScanState {
+        root: None,
+        behavior: None,
+    };
+    for (line_start, raw_line) in physical_lines(source) {
         builder.check_cancelled()?;
         let line = strip_line_comment(raw_line, "--").trim();
         if line.is_empty() {
             continue;
         }
-        if let Some((name_offset, name, kind)) = anubis_root(line) {
-            let raw_offset = raw_line.find(line).unwrap_or(0) + name_offset;
-            let qualified = if kind == SymbolKind::Module {
-                format!("game.states.{name}")
-            } else {
-                format!("game.configs.{name}")
-            };
-            let id = builder.add_symbol(
-                kind,
-                name,
-                qualified.clone(),
-                line_start + raw_offset,
-                line_start + raw_offset + name.len(),
-                SymbolOptions {
+        let line = AnubisLine {
+            start: line_start,
+            raw: raw_line,
+            text: line,
+        };
+        scan_anubis_declaration(builder, &mut state, line)?;
+        scan_anubis_references(builder, &state, line)?;
+    }
+    Ok(())
+}
+
+struct AnubisScanState {
+    root: Option<(SymbolId, String)>,
+    behavior: Option<(SymbolId, String)>,
+}
+
+#[derive(Clone, Copy)]
+struct AnubisLine<'source> {
+    start: usize,
+    raw: &'source str,
+    text: &'source str,
+}
+
+fn scan_anubis_declaration(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut AnubisScanState,
+    line: AnubisLine<'_>,
+) -> Result<(), ExtractError> {
+    if let Some((name_offset, name, kind)) = anubis_root(line.text) {
+        let raw_offset = line.raw.find(line.text).unwrap_or(0) + name_offset;
+        let qualified = if kind == SymbolKind::Module {
+            format!("game.states.{name}")
+        } else {
+            format!("game.configs.{name}")
+        };
+        let id = builder.add_symbol(
+            CustomSymbolInput::new(kind, name, qualified.clone())
+                .at(
+                    line.start + raw_offset,
+                    line.start + raw_offset + name.len(),
+                )
+                .with_options(SymbolOptions {
                     body_search_text: format!("anubis {} {name}", kind.as_str()),
                     exported: true,
                     visibility: Some(Visibility::Public),
                     ..SymbolOptions::default()
-                },
-            )?;
-            root = Some((id, qualified));
-            behavior = None;
-        } else if let Some((name_offset, name, shape)) = anubis_behavior(line) {
-            let raw_offset = raw_line.find(line).unwrap_or(0) + name_offset;
-            let parent = root.as_ref().map(|(id, _)| id.clone());
-            let prefix = root
-                .as_ref()
-                .map_or_else(|| builder.path().to_owned(), |(_, name)| name.clone());
-            let id = builder.add_symbol(
-                SymbolKind::Method,
-                name,
-                format!("{prefix}::{name}"),
-                line_start + raw_offset,
-                line_start + raw_offset + name.len(),
-                SymbolOptions {
+                }),
+        )?;
+        state.root = Some((id, qualified));
+        state.behavior = None;
+    } else if let Some((name_offset, name, shape)) = anubis_behavior(line.text) {
+        let raw_offset = line.raw.find(line.text).unwrap_or(0) + name_offset;
+        let parent = state.root.as_ref().map(|(id, _)| id.clone());
+        let prefix = state
+            .root
+            .as_ref()
+            .map_or_else(|| builder.path().to_owned(), |(_, name)| name.clone());
+        let id = builder.add_symbol(
+            CustomSymbolInput::new(SymbolKind::Method, name, format!("{prefix}::{name}"))
+                .at(
+                    line.start + raw_offset,
+                    line.start + raw_offset + name.len(),
+                )
+                .with_options(SymbolOptions {
                     body_search_text: format!("anubis {shape} {name}"),
                     parent,
                     ..SymbolOptions::default()
-                },
-            )?;
-            behavior = Some((id, name.to_owned()));
-        } else if let Some((name_offset, name, label)) = anubis_handler(line) {
-            let raw_offset = raw_line.find(line).unwrap_or(0) + name_offset;
-            let parent = if label == "event" {
-                root.as_ref().map(|(id, _)| id.clone())
-            } else {
-                behavior
-                    .as_ref()
-                    .map(|(id, _)| id.clone())
-                    .or_else(|| root.as_ref().map(|(id, _)| id.clone()))
-            };
-            let prefix = root
+                }),
+        )?;
+        state.behavior = Some((id, name.to_owned()));
+    } else if let Some((name_offset, name, label)) = anubis_handler(line.text) {
+        let raw_offset = line.raw.find(line.text).unwrap_or(0) + name_offset;
+        let parent = if label == "event" {
+            state.root.as_ref().map(|(id, _)| id.clone())
+        } else {
+            state
+                .behavior
                 .as_ref()
-                .map_or_else(|| builder.path().to_owned(), |(_, name)| name.clone());
-            let display = format!("{label}:{name}");
-            builder.add_symbol(
-                SymbolKind::Method,
-                &display,
-                format!("{prefix}::{display}"),
-                line_start + raw_offset,
-                line_start + raw_offset + name.len(),
-                SymbolOptions {
+                .map(|(id, _)| id.clone())
+                .or_else(|| state.root.as_ref().map(|(id, _)| id.clone()))
+        };
+        let prefix = state
+            .root
+            .as_ref()
+            .map_or_else(|| builder.path().to_owned(), |(_, name)| name.clone());
+        let display = format!("{label}:{name}");
+        builder.add_symbol(
+            CustomSymbolInput::new(SymbolKind::Method, &display, format!("{prefix}::{display}"))
+                .at(
+                    line.start + raw_offset,
+                    line.start + raw_offset + name.len(),
+                )
+                .with_options(SymbolOptions {
                     body_search_text: format!("anubis {label} {name}"),
                     parent,
                     ..SymbolOptions::default()
-                },
-            )?;
+                }),
+        )?;
+    }
+    Ok(())
+}
+
+fn scan_anubis_references(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &AnubisScanState,
+    line: AnubisLine<'_>,
+) -> Result<(), ExtractError> {
+    let owner = state
+        .behavior
+        .as_ref()
+        .map(|(id, _)| id.clone())
+        .or_else(|| state.root.as_ref().map(|(id, _)| id.clone()));
+    for (offset, call) in function_like_names(line.text) {
+        if anubis_call_skip(call) {
+            continue;
         }
-        let owner = behavior
-            .as_ref()
-            .map(|(id, _)| id.clone())
-            .or_else(|| root.as_ref().map(|(id, _)| id.clone()));
-        for (offset, call) in function_like_names(line) {
-            if anubis_call_skip(call) {
-                continue;
-            }
-            let raw_offset = raw_line.find(line).unwrap_or(0) + offset;
-            builder.add_reference(
-                owner.clone(),
-                call,
-                ReferenceKind::Calls,
-                line_start + raw_offset,
-                line_start + raw_offset + call.len(),
-            )?;
-        }
-        for (offset, reference) in dotted_references(line) {
-            let raw_offset = raw_line.find(line).unwrap_or(0) + offset;
-            builder.add_reference(
-                owner.clone(),
-                reference,
-                ReferenceKind::References,
-                line_start + raw_offset,
-                line_start + raw_offset + reference.len(),
-            )?;
-        }
+        let raw_offset = line.raw.find(line.text).unwrap_or(0) + offset;
+        builder.add_reference(
+            CustomReferenceInput::new(owner.clone(), call, ReferenceKind::Calls).at(
+                line.start + raw_offset,
+                line.start + raw_offset + call.len(),
+            ),
+        )?;
+    }
+    for (offset, reference) in dotted_references(line.text) {
+        let raw_offset = line.raw.find(line.text).unwrap_or(0) + offset;
+        builder.add_reference(
+            CustomReferenceInput::new(owner.clone(), reference, ReferenceKind::References).at(
+                line.start + raw_offset,
+                line.start + raw_offset + reference.len(),
+            ),
+        )?;
     }
     Ok(())
 }
@@ -2332,23 +2793,25 @@ fn anubis_handler(line: &str) -> Option<(usize, &str, &str)> {
     None
 }
 
+const ANUBIS_CALL_SKIP_NAMES: &[&str] = &[
+    "if",
+    "function",
+    "State",
+    "Config",
+    "Action",
+    "Selector",
+    "Proxy",
+    "CanEnter",
+    "Valid",
+    "OnFinished",
+    "OnLeave",
+    "OnEnter",
+    "OnUpdate",
+    "OnFailed",
+];
+
 fn anubis_call_skip(name: &str) -> bool {
-    matches!(
-        name,
-        "if" | "function"
-            | "State"
-            | "Config"
-            | "Action"
-            | "Selector"
-            | "Proxy"
-            | "CanEnter"
-            | "Valid"
-            | "OnFinished"
-            | "OnLeave"
-            | "OnEnter"
-            | "OnUpdate"
-            | "OnFailed"
-    )
+    ANUBIS_CALL_SKIP_NAMES.contains(&name)
 }
 
 fn dotted_references(line: &str) -> Vec<(usize, &str)> {
@@ -2381,7 +2844,7 @@ fn dotted_references(line: &str) -> Vec<(usize, &str)> {
 fn extract_bg3_stats(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> {
     let source = builder.source();
     let mut current = None;
-    for (line_start, line) in line_ranges(source) {
+    for (line_start, line) in physical_lines(source) {
         builder.check_cancelled()?;
         let words = identifiers(line);
         if words
@@ -2397,17 +2860,18 @@ fn extract_bg3_stats(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractE
         {
             let shape = words[1].1;
             let id = builder.add_symbol(
-                SymbolKind::Resource,
-                name,
-                format!("{}::{name}", builder.path()),
-                line_start + offset,
-                line_start + offset + name.len(),
-                SymbolOptions {
+                CustomSymbolInput::new(
+                    SymbolKind::Resource,
+                    name,
+                    format!("{}::{name}", builder.path()),
+                )
+                .at(line_start + offset, line_start + offset + name.len())
+                .with_options(SymbolOptions {
                     body_search_text: format!("bg3 {shape} {name}"),
                     exported: true,
                     visibility: Some(Visibility::Public),
                     ..SymbolOptions::default()
-                },
+                }),
             )?;
             current = Some(id);
             continue;
@@ -2421,15 +2885,16 @@ fn extract_bg3_stats(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractE
             && is_qualified_name(value)
         {
             builder.add_reference(
-                Some(owner),
-                value,
-                if command.as_deref() == Some("using") {
-                    ReferenceKind::Extends
-                } else {
-                    ReferenceKind::References
-                },
-                line_start + offset,
-                line_start + offset + value.len(),
+                CustomReferenceInput::new(
+                    Some(owner),
+                    value,
+                    if command.as_deref() == Some("using") {
+                        ReferenceKind::Extends
+                    } else {
+                        ReferenceKind::References
+                    },
+                )
+                .at(line_start + offset, line_start + offset + value.len()),
             )?;
         } else if command.as_deref() == Some("data") {
             let values = quoted_values(line);
@@ -2437,11 +2902,15 @@ fn extract_bg3_stats(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractE
                 for token in bg3_reference_tokens(value) {
                     let relative = value.find(token).unwrap_or(0);
                     builder.add_reference(
-                        Some(owner.clone()),
-                        token,
-                        ReferenceKind::References,
-                        line_start + offset + relative,
-                        line_start + offset + relative + token.len(),
+                        CustomReferenceInput::new(
+                            Some(owner.clone()),
+                            token,
+                            ReferenceKind::References,
+                        )
+                        .at(
+                            line_start + offset + relative,
+                            line_start + offset + relative + token.len(),
+                        ),
                     )?;
                 }
             }
@@ -2471,144 +2940,258 @@ fn extract_osiris(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractErro
     }
     let goal_name = basename_stem(builder.path()).to_owned();
     let goal = builder.add_symbol(
-        SymbolKind::Module,
-        &goal_name,
-        goal_name.clone(),
-        0,
-        builder.source().len().min(goal_name.len().max(1)),
-        SymbolOptions {
-            body_search_text: format!("osiris goal {goal_name}"),
-            exported: true,
-            visibility: Some(Visibility::Public),
-            ..SymbolOptions::default()
-        },
+        CustomSymbolInput::new(SymbolKind::Module, &goal_name, goal_name.clone())
+            .at(0, builder.source().len().min(goal_name.len().max(1)))
+            .with_options(SymbolOptions {
+                body_search_text: format!("osiris goal {goal_name}"),
+                exported: true,
+                visibility: Some(Visibility::Public),
+                ..SymbolOptions::default()
+            }),
     )?;
     let source = builder.source();
-    let mut section: Option<(SymbolId, String)> = None;
-    let mut current_rule: Option<SymbolId> = None;
-    let mut pending_rule: Option<(&str, usize)> = None;
-    let mut db_nodes = BTreeMap::<String, SymbolId>::new();
-    for (line_start, raw_line) in line_ranges(source) {
+    let mut state = OsirisScanState {
+        goal,
+        goal_name,
+        section: None,
+        current_rule: None,
+        pending_rule: None,
+        db_nodes: BTreeMap::new(),
+    };
+    for (line_start, raw_line) in physical_lines(source) {
         builder.check_cancelled()?;
         let line = strip_line_comment(raw_line, "//").trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(name) = osiris_section(line) {
-            let offset = raw_line.find(name).unwrap_or(0);
-            let id = builder.add_symbol(
-                SymbolKind::Namespace,
-                name,
-                format!("{goal_name}::{name}"),
-                line_start + offset,
-                line_start + offset + name.len(),
-                SymbolOptions {
+        scan_osiris_line(
+            builder,
+            &mut state,
+            OsirisLine {
+                start: line_start,
+                raw: raw_line,
+                text: line,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+struct OsirisScanState {
+    goal: SymbolId,
+    goal_name: String,
+    section: Option<SymbolId>,
+    current_rule: Option<SymbolId>,
+    pending_rule: Option<(&'static str, usize)>,
+    db_nodes: BTreeMap<String, SymbolId>,
+}
+
+#[derive(Clone, Copy)]
+struct OsirisLine<'source> {
+    start: usize,
+    raw: &'source str,
+    text: &'source str,
+}
+
+#[derive(Clone, Copy)]
+struct OsirisPredicate<'source> {
+    name: &'source str,
+    raw_offset: usize,
+    line_start: usize,
+}
+
+fn scan_osiris_line(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut OsirisScanState,
+    line: OsirisLine<'_>,
+) -> Result<(), ExtractError> {
+    if scan_osiris_header(builder, state, line)? {
+        return Ok(());
+    }
+    if extract_osiris_declaration(
+        builder,
+        OsirisDeclarationInput {
+            goal: state.goal.clone(),
+            line: line.text,
+            raw_line: line.raw,
+            line_start: line.start,
+        },
+    )? {
+        return Ok(());
+    }
+    scan_osiris_predicates(builder, state, line)?;
+    scan_osiris_string_references(builder, state, line)
+}
+
+fn scan_osiris_header(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut OsirisScanState,
+    line: OsirisLine<'_>,
+) -> Result<bool, ExtractError> {
+    if let Some(name) = osiris_section(line.text) {
+        let offset = line.raw.find(name).unwrap_or(0);
+        state.section = Some(
+            builder.add_symbol(
+                CustomSymbolInput::new(
+                    SymbolKind::Namespace,
+                    name,
+                    format!("{}::{name}", state.goal_name),
+                )
+                .at(line.start + offset, line.start + offset + name.len())
+                .with_options(SymbolOptions {
                     body_search_text: format!("osiris section {name}"),
-                    parent: Some(goal.clone()),
+                    parent: Some(state.goal.clone()),
                     ..SymbolOptions::default()
-                },
+                }),
+            )?,
+        );
+        state.current_rule = None;
+        state.pending_rule = None;
+        return Ok(true);
+    }
+    if let Some(control) = ["IF", "PROC", "QRY"].into_iter().find(|control| {
+        word_after(line.text, control).is_some() || line.text.eq_ignore_ascii_case(control)
+    }) {
+        state.pending_rule = Some((control, line.start));
+        state.current_rule = None;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn scan_osiris_predicates(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut OsirisScanState,
+    line: OsirisLine<'_>,
+) -> Result<(), ExtractError> {
+    for (relative, predicate) in function_like_names(line.text) {
+        if matches_ignore_ascii_case(predicate, &["IF", "AND", "NOT"]) {
+            continue;
+        }
+        let predicate = OsirisPredicate {
+            name: predicate,
+            raw_offset: line.raw.find(line.text).unwrap_or(0) + relative,
+            line_start: line.start,
+        };
+        if begin_pending_osiris_rule(builder, state, predicate)? {
+            continue;
+        }
+        record_osiris_predicate(builder, state, predicate)?;
+    }
+    Ok(())
+}
+
+fn begin_pending_osiris_rule(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut OsirisScanState,
+    predicate: OsirisPredicate<'_>,
+) -> Result<bool, ExtractError> {
+    if state.current_rule.is_some() {
+        return Ok(false);
+    }
+    let Some((control, declaration_start)) = state.pending_rule.take() else {
+        return Ok(false);
+    };
+    let label = match control {
+        "QRY" => "query",
+        "PROC" => "proc",
+        _ => "rule",
+    };
+    let owner = state.section.clone().unwrap_or_else(|| state.goal.clone());
+    state.current_rule = Some(
+        builder.add_symbol(
+            CustomSymbolInput::new(
+                SymbolKind::Method,
+                &format!("{label}:{}", predicate.name),
+                format!("{}::{label}:{declaration_start}", state.goal_name),
+            )
+            .at(
+                predicate.line_start + predicate.raw_offset,
+                predicate.line_start + predicate.raw_offset + predicate.name.len(),
+            )
+            .with_options(SymbolOptions {
+                body_search_text: format!("osiris {label} {}", predicate.name),
+                parent: Some(owner),
+                ..SymbolOptions::default()
+            }),
+        )?,
+    );
+    Ok(control != "IF")
+}
+
+fn record_osiris_predicate(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut OsirisScanState,
+    predicate: OsirisPredicate<'_>,
+) -> Result<(), ExtractError> {
+    let owner = state
+        .current_rule
+        .clone()
+        .unwrap_or_else(|| state.goal.clone());
+    if predicate.name.starts_with("DB_") {
+        ensure_osiris_db_symbol(builder, state, predicate)?;
+        builder.add_reference(
+            CustomReferenceInput::new(Some(owner), predicate.name, ReferenceKind::References).at(
+                predicate.line_start + predicate.raw_offset,
+                predicate.line_start + predicate.raw_offset + predicate.name.len(),
+            ),
+        )?;
+    } else {
+        builder.add_reference(
+            CustomReferenceInput::new(Some(owner), predicate.name, ReferenceKind::Calls).at(
+                predicate.line_start + predicate.raw_offset,
+                predicate.line_start + predicate.raw_offset + predicate.name.len(),
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_osiris_db_symbol(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &mut OsirisScanState,
+    predicate: OsirisPredicate<'_>,
+) -> Result<(), ExtractError> {
+    if state.db_nodes.contains_key(predicate.name) {
+        return Ok(());
+    }
+    let parent = state.section.clone().unwrap_or_else(|| state.goal.clone());
+    let id = builder.add_symbol(
+        CustomSymbolInput::new(SymbolKind::Table, predicate.name, predicate.name.to_owned())
+            .at(
+                predicate.line_start + predicate.raw_offset,
+                predicate.line_start + predicate.raw_offset + predicate.name.len(),
+            )
+            .with_options(SymbolOptions {
+                body_search_text: format!("osiris db {}", predicate.name),
+                parent: Some(parent),
+                ..SymbolOptions::default()
+            }),
+    )?;
+    state.db_nodes.insert(predicate.name.to_owned(), id);
+    Ok(())
+}
+
+fn scan_osiris_string_references(
+    builder: &mut CustomBuilder<'_, '_>,
+    state: &OsirisScanState,
+    line: OsirisLine<'_>,
+) -> Result<(), ExtractError> {
+    let owner = state
+        .current_rule
+        .clone()
+        .unwrap_or_else(|| state.goal.clone());
+    for (offset, value) in quoted_values(line.text) {
+        for token in bg3_reference_tokens(value) {
+            let relative = value.find(token).unwrap_or(0);
+            let raw_offset = line.raw.find(line.text).unwrap_or(0) + offset + relative;
+            builder.add_reference(
+                CustomReferenceInput::new(Some(owner.clone()), token, ReferenceKind::References)
+                    .at(
+                        line.start + raw_offset,
+                        line.start + raw_offset + token.len(),
+                    ),
             )?;
-            section = Some((id, name.to_owned()));
-            current_rule = None;
-            pending_rule = None;
-            continue;
-        }
-        if let Some(control) = ["IF", "PROC", "QRY"].into_iter().find(|control| {
-            word_after(line, control).is_some() || line.eq_ignore_ascii_case(control)
-        }) {
-            pending_rule = Some((control, line_start));
-            current_rule = None;
-            continue;
-        }
-        if extract_osiris_declaration(builder, goal.clone(), line, raw_line, line_start)? {
-            continue;
-        }
-        for (relative, predicate) in function_like_names(line) {
-            if matches_ignore_ascii_case(predicate, &["IF", "AND", "NOT"]) {
-                continue;
-            }
-            let raw_offset = raw_line.find(line).unwrap_or(0) + relative;
-            if current_rule.is_none()
-                && let Some((control, declaration_start)) = pending_rule.take()
-            {
-                let label = if control == "QRY" {
-                    "query"
-                } else if control == "PROC" {
-                    "proc"
-                } else {
-                    "rule"
-                };
-                let owner = section
-                    .as_ref()
-                    .map(|(id, _)| id.clone())
-                    .unwrap_or_else(|| goal.clone());
-                current_rule = Some(builder.add_symbol(
-                    SymbolKind::Method,
-                    &format!("{label}:{predicate}"),
-                    format!("{goal_name}::{label}:{}", declaration_start),
-                    line_start + raw_offset,
-                    line_start + raw_offset + predicate.len(),
-                    SymbolOptions {
-                        body_search_text: format!("osiris {label} {predicate}"),
-                        parent: Some(owner),
-                        ..SymbolOptions::default()
-                    },
-                )?);
-                if control != "IF" {
-                    continue;
-                }
-            }
-            let owner = current_rule.clone().unwrap_or_else(|| goal.clone());
-            if predicate.starts_with("DB_") {
-                if !db_nodes.contains_key(predicate) {
-                    let parent = section
-                        .as_ref()
-                        .map(|(id, _)| id.clone())
-                        .unwrap_or_else(|| goal.clone());
-                    let id = builder.add_symbol(
-                        SymbolKind::Table,
-                        predicate,
-                        predicate.to_owned(),
-                        line_start + raw_offset,
-                        line_start + raw_offset + predicate.len(),
-                        SymbolOptions {
-                            body_search_text: format!("osiris db {predicate}"),
-                            parent: Some(parent),
-                            ..SymbolOptions::default()
-                        },
-                    )?;
-                    db_nodes.insert(predicate.to_owned(), id);
-                }
-                builder.add_reference(
-                    Some(owner),
-                    predicate,
-                    ReferenceKind::References,
-                    line_start + raw_offset,
-                    line_start + raw_offset + predicate.len(),
-                )?;
-            } else {
-                builder.add_reference(
-                    Some(owner),
-                    predicate,
-                    ReferenceKind::Calls,
-                    line_start + raw_offset,
-                    line_start + raw_offset + predicate.len(),
-                )?;
-            }
-        }
-        let string_owner = current_rule.clone().unwrap_or_else(|| goal.clone());
-        for (offset, value) in quoted_values(line) {
-            for token in bg3_reference_tokens(value) {
-                let relative = value.find(token).unwrap_or(0);
-                let raw_offset = raw_line.find(line).unwrap_or(0) + offset + relative;
-                builder.add_reference(
-                    Some(string_owner.clone()),
-                    token,
-                    ReferenceKind::References,
-                    line_start + raw_offset,
-                    line_start + raw_offset + token.len(),
-                )?;
-            }
         }
     }
     Ok(())
@@ -2639,90 +3222,91 @@ fn osiris_section(line: &str) -> Option<&str> {
 
 fn extract_osiris_declaration(
     builder: &mut CustomBuilder<'_, '_>,
-    goal: SymbolId,
-    line: &str,
-    raw_line: &str,
-    line_start: usize,
+    input: OsirisDeclarationInput<'_>,
 ) -> Result<bool, ExtractError> {
-    if let Some(payload) = brace_payload(line, "alias_type") {
+    if let Some(payload) = brace_payload(input.line, "alias_type") {
         if let Some((relative, name)) = first_identifier(payload) {
-            let offset = raw_line.find(payload).unwrap_or(0) + relative;
+            let offset = input.raw_line.find(payload).unwrap_or(0) + relative;
             builder.add_symbol(
-                SymbolKind::TypeAlias,
-                name,
-                name.to_owned(),
-                line_start + offset,
-                line_start + offset + name.len(),
-                SymbolOptions {
-                    body_search_text: format!("osiris alias {name}"),
-                    parent: Some(goal),
-                    ..SymbolOptions::default()
-                },
+                CustomSymbolInput::new(SymbolKind::TypeAlias, name, name.to_owned())
+                    .at(
+                        input.line_start + offset,
+                        input.line_start + offset + name.len(),
+                    )
+                    .with_options(SymbolOptions {
+                        body_search_text: format!("osiris alias {name}"),
+                        parent: Some(input.goal),
+                        ..SymbolOptions::default()
+                    }),
             )?;
         }
         return Ok(true);
     }
-    if let Some(payload) = brace_payload(line, "enum_type") {
+    if let Some(payload) = brace_payload(input.line, "enum_type") {
         let mut fields = payload.split(',').map(str::trim);
         if let Some(name) = fields.next().filter(|name| is_qualified_name(name)) {
-            let offset = raw_line.find(name).unwrap_or(0);
+            let offset = input.raw_line.find(name).unwrap_or(0);
             let enum_id = builder.add_symbol(
-                SymbolKind::Enum,
-                name,
-                name.to_owned(),
-                line_start + offset,
-                line_start + offset + name.len(),
-                SymbolOptions {
-                    body_search_text: format!("osiris enum {name}"),
-                    parent: Some(goal),
-                    ..SymbolOptions::default()
-                },
+                CustomSymbolInput::new(SymbolKind::Enum, name, name.to_owned())
+                    .at(
+                        input.line_start + offset,
+                        input.line_start + offset + name.len(),
+                    )
+                    .with_options(SymbolOptions {
+                        body_search_text: format!("osiris enum {name}"),
+                        parent: Some(input.goal),
+                        ..SymbolOptions::default()
+                    }),
             )?;
             for member in fields.skip(2) {
                 let member_name = member.split('=').next().unwrap_or_default().trim();
                 if !is_qualified_name(member_name) {
                     continue;
                 }
-                let member_offset = raw_line.find(member_name).unwrap_or(offset);
+                let member_offset = input.raw_line.find(member_name).unwrap_or(offset);
                 builder.add_symbol(
-                    SymbolKind::EnumMember,
-                    member_name,
-                    format!("{name}.{member_name}"),
-                    line_start + member_offset,
-                    line_start + member_offset + member_name.len(),
-                    SymbolOptions {
+                    CustomSymbolInput::new(
+                        SymbolKind::EnumMember,
+                        member_name,
+                        format!("{name}.{member_name}"),
+                    )
+                    .at(
+                        input.line_start + member_offset,
+                        input.line_start + member_offset + member_name.len(),
+                    )
+                    .with_options(SymbolOptions {
                         body_search_text: format!("enum member {member_name}"),
                         parent: Some(enum_id.clone()),
                         ..SymbolOptions::default()
-                    },
+                    }),
                 )?;
             }
         }
         return Ok(true);
     }
-    let Some((_, command)) = first_identifier(line) else {
+    let Some((_, command)) = first_identifier(input.line) else {
         return Ok(false);
     };
     if !matches_ignore_ascii_case(command, &["syscall", "sysquery", "call", "query", "event"]) {
         return Ok(false);
     }
-    let Some((offset, name)) = word_after(line, command) else {
+    let Some((offset, name)) = word_after(input.line, command) else {
         return Ok(false);
     };
-    let raw_offset = raw_line.find(line).unwrap_or(0) + offset;
+    let raw_offset = input.raw_line.find(input.line).unwrap_or(0) + offset;
     builder.add_symbol(
-        SymbolKind::Function,
-        name,
-        name.to_owned(),
-        line_start + raw_offset,
-        line_start + raw_offset + name.len(),
-        SymbolOptions {
-            body_search_text: format!("osiris api {name}"),
-            exported: true,
-            visibility: Some(Visibility::Public),
-            parent: Some(goal),
-            ..SymbolOptions::default()
-        },
+        CustomSymbolInput::new(SymbolKind::Function, name, name.to_owned())
+            .at(
+                input.line_start + raw_offset,
+                input.line_start + raw_offset + name.len(),
+            )
+            .with_options(SymbolOptions {
+                body_search_text: format!("osiris api {name}"),
+                exported: true,
+                visibility: Some(Visibility::Public),
+                parent: Some(input.goal),
+                ..SymbolOptions::default()
+            }),
     )?;
     Ok(true)
 }
@@ -2763,75 +3347,82 @@ fn extract_bg3_json(
                 extract_bg3_json(builder, item, parent.clone())?;
             }
         }
-        Value::Object(fields) => {
-            let name = ["NameFS", "Name", "name", "UUID", "Guid", "id"]
-                .into_iter()
-                .find_map(|key| fields.get(key).and_then(Value::as_str))
-                .filter(|name| !name.is_empty() && !looks_sensitive(name));
-            let mut next_parent = parent.clone();
-            if let Some(name) = name {
-                let offset = builder.source().find(name).unwrap_or(0);
-                if offset < builder.source().len() {
-                    let id = builder.add_symbol(
-                        SymbolKind::Resource,
-                        name,
-                        name.to_owned(),
-                        offset,
-                        (offset + name.len()).min(builder.source().len()),
-                        SymbolOptions {
-                            body_search_text: format!("bg3 resource {name}"),
-                            exported: parent.is_none(),
-                            visibility: parent.is_none().then_some(Visibility::Public),
-                            parent: parent.clone(),
-                            ..SymbolOptions::default()
-                        },
-                    )?;
-                    next_parent = Some(id);
-                }
-            }
-            for (key, child) in fields {
-                if let Some(raw) = child.as_str()
-                    && !matches!(
-                        key.as_str(),
-                        "NameFS" | "Name" | "name" | "UUID" | "Guid" | "id"
-                    )
-                {
-                    let base = builder.source().find(raw).unwrap_or(0);
-                    for token in bg3_reference_tokens(raw) {
-                        let relative = raw.find(token).unwrap_or(0);
-                        if base + relative + token.len() <= builder.source().len() {
-                            builder.add_reference(
-                                next_parent.clone(),
-                                token,
-                                ReferenceKind::References,
-                                base + relative,
-                                base + relative + token.len(),
-                            )?;
-                        }
-                    }
-                    continue;
-                }
-                extract_bg3_json(builder, child, next_parent.clone())?;
-            }
-        }
-        Value::String(raw) => {
-            let base = builder.source().find(raw).unwrap_or(0);
-            for token in bg3_reference_tokens(raw) {
-                let relative = raw.find(token).unwrap_or(0);
-                if base + relative + token.len() <= builder.source().len() {
-                    builder.add_reference(
-                        parent.clone(),
-                        token,
-                        ReferenceKind::References,
-                        base + relative,
-                        base + relative + token.len(),
-                    )?;
-                }
-            }
-        }
+        Value::Object(fields) => extract_bg3_object(builder, fields, parent)?,
+        Value::String(raw) => add_bg3_references(builder, raw, parent)?,
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
     Ok(())
+}
+
+fn extract_bg3_object(
+    builder: &mut CustomBuilder<'_, '_>,
+    fields: &serde_json::Map<String, Value>,
+    parent: Option<SymbolId>,
+) -> Result<(), ExtractError> {
+    let next_parent = bg3_object_parent(builder, fields, parent)?;
+    for (key, child) in fields {
+        if let Some(raw) = child.as_str()
+            && !is_bg3_name_key(key)
+        {
+            add_bg3_references(builder, raw, next_parent.clone())?;
+            continue;
+        }
+        extract_bg3_json(builder, child, next_parent.clone())?;
+    }
+    Ok(())
+}
+
+fn bg3_object_parent(
+    builder: &mut CustomBuilder<'_, '_>,
+    fields: &serde_json::Map<String, Value>,
+    parent: Option<SymbolId>,
+) -> Result<Option<SymbolId>, ExtractError> {
+    let Some(name) = ["NameFS", "Name", "name", "UUID", "Guid", "id"]
+        .into_iter()
+        .find_map(|key| fields.get(key).and_then(Value::as_str))
+        .filter(|name| !name.is_empty() && !looks_sensitive(name))
+    else {
+        return Ok(parent);
+    };
+    let offset = builder.source().find(name).unwrap_or(0);
+    if offset >= builder.source().len() {
+        return Ok(parent);
+    }
+    builder
+        .add_symbol(
+            CustomSymbolInput::new(SymbolKind::Resource, name, name.to_owned())
+                .at(offset, (offset + name.len()).min(builder.source().len()))
+                .with_options(SymbolOptions {
+                    body_search_text: format!("bg3 resource {name}"),
+                    exported: parent.is_none(),
+                    visibility: parent.is_none().then_some(Visibility::Public),
+                    parent,
+                    ..SymbolOptions::default()
+                }),
+        )
+        .map(Some)
+}
+
+fn add_bg3_references(
+    builder: &mut CustomBuilder<'_, '_>,
+    raw: &str,
+    parent: Option<SymbolId>,
+) -> Result<(), ExtractError> {
+    let base = builder.source().find(raw).unwrap_or(0);
+    for token in bg3_reference_tokens(raw) {
+        let relative = raw.find(token).unwrap_or(0);
+        if base + relative + token.len() <= builder.source().len() {
+            builder.add_reference(
+                CustomReferenceInput::new(parent.clone(), token, ReferenceKind::References)
+                    .at(base + relative, base + relative + token.len()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn is_bg3_name_key(key: &str) -> bool {
+    matches!(key, "NameFS" | "Name" | "name" | "UUID" | "Guid" | "id")
 }
 
 fn extract_bg3_markup(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractError> {
@@ -2840,119 +3431,165 @@ fn extract_bg3_markup(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Extract
     let mut regions = vec![(None, builder.path().to_owned())];
     for (index, tag) in tags.iter().copied().enumerate() {
         builder.check_cancelled()?;
-        if tag_name_eq(tag, "region") {
-            if tag.closing {
-                if regions.len() > 1 {
-                    regions.pop();
-                }
-            } else if let Some((offset, name)) = tag_attribute(tag, "id") {
-                let parent = regions.last().and_then(|(id, _)| id.clone());
-                let prefix = regions.last().map_or(builder.path(), |(_, name)| name);
-                let qualified = format!("{prefix}::{name}");
-                let id = builder.add_symbol(
-                    SymbolKind::Namespace,
-                    name,
-                    qualified.clone(),
-                    offset,
-                    offset + name.len(),
-                    SymbolOptions {
-                        body_search_text: format!("bg3 region {name}"),
-                        parent,
-                        ..SymbolOptions::default()
-                    },
-                )?;
-                if !tag.self_closing {
-                    regions.push((Some(id), qualified));
-                }
-            }
+        if scan_bg3_region(builder, &mut regions, tag)? {
             continue;
         }
-        if tag_name_eq(tag, "content")
-            && !tag.closing
-            && let Some((offset, handle)) = tag_attribute(tag, "contentuid")
-        {
-            builder.add_symbol(
-                SymbolKind::Resource,
-                handle,
-                handle.to_owned(),
-                offset,
-                offset + handle.len(),
-                SymbolOptions {
-                    body_search_text: format!("localized content {handle}"),
-                    exported: true,
-                    visibility: Some(Visibility::Public),
-                    parent: regions.last().and_then(|(id, _)| id.clone()),
-                    ..SymbolOptions::default()
-                },
-            )?;
+        if scan_bg3_content(builder, &regions, tag)? {
             continue;
         }
         if tag.closing || !matches_ignore_ascii_case(tag.name, &["node", "stat_object"]) {
             continue;
         }
-        let close =
-            find_matching_close(&tags, index).map_or(tag.end, |(_, close_start)| close_start);
-        let object_tags = tags
-            .iter()
-            .copied()
-            .skip(index + 1)
-            .take_while(|candidate| candidate.start < close);
-        let mut fields = BTreeMap::<String, (usize, &str)>::new();
-        for field in object_tags {
-            if field.closing || !matches_ignore_ascii_case(field.name, &["attribute", "field"]) {
-                continue;
-            }
-            let key = tag_attribute(
-                field,
-                if tag_name_eq(field, "field") {
-                    "name"
-                } else {
-                    "id"
-                },
-            );
-            let value = tag_attribute(field, "value").or_else(|| tag_attribute(field, "handle"));
-            if let (Some((_, key)), Some((offset, value))) = (key, value) {
-                fields.insert(key.to_owned(), (offset, value));
-            }
-        }
-        let name = ["NameFS", "DisplayName", "Name", "UUID"]
-            .into_iter()
-            .find_map(|key| fields.get(key).copied())
-            .or_else(|| tag_attribute(tag, "id"));
-        let Some((name_offset, name)) =
-            name.filter(|(_, name)| !name.is_empty() && !looks_sensitive(name))
-        else {
-            continue;
-        };
-        let prefix = regions.last().map_or(builder.path(), |(_, name)| name);
-        let id = builder.add_symbol(
-            SymbolKind::Resource,
-            name,
-            format!("{prefix}::{name}"),
-            name_offset,
-            name_offset + name.len(),
-            SymbolOptions {
-                body_search_text: format!("bg3 resource {name}"),
-                exported: regions.len() == 1,
-                visibility: (regions.len() == 1).then_some(Visibility::Public),
-                parent: regions.last().and_then(|(id, _)| id.clone()),
-                ..SymbolOptions::default()
+        add_bg3_object(
+            builder,
+            Bg3ObjectInput {
+                regions: &regions,
+                tag,
+                fields: bg3_object_fields(&tags, index, tag),
             },
         )?;
-        for (field, (offset, value)) in fields {
-            if matches!(field.as_str(), "NameFS" | "DisplayName" | "Name") {
-                continue;
-            }
-            for token in bg3_reference_tokens(value) {
-                let relative = value.find(token).unwrap_or(0);
-                builder.add_reference(
-                    Some(id.clone()),
-                    token,
-                    ReferenceKind::References,
-                    offset + relative,
-                    offset + relative + token.len(),
-                )?;
-            }
+    }
+    Ok(())
+}
+
+type Bg3Region = (Option<SymbolId>, String);
+
+fn scan_bg3_region(
+    builder: &mut CustomBuilder<'_, '_>,
+    regions: &mut Vec<Bg3Region>,
+    tag: MarkupTag<'_>,
+) -> Result<bool, ExtractError> {
+    if !tag_name_eq(tag, "region") {
+        return Ok(false);
+    }
+    if tag.closing {
+        if regions.len() > 1 {
+            regions.pop();
+        }
+        return Ok(true);
+    }
+    if let Some((offset, name)) = tag_attribute(tag, "id") {
+        let parent = regions.last().and_then(|(id, _)| id.clone());
+        let prefix = regions.last().map_or(builder.path(), |(_, name)| name);
+        let qualified = format!("{prefix}::{name}");
+        let id = builder.add_symbol(
+            CustomSymbolInput::new(SymbolKind::Namespace, name, qualified.clone())
+                .at(offset, offset + name.len())
+                .with_options(SymbolOptions {
+                    body_search_text: format!("bg3 region {name}"),
+                    parent,
+                    ..SymbolOptions::default()
+                }),
+        )?;
+        if !tag.self_closing {
+            regions.push((Some(id), qualified));
+        }
+    }
+    Ok(true)
+}
+
+fn scan_bg3_content(
+    builder: &mut CustomBuilder<'_, '_>,
+    regions: &[Bg3Region],
+    tag: MarkupTag<'_>,
+) -> Result<bool, ExtractError> {
+    if !tag_name_eq(tag, "content") || tag.closing {
+        return Ok(false);
+    }
+    let Some((offset, handle)) = tag_attribute(tag, "contentuid") else {
+        return Ok(false);
+    };
+    builder.add_symbol(
+        CustomSymbolInput::new(SymbolKind::Resource, handle, handle.to_owned())
+            .at(offset, offset + handle.len())
+            .with_options(SymbolOptions {
+                body_search_text: format!("localized content {handle}"),
+                exported: true,
+                visibility: Some(Visibility::Public),
+                parent: regions.last().and_then(|(id, _)| id.clone()),
+                ..SymbolOptions::default()
+            }),
+    )?;
+    Ok(true)
+}
+
+fn bg3_object_fields<'source>(
+    tags: &[MarkupTag<'source>],
+    index: usize,
+    tag: MarkupTag<'source>,
+) -> BTreeMap<String, (usize, &'source str)> {
+    let close = find_matching_close(tags, index).map_or(tag.end, |(_, close_start)| close_start);
+    let mut fields = BTreeMap::new();
+    for field in tags
+        .iter()
+        .copied()
+        .skip(index + 1)
+        .take_while(|candidate| candidate.start < close)
+    {
+        if field.closing || !matches_ignore_ascii_case(field.name, &["attribute", "field"]) {
+            continue;
+        }
+        let key = tag_attribute(
+            field,
+            if tag_name_eq(field, "field") {
+                "name"
+            } else {
+                "id"
+            },
+        );
+        let value = tag_attribute(field, "value").or_else(|| tag_attribute(field, "handle"));
+        if let (Some((_, key)), Some((offset, value))) = (key, value) {
+            fields.insert(key.to_owned(), (offset, value));
+        }
+    }
+    fields
+}
+
+struct Bg3ObjectInput<'source, 'regions> {
+    regions: &'regions [Bg3Region],
+    tag: MarkupTag<'source>,
+    fields: BTreeMap<String, (usize, &'source str)>,
+}
+
+fn add_bg3_object(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: Bg3ObjectInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    let name = ["NameFS", "DisplayName", "Name", "UUID"]
+        .into_iter()
+        .find_map(|key| input.fields.get(key).copied())
+        .or_else(|| tag_attribute(input.tag, "id"));
+    let Some((name_offset, name)) =
+        name.filter(|(_, name)| !name.is_empty() && !looks_sensitive(name))
+    else {
+        return Ok(());
+    };
+    let prefix = input
+        .regions
+        .last()
+        .map_or(builder.path(), |(_, name)| name);
+    let top_level = input.regions.len() == 1;
+    let id = builder.add_symbol(
+        CustomSymbolInput::new(SymbolKind::Resource, name, format!("{prefix}::{name}"))
+            .at(name_offset, name_offset + name.len())
+            .with_options(SymbolOptions {
+                body_search_text: format!("bg3 resource {name}"),
+                exported: top_level,
+                visibility: top_level.then_some(Visibility::Public),
+                parent: input.regions.last().and_then(|(id, _)| id.clone()),
+                ..SymbolOptions::default()
+            }),
+    )?;
+    for (field, (offset, value)) in input.fields {
+        if matches!(field.as_str(), "NameFS" | "DisplayName" | "Name") {
+            continue;
+        }
+        for token in bg3_reference_tokens(value) {
+            let relative = value.find(token).unwrap_or(0);
+            builder.add_reference(
+                CustomReferenceInput::new(Some(id.clone()), token, ReferenceKind::References)
+                    .at(offset + relative, offset + relative + token.len()),
+            )?;
         }
     }
     Ok(())

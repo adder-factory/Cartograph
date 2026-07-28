@@ -1,6 +1,12 @@
 use cartograph_domain::SourceLanguage;
 
-use crate::{ExtractError, framework::FrameworkBuilder};
+use crate::{
+    ExtractError,
+    framework::{
+        DelimiterInput, FrameworkBuilder, FrameworkRouteInput,
+        javascript_identifier_at as identifier_at, matching_delimiter, skip_ascii_whitespace,
+    },
+};
 
 const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
@@ -31,7 +37,8 @@ pub(crate) fn scan(
             cursor = call + "Bun.serve".len();
             continue;
         }
-        let Some(close_paren) = matching_delimiter(source, open_paren, b'(', b')') else {
+        let Some(close_paren) = matching_delimiter(DelimiterInput::parentheses(source, open_paren))
+        else {
             cursor = open_paren + 1;
             continue;
         };
@@ -40,7 +47,8 @@ pub(crate) fn scan(
             cursor = close_paren + 1;
             continue;
         }
-        let Some(config_close) = matching_delimiter(source, config_open, b'{', b'}') else {
+        let Some(config_close) = matching_delimiter(DelimiterInput::braces(source, config_open))
+        else {
             cursor = close_paren + 1;
             continue;
         };
@@ -49,10 +57,18 @@ pub(crate) fn scan(
             continue;
         }
         if let Some(routes_open) = top_level_routes_object(source, config_open + 1, config_close)
-            && let Some(routes_close) = matching_delimiter(source, routes_open, b'{', b'}')
+            && let Some(routes_close) =
+                matching_delimiter(DelimiterInput::braces(source, routes_open))
             && routes_close <= config_close
         {
-            scan_route_entries(builder, source, routes_open + 1, routes_close)?;
+            scan_route_entries(
+                builder,
+                source,
+                ScanRange {
+                    start: routes_open + 1,
+                    end: routes_close,
+                },
+            )?;
         }
         cursor = close_paren + 1;
     }
@@ -67,53 +83,69 @@ fn top_level_routes_object(source: &str, start: usize, end: usize) -> Option<usi
     let mut escaped = false;
     while cursor < end {
         let byte = bytes[cursor];
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
+        if advance_route_quote(byte, &mut quote, &mut escaped) {
             cursor += 1;
             continue;
         }
-        match byte {
-            b'\'' | b'"' | b'`' => {
-                quote = Some(byte);
-                cursor += 1;
-            }
-            b'{' | b'[' | b'(' => {
-                depth = depth.saturating_add(1);
-                cursor += 1;
-            }
-            b'}' | b']' | b')' => {
-                depth = depth.saturating_sub(1);
-                cursor += 1;
-            }
-            byte if depth == 0 && (byte == b'_' || byte.is_ascii_alphabetic()) => {
-                let (name_end, name) = identifier_at(source, cursor)?;
-                let colon = skip_ascii_whitespace(source, name_end);
-                if name == "routes" && bytes.get(colon) == Some(&b':') {
-                    let value = skip_ascii_whitespace(source, colon + 1);
-                    if bytes.get(value) == Some(&b'{') {
-                        return Some(value);
-                    }
+        if let Some(next_depth) = route_delimiter_depth(byte, depth) {
+            depth = next_depth;
+            cursor += 1;
+            continue;
+        }
+        if depth == 0 && (byte == b'_' || byte.is_ascii_alphabetic()) {
+            let (name_end, name) = identifier_at(source, cursor)?;
+            let colon = skip_ascii_whitespace(source, name_end);
+            if name == "routes" && bytes.get(colon) == Some(&b':') {
+                let value = skip_ascii_whitespace(source, colon + 1);
+                if bytes.get(value) == Some(&b'{') {
+                    return Some(value);
                 }
-                cursor = name_end;
             }
-            _ => cursor += 1,
+            cursor = name_end;
+        } else {
+            cursor += 1;
         }
     }
     None
 }
 
+fn advance_route_quote(byte: u8, quote: &mut Option<u8>, escaped: &mut bool) -> bool {
+    if let Some(active_quote) = *quote {
+        if *escaped {
+            *escaped = false;
+        } else if byte == b'\\' {
+            *escaped = true;
+        } else if byte == active_quote {
+            *quote = None;
+        }
+        return true;
+    }
+    if matches!(byte, b'\'' | b'"' | b'`') {
+        *quote = Some(byte);
+        return true;
+    }
+    false
+}
+
+const fn route_delimiter_depth(byte: u8, depth: usize) -> Option<usize> {
+    match byte {
+        b'{' | b'[' | b'(' => Some(depth.saturating_add(1)),
+        b'}' | b']' | b')' => Some(depth.saturating_sub(1)),
+        _ => None,
+    }
+}
+
+struct ScanRange {
+    start: usize,
+    end: usize,
+}
+
 fn scan_route_entries(
     builder: &mut FrameworkBuilder<'_, '_>,
     source: &str,
-    start: usize,
-    end: usize,
+    range: ScanRange,
 ) -> Result<(), ExtractError> {
+    let ScanRange { start, end } = range;
     let bytes = source.as_bytes();
     let mut cursor = start;
     let mut depth = 0_usize;
@@ -144,30 +176,54 @@ fn scan_route_entries(
         }
         let value = skip_ascii_whitespace(source, colon + 1);
         if bytes.get(value) == Some(&b'{') {
-            let Some(map_close) = matching_delimiter(source, value, b'{', b'}') else {
+            let Some(map_close) = matching_delimiter(DelimiterInput::braces(source, value)) else {
                 return Ok(());
             };
             if map_close > end {
                 return Ok(());
             }
-            scan_method_map(builder, source, &path, value + 1, map_close)?;
+            scan_method_map(
+                builder,
+                source,
+                MethodMapInput {
+                    path: &path,
+                    range: ScanRange {
+                        start: value + 1,
+                        end: map_close,
+                    },
+                },
+            )?;
             cursor = map_close + 1;
         } else {
             let handler = direct_handler(source, value, end);
-            builder.add_route("ANY", path.value, path.start, path.end, false, handler)?;
+            builder.add_route(FrameworkRouteInput {
+                method: "ANY",
+                path: path.value,
+                start: path.start,
+                end: path.end,
+                command: false,
+                handler,
+            })?;
             cursor = value.saturating_add(1);
         }
     }
     Ok(())
 }
 
+struct MethodMapInput<'path, 'source> {
+    path: &'path Quoted<'source>,
+    range: ScanRange,
+}
+
 fn scan_method_map(
     builder: &mut FrameworkBuilder<'_, '_>,
     source: &str,
-    path: &Quoted<'_>,
-    start: usize,
-    end: usize,
+    input: MethodMapInput<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let MethodMapInput {
+        path,
+        range: ScanRange { start, end },
+    } = input;
     let bytes = source.as_bytes();
     let first = skip_ascii_whitespace(source, start);
     let Some((first_end, first_method)) = identifier_at(source, first) else {
@@ -198,7 +254,14 @@ fn scan_method_map(
                 if METHODS.contains(&method) && bytes.get(colon) == Some(&b':') {
                     let value = skip_ascii_whitespace(source, colon + 1);
                     let handler = direct_handler(source, value, end);
-                    builder.add_route(method, path.value, path.start, path.end, false, handler)?;
+                    builder.add_route(FrameworkRouteInput {
+                        method,
+                        path: path.value,
+                        start: path.start,
+                        end: path.end,
+                        command: false,
+                        handler,
+                    })?;
                 }
                 cursor = method_end;
             }
@@ -253,60 +316,4 @@ fn quoted_at(value: &str, quote_start: usize, limit: usize) -> Option<Quoted<'_>
 
 fn identifier_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
-}
-
-fn identifier_at(value: &str, start: usize) -> Option<(usize, &str)> {
-    let first = *value.as_bytes().get(start)?;
-    if !(first == b'_' || first == b'$' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut end = start + 1;
-    while value
-        .as_bytes()
-        .get(end)
-        .is_some_and(|byte| identifier_byte(*byte))
-    {
-        end += 1;
-    }
-    Some((end, &value[start..end]))
-}
-
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Option<usize> {
-    let mut depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in value.as_bytes().iter().copied().enumerate().skip(open) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`') {
-            quote = Some(byte);
-        } else if byte == opening {
-            depth = depth.saturating_add(1);
-        } else if byte == closing {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
 }

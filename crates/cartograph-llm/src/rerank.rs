@@ -293,6 +293,8 @@ mod tests {
     const FIXTURE_REQUEST_BYTES: usize = 64 * 1_024;
     const FIXTURE_REQUEST_CHUNK_BYTES: usize = 4 * 1_024;
     const HTTP_HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
+    const RERANK_CONFIG: &[u8] = br#"{"version":2,"llm":{"enabled":true,"rerankerLlm":{"provider":"openai-compat","endpoint":"http://127.0.0.1:8080/v1","model":"fixture-reranker","apiKey":"private-fixture","timeoutMs":3210}}}"#;
+    const NORMALIZED_RERANK_ENDPOINT: &str = "http://127.0.0.1:8080/v1/rerank";
 
     #[test]
     fn response_is_input_ordered_and_raw_logits_are_normalized() {
@@ -328,18 +330,12 @@ mod tests {
                 .unwrap_or_else(|error| panic!("absent reranker failed: {error}"))
                 .is_none()
         );
-        std::fs::write(
-            root.path().join(".cartograph/config.json"),
-            br#"{"version":2,"llm":{"enabled":true,"rerankerLlm":{"provider":"openai-compat","endpoint":"http://127.0.0.1:8080/v1","model":"fixture-reranker","apiKey":"private-fixture","timeoutMs":3210}}}"#,
-        )
-        .unwrap_or_else(|error| panic!("reranker config write failed: {error}"));
+        std::fs::write(root.path().join(".cartograph/config.json"), RERANK_CONFIG)
+            .unwrap_or_else(|error| panic!("reranker config write failed: {error}"));
         let settings = RerankSettings::try_from_project(root.path())
             .unwrap_or_else(|error| panic!("reranker config failed: {error}"))
             .unwrap_or_else(|| panic!("reranker config disappeared"));
-        assert_eq!(
-            settings.endpoint.as_str(),
-            "http://127.0.0.1:8080/v1/rerank"
-        );
+        assert_eq!(settings.endpoint.as_str(), NORMALIZED_RERANK_ENDPOINT);
         assert_eq!(settings.model, "fixture-reranker");
         assert_eq!(settings.timeout, Duration::from_millis(3210));
         let rendered = format!("{settings:?}");

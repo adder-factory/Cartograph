@@ -4,7 +4,7 @@ use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CartographDatabase, GenerationContents, GenerationFacts, GenerationValidationLimits,
     LeaseOwner, LeaseRequest, LeaseTarget, NewGeneration, NewProject, ProjectPurgeError,
-    SearchDocumentInput, validate_generation_facts,
+    ProjectPurgeRequest, SearchDocumentInput, validate_generation_facts,
 };
 use cartograph_domain::{ContentDigest, DocumentId, DocumentKind, ProjectOperation};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -118,7 +118,14 @@ async fn project_purge_blocks_live_work_and_drops_physical_search_relations() {
         .await
         .unwrap_or_else(|error| panic!("purge blocker lease failed: {error}"));
     assert_eq!(
-        database.purge_project(&project, 10, 1_000, TIMEOUT).await,
+        database
+            .purge_project(ProjectPurgeRequest {
+                project_id: &project,
+                maximum_generations: 10,
+                maximum_cascade_rows: 1_000,
+                statement_timeout: TIMEOUT,
+            })
+            .await,
         Err(ProjectPurgeError::LiveLeases { count: 1 })
     );
     database
@@ -127,7 +134,12 @@ async fn project_purge_blocks_live_work_and_drops_physical_search_relations() {
         .unwrap_or_else(|error| panic!("purge blocker release failed: {error}"));
 
     let report = database
-        .purge_project(&project, 10, 1_000, TIMEOUT)
+        .purge_project(ProjectPurgeRequest {
+            project_id: &project,
+            maximum_generations: 10,
+            maximum_cascade_rows: 1_000,
+            statement_timeout: TIMEOUT,
+        })
         .await
         .unwrap_or_else(|error| panic!("project purge failed: {error}"));
     assert_eq!(report.generations_removed, 1);

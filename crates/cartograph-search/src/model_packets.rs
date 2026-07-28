@@ -120,17 +120,7 @@ pub struct WorkingTreeEvidenceInput {
 impl WorkingTreeEvidence {
     /// Validate one live excerpt before it crosses the agent-facing boundary.
     pub fn new(input: WorkingTreeEvidenceInput) -> Result<Self, RetrievalError> {
-        if input.start_line == 0
-            || input.end_line < input.start_line
-            || input.excerpt.is_empty()
-            || input.excerpt.len() > WORKING_TREE_OVERLAY_MAXIMUM_EXCERPT_BYTES
-            || input.matched_terms.is_empty()
-            || input.matched_terms.len() > WORKING_TREE_OVERLAY_MAXIMUM_TERMS
-            || input
-                .matched_terms
-                .iter()
-                .any(|term| term.is_empty() || term.len() > WORKING_TREE_OVERLAY_MAXIMUM_TERM_BYTES)
-        {
+        if invalid_working_tree_evidence(&input) {
             return Err(invalid("working_tree_evidence"));
         }
         Ok(Self {
@@ -155,6 +145,29 @@ impl WorkingTreeEvidence {
     pub fn match_count(&self) -> usize {
         self.matched_terms.len()
     }
+}
+
+fn invalid_working_tree_evidence(input: &WorkingTreeEvidenceInput) -> bool {
+    invalid_working_tree_span(input)
+        || invalid_working_tree_excerpt(&input.excerpt)
+        || invalid_working_tree_terms(&input.matched_terms)
+}
+
+fn invalid_working_tree_span(input: &WorkingTreeEvidenceInput) -> bool {
+    input.start_line == 0 || input.end_line < input.start_line
+}
+
+fn invalid_working_tree_excerpt(excerpt: &str) -> bool {
+    excerpt.is_empty() || excerpt.len() > WORKING_TREE_OVERLAY_MAXIMUM_EXCERPT_BYTES
+}
+
+fn invalid_working_tree_terms(terms: &[String]) -> bool {
+    if terms.is_empty() || terms.len() > WORKING_TREE_OVERLAY_MAXIMUM_TERMS {
+        return true;
+    }
+    terms
+        .iter()
+        .any(|term| term.is_empty() || term.len() > WORKING_TREE_OVERLAY_MAXIMUM_TERM_BYTES)
 }
 
 /// Live working-tree evidence kept separate from immutable-generation evidence.
@@ -286,14 +299,23 @@ pub struct EditCandidate {
     qualified_names: Vec<String>,
 }
 
+pub(crate) struct EditCandidateInput {
+    pub(crate) path: String,
+    pub(crate) basis: EditCandidateBasis,
+    pub(crate) matched_term_count: u16,
+    pub(crate) best_rank: Option<u16>,
+    pub(crate) qualified_names: Vec<String>,
+}
+
 impl EditCandidate {
-    pub(crate) fn new(
-        path: String,
-        basis: EditCandidateBasis,
-        matched_term_count: u16,
-        best_rank: Option<u16>,
-        qualified_names: Vec<String>,
-    ) -> Self {
+    pub(crate) fn new(input: EditCandidateInput) -> Self {
+        let EditCandidateInput {
+            path,
+            basis,
+            matched_term_count,
+            best_rank,
+            qualified_names,
+        } = input;
         Self {
             path,
             basis,

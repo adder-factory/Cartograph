@@ -9,7 +9,7 @@ use crate::{
     model::{
         CartographScipEdge, MAXIMUM_SCIP_BYTES, MAXIMUM_STRING_BYTES, SYMBOL_ROLE_DEFINITION,
         ScipDocument, ScipError, ScipIndex, ScipOccurrence, ScipRelationship,
-        ScipSymbolInformation,
+        ScipSymbolInformation, ScipSymbolKind,
     },
     symbol::{
         Descriptor, DescriptorSuffix, ScipPackage, append_meta_descriptor, build_symbol_string,
@@ -18,6 +18,27 @@ use crate::{
 
 const SCIP_SCHEME: &str = "cartograph";
 const SCIP_MANAGER: &str = "cartograph";
+const CARTOGRAPH_SCIP_KINDS: [(&[&str], ScipSymbolKind); 19] = [
+    (&["class", "component"], ScipSymbolKind::Class),
+    (&["constant"], ScipSymbolKind::Constant),
+    (&["enum"], ScipSymbolKind::Enum),
+    (&["enum_member"], ScipSymbolKind::EnumMember),
+    (&["field"], ScipSymbolKind::Field),
+    (&["file"], ScipSymbolKind::File),
+    (&["function"], ScipSymbolKind::Function),
+    (&["interface"], ScipSymbolKind::Interface),
+    (&["method", "route"], ScipSymbolKind::Method),
+    (&["module"], ScipSymbolKind::Module),
+    (&["namespace"], ScipSymbolKind::Namespace),
+    (&["resource"], ScipSymbolKind::Object),
+    (&["parameter"], ScipSymbolKind::Parameter),
+    (&["property"], ScipSymbolKind::Property),
+    (&["protocol"], ScipSymbolKind::Protocol),
+    (&["struct", "table"], ScipSymbolKind::Struct),
+    (&["trait"], ScipSymbolKind::Trait),
+    (&["type_alias"], ScipSymbolKind::TypeAlias),
+    (&["variable"], ScipSymbolKind::Variable),
+];
 
 /// Validated identity and tool metadata for a SCIP export.
 pub struct ScipExportOptions<'a> {
@@ -27,14 +48,23 @@ pub struct ScipExportOptions<'a> {
     project_root_uri: &'a str,
 }
 
+/// Project and tool metadata attached to one deterministic SCIP export.
+pub struct ScipExportOptionsInput<'a> {
+    pub project_name: &'a str,
+    pub project_version: &'a str,
+    pub tool_version: &'a str,
+    pub project_root_uri: &'a str,
+}
+
 impl<'a> ScipExportOptions<'a> {
     /// Create metadata without retaining source paths or database details.
-    pub fn new(
-        project_name: &'a str,
-        project_version: &'a str,
-        tool_version: &'a str,
-        project_root_uri: &'a str,
-    ) -> Result<Self, ScipError> {
+    pub fn new(input: ScipExportOptionsInput<'a>) -> Result<Self, ScipError> {
+        let ScipExportOptionsInput {
+            project_name,
+            project_version,
+            tool_version,
+            project_root_uri,
+        } = input;
         for value in [
             project_name,
             project_version,
@@ -151,124 +181,10 @@ where
         name: options.project_name,
         version: options.project_version,
     };
-    let file_by_id = snapshot
-        .files
-        .iter()
-        .map(|file| (file.file_id.clone(), file))
-        .collect::<BTreeMap<_, _>>();
-    let (symbol_by_id, disambiguated_symbols) =
-        assign_symbols(&snapshot.symbols, &file_by_id, &package)?;
-    let symbol_record_by_id = snapshot
-        .symbols
-        .iter()
-        .map(|symbol| (symbol.symbol_id.clone(), symbol))
-        .collect::<BTreeMap<_, _>>();
-    let (enclosing_by_id, relationships_by_id, exact_edges_by_id) =
-        graph_metadata(&snapshot.edges, &symbol_by_id);
-    let mut documents = snapshot
-        .files
-        .iter()
-        .map(|file| {
-            (
-                file.file_id.clone(),
-                ScipDocument {
-                    relative_path: file.path.clone(),
-                    language: file.language.clone(),
-                    occurrences: Vec::new(),
-                    symbols: Vec::new(),
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut source_cache = BTreeMap::<FileId, Vec<u8>>::new();
-
-    for symbol in &snapshot.symbols {
-        let Some(scip_symbol) = symbol_by_id.get(&symbol.symbol_id) else {
-            return Err(ScipError::InvalidData);
-        };
-        let Some(file) = file_by_id.get(&symbol.file_id) else {
-            return Err(ScipError::InvalidData);
-        };
-        let source = source_for_file(&mut source_cache, file, &mut read_source)?;
-        let Some(document) = documents.get_mut(&symbol.file_id) else {
-            return Err(ScipError::InvalidData);
-        };
-        document.symbols.push(ScipSymbolInformation {
-            symbol: scip_symbol.clone(),
-            display_name: symbol_display_name(symbol, &file.path),
-            kind: scip_kind(&symbol.symbol_kind),
-            documentation: bounded_documentation(&symbol.natural_text),
-            relationships: relationships_by_id
-                .get(&symbol.symbol_id)
-                .cloned()
-                .unwrap_or_default(),
-            enclosing_symbol: enclosing_by_id
-                .get(&symbol.symbol_id)
-                .cloned()
-                .unwrap_or_default(),
-            cartograph_edges: exact_edges_by_id
-                .get(&symbol.symbol_id)
-                .cloned()
-                .unwrap_or_default(),
-        });
-        if symbol.symbol_kind != "file" {
-            document.occurrences.push(ScipOccurrence {
-                range: symbol_range(symbol, Some(source)),
-                symbol: scip_symbol.clone(),
-                symbol_roles: SYMBOL_ROLE_DEFINITION,
-                enclosing_range: symbol_range(symbol, Some(source)),
-            });
-        }
-    }
-
-    for reference in &snapshot.references {
-        let Some(target_id) = reference.target_symbol_id.as_ref() else {
-            continue;
-        };
-        let Some(target_symbol) = symbol_by_id.get(target_id) else {
-            continue;
-        };
-        let Some(file) = file_by_id.get(&reference.file_id) else {
-            return Err(ScipError::InvalidData);
-        };
-        let source = source_for_file(&mut source_cache, file, &mut read_source)?;
-        let Some(range) = byte_range_to_scip(source, reference.start_byte, reference.end_byte)
-        else {
-            continue;
-        };
-        let enclosing_range = reference
-            .owner_symbol_id
-            .as_ref()
-            .and_then(|owner| symbol_record_by_id.get(owner))
-            .map(|owner| symbol_range(owner, Some(source)))
-            .unwrap_or_default();
-        let Some(document) = documents.get_mut(&reference.file_id) else {
-            return Err(ScipError::InvalidData);
-        };
-        document.occurrences.push(ScipOccurrence {
-            range,
-            symbol: target_symbol.clone(),
-            symbol_roles: 0,
-            enclosing_range,
-        });
-    }
-
-    let mut documents = documents
-        .into_values()
-        .filter(|document| !document.symbols.is_empty() || !document.occurrences.is_empty())
-        .collect::<Vec<_>>();
-    for document in &mut documents {
-        document
-            .symbols
-            .sort_by(|left, right| left.symbol.cmp(&right.symbol));
-        document.occurrences.sort_by(|left, right| {
-            left.range
-                .cmp(&right.range)
-                .then_with(|| left.symbol.cmp(&right.symbol))
-                .then_with(|| left.symbol_roles.cmp(&right.symbol_roles))
-        });
-    }
-    documents.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut assembly = ScipExportAssembly::new(snapshot, &package)?;
+    assembly.add_symbols(snapshot, &mut read_source)?;
+    assembly.add_references(snapshot, &mut read_source)?;
+    let (documents, disambiguated_symbols) = assembly.finish();
     let index = ScipIndex {
         tool_name: "cartograph".to_owned(),
         tool_version: options.tool_version.to_owned(),
@@ -293,6 +209,181 @@ where
         bytes,
         stats,
     })
+}
+
+struct ScipExportAssembly<'snapshot> {
+    file_by_id: BTreeMap<FileId, &'snapshot InterchangeFile>,
+    symbol_by_id: BTreeMap<SymbolId, String>,
+    symbol_record_by_id: BTreeMap<SymbolId, &'snapshot InterchangeSymbol>,
+    enclosing_by_id: BTreeMap<SymbolId, String>,
+    relationships_by_id: BTreeMap<SymbolId, Vec<ScipRelationship>>,
+    exact_edges_by_id: BTreeMap<SymbolId, Vec<CartographScipEdge>>,
+    documents: BTreeMap<FileId, ScipDocument>,
+    source_cache: BTreeMap<FileId, Vec<u8>>,
+    disambiguated_symbols: u64,
+}
+
+impl<'snapshot> ScipExportAssembly<'snapshot> {
+    fn new(
+        snapshot: &'snapshot InterchangeSnapshot,
+        package: &ScipPackage<'_>,
+    ) -> Result<Self, ScipError> {
+        let file_by_id = snapshot
+            .files
+            .iter()
+            .map(|file| (file.file_id.clone(), file))
+            .collect::<BTreeMap<_, _>>();
+        let (symbol_by_id, disambiguated_symbols) =
+            assign_symbols(&snapshot.symbols, &file_by_id, package)?;
+        let symbol_record_by_id = snapshot
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.symbol_id.clone(), symbol))
+            .collect::<BTreeMap<_, _>>();
+        let (enclosing_by_id, relationships_by_id, exact_edges_by_id) =
+            graph_metadata(&snapshot.edges, &symbol_by_id);
+        let documents = snapshot
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.file_id.clone(),
+                    ScipDocument {
+                        relative_path: file.path.clone(),
+                        language: file.language.clone(),
+                        occurrences: Vec::new(),
+                        symbols: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            file_by_id,
+            symbol_by_id,
+            symbol_record_by_id,
+            enclosing_by_id,
+            relationships_by_id,
+            exact_edges_by_id,
+            documents,
+            source_cache: BTreeMap::new(),
+            disambiguated_symbols,
+        })
+    }
+
+    fn add_symbols<ReadSource>(
+        &mut self,
+        snapshot: &InterchangeSnapshot,
+        read_source: &mut ReadSource,
+    ) -> Result<(), ScipError>
+    where
+        ReadSource: FnMut(&str) -> Option<Vec<u8>>,
+    {
+        for symbol in &snapshot.symbols {
+            let Some(scip_symbol) = self.symbol_by_id.get(&symbol.symbol_id) else {
+                return Err(ScipError::InvalidData);
+            };
+            let Some(file) = self.file_by_id.get(&symbol.file_id) else {
+                return Err(ScipError::InvalidData);
+            };
+            let source = source_for_file(&mut self.source_cache, file, read_source)?;
+            let Some(document) = self.documents.get_mut(&symbol.file_id) else {
+                return Err(ScipError::InvalidData);
+            };
+            document.symbols.push(ScipSymbolInformation {
+                symbol: scip_symbol.clone(),
+                display_name: symbol_display_name(symbol, &file.path),
+                kind: scip_kind(&symbol.symbol_kind),
+                documentation: bounded_documentation(&symbol.natural_text),
+                relationships: self
+                    .relationships_by_id
+                    .get(&symbol.symbol_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                enclosing_symbol: self
+                    .enclosing_by_id
+                    .get(&symbol.symbol_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                cartograph_edges: self
+                    .exact_edges_by_id
+                    .get(&symbol.symbol_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+            if symbol.symbol_kind != "file" {
+                document.occurrences.push(ScipOccurrence {
+                    range: symbol_range(symbol, Some(source)),
+                    symbol: scip_symbol.clone(),
+                    symbol_roles: SYMBOL_ROLE_DEFINITION,
+                    enclosing_range: symbol_range(symbol, Some(source)),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn add_references<ReadSource>(
+        &mut self,
+        snapshot: &InterchangeSnapshot,
+        read_source: &mut ReadSource,
+    ) -> Result<(), ScipError>
+    where
+        ReadSource: FnMut(&str) -> Option<Vec<u8>>,
+    {
+        for reference in &snapshot.references {
+            let Some(target_id) = reference.target_symbol_id.as_ref() else {
+                continue;
+            };
+            let Some(target_symbol) = self.symbol_by_id.get(target_id) else {
+                continue;
+            };
+            let Some(file) = self.file_by_id.get(&reference.file_id) else {
+                return Err(ScipError::InvalidData);
+            };
+            let source = source_for_file(&mut self.source_cache, file, read_source)?;
+            let Some(range) = byte_range_to_scip(source, reference.start_byte, reference.end_byte)
+            else {
+                continue;
+            };
+            let enclosing_range = reference
+                .owner_symbol_id
+                .as_ref()
+                .and_then(|owner| self.symbol_record_by_id.get(owner))
+                .map(|owner| symbol_range(owner, Some(source)))
+                .unwrap_or_default();
+            let Some(document) = self.documents.get_mut(&reference.file_id) else {
+                return Err(ScipError::InvalidData);
+            };
+            document.occurrences.push(ScipOccurrence {
+                range,
+                symbol: target_symbol.clone(),
+                symbol_roles: 0,
+                enclosing_range,
+            });
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> (Vec<ScipDocument>, u64) {
+        let mut documents = self
+            .documents
+            .into_values()
+            .filter(|document| !document.symbols.is_empty() || !document.occurrences.is_empty())
+            .collect::<Vec<_>>();
+        for document in &mut documents {
+            document
+                .symbols
+                .sort_by(|left, right| left.symbol.cmp(&right.symbol));
+            document.occurrences.sort_by(|left, right| {
+                left.range
+                    .cmp(&right.range)
+                    .then_with(|| left.symbol.cmp(&right.symbol))
+                    .then_with(|| left.symbol_roles.cmp(&right.symbol_roles))
+            });
+        }
+        documents.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        (documents, self.disambiguated_symbols)
+    }
 }
 
 type GraphMetadata = (
@@ -464,28 +555,10 @@ fn descriptor_suffix(kind: &str) -> DescriptorSuffix {
 }
 
 fn scip_kind(kind: &str) -> u32 {
-    match kind {
-        "class" | "component" => 7,
-        "constant" => 8,
-        "enum" => 11,
-        "enum_member" => 12,
-        "field" => 15,
-        "file" => 16,
-        "function" => 17,
-        "interface" => 21,
-        "method" | "route" => 26,
-        "module" => 29,
-        "namespace" => 30,
-        "resource" => 33,
-        "parameter" => 37,
-        "property" => 41,
-        "protocol" => 42,
-        "struct" | "table" => 49,
-        "trait" => 53,
-        "type_alias" => 55,
-        "variable" => 61,
-        _ => 0,
-    }
+    CARTOGRAPH_SCIP_KINDS
+        .iter()
+        .find(|(cartograph_kinds, _)| cartograph_kinds.contains(&kind))
+        .map_or(ScipSymbolKind::Unspecified, |(_, scip_kind)| *scip_kind) as u32
 }
 
 fn source_for_file<'a, ReadSource>(
@@ -688,8 +761,13 @@ mod tests {
                 site_count: 1,
             }],
         };
-        let options = ScipExportOptions::new("demo", "1", "2.0.0", "cartograph://demo")
-            .unwrap_or_else(|error| panic!("options failed: {error}"));
+        let options = ScipExportOptions::new(ScipExportOptionsInput {
+            project_name: "demo",
+            project_version: "1",
+            tool_version: "2.0.0",
+            project_root_uri: "cartograph://demo",
+        })
+        .unwrap_or_else(|error| panic!("options failed: {error}"));
         let exported = export_snapshot(&snapshot, &options, |_| Some(source.clone()))
             .unwrap_or_else(|error| panic!("export failed: {error}"));
         assert_eq!(exported.stats().exact_typed_edges(), 1);

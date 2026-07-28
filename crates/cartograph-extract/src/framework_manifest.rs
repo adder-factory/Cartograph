@@ -5,13 +5,33 @@ use toml_edit::{Document, Item, Table, Value};
 
 use crate::{
     ExtractError,
-    framework::{FrameworkBuilder, LandmarkInput},
+    framework::{FrameworkBuilder, FrameworkReferenceInput, LandmarkInput},
 };
 
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MANIFEST_ENTRIES: usize = 4_096;
 const MAX_JSON_NESTING: usize = 64;
 const JSON_CANCEL_BYTES: usize = 4_096;
+
+struct CargoDependencyScan<'manifest> {
+    owner: Option<&'manifest SymbolId>,
+    source: &'manifest str,
+    section: &'manifest str,
+    table: &'manifest Table,
+}
+
+struct ManifestSpanInput<'manifest> {
+    ecosystem: &'manifest str,
+    value: &'manifest str,
+    span: Range<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct JsonCompound {
+    opening: u8,
+    closing: u8,
+    depth: usize,
+}
 
 pub(crate) fn scan(
     builder: &mut FrameworkBuilder<'_, '_>,
@@ -49,7 +69,14 @@ fn scan_json_manifest(
     }
     let package_owner = if let Some((name, span)) = name.filter(|(name, _)| safe_package_name(name))
     {
-        add_package(builder, ecosystem, name, span)?
+        add_package(
+            builder,
+            ManifestSpanInput {
+                ecosystem,
+                value: name,
+                span,
+            },
+        )?
     } else {
         None
     };
@@ -81,17 +108,26 @@ fn scan_json_manifest(
             };
             add_dependency(
                 builder,
-                owner.as_ref(),
-                ecosystem,
-                section,
-                name,
-                None,
-                dependency.key_span,
+                DependencyInput {
+                    owner: owner.as_ref(),
+                    ecosystem,
+                    section,
+                    name,
+                    resolution_name: None,
+                    span: dependency.key_span,
+                },
             )?;
         }
     }
     for (pattern, span) in workspace_sections {
-        add_workspace_pattern(builder, ecosystem, pattern, span)?;
+        add_workspace_pattern(
+            builder,
+            ManifestSpanInput {
+                ecosystem,
+                value: pattern,
+                span,
+            },
+        )?;
     }
     Ok(())
 }
@@ -132,7 +168,14 @@ fn scan_cargo_manifest(
         return Ok(());
     }
     let package_owner = match (package_name, package_span) {
-        (Some(name), Some(span)) => add_package(builder, "cargo", name, span)?,
+        (Some(name), Some(span)) => add_package(
+            builder,
+            ManifestSpanInput {
+                ecosystem: "cargo",
+                value: name,
+                span,
+            },
+        )?,
         _ => None,
     };
     let workspace_owner = if workspace_members.is_empty() && workspace_excludes.is_empty() {
@@ -141,42 +184,111 @@ fn scan_cargo_manifest(
         add_workspace_owner(builder, "cargo", source)?
     };
     let owner = package_owner.or(workspace_owner);
+    let scan = CargoManifestScan {
+        source,
+        document: &document,
+        owner: owner.as_ref(),
+    };
+    scan_cargo_dependency_tables(builder, scan)?;
+    scan_cargo_target_dependencies(builder, scan)?;
+    add_cargo_workspace_entries(builder, workspace_members, workspace_excludes)?;
+    Ok(())
+}
 
+#[derive(Clone, Copy)]
+struct CargoManifestScan<'manifest, 'source> {
+    source: &'source str,
+    document: &'manifest Document<&'source str>,
+    owner: Option<&'manifest SymbolId>,
+}
+
+fn scan_cargo_dependency_tables(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    scan: CargoManifestScan<'_, '_>,
+) -> Result<(), ExtractError> {
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(table) = document.get(section).and_then(Item::as_table) {
-            scan_cargo_dependencies(builder, owner.as_ref(), source, section, table)?;
+        if let Some(table) = scan.document.get(section).and_then(Item::as_table) {
+            scan_cargo_dependencies(
+                builder,
+                CargoDependencyScan {
+                    owner: scan.owner,
+                    source: scan.source,
+                    section,
+                    table,
+                },
+            )?;
         }
     }
-    if let Some(workspace) = document.get("workspace").and_then(Item::as_table)
+    if let Some(workspace) = scan.document.get("workspace").and_then(Item::as_table)
         && let Some(table) = workspace.get("dependencies").and_then(Item::as_table)
     {
         scan_cargo_dependencies(
             builder,
-            owner.as_ref(),
-            source,
-            "workspace.dependencies",
-            table,
+            CargoDependencyScan {
+                owner: scan.owner,
+                source: scan.source,
+                section: "workspace.dependencies",
+                table,
+            },
         )?;
     }
-    if let Some(targets) = document.get("target").and_then(Item::as_table) {
-        for (target, target_item) in targets.iter().take(MAX_MANIFEST_ENTRIES) {
-            builder.check_cancelled()?;
-            let Some(target_table) = target_item.as_table() else {
-                continue;
-            };
-            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-                if let Some(table) = target_table.get(section).and_then(Item::as_table) {
-                    let scoped = format!("target.{target}.{section}");
-                    scan_cargo_dependencies(builder, owner.as_ref(), source, &scoped, table)?;
-                }
+    Ok(())
+}
+
+fn scan_cargo_target_dependencies(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    scan: CargoManifestScan<'_, '_>,
+) -> Result<(), ExtractError> {
+    let Some(targets) = scan.document.get("target").and_then(Item::as_table) else {
+        return Ok(());
+    };
+    for (target, target_item) in targets.iter().take(MAX_MANIFEST_ENTRIES) {
+        builder.check_cancelled()?;
+        let Some(target_table) = target_item.as_table() else {
+            continue;
+        };
+        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            if let Some(table) = target_table.get(section).and_then(Item::as_table) {
+                let scoped = format!("target.{target}.{section}");
+                scan_cargo_dependencies(
+                    builder,
+                    CargoDependencyScan {
+                        owner: scan.owner,
+                        source: scan.source,
+                        section: &scoped,
+                        table,
+                    },
+                )?;
             }
         }
     }
-    for (pattern, span) in workspace_members {
-        add_workspace_pattern(builder, "cargo", pattern, span)?;
+    Ok(())
+}
+
+fn add_cargo_workspace_entries(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    members: Vec<(&str, Range<usize>)>,
+    excludes: Vec<(&str, Range<usize>)>,
+) -> Result<(), ExtractError> {
+    for (pattern, span) in members {
+        add_workspace_pattern(
+            builder,
+            ManifestSpanInput {
+                ecosystem: "cargo",
+                value: pattern,
+                span,
+            },
+        )?;
     }
-    for (pattern, span) in workspace_excludes {
-        add_workspace_exclusion(builder, "cargo", pattern, span)?;
+    for (pattern, span) in excludes {
+        add_workspace_exclusion(
+            builder,
+            ManifestSpanInput {
+                ecosystem: "cargo",
+                value: pattern,
+                span,
+            },
+        )?;
     }
     Ok(())
 }
@@ -199,27 +311,35 @@ fn toml_string_array<'value>(
 
 fn scan_cargo_dependencies(
     builder: &mut FrameworkBuilder<'_, '_>,
-    owner: Option<&SymbolId>,
-    source: &str,
-    section: &str,
-    table: &Table,
+    input: CargoDependencyScan<'_>,
 ) -> Result<(), ExtractError> {
-    for (alias, item) in table.iter().take(MAX_MANIFEST_ENTRIES) {
+    for (alias, item) in input.table.iter().take(MAX_MANIFEST_ENTRIES) {
         builder.check_cancelled()?;
         if !safe_package_name(alias) {
             continue;
         }
-        let Some(key_span) = table
+        let Some(key_span) = input
+            .table
             .key(alias)
             .and_then(toml_edit::Key::span)
-            .and_then(|span| value_text_span(source, span, alias))
+            .and_then(|span| value_text_span(input.source, span, alias))
         else {
             continue;
         };
         let package = cargo_dependency_package(item)
             .filter(|name| safe_package_name(name))
             .filter(|name| *name != alias);
-        add_dependency(builder, owner, "cargo", section, alias, package, key_span)?;
+        add_dependency(
+            builder,
+            DependencyInput {
+                owner: input.owner,
+                ecosystem: "cargo",
+                section: input.section,
+                name: alias,
+                resolution_name: package,
+                span: key_span,
+            },
+        )?;
     }
     Ok(())
 }
@@ -237,18 +357,22 @@ fn cargo_dependency_package(item: &Item) -> Option<&str> {
 
 fn add_package(
     builder: &mut FrameworkBuilder<'_, '_>,
-    ecosystem: &str,
-    name: &str,
-    span: Range<usize>,
+    input: ManifestSpanInput<'_>,
 ) -> Result<Option<SymbolId>, ExtractError> {
     let directory = manifest_identity_directory(builder.path());
     builder.add_landmark_with_id(LandmarkInput {
         kind: SymbolKind::Resource,
-        name: name.to_owned(),
-        identity: format!("manifest-package-{ecosystem}::{name}::manifest-dir::{directory}"),
-        start: span.start,
-        end: span.end,
-        body_search_text: format!("{ecosystem} package dependency manifest {name}"),
+        name: input.value.to_owned(),
+        identity: format!(
+            "manifest-package-{}::{}::manifest-dir::{directory}",
+            input.ecosystem, input.value
+        ),
+        start: input.span.start,
+        end: input.span.end,
+        body_search_text: format!(
+            "{} package dependency manifest {}",
+            input.ecosystem, input.value
+        ),
         target: None,
     })
 }
@@ -273,15 +397,27 @@ fn add_workspace_owner(
     })
 }
 
+struct DependencyInput<'value> {
+    owner: Option<&'value SymbolId>,
+    ecosystem: &'value str,
+    section: &'value str,
+    name: &'value str,
+    resolution_name: Option<&'value str>,
+    span: Range<usize>,
+}
+
 fn add_dependency(
     builder: &mut FrameworkBuilder<'_, '_>,
-    owner: Option<&SymbolId>,
-    ecosystem: &str,
-    section: &str,
-    name: &str,
-    resolution_name: Option<&str>,
-    span: Range<usize>,
+    input: DependencyInput<'_>,
 ) -> Result<(), ExtractError> {
+    let DependencyInput {
+        owner,
+        ecosystem,
+        section,
+        name,
+        resolution_name,
+        span,
+    } = input;
     builder.add_landmark(LandmarkInput {
         kind: SymbolKind::Resource,
         name: format!("{ecosystem} dependency {name}"),
@@ -291,58 +427,59 @@ fn add_dependency(
         body_search_text: format!("{ecosystem} {section} dependency {name}"),
         target: None,
     })?;
-    builder.add_reference_with_resolution(
-        owner.cloned(),
+    builder.add_reference_with_resolution(FrameworkReferenceInput {
+        owner: owner.cloned(),
         name,
         resolution_name,
-        ReferenceKind::References,
-        span.start,
-        span.end,
-    )
+        kind: ReferenceKind::References,
+        start: span.start,
+        end: span.end,
+    })
 }
 
 fn add_workspace_pattern(
     builder: &mut FrameworkBuilder<'_, '_>,
-    ecosystem: &str,
-    pattern: &str,
-    span: Range<usize>,
+    input: ManifestSpanInput<'_>,
 ) -> Result<(), ExtractError> {
-    let Some(pattern) = normalized_workspace_pattern(builder.path(), pattern) else {
-        return Ok(());
-    };
-    let workspace_directory = manifest_directory(builder.path());
-    builder.add_landmark(LandmarkInput {
-        kind: SymbolKind::Resource,
-        name: format!("{ecosystem} workspace member {pattern}"),
-        identity: format!(
-            "manifest-workspace-member-{ecosystem}::{workspace_directory}::pattern::{pattern}"
-        ),
-        start: span.start,
-        end: span.end,
-        body_search_text: format!("{ecosystem} workspace member package {pattern}"),
-        target: None,
-    })
+    add_workspace_entry(builder, input, WorkspaceEntryKind::Member)
 }
 
 fn add_workspace_exclusion(
     builder: &mut FrameworkBuilder<'_, '_>,
-    ecosystem: &str,
-    pattern: &str,
-    span: Range<usize>,
+    input: ManifestSpanInput<'_>,
 ) -> Result<(), ExtractError> {
-    let Some(pattern) = normalized_workspace_pattern(builder.path(), pattern) else {
+    add_workspace_entry(builder, input, WorkspaceEntryKind::Exclusion)
+}
+
+#[derive(Clone, Copy)]
+enum WorkspaceEntryKind {
+    Member,
+    Exclusion,
+}
+
+fn add_workspace_entry(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: ManifestSpanInput<'_>,
+    kind: WorkspaceEntryKind,
+) -> Result<(), ExtractError> {
+    let Some(pattern) = normalized_workspace_pattern(builder.path(), input.value) else {
         return Ok(());
     };
     let workspace_directory = manifest_directory(builder.path());
+    let (label, identity_label, search_label) = match kind {
+        WorkspaceEntryKind::Member => ("member", "member", "member package"),
+        WorkspaceEntryKind::Exclusion => ("exclude", "exclude", "excluded package"),
+    };
     builder.add_landmark(LandmarkInput {
         kind: SymbolKind::Resource,
-        name: format!("{ecosystem} workspace exclude {pattern}"),
+        name: format!("{} workspace {label} {pattern}", input.ecosystem),
         identity: format!(
-            "manifest-workspace-exclude-{ecosystem}::{workspace_directory}::pattern::{pattern}"
+            "manifest-workspace-{identity_label}-{}::{workspace_directory}::pattern::{pattern}",
+            input.ecosystem,
         ),
-        start: span.start,
-        end: span.end,
-        body_search_text: format!("{ecosystem} workspace excluded package {pattern}"),
+        start: input.span.start,
+        end: input.span.end,
+        body_search_text: format!("{} workspace {search_label} {pattern}", input.ecosystem),
         target: None,
     })
 }
@@ -598,40 +735,50 @@ impl<'source, 'cancel> JsonScanner<'source, 'cancel> {
         self.skip_ws()?;
         match self.bytes.get(self.cursor).copied() {
             Some(b'"') => Ok(self.string()?.is_some()),
-            Some(b'{') => self.compound(b'{', b'}', depth),
-            Some(b'[') => self.compound(b'[', b']', depth),
+            Some(b'{') => self.compound(JsonCompound {
+                opening: b'{',
+                closing: b'}',
+                depth,
+            }),
+            Some(b'[') => self.compound(JsonCompound {
+                opening: b'[',
+                closing: b']',
+                depth,
+            }),
             Some(_) => self.primitive(),
             None => Ok(false),
         }
     }
 
-    fn compound(&mut self, opening: u8, closing: u8, depth: usize) -> Result<bool, ExtractError> {
-        if !self.take(opening)? {
+    fn compound(&mut self, input: JsonCompound) -> Result<bool, ExtractError> {
+        if !self.take(input.opening)? {
             return Ok(false);
         }
         loop {
             self.skip_ws()?;
-            if self.take(closing)? {
+            if self.take(input.closing)? {
                 return Ok(true);
             }
-            if opening == b'{' {
-                if self.string()?.is_none() {
-                    return Ok(false);
-                }
-                self.skip_ws()?;
-                if !self.take(b':')? {
-                    return Ok(false);
-                }
+            if input.opening == b'{' && !self.object_member_prefix()? {
+                return Ok(false);
             }
-            if !self.value(depth.saturating_add(1))? {
+            if !self.value(input.depth.saturating_add(1))? {
                 return Ok(false);
             }
             self.skip_ws()?;
             if self.take(b',')? {
                 continue;
             }
-            return self.take(closing);
+            return self.take(input.closing);
         }
+    }
+
+    fn object_member_prefix(&mut self) -> Result<bool, ExtractError> {
+        if self.string()?.is_none() {
+            return Ok(false);
+        }
+        self.skip_ws()?;
+        self.take(b':')
     }
 
     fn primitive(&mut self) -> Result<bool, ExtractError> {

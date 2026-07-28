@@ -601,8 +601,17 @@ fn password_copy_arguments(name: &str, password_file: &Path) -> Vec<OsString> {
     ]
 }
 
-fn database_backup_arguments(name: &str, container_path: &str) -> Vec<OsString> {
-    [
+enum DatabaseArchiveMode {
+    Backup,
+    Restore,
+}
+
+fn database_archive_arguments(
+    name: &str,
+    container_path: &str,
+    mode: DatabaseArchiveMode,
+) -> Vec<OsString> {
+    let mut arguments = [
         "exec",
         name,
         "timeout",
@@ -610,20 +619,49 @@ fn database_backup_arguments(name: &str, container_path: &str) -> Vec<OsString> 
         "--kill-after",
         CONTAINER_ARCHIVE_KILL_AFTER,
         CONTAINER_ARCHIVE_TIMEOUT,
-        "pg_dump",
-        "--username",
-        DATABASE_USER,
-        "--dbname",
-        DATABASE_NAME,
-        "--format=custom",
-        "--no-owner",
-        "--no-privileges",
-        "--file",
-        container_path,
     ]
     .into_iter()
     .map(OsString::from)
-    .collect()
+    .collect::<Vec<_>>();
+    match mode {
+        DatabaseArchiveMode::Backup => arguments.extend(
+            [
+                "pg_dump",
+                "--username",
+                DATABASE_USER,
+                "--dbname",
+                DATABASE_NAME,
+                "--format=custom",
+                "--no-owner",
+                "--no-privileges",
+                "--file",
+                container_path,
+            ]
+            .into_iter()
+            .map(OsString::from),
+        ),
+        DatabaseArchiveMode::Restore => arguments.extend(
+            [
+                "pg_restore",
+                "--username",
+                DATABASE_USER,
+                "--dbname",
+                MAINTENANCE_DATABASE_NAME,
+                "--create",
+                "--exit-on-error",
+                "--no-owner",
+                "--no-privileges",
+                container_path,
+            ]
+            .into_iter()
+            .map(OsString::from),
+        ),
+    }
+    arguments
+}
+
+fn database_backup_arguments(name: &str, container_path: &str) -> Vec<OsString> {
+    database_archive_arguments(name, container_path, DatabaseArchiveMode::Backup)
 }
 
 fn database_archive_list_arguments(name: &str, container_path: &str) -> Vec<OsString> {
@@ -645,28 +683,7 @@ fn database_archive_list_arguments(name: &str, container_path: &str) -> Vec<OsSt
 }
 
 fn database_restore_arguments(name: &str, container_path: &str) -> Vec<OsString> {
-    [
-        "exec",
-        name,
-        "timeout",
-        "--signal=TERM",
-        "--kill-after",
-        CONTAINER_ARCHIVE_KILL_AFTER,
-        CONTAINER_ARCHIVE_TIMEOUT,
-        "pg_restore",
-        "--username",
-        DATABASE_USER,
-        "--dbname",
-        MAINTENANCE_DATABASE_NAME,
-        "--create",
-        "--exit-on-error",
-        "--no-owner",
-        "--no-privileges",
-        container_path,
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect()
+    database_archive_arguments(name, container_path, DatabaseArchiveMode::Restore)
 }
 
 fn database_reset_arguments(name: &str) -> Vec<OsString> {

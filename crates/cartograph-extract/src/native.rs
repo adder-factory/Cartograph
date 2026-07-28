@@ -130,10 +130,12 @@ impl NativeExtractor {
         };
         if self.strategy == ExtractionStrategy::TagsQuery {
             let extracted = tags::extract(
-                snapshot,
-                root,
-                parse_status,
-                self.tags_query.ok_or(ExtractError::GrammarUnavailable)?,
+                tags::TagExtractionInput {
+                    snapshot,
+                    root,
+                    parse_status,
+                    query: self.tags_query.ok_or(ExtractError::GrammarUnavailable)?,
+                },
                 &mut cancelled,
             )?;
             let extracted = framework::enrich(snapshot, extracted, &mut cancelled)?;

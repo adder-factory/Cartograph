@@ -1,10 +1,10 @@
 use std::{path::Path, process::Command};
 
 use cartograph_agent::{
-    GitChangeKind, ReviewError, ReviewOptions, SourceCompareOptions, discover_git_blame,
-    discover_git_commit_paths, discover_git_comparison, discover_git_history,
-    discover_git_line_history, discover_git_rename_evidence, discover_source_comparison,
-    trace_git_culprits,
+    GitChangeKind, GitLineHistoryRequest, GitLineRange, ReviewError, ReviewOptions,
+    SourceCompareOptions, discover_git_blame, discover_git_commit_paths, discover_git_comparison,
+    discover_git_history, discover_git_line_history, discover_git_rename_evidence,
+    discover_source_comparison, trace_git_culprits,
 };
 use cartograph_domain::NormalizedPath;
 
@@ -159,9 +159,12 @@ async fn history_blame_and_trace_culprits_use_bounded_exact_git_evidence() {
         .await
         .unwrap_or_else(|error| panic!("history failed: {error}"));
     assert!(!history.commits().is_empty());
-    let line_history = discover_git_line_history(repository.path(), path.clone(), 1, 1, 10)
-        .await
-        .unwrap_or_else(|error| panic!("line history failed: {error}"));
+    let line_history = discover_git_line_history(
+        repository.path(),
+        GitLineHistoryRequest::new(GitLineRange::new(path.clone(), 1, 1), 10),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("line history failed: {error}"));
     assert!(!line_history.commits().is_empty());
     assert!(!line_history.truncated());
     let commit_paths = discover_git_commit_paths(
@@ -184,7 +187,7 @@ async fn history_blame_and_trace_culprits_use_bounded_exact_git_evidence() {
         .unwrap_or_else(|error| panic!("rename evidence failed: {error}"));
     assert!(!rename.renamed());
     assert!(rename.earliest_unix_seconds().is_some());
-    let blame = discover_git_blame(repository.path(), path, 1, 1)
+    let blame = discover_git_blame(repository.path(), GitLineRange::new(path, 1, 1))
         .await
         .unwrap_or_else(|error| panic!("blame failed: {error}"));
     assert_eq!(blame.len(), 1);

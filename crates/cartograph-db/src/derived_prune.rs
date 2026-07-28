@@ -139,24 +139,15 @@ impl CartographDatabase {
             .maximum_deletions_per_store
             .checked_add(1)
             .ok_or(DerivedStorePruneError::InvalidPolicy)?;
-        let artifact_row = prune_artifacts(
-            &mut transaction,
-            &schema,
-            request.fence,
-            &cutoff,
-            request.policy.maximum_deletions_per_store,
+        let batch = PruneBatchContext {
+            schema: &schema,
+            fence: request.fence,
+            cutoff: &cutoff,
+            maximum: request.policy.maximum_deletions_per_store,
             probe_limit,
-        )
-        .await?;
-        let embedding_row = prune_embeddings(
-            &mut transaction,
-            &schema,
-            request.fence,
-            &cutoff,
-            request.policy.maximum_deletions_per_store,
-            probe_limit,
-        )
-        .await?;
+        };
+        let artifact_row = prune_artifacts(&mut transaction, &batch).await?;
+        let embedding_row = prune_embeddings(&mut transaction, &batch).await?;
         require_live_fence(&mut transaction, &schema, request.fence).await?;
         let report = DerivedStorePruneReport {
             cutoff,
@@ -271,14 +262,25 @@ async fn lock_project(
     }
 }
 
-async fn prune_artifacts(
-    connection: &mut sqlx_postgres::PgConnection,
-    schema: &str,
-    fence: &LeaseFence,
-    cutoff: &str,
+struct PruneBatchContext<'value> {
+    schema: &'value str,
+    fence: &'value LeaseFence,
+    cutoff: &'value str,
     maximum: u32,
     probe_limit: u32,
+}
+
+async fn prune_artifacts(
+    connection: &mut sqlx_postgres::PgConnection,
+    context: &PruneBatchContext<'_>,
 ) -> Result<sqlx_postgres::PgRow, DerivedStorePruneError> {
+    let PruneBatchContext {
+        schema,
+        fence,
+        cutoff,
+        maximum,
+        probe_limit,
+    } = context;
     let sql = format!(
         r#"WITH current AS (
                 SELECT current_generation_id AS generation_id
@@ -315,8 +317,8 @@ async fn prune_artifacts(
     query(AssertSqlSafe(sql))
         .bind(fence.target().project_id().as_str())
         .bind(cutoff)
-        .bind(i64::from(maximum))
-        .bind(i64::from(probe_limit))
+        .bind(i64::from(*maximum))
+        .bind(i64::from(*probe_limit))
         .fetch_one(connection)
         .await
         .map_err(|_| database_error("prune-artifacts"))
@@ -324,12 +326,15 @@ async fn prune_artifacts(
 
 async fn prune_embeddings(
     connection: &mut sqlx_postgres::PgConnection,
-    schema: &str,
-    fence: &LeaseFence,
-    cutoff: &str,
-    maximum: u32,
-    probe_limit: u32,
+    context: &PruneBatchContext<'_>,
 ) -> Result<sqlx_postgres::PgRow, DerivedStorePruneError> {
+    let PruneBatchContext {
+        schema,
+        fence,
+        cutoff,
+        maximum,
+        probe_limit,
+    } = context;
     let sql = format!(
         r#"WITH candidates AS MATERIALIZED (
                 SELECT embeddings.ctid AS row_id,
@@ -360,8 +365,8 @@ async fn prune_embeddings(
     query(AssertSqlSafe(sql))
         .bind(fence.target().project_id().as_str())
         .bind(cutoff)
-        .bind(i64::from(maximum))
-        .bind(i64::from(probe_limit))
+        .bind(i64::from(*maximum))
+        .bind(i64::from(*probe_limit))
         .fetch_one(connection)
         .await
         .map_err(|_| database_error("prune-embeddings"))

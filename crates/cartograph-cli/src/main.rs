@@ -18,11 +18,11 @@ use cartograph_agent::{
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{
     CapabilityReport, CartographDatabase, CheckStatus, DEFAULT_MANAGED_DATABASE_PORT,
-    GenerationRetentionPolicy, GenerationRetentionRequest, GenerationValidationLimits, LeaseOwner,
-    LeaseRequest, LeaseTarget, ManagedContainerState, ManagedDatabase, ManagedDatabaseStatus,
-    ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedStartReport,
-    V1PostgresImportExecution, V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource,
-    V1PostgresSourceRevision,
+    GenerationRetentionPolicy, GenerationRetentionRequest, GenerationStorageSummary,
+    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, ManagedContainerState,
+    ManagedDatabase, ManagedDatabaseStatus, ManagedDestructiveConfirmation,
+    ManagedDestructiveOperation, ManagedStartReport, V1PostgresImportExecution,
+    V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
 };
 use cartograph_domain::{
     EdgeKind, ModelId, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage, SymbolId,
@@ -35,13 +35,15 @@ use cartograph_mcp::{ProtocolServer, ServerConfig, ServerLimits, ServerMetadata,
 use cartograph_search::{
     ContextAnchor, ContextBudget, ContextRequest, ContextRequestOptions, DeterministicRetriever,
     EntryPointBucket, EntryPointsQuery, ExactPathQuery, ExactTextQuery, FileInventoryQuery,
-    GraphPathRequest, IndexFreshness, LexicalQuery, SearchMode, SimilarRequest, SourceRangeQuery,
-    TaskIntent, TraversalBudget, TraversalRequest,
+    GraphPathRequest, GraphPathRequestInput, IndexFreshness, LexicalQuery, SearchMode,
+    SimilarRequest, SourceRangeQuery, SourceRangeQueryInput, TaskIntent, TraversalBudget,
+    TraversalRequest,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::{StreamExt as _, stream};
 use install::{
-    InstallLocation as AgentInstallLocation, InstallReport, InstallRequest, InstallTarget,
+    InstallLocation as AgentInstallLocation, InstallReport, InstallRequest, InstallRequestInput,
+    InstallTarget,
 };
 use mcp_handler::{AGENT_PLAYBOOK, CartographMcpHandler, HandlerDefaults};
 use serde::Serialize;
@@ -77,6 +79,13 @@ const DEFAULT_IMPORT_WORKING_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAINTENANCE_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 const MAINTENANCE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 const MAXIMUM_TRANSIENT_FILE_BYTES: usize = 10 * 1024 * 1024;
+const KIBIBYTE: usize = 1_024;
+const MEBIBYTE: usize = KIBIBYTE * KIBIBYTE;
+const GIBIBYTE_U64: u64 = 1_024 * 1_024 * 1_024;
+const MEBIBYTE_U64: u64 = 1_024 * 1_024;
+const RETAINED_BYTE_WARNING: u64 = 4 * GIBIBYTE_U64;
+const MAXIMUM_SUPERSEDED_GENERATIONS_WITHOUT_ATTENTION: u64 = 34;
+const MAXIMUM_FAILED_GENERATIONS_WITHOUT_ATTENTION: u64 = 32;
 const MCP_SERVER_INSTRUCTIONS: &str = "Start with cartograph_status and do not treat stale or unknown-freshness graph evidence as current. Use cartograph_context for the concrete coding task, then narrow with entry_points, files, at_range, find, node, graph, or affected. Read live source before editing. After changes, use cartograph_review against the intended base and run the repository's real quality gates. Preserve generation, freshness, confidence, abstention, provenance, multiplicity, and truncation in your reasoning. Use cartograph_admin only for explicit bounded lifecycle work. Call cartograph_playbook when you need the full workflow and tool-routing guide.";
 
 #[derive(Debug, Parser)]
@@ -641,7 +650,7 @@ enum DatabaseCommand {
     DerivedIndex(DatabaseDerivedIndexArguments),
     /// Validate or resume a PostgreSQL-only v1.1.33 schema import.
     ImportV1(V1ImportArguments),
-    /// Delete a bounded batch of failed and old superseded generations.
+    /// Delete a bounded batch of stale staging, failed, and old superseded generations.
     Prune(PruneArguments),
 }
 
@@ -864,14 +873,28 @@ impl From<GraphEdgeKind> for EdgeKind {
             GraphEdgeKind::Tests => Self::Tests,
             GraphEdgeKind::TypeOf => Self::TypeOf,
             GraphEdgeKind::Returns => Self::Returns,
-            GraphEdgeKind::Instantiates => Self::Instantiates,
-            GraphEdgeKind::Overrides => Self::Overrides,
-            GraphEdgeKind::Decorates => Self::Decorates,
-            GraphEdgeKind::FieldAccess => Self::FieldAccess,
-            GraphEdgeKind::DefUse => Self::DefUse,
-            GraphEdgeKind::Exports => Self::Exports,
-            GraphEdgeKind::Contains => Self::Contains,
+            remaining => graph_edge_kind_tail(remaining),
         }
+    }
+}
+
+const fn graph_edge_kind_tail(value: GraphEdgeKind) -> EdgeKind {
+    match value {
+        GraphEdgeKind::Instantiates => EdgeKind::Instantiates,
+        GraphEdgeKind::Overrides => EdgeKind::Overrides,
+        GraphEdgeKind::Decorates => EdgeKind::Decorates,
+        GraphEdgeKind::FieldAccess => EdgeKind::FieldAccess,
+        GraphEdgeKind::DefUse => EdgeKind::DefUse,
+        GraphEdgeKind::Exports => EdgeKind::Exports,
+        GraphEdgeKind::Contains => EdgeKind::Contains,
+        GraphEdgeKind::Calls
+        | GraphEdgeKind::Imports
+        | GraphEdgeKind::References
+        | GraphEdgeKind::Implements
+        | GraphEdgeKind::Extends
+        | GraphEdgeKind::Tests
+        | GraphEdgeKind::TypeOf
+        | GraphEdgeKind::Returns => unreachable!(),
     }
 }
 
@@ -1058,7 +1081,7 @@ struct PruneArguments {
     /// Number of newest superseded generations that must be retained.
     #[arg(long, default_value_t = 2)]
     keep_superseded: u32,
-    /// Maximum terminal generations deleted in one transaction.
+    /// Maximum generations deleted in one transaction.
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=10000))]
     maximum_deletions: u32,
     /// Exact acknowledgement: prune-old-generations.
@@ -1183,14 +1206,14 @@ async fn run_index_command(command: Command) -> Result<ExitCode, String> {
             summary_breakdown,
             format,
         } => {
-            run_status(
+            run_status(StatusRunInput {
                 project_path,
-                json || matches!(format, OutputFormat::Json),
+                json: json || matches!(format, OutputFormat::Json),
                 verbose,
-                top_hotspots.as_deref(),
-                top_biomarkers.as_deref(),
+                top_hotspots,
+                top_biomarkers,
                 summary_breakdown,
-            )
+            })
             .await
         }
         Command::Embed {
@@ -1448,6 +1471,12 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             })
             .await
         }
+        command => run_runtime_operator_command(command).await,
+    }
+}
+
+async fn run_runtime_operator_command(command: Command) -> Result<ExitCode, String> {
+    match command {
         Command::Serve {
             mcp,
             project_path,
@@ -1485,15 +1514,21 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             json,
             format,
         } => {
-            run_doctor(
+            run_doctor(DoctorRunInput {
                 project_path,
                 fix,
-                no_project_checks,
-                if json { OutputFormat::Json } else { format },
-            )
+                skip_project_checks: no_project_checks,
+                format: if json { OutputFormat::Json } else { format },
+            })
             .await
         }
         Command::Db { command } => run_database_command(command).await,
+        command => run_auxiliary_operator_command(command).await,
+    }
+}
+
+async fn run_auxiliary_operator_command(command: Command) -> Result<ExitCode, String> {
+    match command {
         Command::Export {
             path,
             project_path,
@@ -1506,13 +1541,9 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             file,
         } => {
             let project_path = project_path.unwrap_or(path);
-            let runtime = open_runtime(&project_path).await?;
-            let (project_id, freshness) = current_project(&runtime).await?;
-            require_freshness(freshness, false)?;
-            let output = graph_export::run_graph_export(
-                runtime.database(),
-                GraphExportRequest {
-                    project_id,
+            run_graph_export_command(
+                project_path,
+                GraphExportCommandInput {
                     format,
                     output: out,
                     limit,
@@ -1522,9 +1553,7 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
                     file_prefix: file,
                 },
             )
-            .await?;
-            print!("{output}");
-            Ok(ExitCode::SUCCESS)
+            .await
         }
         Command::Similar {
             symbol,
@@ -1535,21 +1564,16 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             allow_stale,
             project_path,
         } => {
-            if !min_score.is_finite() || !(0.0..=1.0).contains(&min_score) {
-                return Err("--min-score must be between 0 and 1".to_owned());
-            }
-            let mut arguments = Map::from_iter([
-                ("start".to_owned(), Value::String(symbol)),
-                ("direction".to_owned(), Value::String("similar".to_owned())),
-                ("k".to_owned(), Value::from(k)),
-                ("minScore".to_owned(), Value::from(min_score)),
-                ("sameLanguage".to_owned(), Value::Bool(same_language)),
-                ("allowStale".to_owned(), Value::Bool(allow_stale)),
-            ]);
-            if let Some(model_id) = model_id {
-                arguments.insert("modelId".to_owned(), Value::String(model_id));
-            }
-            generated_cli::run_direct("cartograph_graph", project_path, arguments).await
+            run_similar_command(SimilarCommandInput {
+                symbol,
+                k,
+                min_score,
+                same_language,
+                model_id,
+                allow_stale,
+                project_path,
+            })
+            .await
         }
         Command::SyncIfDirty {
             path,
@@ -1562,56 +1586,26 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             command,
             remove,
             dry_run,
-        } => {
-            let output = git_hooks::run_install_hooks(git_hooks::InstallHooksRequest {
-                project_path: path,
-                hooks,
-                command,
-                remove,
-                dry_run,
-            })?;
-            print!("{output}");
-            Ok(ExitCode::SUCCESS)
-        }
+        } => run_install_hooks_command(git_hooks::InstallHooksRequest {
+            project_path: path,
+            hooks,
+            command,
+            remove,
+            dry_run,
+        }),
         Command::McpBudget {
             profile,
             no_write_tools,
             disable_tool,
             top,
             json,
-        } => {
-            let definitions = mcp_handler::tool_definitions()
-                .map_err(|_| "MCP tool contracts are invalid".to_owned())?;
-            let registered = definitions
-                .iter()
-                .map(|definition| definition.name())
-                .collect::<std::collections::BTreeSet<_>>();
-            if let Some(unknown) = disable_tool
-                .iter()
-                .find(|name| !registered.contains(name.as_str()))
-            {
-                return Err(format!("--disable-tool names an unknown tool: {unknown}"));
-            }
-            let report = mcp_budget::measure(
-                definitions,
-                profile.into(),
-                no_write_tools,
-                &disable_tool,
-                usize::from(top),
-                MCP_SERVER_INSTRUCTIONS,
-                AGENT_PLAYBOOK,
-            )?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report)
-                        .map_err(|_| "could not serialize MCP budget".to_owned())?
-                );
-            } else {
-                print!("{}", mcp_budget::render(&report));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        } => run_mcp_budget_command(McpBudgetCommandInput {
+            profile,
+            no_write_tools,
+            disable_tool,
+            top,
+            json,
+        }),
         Command::Completions { shell } => {
             print!("{}", completions::render_script(shell));
             Ok(ExitCode::SUCCESS)
@@ -1628,25 +1622,139 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Llm { command } => llm_commands::run(command).await,
-        Command::Upgrade { apply, json } => {
-            let report = upgrade::run_upgrade(apply).await;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report)
-                        .map_err(|_| "could not serialize upgrade report".to_owned())?
-                );
-            } else {
-                print!("{}", upgrade::render(&report));
-            }
-            Ok(if upgrade::succeeded(&report) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            })
-        }
+        Command::Upgrade { apply, json } => run_upgrade_command(apply, json).await,
         _ => Err("internal operator command routing failed".to_owned()),
     }
+}
+
+struct GraphExportCommandInput {
+    format: GraphExportFormat,
+    output: Option<PathBuf>,
+    limit: u16,
+    kinds: Option<String>,
+    edge_kinds: Option<String>,
+    languages: Option<String>,
+    file_prefix: Option<String>,
+}
+
+struct SimilarCommandInput {
+    symbol: String,
+    k: u16,
+    min_score: f64,
+    same_language: bool,
+    model_id: Option<String>,
+    allow_stale: bool,
+    project_path: PathBuf,
+}
+
+struct McpBudgetCommandInput {
+    profile: McpProfile,
+    no_write_tools: bool,
+    disable_tool: Vec<String>,
+    top: u16,
+    json: bool,
+}
+
+async fn run_graph_export_command(
+    project_path: PathBuf,
+    input: GraphExportCommandInput,
+) -> Result<ExitCode, String> {
+    let runtime = open_runtime(&project_path).await?;
+    let (project_id, freshness) = current_project(&runtime).await?;
+    require_freshness(freshness, false)?;
+    let output = graph_export::run_graph_export(
+        runtime.database(),
+        GraphExportRequest {
+            project_id,
+            format: input.format,
+            output: input.output,
+            limit: input.limit,
+            kinds: input.kinds,
+            edge_kinds: input.edge_kinds,
+            languages: input.languages,
+            file_prefix: input.file_prefix,
+        },
+    )
+    .await?;
+    print!("{output}");
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_similar_command(input: SimilarCommandInput) -> Result<ExitCode, String> {
+    if !input.min_score.is_finite() || !(0.0..=1.0).contains(&input.min_score) {
+        return Err("--min-score must be between 0 and 1".to_owned());
+    }
+    let mut arguments = Map::from_iter([
+        ("start".to_owned(), Value::String(input.symbol)),
+        ("direction".to_owned(), Value::String("similar".to_owned())),
+        ("k".to_owned(), Value::from(input.k)),
+        ("minScore".to_owned(), Value::from(input.min_score)),
+        ("sameLanguage".to_owned(), Value::Bool(input.same_language)),
+        ("allowStale".to_owned(), Value::Bool(input.allow_stale)),
+    ]);
+    if let Some(model_id) = input.model_id {
+        arguments.insert("modelId".to_owned(), Value::String(model_id));
+    }
+    generated_cli::run_direct("cartograph_graph", input.project_path, arguments).await
+}
+
+fn run_install_hooks_command(request: git_hooks::InstallHooksRequest) -> Result<ExitCode, String> {
+    let output = git_hooks::run_install_hooks(request)?;
+    print!("{output}");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_mcp_budget_command(input: McpBudgetCommandInput) -> Result<ExitCode, String> {
+    let definitions =
+        mcp_handler::tool_definitions().map_err(|_| "MCP tool contracts are invalid".to_owned())?;
+    let registered = definitions
+        .iter()
+        .map(|definition| definition.name())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(unknown) = input
+        .disable_tool
+        .iter()
+        .find(|name| !registered.contains(name.as_str()))
+    {
+        return Err(format!("--disable-tool names an unknown tool: {unknown}"));
+    }
+    let report = mcp_budget::measure(mcp_budget::McpBudgetInput {
+        definitions,
+        profile: input.profile.into(),
+        read_only_only: input.no_write_tools,
+        disabled: &input.disable_tool,
+        top: usize::from(input.top),
+        instructions: MCP_SERVER_INSTRUCTIONS,
+        playbook: AGENT_PLAYBOOK,
+    })?;
+    if input.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|_| "could not serialize MCP budget".to_owned())?
+        );
+    } else {
+        print!("{}", mcp_budget::render(&report));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_upgrade_command(apply: bool, json: bool) -> Result<ExitCode, String> {
+    let report = upgrade::run_upgrade(apply).await;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|_| "could not serialize upgrade report".to_owned())?
+        );
+    } else {
+        print!("{}", upgrade::render(&report));
+    }
+    Ok(if upgrade::succeeded(&report) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 async fn run_find(arguments: FindArguments) -> Result<ExitCode, String> {
@@ -1764,12 +1872,12 @@ async fn run_at_range(arguments: AtRangeArguments) -> Result<ExitCode, String> {
     require_freshness(freshness, arguments.allow_stale)?;
     let path = NormalizedPath::parse(&arguments.file)
         .map_err(|_| "source file must be project-relative".to_owned())?;
-    let query = SourceRangeQuery::new(
+    let query = SourceRangeQuery::new(SourceRangeQueryInput {
         path,
-        arguments.start_line,
-        arguments.end_line,
-        arguments.limit,
-    )
+        start_line: arguments.start_line,
+        end_line: arguments.end_line,
+        limit: arguments.limit,
+    })
     .map_err(|error| error.to_string())?;
     let result = DeterministicRetriever::new(runtime.database().clone())
         .symbols_at_range(&project_id, &query)
@@ -1855,6 +1963,7 @@ async fn run_context(arguments: ContextArguments) -> Result<ExitCode, String> {
 }
 
 async fn run_graph(arguments: GraphArguments) -> Result<ExitCode, String> {
+    validate_graph_arguments(&arguments)?;
     let GraphArguments {
         project_path,
         symbol_id,
@@ -1870,113 +1979,195 @@ async fn run_graph(arguments: GraphArguments) -> Result<ExitCode, String> {
         allow_stale,
         format,
     } = arguments;
-    if direction != GraphAxis::Path && target_symbol_id.is_some() {
-        return Err("--to is only valid with --direction path".to_owned());
-    }
-    if direction == GraphAxis::Path && target_symbol_id.is_none() {
-        return Err("--to is required with --direction path".to_owned());
-    }
-    let has_similar_options =
-        similar_limit.is_some() || minimum_score.is_some() || same_language || model_id.is_some();
-    if direction != GraphAxis::Similar && has_similar_options {
-        return Err("--k, --min-score, --same-language, and --model-id are only valid with --direction similar".to_owned());
-    }
-    if direction == GraphAxis::Similar && edge_kind.is_some() {
-        return Err("--edge-kind is not valid with --direction similar".to_owned());
-    }
     let runtime = open_runtime(&project_path).await?;
     let (project_id, freshness) = current_project(&runtime).await?;
     require_freshness(freshness, allow_stale)?;
     let retrieval = DeterministicRetriever::new(runtime.database().clone());
+    let execution = GraphExecution {
+        retrieval: &retrieval,
+        freshness,
+        format,
+    };
     if direction == GraphAxis::Similar {
-        let symbol = SymbolId::parse(&symbol_id)
-            .map_err(|_| "symbol ID must be a non-nil UUID".to_owned())?;
-        let mut request = SimilarRequest::new(project_id, symbol, similar_limit.unwrap_or(5))
-            .and_then(|request| request.with_minimum_score(minimum_score.unwrap_or(0.3)))
-            .map_err(|error| error.to_string())?
-            .with_same_language(same_language);
-        if let Some(model_id) = model_id {
-            request = request.with_model_id(
-                ModelId::parse(&model_id)
-                    .map_err(|_| "model ID must be a non-nil UUID".to_owned())?,
-            );
-        }
-        let result = retrieval
-            .similar(&request)
-            .await
-            .map_err(|error| error.to_string())?;
-        print_fresh_evidence(freshness, &result, format)?;
-        runtime.close().await;
-        return Ok(ExitCode::SUCCESS);
-    }
-    let request = traversal_request(TraversalArguments {
-        project_id: project_id.clone(),
-        symbol_id: &symbol_id,
-        depth,
-        max_nodes,
-        edge_kind,
-    })?;
-    match direction {
-        GraphAxis::Callers => print_fresh_evidence(
-            freshness,
-            &retrieval
-                .callers(&request)
-                .await
-                .map_err(|error| error.to_string())?,
-            format,
-        )?,
-        GraphAxis::Callees => print_fresh_evidence(
-            freshness,
-            &retrieval
-                .callees(&request)
-                .await
-                .map_err(|error| error.to_string())?,
-            format,
-        )?,
-        GraphAxis::Both => print_fresh_evidence(
-            freshness,
-            &retrieval
-                .both(&request)
-                .await
-                .map_err(|error| error.to_string())?,
-            format,
-        )?,
-        GraphAxis::Path => {
-            let target_symbol_id = target_symbol_id
-                .as_deref()
-                .ok_or_else(|| "--to is required with --direction path".to_owned())?;
-            let target = SymbolId::parse(target_symbol_id)
-                .map_err(|_| "target symbol ID must be a non-nil UUID".to_owned())?;
-            let mut path = GraphPathRequest::new(
+        run_similar_graph(
+            execution,
+            SimilarGraphInput {
                 project_id,
-                request.roots()[0].clone(),
-                target,
-                TraversalBudget::new(depth, max_nodes).map_err(|error| error.to_string())?,
-            );
-            if let Some(edge_kind) = edge_kind {
-                path = path.with_edge_kind(edge_kind);
-            }
-            print_fresh_evidence(
-                freshness,
-                &retrieval
-                    .path(&path)
-                    .await
-                    .map_err(|error| error.to_string())?,
-                format,
-            )?;
-        }
-        GraphAxis::Similar => unreachable!("similar returned before structural traversal"),
-        GraphAxis::Impact => print_fresh_evidence(
-            freshness,
-            &retrieval
-                .impact(&request)
-                .await
-                .map_err(|error| error.to_string())?,
-            format,
-        )?,
+                symbol_id,
+                limit: similar_limit.unwrap_or(5),
+                minimum_score: minimum_score.unwrap_or(0.3),
+                same_language,
+                model_id,
+            },
+        )
+        .await?;
+    } else {
+        run_structural_graph(
+            execution,
+            StructuralGraphInput {
+                project_id,
+                symbol_id,
+                direction,
+                target_symbol_id,
+                edge_kind,
+                depth,
+                max_nodes,
+            },
+        )
+        .await?;
     }
     runtime.close().await;
     Ok(ExitCode::SUCCESS)
+}
+
+fn validate_graph_arguments(arguments: &GraphArguments) -> Result<(), String> {
+    if arguments.direction != GraphAxis::Path && arguments.target_symbol_id.is_some() {
+        return Err("--to is only valid with --direction path".to_owned());
+    }
+    if arguments.direction == GraphAxis::Path && arguments.target_symbol_id.is_none() {
+        return Err("--to is required with --direction path".to_owned());
+    }
+    let has_similar_options = arguments.similar_limit.is_some()
+        || arguments.minimum_score.is_some()
+        || arguments.same_language
+        || arguments.model_id.is_some();
+    if arguments.direction != GraphAxis::Similar && has_similar_options {
+        return Err("--k, --min-score, --same-language, and --model-id are only valid with --direction similar".to_owned());
+    }
+    if arguments.direction == GraphAxis::Similar && arguments.edge_kind.is_some() {
+        return Err("--edge-kind is not valid with --direction similar".to_owned());
+    }
+    Ok(())
+}
+
+struct GraphExecution<'retriever> {
+    retrieval: &'retriever DeterministicRetriever,
+    freshness: IndexFreshness,
+    format: OutputFormat,
+}
+
+struct SimilarGraphInput {
+    project_id: ProjectId,
+    symbol_id: String,
+    limit: u16,
+    minimum_score: f64,
+    same_language: bool,
+    model_id: Option<String>,
+}
+
+async fn run_similar_graph(
+    execution: GraphExecution<'_>,
+    input: SimilarGraphInput,
+) -> Result<(), String> {
+    let symbol = SymbolId::parse(&input.symbol_id)
+        .map_err(|_| "symbol ID must be a non-nil UUID".to_owned())?;
+    let mut request = SimilarRequest::new(input.project_id, symbol, input.limit)
+        .and_then(|request| request.with_minimum_score(input.minimum_score))
+        .map_err(|error| error.to_string())?
+        .with_same_language(input.same_language);
+    if let Some(model_id) = input.model_id {
+        request = request.with_model_id(
+            ModelId::parse(&model_id).map_err(|_| "model ID must be a non-nil UUID".to_owned())?,
+        );
+    }
+    let result = execution
+        .retrieval
+        .similar(&request)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_fresh_evidence(execution.freshness, &result, execution.format)
+}
+
+struct StructuralGraphInput {
+    project_id: ProjectId,
+    symbol_id: String,
+    direction: GraphAxis,
+    target_symbol_id: Option<String>,
+    edge_kind: Option<EdgeKind>,
+    depth: u8,
+    max_nodes: u16,
+}
+
+async fn run_structural_graph(
+    execution: GraphExecution<'_>,
+    input: StructuralGraphInput,
+) -> Result<(), String> {
+    let request = traversal_request(TraversalArguments {
+        project_id: input.project_id.clone(),
+        symbol_id: &input.symbol_id,
+        depth: input.depth,
+        max_nodes: input.max_nodes,
+        edge_kind: input.edge_kind,
+    })?;
+    match input.direction {
+        GraphAxis::Callers => print_fresh_evidence(
+            execution.freshness,
+            &execution
+                .retrieval
+                .callers(&request)
+                .await
+                .map_err(|error| error.to_string())?,
+            execution.format,
+        ),
+        GraphAxis::Callees => print_fresh_evidence(
+            execution.freshness,
+            &execution
+                .retrieval
+                .callees(&request)
+                .await
+                .map_err(|error| error.to_string())?,
+            execution.format,
+        ),
+        GraphAxis::Both => print_fresh_evidence(
+            execution.freshness,
+            &execution
+                .retrieval
+                .both(&request)
+                .await
+                .map_err(|error| error.to_string())?,
+            execution.format,
+        ),
+        GraphAxis::Path => run_graph_path(execution, input, &request).await,
+        GraphAxis::Impact => print_fresh_evidence(
+            execution.freshness,
+            &execution
+                .retrieval
+                .impact(&request)
+                .await
+                .map_err(|error| error.to_string())?,
+            execution.format,
+        ),
+        GraphAxis::Similar => unreachable!("similar is handled before structural traversal"),
+    }
+}
+
+async fn run_graph_path(
+    execution: GraphExecution<'_>,
+    input: StructuralGraphInput,
+    request: &TraversalRequest,
+) -> Result<(), String> {
+    let target_symbol_id = input
+        .target_symbol_id
+        .as_deref()
+        .ok_or_else(|| "--to is required with --direction path".to_owned())?;
+    let target = SymbolId::parse(target_symbol_id)
+        .map_err(|_| "target symbol ID must be a non-nil UUID".to_owned())?;
+    let mut path = GraphPathRequest::new(GraphPathRequestInput {
+        project_id: input.project_id,
+        start: request.roots()[0].clone(),
+        target,
+        budget: TraversalBudget::new(input.depth, input.max_nodes)
+            .map_err(|error| error.to_string())?,
+    });
+    if let Some(edge_kind) = input.edge_kind {
+        path = path.with_edge_kind(edge_kind);
+    }
+    let result = execution
+        .retrieval
+        .path(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_fresh_evidence(execution.freshness, &result, execution.format)
 }
 
 async fn run_affected(arguments: AffectedArguments) -> Result<ExitCode, String> {
@@ -2217,6 +2408,115 @@ fn print_review_report(report: &ReviewReport, format: OutputFormat) -> Result<()
     Ok(())
 }
 
+struct AgentInstallContext {
+    project_path: PathBuf,
+    executable: PathBuf,
+    location: AgentInstallLocation,
+    managed_database_port: Option<u16>,
+    command: Option<String>,
+    permissions: bool,
+    format: OutputFormat,
+}
+
+impl AgentInstallContext {
+    fn request(&self, target: InstallTarget) -> Result<InstallRequest, String> {
+        let request = InstallRequest::new(InstallRequestInput {
+            project_root: &self.project_path,
+            executable: &self.executable,
+            target,
+            location: self.location,
+            command_override: self.command.as_deref(),
+            permissions: self.permissions,
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(match self.managed_database_port {
+            Some(port) => request.with_managed_database_port(port),
+            None => request,
+        })
+    }
+
+    fn print_config(&self, target: &str) -> Result<(), String> {
+        let target = InstallTarget::parse(target).ok_or_else(|| unknown_target(target))?;
+        print!(
+            "{}",
+            install::print_config(&self.request(target)?).map_err(|error| error.to_string())?
+        );
+        Ok(())
+    }
+
+    fn apply_targets(
+        &self,
+        targets: Vec<InstallTarget>,
+        remove: bool,
+    ) -> Result<Vec<install::InstallReport>, String> {
+        let mut reports = Vec::with_capacity(targets.len());
+        for target in targets {
+            if !target.supports(self.location) {
+                if matches!(self.format, OutputFormat::Text) {
+                    eprintln!(
+                        "{}: skipped because it has no project-local MCP configuration",
+                        target.label()
+                    );
+                }
+                continue;
+            }
+            let request = self.request(target)?;
+            let report = if remove {
+                install::uninstall(&request)
+            } else {
+                install::install(&request)
+            }
+            .map_err(|error| format!("{}: {error}", target.label()))?;
+            reports.push(report);
+        }
+        Ok(reports)
+    }
+
+    async fn initialize_local_project(&self) -> Result<(), String> {
+        if env::var_os(DATABASE_URL_ENV).is_none() {
+            run_database_start(DatabaseStartArguments {
+                project_path: self.project_path.clone(),
+                port: self
+                    .managed_database_port
+                    .unwrap_or(DEFAULT_MANAGED_DATABASE_PORT),
+                wait_seconds: 90,
+                format: self.format,
+            })
+            .await?;
+        }
+        run_index(IndexArguments {
+            project_path: self.project_path.clone(),
+            workers: None,
+            force: false,
+            format: self.format,
+            managed_database_port: self.managed_database_port,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    fn install_hooks(&self) {
+        let hook_command = self
+            .command
+            .clone()
+            .or_else(|| self.executable.to_str().map(str::to_owned));
+        match git_hooks::run_install_hooks(git_hooks::InstallHooksRequest {
+            project_path: self.project_path.clone(),
+            hooks: None,
+            command: hook_command,
+            remove: false,
+            dry_run: false,
+        }) {
+            Ok(output) if matches!(self.format, OutputFormat::Text) => print!("{output}"),
+            Ok(_) => {}
+            Err(error) if matches!(self.format, OutputFormat::Text) => {
+                eprintln!("Git hooks were not installed: {error}");
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode, String> {
     let AgentInstallArguments {
         target,
@@ -2242,127 +2542,47 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
     } else {
         None
     };
+    let context = AgentInstallContext {
+        project_path,
+        executable,
+        location,
+        managed_database_port,
+        command,
+        permissions,
+        format,
+    };
     if let Some(target) = print_config {
         if remove {
             return Err("--print-config is only available for install".to_owned());
         }
-        let target = InstallTarget::parse(&target).ok_or_else(|| unknown_target(&target))?;
-        let request = InstallRequest::new(
-            &project_path,
-            &executable,
-            target,
-            location,
-            command.as_deref(),
-            permissions,
-        )
-        .map_err(|error| error.to_string())?;
-        let request = match managed_database_port {
-            Some(port) => request.with_managed_database_port(port),
-            None => request,
-        };
-        print!(
-            "{}",
-            install::print_config(&request).map_err(|error| error.to_string())?
-        );
+        context.print_config(&target)?;
         return Ok(ExitCode::SUCCESS);
     }
 
     let selector = target
         .as_deref()
         .unwrap_or(if remove { "all" } else { "auto" });
-    let targets = resolve_install_targets(
-        selector,
-        &project_path,
-        &executable,
-        location,
-        command.as_deref(),
-        permissions,
-    )?;
+    let targets = resolve_install_targets(selector, &context)?;
     if !remove && !yes {
-        confirm_agent_install(location, &targets)?;
+        confirm_agent_install(context.location, &targets)?;
     }
 
-    let mut reports = Vec::with_capacity(targets.len());
-    for target in targets {
-        if !target.supports(location) {
-            if matches!(format, OutputFormat::Text) {
-                eprintln!(
-                    "{}: skipped because it has no project-local MCP configuration",
-                    target.label()
-                );
-            }
-            continue;
-        }
-        let request = InstallRequest::new(
-            &project_path,
-            &executable,
-            target,
-            location,
-            command.as_deref(),
-            permissions,
-        )
-        .map_err(|error| error.to_string())?;
-        let request = match managed_database_port {
-            Some(port) => request.with_managed_database_port(port),
-            None => request,
-        };
-        let report = if remove {
-            install::uninstall(&request)
-        } else {
-            install::install(&request)
-        }
-        .map_err(|error| format!("{}: {error}", target.label()))?;
-        reports.push(report);
-    }
-    print_install_reports(&reports, format, remove)?;
+    let reports = context.apply_targets(targets, remove)?;
+    print_install_reports(&reports, context.format, remove)?;
 
-    if !remove && location == AgentInstallLocation::Local {
-        if env::var_os(DATABASE_URL_ENV).is_none() {
-            run_database_start(DatabaseStartArguments {
-                project_path: project_path.clone(),
-                port: managed_database_port.unwrap_or(DEFAULT_MANAGED_DATABASE_PORT),
-                wait_seconds: 90,
-                format,
-            })
-            .await?;
-        }
-        run_index(IndexArguments {
-            project_path: project_path.clone(),
-            workers: None,
-            force: false,
-            format,
-            managed_database_port,
-        })
-        .await?;
+    if !remove && context.location == AgentInstallLocation::Local {
+        context.initialize_local_project().await?;
     }
 
-    if !remove && location == AgentInstallLocation::Local && hooks {
-        let hook_command = command.or_else(|| executable.to_str().map(str::to_owned));
-        match git_hooks::run_install_hooks(git_hooks::InstallHooksRequest {
-            project_path,
-            hooks: None,
-            command: hook_command,
-            remove: false,
-            dry_run: false,
-        }) {
-            Ok(output) if matches!(format, OutputFormat::Text) => print!("{output}"),
-            Ok(_) => {}
-            Err(error) if matches!(format, OutputFormat::Text) => {
-                eprintln!("Git hooks were not installed: {error}");
-            }
-            Err(_) => {}
-        }
+    if !remove && context.location == AgentInstallLocation::Local && hooks {
+        context.install_hooks();
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn resolve_install_targets(
     selector: &str,
-    project_path: &PathBuf,
-    executable: &PathBuf,
-    location: AgentInstallLocation,
-    command: Option<&str>,
-    permissions: bool,
+    context: &AgentInstallContext,
 ) -> Result<Vec<InstallTarget>, String> {
     match selector.trim().to_ascii_lowercase().as_str() {
         "none" => return Ok(Vec::new()),
@@ -2370,17 +2590,17 @@ fn resolve_install_targets(
         "auto" => {
             let mut detected = Vec::new();
             for target in InstallTarget::ALL {
-                if !target.supports(location) {
+                if !target.supports(context.location) {
                     continue;
                 }
-                let request = InstallRequest::new(
-                    project_path,
-                    executable,
+                let request = InstallRequest::new(InstallRequestInput {
+                    project_root: &context.project_path,
+                    executable: &context.executable,
                     target,
-                    location,
-                    command,
-                    permissions,
-                )
+                    location: context.location,
+                    command_override: context.command.as_deref(),
+                    permissions: context.permissions,
+                })
                 .map_err(|error| error.to_string())?;
                 if request.detected() {
                     detected.push(target);
@@ -2529,15 +2749,16 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
     let runtime = Arc::new(runtime);
     let handler = CartographMcpHandler::new(runtime)
         .map_err(|error| error.to_string())?
-        .with_managed_database_port(managed_database_port)
-        .with_defaults(HandlerDefaults {
-            allow_stale: allow_stale_default,
-            low_tokens: low_tokens_default,
-            trace_calls: !read_only_mode,
-            read_only: read_only_mode,
-        });
-    handler
-        .enable_auto_sync()
+        .configured(
+            HandlerDefaults {
+                allow_stale: allow_stale_default,
+                low_tokens: low_tokens_default,
+                trace_calls: !read_only_mode,
+                read_only: read_only_mode,
+            },
+            managed_database_port,
+        );
+    mcp_handler::enable_handler_auto_sync(&handler)
         .await
         .map_err(|error| error.to_string())?;
     let definitions =
@@ -2640,8 +2861,8 @@ fn parse_max_file_size(raw: &str) -> Result<usize, String> {
     let unit = unit.trim();
     let multiplier = match unit {
         "" | "b" | "byte" | "bytes" => 1_usize,
-        "k" | "kb" | "kib" => 1_024,
-        "m" | "mb" | "mib" => 1_024 * 1_024,
+        "k" | "kb" | "kib" => KIBIBYTE,
+        "m" | "mb" | "mib" => MEBIBYTE,
         _ => return Err(max_file_size_error(raw)),
     };
     let bytes = quantity
@@ -2691,36 +2912,39 @@ fn git_worktree_dirty(project_path: &PathBuf) -> bool {
     }
 }
 
-async fn run_status(
+struct StatusRunInput {
     project_path: PathBuf,
     json: bool,
     verbose: bool,
-    top_hotspots: Option<&str>,
-    top_biomarkers: Option<&str>,
+    top_hotspots: Option<String>,
+    top_biomarkers: Option<String>,
     summary_breakdown: bool,
-) -> Result<ExitCode, String> {
+}
+
+async fn run_status(input: StatusRunInput) -> Result<ExitCode, String> {
     let mut arguments = Map::new();
-    if verbose {
+    if input.verbose {
         arguments.insert("verbose".to_owned(), Value::Bool(true));
     }
-    if summary_breakdown {
+    if input.summary_breakdown {
         arguments.insert("summaryBreakdown".to_owned(), Value::Bool(true));
     }
-    if let Some(value) = normalize_status_rollup(top_hotspots) {
+    if let Some(value) = normalize_status_rollup(input.top_hotspots.as_deref()) {
         arguments.insert("topHotspots".to_owned(), Value::from(value));
     }
-    if let Some(value) = normalize_status_rollup(top_biomarkers) {
+    if let Some(value) = normalize_status_rollup(input.top_biomarkers.as_deref()) {
         arguments.insert("topBiomarkers".to_owned(), Value::from(value));
     }
     let result =
-        generated_cli::run_direct_result("cartograph_status", project_path, arguments).await?;
+        generated_cli::run_direct_result("cartograph_status", input.project_path, arguments)
+            .await?;
     if result.is_error() {
         return Ok(ExitCode::FAILURE);
     }
     let text = result
         .primary_text()
         .ok_or_else(|| "status returned no structured payload".to_owned())?;
-    if json {
+    if input.json {
         println!("{text}");
     } else {
         let value: Value = serde_json::from_str(text)
@@ -2778,6 +3002,37 @@ fn render_status_text(value: &Value) {
     } else {
         println!("Project has no published generation; run `cartograph index`.");
     }
+    if let Some(generations) = value
+        .pointer("/project/snapshot/generation_storage")
+        .and_then(Value::as_object)
+    {
+        let staging = status_count(generations, "staging");
+        let ready = status_count(generations, "ready");
+        let current = status_count(generations, "current");
+        let superseded = status_count(generations, "superseded");
+        let failed = status_count(generations, "failed");
+        let retained_bytes = status_count(generations, "estimated_retained_bytes");
+        let generation_storage = GenerationStorageSummary {
+            staging,
+            ready,
+            current,
+            superseded,
+            failed,
+            estimated_retained_bytes: retained_bytes,
+            ..GenerationStorageSummary::default()
+        };
+        println!(
+            "Retained generations: {staging} staging, {ready} ready, {current} current, \
+             {superseded} superseded, {failed} failed; estimated {}",
+            render_byte_count(retained_bytes)
+        );
+        if generation_storage_needs_attention(generation_storage) {
+            println!(
+                "WARNING: generation retention needs attention; run `cartograph index` to trigger \
+                 automatic bounded cleanup, then inspect `cartograph db prune --help` if the backlog remains."
+            );
+        }
+    }
     if let Some(state) = value
         .pointer("/featureReadiness/state")
         .and_then(Value::as_str)
@@ -2796,6 +3051,26 @@ fn render_status_text(value: &Value) {
         println!("Inline rollups: {hotspots} hotspots, {biomarkers} biomarkers");
     }
     println!("Graph queries: retained; browser visualizer: intentionally removed");
+}
+
+fn status_count(values: &Map<String, Value>, field: &str) -> u64 {
+    values.get(field).and_then(Value::as_u64).unwrap_or(0)
+}
+
+const fn generation_storage_needs_attention(storage: GenerationStorageSummary) -> bool {
+    storage.staging > 1
+        || storage.ready > 1
+        || storage.superseded > MAXIMUM_SUPERSEDED_GENERATIONS_WITHOUT_ATTENTION
+        || storage.failed > MAXIMUM_FAILED_GENERATIONS_WITHOUT_ATTENTION
+        || storage.estimated_retained_bytes > RETAINED_BYTE_WARNING
+}
+
+fn render_byte_count(bytes: u64) -> String {
+    if bytes >= GIBIBYTE_U64 {
+        format!("{} GiB ({} bytes)", bytes / GIBIBYTE_U64, bytes)
+    } else {
+        format!("{} MiB ({} bytes)", bytes / MEBIBYTE_U64, bytes)
+    }
 }
 
 async fn run_embed(
@@ -3287,14 +3562,31 @@ struct DoctorReport {
     database: Option<CapabilityReport>,
 }
 
-async fn run_doctor(
+struct DoctorRunInput {
     project_path: PathBuf,
     fix: bool,
     skip_project_checks: bool,
     format: OutputFormat,
-) -> Result<ExitCode, String> {
-    let report = build_doctor_report(project_path, fix, skip_project_checks).await?;
-    match format {
+}
+
+pub(crate) struct DoctorReportInput<'settings> {
+    pub(crate) project_path: PathBuf,
+    pub(crate) fix: bool,
+    pub(crate) skip_project_checks: bool,
+    pub(crate) explicit_database_settings: Option<&'settings DatabaseSettings>,
+}
+
+pub(crate) struct ProjectStateCheckInput<'input> {
+    pub(crate) project_path: &'input Path,
+    pub(crate) fix: bool,
+    pub(crate) fixes: &'input mut Vec<String>,
+    pub(crate) checks: &'input mut Vec<DoctorCheck>,
+}
+
+async fn run_doctor(input: DoctorRunInput) -> Result<ExitCode, String> {
+    let report =
+        build_doctor_report(input.project_path, input.fix, input.skip_project_checks).await?;
+    match input.format {
         OutputFormat::Text => print!("{}", render_doctor_report(&report)),
         OutputFormat::Json => println!(
             "{}",
@@ -3314,16 +3606,60 @@ async fn build_doctor_report(
     fix: bool,
     skip_project_checks: bool,
 ) -> Result<DoctorReport, String> {
-    build_doctor_report_with_settings(project_path, fix, skip_project_checks, None).await
+    build_doctor_report_with_settings(DoctorReportInput {
+        project_path,
+        fix,
+        skip_project_checks,
+        explicit_database_settings: None,
+    })
+    .await
+}
+
+async fn apply_managed_database_doctor_fix(
+    project_path: &Path,
+    fixes_applied: &mut Vec<String>,
+    checks: &mut Vec<DoctorCheck>,
+) {
+    match ManagedDatabase::new(project_path, DEFAULT_MANAGED_DATABASE_PORT) {
+        Ok(database) => match database.lifecycle().start().await {
+            Ok(report) => fixes_applied.push(format!(
+                "managed PostgreSQL is ready; {} migration(s) applied",
+                report.migrations.applied_versions.len()
+            )),
+            Err(error) => checks.push(doctor_fail(
+                "database-fix",
+                error.to_string(),
+                "Start Docker, then run `cartograph db start --project-path <path>`.".to_owned(),
+            )),
+        },
+        Err(error) => checks.push(doctor_fail(
+            "database-fix",
+            error.to_string(),
+            "Run `cartograph db start --project-path <path>`.".to_owned(),
+        )),
+    }
+}
+
+async fn apply_llm_doctor_fix(
+    project_path: &Path,
+    fixes_applied: &mut Vec<String>,
+    checks: &mut Vec<DoctorCheck>,
+) {
+    match llm_commands::doctor_fix_missing_tiers(project_path).await {
+        Ok(fixes) => fixes_applied.extend(fixes),
+        Err(error) => checks.push(doctor_fail(
+            "llm-fix",
+            error,
+            "Run `cartograph llm setup` or `cartograph llm install --minimal`.".to_owned(),
+        )),
+    }
 }
 
 async fn build_doctor_report_with_settings(
-    project_path: PathBuf,
-    fix: bool,
-    skip_project_checks: bool,
-    explicit_database_settings: Option<&DatabaseSettings>,
+    input: DoctorReportInput<'_>,
 ) -> Result<DoctorReport, String> {
-    let project_path = project_path
+    let project_path = input
+        .project_path
         .canonicalize()
         .map_err(|_| "doctor project path must be an existing directory".to_owned())?;
     if !project_path.is_dir() {
@@ -3333,43 +3669,23 @@ async fn build_doctor_report_with_settings(
     let mut checks = Vec::new();
 
     check_native_executable(&mut checks);
-    if !skip_project_checks {
-        check_or_fix_project_state(&project_path, fix, &mut fixes_applied, &mut checks)?;
+    if !input.skip_project_checks {
+        check_or_fix_project_state(ProjectStateCheckInput {
+            project_path: &project_path,
+            fix: input.fix,
+            fixes: &mut fixes_applied,
+            checks: &mut checks,
+        })?;
     }
 
     let external_database =
-        explicit_database_settings.is_some() || env::var_os(DATABASE_URL_ENV).is_some();
-    if fix && !external_database {
-        match ManagedDatabase::new(&project_path, DEFAULT_MANAGED_DATABASE_PORT) {
-            Ok(database) => match database.lifecycle().start().await {
-                Ok(report) => fixes_applied.push(format!(
-                    "managed PostgreSQL is ready; {} migration(s) applied",
-                    report.migrations.applied_versions.len()
-                )),
-                Err(error) => checks.push(doctor_fail(
-                    "database-fix",
-                    error.to_string(),
-                    "Start Docker, then run `cartograph db start --project-path <path>`."
-                        .to_owned(),
-                )),
-            },
-            Err(error) => checks.push(doctor_fail(
-                "database-fix",
-                error.to_string(),
-                "Run `cartograph db start --project-path <path>`.".to_owned(),
-            )),
-        }
+        input.explicit_database_settings.is_some() || env::var_os(DATABASE_URL_ENV).is_some();
+    if input.fix && !external_database {
+        apply_managed_database_doctor_fix(&project_path, &mut fixes_applied, &mut checks).await;
     }
 
-    if fix && !skip_project_checks {
-        match llm_commands::doctor_fix_missing_tiers(&project_path).await {
-            Ok(fixes) => fixes_applied.extend(fixes),
-            Err(error) => checks.push(doctor_fail(
-                "llm-fix",
-                error,
-                "Run `cartograph llm setup` or `cartograph llm install --minimal`.".to_owned(),
-            )),
-        }
+    if input.fix && !input.skip_project_checks {
+        apply_llm_doctor_fix(&project_path, &mut fixes_applied, &mut checks).await;
     }
 
     if !external_database {
@@ -3377,7 +3693,7 @@ async fn build_doctor_report_with_settings(
     } else {
         checks.push(doctor_pass(
             "database-source",
-            if explicit_database_settings.is_some() {
+            if input.explicit_database_settings.is_some() {
                 "Using validated external PostgreSQL settings supplied to this process."
             } else {
                 "Using validated external PostgreSQL settings from the process environment."
@@ -3386,11 +3702,14 @@ async fn build_doctor_report_with_settings(
     }
 
     let (database, settings) =
-        check_database_capabilities(&project_path, explicit_database_settings, &mut checks).await;
-    if !skip_project_checks && let Some(settings) = settings.as_ref() {
+        check_database_capabilities(&project_path, input.explicit_database_settings, &mut checks)
+            .await;
+    if !input.skip_project_checks
+        && let Some(settings) = settings.as_ref()
+    {
         check_project_index(&project_path, settings, &mut checks).await;
     }
-    if !skip_project_checks {
+    if !input.skip_project_checks {
         check_llm_configuration(&project_path, &mut checks).await;
     }
 
@@ -3408,8 +3727,7 @@ async fn build_doctor_report_with_settings(
 fn check_native_executable(checks: &mut Vec<DoctorCheck>) {
     let healthy = env::current_exe()
         .ok()
-        .and_then(|path| fs::symlink_metadata(path).ok())
-        .is_some_and(|metadata| metadata.file_type().is_file());
+        .is_some_and(|path| native_executable_path_is_safe(&path));
     checks.push(if healthy {
         doctor_pass(
             "native-runtime",
@@ -3428,25 +3746,27 @@ fn check_native_executable(checks: &mut Vec<DoctorCheck>) {
     });
 }
 
-fn check_or_fix_project_state(
-    project_path: &Path,
-    fix: bool,
-    fixes: &mut Vec<String>,
-    checks: &mut Vec<DoctorCheck>,
-) -> Result<(), String> {
-    let state = project_path.join(".cartograph");
+fn native_executable_path_is_safe(path: &Path) -> bool {
+    path.canonicalize()
+        .ok()
+        .and_then(|canonical| fs::symlink_metadata(canonical).ok())
+        .is_some_and(|metadata| metadata.file_type().is_file())
+}
+
+fn check_or_fix_project_state(input: ProjectStateCheckInput<'_>) -> Result<(), String> {
+    let state = input.project_path.join(".cartograph");
     match fs::symlink_metadata(&state) {
-        Ok(metadata) if metadata.file_type().is_dir() => checks.push(doctor_pass(
+        Ok(metadata) if metadata.file_type().is_dir() => input.checks.push(doctor_pass(
             "project-state",
             "The project has a real .cartograph state directory.",
         )),
-        Ok(_) => checks.push(doctor_fail(
+        Ok(_) => input.checks.push(doctor_fail(
             "project-state",
             "The .cartograph state entry is not a real directory.".to_owned(),
             "Replace it with a private directory after preserving any intentional contents."
                 .to_owned(),
         )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && fix => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && input.fix => {
             fs::create_dir(&state).map_err(|_| {
                 "doctor could not create the .cartograph state directory".to_owned()
             })?;
@@ -3457,18 +3777,22 @@ fn check_or_fix_project_state(
                     "doctor could not make the .cartograph state directory private".to_owned()
                 })?;
             }
-            fixes.push("created the private .cartograph state directory".to_owned());
-            checks.push(doctor_pass(
+            input
+                .fixes
+                .push("created the private .cartograph state directory".to_owned());
+            input.checks.push(doctor_pass(
                 "project-state",
                 "The project has a real .cartograph state directory.",
             ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => checks.push(doctor_warn(
-            "project-state",
-            "The project is not initialized yet.",
-            "Run `cartograph doctor --fix` or `cartograph db start`.".to_owned(),
-        )),
-        Err(_) => checks.push(doctor_fail(
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            input.checks.push(doctor_warn(
+                "project-state",
+                "The project is not initialized yet.",
+                "Run `cartograph doctor --fix` or `cartograph db start`.".to_owned(),
+            ))
+        }
+        Err(_) => input.checks.push(doctor_fail(
             "project-state",
             "The .cartograph state entry could not be inspected.".to_owned(),
             "Check project-directory permissions.".to_owned(),
@@ -3587,7 +3911,13 @@ async fn check_project_index(
             return;
         }
     };
-    match runtime.status().await {
+    let status = runtime.status().await;
+    if let Ok(status) = &status
+        && let Some(snapshot) = &status.snapshot
+    {
+        check_generation_storage(snapshot.generation_storage, checks);
+    }
+    match status {
         Ok(status)
             if status
                 .snapshot
@@ -3617,6 +3947,28 @@ async fn check_project_index(
         )),
     }
     runtime.close().await;
+}
+
+fn check_generation_storage(storage: GenerationStorageSummary, checks: &mut Vec<DoctorCheck>) {
+    let message = format!(
+        "Retained generations: {} staging, {} ready, {} current, {} superseded, {} failed; \
+         estimated {}.",
+        storage.staging,
+        storage.ready,
+        storage.current,
+        storage.superseded,
+        storage.failed,
+        render_byte_count(storage.estimated_retained_bytes)
+    );
+    if generation_storage_needs_attention(storage) {
+        checks.push(doctor_warn(
+            "generation-retention",
+            message,
+            "Run `cartograph index` to trigger automatic bounded cleanup; if the backlog remains, inspect `cartograph db prune --help` and database free space.".to_owned(),
+        ));
+    } else {
+        checks.push(doctor_pass("generation-retention", message));
+    }
 }
 
 async fn check_llm_configuration(project_path: &Path, checks: &mut Vec<DoctorCheck>) {
@@ -3759,12 +4111,9 @@ fn doctor_fail(
     message: impl Into<String>,
     remediation: String,
 ) -> DoctorCheck {
-    DoctorCheck {
-        id: id.into(),
-        status: DoctorStatus::Fail,
-        message: message.into(),
-        remediation: Some(remediation),
-    }
+    let mut check = doctor_warn(id, message, remediation);
+    check.status = DoctorStatus::Fail;
+    check
 }
 
 fn render_doctor_report(report: &DoctorReport) -> String {
@@ -3965,6 +4314,93 @@ mod tests {
         assert!(rendered.contains("✗ database-postgres-18"));
         assert!(rendered.contains("Fix: Upgrade PostgreSQL."));
         assert!(rendered.contains("is not ready"));
+    }
+
+    #[test]
+    fn generation_retention_warning_matches_automatic_cleanup_bounds() {
+        const FOUR_GIBIBYTES: u64 = 4 * 1_024 * 1_024 * 1_024;
+
+        let healthy = GenerationStorageSummary {
+            staging: 1,
+            ready: 1,
+            superseded: 34,
+            failed: 32,
+            estimated_retained_bytes: FOUR_GIBIBYTES,
+            ..GenerationStorageSummary::default()
+        };
+        assert!(!generation_storage_needs_attention(healthy));
+        let mut warnings = [healthy; 5];
+        warnings[0].staging += 1;
+        warnings[1].ready += 1;
+        warnings[2].superseded += 1;
+        warnings[3].failed += 1;
+        warnings[4].estimated_retained_bytes += 1;
+        for warning in warnings {
+            assert!(generation_storage_needs_attention(warning));
+        }
+    }
+
+    #[test]
+    fn doctor_generation_retention_check_is_actionable_and_byte_exact() {
+        let mut healthy_checks = Vec::new();
+        check_generation_storage(
+            GenerationStorageSummary {
+                current: 1,
+                estimated_retained_bytes: 1_024 * 1_024,
+                ..GenerationStorageSummary::default()
+            },
+            &mut healthy_checks,
+        );
+        assert_eq!(healthy_checks.len(), 1);
+        assert_eq!(healthy_checks[0].id, "generation-retention");
+        assert_eq!(healthy_checks[0].status, DoctorStatus::Pass);
+        assert!(healthy_checks[0].message.contains("1 MiB (1048576 bytes)"));
+        assert!(healthy_checks[0].remediation.is_none());
+
+        let mut warning_checks = Vec::new();
+        check_generation_storage(
+            GenerationStorageSummary {
+                staging: 2,
+                current: 1,
+                estimated_retained_bytes: 5 * 1_024 * 1_024 * 1_024,
+                ..GenerationStorageSummary::default()
+            },
+            &mut warning_checks,
+        );
+        assert_eq!(warning_checks.len(), 1);
+        assert_eq!(warning_checks[0].id, "generation-retention");
+        assert_eq!(warning_checks[0].status, DoctorStatus::Warn);
+        assert!(warning_checks[0].message.contains("2 staging"));
+        assert!(warning_checks[0].message.contains("5 GiB"));
+        assert!(
+            warning_checks[0]
+                .remediation
+                .as_deref()
+                .is_some_and(|message| message.contains("cartograph db prune --help"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_runtime_accepts_installer_symlink_to_regular_executable() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory failed: {error}"));
+        let versioned_binary = directory.path().join("versions/v2.0.4/bin/cartograph");
+        fs::create_dir_all(
+            versioned_binary
+                .parent()
+                .unwrap_or_else(|| panic!("versioned binary must have a parent")),
+        )
+        .unwrap_or_else(|error| panic!("versioned directory failed: {error}"));
+        fs::write(&versioned_binary, b"native-binary")
+            .unwrap_or_else(|error| panic!("versioned binary failed: {error}"));
+        let installer_link = directory.path().join("cartograph");
+        symlink(&versioned_binary, &installer_link)
+            .unwrap_or_else(|error| panic!("installer symlink failed: {error}"));
+
+        assert!(native_executable_path_is_safe(&installer_link));
     }
 
     #[test]

@@ -479,11 +479,35 @@ const EDGE_KIND_VALUES: [&str; EdgeKind::Contains as usize + 1] = [
     "contains",
 ];
 
+const EDGE_KINDS: [EdgeKind; EdgeKind::Contains as usize + 1] = [
+    EdgeKind::Calls,
+    EdgeKind::Imports,
+    EdgeKind::References,
+    EdgeKind::Implements,
+    EdgeKind::Extends,
+    EdgeKind::Tests,
+    EdgeKind::TypeOf,
+    EdgeKind::Returns,
+    EdgeKind::Instantiates,
+    EdgeKind::Overrides,
+    EdgeKind::Decorates,
+    EdgeKind::FieldAccess,
+    EdgeKind::DefUse,
+    EdgeKind::Exports,
+    EdgeKind::Contains,
+];
+
 impl EdgeKind {
     /// Stable PostgreSQL representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         EDGE_KIND_VALUES[self as usize]
+    }
+
+    /// Parse the stable PostgreSQL and wire representation.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        EDGE_KINDS.into_iter().find(|kind| kind.as_str() == value)
     }
 }
 

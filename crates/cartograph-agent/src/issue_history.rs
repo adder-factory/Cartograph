@@ -5,8 +5,9 @@ use std::{
 };
 
 use cartograph_db::{
-    IssueAttributionKind, IssueHistoryRefreshMetadata, IssueHistoryRefreshReport,
-    IssueHistoryRefreshRequest, SymbolIssueAttribution,
+    IssueAttributionKind, IssueHistoryRefreshInput, IssueHistoryRefreshMetadata,
+    IssueHistoryRefreshMetadataInput, IssueHistoryRefreshReport, IssueHistoryRefreshRequest,
+    SymbolIssueAttribution, SymbolIssueAttributionInput,
 };
 use cartograph_domain::{GenerationId, ProjectId};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -15,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     ProjectCancellation, ProjectRuntime, SourceCompareError, SourceCompareOptions,
-    review::run_git_bounded,
+    review::{GitCommandBounds, run_git_bounded},
 };
 
 const DEFAULT_MAXIMUM_COMMITS: u32 = 20_000;
@@ -56,6 +57,14 @@ impl IssueHistoryIndexOptions {
     }
 }
 
+/// Exact generation, scan bounds, and cancellation scope for issue-history refresh.
+pub struct IssueHistoryIndexRequest {
+    pub project_id: ProjectId,
+    pub generation_id: GenerationId,
+    pub options: IssueHistoryIndexOptions,
+    pub cancellation: ProjectCancellation,
+}
+
 /// Source-safe issue-history failure.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum IssueHistoryIndexError {
@@ -79,11 +88,14 @@ impl ProjectRuntime {
     /// Rebuild issue-tagged symbol evidence for one exact current generation.
     pub async fn refresh_issue_history(
         &self,
-        project_id: ProjectId,
-        generation_id: GenerationId,
-        options: IssueHistoryIndexOptions,
-        cancellation: ProjectCancellation,
+        input: IssueHistoryIndexRequest,
     ) -> Result<IssueHistoryRefreshReport, IssueHistoryIndexError> {
+        let IssueHistoryIndexRequest {
+            project_id,
+            generation_id,
+            options,
+            cancellation,
+        } = input;
         let prepared = self.prepare_issue_history(options, cancellation).await?;
         self.persist_issue_history(project_id, generation_id, prepared)
             .await
@@ -115,8 +127,7 @@ impl ProjectRuntime {
                 "HEAD",
                 "--",
             ],
-            MAXIMUM_GIT_LOG_BYTES,
-            GIT_LOG_TIMEOUT,
+            GitCommandBounds::new(MAXIMUM_GIT_LOG_BYTES, GIT_LOG_TIMEOUT),
         )
         .await
         .map_err(|_| IssueHistoryIndexError::GitUnavailable)?;
@@ -188,8 +199,13 @@ impl ProjectRuntime {
         let attributions = attributions
             .into_iter()
             .map(|(symbol_id, issue_number, sha, kind)| {
-                SymbolIssueAttribution::new(symbol_id, issue_number, sha, kind)
-                    .map_err(|_| IssueHistoryIndexError::RelationLimit)
+                SymbolIssueAttribution::new(SymbolIssueAttributionInput {
+                    symbol_id,
+                    issue_number,
+                    commit_sha: sha,
+                    kind,
+                })
+                .map_err(|_| IssueHistoryIndexError::RelationLimit)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(PreparedIssueHistory {
@@ -209,20 +225,22 @@ impl ProjectRuntime {
         generation_id: GenerationId,
         prepared: PreparedIssueHistory,
     ) -> Result<IssueHistoryRefreshReport, IssueHistoryIndexError> {
-        let metadata = IssueHistoryRefreshMetadata::new(
-            prepared.head,
-            prepared.commits_scanned,
-            prepared.tagged_commits,
-            prepared.oversized_commits_skipped,
-            prepared.comparison_failures_skipped,
-            prepared.truncated,
-        )
+        let metadata = IssueHistoryRefreshMetadata::new(IssueHistoryRefreshMetadataInput {
+            head_commit: prepared.head,
+            commits_scanned: prepared.commits_scanned,
+            tagged_commits: prepared.tagged_commits,
+            oversized_commits_skipped: prepared.oversized_commits_skipped,
+            comparison_failures_skipped: prepared.comparison_failures_skipped,
+            truncated: prepared.truncated,
+        })
         .map_err(|_| IssueHistoryIndexError::RelationLimit)?;
         let request = IssueHistoryRefreshRequest::new(
             project_id,
             generation_id,
-            metadata,
-            prepared.attributions,
+            IssueHistoryRefreshInput {
+                metadata,
+                attributions: prepared.attributions,
+            },
         )
         .map_err(|_| IssueHistoryIndexError::RelationLimit)?;
         self.database()
@@ -318,8 +336,7 @@ async fn git_head(runtime: &ProjectRuntime) -> Result<String, IssueHistoryIndexE
     let output = run_git_bounded(
         runtime.project_root_for_host_operations(),
         &["rev-parse", "--verify", "HEAD"],
-        256,
-        Duration::from_secs(10),
+        GitCommandBounds::new(256, Duration::from_secs(10)),
     )
     .await
     .map_err(|_| IssueHistoryIndexError::NotGitRepository)?;

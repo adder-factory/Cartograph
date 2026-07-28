@@ -2,7 +2,11 @@ use cartograph_domain::{SourceLanguage, SymbolKind};
 
 use crate::{
     ExtractError,
-    framework::{FrameworkBuilder, LandmarkInput},
+    framework::{
+        FrameworkBuilder, FrameworkRouteInput, LandmarkInput, Quoted,
+        quoted_literal_after as quoted_after, skip_ascii_whitespace,
+    },
+    source_lines::physical_lines,
 };
 
 const MAX_ROUTE_BYTES: usize = 1_024;
@@ -39,14 +43,35 @@ pub(crate) fn scan(
             continue;
         }
         if trimmed.starts_with("root") {
-            scan_root(builder, line_start, line, &scopes)?;
+            scan_root(
+                builder,
+                RouteLineInput {
+                    line_start,
+                    line,
+                    scopes: &scopes,
+                },
+            )?;
             continue;
         }
         if trimmed.starts_with("resources ") || trimmed.starts_with("resource ") {
-            scan_resource(builder, line_start, line, &scopes)?;
+            scan_resource(
+                builder,
+                RouteLineInput {
+                    line_start,
+                    line,
+                    scopes: &scopes,
+                },
+            )?;
             continue;
         }
-        scan_http_route(builder, line_start, line, &scopes)?;
+        scan_http_route(
+            builder,
+            RouteLineInput {
+                line_start,
+                line,
+                scopes: &scopes,
+            },
+        )?;
     }
     Ok(())
 }
@@ -55,6 +80,12 @@ pub(crate) fn scan(
 struct RouteScope {
     path: String,
     module: String,
+}
+
+struct RouteLineInput<'line, 'scope> {
+    line_start: usize,
+    line: &'line str,
+    scopes: &'scope [RouteScope],
 }
 
 fn parse_scope(line: &str) -> Option<RouteScope> {
@@ -77,10 +108,13 @@ fn parse_scope(line: &str) -> Option<RouteScope> {
 
 fn scan_root(
     builder: &mut FrameworkBuilder<'_, '_>,
-    line_start: usize,
-    line: &str,
-    scopes: &[RouteScope],
+    input: RouteLineInput<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let RouteLineInput {
+        line_start,
+        line,
+        scopes,
+    } = input;
     let Some(target) = quoted_after(line, line.find("root").unwrap_or(0) + "root".len()) else {
         return Ok(());
     };
@@ -107,10 +141,13 @@ fn scan_root(
 
 fn scan_resource(
     builder: &mut FrameworkBuilder<'_, '_>,
-    line_start: usize,
-    line: &str,
-    scopes: &[RouteScope],
+    input: RouteLineInput<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let RouteLineInput {
+        line_start,
+        line,
+        scopes,
+    } = input;
     let trimmed = line.trim_start();
     let singular = trimmed.starts_with("resource ") && !trimmed.starts_with("resources ");
     let keyword = if singular { "resource" } else { "resources" };
@@ -150,24 +187,27 @@ fn scan_resource(
         ]
     };
     for (method, suffix) in resource_routes {
-        builder.add_route(
+        builder.add_route(FrameworkRouteInput {
             method,
-            &format!("{base}{suffix}"),
-            line_start + start,
-            line_start + end,
-            false,
-            None,
-        )?;
+            path: &format!("{base}{suffix}"),
+            start: line_start + start,
+            end: line_start + end,
+            command: false,
+            handler: None,
+        })?;
     }
     Ok(())
 }
 
 fn scan_http_route(
     builder: &mut FrameworkBuilder<'_, '_>,
-    line_start: usize,
-    line: &str,
-    scopes: &[RouteScope],
+    input: RouteLineInput<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let RouteLineInput {
+        line_start,
+        line,
+        scopes,
+    } = input;
     let trimmed = line.trim_start();
     let indentation = line.len().saturating_sub(trimmed.len());
     let Some((keyword, method)) = [
@@ -320,41 +360,6 @@ fn ruby_symbol_or_string_with_span(value: &str, from: usize) -> Option<(&str, us
     quoted_after(value, start).map(|quoted| (quoted.value, quoted.start, quoted.end))
 }
 
-struct Quoted<'source> {
-    value: &'source str,
-    start: usize,
-    end: usize,
-    quote_end: usize,
-}
-
-fn quoted_after(value: &str, from: usize) -> Option<Quoted<'_>> {
-    let mut cursor = from;
-    while cursor < value.len() && !matches!(value.as_bytes()[cursor], b'\'' | b'"') {
-        cursor += 1;
-    }
-    let quote = *value.as_bytes().get(cursor)?;
-    let start = cursor + 1;
-    cursor = start;
-    let mut escaped = false;
-    while cursor < value.len() {
-        let byte = value.as_bytes()[cursor];
-        if escaped {
-            escaped = false;
-        } else if byte == b'\\' {
-            escaped = true;
-        } else if byte == quote {
-            return Some(Quoted {
-                value: &value[start..cursor],
-                start,
-                end: cursor,
-                quote_end: cursor,
-            });
-        }
-        cursor += 1;
-    }
-    None
-}
-
 fn identifier_end(value: &str, mut cursor: usize) -> usize {
     while value
         .as_bytes()
@@ -364,23 +369,4 @@ fn identifier_end(value: &str, mut cursor: usize) -> usize {
         cursor += 1;
     }
     cursor
-}
-
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn physical_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
-    source.split_inclusive('\n').scan(0_usize, |offset, line| {
-        let start = *offset;
-        *offset = offset.saturating_add(line.len());
-        Some((start, line.trim_end_matches(['\n', '\r'])))
-    })
 }

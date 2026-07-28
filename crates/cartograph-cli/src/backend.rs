@@ -30,6 +30,10 @@ const START_CONFIRMATION: Duration = Duration::from_millis(250);
 const ENDPOINT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(unix, windows))]
 const MAXIMUM_PROCESS_OUTPUT_BYTES: usize = 128 * 1024;
+const MAXIMUM_PID_COMMAND_BYTES: usize = 4_096;
+const MAXIMUM_PID_ARGUMENTS: usize = 256;
+const MAXIMUM_PID_LABELS: usize = 16;
+const MAXIMUM_PID_LABEL_BYTES: usize = 64;
 
 #[derive(Debug, Subcommand)]
 pub(super) enum BackendCommand {
@@ -325,7 +329,13 @@ fn build_specs(project: &Path, binary: &str) -> Result<Vec<BackendSpec>, String>
         else {
             continue;
         };
-        let Some((key, mut spec)) = build_tier_spec(tier, label, &config, binary)? else {
+        let Some((key, mut spec)) = build_tier_spec(TierSpecInput {
+            tier,
+            label,
+            config: &config,
+            binary,
+        })?
+        else {
             continue;
         };
         if let Some(existing) = specs.get_mut(&key) {
@@ -347,12 +357,20 @@ fn build_specs(project: &Path, binary: &str) -> Result<Vec<BackendSpec>, String>
     Ok(specs.into_values().collect())
 }
 
-fn build_tier_spec(
+struct TierSpecInput<'a> {
     tier: ProjectLlmTier,
-    label: &str,
-    config: &ProjectLlmTierConfig,
-    binary: &str,
-) -> Result<Option<(String, BackendSpec)>, String> {
+    label: &'a str,
+    config: &'a ProjectLlmTierConfig,
+    binary: &'a str,
+}
+
+fn build_tier_spec(input: TierSpecInput<'_>) -> Result<Option<(String, BackendSpec)>, String> {
+    let TierSpecInput {
+        tier,
+        label,
+        config,
+        binary,
+    } = input;
     let model_path = PathBuf::from(config.model());
     if !model_path.is_absolute() {
         return Ok(None);
@@ -700,18 +718,20 @@ fn valid_pid_record(record: &BackendPidRecord) -> bool {
     record.schema_version == PID_SCHEMA_VERSION
         && record.pid > 0
         && !record.command.is_empty()
-        && record.command.len() <= 4_096
-        && record.args.len() <= 256
+        && record.command.len() <= MAXIMUM_PID_COMMAND_BYTES
+        && record.args.len() <= MAXIMUM_PID_ARGUMENTS
         && record.args.iter().all(|argument| {
             !argument.is_empty()
-                && argument.len() <= 4_096
+                && argument.len() <= MAXIMUM_PID_COMMAND_BYTES
                 && !argument.chars().any(char::is_control)
         })
         && !record.endpoint.is_empty()
-        && record.labels.len() <= 16
+        && record.labels.len() <= MAXIMUM_PID_LABELS
         && !record.labels.is_empty()
         && record.labels.iter().all(|label| {
-            !label.is_empty() && label.len() <= 64 && !label.chars().any(char::is_control)
+            !label.is_empty()
+                && label.len() <= MAXIMUM_PID_LABEL_BYTES
+                && !label.chars().any(char::is_control)
         })
         && record.model_path.is_absolute()
         && record.log_path.is_absolute()
@@ -1099,6 +1119,54 @@ fn remove_pid_file(path: &Path) -> Result<(), String> {
     fs::remove_file(path).map_err(|_| "backend pid state cannot be removed".to_owned())
 }
 
+#[derive(Clone, Copy)]
+struct RestartPolicy {
+    force: bool,
+    dry_run: bool,
+}
+
+enum RestartOutcome {
+    Changed(ActionDisposition),
+    Skipped(ActionDisposition),
+}
+
+fn restart_skip_reason(row: &BackendRow) -> Option<String> {
+    if row.origin == BackendOrigin::Orphan {
+        Some("orphaned state must be reclaimed with backend stop".to_owned())
+    } else if row.spec.externally_managed || (row.endpoint_reachable && row.pid_record.is_none()) {
+        Some(format!(
+            "external process; relaunch manually with {}",
+            render_command(&row.spec)
+        ))
+    } else if !row.model_exists || row.state_error.is_some() {
+        Some("backend model or pid state is invalid".to_owned())
+    } else {
+        None
+    }
+}
+
+async fn restart_row(row: &BackendRow, policy: RestartPolicy) -> RestartOutcome {
+    if let Some(reason) = restart_skip_reason(row) {
+        return RestartOutcome::Skipped(disposition(row, reason));
+    }
+    if policy.dry_run {
+        return RestartOutcome::Changed(disposition(row, "would restart"));
+    }
+    if row.pid_record.is_some()
+        && let Err(error) = stop_row(row, policy.force).await
+    {
+        return RestartOutcome::Skipped(disposition(row, error));
+    }
+    match spawn_row(row).await {
+        Ok(pid) => RestartOutcome::Changed(disposition(row, format!("restarted as pid {pid}"))),
+        Err(error) => RestartOutcome::Skipped(disposition(row, error)),
+    }
+}
+
+fn row_matches_tier(row: &BackendRow, tier: Option<BackendTier>) -> bool {
+    tier.is_none_or(|tier| row.spec.labels.iter().any(|label| label == tier.label()))
+}
+
 async fn run_restart(arguments: RestartArguments) -> Result<ExitCode, String> {
     let before = backend_status(&arguments.path, &arguments.binary).await?;
     let paths = state_paths(&arguments.path)?;
@@ -1107,45 +1175,18 @@ async fn run_restart(arguments: RestartArguments) -> Result<ExitCode, String> {
     if !arguments.dry_run {
         ensure_state_directory(&paths)?;
     }
-    for row in before.rows.iter().filter(|row| {
-        arguments
-            .tier
-            .is_none_or(|tier| row.spec.labels.iter().any(|label| label == tier.label()))
-    }) {
-        if row.origin == BackendOrigin::Orphan {
-            skipped.push(disposition(
-                row,
-                "orphaned state must be reclaimed with backend stop",
-            ));
-            continue;
-        }
-        if row.spec.externally_managed || (row.endpoint_reachable && row.pid_record.is_none()) {
-            skipped.push(disposition(
-                row,
-                format!(
-                    "external process; relaunch manually with {}",
-                    render_command(&row.spec)
-                ),
-            ));
-            continue;
-        }
-        if !row.model_exists || row.state_error.is_some() {
-            skipped.push(disposition(row, "backend model or pid state is invalid"));
-            continue;
-        }
-        if arguments.dry_run {
-            changed.push(disposition(row, "would restart"));
-            continue;
-        }
-        if row.pid_record.is_some()
-            && let Err(error) = stop_row(row, arguments.force).await
-        {
-            skipped.push(disposition(row, error));
-            continue;
-        }
-        match spawn_row(row).await {
-            Ok(pid) => changed.push(disposition(row, format!("restarted as pid {pid}"))),
-            Err(error) => skipped.push(disposition(row, error)),
+    let policy = RestartPolicy {
+        force: arguments.force,
+        dry_run: arguments.dry_run,
+    };
+    for row in before
+        .rows
+        .iter()
+        .filter(|row| row_matches_tier(row, arguments.tier))
+    {
+        match restart_row(row, policy).await {
+            RestartOutcome::Changed(result) => changed.push(result),
+            RestartOutcome::Skipped(result) => skipped.push(result),
         }
     }
     let status = if arguments.dry_run {
@@ -1392,6 +1433,15 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    const EMBED_ENDPOINT: &str = "http://127.0.0.1:8080";
+    const CHAT_ENDPOINT: &str = "http://127.0.0.1:8081";
+    const LOCALHOST_V1_ENDPOINT: &str = "http://localhost:8080/v1";
+    const LOCALHOST_ENDPOINT: &str = "http://localhost:8080";
+    const IPV6_ENDPOINT: &str = "http://[::1]:8081";
+    const SECURE_LOCALHOST_ENDPOINT: &str = "https://localhost:8080";
+    const REMOTE_ENDPOINT: &str = "http://example.com:8080";
+    const UNREACHABLE_ENDPOINT: &str = "http://127.0.0.1:65534";
+
     #[test]
     fn managed_passthrough_cannot_override_identity_flags() {
         assert!(validate_passthrough(&["--cache-ram".to_owned(), "1024".to_owned()]).is_ok());
@@ -1421,20 +1471,20 @@ mod tests {
             "llm": {
                 "summarizeLlm": {
                     "provider": "openai-compat",
-                    "endpoint": "http://127.0.0.1:8081",
+                    "endpoint": CHAT_ENDPOINT,
                     "model": chat_model,
                     "concurrency": 2
                 },
                 "localLlm": {
                     "provider": "openai-compat",
-                    "endpoint": "http://127.0.0.1:8081",
+                    "endpoint": CHAT_ENDPOINT,
                     "model": chat_model,
                     "concurrency": 2,
                     "externallyManaged": true
                 },
                 "embeddingLlm": {
                     "provider": "openai-compat",
-                    "endpoint": "http://127.0.0.1:8080",
+                    "endpoint": EMBED_ENDPOINT,
                     "model": embed_model,
                     "concurrency": 4
                 }
@@ -1569,26 +1619,22 @@ mod tests {
         }
 
         assert_eq!(
-            local_endpoint("http://localhost:8080/v1")
+            local_endpoint(LOCALHOST_V1_ENDPOINT)
                 .unwrap_or_else(|error| panic!("localhost endpoint failed: {error}")),
-            Some((
-                "http://localhost:8080".to_owned(),
-                "localhost".to_owned(),
-                8080,
-            ))
+            Some((LOCALHOST_ENDPOINT.to_owned(), "localhost".to_owned(), 8080,))
         );
         assert_eq!(
-            local_endpoint("http://[::1]:8081")
+            local_endpoint(IPV6_ENDPOINT)
                 .unwrap_or_else(|error| panic!("IPv6 endpoint failed: {error}")),
-            Some(("http://[::1]:8081".to_owned(), "::1".to_owned(), 8081))
+            Some((IPV6_ENDPOINT.to_owned(), "::1".to_owned(), 8081))
         );
         assert!(
-            local_endpoint("https://localhost:8080")
+            local_endpoint(SECURE_LOCALHOST_ENDPOINT)
                 .unwrap_or_else(|error| panic!("HTTPS endpoint failed: {error}"))
                 .is_none()
         );
         assert!(
-            local_endpoint("http://example.com:8080")
+            local_endpoint(REMOTE_ENDPOINT)
                 .unwrap_or_else(|error| panic!("remote endpoint failed: {error}"))
                 .is_none()
         );
@@ -1633,7 +1679,7 @@ mod tests {
         let spec = BackendSpec {
             id: "fixture".to_owned(),
             labels: vec!["embed".to_owned()],
-            endpoint: "http://127.0.0.1:65534".to_owned(),
+            endpoint: UNREACHABLE_ENDPOINT.to_owned(),
             model_path: model.clone(),
             host: "127.0.0.1".to_owned(),
             port: 65_534,

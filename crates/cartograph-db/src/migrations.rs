@@ -31,7 +31,7 @@ const SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION: i64 = 21;
 const LATEST_SCHEMA_VERSION: i64 = DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
-pub(crate) const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
+const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
             USING bm25 (
                 id,

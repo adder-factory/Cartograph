@@ -7,17 +7,20 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope, AgentArtifactState,
-    CanonicalGenerationFacts, CartographDatabase, CurrentFileLookup, CurrentFilesLookup,
-    CurrentGeneration, CurrentGraphLookup, CurrentSourceRangeLookup, CurrentSymbolSetLookup,
-    DerivedStorePrunePolicy, DerivedStorePruneRequest, EdgeInput, ExactTextLookup,
-    FailGenerationError, FailedGeneration, FileInput, GenerationContents, GenerationFacts,
-    GenerationRecoveryRequest, GenerationValidationError, GenerationValidationLimits,
-    GraphDirection, LeaseOwner, LeaseRequest, LeaseTarget, McpMacroStep, McpToolCallInput,
-    MigrationError, NewAgentArtifact, NewGeneration, NewMcpMacro, NewMcpSession, NewProject,
-    PrepareGenerationError, ProjectLease, PublishGenerationError, ReadOnlySqlRequest,
+    AgentArtifactContent, AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope,
+    AgentArtifactState, CanonicalGenerationFacts, CartographDatabase, CurrentFileLookup,
+    CurrentFilesLookup, CurrentGeneration, CurrentGenerationLookup, CurrentGraphLookup,
+    CurrentSourceRangeLookup, CurrentSymbolSetLookup, DerivedStorePrunePolicy,
+    DerivedStorePruneRequest, EdgeInput, ExactTextLookup, FailGenerationError, FailedGeneration,
+    FileInput, GenerationContents, GenerationFacts, GenerationRecoveryRequest,
+    GenerationRetentionPolicy, GenerationRetentionRequest, GenerationValidationError,
+    GenerationValidationLimits, GraphDirection, LeaseOwner, LeaseRequest, LeaseTarget,
+    McpMacroStep, McpSessionCallsQuery, McpSessionLookup, McpToolCallData, McpToolCallInput,
+    McpToolCallWrite, MigrationError, NewAgentArtifact, NewGeneration, NewMcpMacro, NewMcpSession,
+    NewProject, PrepareGenerationError, ProjectLease, PublishGenerationError, ReadOnlySqlRequest,
     ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
-    StorageError, SummaryCandidatePolicy, SymbolInput, validate_generation_facts,
+    SourceLineRange, StorageError, SummaryCandidatePolicy, SymbolInput, SymbolRoleSaveInput,
+    SymbolSummarySaveInput, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
@@ -113,6 +116,136 @@ const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_CHECKSUM: &str =
     "5cbc965cc09530332f8c320c70aac3b083324a21f78fe6ed8edb23057d6af518";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn unleased_staging_cleanup_is_exact_lease_safe_and_retention_collects_stale_rows() {
+    let (database, pool, schema) = open_isolated_database().await;
+    database
+        .migrate()
+        .await
+        .unwrap_or_else(|error| panic!("staging cleanup fixture migration failed: {error}"));
+    let project = register_project(&database).await;
+
+    let abandoned = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let abandoned_id = abandoned.generation_id().clone();
+    assert!(
+        database
+            .fail_unleased_staging_generation_bounded(
+                GenerationRecoveryRequest::new(&project, &abandoned_id),
+                LOCK_ORDER_TIMEOUT,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("unleased staging cleanup failed: {error}"))
+    );
+    assert!(
+        !database
+            .fail_unleased_staging_generation_bounded(
+                GenerationRecoveryRequest::new(&project, &abandoned_id),
+                LOCK_ORDER_TIMEOUT,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("idempotent staging cleanup failed: {error}"))
+    );
+    assert_state(
+        &database,
+        StateExpectation::new(&project, &abandoned_id, GenerationState::Failed),
+    )
+    .await;
+
+    let leased = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_TWO,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let leased_id = leased.generation_id().clone();
+    let exact_lease = acquire_generation_lease(&database, &project, &leased_id).await;
+    assert!(
+        !database
+            .fail_unleased_staging_generation_bounded(
+                GenerationRecoveryRequest::new(&project, &leased_id),
+                LOCK_ORDER_TIMEOUT,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("lease-safe staging cleanup failed: {error}"))
+    );
+    assert_state(
+        &database,
+        StateExpectation::new(&project, &leased_id, GenerationState::Staging),
+    )
+    .await;
+    database
+        .release_lease(&exact_lease)
+        .await
+        .unwrap_or_else(|error| panic!("exact staging lease did not release: {error}"));
+
+    let recent = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_THREE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let recent_id = recent.generation_id().clone();
+    let age_sql = format!(
+        r#"UPDATE "{schema}"."index_generations"
+            SET started_at = clock_timestamp() - interval '2 minutes'
+            WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)"#
+    );
+    query(AssertSqlSafe(age_sql))
+        .bind(project.as_str())
+        .bind(leased_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("stale staging fixture could not be aged: {error}"));
+    let retention_lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "stale-staging-retention"),
+            TEST_LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("stale staging retention lease failed: {error}"));
+    let retention = database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            GenerationRetentionPolicy::new(2, 10)
+                .and_then(|policy| policy.with_stale_staging_age(Duration::from_secs(60)))
+                .unwrap_or_else(|error| panic!("stale staging policy failed: {error}")),
+            &retention_lease.fence(),
+            LOCK_ORDER_TIMEOUT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("stale staging retention failed: {error}"));
+    assert_eq!(retention.staging_removed, 1);
+    assert_eq!(retention.staging_remaining, 1);
+    assert_state(
+        &database,
+        StateExpectation::new(&project, &recent_id, GenerationState::Staging),
+    )
+    .await;
+    database
+        .release_lease(&retention_lease)
+        .await
+        .unwrap_or_else(|error| panic!("stale staging retention lease did not release: {error}"));
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
@@ -338,41 +471,58 @@ async fn agent_sessions_trace_usage_and_macros_are_durable() {
         .create_mcp_session(&project, &named_input)
         .await
         .unwrap_or_else(|error| panic!("could not create named session: {error}"));
-    let first_call = McpToolCallInput::new(
-        "cartograph_status",
-        serde_json::json!({"mode": "diagnostics"}),
-        "status current",
-        true,
-        12,
-    )
+    let first_call = McpToolCallInput::new(McpToolCallData {
+        tool_name: "cartograph_status",
+        arguments: serde_json::json!({"mode": "diagnostics"}),
+        result_summary: "status current",
+        success: true,
+        duration_ms: 12,
+    })
     .unwrap_or_else(|error| panic!("could not build first trace call: {error}"));
-    let second_call = McpToolCallInput::new(
-        "cartograph_find",
-        serde_json::json!({"query": "missing"}),
-        "not_found: symbol was not found",
-        false,
-        48,
-    )
+    let second_call = McpToolCallInput::new(McpToolCallData {
+        tool_name: "cartograph_find",
+        arguments: serde_json::json!({"query": "missing"}),
+        result_summary: "not_found: symbol was not found",
+        success: false,
+        duration_ms: 48,
+    })
     .unwrap_or_else(|error| panic!("could not build second trace call: {error}"));
     let recorded_one = database
-        .record_mcp_tool_call(&project, named.session_id(), &first_call)
+        .record_mcp_tool_call(McpToolCallWrite {
+            project_id: &project,
+            session_id: named.session_id(),
+            input: &first_call,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not record first trace call: {error}"));
     let recorded_two = database
-        .record_mcp_tool_call(&project, named.session_id(), &second_call)
+        .record_mcp_tool_call(McpToolCallWrite {
+            project_id: &project,
+            session_id: named.session_id(),
+            input: &second_call,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not record second trace call: {error}"));
     assert_eq!(recorded_one.step(), 1);
     assert_eq!(recorded_two.step(), 2);
     let calls = database
-        .mcp_calls_for_session(&project, named.session_id(), 100)
+        .mcp_calls_for_session(McpSessionCallsQuery {
+            project_id: &project,
+            session_id: named.session_id(),
+            limit: 100,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not read trace calls: {error}"));
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].tool_name(), "cartograph_status");
     assert!(!calls[1].success());
     let found = database
-        .find_mcp_session(&project, None, Some("postgres-review"), false)
+        .find_mcp_session(McpSessionLookup {
+            project_id: &project,
+            session_id: None,
+            label: Some("postgres-review"),
+            require_calls: false,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not find named session: {error}"))
         .unwrap_or_else(|| panic!("named session was missing"));
@@ -433,7 +583,11 @@ async fn agent_sessions_trace_usage_and_macros_are_durable() {
     );
     assert!(
         database
-            .mcp_calls_for_session(&project, named.session_id(), 100)
+            .mcp_calls_for_session(McpSessionCallsQuery {
+                project_id: &project,
+                session_id: named.session_id(),
+                limit: 100,
+            })
             .await
             .unwrap_or_else(|error| panic!("could not verify cascade: {error}"))
             .is_empty()
@@ -460,8 +614,7 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     let note = NewAgentArtifact::new(
         AgentArtifactKind::Note,
         AgentArtifactScope::Project,
-        "project",
-        "Review the public API boundary before editing.",
+        AgentArtifactContent::new("project", "Review the public API boundary before editing."),
     )
     .unwrap_or_else(|error| panic!("could not build note fixture: {error}"));
     let created = database
@@ -481,8 +634,7 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     let question = NewAgentArtifact::new(
         AgentArtifactKind::Note,
         AgentArtifactScope::Project,
-        "project",
-        "Does this boundary need an integration test?",
+        AgentArtifactContent::new("project", "Does this boundary need an integration test?"),
     )
     .and_then(|artifact| {
         artifact.with_metadata(serde_json::json!({
@@ -524,8 +676,7 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     let role = NewAgentArtifact::new(
         AgentArtifactKind::Role,
         AgentArtifactScope::Symbol,
-        symbol_id.as_str(),
-        "business_logic",
+        AgentArtifactContent::new(symbol_id.as_str(), "business_logic"),
     )
     .unwrap_or_else(|error| panic!("could not build role fixture: {error}"))
     .with_generation(current.generation_id().clone())
@@ -589,11 +740,9 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     assert_eq!(explain_json["explain"], true);
     database
         .save_symbol_summary(
-            &project,
-            &symbol_id,
-            &source_digest,
-            "Handles the live artifact fixture.",
-            "integration-test",
+            SymbolSummarySaveInput::new(&project, &symbol_id, &source_digest)
+                .with_summary("Handles the live artifact fixture.")
+                .with_model("integration-test"),
         )
         .await
         .unwrap_or_else(|error| panic!("could not save current summary: {error}"));
@@ -606,11 +755,9 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     assert!(matches!(
         database
             .save_symbol_summary(
-                &project,
-                &symbol_id,
-                &stale_digest,
-                "This must not overwrite current evidence.",
-                "integration-test",
+                SymbolSummarySaveInput::new(&project, &symbol_id, &stale_digest)
+                    .with_summary("This must not overwrite current evidence.")
+                    .with_model("integration-test"),
             )
             .await,
         Err(StorageError::CurrentGenerationChanged)
@@ -658,20 +805,16 @@ async fn publication_carries_only_digest_identical_derived_evidence() {
 
     database
         .save_symbol_role(
-            &project,
-            &symbol_id,
-            "business_logic",
-            serde_json::json!({"via": "integration-test"}),
+            SymbolRoleSaveInput::new(&project, &symbol_id, "business_logic")
+                .with_metadata(serde_json::json!({"via": "integration-test"})),
         )
         .await
         .unwrap_or_else(|error| panic!("could not save role evidence: {error}"));
     database
         .save_symbol_summary(
-            &project,
-            &symbol_id,
-            &structural_digest,
-            "Decodes a JSON payload.",
-            "integration-test",
+            SymbolSummarySaveInput::new(&project, &symbol_id, &structural_digest)
+                .with_summary("Decodes a JSON payload.")
+                .with_model("integration-test"),
         )
         .await
         .unwrap_or_else(|error| panic!("could not save summary evidence: {error}"));
@@ -774,28 +917,26 @@ async fn cold_derived_prune_removes_only_unreferenced_artifacts_and_terminal_vec
     let structural_digest = digest(DIGEST_ONE);
     database
         .save_symbol_role(
-            &project,
-            &symbol_id,
-            "business_logic",
-            serde_json::json!({"via": "integration-test"}),
+            SymbolRoleSaveInput::new(&project, &symbol_id, "business_logic")
+                .with_metadata(serde_json::json!({"via": "integration-test"})),
         )
         .await
         .unwrap_or_else(|error| panic!("could not seed prune role: {error}"));
     database
         .save_symbol_summary(
-            &project,
-            &symbol_id,
-            &structural_digest,
-            "Decodes a cold JSON payload.",
-            "integration-test",
+            SymbolSummarySaveInput::new(&project, &symbol_id, &structural_digest)
+                .with_summary("Decodes a cold JSON payload.")
+                .with_model("integration-test"),
         )
         .await
         .unwrap_or_else(|error| panic!("could not seed prune summary: {error}"));
     let note = NewAgentArtifact::new(
         AgentArtifactKind::Note,
         AgentArtifactScope::Project,
-        "project",
-        "This operator note must survive derived-store pruning.",
+        AgentArtifactContent::new(
+            "project",
+            "This operator note must survive derived-store pruning.",
+        ),
     )
     .unwrap_or_else(|error| panic!("could not build prune note: {error}"));
     database
@@ -950,8 +1091,7 @@ async fn expected_generation_reads_survive_publication_without_mixing_snapshots(
     let lookup = tokio::spawn(async move {
         lookup_database
             .exact_current_symbols_by_name(ExactTextLookup::new(
-                &lookup_project,
-                &expected_generation,
+                CurrentGenerationLookup::new(&lookup_project, &expected_generation),
                 "fencedCanary",
                 SEARCH_LIMIT,
             ))
@@ -976,8 +1116,7 @@ async fn expected_generation_reads_survive_publication_without_mixing_snapshots(
     assert_eq!(
         database
             .exact_current_symbols_by_name(ExactTextLookup::new(
-                &project,
-                current.generation_id(),
+                CurrentGenerationLookup::new(&project, current.generation_id()),
                 "fencedCanary",
                 SEARCH_LIMIT,
             ))
@@ -986,8 +1125,7 @@ async fn expected_generation_reads_survive_publication_without_mixing_snapshots(
     );
     let replacement_rows = database
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            &project,
-            replacement.generation_id(),
+            CurrentGenerationLookup::new(&project, replacement.generation_id()),
             "fencedCanary",
             SEARCH_LIMIT,
         ))
@@ -1098,8 +1236,7 @@ async fn concurrent_bm25_reader_observes_one_complete_generation_relation() {
     let reader = tokio::spawn(async move {
         reader_database
             .search_current_code(SearchQuery::new(
-                reader_project,
-                reader_generation,
+                CurrentGenerationLookup::new(&reader_project, &reader_generation),
                 "http response",
                 SEARCH_LIMIT,
             ))
@@ -1124,8 +1261,7 @@ async fn concurrent_bm25_reader_observes_one_complete_generation_relation() {
     assert_eq!(
         database
             .search_current_code(SearchQuery::new(
-                project.clone(),
-                current.generation_id().clone(),
+                CurrentGenerationLookup::new(&project, current.generation_id()),
                 "http response",
                 SEARCH_LIMIT,
             ))
@@ -1134,8 +1270,7 @@ async fn concurrent_bm25_reader_observes_one_complete_generation_relation() {
     );
     let new_hits = database
         .search_current_code(SearchQuery::new(
-            project,
-            replacement.generation_id().clone(),
+            CurrentGenerationLookup::new(&project, replacement.generation_id()),
             "json payload",
             SEARCH_LIMIT,
         ))
@@ -1167,8 +1302,7 @@ async fn startup_rebuilds_crash_lost_search_relation_and_removes_trusted_orphan(
     assert_eq!(
         database
             .search_current_code(SearchQuery::new(
-                project.clone(),
-                current.generation_id().clone(),
+                CurrentGenerationLookup::new(&project, current.generation_id()),
                 "isolationtoken",
                 SEARCH_LIMIT,
             ))
@@ -1496,6 +1630,151 @@ async fn concurrent_prepare_and_cleanup_share_one_pre_copy_lock_order() {
     drop(database);
     drop_schema(&pool, &schema).await;
     pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn stale_publish_and_post_index_retention_share_one_lock_order() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let generation_id = staged.generation_id().clone();
+    let target = LeaseTarget::new(
+        project.clone(),
+        ProjectOperation::Index,
+        Some(generation_id.clone()),
+    );
+    let stale_lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    let stale_fence = stale_lease.fence();
+    let ready = database
+        .prepare_generation(
+            GenerationContents::new(staged, canonical(GenerationFacts::default())),
+            &stale_fence,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("stale publication fixture did not become ready: {error}"));
+    expire_generation_lease(&pool, &schema, &target).await;
+    let retention_lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "post-index-lock-order"),
+            TEST_LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("post-index retention lease failed: {error}"));
+
+    let project_key = format!("cartograph-v2-operation:{schema}:{project}");
+    let publication_key = format!("cartograph-v2-publish:{schema}:{project}");
+    let mut project_blocker = pool
+        .acquire()
+        .await
+        .unwrap_or_else(|error| panic!("project lock-order blocker connection failed: {error}"));
+    query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&project_key)
+        .execute(&mut *project_blocker)
+        .await
+        .unwrap_or_else(|error| panic!("project lock-order blocker failed: {error}"));
+    let baseline_waiters = advisory_waiter_count(&pool).await;
+    let publish_database = database.clone();
+    let publish = tokio::spawn(async move {
+        publish_database
+            .publish_generation(ready, &stale_fence)
+            .await
+    });
+    wait_for_advisory_waiter(&pool, baseline_waiters, "stale publication").await;
+
+    let publication_available = query("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+        .bind(&publication_key)
+        .fetch_one(&mut *project_blocker)
+        .await
+        .and_then(|row| row.try_get::<bool, _>(0))
+        .unwrap_or_else(|error| panic!("publication lock-order probe failed: {error}"));
+    assert!(
+        publication_available,
+        "publication acquired its advisory lock before the project operation lock"
+    );
+
+    let retention_database = database.clone();
+    let retention_fence = retention_lease.fence();
+    let retention = tokio::spawn(async move {
+        retention_database
+            .cleanup_generations(GenerationRetentionRequest::new(
+                GenerationRetentionPolicy::new(2, 10)
+                    .unwrap_or_else(|error| panic!("post-index retention policy failed: {error}")),
+                &retention_fence,
+                LOCK_ORDER_TIMEOUT,
+            ))
+            .await
+    });
+    wait_for_advisory_waiter(&pool, baseline_waiters + 1, "post-index retention").await;
+    query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&project_key)
+        .execute(&mut *project_blocker)
+        .await
+        .unwrap_or_else(|error| panic!("project lock-order blocker did not release: {error}"));
+    query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&publication_key)
+        .execute(&mut *project_blocker)
+        .await
+        .unwrap_or_else(|error| panic!("publication lock-order probe did not release: {error}"));
+
+    let joined = tokio::time::timeout(LOCK_ORDER_TIMEOUT, async {
+        tokio::join!(publish, retention)
+    })
+    .await
+    .unwrap_or_else(|_| panic!("stale publication and retention deadlocked"));
+    let publish = match joined.0 {
+        Ok(publish) => publish,
+        Err(error) => panic!("stale publication task failed: {error}"),
+    };
+    assert!(matches!(
+        publish,
+        Err(error) if *error.error() == StorageError::LeaseFenceLost
+    ));
+    joined
+        .1
+        .unwrap_or_else(|error| panic!("post-index retention task failed: {error}"))
+        .unwrap_or_else(|error| panic!("post-index retention failed: {error}"));
+    database
+        .release_lease(&retention_lease)
+        .await
+        .unwrap_or_else(|error| panic!("post-index retention lease did not release: {error}"));
+
+    drop(project_blocker);
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+async fn advisory_waiter_count(pool: &sqlx_postgres::PgPool) -> i64 {
+    query(
+        r#"SELECT count(*)::bigint
+            FROM pg_catalog.pg_locks
+            WHERE locktype = 'advisory' AND NOT granted"#,
+    )
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<i64, _>(0))
+    .unwrap_or_else(|error| panic!("could not count advisory waiters: {error}"))
+}
+
+async fn wait_for_advisory_waiter(pool: &sqlx_postgres::PgPool, prior: i64, operation: &str) {
+    for _ in 0..LOCK_OBSERVATION_ATTEMPTS {
+        if advisory_waiter_count(pool).await > prior {
+            return;
+        }
+        tokio::time::sleep(LOCK_OBSERVATION_INTERVAL).await;
+    }
+    panic!("expected {operation} advisory waiter was not observed");
 }
 
 async fn install_copy_barrier(pool: &sqlx_postgres::PgPool, schema: &str, barrier_key: &str) {
@@ -1885,8 +2164,7 @@ async fn bm25_signature(
 ) -> Vec<(String, u64)> {
     database
         .search_current_code(SearchQuery::new(
-            project.clone(),
-            generation.clone(),
+            CurrentGenerationLookup::new(project, generation),
             "isolationtoken",
             SEARCH_LIMIT,
         ))
@@ -2273,11 +2551,8 @@ async fn assert_deterministic_retrieval(
 
     let symbols_at_range = database
         .current_symbols_at_range(CurrentSourceRangeLookup::new(
-            project,
-            generation_id,
-            &path,
-            2,
-            2,
+            CurrentGenerationLookup::new(project, generation_id),
+            SourceLineRange::new(&path, 2, 2),
             SEARCH_LIMIT,
         ))
         .await;
@@ -2293,8 +2568,7 @@ async fn assert_deterministic_retrieval(
 
     let named = database
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            project,
-            generation_id,
+            CurrentGenerationLookup::new(project, generation_id),
             "decodeJSONPayload",
             SEARCH_LIMIT,
         ))
@@ -2313,8 +2587,7 @@ async fn assert_deterministic_retrieval(
 
     let references = database
         .exact_current_references_by_name(ExactTextLookup::new(
-            project,
-            generation_id,
+            CurrentGenerationLookup::new(project, generation_id),
             "decodeJSONPayload",
             SEARCH_LIMIT,
         ))
@@ -2332,8 +2605,7 @@ async fn assert_deterministic_retrieval(
     let incoming = database
         .current_graph_edges(
             CurrentGraphLookup::new(
-                project,
-                generation_id,
+                CurrentGenerationLookup::new(project, generation_id),
                 std::slice::from_ref(&target_id),
                 GraphDirection::Incoming,
             )
@@ -2385,8 +2657,7 @@ async fn assert_interactive_reads_timeout_and_pool_recovers(
     let search = database
         .search_current_code_bounded(
             SearchQuery::new(
-                project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(project, generation_id),
                 "json payload",
                 SEARCH_LIMIT,
             ),
@@ -2410,8 +2681,7 @@ async fn assert_interactive_reads_timeout_and_pool_recovers(
     assert!(matches!(
         database
             .search_current_code(SearchQuery::new(
-                project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(project, generation_id),
                 "json payload",
                 SEARCH_LIMIT,
             ))
@@ -2521,8 +2791,7 @@ async fn assert_search(database: &CartographDatabase, expected: SearchExpectatio
         .unwrap_or_else(|| panic!("search fixture has no current generation"));
     let hits = database
         .search_current_code(SearchQuery::new(
-            expected.project.clone(),
-            current.generation_id().clone(),
+            CurrentGenerationLookup::new(expected.project, current.generation_id()),
             expected.query,
             SEARCH_LIMIT,
         ))

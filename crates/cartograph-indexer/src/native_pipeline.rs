@@ -8,9 +8,9 @@ use std::{
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationFacts,
     GenerationValidationLimits, GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
-    NativeParseCacheKey, NativeParseCacheWrite, ReferenceInput, ReferenceSpanPrecision,
-    SearchDocumentInput, SymbolInput, apply_page_rank, apply_sampled_betweenness,
-    validate_generation_facts,
+    NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheWrite, ReferenceInput,
+    ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
+    apply_sampled_betweenness, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, NormalizedPath, ProjectId,
@@ -20,11 +20,14 @@ use cartograph_domain::{
 use cartograph_extract::{
     CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX, DiscoveredSource,
     DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, ExtractedImportBinding,
-    ExtractedReference, ImportBindingKind, NativeExtractor, SourceDiscoveryOptions, SourceLimits,
-    SourceReadError, SourceReadOptions, SourceRoot, is_test_source_path,
-    native_extraction_reservation, native_extractor_contract_digest, native_read_reservation,
+    ExtractedReference, ImportBindingKind, NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX,
+    SourceDiscoveryOptions, SourceLimits, SourceReadError, SourceReadOptions, SourceRoot,
+    is_test_source_path, native_extraction_reservation, native_extractor_contract_digest,
+    native_read_reservation,
 };
-use cartograph_scip::{ScipOverlayReport, apply_scip_overlay_with_cancellation};
+use cartograph_scip::{
+    ScipOverlayReport, ScipOverlayRequest, apply_scip_overlay_with_cancellation,
+};
 use globset::GlobBuilder;
 use serde_json::json;
 use thiserror::Error;
@@ -63,8 +66,18 @@ const MODULE_IMPORT_PROVENANCE: &str = "native-module-import";
 const QUOTED_INCLUDE_PROVENANCE: &str = "native-c-quoted-include";
 const EXACT_SAME_FILE_PROVENANCE: &str = "native-exact-same-file";
 const EXACT_PROJECT_PROVENANCE: &str = "native-exact-project";
+const RUST_QUALIFIED_PATH_PROVENANCE: &str = "native-rust-qualified-path";
 const FRAMEWORK_CONVENTION_PROVENANCE: &str = "native-framework-convention";
 const DYNAMIC_DISPATCH_PROVENANCE: &str = "native-dynamic-dispatch";
+const DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE: &str = "native-dynamic-unresolved";
+const MEMBER_ACCESS_UNRESOLVED_PROVENANCE: &str = "native-member-unresolved";
+const RUST_EXTERNAL_UNRESOLVED_PROVENANCE: &str = "native-rust-external";
+const RUST_INTRINSIC_UNRESOLVED_PROVENANCE: &str = "native-rust-intrinsic";
+const RUST_MACRO_UNRESOLVED_PROVENANCE: &str = "native-rust-macro-unexpanded";
+const EXTERNAL_REFERENCE_UNRESOLVED_PROVENANCE: &str = "native-external-reference";
+const JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE: &str = "native-javascript-intrinsic";
+const SHELL_COMMAND_UNRESOLVED_PROVENANCE: &str = "native-shell-command";
+const MANIFEST_REFERENCE_UNRESOLVED_PROVENANCE: &str = "native-manifest-reference";
 const EMBEDDED_SQL_READ_PROVENANCE: &str = "native-embedded-sql-read";
 const EMBEDDED_SQL_WRITE_PROVENANCE: &str = "native-embedded-sql-write";
 const EMBEDDED_SQL_DDL_PROVENANCE: &str = "native-embedded-sql-ddl";
@@ -162,14 +175,14 @@ impl NativeParseCache {
     }
 
     fn key(&self, manifest: &SourceManifestEntry) -> NativeParseCacheKey {
-        NativeParseCacheKey::new(
-            self.project_id.clone(),
-            self.extractor_contract_digest.clone(),
-            manifest.path.clone(),
-            manifest.language,
-            manifest.content_hash.clone(),
-            manifest.byte_size,
-        )
+        NativeParseCacheKey::new(NativeParseCacheKeyInput {
+            project_id: self.project_id.clone(),
+            extractor_contract_digest: self.extractor_contract_digest.clone(),
+            path: manifest.path.clone(),
+            language: manifest.language,
+            content_hash: manifest.content_hash.clone(),
+            source_bytes: manifest.byte_size,
+        })
     }
 }
 
@@ -665,6 +678,41 @@ pub enum NativePipelineError {
     Incomplete,
 }
 
+/// Complete bounded input for a native generation build with optional overlays and cache reads.
+pub struct NativeGenerationBuild {
+    source_root: SourceRoot,
+    config: NativePipelineConfig,
+    scip_overlay: Option<ScipOverlayInput>,
+    parse_cache: Option<NativeParseCache>,
+}
+
+impl NativeGenerationBuild {
+    /// Start a complete native build without optional SCIP or cache inputs.
+    #[must_use]
+    pub const fn new(source_root: SourceRoot, config: NativePipelineConfig) -> Self {
+        Self {
+            source_root,
+            config,
+            scip_overlay: None,
+            parse_cache: None,
+        }
+    }
+
+    /// Reconcile one validated SCIP overlay before canonical reduction.
+    #[must_use]
+    pub fn with_scip_overlay(mut self, overlay: ScipOverlayInput) -> Self {
+        self.scip_overlay = Some(overlay);
+        self
+    }
+
+    /// Reuse exact extraction facts through the bounded PostgreSQL cache.
+    #[must_use]
+    pub fn with_parse_cache(mut self, cache: NativeParseCache) -> Self {
+        self.parse_cache = Some(cache);
+        self
+    }
+}
+
 /// Discover, hash, parse, resolve, and canonically reduce native source facts.
 ///
 /// Source buffers are never retained across stages. Read/hash emits a compact manifest, parse
@@ -676,18 +724,19 @@ pub async fn build_native_generation(
     source_root: SourceRoot,
     config: NativePipelineConfig,
 ) -> Result<NativeGeneration, NativePipelineError> {
-    build_native_generation_with_scip(runner, source_root, config, None).await
+    build_native_generation_with_scip_and_cache(
+        runner,
+        NativeGenerationBuild::new(source_root, config),
+    )
+    .await
 }
 
 /// Build native facts and reconcile an optional persistent SCIP overlay before reduction.
 pub async fn build_native_generation_with_scip(
     runner: &StageRunner,
-    source_root: SourceRoot,
-    config: NativePipelineConfig,
-    scip_overlay: Option<ScipOverlayInput>,
+    request: NativeGenerationBuild,
 ) -> Result<NativeGeneration, NativePipelineError> {
-    build_native_generation_with_scip_and_cache(runner, source_root, config, scip_overlay, None)
-        .await
+    build_native_generation_with_scip_and_cache(runner, request).await
 }
 
 /// Build native facts with an optional PostgreSQL path/content extraction cache.
@@ -697,11 +746,14 @@ pub async fn build_native_generation_with_scip(
 /// atomically, so incremental speed never weakens graph completeness.
 pub async fn build_native_generation_with_scip_and_cache(
     runner: &StageRunner,
-    source_root: SourceRoot,
-    config: NativePipelineConfig,
-    scip_overlay: Option<ScipOverlayInput>,
-    parse_cache: Option<NativeParseCache>,
+    request: NativeGenerationBuild,
 ) -> Result<NativeGeneration, NativePipelineError> {
+    let NativeGenerationBuild {
+        source_root,
+        config,
+        scip_overlay,
+        parse_cache,
+    } = request;
     require_multithread_runtime()?;
     let stages = NativeStageContext {
         runner,
@@ -907,9 +959,11 @@ async fn run_parse_stage(
                     let cancellation = item.cancellation();
                     let (_, _, manifest) = item.into_parts();
                     parse_manifest_entry_with_cache(
-                        &source_root,
-                        manifest,
-                        parse_cache.as_ref(),
+                        ParseManifestRequest {
+                            source_root: &source_root,
+                            manifest,
+                            parse_cache: parse_cache.as_ref(),
+                        },
                         cancellation,
                     )
                     .await
@@ -962,12 +1016,21 @@ struct ParsedManifestEntry {
     cache: NativeParseCacheReport,
 }
 
-async fn parse_manifest_entry_with_cache(
-    source_root: &SourceRoot,
+struct ParseManifestRequest<'input> {
+    source_root: &'input SourceRoot,
     manifest: SourceManifestEntry,
-    parse_cache: Option<&NativeParseCache>,
+    parse_cache: Option<&'input NativeParseCache>,
+}
+
+async fn parse_manifest_entry_with_cache(
+    request: ParseManifestRequest<'_>,
     cancellation: StageCancellation,
 ) -> Result<ParsedManifestEntry, StageItemFailure> {
+    let ParseManifestRequest {
+        source_root,
+        manifest,
+        parse_cache,
+    } = request;
     let mut metrics = NativeParseCacheReport::default();
     let key = parse_cache.map(|cache| cache.key(&manifest));
     if let (Some(cache), Some(key)) = (parse_cache, key.as_ref()) {
@@ -1101,11 +1164,13 @@ async fn run_resolve_stage(
                     let (_, _, extracted) = item.into_parts();
                     block_in_place(move || {
                         resolve_generation(
-                            extracted,
-                            maximum,
-                            &source_root,
-                            evidence_policy,
-                            clone_policy,
+                            ResolveGenerationRequest {
+                                extracted,
+                                maximum_bytes: maximum,
+                                source_root,
+                                evidence_policy,
+                                clone_policy,
+                            },
                             || cancellation.is_cancelled(),
                         )
                     })
@@ -1174,12 +1239,14 @@ async fn run_scip_overlay_stage(
                 let (_, _, work) = item.into_parts();
                 block_in_place(move || {
                     apply_scip_overlay_work(
-                        work,
-                        source_root,
-                        source_limits,
-                        maximum_generation_bytes,
-                        high_water_bytes,
-                        evidence_policy,
+                        ScipOverlayExecution {
+                            work,
+                            source_root,
+                            source_limits,
+                            maximum_generation_bytes,
+                            high_water_bytes,
+                            evidence_policy,
+                        },
                         cancellation,
                     )
                 })
@@ -1202,22 +1269,32 @@ async fn run_scip_overlay_stage(
         .ok_or(NativePipelineError::Incomplete)
 }
 
-fn apply_scip_overlay_work(
+struct ScipOverlayExecution {
     work: ScipOverlayWork,
     source_root: SourceRoot,
     source_limits: SourceLimits,
     maximum_generation_bytes: u64,
     high_water_bytes: u64,
     evidence_policy: NativeEvidencePolicy,
+}
+
+fn apply_scip_overlay_work(
+    execution: ScipOverlayExecution,
     cancellation: crate::StageCancellation,
 ) -> Result<ScipOverlayStageOutput, StageItemFailure> {
+    let ScipOverlayExecution {
+        work,
+        source_root,
+        source_limits,
+        maximum_generation_bytes,
+        high_water_bytes,
+        evidence_policy,
+    } = execution;
     let ScipOverlayWork { mut facts, overlay } = work;
     let source_cancellation = cancellation.clone();
     let overlay_cancellation = cancellation.clone();
     let report = apply_scip_overlay_with_cancellation(
-        &mut facts,
-        &overlay.bytes,
-        overlay.maximum_rows,
+        ScipOverlayRequest::new(&mut facts, &overlay.bytes, overlay.maximum_rows),
         |raw_path| {
             let path = NormalizedPath::parse(raw_path).ok()?;
             let snapshot = source_root
@@ -1610,70 +1687,7 @@ impl NativeFileFacts {
             .try_reserve(symbols.len())
             .map_err(|_| StageItemFailure)?;
         for symbol in symbols {
-            let cartograph_extract::ExtractedSymbol {
-                id,
-                kind,
-                name,
-                qualified_name,
-                span,
-                signature,
-                docstring,
-                body_search_text,
-                body_search_truncated,
-                health,
-                declaration_only,
-                exported,
-                default_export,
-                async_symbol,
-                static_member,
-                visibility,
-                structural_digest,
-                clone_shape_digest,
-                clone_token_profile,
-            } = symbol;
-            let augmentation = language == SourceLanguage::GraphQl
-                && signature
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with("extend "));
-            normalized_symbols.push(NativeSymbolFacts {
-                input: SymbolInput {
-                    symbol_id: id,
-                    file_id: file_id.clone(),
-                    symbol_kind: kind.as_str().to_owned(),
-                    qualified_name,
-                    signature: persisted_signature(kind, signature),
-                    start_byte: span.start_byte(),
-                    end_byte: span.end_byte(),
-                    start_line: span.start_line(),
-                    end_line: span.end_line(),
-                    structural_digest,
-                    visibility,
-                    exported,
-                    default_export,
-                    async_symbol,
-                    static_member,
-                    declaration_only,
-                    betweenness_ppb: None,
-                    pagerank_ppb: None,
-                },
-                kind,
-                name,
-                docstring,
-                body_search_text,
-                body_search_truncated,
-                health,
-                declaration_only,
-                exported,
-                default_export,
-                async_symbol,
-                static_member,
-                visibility,
-                clone_shape_digest,
-                clone_token_profile,
-                duplicate_detection_enabled: true,
-                partial_clone: None,
-                augmentation,
-            });
+            normalized_symbols.push(normalize_native_symbol(&file_id, language, symbol));
         }
         Ok(Self {
             file: FileInput {
@@ -1776,6 +1790,79 @@ impl NativeFileFacts {
     }
 }
 
+fn normalize_native_symbol(
+    file_id: &FileId,
+    language: SourceLanguage,
+    symbol: cartograph_extract::ExtractedSymbol,
+) -> NativeSymbolFacts {
+    let cartograph_extract::ExtractedSymbol {
+        id,
+        kind,
+        name,
+        qualified_name,
+        span,
+        signature,
+        docstring,
+        body_search_text,
+        body_search_truncated,
+        health,
+        declaration_only,
+        test_symbol,
+        exported,
+        default_export,
+        async_symbol,
+        static_member,
+        visibility,
+        structural_digest,
+        clone_shape_digest,
+        clone_token_profile,
+    } = symbol;
+    let augmentation = language == SourceLanguage::GraphQl
+        && signature
+            .as_deref()
+            .is_some_and(|value| value.starts_with("extend "));
+    NativeSymbolFacts {
+        input: SymbolInput {
+            symbol_id: id,
+            file_id: file_id.clone(),
+            symbol_kind: kind.as_str().to_owned(),
+            qualified_name,
+            signature: persisted_signature(kind, signature),
+            start_byte: span.start_byte(),
+            end_byte: span.end_byte(),
+            start_line: span.start_line(),
+            end_line: span.end_line(),
+            structural_digest,
+            visibility,
+            exported,
+            default_export,
+            async_symbol,
+            static_member,
+            declaration_only,
+            betweenness_ppb: None,
+            pagerank_ppb: None,
+        },
+        kind,
+        name,
+        docstring,
+        body_search_text,
+        body_search_truncated,
+        health,
+        declaration_only,
+        test_symbol,
+        exported,
+        default_export,
+        async_symbol,
+        static_member,
+        visibility,
+        clone_shape_digest,
+        clone_token_profile,
+        duplicate_detection_enabled: true,
+        partial_clone: None,
+        augmentation,
+    }
+}
+
 fn persisted_signature(kind: SymbolKind, signature: Option<String>) -> String {
     signature
         .filter(|value| symbol_signature_is_search_safe(kind, value))
@@ -1791,6 +1878,7 @@ struct NativeSymbolFacts {
     body_search_truncated: bool,
     health: cartograph_extract::SymbolHealthMetrics,
     declaration_only: bool,
+    test_symbol: bool,
     exported: bool,
     default_export: bool,
     async_symbol: bool,
@@ -2025,128 +2113,357 @@ struct GoContainerMethods<'candidate> {
     methods: BTreeMap<&'candidate str, Option<&'candidate str>>,
 }
 
+type GoContainers<'candidate> = BTreeMap<SymbolId, GoContainerMethods<'candidate>>;
+type GoOwnerLookup = BTreeMap<String, Option<SymbolId>>;
+
+struct GoMethodAttachment<'context, 'index> {
+    index: &'index ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    containers: &'context mut GoContainers<'index>,
+    owner_lookup: &'context GoOwnerLookup,
+    key: &'context str,
+    candidate: &'index ResolutionCandidate,
+}
+
+struct GoStructuralEdges<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    cancelled: &'context mut Cancel,
+}
+
+struct GoContainerCandidate<'context, 'index> {
+    index: &'index ResolutionIndex,
+    key: &'context str,
+    candidate: &'index ResolutionCandidate,
+    budget: &'context mut ResolveBudget,
+    containers: &'context mut GoContainers<'index>,
+    owner_lookup: &'context mut GoOwnerLookup,
+}
+
+struct GoMethodCollection<'context, 'index, Cancel> {
+    index: &'index ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    containers: &'context mut GoContainers<'index>,
+    owner_lookup: &'context GoOwnerLookup,
+    cancelled: &'context mut Cancel,
+}
+
+struct GoOwnerQuery<'context, 'index> {
+    file: &'context ResolutionFileContext,
+    receiver_name: &'context str,
+    parent_symbol_id: Option<&'context SymbolId>,
+    containers: &'context GoContainers<'index>,
+    owner_lookup: &'context GoOwnerLookup,
+}
+
+struct GoImplementationCollection<'context, 'index, Cancel> {
+    index: &'index ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    containers: &'context GoContainers<'index>,
+    cancelled: &'context mut Cancel,
+}
+
+struct GoStructImplementation<'context, 'index> {
+    index: &'index ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    containers: &'context GoContainers<'index>,
+    interface: &'context GoContainerMethods<'index>,
+    struct_id: &'context SymbolId,
+}
+
+struct GoMethodScopeQuery<'context, 'index> {
+    index: &'index ResolutionIndex,
+    structure: &'context GoContainerMethods<'index>,
+    interface: &'context GoContainerMethods<'index>,
+    method_name: &'context str,
+}
+
+struct GoInterfaceImplementation<'context, 'index, 'method, Cancel> {
+    index: &'context ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    containers: &'context GoContainers<'index>,
+    method_to_structs: &'context BTreeMap<&'method str, Vec<&'method SymbolId>>,
+    interface: &'context GoContainerMethods<'index>,
+    cancelled: &'context mut Cancel,
+}
+
 fn append_go_structural_edges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    cancelled: &mut Cancel,
+    input: GoStructuralEdges<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
-    let mut containers = BTreeMap::<SymbolId, GoContainerMethods<'_>>::new();
-    let mut owner_lookup = BTreeMap::<String, Option<SymbolId>>::new();
-    for (key, candidates) in &index.candidates {
-        for candidate in candidates {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            if candidate.qualified_name != *key
-                || !candidate.top_level
-                || !matches!(candidate.kind, SymbolKind::Struct | SymbolKind::Interface)
-            {
-                continue;
-            }
-            let Some(file) = index.modules.files.get(&candidate.file_id) else {
-                return Err(StageItemFailure);
-            };
-            if file.language != SourceLanguage::Go.as_str() {
-                continue;
-            }
-            budget.charge(
-                RESOLUTION_MAP_NODE_ALLOWANCE
-                    .saturating_add(usize_to_u64(size_of::<GoContainerMethods<'_>>()))
-                    .saturating_add(usize_to_u64(candidate.symbol_id.as_str().len())),
-            )?;
-            containers.insert(
-                candidate.symbol_id.clone(),
-                GoContainerMethods {
-                    candidate,
-                    methods: BTreeMap::new(),
-                },
-            );
-            let owner_key = go_owner_lookup_key(file, &candidate.qualified_name)?;
-            budget.charge(
-                RESOLUTION_MAP_NODE_ALLOWANCE
-                    .saturating_add(usize_to_u64(owner_key.capacity()))
-                    .saturating_add(usize_to_u64(candidate.symbol_id.as_str().len())),
-            )?;
-            if let Some(existing) = owner_lookup.get_mut(&owner_key) {
-                *existing = None;
-            } else {
-                owner_lookup.insert(owner_key, Some(candidate.symbol_id.clone()));
-            }
-        }
-    }
+    let GoStructuralEdges {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
+    let (mut containers, owner_lookup) = collect_go_containers(index, budget, cancelled)?;
     if containers.is_empty() {
         return Ok(());
     }
+    attach_go_methods(GoMethodCollection {
+        index,
+        facts,
+        budget,
+        containers: &mut containers,
+        owner_lookup: &owner_lookup,
+        cancelled,
+    })?;
+    append_go_implementations(GoImplementationCollection {
+        index,
+        facts,
+        budget,
+        containers: &containers,
+        cancelled,
+    })
+}
 
+fn collect_go_containers<'index, Cancel>(
+    index: &'index ResolutionIndex,
+    budget: &mut ResolveBudget,
+    cancelled: &mut Cancel,
+) -> Result<(GoContainers<'index>, GoOwnerLookup), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let mut containers = GoContainers::new();
+    let mut owner_lookup = GoOwnerLookup::new();
     for (key, candidates) in &index.candidates {
         for candidate in candidates {
             if cancelled() {
                 return Err(StageItemFailure);
             }
-            if candidate.qualified_name != *key || candidate.kind != SymbolKind::Method {
-                continue;
-            }
-            let Some(file) = index.modules.files.get(&candidate.file_id) else {
-                return Err(StageItemFailure);
-            };
-            if file.language != SourceLanguage::Go.as_str() {
-                continue;
-            }
-            let Some((receiver_name, method_name)) = candidate.qualified_name.rsplit_once("::")
-            else {
-                continue;
-            };
-            if receiver_name.is_empty() || method_name.is_empty() {
-                continue;
-            }
-            let owner = if let Some(parent) = candidate
-                .parent_symbol_id
-                .as_ref()
-                .filter(|parent| containers.contains_key(*parent))
-            {
-                Some(parent.clone())
-            } else {
-                let key = go_owner_lookup_key(file, receiver_name)?;
-                owner_lookup.get(&key).cloned().flatten()
-            };
-            let Some(owner) = owner else {
-                continue;
-            };
-            let Some(container) = containers.get_mut(&owner) else {
-                return Err(StageItemFailure);
-            };
-            budget.charge(
-                RESOLUTION_MAP_NODE_ALLOWANCE
-                    .saturating_add(usize_to_u64(method_name.len()))
-                    .saturating_add(usize_to_u64(candidate.signature.len())),
-            )?;
-            if let Some(existing) = container.methods.get_mut(method_name) {
-                *existing = None;
-            } else {
-                container
-                    .methods
-                    .insert(method_name, Some(candidate.signature.as_str()));
-            }
-            if candidate.parent_symbol_id.as_ref() != Some(&owner) {
-                append_derived_edge(
-                    facts,
-                    budget,
-                    &owner,
-                    &candidate.symbol_id,
-                    EdgeKind::Contains,
-                    EXTRACTED_EDGE_CONFIDENCE,
-                    GO_RECEIVER_OWNERSHIP_PROVENANCE,
-                )?;
-            }
+            collect_go_container_candidate(GoContainerCandidate {
+                index,
+                key,
+                candidate,
+                budget,
+                containers: &mut containers,
+                owner_lookup: &mut owner_lookup,
+            })?;
         }
     }
+    Ok((containers, owner_lookup))
+}
 
+fn collect_go_container_candidate<'index>(
+    input: GoContainerCandidate<'_, 'index>,
+) -> Result<(), StageItemFailure> {
+    let GoContainerCandidate {
+        index,
+        key,
+        candidate,
+        budget,
+        containers,
+        owner_lookup,
+    } = input;
+    if !is_go_container_candidate(key, candidate) {
+        return Ok(());
+    }
+    let Some(file) = index.modules.files.get(&candidate.file_id) else {
+        return Err(StageItemFailure);
+    };
+    if file.language != SourceLanguage::Go.as_str() {
+        return Ok(());
+    }
+    budget.charge(
+        RESOLUTION_MAP_NODE_ALLOWANCE
+            .saturating_add(usize_to_u64(size_of::<GoContainerMethods<'_>>()))
+            .saturating_add(usize_to_u64(candidate.symbol_id.as_str().len())),
+    )?;
+    containers.insert(
+        candidate.symbol_id.clone(),
+        GoContainerMethods {
+            candidate,
+            methods: BTreeMap::new(),
+        },
+    );
+    let owner_key = go_owner_lookup_key(file, &candidate.qualified_name)?;
+    budget.charge(
+        RESOLUTION_MAP_NODE_ALLOWANCE
+            .saturating_add(usize_to_u64(owner_key.capacity()))
+            .saturating_add(usize_to_u64(candidate.symbol_id.as_str().len())),
+    )?;
+    match owner_lookup.entry(owner_key) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(Some(candidate.symbol_id.clone()));
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            entry.insert(None);
+        }
+    }
+    Ok(())
+}
+
+fn is_go_container_candidate(key: &str, candidate: &ResolutionCandidate) -> bool {
+    candidate.qualified_name == key
+        && candidate.top_level
+        && matches!(candidate.kind, SymbolKind::Struct | SymbolKind::Interface)
+}
+
+fn attach_go_methods<'index, Cancel>(
+    input: GoMethodCollection<'_, 'index, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let GoMethodCollection {
+        index,
+        facts,
+        budget,
+        containers,
+        owner_lookup,
+        cancelled,
+    } = input;
+    for (key, candidates) in &index.candidates {
+        for candidate in candidates {
+            if cancelled() {
+                return Err(StageItemFailure);
+            }
+            attach_go_method_candidate(GoMethodAttachment {
+                index,
+                facts,
+                budget,
+                containers,
+                owner_lookup,
+                key,
+                candidate,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn attach_go_method_candidate(input: GoMethodAttachment<'_, '_>) -> Result<(), StageItemFailure> {
+    let GoMethodAttachment {
+        index,
+        facts,
+        budget,
+        containers,
+        owner_lookup,
+        key,
+        candidate,
+    } = input;
+    if candidate.qualified_name != key || candidate.kind != SymbolKind::Method {
+        return Ok(());
+    }
+    let Some(file) = index.modules.files.get(&candidate.file_id) else {
+        return Err(StageItemFailure);
+    };
+    if file.language != SourceLanguage::Go.as_str() {
+        return Ok(());
+    }
+    let Some((receiver_name, method_name)) = go_method_parts(candidate) else {
+        return Ok(());
+    };
+    let Some(owner) = go_method_owner(GoOwnerQuery {
+        file,
+        receiver_name,
+        parent_symbol_id: candidate.parent_symbol_id.as_ref(),
+        containers,
+        owner_lookup,
+    })?
+    else {
+        return Ok(());
+    };
+    let Some(container) = containers.get_mut(&owner) else {
+        return Err(StageItemFailure);
+    };
+    budget.charge(
+        RESOLUTION_MAP_NODE_ALLOWANCE
+            .saturating_add(usize_to_u64(method_name.len()))
+            .saturating_add(usize_to_u64(candidate.signature.len())),
+    )?;
+    match container.methods.entry(method_name) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(Some(candidate.signature.as_str()));
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            entry.insert(None);
+        }
+    }
+    if candidate.parent_symbol_id.as_ref() != Some(&owner) {
+        append_derived_edge(
+            facts,
+            budget,
+            DerivedEdgeInput {
+                source_symbol_id: &owner,
+                target_symbol_id: &candidate.symbol_id,
+                kind: EdgeKind::Contains,
+                confidence: EXTRACTED_EDGE_CONFIDENCE,
+                provenance: GO_RECEIVER_OWNERSHIP_PROVENANCE,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn go_method_parts(candidate: &ResolutionCandidate) -> Option<(&str, &str)> {
+    let (receiver_name, method_name) = candidate.qualified_name.rsplit_once("::")?;
+    (!receiver_name.is_empty() && !method_name.is_empty()).then_some((receiver_name, method_name))
+}
+
+fn go_method_owner(input: GoOwnerQuery<'_, '_>) -> Result<Option<SymbolId>, StageItemFailure> {
+    let GoOwnerQuery {
+        file,
+        receiver_name,
+        parent_symbol_id,
+        containers,
+        owner_lookup,
+    } = input;
+    if let Some(parent) = parent_symbol_id.filter(|parent| containers.contains_key(*parent)) {
+        return Ok(Some(parent.clone()));
+    }
+    let key = go_owner_lookup_key(file, receiver_name)?;
+    Ok(owner_lookup.get(&key).cloned().flatten())
+}
+
+fn append_go_implementations<Cancel>(
+    input: GoImplementationCollection<'_, '_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let GoImplementationCollection {
+        index,
+        facts,
+        budget,
+        containers,
+        cancelled,
+    } = input;
+    let method_to_structs = collect_go_method_implementors(containers, budget)?;
+
+    for interface in containers
+        .values()
+        .filter(|container| container.candidate.kind == SymbolKind::Interface)
+    {
+        append_go_interface_implementations(GoInterfaceImplementation {
+            index,
+            facts,
+            budget,
+            containers,
+            method_to_structs: &method_to_structs,
+            interface,
+            cancelled,
+        })?;
+    }
+    Ok(())
+}
+
+fn collect_go_method_implementors<'container>(
+    containers: &'container GoContainers<'_>,
+    budget: &mut ResolveBudget,
+) -> Result<BTreeMap<&'container str, Vec<&'container SymbolId>>, StageItemFailure> {
     let mut method_to_structs = BTreeMap::<&str, Vec<&SymbolId>>::new();
-    for (struct_id, container) in &containers {
+    for (struct_id, container) in containers {
         if container.candidate.kind != SymbolKind::Struct {
             continue;
         }
@@ -2160,47 +2477,82 @@ where
             bucket.push(struct_id);
         }
     }
+    Ok(method_to_structs)
+}
 
-    for interface in containers
-        .values()
-        .filter(|container| container.candidate.kind == SymbolKind::Interface)
-    {
+fn append_go_interface_implementations<Cancel>(
+    input: GoInterfaceImplementation<'_, '_, '_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let GoInterfaceImplementation {
+        index,
+        facts,
+        budget,
+        containers,
+        method_to_structs,
+        interface,
+        cancelled,
+    } = input;
+    if cancelled() {
+        return Err(StageItemFailure);
+    }
+    if interface.methods.is_empty() || interface.methods.values().any(Option::is_none) {
+        return Ok(());
+    }
+    let Some(candidates) = interface
+        .methods
+        .keys()
+        .filter_map(|method| method_to_structs.get(method))
+        .min_by_key(|entries| entries.len())
+    else {
+        return Ok(());
+    };
+    for struct_id in candidates {
         if cancelled() {
             return Err(StageItemFailure);
         }
-        if interface.methods.is_empty() || interface.methods.values().any(Option::is_none) {
-            continue;
-        }
-        let Some(candidates) = interface
-            .methods
-            .keys()
-            .filter_map(|method| method_to_structs.get(method))
-            .min_by_key(|entries| entries.len())
-        else {
-            continue;
-        };
-        for struct_id in candidates {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            let Some(structure) = containers.get(*struct_id) else {
-                return Err(StageItemFailure);
-            };
-            if !go_struct_satisfies_interface(index, structure, interface) {
-                continue;
-            }
-            append_derived_edge(
-                facts,
-                budget,
-                &structure.candidate.symbol_id,
-                &interface.candidate.symbol_id,
-                EdgeKind::Implements,
-                GO_STRUCTURAL_CONFIDENCE,
-                GO_IMPLEMENTS_PROVENANCE,
-            )?;
-        }
+        append_go_struct_implementation(GoStructImplementation {
+            index,
+            facts,
+            budget,
+            containers,
+            interface,
+            struct_id,
+        })?;
     }
     Ok(())
+}
+
+fn append_go_struct_implementation(
+    input: GoStructImplementation<'_, '_>,
+) -> Result<(), StageItemFailure> {
+    let GoStructImplementation {
+        index,
+        facts,
+        budget,
+        containers,
+        interface,
+        struct_id,
+    } = input;
+    let Some(structure) = containers.get(struct_id) else {
+        return Err(StageItemFailure);
+    };
+    if !go_struct_satisfies_interface(index, structure, interface) {
+        return Ok(());
+    }
+    append_derived_edge(
+        facts,
+        budget,
+        DerivedEdgeInput {
+            source_symbol_id: &structure.candidate.symbol_id,
+            target_symbol_id: &interface.candidate.symbol_id,
+            kind: EdgeKind::Implements,
+            confidence: GO_STRUCTURAL_CONFIDENCE,
+            provenance: GO_IMPLEMENTS_PROVENANCE,
+        },
+    )
 }
 
 fn go_owner_lookup_key(
@@ -2238,17 +2590,22 @@ fn go_struct_satisfies_interface(
         let Some(actual) = structure.methods.get(name).and_then(|value| *value) else {
             return false;
         };
-        go_method_scope_compatible(index, structure, interface, name)
-            && go_signatures_compatible(actual, expected)
+        go_method_scope_compatible(GoMethodScopeQuery {
+            index,
+            structure,
+            interface,
+            method_name: name,
+        }) && go_signatures_compatible(actual, expected)
     })
 }
 
-fn go_method_scope_compatible(
-    index: &ResolutionIndex,
-    structure: &GoContainerMethods<'_>,
-    interface: &GoContainerMethods<'_>,
-    method_name: &str,
-) -> bool {
+fn go_method_scope_compatible(input: GoMethodScopeQuery<'_, '_>) -> bool {
+    let GoMethodScopeQuery {
+        index,
+        structure,
+        interface,
+        method_name,
+    } = input;
     if method_name.chars().next().is_some_and(char::is_uppercase) {
         return true;
     }
@@ -2278,7 +2635,7 @@ fn go_signatures_compatible(actual: &str, expected: &str) -> bool {
 
 fn canonical_go_signature(signature: &str) -> Option<String> {
     let signature = signature.trim();
-    let close = matching_group_end(signature, 0, '(', ')')?;
+    let close = matching_group_end(signature, 0, GroupDelimiters::PARENTHESES)?;
     let parameters = signature.get(1..close)?;
     let remainder = signature.get(close.saturating_add(1)..)?.trim();
     let returns = remainder
@@ -2289,7 +2646,7 @@ fn canonical_go_signature(signature: &str) -> Option<String> {
     let return_types = if returns.is_empty() {
         Vec::new()
     } else if returns.starts_with('(') {
-        let end = matching_group_end(returns, 0, '(', ')')?;
+        let end = matching_group_end(returns, 0, GroupDelimiters::PARENTHESES)?;
         if !returns.get(end.saturating_add(1)..)?.trim().is_empty() {
             return None;
         }
@@ -2416,15 +2773,28 @@ fn update_group_depths(depths: &mut [u16; 3], character: char) -> Option<()> {
     Some(())
 }
 
-fn matching_group_end(value: &str, start: usize, open: char, close: char) -> Option<usize> {
-    if value.get(start..)?.chars().next()? != open {
+#[derive(Clone, Copy)]
+struct GroupDelimiters {
+    open: char,
+    close: char,
+}
+
+impl GroupDelimiters {
+    const PARENTHESES: Self = Self {
+        open: '(',
+        close: ')',
+    };
+}
+
+fn matching_group_end(value: &str, start: usize, delimiters: GroupDelimiters) -> Option<usize> {
+    if value.get(start..)?.chars().next()? != delimiters.open {
         return None;
     }
     let mut depth = 0_u16;
     for (relative, character) in value.get(start..)?.char_indices() {
-        if character == open {
+        if character == delimiters.open {
             depth = depth.checked_add(1)?;
-        } else if character == close {
+        } else if character == delimiters.close {
             depth = depth.checked_sub(1)?;
             if depth == 0 {
                 return start.checked_add(relative);
@@ -2454,15 +2824,70 @@ fn go_identifier(value: &str) -> bool {
 
 type VisibleExportMap = BTreeMap<String, Option<SymbolId>>;
 
+struct ResolutionMutation<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    cancelled: &'context mut Cancel,
+}
+
+struct VisibleExportQuery<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    file_id: &'context FileId,
+    include_default: bool,
+    stack: &'context mut BTreeSet<FileId>,
+    cancelled: &'context mut Cancel,
+}
+
+struct TestEdgeInput<'context> {
+    source_symbol_id: &'context SymbolId,
+    target_symbol_id: &'context SymbolId,
+    confidence: f32,
+    provenance: &'static str,
+}
+
+struct ConventionalTestSubjectQuery<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    source: &'context ResolutionFileContext,
+    language: SourceLanguage,
+    cancelled: &'context mut Cancel,
+}
+
+struct ImportedTestSubjectQuery<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    evidence: &'context TestFileEvidence,
+    source: &'context ResolutionFileContext,
+    cancelled: &'context mut Cancel,
+}
+
+struct SubjectMatchInput<'context> {
+    index: &'context ResolutionIndex,
+    directory: &'context str,
+    subject: &'context str,
+    extensions: &'context [&'context str],
+    test_path: &'context str,
+    subjects: &'context mut BTreeSet<FileId>,
+}
+
+struct SubjectAdmission<'context> {
+    index: &'context ResolutionIndex,
+    candidate: &'context str,
+    test_path: &'context str,
+    subjects: &'context mut BTreeSet<FileId>,
+}
+
 fn append_module_reexport_edges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    cancelled: &mut Cancel,
+    input: ResolutionMutation<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
     if index.re_exports.is_empty() {
         return Ok(());
     }
@@ -2479,7 +2904,13 @@ where
             continue;
         };
         let mut stack = BTreeSet::new();
-        let visible = collect_visible_exports(index, target_file, true, &mut stack, cancelled)?;
+        let visible = collect_visible_exports(VisibleExportQuery {
+            index,
+            file_id: target_file,
+            include_default: true,
+            stack: &mut stack,
+            cancelled,
+        })?;
         for target in visible.values().flatten() {
             if cancelled() {
                 return Err(StageItemFailure);
@@ -2487,11 +2918,13 @@ where
             append_derived_edge(
                 facts,
                 budget,
-                &re_export.source_symbol_id,
-                target,
-                EdgeKind::Exports,
-                IMPORT_BINDING_CONFIDENCE,
-                RE_EXPORT_NAMESPACE_PROVENANCE,
+                DerivedEdgeInput {
+                    source_symbol_id: &re_export.source_symbol_id,
+                    target_symbol_id: target,
+                    kind: EdgeKind::Exports,
+                    confidence: IMPORT_BINDING_CONFIDENCE,
+                    provenance: RE_EXPORT_NAMESPACE_PROVENANCE,
+                },
             )?;
         }
     }
@@ -2512,11 +2945,13 @@ where
             append_derived_edge(
                 facts,
                 budget,
-                source_symbol,
-                target,
-                EdgeKind::Exports,
-                IMPORT_BINDING_CONFIDENCE,
-                RE_EXPORT_ALL_PROVENANCE,
+                DerivedEdgeInput {
+                    source_symbol_id: source_symbol,
+                    target_symbol_id: target,
+                    kind: EdgeKind::Exports,
+                    confidence: IMPORT_BINDING_CONFIDENCE,
+                    provenance: RE_EXPORT_ALL_PROVENANCE,
+                },
             )?;
         }
     }
@@ -2524,33 +2959,45 @@ where
 }
 
 fn collect_visible_exports<Cancel>(
-    index: &ResolutionIndex,
-    file_id: &FileId,
-    include_default: bool,
-    stack: &mut BTreeSet<FileId>,
-    cancelled: &mut Cancel,
+    input: VisibleExportQuery<'_, Cancel>,
 ) -> Result<VisibleExportMap, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let VisibleExportQuery {
+        index,
+        file_id,
+        include_default,
+        stack,
+        cancelled,
+    } = input;
     if !stack.insert(file_id.clone()) {
         return Ok(VisibleExportMap::new());
     }
-    let result = collect_visible_exports_inner(index, file_id, include_default, stack, cancelled);
+    let result = collect_visible_exports_inner(VisibleExportQuery {
+        index,
+        file_id,
+        include_default,
+        stack,
+        cancelled,
+    });
     stack.remove(file_id);
     result
 }
 
 fn collect_visible_exports_inner<Cancel>(
-    index: &ResolutionIndex,
-    file_id: &FileId,
-    include_default: bool,
-    stack: &mut BTreeSet<FileId>,
-    cancelled: &mut Cancel,
+    input: VisibleExportQuery<'_, Cancel>,
 ) -> Result<VisibleExportMap, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let VisibleExportQuery {
+        index,
+        file_id,
+        include_default,
+        stack,
+        cancelled,
+    } = input;
     let mut visible = VisibleExportMap::new();
     let mut explicit_names = BTreeSet::new();
     if let Some(exports) = index.exports.get(file_id) {
@@ -2582,7 +3029,13 @@ where
         let Some(target_file) = resolve_reexport_target(index, re_export) else {
             continue;
         };
-        let nested = collect_visible_exports(index, target_file, false, stack, cancelled)?;
+        let nested = collect_visible_exports(VisibleExportQuery {
+            index,
+            file_id: target_file,
+            include_default: false,
+            stack,
+            cancelled,
+        })?;
         for (name, target) in nested {
             if explicit_names.contains(&name) {
                 continue;
@@ -2619,7 +3072,13 @@ where
             continue;
         };
         let mut stack = BTreeSet::from([source_file.clone()]);
-        let nested = collect_visible_exports(index, target_file, false, &mut stack, cancelled)?;
+        let nested = collect_visible_exports(VisibleExportQuery {
+            index,
+            file_id: target_file,
+            include_default: false,
+            stack: &mut stack,
+            cancelled,
+        })?;
         for (name, target) in nested {
             if explicit_names.contains(name.as_str()) {
                 continue;
@@ -2656,14 +3115,17 @@ fn resolve_reexport_target<'index>(
 }
 
 fn append_test_subject_edges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    cancelled: &mut Cancel,
+    input: ResolutionMutation<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
     for evidence in &index.test_files {
         if cancelled() {
             return Err(StageItemFailure);
@@ -2686,10 +3148,12 @@ where
                 append_test_edge(
                     facts,
                     budget,
-                    source_symbol,
-                    target_symbol,
-                    EXTRACTED_EDGE_CONFIDENCE,
-                    RUST_INTEGRATION_TEST_PROVENANCE,
+                    TestEdgeInput {
+                        source_symbol_id: source_symbol,
+                        target_symbol_id: target_symbol,
+                        confidence: EXTRACTED_EDGE_CONFIDENCE,
+                        provenance: RUST_INTEGRATION_TEST_PROVENANCE,
+                    },
                 )?;
             }
             continue;
@@ -2699,10 +3163,12 @@ where
             append_test_edge(
                 facts,
                 budget,
-                source_symbol,
-                source_symbol,
-                EXTRACTED_EDGE_CONFIDENCE,
-                RUST_INLINE_TEST_PROVENANCE,
+                TestEdgeInput {
+                    source_symbol_id: source_symbol,
+                    target_symbol_id: source_symbol,
+                    confidence: EXTRACTED_EDGE_CONFIDENCE,
+                    provenance: RUST_INLINE_TEST_PROVENANCE,
+                },
             )?;
             continue;
         }
@@ -2710,9 +3176,19 @@ where
         let Some(language) = SourceLanguage::from_stable_str(&source.language) else {
             return Err(StageItemFailure);
         };
-        let mut subjects = conventional_test_subjects(index, source, language, cancelled)?;
+        let mut subjects = conventional_test_subjects(ConventionalTestSubjectQuery {
+            index,
+            source,
+            language,
+            cancelled,
+        })?;
         let (confidence, provenance) = if subjects.is_empty() {
-            subjects = imported_test_subjects(index, evidence, source, cancelled)?;
+            subjects = imported_test_subjects(ImportedTestSubjectQuery {
+                index,
+                evidence,
+                source,
+                cancelled,
+            })?;
             (TEST_IMPORT_CONFIDENCE, TEST_IMPORT_PROVENANCE)
         } else {
             (TEST_CONVENTION_CONFIDENCE, TEST_CONVENTION_PROVENANCE)
@@ -2722,10 +3198,12 @@ where
             append_test_edge(
                 facts,
                 budget,
-                source_symbol,
-                target_symbol,
-                confidence,
-                provenance,
+                TestEdgeInput {
+                    source_symbol_id: source_symbol,
+                    target_symbol_id: target_symbol,
+                    confidence,
+                    provenance,
+                },
             )?;
         }
     }
@@ -2735,11 +3213,14 @@ where
 fn append_test_edge(
     facts: &mut GenerationFacts,
     budget: &mut ResolveBudget,
-    source_symbol_id: &SymbolId,
-    target_symbol_id: &SymbolId,
-    confidence: f32,
-    provenance: &'static str,
+    input: TestEdgeInput<'_>,
 ) -> Result<(), StageItemFailure> {
+    let TestEdgeInput {
+        source_symbol_id,
+        target_symbol_id,
+        confidence,
+        provenance,
+    } = input;
     let retained = usize_to_u64(size_of::<EdgeInput>())
         .saturating_add(usize_to_u64(source_symbol_id.as_str().len()))
         .saturating_add(usize_to_u64(target_symbol_id.as_str().len()))
@@ -2761,39 +3242,42 @@ fn append_test_edge(
 }
 
 fn conventional_test_subjects<Cancel>(
-    index: &ResolutionIndex,
-    source: &ResolutionFileContext,
-    language: SourceLanguage,
-    cancelled: &mut Cancel,
+    input: ConventionalTestSubjectQuery<'_, Cancel>,
 ) -> Result<BTreeSet<FileId>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ConventionalTestSubjectQuery {
+        index,
+        source,
+        language,
+        cancelled,
+    } = input;
     let Some(subject) = test_subject_basename(&source.path, language) else {
         return Ok(BTreeSet::new());
     };
     let extensions = test_subject_extensions(&source.path, language);
     let mut subjects = BTreeSet::new();
-    add_subject_matches(
+    add_subject_matches(SubjectMatchInput {
         index,
-        &source.directory,
+        directory: &source.directory,
         subject,
         extensions,
-        &source.path,
-        &mut subjects,
-    )?;
+        test_path: &source.path,
+        subjects: &mut subjects,
+    })?;
     for root in mirrored_test_roots(&source.directory)? {
         if cancelled() {
             return Err(StageItemFailure);
         }
-        add_subject_matches(
+        add_subject_matches(SubjectMatchInput {
             index,
-            &root,
+            directory: &root,
             subject,
             extensions,
-            &source.path,
-            &mut subjects,
-        )?;
+            test_path: &source.path,
+            subjects: &mut subjects,
+        })?;
     }
     if !subjects.is_empty() {
         return Ok(subjects);
@@ -2835,14 +3319,17 @@ where
 }
 
 fn imported_test_subjects<Cancel>(
-    index: &ResolutionIndex,
-    evidence: &TestFileEvidence,
-    source: &ResolutionFileContext,
-    cancelled: &mut Cancel,
+    input: ImportedTestSubjectQuery<'_, Cancel>,
 ) -> Result<BTreeSet<FileId>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ImportedTestSubjectQuery {
+        index,
+        evidence,
+        source,
+        cancelled,
+    } = input;
     let mut subjects = BTreeSet::new();
     for specifier in &evidence.import_specifiers {
         if cancelled() {
@@ -3004,54 +3491,90 @@ fn strip_suffix_ignore_ascii_case<'value>(value: &'value str, suffix: &str) -> O
 
 fn test_subject_extensions(path: &str, language: SourceLanguage) -> &'static [&'static str] {
     let extension = path.rsplit_once('.').map_or("", |(_, extension)| extension);
-    match language {
-        SourceLanguage::Tsx => &["tsx", "ts"],
-        SourceLanguage::Jsx => &["jsx", "js"],
-        SourceLanguage::TypeScript if extension.eq_ignore_ascii_case("mts") => &["mts", "ts"],
-        SourceLanguage::TypeScript if extension.eq_ignore_ascii_case("cts") => &["cts", "ts"],
-        SourceLanguage::TypeScript => &["ts"],
-        SourceLanguage::JavaScript if extension.eq_ignore_ascii_case("mjs") => &["mjs", "js"],
-        SourceLanguage::JavaScript if extension.eq_ignore_ascii_case("cjs") => &["cjs", "js"],
-        SourceLanguage::JavaScript => &["js"],
-        SourceLanguage::Python => &["py", "pyi"],
-        SourceLanguage::Rust => &["rs"],
-        SourceLanguage::Go => &["go"],
-        SourceLanguage::Ruby => &["rb"],
-        SourceLanguage::Java => &["java"],
-        SourceLanguage::Kotlin => &["kt", "kts"],
-        SourceLanguage::Scala => &["scala"],
-        SourceLanguage::CSharp => &["cs"],
-        SourceLanguage::Swift => &["swift"],
-        _ => &[],
+    if language == SourceLanguage::TypeScript {
+        return typescript_subject_extensions(extension);
+    }
+    if language == SourceLanguage::JavaScript {
+        return javascript_subject_extensions(extension);
+    }
+    TEST_SUBJECT_EXTENSIONS
+        .iter()
+        .find_map(|(candidate, extensions)| (*candidate == language).then_some(*extensions))
+        .unwrap_or_default()
+}
+
+fn typescript_subject_extensions(extension: &str) -> &'static [&'static str] {
+    if extension.eq_ignore_ascii_case("mts") {
+        &["mts", "ts"]
+    } else if extension.eq_ignore_ascii_case("cts") {
+        &["cts", "ts"]
+    } else {
+        &["ts"]
     }
 }
 
-fn add_subject_matches(
-    index: &ResolutionIndex,
-    directory: &str,
-    subject: &str,
-    extensions: &[&str],
-    test_path: &str,
-    subjects: &mut BTreeSet<FileId>,
-) -> Result<(), StageItemFailure> {
+fn javascript_subject_extensions(extension: &str) -> &'static [&'static str] {
+    if extension.eq_ignore_ascii_case("mjs") {
+        &["mjs", "js"]
+    } else if extension.eq_ignore_ascii_case("cjs") {
+        &["cjs", "js"]
+    } else {
+        &["js"]
+    }
+}
+
+const TEST_SUBJECT_EXTENSIONS: &[(SourceLanguage, &[&str])] = &[
+    (SourceLanguage::Tsx, &["tsx", "ts"]),
+    (SourceLanguage::Jsx, &["jsx", "js"]),
+    (SourceLanguage::Python, &["py", "pyi"]),
+    (SourceLanguage::Rust, &["rs"]),
+    (SourceLanguage::Go, &["go"]),
+    (SourceLanguage::Ruby, &["rb"]),
+    (SourceLanguage::Java, &["java"]),
+    (SourceLanguage::Kotlin, &["kt", "kts"]),
+    (SourceLanguage::Scala, &["scala"]),
+    (SourceLanguage::CSharp, &["cs"]),
+    (SourceLanguage::Swift, &["swift"]),
+];
+
+fn add_subject_matches(input: SubjectMatchInput<'_>) -> Result<(), StageItemFailure> {
+    let SubjectMatchInput {
+        index,
+        directory,
+        subject,
+        extensions,
+        test_path,
+        subjects,
+    } = input;
     for extension in extensions {
         let direct_name = suffixed_name(subject, ".", extension)?;
         let direct = joined_path(directory, &direct_name)?;
-        admit_subject_path(index, &direct, test_path, subjects);
+        admit_subject_path(SubjectAdmission {
+            index,
+            candidate: &direct,
+            test_path,
+            subjects,
+        });
         let index_name = suffixed_name("index", ".", extension)?;
         let subject_directory = joined_path(directory, subject)?;
         let indexed = joined_path(&subject_directory, &index_name)?;
-        admit_subject_path(index, &indexed, test_path, subjects);
+        admit_subject_path(SubjectAdmission {
+            index,
+            candidate: &indexed,
+            test_path,
+            subjects,
+        });
     }
     Ok(())
 }
 
-fn admit_subject_path(
-    index: &ResolutionIndex,
-    candidate: &str,
-    test_path: &str,
-    subjects: &mut BTreeSet<FileId>,
-) {
+fn admit_subject_path(input: SubjectAdmission<'_>) {
+    let SubjectAdmission {
+        index,
+        candidate,
+        test_path,
+        subjects,
+    } = input;
     if candidate != test_path
         && plausible_test_subject(candidate)
         && let Some(file_id) = unique_file_for_path(index, candidate)
@@ -3188,17 +3711,58 @@ fn common_path_prefix_segments(left: &str, right: &str) -> usize {
         .count()
 }
 
-fn resolve_generation<Cancel>(
-    mut extracted: NativeFactAccumulator,
+struct ResolveGenerationRequest {
+    extracted: NativeFactAccumulator,
     maximum_bytes: u64,
-    source_root: &SourceRoot,
+    source_root: SourceRoot,
     evidence_policy: NativeEvidencePolicy,
     clone_policy: NativeClonePolicy,
+}
+
+struct CloneAnalysisInput<'context> {
+    extracted: &'context mut NativeFactAccumulator,
+    source_root: &'context SourceRoot,
+    policy: NativeClonePolicy,
+    budget: &'context mut ResolveBudget,
+}
+
+struct PartialCloneBand<'context, Cancel> {
+    extracted: &'context NativeFactAccumulator,
+    candidates: &'context mut [CloneAnalysisCandidate],
+    minimum_overlap_ppm: u32,
+    exclude_first_band: bool,
+    cancelled: &'context mut Cancel,
+}
+
+struct PartialCloneLink<'context> {
+    candidates: &'context mut [CloneAnalysisCandidate],
+    left: usize,
+    right: usize,
+    overlap_ppm: u32,
+    minimum_overlap_ppm: u32,
+}
+
+struct PersistPartialClones<'context, Cancel> {
+    extracted: &'context mut NativeFactAccumulator,
+    candidates: &'context [CloneAnalysisCandidate],
+    budget: &'context mut ResolveBudget,
+    cancelled: &'context mut Cancel,
+}
+
+fn resolve_generation<Cancel>(
+    request: ResolveGenerationRequest,
     mut cancelled: Cancel,
 ) -> Result<(GenerationFacts, ResolutionReport), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ResolveGenerationRequest {
+        mut extracted,
+        maximum_bytes,
+        source_root,
+        evidence_policy,
+        clone_policy,
+    } = request;
     if cancelled() {
         return Err(StageItemFailure);
     }
@@ -3212,10 +3776,12 @@ where
         }
     }
     analyze_partial_clones(
-        &mut extracted,
-        source_root,
-        clone_policy,
-        &mut budget,
+        CloneAnalysisInput {
+            extracted: &mut extracted,
+            source_root: &source_root,
+            policy: clone_policy,
+            budget: &mut budget,
+        },
         &mut cancelled,
     )?;
     let index = build_resolution_index(&extracted, &mut budget, &mut cancelled)?;
@@ -3237,10 +3803,30 @@ where
             output.append_file(file, &mut cancelled)?;
         }
     }
-    append_framework_bridge_edges(&index, &mut facts, &mut budget, &mut cancelled)?;
-    append_go_structural_edges(&index, &mut facts, &mut budget, &mut cancelled)?;
-    append_module_reexport_edges(&index, &mut facts, &mut budget, &mut cancelled)?;
-    append_test_subject_edges(&index, &mut facts, &mut budget, &mut cancelled)?;
+    append_framework_bridge_edges(ResolutionMutation {
+        index: &index,
+        facts: &mut facts,
+        budget: &mut budget,
+        cancelled: &mut cancelled,
+    })?;
+    append_go_structural_edges(GoStructuralEdges {
+        index: &index,
+        facts: &mut facts,
+        budget: &mut budget,
+        cancelled: &mut cancelled,
+    })?;
+    append_module_reexport_edges(ResolutionMutation {
+        index: &index,
+        facts: &mut facts,
+        budget: &mut budget,
+        cancelled: &mut cancelled,
+    })?;
+    append_test_subject_edges(ResolutionMutation {
+        index: &index,
+        facts: &mut facts,
+        budget: &mut budget,
+        cancelled: &mut cancelled,
+    })?;
     if evidence_policy.compute_page_rank {
         apply_page_rank(&mut facts, &mut cancelled).map_err(|_| StageItemFailure)?;
     }
@@ -3273,28 +3859,38 @@ struct CloneAnalysisCandidate {
     listed_peer_count: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ClonePeerInput {
+    peer: usize,
+    overlap_ppm: u32,
+    minimum_overlap_ppm: u32,
+}
+
 impl CloneAnalysisCandidate {
-    fn push_peer(&mut self, peer: usize, overlap_ppm: u32, minimum_overlap_ppm: u32) {
+    fn push_peer(&mut self, input: ClonePeerInput) {
         self.partial_peer_count = self.partial_peer_count.saturating_add(1);
-        self.maximum_overlap_ppm = self.maximum_overlap_ppm.max(overlap_ppm);
-        self.minimum_overlap_ppm = minimum_overlap_ppm;
+        self.maximum_overlap_ppm = self.maximum_overlap_ppm.max(input.overlap_ppm);
+        self.minimum_overlap_ppm = input.minimum_overlap_ppm;
         if self.listed_peer_count < MAXIMUM_LISTED_CLONE_PEERS {
-            self.listed_peer_indexes[self.listed_peer_count] = Some(peer);
+            self.listed_peer_indexes[self.listed_peer_count] = Some(input.peer);
             self.listed_peer_count = self.listed_peer_count.saturating_add(1);
         }
     }
 }
 
 fn analyze_partial_clones<Cancel>(
-    extracted: &mut NativeFactAccumulator,
-    source_root: &SourceRoot,
-    policy: NativeClonePolicy,
-    budget: &mut ResolveBudget,
+    input: CloneAnalysisInput<'_>,
     cancelled: &mut Cancel,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let CloneAnalysisInput {
+        extracted,
+        source_root,
+        policy,
+        budget,
+    } = input;
     let symbol_count = extracted
         .files
         .iter()
@@ -3358,23 +3954,28 @@ where
     budget.charge(order_bytes)?;
     mark_exact_clone_candidates(extracted, &mut candidates, cancelled)?;
     mark_near_clone_candidates(extracted, &mut candidates, cancelled)?;
-    compare_partial_clone_band(
+    compare_partial_clone_band(PartialCloneBand {
         extracted,
-        &mut candidates,
-        DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM,
-        false,
+        candidates: &mut candidates,
+        minimum_overlap_ppm: DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM,
+        exclude_first_band: false,
         cancelled,
-    )?;
+    })?;
     if policy.wider_partial_band {
-        compare_partial_clone_band(
+        compare_partial_clone_band(PartialCloneBand {
             extracted,
-            &mut candidates,
-            DUPLICATE_PARTIAL_WIDER_OVERLAP_PPM,
-            true,
+            candidates: &mut candidates,
+            minimum_overlap_ppm: DUPLICATE_PARTIAL_WIDER_OVERLAP_PPM,
+            exclude_first_band: true,
             cancelled,
-        )?;
+        })?;
     }
-    persist_partial_clone_evidence(extracted, &candidates, budget, cancelled)
+    persist_partial_clone_evidence(PersistPartialClones {
+        extracted,
+        candidates: &candidates,
+        budget,
+        cancelled,
+    })
 }
 
 fn mark_exact_clone_candidates<Cancel>(
@@ -3484,15 +4085,18 @@ where
 }
 
 fn compare_partial_clone_band<Cancel>(
-    extracted: &NativeFactAccumulator,
-    candidates: &mut [CloneAnalysisCandidate],
-    minimum_overlap_ppm: u32,
-    exclude_first_band: bool,
-    cancelled: &mut Cancel,
+    input: PartialCloneBand<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let PartialCloneBand {
+        extracted,
+        candidates,
+        minimum_overlap_ppm,
+        exclude_first_band,
+        cancelled,
+    } = input;
     let mut order = clone_candidate_order(candidates.len())?;
     order.retain(|index| {
         let candidate = &candidates[*index];
@@ -3546,25 +4150,26 @@ where
             if overlap_ppm < minimum_overlap_ppm {
                 continue;
             }
-            link_partial_candidates(
+            link_partial_candidates(PartialCloneLink {
                 candidates,
-                left_index,
-                right_index,
+                left: left_index,
+                right: right_index,
                 overlap_ppm,
                 minimum_overlap_ppm,
-            );
+            });
         }
     }
     Ok(())
 }
 
-fn link_partial_candidates(
-    candidates: &mut [CloneAnalysisCandidate],
-    left: usize,
-    right: usize,
-    overlap_ppm: u32,
-    minimum_overlap_ppm: u32,
-) {
+fn link_partial_candidates(input: PartialCloneLink<'_>) {
+    let PartialCloneLink {
+        candidates,
+        left,
+        right,
+        overlap_ppm,
+        minimum_overlap_ppm,
+    } = input;
     let (left_candidate, right_candidate) = if left < right {
         let (before_right, from_right) = candidates.split_at_mut(right);
         (&mut before_right[left], &mut from_right[0])
@@ -3572,8 +4177,16 @@ fn link_partial_candidates(
         let (before_left, from_left) = candidates.split_at_mut(left);
         (&mut from_left[0], &mut before_left[right])
     };
-    left_candidate.push_peer(right, overlap_ppm, minimum_overlap_ppm);
-    right_candidate.push_peer(left, overlap_ppm, minimum_overlap_ppm);
+    left_candidate.push_peer(ClonePeerInput {
+        peer: right,
+        overlap_ppm,
+        minimum_overlap_ppm,
+    });
+    right_candidate.push_peer(ClonePeerInput {
+        peer: left,
+        overlap_ppm,
+        minimum_overlap_ppm,
+    });
     if minimum_overlap_ppm == DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM {
         left_candidate.first_partial_band_hit = true;
         right_candidate.first_partial_band_hit = true;
@@ -3581,14 +4194,17 @@ fn link_partial_candidates(
 }
 
 fn persist_partial_clone_evidence<Cancel>(
-    extracted: &mut NativeFactAccumulator,
-    candidates: &[CloneAnalysisCandidate],
-    budget: &mut ResolveBudget,
-    cancelled: &mut Cancel,
+    input: PersistPartialClones<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let PersistPartialClones {
+        extracted,
+        candidates,
+        budget,
+        cancelled,
+    } = input;
     for candidate in candidates {
         if cancelled() {
             return Err(StageItemFailure);
@@ -3784,16 +4400,100 @@ fn is_production_clone_path(path: &str) -> bool {
         .any(|suffix| original_stem.ends_with(suffix) && original_stem.len() > suffix.len())
 }
 
+struct FrameworkCandidateMutation<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    candidates: &'context [ResolutionCandidate],
+    cancelled: &'context mut Cancel,
+}
+
+struct FrameworkEdgeInput<'context> {
+    source: &'context ResolutionCandidate,
+    target: &'context ResolutionCandidate,
+    confidence: f32,
+    provenance: &'static str,
+}
+
+struct ManifestWorkspaceExclusion<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    workspace: ManifestWorkspaceTag<'context>,
+    package_directory: &'context str,
+    cancelled: &'context mut Cancel,
+}
+
+struct DrupalServiceQuery<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    file_id: &'context FileId,
+    service_id: &'context str,
+    cancelled: &'context mut Cancel,
+}
+
+struct TurboTargetQuery<'context, 'candidate, Cancel> {
+    index: &'context ResolutionIndex,
+    candidates: &'candidate [ResolutionCandidate],
+    module: &'context str,
+    cancelled: &'context mut Cancel,
+}
+
+struct TurboTargetTierQuery<'context, 'candidate, Cancel> {
+    index: &'context ResolutionIndex,
+    candidates: &'candidate [ResolutionCandidate],
+    module: &'context str,
+    languages: &'context [&'context str],
+    tagged: bool,
+    cancelled: &'context mut Cancel,
+}
+
+struct TaggedCandidateQuery<'context, 'candidate> {
+    index: &'context ResolutionIndex,
+    candidates: &'candidate [ResolutionCandidate],
+}
+
 fn append_framework_bridge_edges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    cancelled: &mut Cancel,
+    input: ResolutionMutation<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
-    append_manifest_workspace_edges(index, facts, budget, cancelled)?;
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
+    append_manifest_workspace_edges(ResolutionMutation {
+        index,
+        facts: &mut *facts,
+        budget: &mut *budget,
+        cancelled: &mut *cancelled,
+    })?;
+    append_mybatis_bridge_edges(ResolutionMutation {
+        index,
+        facts: &mut *facts,
+        budget: &mut *budget,
+        cancelled: &mut *cancelled,
+    })?;
+    append_named_framework_bridges(ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    })
+}
+
+fn append_mybatis_bridge_edges<Cancel>(
+    input: ResolutionMutation<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
     for (qualified_name, candidates) in &index.candidates {
         if cancelled() {
             return Err(StageItemFailure);
@@ -3801,41 +4501,84 @@ where
         if !qualified_name.contains("::") {
             continue;
         }
-        let exact = candidates
-            .iter()
-            .filter(|candidate| candidate.qualified_name == *qualified_name)
-            .collect::<Vec<_>>();
-        for source in &exact {
-            let Some(source_file) = index.modules.files.get(&source.file_id) else {
+        append_mybatis_qualified_edges(
+            ResolutionMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                cancelled: &mut *cancelled,
+            },
+            qualified_name,
+            candidates,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_mybatis_qualified_edges<Cancel>(
+    input: ResolutionMutation<'_, Cancel>,
+    qualified_name: &str,
+    candidates: &[ResolutionCandidate],
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled: _,
+    } = input;
+    let exact = candidates
+        .iter()
+        .filter(|candidate| candidate.qualified_name == qualified_name)
+        .collect::<Vec<_>>();
+    for source in &exact {
+        let Some(source_file) = index.modules.files.get(&source.file_id) else {
+            return Err(StageItemFailure);
+        };
+        if !matches!(source_file.language.as_str(), "java" | "kotlin" | "scala")
+            || source.kind != SymbolKind::Method
+        {
+            continue;
+        }
+        for target in &exact {
+            let Some(target_file) = index.modules.files.get(&target.file_id) else {
                 return Err(StageItemFailure);
             };
-            if !matches!(source_file.language.as_str(), "java" | "kotlin" | "scala")
-                || source.kind != SymbolKind::Method
+            if target_file.language != "xml"
+                || target.kind != SymbolKind::Method
+                || source.symbol_id == target.symbol_id
             {
                 continue;
             }
-            for target in &exact {
-                let Some(target_file) = index.modules.files.get(&target.file_id) else {
-                    return Err(StageItemFailure);
-                };
-                if target_file.language != "xml"
-                    || target.kind != SymbolKind::Method
-                    || source.symbol_id == target.symbol_id
-                {
-                    continue;
-                }
-                append_framework_edge(
-                    facts,
-                    budget,
+            append_framework_edge(
+                facts,
+                budget,
+                FrameworkEdgeInput {
                     source,
                     target,
-                    EXACT_PROJECT_CONFIDENCE,
-                    MYBATIS_BRIDGE_PROVENANCE,
-                )?;
-            }
+                    confidence: EXACT_PROJECT_CONFIDENCE,
+                    provenance: MYBATIS_BRIDGE_PROVENANCE,
+                },
+            )?;
         }
     }
+    Ok(())
+}
 
+fn append_named_framework_bridges<Cancel>(
+    input: ResolutionMutation<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
     for (name, candidates) in &index.candidates {
         if cancelled() {
             return Err(StageItemFailure);
@@ -3844,45 +4587,71 @@ where
             continue;
         }
         append_tagged_bridges(
-            index,
-            facts,
-            budget,
-            candidates,
+            FrameworkCandidateMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                candidates,
+                cancelled: &mut *cancelled,
+            },
             TaggedBridgeRule {
                 source_tag: "::native-module-spec::",
                 target_tags: &["::react-native-module::", "::expo-module::"],
                 provenance: NATIVE_MODULE_BRIDGE_PROVENANCE,
             },
-            cancelled,
         )?;
         append_tagged_bridges(
-            index,
-            facts,
-            budget,
-            candidates,
+            FrameworkCandidateMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                candidates,
+                cancelled: &mut *cancelled,
+            },
             TaggedBridgeRule {
                 source_tag: "::fabric-component::",
                 target_tags: &["::native-view-manager::"],
                 provenance: FABRIC_NATIVE_BRIDGE_PROVENANCE,
             },
-            cancelled,
         )?;
-        append_turbo_method_bridges(index, facts, budget, candidates, cancelled)?;
-        append_drupal_tag_bridges(index, facts, budget, candidates, cancelled)?;
-        append_native_event_bridges(facts, budget, candidates, cancelled)?;
+        append_turbo_method_bridges(FrameworkCandidateMutation {
+            index,
+            facts: &mut *facts,
+            budget: &mut *budget,
+            candidates,
+            cancelled: &mut *cancelled,
+        })?;
+        append_drupal_tag_bridges(FrameworkCandidateMutation {
+            index,
+            facts: &mut *facts,
+            budget: &mut *budget,
+            candidates,
+            cancelled: &mut *cancelled,
+        })?;
+        append_native_event_bridges(FrameworkCandidateMutation {
+            index,
+            facts: &mut *facts,
+            budget: &mut *budget,
+            candidates,
+            cancelled: &mut *cancelled,
+        })?;
     }
     Ok(())
 }
 
 fn append_native_event_bridges<Cancel>(
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    candidates: &[ResolutionCandidate],
-    cancelled: &mut Cancel,
+    input: FrameworkCandidateMutation<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let FrameworkCandidateMutation {
+        facts,
+        budget,
+        candidates,
+        cancelled,
+        ..
+    } = input;
     for producer in candidates.iter().filter(|candidate| {
         candidate.kind == SymbolKind::Resource
             && candidate
@@ -3901,10 +4670,12 @@ where
             append_framework_edge(
                 facts,
                 budget,
-                producer,
-                consumer,
-                FRAMEWORK_CONVENTION_CONFIDENCE,
-                NATIVE_EVENT_BRIDGE_PROVENANCE,
+                FrameworkEdgeInput {
+                    source: producer,
+                    target: consumer,
+                    confidence: FRAMEWORK_CONVENTION_CONFIDENCE,
+                    provenance: NATIVE_EVENT_BRIDGE_PROVENANCE,
+                },
             )?;
         }
     }
@@ -3912,14 +4683,17 @@ where
 }
 
 fn append_manifest_workspace_edges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    cancelled: &mut Cancel,
+    input: ResolutionMutation<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
     for (qualified_name, workspace_candidates) in &index.candidates {
         if cancelled() {
             return Err(StageItemFailure);
@@ -3950,27 +4724,57 @@ where
                 };
                 if workspace.ecosystem != package.ecosystem
                     || !matcher.is_match(package.directory)
-                    || manifest_workspace_excludes(index, workspace, package.directory, cancelled)?
+                    || manifest_workspace_excludes(ManifestWorkspaceExclusion {
+                        index,
+                        workspace,
+                        package_directory: package.directory,
+                        cancelled,
+                    })?
                 {
                     continue;
                 }
-                for target in package_candidates
-                    .iter()
-                    .filter(|candidate| candidate.qualified_name == *package_qualified_name)
-                {
-                    if target.kind == SymbolKind::Resource {
-                        append_framework_edge(
-                            facts,
-                            budget,
-                            source,
-                            target,
-                            EXACT_PROJECT_CONFIDENCE,
-                            MANIFEST_WORKSPACE_PROVENANCE,
-                        )?;
-                    }
-                }
+                append_manifest_resource_targets(
+                    facts,
+                    budget,
+                    ManifestResourceTargets {
+                        source,
+                        qualified_name: package_qualified_name,
+                        candidates: package_candidates,
+                    },
+                )?;
             }
         }
+    }
+    Ok(())
+}
+
+struct ManifestResourceTargets<'candidate> {
+    source: &'candidate ResolutionCandidate,
+    qualified_name: &'candidate str,
+    candidates: &'candidate [ResolutionCandidate],
+}
+
+fn append_manifest_resource_targets(
+    facts: &mut GenerationFacts,
+    budget: &mut ResolveBudget,
+    targets: ManifestResourceTargets<'_>,
+) -> Result<(), StageItemFailure> {
+    for target in targets
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.qualified_name == targets.qualified_name)
+        .filter(|candidate| candidate.kind == SymbolKind::Resource)
+    {
+        append_framework_edge(
+            facts,
+            budget,
+            FrameworkEdgeInput {
+                source: targets.source,
+                target,
+                confidence: EXACT_PROJECT_CONFIDENCE,
+                provenance: MANIFEST_WORKSPACE_PROVENANCE,
+            },
+        )?;
     }
     Ok(())
 }
@@ -4028,14 +4832,17 @@ fn manifest_package_tag(qualified_name: &str) -> Option<ManifestPackageTag<'_>> 
 }
 
 fn manifest_workspace_excludes<Cancel>(
-    index: &ResolutionIndex,
-    workspace: ManifestWorkspaceTag<'_>,
-    package_directory: &str,
-    cancelled: &mut Cancel,
+    input: ManifestWorkspaceExclusion<'_, Cancel>,
 ) -> Result<bool, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ManifestWorkspaceExclusion {
+        index,
+        workspace,
+        package_directory,
+        cancelled,
+    } = input;
     for qualified_name in index.candidates.keys() {
         if cancelled() {
             return Err(StageItemFailure);
@@ -4060,15 +4867,18 @@ where
 }
 
 fn append_drupal_tag_bridges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    candidates: &[ResolutionCandidate],
-    cancelled: &mut Cancel,
+    input: FrameworkCandidateMutation<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let FrameworkCandidateMutation {
+        index,
+        facts,
+        budget,
+        candidates,
+        cancelled,
+    } = input;
     let hub = candidates
         .iter()
         .filter(|candidate| drupal_tag_role(candidate).is_some())
@@ -4083,7 +4893,12 @@ where
         let Some((provider, service_id)) = drupal_tag_role(fact) else {
             continue;
         };
-        let Some(service) = unique_drupal_service(index, &fact.file_id, service_id, cancelled)?
+        let Some(service) = unique_drupal_service(DrupalServiceQuery {
+            index,
+            file_id: &fact.file_id,
+            service_id,
+            cancelled,
+        })?
         else {
             continue;
         };
@@ -4091,29 +4906,35 @@ where
             append_framework_edge(
                 facts,
                 budget,
-                service,
-                hub,
-                FRAMEWORK_CONVENTION_CONFIDENCE,
-                DRUPAL_TAG_PROVIDES_PROVENANCE,
+                FrameworkEdgeInput {
+                    source: service,
+                    target: hub,
+                    confidence: FRAMEWORK_CONVENTION_CONFIDENCE,
+                    provenance: DRUPAL_TAG_PROVIDES_PROVENANCE,
+                },
             )?;
         } else {
             append_framework_edge(
                 facts,
                 budget,
-                hub,
-                service,
-                FRAMEWORK_CONVENTION_CONFIDENCE,
-                DRUPAL_TAG_CONSUMES_PROVENANCE,
+                FrameworkEdgeInput {
+                    source: hub,
+                    target: service,
+                    confidence: FRAMEWORK_CONVENTION_CONFIDENCE,
+                    provenance: DRUPAL_TAG_CONSUMES_PROVENANCE,
+                },
             )?;
         }
         if fact.symbol_id != hub.symbol_id {
             append_framework_edge(
                 facts,
                 budget,
-                fact,
-                hub,
-                FRAMEWORK_CONVENTION_CONFIDENCE,
-                DRUPAL_TAG_EVIDENCE_PROVENANCE,
+                FrameworkEdgeInput {
+                    source: fact,
+                    target: hub,
+                    confidence: FRAMEWORK_CONVENTION_CONFIDENCE,
+                    provenance: DRUPAL_TAG_EVIDENCE_PROVENANCE,
+                },
             )?;
         }
     }
@@ -4137,14 +4958,17 @@ fn drupal_tag_role(candidate: &ResolutionCandidate) -> Option<(bool, &str)> {
 }
 
 fn unique_drupal_service<'candidate, Cancel>(
-    index: &'candidate ResolutionIndex,
-    file_id: &FileId,
-    service_id: &str,
-    cancelled: &mut Cancel,
+    input: DrupalServiceQuery<'candidate, Cancel>,
 ) -> Result<Option<&'candidate ResolutionCandidate>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let DrupalServiceQuery {
+        index,
+        file_id,
+        service_id,
+        cancelled,
+    } = input;
     let candidates = index
         .candidates
         .get(service_id)
@@ -4161,15 +4985,18 @@ where
 }
 
 fn append_turbo_method_bridges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    candidates: &[ResolutionCandidate],
-    cancelled: &mut Cancel,
+    input: FrameworkCandidateMutation<'_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let FrameworkCandidateMutation {
+        index,
+        facts,
+        budget,
+        candidates,
+        cancelled,
+    } = input;
     for source in candidates {
         if cancelled() {
             return Err(StageItemFailure);
@@ -4185,14 +5012,21 @@ where
         if !javascript_family_name(&source_file.language) {
             continue;
         }
-        if let Some(target) = select_turbo_native_target(index, candidates, module, cancelled)? {
+        if let Some(target) = select_turbo_native_target(TurboTargetQuery {
+            index,
+            candidates,
+            module,
+            cancelled,
+        })? {
             append_framework_edge(
                 facts,
                 budget,
-                source,
-                target,
-                FRAMEWORK_CONVENTION_CONFIDENCE,
-                TURBO_NATIVE_BRIDGE_PROVENANCE,
+                FrameworkEdgeInput {
+                    source,
+                    target,
+                    confidence: FRAMEWORK_CONVENTION_CONFIDENCE,
+                    provenance: TURBO_NATIVE_BRIDGE_PROVENANCE,
+                },
             )?;
         }
     }
@@ -4200,24 +5034,39 @@ where
 }
 
 fn select_turbo_native_target<'candidate, Cancel>(
-    index: &ResolutionIndex,
-    candidates: &'candidate [ResolutionCandidate],
-    module: &str,
-    cancelled: &mut Cancel,
+    input: TurboTargetQuery<'_, 'candidate, Cancel>,
 ) -> Result<Option<&'candidate ResolutionCandidate>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let TurboTargetQuery {
+        index,
+        candidates,
+        module,
+        cancelled,
+    } = input;
     for languages in [&["objc"][..], &["java", "kotlin"][..]] {
-        let tagged =
-            select_turbo_target_tier(index, candidates, module, languages, true, cancelled)?;
+        let tagged = select_turbo_target_tier(TurboTargetTierQuery {
+            index,
+            candidates,
+            module,
+            languages,
+            tagged: true,
+            cancelled,
+        })?;
         match tagged {
             CandidateTier::Unique(candidate) => return Ok(Some(candidate)),
             CandidateTier::Ambiguous => return Ok(None),
             CandidateTier::Missing => {}
         }
-        let structural =
-            select_turbo_target_tier(index, candidates, module, languages, false, cancelled)?;
+        let structural = select_turbo_target_tier(TurboTargetTierQuery {
+            index,
+            candidates,
+            module,
+            languages,
+            tagged: false,
+            cancelled,
+        })?;
         match structural {
             CandidateTier::Unique(candidate) => return Ok(Some(candidate)),
             CandidateTier::Ambiguous => return Ok(None),
@@ -4234,16 +5083,19 @@ enum CandidateTier<'candidate> {
 }
 
 fn select_turbo_target_tier<'candidate, Cancel>(
-    index: &ResolutionIndex,
-    candidates: &'candidate [ResolutionCandidate],
-    module: &str,
-    languages: &[&str],
-    tagged: bool,
-    cancelled: &mut Cancel,
+    input: TurboTargetTierQuery<'_, 'candidate, Cancel>,
 ) -> Result<CandidateTier<'candidate>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let TurboTargetTierQuery {
+        index,
+        candidates,
+        module,
+        languages,
+        tagged,
+        cancelled,
+    } = input;
     let mut eligible = 0_usize;
     let selected = select_candidate(
         candidates,
@@ -4332,19 +5184,21 @@ struct TaggedBridgeRule {
 }
 
 fn append_tagged_bridges<Cancel>(
-    index: &ResolutionIndex,
-    facts: &mut GenerationFacts,
-    budget: &mut ResolveBudget,
-    candidates: &[ResolutionCandidate],
+    input: FrameworkCandidateMutation<'_, Cancel>,
     rule: TaggedBridgeRule,
-    cancelled: &mut Cancel,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
-    let target = unique_tagged_candidate(
+    let FrameworkCandidateMutation {
         index,
+        facts,
+        budget,
         candidates,
+        cancelled,
+    } = input;
+    let target = unique_tagged_candidate(
+        TaggedCandidateQuery { index, candidates },
         |language, candidate| {
             native_bridge_target_language(language)
                 && rule
@@ -4369,10 +5223,12 @@ where
             append_framework_edge(
                 facts,
                 budget,
-                source,
-                target,
-                FRAMEWORK_CONVENTION_CONFIDENCE,
-                rule.provenance,
+                FrameworkEdgeInput {
+                    source,
+                    target,
+                    confidence: FRAMEWORK_CONVENTION_CONFIDENCE,
+                    provenance: rule.provenance,
+                },
             )?;
         }
     }
@@ -4380,8 +5236,7 @@ where
 }
 
 fn unique_tagged_candidate<'candidate, Predicate, Cancel>(
-    index: &ResolutionIndex,
-    candidates: &'candidate [ResolutionCandidate],
+    query: TaggedCandidateQuery<'_, 'candidate>,
     mut predicate: Predicate,
     cancelled: &mut Cancel,
 ) -> Result<Option<&'candidate ResolutionCandidate>, StageItemFailure>
@@ -4389,6 +5244,7 @@ where
     Predicate: FnMut(&str, &ResolutionCandidate) -> bool,
     Cancel: FnMut() -> bool,
 {
+    let TaggedCandidateQuery { index, candidates } = query;
     let mut unique = None;
     for candidate in candidates {
         if cancelled() {
@@ -4411,31 +5267,47 @@ where
 fn append_framework_edge(
     facts: &mut GenerationFacts,
     budget: &mut ResolveBudget,
-    source: &ResolutionCandidate,
-    target: &ResolutionCandidate,
-    confidence: f32,
-    provenance: &'static str,
+    input: FrameworkEdgeInput<'_>,
 ) -> Result<(), StageItemFailure> {
+    let FrameworkEdgeInput {
+        source,
+        target,
+        confidence,
+        provenance,
+    } = input;
     append_derived_edge(
         facts,
         budget,
-        &source.symbol_id,
-        &target.symbol_id,
-        EdgeKind::References,
-        confidence,
-        provenance,
+        DerivedEdgeInput {
+            source_symbol_id: &source.symbol_id,
+            target_symbol_id: &target.symbol_id,
+            kind: EdgeKind::References,
+            confidence,
+            provenance,
+        },
     )
+}
+
+struct DerivedEdgeInput<'symbol> {
+    source_symbol_id: &'symbol SymbolId,
+    target_symbol_id: &'symbol SymbolId,
+    kind: EdgeKind,
+    confidence: f32,
+    provenance: &'static str,
 }
 
 fn append_derived_edge(
     facts: &mut GenerationFacts,
     budget: &mut ResolveBudget,
-    source_symbol_id: &SymbolId,
-    target_symbol_id: &SymbolId,
-    kind: EdgeKind,
-    confidence: f32,
-    provenance: &'static str,
+    input: DerivedEdgeInput<'_>,
 ) -> Result<(), StageItemFailure> {
+    let DerivedEdgeInput {
+        source_symbol_id,
+        target_symbol_id,
+        kind,
+        confidence,
+        provenance,
+    } = input;
     if source_symbol_id == target_symbol_id {
         return Ok(());
     }
@@ -4466,91 +5338,132 @@ where
 {
     let mut index = ResolutionIndex::default();
     for file in &extracted.files {
-        if cancelled() {
-            return Err(StageItemFailure);
-        }
-        index_file_symbol(&mut index.file_symbols, &file.file, budget)?;
-        index_module_path(
-            &mut index.modules,
-            ModuleFileIndexInput {
-                file: &file.file,
-                package: native_package_name(file),
-            },
+        index_resolution_file_metadata(ResolutionIndexFileInput {
+            index: &mut index,
+            file,
             budget,
-        )?;
-        index_test_file_evidence(&mut index.test_files, file, budget)?;
-        for containment in &file.containments {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            insert_parent(&mut index.parents, containment, budget)?;
-        }
+            cancelled,
+        })?;
     }
     for file in &extracted.files {
-        if cancelled() {
-            return Err(StageItemFailure);
-        }
-        for symbol in &file.symbols {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            if symbol.input.symbol_kind != "import" {
-                let parent_symbol_id = index.parents.get(&symbol.input.symbol_id).cloned();
-                push_candidate(
-                    &mut index.candidates,
-                    ResolutionCandidateInsertion {
-                        key: &symbol.name,
-                        symbol,
-                        parent_symbol_id: parent_symbol_id.as_ref(),
-                    },
-                    budget,
-                )?;
-                if symbol.input.qualified_name != symbol.name {
-                    push_candidate(
-                        &mut index.candidates,
-                        ResolutionCandidateInsertion {
-                            key: &symbol.input.qualified_name,
-                            symbol,
-                            parent_symbol_id: parent_symbol_id.as_ref(),
-                        },
-                        budget,
-                    )?;
-                }
-                if let Some(alias) = framework_resolution_alias(symbol, &file.file.language)
-                    && alias != symbol.name
-                    && alias != symbol.input.qualified_name
-                {
-                    push_candidate(
-                        &mut index.candidates,
-                        ResolutionCandidateInsertion {
-                            key: alias,
-                            symbol,
-                            parent_symbol_id: parent_symbol_id.as_ref(),
-                        },
-                        budget,
-                    )?;
-                }
-                if symbol.default_export {
-                    push_default_export(
-                        &mut index.default_exports,
-                        DefaultExportInsertion {
-                            symbol,
-                            parent_symbol_id: parent_symbol_id.as_ref(),
-                        },
-                        budget,
-                    )?;
-                }
-                if symbol.exported
-                    && parent_symbol_id.is_none()
-                    && symbol.input.qualified_name == symbol.name
-                {
-                    index_project_export(&mut index.exports, symbol, budget)?;
-                }
-            }
-        }
-        index_project_reexports(&mut index, file, budget)?;
+        index_resolution_file_symbols(ResolutionIndexFileInput {
+            index: &mut index,
+            file,
+            budget,
+            cancelled,
+        })?;
     }
     Ok(index)
+}
+
+struct ResolutionIndexFileInput<'index, 'file, 'budget, 'cancel, Cancel> {
+    index: &'index mut ResolutionIndex,
+    file: &'file NativeFileFacts,
+    budget: &'budget mut ResolveBudget,
+    cancelled: &'cancel mut Cancel,
+}
+
+fn index_resolution_file_metadata<Cancel>(
+    input: ResolutionIndexFileInput<'_, '_, '_, '_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    if (input.cancelled)() {
+        return Err(StageItemFailure);
+    }
+    index_file_symbol(
+        &mut input.index.file_symbols,
+        &input.file.file,
+        input.budget,
+    )?;
+    index_module_path(
+        &mut input.index.modules,
+        ModuleFileIndexInput {
+            file: &input.file.file,
+            package: native_package_name(input.file),
+        },
+        input.budget,
+    )?;
+    index_test_file_evidence(&mut input.index.test_files, input.file, input.budget)?;
+    for containment in &input.file.containments {
+        if (input.cancelled)() {
+            return Err(StageItemFailure);
+        }
+        insert_parent(&mut input.index.parents, containment, input.budget)?;
+    }
+    Ok(())
+}
+
+fn index_resolution_file_symbols<Cancel>(
+    input: ResolutionIndexFileInput<'_, '_, '_, '_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    if (input.cancelled)() {
+        return Err(StageItemFailure);
+    }
+    for symbol in &input.file.symbols {
+        if (input.cancelled)() {
+            return Err(StageItemFailure);
+        }
+        if symbol.input.symbol_kind == "import" {
+            continue;
+        }
+        let parent_symbol_id = input.index.parents.get(&symbol.input.symbol_id).cloned();
+        push_candidate(
+            &mut input.index.candidates,
+            ResolutionCandidateInsertion {
+                key: &symbol.name,
+                symbol,
+                parent_symbol_id: parent_symbol_id.as_ref(),
+            },
+            input.budget,
+        )?;
+        if symbol.input.qualified_name != symbol.name {
+            push_candidate(
+                &mut input.index.candidates,
+                ResolutionCandidateInsertion {
+                    key: &symbol.input.qualified_name,
+                    symbol,
+                    parent_symbol_id: parent_symbol_id.as_ref(),
+                },
+                input.budget,
+            )?;
+        }
+        if let Some(alias) = framework_resolution_alias(symbol, &input.file.file.language)
+            && alias != symbol.name
+            && alias != symbol.input.qualified_name
+        {
+            push_candidate(
+                &mut input.index.candidates,
+                ResolutionCandidateInsertion {
+                    key: alias,
+                    symbol,
+                    parent_symbol_id: parent_symbol_id.as_ref(),
+                },
+                input.budget,
+            )?;
+        }
+        if symbol.default_export {
+            push_default_export(
+                &mut input.index.default_exports,
+                DefaultExportInsertion {
+                    symbol,
+                    parent_symbol_id: parent_symbol_id.as_ref(),
+                },
+                input.budget,
+            )?;
+        }
+        if symbol.exported
+            && parent_symbol_id.is_none()
+            && symbol.input.qualified_name == symbol.name
+        {
+            index_project_export(&mut input.index.exports, symbol, input.budget)?;
+        }
+    }
+    index_project_reexports(input.index, input.file, input.budget)
 }
 
 fn index_project_export(
@@ -4781,6 +5694,21 @@ struct ReferenceAppendRequest<'a, 'b> {
     reference: ExtractedReference,
 }
 
+struct FileRecordInput<'file> {
+    file: &'file FileInput,
+    identity: &'file FileDocumentIdentity,
+    file_symbol_id: &'file SymbolId,
+    line_count: u32,
+    test_search_text: String,
+    test_search_truncated: bool,
+}
+
+struct FileContainmentInput<'file> {
+    file_symbol_id: &'file SymbolId,
+    symbols: &'file [NativeSymbolFacts],
+    containments: Vec<Containment>,
+}
+
 impl<'a> ResolutionOutput<'a> {
     fn append_file<Cancel>(
         &mut self,
@@ -4816,81 +5744,34 @@ impl<'a> ResolutionOutput<'a> {
             path: try_clone_text(&file.normalized_path)?,
             language: try_clone_text(&file.language)?,
         };
-        self.facts.documents.push(SearchDocumentInput {
-            document_id: native_document_id("file", identity.file_id.as_str()),
-            file_id: Some(identity.file_id.clone()),
-            symbol_id: Some(file_symbol_id.clone()),
-            path: try_clone_text(&identity.path)?,
-            language: try_clone_text(&identity.language)?,
-            kind: document_kind_for_path(&identity.path, DocumentKind::File),
-            qualified_name: String::new(),
-            code: try_clone_text(&identity.path)?,
-            natural_text: test_search_text,
-            metadata: json!({
-                "byte_size": file.byte_size,
-                "parse_status": file.parse_status.as_str(),
-                "test_search_truncated": test_search_truncated,
-            }),
-        });
-        self.facts.symbols.push(SymbolInput {
-            symbol_id: file_symbol_id.clone(),
-            file_id: identity.file_id.clone(),
-            symbol_kind: SymbolKind::File.as_str().to_owned(),
-            qualified_name: file_symbol_qualified_name(&identity)?,
-            signature: String::new(),
-            start_byte: 0,
-            end_byte: file.byte_size,
-            start_line: 1,
-            end_line: line_count,
-            structural_digest: file.content_hash.clone(),
-            visibility: None,
-            exported: false,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
-            declaration_only: false,
-            betweenness_ppb: None,
-            pagerank_ppb: None,
-        });
-        for symbol in &symbols {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            if !self.index.parents.contains_key(&symbol.input.symbol_id) {
-                self.facts.edges.push(EdgeInput {
-                    source_symbol_id: file_symbol_id.clone(),
-                    target_symbol_id: symbol.input.symbol_id.clone(),
-                    kind: EdgeKind::Contains,
-                    confidence: EXTRACTED_EDGE_CONFIDENCE,
-                    provenance: FILE_CONTAINMENT_PROVENANCE.to_owned(),
-                    site_count: 1,
-                });
-            }
-        }
-        for containment in containments {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            self.facts.edges.push(EdgeInput {
-                source_symbol_id: containment.parent,
-                target_symbol_id: containment.child,
-                kind: EdgeKind::Contains,
-                confidence: EXTRACTED_EDGE_CONFIDENCE,
-                provenance: CONTAINMENT_PROVENANCE.to_owned(),
-                site_count: 1,
-            });
-        }
+        self.append_file_records(FileRecordInput {
+            file: &file,
+            identity: &identity,
+            file_symbol_id: &file_symbol_id,
+            line_count,
+            test_search_text,
+            test_search_truncated,
+        })?;
+        self.append_file_containments(
+            FileContainmentInput {
+                file_symbol_id: &file_symbol_id,
+                symbols: &symbols,
+                containments,
+            },
+            cancelled,
+        )?;
+        let context = FileResolutionContext {
+            identity: &identity,
+            file_symbol_id: &file_symbol_id,
+            import_bindings: &import_bindings,
+        };
         for reference in references {
             if cancelled() {
                 return Err(StageItemFailure);
             }
             self.append_reference(
                 ReferenceAppendRequest {
-                    context: &FileResolutionContext {
-                        identity: &identity,
-                        file_symbol_id: &file_symbol_id,
-                        import_bindings: &import_bindings,
-                    },
+                    context: &context,
                     reference,
                 },
                 cancelled,
@@ -4903,6 +5784,85 @@ impl<'a> ResolutionOutput<'a> {
             self.append_symbol(&identity, symbol)?;
         }
         self.facts.files.push(file);
+        Ok(())
+    }
+
+    fn append_file_records(&mut self, input: FileRecordInput<'_>) -> Result<(), StageItemFailure> {
+        self.facts.documents.push(SearchDocumentInput {
+            document_id: native_document_id("file", input.identity.file_id.as_str()),
+            file_id: Some(input.identity.file_id.clone()),
+            symbol_id: Some(input.file_symbol_id.clone()),
+            path: try_clone_text(&input.identity.path)?,
+            language: try_clone_text(&input.identity.language)?,
+            kind: document_kind_for_path(&input.identity.path, DocumentKind::File),
+            qualified_name: String::new(),
+            code: try_clone_text(&input.identity.path)?,
+            natural_text: input.test_search_text,
+            metadata: json!({
+                "byte_size": input.file.byte_size,
+                "parse_status": input.file.parse_status.as_str(),
+                "test_search_truncated": input.test_search_truncated,
+            }),
+        });
+        self.facts.symbols.push(SymbolInput {
+            symbol_id: input.file_symbol_id.clone(),
+            file_id: input.identity.file_id.clone(),
+            symbol_kind: SymbolKind::File.as_str().to_owned(),
+            qualified_name: file_symbol_qualified_name(input.identity)?,
+            signature: String::new(),
+            start_byte: 0,
+            end_byte: input.file.byte_size,
+            start_line: 1,
+            end_line: input.line_count,
+            structural_digest: input.file.content_hash.clone(),
+            visibility: None,
+            exported: false,
+            default_export: false,
+            async_symbol: false,
+            static_member: false,
+            declaration_only: false,
+            betweenness_ppb: None,
+            pagerank_ppb: None,
+        });
+        Ok(())
+    }
+
+    fn append_file_containments<Cancel>(
+        &mut self,
+        input: FileContainmentInput<'_>,
+        cancelled: &mut Cancel,
+    ) -> Result<(), StageItemFailure>
+    where
+        Cancel: FnMut() -> bool,
+    {
+        for symbol in input.symbols {
+            if cancelled() {
+                return Err(StageItemFailure);
+            }
+            if !self.index.parents.contains_key(&symbol.input.symbol_id) {
+                self.facts.edges.push(EdgeInput {
+                    source_symbol_id: input.file_symbol_id.clone(),
+                    target_symbol_id: symbol.input.symbol_id.clone(),
+                    kind: EdgeKind::Contains,
+                    confidence: EXTRACTED_EDGE_CONFIDENCE,
+                    provenance: FILE_CONTAINMENT_PROVENANCE.to_owned(),
+                    site_count: 1,
+                });
+            }
+        }
+        for containment in input.containments {
+            if cancelled() {
+                return Err(StageItemFailure);
+            }
+            self.facts.edges.push(EdgeInput {
+                source_symbol_id: containment.parent,
+                target_symbol_id: containment.child,
+                kind: EdgeKind::Contains,
+                confidence: EXTRACTED_EDGE_CONFIDENCE,
+                provenance: CONTAINMENT_PROVENANCE.to_owned(),
+                site_count: 1,
+            });
+        }
         Ok(())
     }
 
@@ -4919,8 +5879,13 @@ impl<'a> ResolutionOutput<'a> {
             .resolution_name
             .as_deref()
             .and_then(|name| name.strip_prefix(DYNAMIC_DISPATCH_RESOLUTION_PREFIX));
+        let rust_macro_name = reference
+            .resolution_name
+            .as_deref()
+            .and_then(|name| name.strip_prefix(RUST_MACRO_RESOLUTION_PREFIX));
         let embedded_sql = embedded_sql_lookup(reference.resolution_name.as_deref());
         let lookup_name = dynamic_dispatch_name
+            .or(rust_macro_name)
             .or_else(|| embedded_sql.as_ref().map(|lookup| lookup.table))
             .unwrap_or_else(|| {
                 reference
@@ -4928,7 +5893,9 @@ impl<'a> ResolutionOutput<'a> {
                     .as_deref()
                     .unwrap_or(&reference.name)
             });
-        let mut resolution = if let Some(lookup) = embedded_sql {
+        let mut resolution = if rust_macro_name.is_some() {
+            ReferenceResolution::unresolved(RUST_MACRO_UNRESOLVED_PROVENANCE)
+        } else if let Some(lookup) = embedded_sql {
             resolve_embedded_sql(self.index, lookup, cancelled)?
         } else {
             resolve_reference(
@@ -4940,6 +5907,7 @@ impl<'a> ResolutionOutput<'a> {
                     import_bindings: context.import_bindings,
                     owner: reference.owner.as_ref(),
                     name: lookup_name,
+                    dynamic_dispatch: dynamic_dispatch_name.is_some(),
                     kind: reference.kind,
                     span: reference.span,
                 },
@@ -4982,12 +5950,14 @@ impl<'a> ResolutionOutput<'a> {
                 site_count: 1,
             });
         }
-        self.facts.references.push(reference_input(
-            &context.identity.file_id,
-            context.file_symbol_id,
-            reference,
-            resolution,
-        ));
+        self.facts
+            .references
+            .push(reference_input(ReferenceFactInput {
+                file_id: &context.identity.file_id,
+                file_symbol_id: context.file_symbol_id,
+                reference,
+                resolution,
+            }));
         Ok(())
     }
 
@@ -5013,7 +5983,11 @@ impl<'a> ResolutionOutput<'a> {
             symbol_id: Some(symbol_id),
             path: try_clone_text(&identity.path)?,
             language: try_clone_text(&identity.language)?,
-            kind: document_kind_for_path(&identity.path, DocumentKind::Symbol),
+            kind: if symbol.test_symbol {
+                DocumentKind::Test
+            } else {
+                document_kind_for_path(&identity.path, DocumentKind::Symbol)
+            },
             qualified_name: try_clone_text(&symbol.input.qualified_name)?,
             code,
             natural_text: symbol.docstring.unwrap_or_default(),
@@ -5025,9 +5999,11 @@ impl<'a> ResolutionOutput<'a> {
                 "duplicate_detection_enabled": symbol.duplicate_detection_enabled,
                 "partial_clone": partial_clone,
                 "declaration_only": symbol.declaration_only,
+                "test_symbol": symbol.test_symbol,
                 "default_export": symbol.default_export,
                 "exported": symbol.exported,
                 "health": {
+                    "code_lines": symbol.health.code_lines,
                     "parameter_count": symbol.health.parameter_count,
                     "cyclomatic": symbol.health.cyclomatic,
                     "max_nesting": symbol.health.max_nesting,
@@ -5416,6 +6392,7 @@ struct ResolutionRequest<'a> {
     import_bindings: &'a [ExtractedImportBinding],
     owner: Option<&'a SymbolId>,
     name: &'a str,
+    dynamic_dispatch: bool,
     kind: ReferenceKind,
     span: SourceSpan,
 }
@@ -5425,7 +6402,54 @@ struct ProjectCandidateInput<'a> {
     source: &'a ResolutionFileContext,
     source_file_id: &'a FileId,
     reference_name: &'a str,
+    dynamic_dispatch: bool,
+    rust_local_import: bool,
     candidate: &'a ResolutionCandidate,
+}
+
+struct AppleBridgeQuery<'context, 'request, Cancel> {
+    index: &'context ResolutionIndex,
+    source: &'context ResolutionFileContext,
+    request: &'context ResolutionRequest<'request>,
+    cancelled: &'context mut Cancel,
+}
+
+struct AppleBridgeSelection<'context, 'request, 'candidate, Cancel> {
+    index: &'context ResolutionIndex,
+    source: &'context ResolutionFileContext,
+    request: &'context ResolutionRequest<'request>,
+    candidates: &'candidate [ResolutionCandidate],
+    target_language: &'context str,
+    cancelled: &'context mut Cancel,
+}
+
+struct FrameworkSelection<'context, 'request, 'candidate, Cancel> {
+    index: &'context ResolutionIndex,
+    source: &'context ResolutionFileContext,
+    request: &'context ResolutionRequest<'request>,
+    candidates: &'candidate [ResolutionCandidate],
+    cancelled: &'context mut Cancel,
+}
+
+struct FrameworkCandidateInput<'context> {
+    modules: &'context ModulePathIndex,
+    source: &'context ResolutionFileContext,
+    source_file_id: &'context FileId,
+    candidate: &'context ResolutionCandidate,
+}
+
+struct PhpRouteCandidateInput<'context> {
+    source: &'context ResolutionFileContext,
+    target: &'context ResolutionFileContext,
+    source_file_id: &'context FileId,
+    candidate: &'context ResolutionCandidate,
+}
+
+struct ReferenceFactInput<'context> {
+    file_id: &'context FileId,
+    file_symbol_id: &'context SymbolId,
+    reference: ExtractedReference,
+    resolution: ReferenceResolution,
 }
 
 #[derive(Clone, Copy)]
@@ -5443,6 +6467,40 @@ struct ModuleResolutionRequest<'a> {
     importing_path: &'a str,
     specifier: &'a str,
     importing_language: &'a str,
+}
+
+struct RustQualifiedModuleQuery<'context, 'request> {
+    index: &'context ResolutionIndex,
+    request: &'context ResolutionRequest<'request>,
+    module_specifier: &'context str,
+    target_name: &'context str,
+    allow_unique_project_reexport: bool,
+}
+
+struct RustCandidateVisibility<'context> {
+    index: &'context ResolutionIndex,
+    candidate: &'context ResolutionCandidate,
+    target_name: &'context str,
+    source_path: &'context str,
+}
+
+struct IncludeImplementationQuery<'context, 'request> {
+    index: &'context ResolutionIndex,
+    request: &'context ResolutionRequest<'request>,
+    declaration: &'context ResolutionCandidate,
+}
+
+struct RustNamespaceImportQuery<'context, 'request> {
+    index: &'context ResolutionIndex,
+    reference: &'context ResolutionRequest<'request>,
+    binding: &'context ExtractedImportBinding,
+}
+
+struct ImportCandidatesQuery<'context> {
+    index: &'context ResolutionIndex,
+    binding: &'context ExtractedImportBinding,
+    imported_name: &'context str,
+    module_file_id: &'context FileId,
 }
 
 fn resolve_embedded_sql<Cancel>(
@@ -5498,114 +6556,306 @@ fn resolve_reference<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    if request.kind == ReferenceKind::Imports && request.owner.is_none() {
-        match resolve_include_file_reference(index, request, cancelled)? {
-            ImportResolution::NotBound => {}
-            ImportResolution::Resolved(target) => {
-                return Ok(ReferenceResolution::resolved(target));
-            }
-            ImportResolution::Unresolved => {
-                return Ok(ReferenceResolution::unresolved(
-                    UNRESOLVED_IMPORT_PROVENANCE,
-                ));
-            }
-        }
+    if request.kind == ReferenceKind::Imports
+        && request.owner.is_none()
+        && let Some(resolution) =
+            import_reference_resolution(resolve_include_file_reference(index, request, cancelled)?)
+    {
+        return Ok(resolution);
     }
-    if request.owner.is_none() && request.kind == ReferenceKind::References {
-        match resolve_import(
+    if request.owner.is_none()
+        && request.kind == ReferenceKind::References
+        && let Some(resolution) = import_reference_resolution(resolve_import(
             index,
             ImportResolutionRequest {
                 reference: request,
                 site: ImportReferenceSite::Declaration,
             },
             cancelled,
-        )? {
-            ImportResolution::NotBound => {}
-            ImportResolution::Resolved(target) => {
-                return Ok(ReferenceResolution::resolved(target));
-            }
-            ImportResolution::Unresolved => {
-                return Ok(ReferenceResolution::unresolved(
-                    UNRESOLVED_IMPORT_PROVENANCE,
-                ));
-            }
-        }
+        )?)
+    {
+        return Ok(resolution);
     }
-    if request.kind == ReferenceKind::Exports {
-        match resolve_import(
+    if request.kind == ReferenceKind::Exports
+        && let Some(resolution) = import_reference_resolution(resolve_import(
             index,
             ImportResolutionRequest {
                 reference: request,
                 site: ImportReferenceSite::Usage,
             },
             cancelled,
-        )? {
-            ImportResolution::NotBound => {}
-            ImportResolution::Resolved(target) => {
-                return Ok(ReferenceResolution::resolved(target));
-            }
-            ImportResolution::Unresolved => {
-                return Ok(ReferenceResolution::unresolved(
-                    UNRESOLVED_IMPORT_PROVENANCE,
-                ));
-            }
-        }
+        )?)
+    {
+        return Ok(resolution);
     }
     if let Some(target) = resolve_lexical(index, request, cancelled)? {
         return Ok(ReferenceResolution::resolved(target));
     }
-    match resolve_module_import_file_reference(index, request, cancelled)? {
-        ImportResolution::NotBound => {}
-        ImportResolution::Resolved(target) => {
-            return Ok(ReferenceResolution::resolved(target));
-        }
-        ImportResolution::Unresolved => {
-            return Ok(ReferenceResolution::unresolved(
-                UNRESOLVED_IMPORT_PROVENANCE,
-            ));
-        }
+    if let Some(target) = resolve_rust_qualified_path(index, request, cancelled)? {
+        return Ok(ReferenceResolution::resolved(target));
     }
-    match resolve_include_bound_symbol(index, request, cancelled)? {
-        ImportResolution::NotBound => {}
-        ImportResolution::Resolved(target) => {
-            return Ok(ReferenceResolution::resolved(target));
-        }
-        ImportResolution::Unresolved => {
-            return Ok(ReferenceResolution::unresolved(
-                UNRESOLVED_IMPORT_PROVENANCE,
-            ));
-        }
+    if let Some(resolution) = import_reference_resolution(resolve_module_import_file_reference(
+        index, request, cancelled,
+    )?) {
+        return Ok(resolution);
     }
-    match resolve_import(
+    if let Some(resolution) =
+        import_reference_resolution(resolve_include_bound_symbol(index, request, cancelled)?)
+    {
+        return Ok(resolution);
+    }
+    if let Some(resolution) = import_reference_resolution(resolve_import(
         index,
         ImportResolutionRequest {
             reference: request,
             site: ImportReferenceSite::Usage,
         },
         cancelled,
-    )? {
-        ImportResolution::NotBound => {}
-        ImportResolution::Resolved(target) => {
-            return Ok(ReferenceResolution::resolved(target));
-        }
-        ImportResolution::Unresolved => {
-            return Ok(ReferenceResolution::unresolved(
-                UNRESOLVED_IMPORT_PROVENANCE,
-            ));
-        }
+    )?) {
+        return Ok(resolution);
     }
     if project_fallback_allowed(request)
         && let Some(target) = resolve_project(index, request, cancelled)?
     {
         return Ok(ReferenceResolution::resolved(target));
     }
-    Ok(ReferenceResolution::unresolved(UNRESOLVED_PROVENANCE))
+    Ok(ReferenceResolution::unresolved(
+        unresolved_reference_provenance(index, request, cancelled)?,
+    ))
+}
+
+fn unresolved_reference_provenance<Cancel>(
+    index: &ResolutionIndex,
+    request: &ResolutionRequest<'_>,
+    cancelled: &mut Cancel,
+) -> Result<&'static str, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    if let Some(provenance) = fixed_unresolved_provenance(request) {
+        return Ok(provenance);
+    }
+    let import_scope = reference_import_scope(request, cancelled)?;
+    if let Some(provenance) = import_scope_unresolved_provenance(import_scope, request) {
+        return Ok(provenance);
+    }
+    if rust_explicit_external_path(request) {
+        return Ok(RUST_EXTERNAL_UNRESOLVED_PROVENANCE);
+    }
+    if has_project_candidate(index, request) {
+        return Ok(UNRESOLVED_PROVENANCE);
+    }
+    Ok(language_unresolved_provenance(request).unwrap_or(UNRESOLVED_PROVENANCE))
+}
+
+fn fixed_unresolved_provenance(request: &ResolutionRequest<'_>) -> Option<&'static str> {
+    if request.dynamic_dispatch {
+        Some(DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE)
+    } else if request.kind == ReferenceKind::FieldAccess {
+        Some(MEMBER_ACCESS_UNRESOLVED_PROVENANCE)
+    } else if request.language == SourceLanguage::Rust.as_str() && rust_intrinsic_reference(request)
+    {
+        Some(RUST_INTRINSIC_UNRESOLVED_PROVENANCE)
+    } else {
+        None
+    }
+}
+
+fn import_scope_unresolved_provenance(
+    scope: ImportScope,
+    request: &ResolutionRequest<'_>,
+) -> Option<&'static str> {
+    match scope {
+        ImportScope::Local => Some(UNRESOLVED_IMPORT_PROVENANCE),
+        ImportScope::NonLocal if request.language == SourceLanguage::Rust.as_str() => {
+            Some(RUST_EXTERNAL_UNRESOLVED_PROVENANCE)
+        }
+        ImportScope::NonLocal => Some(EXTERNAL_REFERENCE_UNRESOLVED_PROVENANCE),
+        ImportScope::None | ImportScope::Ambiguous => None,
+    }
+}
+
+fn language_unresolved_provenance(request: &ResolutionRequest<'_>) -> Option<&'static str> {
+    if javascript_family_name(request.language) {
+        if javascript_intrinsic_reference(request) {
+            return Some(JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE);
+        }
+        if request.kind == ReferenceKind::Calls && javascript_receiver_reference(request.name) {
+            return Some(DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE);
+        }
+    }
+    if shell_command_language(request.language) && request.kind == ReferenceKind::Calls {
+        return Some(SHELL_COMMAND_UNRESOLVED_PROVENANCE);
+    }
+    if request.language == SourceLanguage::Toml.as_str()
+        && request.kind == ReferenceKind::References
+    {
+        return Some(MANIFEST_REFERENCE_UNRESOLVED_PROVENANCE);
+    }
+    None
+}
+
+fn has_project_candidate(index: &ResolutionIndex, request: &ResolutionRequest<'_>) -> bool {
+    index
+        .candidates
+        .get(request.name)
+        .is_some_and(|candidates| {
+            candidates.iter().any(|candidate| {
+                reference_kind_candidate(request.kind, candidate)
+                    && index
+                        .modules
+                        .files
+                        .get(&candidate.file_id)
+                        .is_some_and(|file| {
+                            resolution_languages_compatible(request.language, &file.language)
+                        })
+            })
+        })
+}
+
+fn rust_intrinsic_reference(request: &ResolutionRequest<'_>) -> bool {
+    let root = request.name.split("::").next().unwrap_or(request.name);
+    if matches!(root, "std" | "core" | "alloc") {
+        return true;
+    }
+    let intrinsic_type = matches!(
+        root,
+        "Self"
+            | "Cow"
+            | "Fn"
+            | "FnMut"
+            | "FnOnce"
+            | "Result"
+            | "Option"
+            | "String"
+            | "str"
+            | "Vec"
+            | "Box"
+            | "bool"
+            | "char"
+            | "f32"
+            | "f64"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+    );
+    if intrinsic_type {
+        return true;
+    }
+    request.kind == ReferenceKind::Calls
+        && matches!(request.name, "Ok" | "Err" | "Some" | "None" | "drop")
+}
+
+fn rust_explicit_external_path(request: &ResolutionRequest<'_>) -> bool {
+    if request.language != SourceLanguage::Rust.as_str() {
+        return false;
+    }
+    let Some((root, _)) = request.name.split_once("::") else {
+        return false;
+    };
+    !matches!(root, "crate" | "self" | "super" | "Self")
+        && root
+            .as_bytes()
+            .first()
+            .is_some_and(|first| first.is_ascii_lowercase())
+}
+
+fn javascript_intrinsic_reference(request: &ResolutionRequest<'_>) -> bool {
+    let root = request.name.split('.').next().unwrap_or(request.name);
+    matches!(
+        root,
+        "Array"
+            | "ArrayBuffer"
+            | "BigInt"
+            | "Boolean"
+            | "Buffer"
+            | "Date"
+            | "Error"
+            | "EvalError"
+            | "Intl"
+            | "JSON"
+            | "Map"
+            | "Math"
+            | "Number"
+            | "Object"
+            | "Parameters"
+            | "Promise"
+            | "RangeError"
+            | "ReferenceError"
+            | "Reflect"
+            | "RegExp"
+            | "Set"
+            | "String"
+            | "Symbol"
+            | "SyntaxError"
+            | "TextDecoder"
+            | "TextEncoder"
+            | "TypeError"
+            | "URIError"
+            | "URL"
+            | "URLSearchParams"
+            | "WeakMap"
+            | "WeakSet"
+            | "clearInterval"
+            | "clearTimeout"
+            | "console"
+            | "fetch"
+            | "globalThis"
+            | "parseFloat"
+            | "parseInt"
+            | "process"
+            | "queueMicrotask"
+            | "setInterval"
+            | "setTimeout"
+            | "structuredClone"
+    )
+}
+
+fn javascript_receiver_reference(name: &str) -> bool {
+    name.split_once('.').is_some_and(|(receiver, member)| {
+        !receiver.is_empty()
+            && !member.is_empty()
+            && (receiver == "this"
+                || receiver == "super"
+                || receiver
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_lowercase))
+    })
+}
+
+fn shell_command_language(language: &str) -> bool {
+    matches!(language, "bash" | "fish" | "powershell" | "zsh")
+}
+
+fn import_reference_resolution(resolution: ImportResolution) -> Option<ReferenceResolution> {
+    match resolution {
+        ImportResolution::NotBound => None,
+        ImportResolution::Resolved(target) => Some(ReferenceResolution::resolved(target)),
+        ImportResolution::Unresolved => Some(ReferenceResolution::unresolved(
+            UNRESOLVED_IMPORT_PROVENANCE,
+        )),
+    }
 }
 
 fn project_fallback_allowed(request: &ResolutionRequest<'_>) -> bool {
-    !(javascript_family_name(request.language)
+    let runtime_require = javascript_family_name(request.language)
         && request.kind == ReferenceKind::Calls
-        && request.name == "require")
+        && request.name == "require";
+    let external_binding = request.import_bindings.iter().any(|binding| {
+        binding_matches_reference_name(binding, request.name)
+            && !import_binding_is_project_local(binding, request.language)
+    });
+    !runtime_require && !external_binding
 }
 
 fn resolve_lexical<Cancel>(
@@ -5672,6 +6922,172 @@ where
         scope = index.parents.get(symbol_id);
     }
     Ok(None)
+}
+
+fn resolve_rust_qualified_path<Cancel>(
+    index: &ResolutionIndex,
+    request: &ResolutionRequest<'_>,
+    cancelled: &mut Cancel,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    if request.language != SourceLanguage::Rust.as_str() {
+        return Ok(None);
+    }
+    let Some((module_specifier, name)) = request.name.rsplit_once("::") else {
+        return Ok(None);
+    };
+    if !matches!(
+        module_specifier.split("::").next(),
+        Some("crate" | "self" | "super")
+    ) {
+        return Ok(None);
+    }
+    if let Some(target) = resolve_rust_qualified_in_module(
+        RustQualifiedModuleQuery {
+            index,
+            request,
+            module_specifier,
+            target_name: name,
+            allow_unique_project_reexport: false,
+        },
+        cancelled,
+    )? {
+        return Ok(Some(target));
+    }
+    let Some((associated_module, parent_name)) = module_specifier.rsplit_once("::") else {
+        return Ok(None);
+    };
+    if !matches!(
+        associated_module.split("::").next(),
+        Some("crate" | "self" | "super")
+    ) {
+        return Ok(None);
+    }
+    let parent_and_member = request
+        .name
+        .strip_prefix(associated_module)
+        .and_then(|suffix| suffix.strip_prefix("::"))
+        .filter(|suffix| suffix.starts_with(parent_name))
+        .ok_or(StageItemFailure)?;
+    resolve_rust_qualified_in_module(
+        RustQualifiedModuleQuery {
+            index,
+            request,
+            module_specifier: associated_module,
+            target_name: parent_and_member,
+            allow_unique_project_reexport: associated_module == "crate",
+        },
+        cancelled,
+    )
+}
+
+fn resolve_rust_qualified_in_module<Cancel>(
+    query: RustQualifiedModuleQuery<'_, '_>,
+    cancelled: &mut Cancel,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let RustQualifiedModuleQuery {
+        index,
+        request,
+        module_specifier,
+        target_name,
+        allow_unique_project_reexport,
+    } = query;
+    let Some(module_file_id) = resolve_module_file(
+        &index.modules,
+        ModuleResolutionRequest {
+            importing_path: request.file_path,
+            specifier: module_specifier,
+            importing_language: request.language,
+        },
+    ) else {
+        return Ok(None);
+    };
+    let candidates = index
+        .candidates
+        .get(target_name)
+        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let mut candidate = select_candidate(
+        candidates,
+        |candidate| {
+            &candidate.file_id == module_file_id
+                && rust_module_candidate_visible(RustCandidateVisibility {
+                    index,
+                    candidate,
+                    target_name,
+                    source_path: request.file_path,
+                })
+                && reference_kind_candidate(request.kind, candidate)
+        },
+        cancelled,
+    )?;
+    if candidate.is_none() && allow_unique_project_reexport {
+        candidate = select_candidate(
+            candidates,
+            |candidate| {
+                rust_module_candidate_visible(RustCandidateVisibility {
+                    index,
+                    candidate,
+                    target_name,
+                    source_path: request.file_path,
+                }) && reference_kind_candidate(request.kind, candidate)
+                    && index
+                        .modules
+                        .files
+                        .get(&candidate.file_id)
+                        .is_some_and(|target| {
+                            resolution_languages_compatible(request.language, &target.language)
+                        })
+            },
+            cancelled,
+        )?;
+    }
+    Ok(candidate.map(|candidate| ResolvedTarget {
+        symbol_id: candidate.symbol_id.clone(),
+        kind: candidate.kind,
+        confidence: IMPORT_BINDING_CONFIDENCE,
+        provenance: RUST_QUALIFIED_PATH_PROVENANCE,
+    }))
+}
+
+fn rust_module_candidate_visible(input: RustCandidateVisibility<'_>) -> bool {
+    let RustCandidateVisibility {
+        index,
+        candidate,
+        target_name,
+        source_path,
+    } = input;
+    let Some(target) = index.modules.files.get(&candidate.file_id) else {
+        return false;
+    };
+    let private_parent_visible = rust_parent_module_contains(source_path, &target.path);
+    if !candidate.exported && candidate.kind != SymbolKind::EnumMember && !private_parent_visible {
+        return false;
+    }
+    if candidate.parent_symbol_id.is_none() && candidate.top_level {
+        return true;
+    }
+    let Some((parent_name, _)) = target_name.rsplit_once("::") else {
+        return false;
+    };
+    if candidate.qualified_name != target_name {
+        return false;
+    }
+    index.candidates.get(parent_name).is_some_and(|parents| {
+        parents.iter().any(|parent| {
+            parent.file_id == candidate.file_id
+                && (parent.exported || private_parent_visible)
+                && parent.top_level
+                && candidate
+                    .parent_symbol_id
+                    .as_ref()
+                    .is_none_or(|owner| owner == &parent.symbol_id)
+        })
+    })
 }
 
 fn is_lexical_candidate(
@@ -5898,8 +7314,15 @@ where
         return Ok(ImportResolution::NotBound);
     };
     let target = if declaration.declaration_only {
-        unique_include_implementation(index, request, declaration, cancelled)?
-            .unwrap_or(declaration)
+        unique_include_implementation(
+            IncludeImplementationQuery {
+                index,
+                request,
+                declaration,
+            },
+            cancelled,
+        )?
+        .unwrap_or(declaration)
     } else {
         declaration
     };
@@ -5912,14 +7335,17 @@ where
 }
 
 fn unique_include_implementation<'a, Cancel>(
-    index: &'a ResolutionIndex,
-    request: &ResolutionRequest<'_>,
-    declaration: &'a ResolutionCandidate,
+    query: IncludeImplementationQuery<'a, '_>,
     cancelled: &mut Cancel,
 ) -> Result<Option<&'a ResolutionCandidate>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let IncludeImplementationQuery {
+        index,
+        request,
+        declaration,
+    } = query;
     let candidates = index
         .candidates
         .get(&declaration.qualified_name)
@@ -5985,43 +7411,293 @@ where
     Cancel: FnMut() -> bool,
 {
     let ImportResolutionRequest { reference, site } = input;
-    let mut matched: Option<(&ExtractedImportBinding, &str)> = None;
-    for binding in reference.import_bindings {
-        if cancelled() {
-            return Err(StageItemFailure);
-        }
-        let imported_name = match site {
-            ImportReferenceSite::Declaration => {
-                binding_matches_declaration_site(binding, reference)
-                    .then_some(binding.imported_name.as_str())
-            }
-            ImportReferenceSite::Usage => runtime_binding_target_name(binding, reference.name),
-        };
-        let Some(imported_name) = imported_name else {
-            continue;
-        };
-        if matched.is_some() {
-            return Ok(ImportResolution::Unresolved);
-        }
-        matched = Some((binding, imported_name));
-    }
-    let Some((binding, imported_name)) = matched else {
-        return Ok(ImportResolution::NotBound);
+    let (binding, imported_name) = match matched_import_binding(reference, site, cancelled)? {
+        ImportBindingMatch::NotBound => return Ok(ImportResolution::NotBound),
+        ImportBindingMatch::Ambiguous => return Ok(ImportResolution::Unresolved),
+        ImportBindingMatch::Unique(binding, imported_name) => (binding, imported_name),
     };
     if imported_name.is_empty() {
         return Ok(ImportResolution::Unresolved);
     }
-    let Some(module_file_id) = resolve_module_file(
+    let module_file_id = resolve_module_file(
         &index.modules,
         ModuleResolutionRequest {
             importing_path: reference.file_path,
             specifier: &binding.module_specifier,
             importing_language: reference.language,
         },
-    ) else {
-        return Ok(ImportResolution::Unresolved);
+    );
+    if let Some(module_file_id) = module_file_id {
+        let candidates = import_resolution_candidates(ImportCandidatesQuery {
+            index,
+            binding,
+            imported_name,
+            module_file_id,
+        });
+        if let Some(candidate) = select_candidate(
+            candidates,
+            |candidate| {
+                &candidate.file_id == module_file_id
+                    && candidate.exported
+                    && reference_kind_candidate(reference.kind, candidate)
+                    && (reference.language != SourceLanguage::Rust.as_str()
+                        || rust_module_candidate_visible(RustCandidateVisibility {
+                            index,
+                            candidate,
+                            target_name: imported_name,
+                            source_path: reference.file_path,
+                        }))
+            },
+            cancelled,
+        )? {
+            return Ok(ImportResolution::Resolved(import_binding_target(candidate)));
+        }
+    }
+    if let Some(target) = resolve_rust_namespace_symbol_import(
+        RustNamespaceImportQuery {
+            index,
+            reference,
+            binding,
+        },
+        cancelled,
+    )? {
+        return Ok(ImportResolution::Resolved(target));
+    }
+    Ok(if module_file_id.is_some() {
+        ImportResolution::Unresolved
+    } else {
+        missing_import_module_resolution(reference, binding)
+    })
+}
+
+fn import_binding_target(candidate: &ResolutionCandidate) -> ResolvedTarget {
+    ResolvedTarget {
+        symbol_id: candidate.symbol_id.clone(),
+        kind: candidate.kind,
+        confidence: IMPORT_BINDING_CONFIDENCE,
+        provenance: IMPORT_BINDING_PROVENANCE,
+    }
+}
+
+fn resolve_rust_namespace_symbol_import<Cancel>(
+    query: RustNamespaceImportQuery<'_, '_>,
+    cancelled: &mut Cancel,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let RustNamespaceImportQuery {
+        index,
+        reference,
+        binding,
+    } = query;
+    if reference.language != SourceLanguage::Rust.as_str()
+        || binding.kind != ImportBindingKind::Namespace
+    {
+        return Ok(None);
+    }
+    let Some((parent_specifier, imported_leaf)) = binding.module_specifier.rsplit_once("::") else {
+        return Ok(None);
     };
-    let candidates = if binding.kind == ImportBindingKind::Default || imported_name == "default" {
+    let Some(module_file_id) = resolve_module_file(
+        &index.modules,
+        ModuleResolutionRequest {
+            importing_path: reference.file_path,
+            specifier: parent_specifier,
+            importing_language: reference.language,
+        },
+    ) else {
+        return Ok(None);
+    };
+    let target_name = if imported_leaf == "*" && binding.local_name == "*" {
+        try_clone_text(reference.name)?
+    } else {
+        let suffix = reference
+            .name
+            .strip_prefix(&binding.local_name)
+            .filter(|suffix| suffix.is_empty() || suffix.starts_with("::"))
+            .ok_or(StageItemFailure)?;
+        rust_imported_target_name(imported_leaf, suffix)?
+    };
+    let candidates = index
+        .candidates
+        .get(&target_name)
+        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let allow_unique_project_reexport = parent_specifier == "crate";
+    let mut candidate = select_candidate(
+        candidates,
+        |candidate| {
+            &candidate.file_id == module_file_id
+                && rust_module_candidate_visible(RustCandidateVisibility {
+                    index,
+                    candidate,
+                    target_name: &target_name,
+                    source_path: reference.file_path,
+                })
+                && reference_kind_candidate(reference.kind, candidate)
+        },
+        cancelled,
+    )?;
+    if candidate.is_none() && allow_unique_project_reexport {
+        candidate = select_candidate(
+            candidates,
+            |candidate| {
+                rust_module_candidate_visible(RustCandidateVisibility {
+                    index,
+                    candidate,
+                    target_name: &target_name,
+                    source_path: reference.file_path,
+                }) && reference_kind_candidate(reference.kind, candidate)
+                    && index
+                        .modules
+                        .files
+                        .get(&candidate.file_id)
+                        .is_some_and(|target| target.language == SourceLanguage::Rust.as_str())
+            },
+            cancelled,
+        )?;
+    }
+    Ok(candidate.map(import_binding_target))
+}
+
+fn rust_imported_target_name(
+    imported_leaf: &str,
+    suffix: &str,
+) -> Result<String, StageItemFailure> {
+    let length = imported_leaf
+        .len()
+        .checked_add(suffix.len())
+        .ok_or(StageItemFailure)?;
+    let mut target = String::new();
+    target
+        .try_reserve_exact(length)
+        .map_err(|_| StageItemFailure)?;
+    target.push_str(imported_leaf);
+    target.push_str(suffix);
+    Ok(target)
+}
+
+enum ImportBindingMatch<'binding> {
+    NotBound,
+    Ambiguous,
+    Unique(&'binding ExtractedImportBinding, &'binding str),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportScope {
+    None,
+    Local,
+    NonLocal,
+    Ambiguous,
+}
+
+fn reference_import_scope<Cancel>(
+    reference: &ResolutionRequest<'_>,
+    cancelled: &mut Cancel,
+) -> Result<ImportScope, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let mut scope = ImportScope::None;
+    for binding in reference.import_bindings {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        if !binding_matches_reference_name(binding, reference.name) {
+            continue;
+        }
+        let candidate = if import_binding_is_project_local(binding, reference.language) {
+            ImportScope::Local
+        } else {
+            ImportScope::NonLocal
+        };
+        if scope != ImportScope::None {
+            return Ok(ImportScope::Ambiguous);
+        }
+        scope = candidate;
+    }
+    Ok(scope)
+}
+
+fn binding_matches_reference_name(binding: &ExtractedImportBinding, reference_name: &str) -> bool {
+    binding.local_name == "*"
+        || binding.local_name == reference_name
+        || reference_name
+            .strip_prefix(&binding.local_name)
+            .is_some_and(|suffix| suffix.starts_with("::") || suffix.starts_with('.'))
+}
+
+fn import_binding_is_project_local(binding: &ExtractedImportBinding, language: &str) -> bool {
+    let specifier = binding.module_specifier.as_str();
+    matches!(binding.kind, ImportBindingKind::IncludeQuoted)
+        || matches!(specifier, "." | "..")
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || language == SourceLanguage::Rust.as_str() && rust_use_binding_is_hypothesis(specifier)
+        || (javascript_family_name(language)
+            && (specifier.starts_with("@/")
+                || specifier.starts_with("~/")
+                || specifier.starts_with("$lib/")))
+}
+
+fn matched_import_binding<'binding, Cancel>(
+    reference: &ResolutionRequest<'binding>,
+    site: ImportReferenceSite,
+    cancelled: &mut Cancel,
+) -> Result<ImportBindingMatch<'binding>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let mut matched: Option<(&ExtractedImportBinding, &str)> = None;
+    for binding in reference.import_bindings {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        let imported_name = match site {
+            ImportReferenceSite::Declaration => declaration_binding_target_name(binding, reference),
+            ImportReferenceSite::Usage => {
+                runtime_binding_target_name(binding, reference.name, reference.language)
+            }
+        };
+        let Some(imported_name) = imported_name else {
+            continue;
+        };
+        if matched.is_some() {
+            return Ok(ImportBindingMatch::Ambiguous);
+        }
+        matched = Some((binding, imported_name));
+    }
+    Ok(match matched {
+        Some((binding, imported_name)) => ImportBindingMatch::Unique(binding, imported_name),
+        None => ImportBindingMatch::NotBound,
+    })
+}
+
+fn missing_import_module_resolution(
+    reference: &ResolutionRequest<'_>,
+    binding: &ExtractedImportBinding,
+) -> ImportResolution {
+    if !import_binding_is_project_local(binding, reference.language)
+        || (reference.language == SourceLanguage::Rust.as_str()
+            && binding.kind == ImportBindingKind::Namespace
+            && rust_use_binding_is_hypothesis(&binding.module_specifier))
+    {
+        ImportResolution::NotBound
+    } else {
+        ImportResolution::Unresolved
+    }
+}
+
+fn import_resolution_candidates<'index>(
+    query: ImportCandidatesQuery<'index>,
+) -> &'index [ResolutionCandidate] {
+    let ImportCandidatesQuery {
+        index,
+        binding,
+        imported_name,
+        module_file_id,
+    } = query;
+    if binding.kind == ImportBindingKind::Default || imported_name == "default" {
         index
             .default_exports
             .get(module_file_id)
@@ -6031,48 +7707,42 @@ where
             .candidates
             .get(imported_name)
             .map_or(&[] as &[ResolutionCandidate], Vec::as_slice)
-    };
-    let Some(candidate) = select_candidate(
-        candidates,
-        |candidate| {
-            &candidate.file_id == module_file_id
-                && candidate.exported
-                && reference_kind_candidate(reference.kind, candidate)
-                && (reference.language != SourceLanguage::Rust.as_str()
-                    || (candidate.parent_symbol_id.is_none() && candidate.top_level))
-        },
-        cancelled,
-    )?
-    else {
-        return Ok(ImportResolution::Unresolved);
-    };
-    Ok(ImportResolution::Resolved(ResolvedTarget {
-        symbol_id: candidate.symbol_id.clone(),
-        kind: candidate.kind,
-        confidence: IMPORT_BINDING_CONFIDENCE,
-        provenance: IMPORT_BINDING_PROVENANCE,
-    }))
+    }
 }
 
-fn binding_matches_declaration_site(
-    binding: &ExtractedImportBinding,
+fn declaration_binding_target_name<'a>(
+    binding: &'a ExtractedImportBinding,
     request: &ResolutionRequest<'_>,
-) -> bool {
-    binding.kind == ImportBindingKind::Named
-        && binding.span == request.span
-        && binding.imported_name == request.name
+) -> Option<&'a str> {
+    if binding.span != request.span {
+        return None;
+    }
+    if binding.kind == ImportBindingKind::Named && binding.imported_name == request.name {
+        return Some(binding.imported_name.as_str());
+    }
+    (request.language == SourceLanguage::Rust.as_str()
+        && binding.kind == ImportBindingKind::Namespace
+        && binding.local_name == request.name)
+        .then_some(binding.local_name.as_str())
 }
 
 fn runtime_binding_target_name<'a>(
     binding: &'a ExtractedImportBinding,
     reference_name: &'a str,
+    language: &str,
 ) -> Option<&'a str> {
     match binding.kind {
         ImportBindingKind::Default | ImportBindingKind::Named => {
             (binding.local_name == reference_name).then_some(binding.imported_name.as_str())
         }
         ImportBindingKind::Namespace => {
+            if language == SourceLanguage::Rust.as_str() && binding.local_name == "*" {
+                return Some(reference_name);
+            }
             if binding.local_name == reference_name {
+                if language == SourceLanguage::Rust.as_str() {
+                    return Some(binding.local_name.as_str());
+                }
                 return Some("");
             }
             reference_name
@@ -6094,6 +7764,20 @@ fn resolve_module_file<'a>(
     modules: &'a ModulePathIndex,
     request: ModuleResolutionRequest<'_>,
 ) -> Option<&'a FileId> {
+    if request.importing_language == SourceLanguage::Rust.as_str()
+        && request.specifier == "crate"
+        && let Some(file_id) = rust_crate_entry_file(modules, request.importing_path)
+    {
+        return Some(file_id);
+    }
+    if request.importing_language == SourceLanguage::Rust.as_str()
+        && let Some(normalized) =
+            normalize_rust_module_path(modules, request.importing_path, request.specifier)
+        && let Some(file_id) =
+            resolve_normalized_module_file(modules, &normalized, request.importing_language)
+    {
+        return Some(file_id);
+    }
     if let Some(normalized) =
         normalize_relative_module_path(request.importing_path, request.specifier)
         && let Some(file_id) =
@@ -6112,6 +7796,152 @@ fn resolve_module_file<'a>(
         }
     }
     None
+}
+
+fn rust_use_binding_is_hypothesis(specifier: &str) -> bool {
+    matches!(specifier, "." | ".." | "crate" | "self" | "super")
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with("crate::")
+        || specifier.starts_with("self::")
+        || specifier.starts_with("super::")
+}
+
+fn normalize_rust_module_path(
+    modules: &ModulePathIndex,
+    importing_path: &str,
+    specifier: &str,
+) -> Option<String> {
+    if specifier.is_empty() || specifier.contains(['/', '\\', '\0']) {
+        return None;
+    }
+    let mut components = specifier.split("::");
+    let first = components.next()?;
+    let mut normalized = match first {
+        "crate" => rust_crate_module_directory(modules, importing_path)?,
+        "self" => rust_current_module_directory(importing_path)?,
+        "super" => {
+            let mut directory = rust_current_module_directory(importing_path)?;
+            pop_rust_module_directory(&mut directory)?;
+            while components.clone().next() == Some("super") {
+                components.next();
+                pop_rust_module_directory(&mut directory)?;
+            }
+            directory
+        }
+        component => {
+            let mut directory = rust_current_module_directory(importing_path)?;
+            append_rust_module_component(&mut directory, component)?;
+            directory
+        }
+    };
+    append_rust_module_suffix(&mut normalized, components)?;
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn append_rust_module_suffix<'component>(
+    path: &mut String,
+    components: impl Iterator<Item = &'component str>,
+) -> Option<()> {
+    for component in components {
+        if component.is_empty() || matches!(component, "crate" | "self" | "super") {
+            return None;
+        }
+        append_rust_module_component(path, component)?;
+    }
+    Some(())
+}
+
+fn rust_crate_module_directory(modules: &ModulePathIndex, importing_path: &str) -> Option<String> {
+    let mut directory = importing_path
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
+    loop {
+        if rust_crate_entry_in_directory(modules, directory) {
+            return try_clone_text(directory).ok();
+        }
+        if directory.is_empty() {
+            return None;
+        }
+        directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
+fn rust_crate_entry_file<'a>(
+    modules: &'a ModulePathIndex,
+    importing_path: &str,
+) -> Option<&'a FileId> {
+    let directory = rust_crate_module_directory(modules, importing_path)?;
+    let mut selected = None;
+    for filename in ["lib.rs", "main.rs"] {
+        let path = joined_path(&directory, filename).ok()?;
+        let candidate = match module_file_match(
+            modules.exact.get(&path),
+            &modules.files,
+            SourceLanguage::Rust.as_str(),
+        ) {
+            ModuleFileMatch::Unique(candidate) => candidate,
+            ModuleFileMatch::Missing => continue,
+            ModuleFileMatch::Ambiguous => return None,
+        };
+        if selected.is_some_and(|existing| existing != candidate) {
+            return None;
+        }
+        selected = Some(candidate);
+    }
+    selected
+}
+
+fn rust_crate_entry_in_directory(modules: &ModulePathIndex, directory: &str) -> bool {
+    ["lib.rs", "main.rs"].into_iter().any(|filename| {
+        joined_path(directory, filename)
+            .ok()
+            .and_then(|path| modules.exact.get(&path))
+            .is_some_and(|files| {
+                files.iter().any(|file_id| {
+                    modules
+                        .files
+                        .get(file_id)
+                        .is_some_and(|file| file.language == SourceLanguage::Rust.as_str())
+                })
+            })
+    })
+}
+
+fn rust_current_module_directory(importing_path: &str) -> Option<String> {
+    let filename = importing_path
+        .rsplit_once('/')
+        .map_or(importing_path, |(_, filename)| filename);
+    if matches!(filename, "lib.rs" | "main.rs" | "mod.rs") {
+        let directory = importing_path
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory);
+        return try_clone_text(directory).ok();
+    }
+    try_clone_text(importing_path.strip_suffix(".rs")?).ok()
+}
+
+fn pop_rust_module_directory(directory: &mut String) -> Option<()> {
+    if directory.is_empty() {
+        return None;
+    }
+    if let Some(separator) = directory.rfind('/') {
+        directory.truncate(separator);
+    } else {
+        directory.clear();
+    }
+    Some(())
+}
+
+fn append_rust_module_component(path: &mut String, component: &str) -> Option<()> {
+    let separator = usize::from(!path.is_empty());
+    let additional = component.len().checked_add(separator)?;
+    path.try_reserve_exact(additional).ok()?;
+    if separator > 0 {
+        path.push('/');
+    }
+    path.push_str(component);
+    Some(())
 }
 
 fn resolve_normalized_module_file<'a>(
@@ -6297,7 +8127,12 @@ where
     Cancel: FnMut() -> bool,
 {
     let source = project_source_context(index, request)?;
-    if let Some(target) = resolve_apple_bridge(index, source, request, cancelled)? {
+    if let Some(target) = resolve_apple_bridge(AppleBridgeQuery {
+        index,
+        source,
+        request,
+        cancelled,
+    })? {
         return Ok(Some(target));
     }
     let candidates = index
@@ -6312,6 +8147,8 @@ where
     {
         return Ok(None);
     }
+    let rust_local_import = request.language == SourceLanguage::Rust.as_str()
+        && reference_import_scope(request, cancelled)? == ImportScope::Local;
     let candidate = select_candidate(
         candidates,
         |candidate| {
@@ -6320,6 +8157,8 @@ where
                 source,
                 source_file_id: request.file_id,
                 reference_name: request.name,
+                dynamic_dispatch: request.dynamic_dispatch,
+                rust_local_import,
                 candidate,
             }) && reference_kind_candidate(request.kind, candidate)
         },
@@ -6328,9 +8167,13 @@ where
     if let Some(candidate) = candidate {
         return Ok(Some(project_resolved_target(candidate)));
     }
-    if let Some(candidate) =
-        select_framework_candidate(index, source, request, candidates, cancelled)?
-    {
+    if let Some(candidate) = select_framework_candidate(FrameworkSelection {
+        index,
+        source,
+        request,
+        candidates,
+        cancelled,
+    })? {
         return Ok(Some(framework_convention_target(candidate)));
     }
     if candidates.is_empty() && php_route_source(source) {
@@ -6355,16 +8198,17 @@ where
                 import_bindings: request.import_bindings,
                 owner: request.owner,
                 name: &fallback_name,
+                dynamic_dispatch: request.dynamic_dispatch,
                 kind: request.kind,
                 span: request.span,
             };
-            if let Some(candidate) = select_framework_candidate(
+            if let Some(candidate) = select_framework_candidate(FrameworkSelection {
                 index,
                 source,
-                &fallback_request,
-                fallback_candidates,
+                request: &fallback_request,
+                candidates: fallback_candidates,
                 cancelled,
-            )? {
+            })? {
                 return Ok(Some(framework_convention_target(candidate)));
             }
             return Ok(None);
@@ -6374,14 +8218,17 @@ where
 }
 
 fn resolve_apple_bridge<Cancel>(
-    index: &ResolutionIndex,
-    source: &ResolutionFileContext,
-    request: &ResolutionRequest<'_>,
-    cancelled: &mut Cancel,
+    input: AppleBridgeQuery<'_, '_, Cancel>,
 ) -> Result<Option<ResolvedTarget>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let AppleBridgeQuery {
+        index,
+        source,
+        request,
+        cancelled,
+    } = input;
     let target_language = match source.language.as_str() {
         "swift" => "objc",
         "objc" => "swift",
@@ -6406,14 +8253,14 @@ where
         return Ok(None);
     }
     if source.language == "swift" {
-        return select_apple_bridge_candidate(
+        return select_apple_bridge_candidate(AppleBridgeSelection {
             index,
             source,
             request,
-            direct,
+            candidates: direct,
             target_language,
             cancelled,
-        )
+        })
         .map(|candidate| candidate.map(apple_bridge_target));
     }
     let selector_candidates = swift_base_names_for_objc_selector(request.name);
@@ -6457,14 +8304,14 @@ where
             .candidates
             .get(&candidate_name)
             .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
-        if let Some(candidate) = select_apple_bridge_candidate(
+        if let Some(candidate) = select_apple_bridge_candidate(AppleBridgeSelection {
             index,
             source,
             request,
             candidates,
             target_language,
             cancelled,
-        )? {
+        })? {
             return Ok(Some(apple_bridge_target(candidate)));
         }
     }
@@ -6472,16 +8319,19 @@ where
 }
 
 fn select_apple_bridge_candidate<'candidate, Cancel>(
-    index: &ResolutionIndex,
-    source: &ResolutionFileContext,
-    request: &ResolutionRequest<'_>,
-    candidates: &'candidate [ResolutionCandidate],
-    target_language: &str,
-    cancelled: &mut Cancel,
+    input: AppleBridgeSelection<'_, '_, 'candidate, Cancel>,
 ) -> Result<Option<&'candidate ResolutionCandidate>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let AppleBridgeSelection {
+        index,
+        source,
+        request,
+        candidates,
+        target_language,
+        cancelled,
+    } = input;
     select_candidate(
         candidates,
         |candidate| {
@@ -6492,12 +8342,12 @@ where
                 .is_some_and(|target| {
                     target.language == target_language
                         && reference_kind_candidate(request.kind, candidate)
-                        && is_framework_candidate(
-                            &index.modules,
+                        && is_framework_candidate(FrameworkCandidateInput {
+                            modules: &index.modules,
                             source,
-                            request.file_id,
+                            source_file_id: request.file_id,
                             candidate,
-                        )
+                        })
                 })
         },
         cancelled,
@@ -6514,15 +8364,18 @@ fn apple_bridge_target(candidate: &ResolutionCandidate) -> ResolvedTarget {
 }
 
 fn select_framework_candidate<'candidate, Cancel>(
-    index: &ResolutionIndex,
-    source: &ResolutionFileContext,
-    request: &ResolutionRequest<'_>,
-    candidates: &'candidate [ResolutionCandidate],
-    cancelled: &mut Cancel,
+    input: FrameworkSelection<'_, '_, 'candidate, Cancel>,
 ) -> Result<Option<&'candidate ResolutionCandidate>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let FrameworkSelection {
+        index,
+        source,
+        request,
+        candidates,
+        cancelled,
+    } = input;
     let mut selected = None;
     let mut best_score = 0_u8;
     let mut best_count = 0_usize;
@@ -6533,10 +8386,23 @@ where
         let Some(target) = index.modules.files.get(&candidate.file_id) else {
             return Err(StageItemFailure);
         };
-        let score = framework_convention_score(request.name, source, target, candidate);
-        let convention_eligible =
-            is_framework_candidate(&index.modules, source, request.file_id, candidate)
-                || php_route_candidate(source, target, request.file_id, candidate);
+        let score = framework_convention_score(FrameworkConventionInput {
+            reference_name: request.name,
+            source,
+            target,
+            candidate,
+        });
+        let convention_eligible = is_framework_candidate(FrameworkCandidateInput {
+            modules: &index.modules,
+            source,
+            source_file_id: request.file_id,
+            candidate,
+        }) || php_route_candidate(PhpRouteCandidateInput {
+            source,
+            target,
+            source_file_id: request.file_id,
+            candidate,
+        });
         if score == 0 || !convention_eligible || !reference_kind_candidate(request.kind, candidate)
         {
             continue;
@@ -6572,33 +8438,88 @@ fn is_project_candidate(input: ProjectCandidateInput<'_>) -> bool {
     };
     let framework_bridge =
         framework_bridge_allowed(&input.source.language, &target.language, input.candidate);
-    let exact_qualified = input.candidate.qualified_name == input.reference_name;
-    let member_excluded = matches!(
+    if &input.candidate.file_id == input.source_file_id {
+        return false;
+    }
+    if !project_candidate_externally_visible(&input, target, framework_bridge) {
+        return false;
+    }
+    if c_include_family_name(&input.source.language)
+        && !c_candidate_is_externally_visible(input.candidate)
+    {
+        return false;
+    }
+    if !project_scope_matches(input.source, target, input.candidate) {
+        return false;
+    }
+    !project_member_excluded(&input, framework_bridge)
+}
+
+fn project_member_excluded(input: &ProjectCandidateInput<'_>, framework_bridge: bool) -> bool {
+    if input.dynamic_dispatch || framework_bridge {
+        return false;
+    }
+    let member = matches!(
         input.candidate.kind,
         SymbolKind::Method
             | SymbolKind::Property
             | SymbolKind::Field
             | SymbolKind::EnumMember
             | SymbolKind::Parameter
-    ) && !exact_qualified
-        && !framework_bridge;
-    let externally_visible = input.candidate.exported
-        || input.candidate.visibility == Some(Visibility::Public)
-        || (framework_bridge && input.candidate.visibility != Some(Visibility::Private));
-    &input.candidate.file_id != input.source_file_id
-        && externally_visible
-        && (!c_include_family_name(&input.source.language)
-            || c_candidate_is_externally_visible(input.candidate))
-        && project_scope_matches(input.source, target, input.candidate)
-        && !member_excluded
+    );
+    member && input.candidate.qualified_name != input.reference_name
 }
 
-fn is_framework_candidate(
-    modules: &ModulePathIndex,
-    source: &ResolutionFileContext,
-    source_file_id: &FileId,
-    candidate: &ResolutionCandidate,
+fn project_candidate_externally_visible(
+    input: &ProjectCandidateInput<'_>,
+    target: &ResolutionFileContext,
+    framework_bridge: bool,
 ) -> bool {
+    input.candidate.exported
+        || input.candidate.visibility == Some(Visibility::Public)
+        || rust_private_parent_visible(input, target)
+        || (framework_bridge && input.candidate.visibility != Some(Visibility::Private))
+}
+
+fn rust_private_parent_visible(
+    input: &ProjectCandidateInput<'_>,
+    target: &ResolutionFileContext,
+) -> bool {
+    input.rust_local_import
+        && input.source.language == SourceLanguage::Rust.as_str()
+        && target.language == SourceLanguage::Rust.as_str()
+        && rust_parent_module_contains(&input.source.path, &target.path)
+}
+
+fn rust_parent_module_contains(source_path: &str, target_path: &str) -> bool {
+    let (directory, filename) = target_path
+        .rsplit_once('/')
+        .map_or(("", target_path), |(directory, filename)| {
+            (directory, filename)
+        });
+    let module = if matches!(filename, "lib.rs" | "main.rs" | "mod.rs") {
+        directory
+    } else {
+        let Some(stem) = target_path.strip_suffix(".rs") else {
+            return false;
+        };
+        stem
+    };
+    if module.is_empty() {
+        return true;
+    }
+    source_path
+        .strip_prefix(module)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn is_framework_candidate(input: FrameworkCandidateInput<'_>) -> bool {
+    let FrameworkCandidateInput {
+        modules,
+        source,
+        source_file_id,
+        candidate,
+    } = input;
     let Some(target) = modules.files.get(&candidate.file_id) else {
         return false;
     };
@@ -6627,266 +8548,488 @@ fn framework_convention_target(candidate: &ResolutionCandidate) -> ResolvedTarge
     }
 }
 
-fn framework_convention_score(
-    reference_name: &str,
-    source: &ResolutionFileContext,
-    target: &ResolutionFileContext,
-    candidate: &ResolutionCandidate,
-) -> u8 {
-    if javascript_family_name(&source.language)
-        && javascript_family_name(&target.language)
+const FRAMEWORK_SCORE_OBJC_BRIDGE: u8 = 125;
+const FRAMEWORK_SCORE_TURBO_MODULE: u8 = 124;
+const FRAMEWORK_SCORE_SWIFT_BRIDGE: u8 = 123;
+const FRAMEWORK_SCORE_JVM_BRIDGE: u8 = 120;
+const FRAMEWORK_SCORE_APPLE_BRIDGE: u8 = 115;
+const FRAMEWORK_SCORE_LOCAL_COMPONENT: u8 = 112;
+const FRAMEWORK_SCORE_ROUTE_METHOD: u8 = 110;
+const FRAMEWORK_SCORE_CONVENTIONAL_COMPONENT: u8 = 105;
+const FRAMEWORK_SCORE_STRONG: u8 = 100;
+const FRAMEWORK_SCORE_NAMED_CONVENTION: u8 = 95;
+const FRAMEWORK_SCORE_EXACT_DIRECTORY: u8 = 90;
+const FRAMEWORK_SCORE_COMPONENT_FALLBACK: u8 = 80;
+const FRAMEWORK_SCORE_PHP_MODEL: u8 = 75;
+const FRAMEWORK_SCORE_MODEL: u8 = 70;
+const FRAMEWORK_SCORE_PASCAL_FALLBACK: u8 = 10;
+
+struct FrameworkConventionInput<'a> {
+    reference_name: &'a str,
+    source: &'a ResolutionFileContext,
+    target: &'a ResolutionFileContext,
+    candidate: &'a ResolutionCandidate,
+}
+
+impl FrameworkConventionInput<'_> {
+    fn same_directory(&self) -> bool {
+        self.source.directory == self.target.directory
+    }
+}
+
+enum FrameworkNamePattern {
+    Prefixes {
+        values: &'static [&'static str],
+        minimum_length: usize,
+    },
+    Suffixes(&'static [&'static str]),
+    ExactOrSuffixes {
+        exact: &'static [&'static str],
+        suffixes: &'static [&'static str],
+    },
+    PrefixesOrSuffixes {
+        prefixes: &'static [&'static str],
+        suffixes: &'static [&'static str],
+        minimum_length: usize,
+    },
+    PascalCase,
+    Middleware,
+}
+
+impl FrameworkNamePattern {
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            Self::Prefixes {
+                values,
+                minimum_length,
+            } => name.len() >= *minimum_length && name_has_any_prefix(name, values),
+            Self::Suffixes(values) => name_has_any_suffix(name, values),
+            Self::ExactOrSuffixes { exact, suffixes } => {
+                exact.contains(&name) || name_has_any_suffix(name, suffixes)
+            }
+            Self::PrefixesOrSuffixes {
+                prefixes,
+                suffixes,
+                minimum_length,
+            } => {
+                name.len() >= *minimum_length
+                    && (name_has_any_prefix(name, prefixes) || name_has_any_suffix(name, suffixes))
+            }
+            Self::PascalCase => framework_pascal_case(name),
+            Self::Middleware => is_middleware_convention(name),
+        }
+    }
+}
+
+fn name_has_any_prefix(name: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| name.starts_with(prefix))
+}
+
+fn name_has_any_suffix(name: &str, suffixes: &[&str]) -> bool {
+    suffixes.iter().any(|suffix| name.ends_with(suffix))
+}
+
+enum FrameworkCandidatePattern {
+    Any,
+    Callable,
+    TopLevelType,
+    ClassOrInterface,
+    Kinds(&'static [SymbolKind]),
+}
+
+impl FrameworkCandidatePattern {
+    fn matches(&self, candidate: &ResolutionCandidate) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Callable => framework_callable(candidate),
+            Self::TopLevelType => framework_top_level_type(candidate),
+            Self::ClassOrInterface => {
+                matches!(candidate.kind, SymbolKind::Class | SymbolKind::Interface)
+            }
+            Self::Kinds(kinds) => kinds.contains(&candidate.kind),
+        }
+    }
+}
+
+struct FrameworkRule {
+    name: FrameworkNamePattern,
+    candidate: FrameworkCandidatePattern,
+    directories: &'static [&'static str],
+    score: u8,
+}
+
+impl FrameworkRule {
+    fn matches(&self, input: &FrameworkConventionInput<'_>) -> bool {
+        self.name.matches(input.reference_name)
+            && self.candidate.matches(input.candidate)
+            && directory_has_any(&input.target.path, self.directories)
+    }
+}
+
+const JAVASCRIPT_HOOK_MINIMUM_LENGTH: usize = 4;
+
+const JAVASCRIPT_FRAMEWORK_RULES: &[FrameworkRule] = &[
+    FrameworkRule {
+        name: FrameworkNamePattern::Prefixes {
+            values: &["use"],
+            minimum_length: JAVASCRIPT_HOOK_MINIMUM_LENGTH,
+        },
+        candidate: FrameworkCandidatePattern::Callable,
+        directories: &["hooks"],
+        score: FRAMEWORK_SCORE_STRONG,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Context", "Provider"]),
+        candidate: FrameworkCandidatePattern::Any,
+        directories: &["context", "contexts", "providers"],
+        score: FRAMEWORK_SCORE_NAMED_CONVENTION,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Middleware,
+        candidate: FrameworkCandidatePattern::Callable,
+        directories: &["middleware", "middlewares"],
+        score: FRAMEWORK_SCORE_NAMED_CONVENTION,
+    },
+];
+
+const JVM_FRAMEWORK_RULES: &[FrameworkRule] = &[
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Service"]),
+        candidate: FrameworkCandidatePattern::ClassOrInterface,
+        directories: &["service", "services"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Repository"]),
+        candidate: FrameworkCandidatePattern::ClassOrInterface,
+        directories: &["repository", "repositories"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Controller"]),
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["controller", "controllers"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Config", "Component"]),
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["config", "component", "components"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::PascalCase,
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["entity", "entities", "model", "models", "domain"],
+        score: FRAMEWORK_SCORE_MODEL,
+    },
+];
+
+const PHP_FRAMEWORK_RULES: &[FrameworkRule] = &[
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Controller"]),
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["controller", "controllers"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::PascalCase,
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["model", "models", "entity", "entities"],
+        score: FRAMEWORK_SCORE_PHP_MODEL,
+    },
+];
+
+const CSHARP_FRAMEWORK_RULES: &[FrameworkRule] = &[
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Controller"]),
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["controllers"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::PrefixesOrSuffixes {
+            prefixes: &["I"],
+            suffixes: &["Service"],
+            minimum_length: 2,
+        },
+        candidate: FrameworkCandidatePattern::ClassOrInterface,
+        directories: &["services", "service", "application"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Repository"]),
+        candidate: FrameworkCandidatePattern::ClassOrInterface,
+        directories: &["repositories", "repository", "data", "infrastructure"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::PascalCase,
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &[
+            "models",
+            "model",
+            "entities",
+            "entity",
+            "domain",
+            "viewmodels",
+            "dtos",
+        ],
+        score: FRAMEWORK_SCORE_MODEL,
+    },
+];
+
+const PYTHON_FRAMEWORK_RULES: &[FrameworkRule] = &[
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["View", "ViewSet"]),
+        candidate: FrameworkCandidatePattern::Kinds(&[SymbolKind::Class, SymbolKind::Function]),
+        directories: &["views"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["Form"]),
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["forms"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::ExactOrSuffixes {
+            exact: &["router"],
+            suffixes: &["_router"],
+        },
+        candidate: FrameworkCandidatePattern::Kinds(&[SymbolKind::Variable, SymbolKind::Constant]),
+        directories: &["routers", "api", "routes", "endpoints"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Prefixes {
+            values: &["get_", "Depends"],
+            minimum_length: 0,
+        },
+        candidate: FrameworkCandidatePattern::Callable,
+        directories: &["dependencies", "deps", "core"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::PascalCase,
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["models", "model"],
+        score: FRAMEWORK_SCORE_MODEL,
+    },
+];
+
+const SWIFT_FRAMEWORK_RULES: &[FrameworkRule] = &[
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["ViewController"]),
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["viewcontrollers", "controllers"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["View"]),
+        candidate: FrameworkCandidatePattern::Kinds(&[
+            SymbolKind::Component,
+            SymbolKind::Class,
+            SymbolKind::Struct,
+        ]),
+        directories: &["views", "screens"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::Suffixes(&["ViewModel", "Store", "Manager"]),
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["viewmodels", "stores", "managers"],
+        score: FRAMEWORK_SCORE_EXACT_DIRECTORY,
+    },
+    FrameworkRule {
+        name: FrameworkNamePattern::PascalCase,
+        candidate: FrameworkCandidatePattern::TopLevelType,
+        directories: &["models", "model"],
+        score: FRAMEWORK_SCORE_MODEL,
+    },
+];
+
+fn framework_convention_score(input: FrameworkConventionInput<'_>) -> u8 {
+    if let Some(score) = bridge_framework_score(&input) {
+        return score;
+    }
+    if let Some(score) = component_framework_score(&input) {
+        return score;
+    }
+    if let Some(score) = php_route_framework_score(&input) {
+        return score;
+    }
+    if !same_framework_language(&input) {
+        return 0;
+    }
+    same_language_framework_score(&input)
+}
+
+fn bridge_framework_score(input: &FrameworkConventionInput<'_>) -> Option<u8> {
+    let source_language = input.source.language.as_str();
+    let target_language = input.target.language.as_str();
+    let candidate = input.candidate;
+    if javascript_family_name(source_language)
+        && javascript_family_name(target_language)
         && candidate
             .qualified_name
             .contains("::turbo-module-spec-method::")
     {
-        return 124;
+        return Some(FRAMEWORK_SCORE_TURBO_MODULE);
     }
-    if apple_framework_bridge_candidate(&source.language, &target.language, candidate) {
-        return 115;
+    if apple_framework_bridge_candidate(source_language, target_language, candidate) {
+        return Some(FRAMEWORK_SCORE_APPLE_BRIDGE);
     }
-    if javascript_family_name(&source.language)
-        && native_bridge_target_language(&target.language)
+    if javascript_family_name(source_language)
+        && native_bridge_target_language(target_language)
         && native_javascript_bridge_candidate(candidate)
     {
-        return match target.language.as_str() {
-            "objc" => 125,
-            "swift" => 123,
-            "java" | "kotlin" => 120,
+        return Some(match target_language {
+            "objc" => FRAMEWORK_SCORE_OBJC_BRIDGE,
+            "swift" => FRAMEWORK_SCORE_SWIFT_BRIDGE,
+            "java" | "kotlin" => FRAMEWORK_SCORE_JVM_BRIDGE,
             _ => 0,
-        };
+        });
     }
-    if matches!(
-        source.language.as_str(),
-        "svelte" | "vue" | "astro" | "html"
-    ) {
-        if candidate.kind == SymbolKind::Component {
-            if source.directory == target.directory {
-                return 112;
-            }
-            if directory_has_any(&target.path, &["components", "component", "views", "pages"]) {
-                return 105;
-            }
-            return 80;
-        }
-        if source.language == "svelte"
-            && matches!(candidate.kind, SymbolKind::Variable | SymbolKind::Constant)
-            && directory_has_any(&target.path, &["stores", "store"])
-        {
-            return 100;
-        }
+    None
+}
+
+fn component_framework_score(input: &FrameworkConventionInput<'_>) -> Option<u8> {
+    let source_language = input.source.language.as_str();
+    let candidate_kind = input.candidate.kind;
+    let target_path = input.target.path.as_str();
+    if !matches!(source_language, "svelte" | "vue" | "astro" | "html") {
+        return None;
     }
-    if php_route_source(source)
-        && target.language == SourceLanguage::Php.as_str()
-        && directory_has_any(&target.path, &["controller", "controllers"])
+    if candidate_kind == SymbolKind::Component {
+        if input.same_directory() {
+            return Some(FRAMEWORK_SCORE_LOCAL_COMPONENT);
+        }
+        if directory_has_any(target_path, &["components", "component", "views", "pages"]) {
+            return Some(FRAMEWORK_SCORE_CONVENTIONAL_COMPONENT);
+        }
+        return Some(FRAMEWORK_SCORE_COMPONENT_FALLBACK);
+    }
+    (source_language == "svelte"
+        && matches!(candidate_kind, SymbolKind::Variable | SymbolKind::Constant)
+        && directory_has_any(target_path, &["stores", "store"]))
+    .then_some(FRAMEWORK_SCORE_STRONG)
+}
+
+fn php_route_framework_score(input: &FrameworkConventionInput<'_>) -> Option<u8> {
+    let reference_name = input.reference_name;
+    let target_language = input.target.language.as_str();
+    let target_path = input.target.path.as_str();
+    let candidate_kind = input.candidate.kind;
+    if !php_route_source(input.source)
+        || target_language != SourceLanguage::Php.as_str()
+        || !directory_has_any(target_path, &["controller", "controllers"])
     {
-        if candidate.kind == SymbolKind::Method && reference_name.contains("::") {
-            return 110;
-        }
-        if candidate.kind == SymbolKind::Class && reference_name.ends_with("Controller") {
-            return 105;
-        }
+        return None;
     }
-    if source.language != target.language
-        && !(javascript_family_name(&source.language) && javascript_family_name(&target.language))
+    if candidate_kind == SymbolKind::Method && reference_name.contains("::") {
+        return Some(FRAMEWORK_SCORE_ROUTE_METHOD);
+    }
+    (candidate_kind == SymbolKind::Class && reference_name.ends_with("Controller"))
+        .then_some(FRAMEWORK_SCORE_CONVENTIONAL_COMPONENT)
+}
+
+fn same_framework_language(input: &FrameworkConventionInput<'_>) -> bool {
+    input.source.language == input.target.language
+        || javascript_family_name(&input.source.language)
+            && javascript_family_name(&input.target.language)
+}
+
+fn same_language_framework_score(input: &FrameworkConventionInput<'_>) -> u8 {
+    match input.source.language.as_str() {
+        "typescript" | "tsx" | "javascript" | "jsx" => javascript_framework_score(input),
+        "java" | "kotlin" | "scala" => framework_rule_score(input, JVM_FRAMEWORK_RULES),
+        "ruby" => ruby_framework_score(input),
+        "php" => framework_rule_score(input, PHP_FRAMEWORK_RULES),
+        "csharp" => framework_rule_score(input, CSHARP_FRAMEWORK_RULES),
+        "python" => framework_rule_score(input, PYTHON_FRAMEWORK_RULES),
+        "swift" => framework_rule_score(input, SWIFT_FRAMEWORK_RULES),
+        _ => 0,
+    }
+}
+
+fn javascript_framework_score(input: &FrameworkConventionInput<'_>) -> u8 {
+    let conventional_score = framework_rule_score(input, JAVASCRIPT_FRAMEWORK_RULES);
+    if conventional_score != 0 {
+        return conventional_score;
+    }
+    if !framework_pascal_case(input.reference_name)
+        || !matches!(
+            input.candidate.kind,
+            SymbolKind::Component | SymbolKind::Function | SymbolKind::Class
+        )
     {
         return 0;
     }
-    let same_directory = source.directory == target.directory;
-    let top_level_type = matches!(
+    if input.same_directory() {
+        return FRAMEWORK_SCORE_EXACT_DIRECTORY;
+    }
+    if directory_has_any(
+        &input.target.path,
+        &["components", "views", "pages", "screens"],
+    ) {
+        return FRAMEWORK_SCORE_COMPONENT_FALLBACK;
+    }
+    FRAMEWORK_SCORE_PASCAL_FALLBACK
+}
+
+fn ruby_framework_score(input: &FrameworkConventionInput<'_>) -> u8 {
+    if !framework_pascal_case(input.reference_name) || !framework_top_level_type(input.candidate) {
+        return 0;
+    }
+    let directories = if input.reference_name.ends_with("Controller") {
+        &["controllers"][..]
+    } else if input.reference_name.ends_with("Helper") {
+        &["helpers"][..]
+    } else if input.reference_name.ends_with("Service") {
+        &["services"][..]
+    } else if input.reference_name.ends_with("Job") {
+        &["jobs"][..]
+    } else {
+        &["models", "concerns"][..]
+    };
+    if directory_has_any(&input.target.path, directories) {
+        FRAMEWORK_SCORE_EXACT_DIRECTORY
+    } else {
+        0
+    }
+}
+
+fn framework_rule_score(input: &FrameworkConventionInput<'_>, rules: &[FrameworkRule]) -> u8 {
+    rules
+        .iter()
+        .find(|rule| rule.matches(input))
+        .map_or(0, |rule| rule.score)
+}
+
+fn framework_top_level_type(candidate: &ResolutionCandidate) -> bool {
+    matches!(
         candidate.kind,
         SymbolKind::Class
             | SymbolKind::Struct
             | SymbolKind::Interface
             | SymbolKind::Component
             | SymbolKind::Module
-    );
-    let callable = matches!(candidate.kind, SymbolKind::Function | SymbolKind::Method);
-    let pascal_case = reference_name
+    )
+}
+
+fn framework_callable(candidate: &ResolutionCandidate) -> bool {
+    matches!(candidate.kind, SymbolKind::Function | SymbolKind::Method)
+}
+
+fn framework_pascal_case(reference_name: &str) -> bool {
+    reference_name
         .as_bytes()
         .first()
         .is_some_and(u8::is_ascii_uppercase)
         && reference_name
             .bytes()
-            .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric());
-    match source.language.as_str() {
-        "typescript" | "tsx" | "javascript" | "jsx" => {
-            if reference_name.starts_with("use")
-                && reference_name.len() > 3
-                && callable
-                && directory_has_any(&target.path, &["hooks"])
-            {
-                return 100;
-            }
-            if (reference_name.ends_with("Context") || reference_name.ends_with("Provider"))
-                && directory_has_any(&target.path, &["context", "contexts", "providers"])
-            {
-                return 95;
-            }
-            if is_middleware_convention(reference_name)
-                && callable
-                && directory_has_any(&target.path, &["middleware", "middlewares"])
-            {
-                return 95;
-            }
-            if pascal_case
-                && matches!(
-                    candidate.kind,
-                    SymbolKind::Component | SymbolKind::Function | SymbolKind::Class
-                )
-            {
-                if same_directory {
-                    return 90;
-                }
-                if directory_has_any(&target.path, &["components", "views", "pages", "screens"]) {
-                    return 80;
-                }
-                return 10;
-            }
-        }
-        "java" | "kotlin" | "scala" => {
-            if reference_name.ends_with("Service")
-                && matches!(candidate.kind, SymbolKind::Class | SymbolKind::Interface)
-                && directory_has_any(&target.path, &["service", "services"])
-                || reference_name.ends_with("Repository")
-                    && matches!(candidate.kind, SymbolKind::Class | SymbolKind::Interface)
-                    && directory_has_any(&target.path, &["repository", "repositories"])
-                || reference_name.ends_with("Controller")
-                    && top_level_type
-                    && directory_has_any(&target.path, &["controller", "controllers"])
-                || (reference_name.ends_with("Config") || reference_name.ends_with("Component"))
-                    && top_level_type
-                    && directory_has_any(&target.path, &["config", "component", "components"])
-            {
-                return 90;
-            }
-            if pascal_case
-                && top_level_type
-                && directory_has_any(
-                    &target.path,
-                    &["entity", "entities", "model", "models", "domain"],
-                )
-            {
-                return 70;
-            }
-        }
-        "ruby" => {
-            if pascal_case && top_level_type {
-                let directories = if reference_name.ends_with("Controller") {
-                    &["controllers"][..]
-                } else if reference_name.ends_with("Helper") {
-                    &["helpers"][..]
-                } else if reference_name.ends_with("Service") {
-                    &["services"][..]
-                } else if reference_name.ends_with("Job") {
-                    &["jobs"][..]
-                } else {
-                    &["models", "concerns"][..]
-                };
-                if directory_has_any(&target.path, directories) {
-                    return 90;
-                }
-            }
-        }
-        "php" => {
-            if reference_name.ends_with("Controller")
-                && top_level_type
-                && directory_has_any(&target.path, &["controller", "controllers"])
-            {
-                return 90;
-            }
-            if pascal_case
-                && top_level_type
-                && directory_has_any(&target.path, &["model", "models", "entity", "entities"])
-            {
-                return 75;
-            }
-        }
-        "csharp" => {
-            if reference_name.ends_with("Controller")
-                && top_level_type
-                && directory_has_any(&target.path, &["controllers"])
-                || (reference_name.ends_with("Service")
-                    || reference_name.starts_with('I') && reference_name.len() > 1)
-                    && matches!(candidate.kind, SymbolKind::Class | SymbolKind::Interface)
-                    && directory_has_any(&target.path, &["services", "service", "application"])
-                || reference_name.ends_with("Repository")
-                    && matches!(candidate.kind, SymbolKind::Class | SymbolKind::Interface)
-                    && directory_has_any(
-                        &target.path,
-                        &["repositories", "repository", "data", "infrastructure"],
-                    )
-            {
-                return 90;
-            }
-            if pascal_case
-                && top_level_type
-                && directory_has_any(
-                    &target.path,
-                    &[
-                        "models",
-                        "model",
-                        "entities",
-                        "entity",
-                        "domain",
-                        "viewmodels",
-                        "dtos",
-                    ],
-                )
-            {
-                return 70;
-            }
-        }
-        "python" => {
-            if (reference_name.ends_with("View") || reference_name.ends_with("ViewSet"))
-                && matches!(candidate.kind, SymbolKind::Class | SymbolKind::Function)
-                && directory_has_any(&target.path, &["views"])
-                || reference_name.ends_with("Form")
-                    && top_level_type
-                    && directory_has_any(&target.path, &["forms"])
-                || (reference_name.ends_with("_router") || reference_name == "router")
-                    && matches!(candidate.kind, SymbolKind::Variable | SymbolKind::Constant)
-                    && directory_has_any(&target.path, &["routers", "api", "routes", "endpoints"])
-                || (reference_name.starts_with("get_") || reference_name.starts_with("Depends"))
-                    && callable
-                    && directory_has_any(&target.path, &["dependencies", "deps", "core"])
-            {
-                return 90;
-            }
-            if pascal_case
-                && top_level_type
-                && directory_has_any(&target.path, &["models", "model"])
-            {
-                return 70;
-            }
-        }
-        "swift" => {
-            if reference_name.ends_with("ViewController")
-                && top_level_type
-                && directory_has_any(&target.path, &["viewcontrollers", "controllers"])
-                || reference_name.ends_with("View")
-                    && matches!(
-                        candidate.kind,
-                        SymbolKind::Component | SymbolKind::Class | SymbolKind::Struct
-                    )
-                    && directory_has_any(&target.path, &["views", "screens"])
-                || (reference_name.ends_with("ViewModel")
-                    || reference_name.ends_with("Store")
-                    || reference_name.ends_with("Manager"))
-                    && top_level_type
-                    && directory_has_any(&target.path, &["viewmodels", "stores", "managers"])
-            {
-                return 90;
-            }
-            if pascal_case
-                && top_level_type
-                && directory_has_any(&target.path, &["models", "model"])
-            {
-                return 70;
-            }
-        }
-        _ => {}
-    }
-    0
+            .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
 fn php_route_source(source: &ResolutionFileContext) -> bool {
@@ -6904,12 +9047,13 @@ fn php_route_source(source: &ResolutionFileContext) -> bool {
         || file_name.contains(".routing.")
 }
 
-fn php_route_candidate(
-    source: &ResolutionFileContext,
-    target: &ResolutionFileContext,
-    source_file_id: &FileId,
-    candidate: &ResolutionCandidate,
-) -> bool {
+fn php_route_candidate(input: PhpRouteCandidateInput<'_>) -> bool {
+    let PhpRouteCandidateInput {
+        source,
+        target,
+        source_file_id,
+        candidate,
+    } = input;
     php_route_source(source)
         && target.language == SourceLanguage::Php.as_str()
         && &candidate.file_id != source_file_id
@@ -6977,19 +9121,41 @@ fn project_scope_matches(
 }
 
 fn framework_bridge_allowed(source: &str, target: &str, candidate: &ResolutionCandidate) -> bool {
-    let javascript_component_source =
-        matches!(source, "svelte" | "vue" | "astro" | "html") && javascript_family_name(target);
-    let salesforce = ((matches!(source, "aura" | "visualforce") || javascript_family_name(source))
+    [
+        javascript_component_bridge(source, target),
+        salesforce_bridge(source, target),
+        mybatis_bridge(source, target),
+        apple_framework_bridge_candidate(source, target, candidate),
+        config_constant_bridge(target, candidate),
+        native_javascript_bridge(source, target, candidate),
+    ]
+    .into_iter()
+    .any(std::convert::identity)
+}
+
+fn javascript_component_bridge(source: &str, target: &str) -> bool {
+    matches!(source, "svelte" | "vue" | "astro" | "html") && javascript_family_name(target)
+}
+
+fn salesforce_bridge(source: &str, target: &str) -> bool {
+    ((matches!(source, "aura" | "visualforce") || javascript_family_name(source))
         && target == "apex")
-        || (source == "apex" && matches!(target, "aura" | "visualforce"));
-    let mybatis = (source == "xml" && matches!(target, "java" | "kotlin" | "scala"))
-        || (matches!(source, "java" | "kotlin" | "scala") && target == "xml");
-    let apple = apple_framework_bridge_candidate(source, target, candidate);
-    let config = target == "properties" && candidate.kind == SymbolKind::Constant;
-    let native_javascript = javascript_family_name(source)
+        || (source == "apex" && matches!(target, "aura" | "visualforce"))
+}
+
+fn mybatis_bridge(source: &str, target: &str) -> bool {
+    (source == "xml" && matches!(target, "java" | "kotlin" | "scala"))
+        || (matches!(source, "java" | "kotlin" | "scala") && target == "xml")
+}
+
+fn config_constant_bridge(target: &str, candidate: &ResolutionCandidate) -> bool {
+    target == "properties" && candidate.kind == SymbolKind::Constant
+}
+
+fn native_javascript_bridge(source: &str, target: &str, candidate: &ResolutionCandidate) -> bool {
+    javascript_family_name(source)
         && native_bridge_target_language(target)
-        && native_javascript_bridge_candidate(candidate);
-    javascript_component_source || salesforce || mybatis || apple || config || native_javascript
+        && native_javascript_bridge_candidate(candidate)
 }
 
 fn apple_framework_bridge_candidate(
@@ -7121,12 +9287,13 @@ where
     }
 }
 
-fn reference_input(
-    file_id: &FileId,
-    file_symbol_id: &SymbolId,
-    reference: ExtractedReference,
-    resolution: ReferenceResolution,
-) -> ReferenceInput {
+fn reference_input(input: ReferenceFactInput<'_>) -> ReferenceInput {
+    let ReferenceFactInput {
+        file_id,
+        file_symbol_id,
+        reference,
+        resolution,
+    } = input;
     let ReferenceResolution {
         target,
         unresolved_provenance,
@@ -7158,27 +9325,34 @@ fn reference_input(
     }
 }
 
-const fn reference_edge_kind(kind: ReferenceKind, target_kind: SymbolKind) -> Option<EdgeKind> {
-    match kind {
-        ReferenceKind::Calls => Some(EdgeKind::Calls),
-        ReferenceKind::Imports => Some(EdgeKind::Imports),
-        ReferenceKind::References => Some(EdgeKind::References),
-        ReferenceKind::Implements => Some(EdgeKind::Implements),
-        ReferenceKind::Extends => Some(EdgeKind::Extends),
-        ReferenceKind::Tests => Some(EdgeKind::Tests),
-        ReferenceKind::Exports => Some(EdgeKind::Exports),
-        ReferenceKind::TypeOf => Some(EdgeKind::TypeOf),
-        ReferenceKind::Returns => Some(EdgeKind::Returns),
-        ReferenceKind::Instantiates => Some(EdgeKind::Instantiates),
-        ReferenceKind::Overrides => Some(EdgeKind::Overrides),
-        ReferenceKind::Decorates => Some(EdgeKind::Decorates),
-        ReferenceKind::FieldAccess => Some(EdgeKind::FieldAccess),
-        ReferenceKind::DefUse => Some(EdgeKind::DefUse),
-        ReferenceKind::Inherits => match target_kind {
+const REFERENCE_EDGE_KINDS: &[(ReferenceKind, EdgeKind)] = &[
+    (ReferenceKind::Calls, EdgeKind::Calls),
+    (ReferenceKind::Imports, EdgeKind::Imports),
+    (ReferenceKind::References, EdgeKind::References),
+    (ReferenceKind::Implements, EdgeKind::Implements),
+    (ReferenceKind::Extends, EdgeKind::Extends),
+    (ReferenceKind::Tests, EdgeKind::Tests),
+    (ReferenceKind::Exports, EdgeKind::Exports),
+    (ReferenceKind::TypeOf, EdgeKind::TypeOf),
+    (ReferenceKind::Returns, EdgeKind::Returns),
+    (ReferenceKind::Instantiates, EdgeKind::Instantiates),
+    (ReferenceKind::Overrides, EdgeKind::Overrides),
+    (ReferenceKind::Decorates, EdgeKind::Decorates),
+    (ReferenceKind::FieldAccess, EdgeKind::FieldAccess),
+    (ReferenceKind::DefUse, EdgeKind::DefUse),
+];
+
+fn reference_edge_kind(kind: ReferenceKind, target_kind: SymbolKind) -> Option<EdgeKind> {
+    if kind == ReferenceKind::Inherits {
+        match target_kind {
             SymbolKind::Interface | SymbolKind::Trait => Some(EdgeKind::Implements),
             SymbolKind::Class | SymbolKind::Struct => Some(EdgeKind::Extends),
             _ => None,
-        },
+        }
+    } else {
+        REFERENCE_EDGE_KINDS
+            .iter()
+            .find_map(|(reference, edge)| (*reference == kind).then_some(*edge))
     }
 }
 
@@ -7411,6 +9585,7 @@ mod tests {
     const TEST_SOURCE_BYTES: usize = 1024 * 1024;
     const TEST_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
     const TEST_GENERATION_BYTES: u64 = 32 * 1024 * 1024;
+    const MEGA_TEST_GENERATION_BYTES: u64 = 64 * 1024 * 1024;
     const TEST_SCOPE_BYTES: u64 = 128 * 1024 * 1024;
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
     const CLEANUP_GRACE: Duration = Duration::from_millis(500);
@@ -7444,36 +9619,35 @@ mod tests {
             .unwrap_or_else(|error| panic!("test source root failed: {error}"))
     }
 
-    const fn test_evidence_policy(
-        page_rank: bool,
-        betweenness: bool,
-        docstrings: bool,
-        call_sites: bool,
-    ) -> NativeEvidencePolicy {
-        NativeEvidencePolicy {
-            compute_page_rank: page_rank,
-            compute_betweenness: betweenness,
-            retain_docstrings: docstrings,
-            retain_call_sites: call_sites,
-        }
-    }
+    const FULL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy {
+        compute_page_rank: true,
+        compute_betweenness: true,
+        retain_docstrings: true,
+        retain_call_sites: true,
+    };
+    const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy {
+        compute_page_rank: true,
+        compute_betweenness: true,
+        retain_docstrings: false,
+        retain_call_sites: false,
+    };
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
         "4548bf7735dc9a9b00579bd5f325b5bd3e1c835d6008fd83a83d4129280e490b";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "ef65adb5ecef9df499f619f6dd377acb964ed0a205397ff6556c60d9507362dc";
+        "cdf923a598bf42ba3af4706e9a4d6ed379f7b454b36a82eb5f7eff716ccca02a";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "4acd56bef0297ac0c1af4d78a065aecc0e76b456a6ae43c93e5dcafe2891d3d2";
+        "860f6184d433be51528a7a37061126614cb2b9cee31559bf6d0c8b934c5e0c68";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 12;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "541a2e5452be52094c590f4f78f530611bc15e26fbce2f0a513fd6c4f08d4553";
+        "91ea7bc81577d41dbe894d31fc23201b08c1e2ab77b04eba4e89ba21c63fafb2";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (12, 40, 34, 27, 40);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -7844,7 +10018,7 @@ mod tests {
         provenance: &'static str,
     }
 
-    const POLYGLOT_RESOLVED_REFERENCES: [ExpectedResolvedReference; 11] = [
+    const POLYGLOT_RESOLVED_REFERENCES: [ExpectedResolvedReference; 24] = [
         ExpectedResolvedReference {
             caller_path: "lib.rs",
             caller_name: "rust_use",
@@ -7855,10 +10029,114 @@ mod tests {
         },
         ExpectedResolvedReference {
             caller_path: "lib.rs",
+            caller_name: "rust_dynamic_use",
+            reference_name: "worker.unique_finish",
+            target_path: "rust_helper.rs",
+            target_name: "LateWorker::unique_finish",
+            provenance: DYNAMIC_DISPATCH_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
+            caller_name: "rust_callback_use",
+            reference_name: "enabled",
+            target_path: "lib.rs",
+            target_name: "rust_callback_use::enabled",
+            provenance: EXACT_LEXICAL_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
             caller_name: "rust_use",
             reference_name: "rust_helper::rust_helper",
             target_path: "rust_helper.rs",
             target_name: "rust_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
+            caller_name: "rust_use",
+            reference_name: "rust_helper::LateWorker::orphan_method",
+            target_path: "rust_helper.rs",
+            target_name: "LateWorker::orphan_method",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
+            caller_name: "rust_qualified_use",
+            reference_name: "crate::rust_helper::LateWorker::orphan_method",
+            target_path: "rust_helper.rs",
+            target_name: "LateWorker::orphan_method",
+            provenance: RUST_QUALIFIED_PATH_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
+            caller_name: "rust_root_reexport_use",
+            reference_name: "crate::LateWorker::orphan_method",
+            target_path: "rust_helper.rs",
+            target_name: "LateWorker::orphan_method",
+            provenance: RUST_QUALIFIED_PATH_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "lib.rs",
+            caller_name: "rust_macro_use",
+            reference_name: "rust_helper::rust_helper",
+            target_path: "rust_helper.rs",
+            target_name: "rust_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "grouped_use.rs",
+            caller_name: "grouped_rust_use",
+            reference_name: "nested::nested_helper",
+            target_path: "nested/mod.rs",
+            target_name: "nested_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "grouped_use.rs",
+            caller_name: "grouped_rust_use",
+            reference_name: "helper_alias::rust_helper",
+            target_path: "rust_helper.rs",
+            target_name: "rust_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "grouped_use.rs",
+            caller_name: "grouped_rust_use",
+            reference_name: "nested_helper",
+            target_path: "nested/mod.rs",
+            target_name: "nested_helper",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "grouped_use.rs",
+            caller_name: "rust_function_item_use",
+            reference_name: "LateWorker::orphan_method",
+            target_path: "rust_helper.rs",
+            target_name: "LateWorker::orphan_method",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "walk.rs",
+            caller_name: "visit_usage",
+            reference_name: "references::capture_usage",
+            target_path: "walk/references.rs",
+            target_name: "capture_usage",
+            provenance: IMPORT_BINDING_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "walk.rs",
+            caller_name: "visit_usage",
+            reference_name: "self::references::capture_usage",
+            target_path: "walk/references.rs",
+            target_name: "capture_usage",
+            provenance: RUST_QUALIFIED_PATH_PROVENANCE,
+        },
+        ExpectedResolvedReference {
+            caller_path: "walk/references.rs",
+            caller_name: "capture_usage",
+            reference_name: "parent_helper",
+            target_path: "walk.rs",
+            target_name: "parent_helper",
             provenance: IMPORT_BINDING_PROVENANCE,
         },
         ExpectedResolvedReference {
@@ -7935,12 +10213,13 @@ mod tests {
         },
     ];
 
-    const POLYGLOT_DIRECTORIES: [&str; 5] = ["other", "nested", "conflict", "index_only", "fake"];
+    const POLYGLOT_DIRECTORIES: [&str; 6] =
+        ["other", "nested", "conflict", "index_only", "fake", "walk"];
 
-    const POLYGLOT_FIXTURES: [(&str, &str); 30] = [
+    const POLYGLOT_FIXTURES: [(&str, &str); 34] = [
         (
             "rust_helper.rs",
-            "impl LateWorker { pub fn orphan_method() -> usize { 8 } }\npub struct LateWorker;\npub mod inner { pub fn nested_only() -> usize { 7 } }\npub fn rust_helper() -> usize { 1 }\npub(self) fn hidden() -> usize { 9 }\n",
+            "impl LateWorker { pub fn orphan_method() -> usize { 8 } pub fn unique_finish(&self) -> usize { 10 } pub fn ambiguous_finish(&self) -> usize { 11 } }\npub struct LateWorker;\npub struct OtherWorker;\nimpl OtherWorker { pub fn ambiguous_finish(&self) -> usize { 12 } }\npub enum ProjectResult { Ok, Err }\npub mod inner { pub fn nested_only() -> usize { 7 } }\npub const RUST_LIMIT: usize = 13;\npub fn rust_helper() -> usize { 1 }\npub(self) fn hidden() -> usize { 9 }\n",
         ),
         ("nested/mod.rs", "pub fn nested_helper() -> usize { 2 }\n"),
         ("conflict.rs", "pub fn conflict_helper() -> usize { 3 }\n"),
@@ -7954,7 +10233,19 @@ mod tests {
         ),
         (
             "lib.rs",
-            "mod conflict;\nmod index_only;\nmod nested;\nmod rust_helper;\npub fn rust_use() -> usize { nested::nested_helper() + rust_helper::rust_helper() }\npub fn rust_rejected() -> usize { rust_helper::hidden() + rust_helper::nested_only() + rust_helper::orphan_method() + rust_helper::inner() + conflict::conflict_helper() + index_only::index_helper() }\n",
+            "mod conflict;\nmod grouped_use;\nmod index_only;\nmod nested;\nmod rust_helper;\nmod walk;\npub use rust_helper::LateWorker;\nuse external_crate::Remote;\npub fn rust_use() -> usize { nested::nested_helper() + rust_helper::rust_helper() + rust_helper::LateWorker::orphan_method() }\npub fn rust_qualified_use() -> usize { crate::rust_helper::LateWorker::orphan_method() }\npub fn rust_root_reexport_use() -> usize { crate::LateWorker::orphan_method() }\npub fn rust_macro_use() { print!(\"{}\", rust_helper::rust_helper()); }\npub fn rust_dynamic_use(worker: &rust_helper::LateWorker) -> usize { worker.unique_finish() + worker.ambiguous_finish() }\npub fn rust_callback_use(enabled: impl Fn() -> bool) -> bool { enabled() }\npub fn rust_expected_boundaries(_remote: &Remote) -> Result<(), ()> { assert!(true); let _values = Vec::new(); let _remote = Remote::default(); let _json = serde_json::to_value(()); Ok(()) }\npub fn rust_rejected() -> usize { rust_helper::hidden() + rust_helper::nested_only() + rust_helper::orphan_method() + rust_helper::inner() + conflict::conflict_helper() + index_only::index_helper() }\n",
+        ),
+        (
+            "grouped_use.rs",
+            "use crate::{nested::{self, nested_helper}, rust_helper::{LateWorker, RUST_LIMIT}, rust_helper as helper_alias};\npub fn grouped_rust_use() -> usize { nested::nested_helper() + helper_alias::rust_helper() + nested_helper() + RUST_LIMIT }\nfn apply(callback: fn() -> usize) -> usize { callback() }\npub fn rust_function_item_use() -> usize { apply(LateWorker::orphan_method) }\n",
+        ),
+        (
+            "walk.rs",
+            "mod references;\nfn parent_helper() {}\npub fn visit_usage() { references::capture_usage(); self::references::capture_usage(); }\n",
+        ),
+        (
+            "walk/references.rs",
+            "use super::*;\npub(super) fn capture_usage() { parent_helper(); }\n",
         ),
         ("py_helpers.py", "def python_helper():\n    return 1\n"),
         (
@@ -7988,6 +10279,10 @@ mod tests {
         (
             "cross_language.ts",
             "import { python_helper } from './py_helpers';\nexport function crossLanguage(): number { return python_helper(); }\n",
+        ),
+        (
+            "external_boundary.ts",
+            "import { remote } from 'external-package';\nexport function externalBoundaries(value: Parameters<() => [unknown]>[0]) { remote(); value.map(() => 1); Date.now(); }\n",
         ),
         (
             "fake/mod.ts",
@@ -8410,9 +10705,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not open SCIP fixture: {error}"));
         let generation = build_native_generation_with_scip(
             &runner,
-            source_root,
-            config(PARALLEL_WORKERS),
-            Some(overlay),
+            NativeGenerationBuild::new(source_root, config(PARALLEL_WORKERS))
+                .with_scip_overlay(overlay),
         )
         .await
         .unwrap_or_else(|error| panic!("SCIP pipeline failed: {error}"));
@@ -8694,12 +10988,8 @@ mod tests {
         let shared_implementation = capability_symbol(&forward, "src/api.cpp", "api::shared_value");
         let use_api = capability_symbol(&forward, "src/main.cpp", "use_api");
 
-        let include = capability_reference(
-            &forward,
-            main_file,
-            "../include/api.hpp",
-            ReferenceKind::Imports,
-        );
+        let include = CapabilityReferenceQuery::new(&forward, main_file)
+            .named("../include/api.hpp", ReferenceKind::Imports);
         assert_eq!(
             include.target_symbol_id.as_ref(),
             Some(&header_file.symbol_id)
@@ -8725,13 +11015,14 @@ mod tests {
                 shared_implementation,
             ),
         ] {
-            let reference = capability_reference(&forward, use_api, name, kind);
+            let reference = CapabilityReferenceQuery::new(&forward, use_api).named(name, kind);
             assert_eq!(reference.target_symbol_id.as_ref(), Some(&target.symbol_id));
             assert_eq!(reference.resolution_provenance, QUOTED_INCLUDE_PROVENANCE);
         }
 
         for name in ["worker.run", "ping", "api::Worker::private_run"] {
-            let reference = capability_reference(&forward, use_api, name, ReferenceKind::Calls);
+            let reference =
+                CapabilityReferenceQuery::new(&forward, use_api).named(name, ReferenceKind::Calls);
             assert!(
                 reference.target_symbol_id.is_none(),
                 "{name}: {reference:?}"
@@ -8739,8 +11030,8 @@ mod tests {
             assert_ne!(reference.resolution_provenance, QUOTED_INCLUDE_PROVENANCE);
         }
 
-        let system_include =
-            capability_reference(&forward, main_file, "vector", ReferenceKind::Imports);
+        let system_include = CapabilityReferenceQuery::new(&forward, main_file)
+            .named("vector", ReferenceKind::Imports);
         assert!(system_include.target_symbol_id.is_none());
         assert_eq!(
             system_include.resolution_provenance,
@@ -8748,16 +11039,13 @@ mod tests {
         );
         let negative = capability_symbol(&forward, "src/negative.cpp", "unresolved_use");
         for name in ["orphan", "duplicate", "missing_system"] {
-            let reference = capability_reference(&forward, negative, name, ReferenceKind::Calls);
+            let reference =
+                CapabilityReferenceQuery::new(&forward, negative).named(name, ReferenceKind::Calls);
             assert!(reference.target_symbol_id.is_none(), "{name}");
         }
         let missing_file = capability_file_symbol(&forward, "src/missing.cpp");
-        let missing_include = capability_reference(
-            &forward,
-            missing_file,
-            "../include/missing.hpp",
-            ReferenceKind::Imports,
-        );
+        let missing_include = CapabilityReferenceQuery::new(&forward, missing_file)
+            .named("../include/missing.hpp", ReferenceKind::Imports);
         assert!(missing_include.target_symbol_id.is_none());
         assert_eq!(
             missing_include.resolution_provenance,
@@ -8790,8 +11078,8 @@ mod tests {
         let disposable = capability_symbol(&forward, "src/Bases.cs", "Disposable");
         let missing_device = capability_symbol(&forward, "src/Bases.cs", "MissingDevice");
 
-        let iphone_reference =
-            capability_reference(&forward, device, "IPhone", ReferenceKind::Inherits);
+        let iphone_reference = CapabilityReferenceQuery::new(&forward, device)
+            .named("IPhone", ReferenceKind::Inherits);
         assert_eq!(
             iphone_reference.target_symbol_id.as_ref(),
             Some(&iphone.symbol_id)
@@ -8802,8 +11090,8 @@ mod tests {
                 && edge.kind == EdgeKind::Extends
         }));
 
-        let disposable_reference =
-            capability_reference(&forward, device, "Disposable", ReferenceKind::Inherits);
+        let disposable_reference = CapabilityReferenceQuery::new(&forward, device)
+            .named("Disposable", ReferenceKind::Inherits);
         assert_eq!(
             disposable_reference.target_symbol_id.as_ref(),
             Some(&disposable.symbol_id)
@@ -8814,12 +11102,8 @@ mod tests {
                 && edge.kind == EdgeKind::Implements
         }));
 
-        let missing = capability_reference(
-            &forward,
-            missing_device,
-            "MissingBase",
-            ReferenceKind::Inherits,
-        );
+        let missing = CapabilityReferenceQuery::new(&forward, missing_device)
+            .named("MissingBase", ReferenceKind::Inherits);
         assert!(missing.target_symbol_id.is_none());
         assert_eq!(missing.resolution_provenance, UNRESOLVED_PROVENANCE);
         assert!(forward.edges().iter().all(|edge| {
@@ -8866,12 +11150,8 @@ mod tests {
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
 
-        assert_named_reference_targets(
-            &forward,
-            "orders.cache.ttl",
-            "config/application.properties",
-            "orders.cache.ttl",
-        );
+        NamedReferenceAssertion::new(&forward, "orders.cache.ttl")
+            .targets("config/application.properties", "orders.cache.ttl");
         let java_mapper =
             capability_symbol(&forward, "src/OrderMapper.java", "OrderMapper::findOrder");
         let xml_statement = capability_symbol(
@@ -8885,13 +11165,12 @@ mod tests {
                 && edge.kind == EdgeKind::References
                 && edge.provenance == MYBATIS_BRIDGE_PROVENANCE
         }));
-        assert_named_reference_targets(
-            &forward,
-            "loadOrders",
+        NamedReferenceAssertion::new(&forward, "loadOrders").targets(
             "force-app/main/default/classes/OrderController.cls",
             "OrderController::loadOrders",
         );
-        assert_named_reference_targets(&forward, "OrderCard", "src/OrderCard.tsx", "OrderCard");
+        NamedReferenceAssertion::new(&forward, "OrderCard")
+            .targets("src/OrderCard.tsx", "OrderCard");
     }
 
     #[test]
@@ -8993,27 +11272,19 @@ mod tests {
         assert_eq!(forward.references(), reversed.references());
         assert_eq!(forward.edges(), reversed.edges());
 
-        assert_named_reference_targets(
-            &forward,
-            "getCurrentPosition",
+        NamedReferenceAssertion::new(&forward, "getCurrentPosition").targets(
             "ios/RCTGeolocation.m",
             "ios/RCTGeolocation.m::react-native-method::Geolocation::getCurrentPosition",
         );
-        assert_named_reference_targets(
-            &forward,
-            "startScan",
+        NamedReferenceAssertion::new(&forward, "startScan").targets(
             "android/ScannerModule.kt",
             "android/ScannerModule.kt::react-native-method::Scanner::startScan",
         );
-        assert_named_reference_targets(
-            &forward,
-            "notificationAsync",
+        NamedReferenceAssertion::new(&forward, "notificationAsync").targets(
             "ios/HapticsModule.swift",
             "ios/HapticsModule.swift::expo-module-method::ExpoHaptics::notificationAsync",
         );
-        assert_named_reference_targets(
-            &forward,
-            "getConstants",
+        NamedReferenceAssertion::new(&forward, "getConstants").targets(
             "src/NativeDeviceInfo.ts",
             "src/NativeDeviceInfo.ts::turbo-module-spec-method::DeviceInfo::getConstants",
         );
@@ -9046,12 +11317,8 @@ mod tests {
             "src/NativeDeviceInfo.ts",
             "src/NativeDeviceInfo.ts::turbo-module-spec-method::DeviceInfo::getConstants",
         );
-        let native_method = capability_symbol_matching(
-            &forward,
-            "ios/RCTDeviceInfo.m",
-            "getConstants",
-            "RCTDeviceInfo::",
-        );
+        let native_method = CapabilitySymbolQuery::new(&forward, "ios/RCTDeviceInfo.m")
+            .matching("getConstants", "RCTDeviceInfo::");
         assert!(forward.edges().iter().any(|edge| {
             edge.source_symbol_id == turbo_method.symbol_id
                 && edge.target_symbol_id == native_method.symbol_id
@@ -9129,12 +11396,8 @@ mod tests {
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
 
-        let objc_download = capability_symbol_matching(
-            &forward,
-            "ios/NativeDownloader.m",
-            "download",
-            "::objc-swift-method::",
-        );
+        let objc_download = CapabilitySymbolQuery::new(&forward, "ios/NativeDownloader.m")
+            .matching("download", "::objc-swift-method::");
         let swift_call =
             capability_reference_in_file(&forward, "ios/SwiftCaller.swift", "download");
         assert_eq!(
@@ -9143,12 +11406,8 @@ mod tests {
         );
         assert_eq!(swift_call.resolution_provenance, APPLE_BRIDGE_PROVENANCE);
 
-        let swift_play = capability_symbol_matching(
-            &forward,
-            "ios/SwiftPlayer.swift",
-            "play",
-            "::swift-objc-method::",
-        );
+        let swift_play = CapabilitySymbolQuery::new(&forward, "ios/SwiftPlayer.swift")
+            .matching("play", "::swift-objc-method::");
         let objc_call = capability_reference_in_file(&forward, "ios/ObjcCaller.m", "playWithSong:");
         assert_eq!(
             objc_call.target_symbol_id.as_ref(),
@@ -9295,9 +11554,7 @@ mod tests {
             edge.source_symbol_id != npm_workspace.symbol_id
                 || edge.target_symbol_id != npm_nested.symbol_id
         }));
-        assert_named_reference_targets(
-            &forward,
-            "@acme/core",
+        NamedReferenceAssertion::new(&forward, "@acme/core").targets(
             "packages/core/package.json",
             "packages/core/package.json::manifest-package-npm::@acme/core::manifest-dir::packages/core",
         );
@@ -9445,24 +11702,14 @@ mod tests {
             "app/Http/Controllers/OrderController.php",
             "OrderController",
         );
-        let index = capability_symbol_matching(
-            &forward,
-            "app/Http/Controllers/OrderController.php",
-            "index",
-            "OrderController",
-        );
-        let store = capability_symbol_matching(
-            &forward,
-            "app/Http/Controllers/OrderController.php",
-            "store",
-            "OrderController",
-        );
-        let show = capability_symbol_matching(
-            &forward,
-            "app/Http/Controllers/OrderController.php",
-            "show",
-            "OrderController",
-        );
+        let index =
+            CapabilitySymbolQuery::new(&forward, "app/Http/Controllers/OrderController.php")
+                .matching("index", "OrderController");
+        let store =
+            CapabilitySymbolQuery::new(&forward, "app/Http/Controllers/OrderController.php")
+                .matching("store", "OrderController");
+        let show = CapabilitySymbolQuery::new(&forward, "app/Http/Controllers/OrderController.php")
+            .matching("show", "OrderController");
         for (path, reference_name, target) in [
             ("routes/web.php", "index", index),
             ("routes/web.php", "OrderController@store", store),
@@ -9538,19 +11785,11 @@ mod tests {
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
 
-        let schema = capability_symbol_of_kind(
-            &forward,
-            "src/contracts.ts",
-            "UserSchema",
-            SymbolKind::Struct,
-        );
+        let schema = CapabilitySymbolQuery::new(&forward, "src/contracts.ts")
+            .of_kind("UserSchema", SymbolKind::Struct);
         assert_eq!(schema.symbol_kind, SymbolKind::Struct.as_str());
-        let role = capability_symbol_of_kind(
-            &forward,
-            "src/contracts.ts",
-            "UserSchema::role",
-            SymbolKind::Field,
-        );
+        let role = CapabilitySymbolQuery::new(&forward, "src/contracts.ts")
+            .of_kind("UserSchema::role", SymbolKind::Field);
         let type_reference = forward
             .references()
             .iter()
@@ -9610,12 +11849,14 @@ mod tests {
         }));
 
         assert_eq!(
-            capability_symbol_of_kind(&forward, "models.py", "Account", SymbolKind::Struct)
+            CapabilitySymbolQuery::new(&forward, "models.py")
+                .of_kind("Account", SymbolKind::Struct)
                 .symbol_kind,
             SymbolKind::Struct.as_str()
         );
         assert_eq!(
-            capability_symbol_of_kind(&forward, "models.py", "Account::id", SymbolKind::Field,)
+            CapabilitySymbolQuery::new(&forward, "models.py")
+                .of_kind("Account::id", SymbolKind::Field)
                 .symbol_kind,
             SymbolKind::Field.as_str()
         );
@@ -9983,8 +12224,18 @@ mod tests {
         source.push_str(&"x".repeat(512 * 1_024));
         source.push_str("\n*/\n");
         let fixtures = [("src/mega.ts", source.as_str())];
-        let first = build_capability_generation(&fixtures, false);
-        let second = build_capability_generation(&fixtures, false);
+        let first = build_capability_generation_with_budget(
+            &fixtures,
+            false,
+            false,
+            MEGA_TEST_GENERATION_BYTES,
+        );
+        let second = build_capability_generation_with_budget(
+            &fixtures,
+            false,
+            false,
+            MEGA_TEST_GENERATION_BYTES,
+        );
         assert_eq!(first.digest(), second.digest());
 
         let nested = first
@@ -10025,8 +12276,22 @@ mod tests {
             NESTED_FUNCTIONS
         );
         assert!((512 * 1_024..1024 * 1024).contains(&source.len()));
-        assert!(first.symbols().len() <= NESTED_FUNCTIONS + 2);
-        assert!(first.edges().len() <= (NESTED_FUNCTIONS * 3) + 4);
+        let parameters = first
+            .symbols()
+            .iter()
+            .filter(|symbol| symbol.symbol_kind == SymbolKind::Parameter.as_str())
+            .count();
+        assert_eq!(parameters, NESTED_FUNCTIONS + 1);
+        assert!(
+            first.symbols().len() <= (NESTED_FUNCTIONS * 2) + 3,
+            "mega fixture retained {} symbols",
+            first.symbols().len()
+        );
+        assert!(
+            first.edges().len() <= (NESTED_FUNCTIONS * 5) + 8,
+            "mega fixture retained {} edges",
+            first.edges().len()
+        );
     }
 
     #[test]
@@ -10054,48 +12319,24 @@ mod tests {
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
 
-        let reader =
-            capability_symbol_of_kind(&forward, "api/reader.go", "Reader", SymbolKind::Interface);
-        let resettable = capability_symbol_of_kind(
-            &forward,
-            "api/reader.go",
-            "Resettable",
-            SymbolKind::Interface,
-        );
-        let empty =
-            capability_symbol_of_kind(&forward, "api/reader.go", "Empty", SymbolKind::Interface);
-        let file_reader = capability_symbol_of_kind(
-            &forward,
-            "impl/readers.go",
-            "FileReader",
-            SymbolKind::Struct,
-        );
-        let wrong_reader = capability_symbol_of_kind(
-            &forward,
-            "impl/readers.go",
-            "WrongReader",
-            SymbolKind::Struct,
-        );
-        let foreign_reset = capability_symbol_of_kind(
-            &forward,
-            "impl/readers.go",
-            "ForeignReset",
-            SymbolKind::Struct,
-        );
-        let worker =
-            capability_symbol_of_kind(&forward, "worker/types.go", "Worker", SymbolKind::Struct);
-        let run = capability_symbol_of_kind(
-            &forward,
-            "worker/methods.go",
-            "Worker::Run",
-            SymbolKind::Method,
-        );
-        let runner = capability_symbol_of_kind(
-            &forward,
-            "contracts/runner.go",
-            "Runner",
-            SymbolKind::Interface,
-        );
+        let reader = CapabilitySymbolQuery::new(&forward, "api/reader.go")
+            .of_kind("Reader", SymbolKind::Interface);
+        let resettable = CapabilitySymbolQuery::new(&forward, "api/reader.go")
+            .of_kind("Resettable", SymbolKind::Interface);
+        let empty = CapabilitySymbolQuery::new(&forward, "api/reader.go")
+            .of_kind("Empty", SymbolKind::Interface);
+        let file_reader = CapabilitySymbolQuery::new(&forward, "impl/readers.go")
+            .of_kind("FileReader", SymbolKind::Struct);
+        let wrong_reader = CapabilitySymbolQuery::new(&forward, "impl/readers.go")
+            .of_kind("WrongReader", SymbolKind::Struct);
+        let foreign_reset = CapabilitySymbolQuery::new(&forward, "impl/readers.go")
+            .of_kind("ForeignReset", SymbolKind::Struct);
+        let worker = CapabilitySymbolQuery::new(&forward, "worker/types.go")
+            .of_kind("Worker", SymbolKind::Struct);
+        let run = CapabilitySymbolQuery::new(&forward, "worker/methods.go")
+            .of_kind("Worker::Run", SymbolKind::Method);
+        let runner = CapabilitySymbolQuery::new(&forward, "contracts/runner.go")
+            .of_kind("Runner", SymbolKind::Interface);
 
         assert!(forward.edges().iter().any(|edge| {
             edge.source_symbol_id == file_reader.symbol_id
@@ -10172,27 +12413,16 @@ mod tests {
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
 
-        let base_user =
-            capability_symbol_of_kind(&forward, "schema/base.graphql", "User", SymbolKind::Class);
-        let node = capability_symbol_of_kind(
-            &forward,
-            "schema/base.graphql",
-            "Node",
-            SymbolKind::Interface,
-        );
-        let date_time = capability_symbol_of_kind(
-            &forward,
-            "schema/base.graphql",
-            "DateTime",
-            SymbolKind::TypeAlias,
-        );
-        let extension = capability_symbol_of_kind(
-            &forward,
-            "schema/user-extension.graphql",
-            "User",
-            SymbolKind::Class,
-        );
-        let extends = capability_reference(&forward, extension, "User", ReferenceKind::Extends);
+        let base_user = CapabilitySymbolQuery::new(&forward, "schema/base.graphql")
+            .of_kind("User", SymbolKind::Class);
+        let node = CapabilitySymbolQuery::new(&forward, "schema/base.graphql")
+            .of_kind("Node", SymbolKind::Interface);
+        let date_time = CapabilitySymbolQuery::new(&forward, "schema/base.graphql")
+            .of_kind("DateTime", SymbolKind::TypeAlias);
+        let extension = CapabilitySymbolQuery::new(&forward, "schema/user-extension.graphql")
+            .of_kind("User", SymbolKind::Class);
+        let extends = CapabilityReferenceQuery::new(&forward, extension)
+            .named("User", ReferenceKind::Extends);
         assert_eq!(
             extends.target_symbol_id.as_ref(),
             Some(&base_user.symbol_id)
@@ -10207,54 +12437,42 @@ mod tests {
                 && edge.kind == EdgeKind::Extends
         }));
 
-        let base_implements =
-            capability_reference(&forward, base_user, "Node", ReferenceKind::Implements);
+        let base_implements = CapabilityReferenceQuery::new(&forward, base_user)
+            .named("Node", ReferenceKind::Implements);
         assert_eq!(
             base_implements.target_symbol_id.as_ref(),
             Some(&node.symbol_id)
         );
-        let extension_implements =
-            capability_reference(&forward, extension, "Node", ReferenceKind::Implements);
+        let extension_implements = CapabilityReferenceQuery::new(&forward, extension)
+            .named("Node", ReferenceKind::Implements);
         assert_eq!(
             extension_implements.target_symbol_id.as_ref(),
             Some(&node.symbol_id)
         );
-        let last_seen = capability_symbol_of_kind(
-            &forward,
-            "schema/user-extension.graphql",
-            "User::lastSeen",
-            SymbolKind::Field,
-        );
-        let last_seen_type =
-            capability_reference(&forward, last_seen, "DateTime", ReferenceKind::TypeOf);
+        let last_seen = CapabilitySymbolQuery::new(&forward, "schema/user-extension.graphql")
+            .of_kind("User::lastSeen", SymbolKind::Field);
+        let last_seen_type = CapabilityReferenceQuery::new(&forward, last_seen)
+            .named("DateTime", ReferenceKind::TypeOf);
         assert_eq!(
             last_seen_type.target_symbol_id.as_ref(),
             Some(&date_time.symbol_id)
         );
 
-        let access =
-            capability_symbol_of_kind(&forward, "prisma/schema.prisma", "Access", SymbolKind::Enum);
-        let account = capability_symbol_of_kind(
-            &forward,
-            "prisma/schema.prisma",
-            "Account",
-            SymbolKind::Struct,
-        );
-        let item =
-            capability_symbol_of_kind(&forward, "prisma/schema.prisma", "Item", SymbolKind::Struct);
+        let access = CapabilitySymbolQuery::new(&forward, "prisma/schema.prisma")
+            .of_kind("Access", SymbolKind::Enum);
+        let account = CapabilitySymbolQuery::new(&forward, "prisma/schema.prisma")
+            .of_kind("Account", SymbolKind::Struct);
+        let item = CapabilitySymbolQuery::new(&forward, "prisma/schema.prisma")
+            .of_kind("Item", SymbolKind::Struct);
         for (owner_name, target_name, target_id) in [
             ("Account::access", "Access", &access.symbol_id),
             ("Account::items", "Item", &item.symbol_id),
             ("Item::owner", "Account", &account.symbol_id),
         ] {
-            let owner = capability_symbol_of_kind(
-                &forward,
-                "prisma/schema.prisma",
-                owner_name,
-                SymbolKind::Field,
-            );
-            let relation =
-                capability_reference(&forward, owner, target_name, ReferenceKind::TypeOf);
+            let owner = CapabilitySymbolQuery::new(&forward, "prisma/schema.prisma")
+                .of_kind(owner_name, SymbolKind::Field);
+            let relation = CapabilityReferenceQuery::new(&forward, owner)
+                .named(target_name, ReferenceKind::TypeOf);
             assert_eq!(relation.target_symbol_id.as_ref(), Some(target_id));
             assert!(forward.documents().iter().any(|document| {
                 document.symbol_id() == Some(&owner.symbol_id)
@@ -10284,27 +12502,15 @@ mod tests {
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
 
-        let users =
-            capability_symbol_of_kind(&forward, "db/schema.sql", "public.users", SymbolKind::Table);
-        let orders = capability_symbol_of_kind(
-            &forward,
-            "db/schema.sql",
-            "reporting.orders",
-            SymbolKind::Table,
-        );
-        let view = capability_symbol_of_kind(
-            &forward,
-            "db/schema.sql",
-            "reporting.active_orders",
-            SymbolKind::Table,
-        );
+        let users = CapabilitySymbolQuery::new(&forward, "db/schema.sql")
+            .of_kind("public.users", SymbolKind::Table);
+        let orders = CapabilitySymbolQuery::new(&forward, "db/schema.sql")
+            .of_kind("reporting.orders", SymbolKind::Table);
+        let view = CapabilitySymbolQuery::new(&forward, "db/schema.sql")
+            .of_kind("reporting.active_orders", SymbolKind::Table);
         let load = capability_symbol(&forward, "src/repository.ts", "loadOrders");
-        let function = capability_symbol_of_kind(
-            &forward,
-            "db/schema.sql",
-            "reporting.find_users",
-            SymbolKind::Function,
-        );
+        let function = CapabilitySymbolQuery::new(&forward, "db/schema.sql")
+            .of_kind("reporting.find_users", SymbolKind::Function);
 
         for (owner, target, name, provenance) in [
             (load, users, "public.users", EMBEDDED_SQL_READ_PROVENANCE),
@@ -10385,12 +12591,8 @@ mod tests {
             EMBEDDED_SQL_DDL_UNRESOLVED
         );
 
-        let order_user_id = capability_symbol_of_kind(
-            &forward,
-            "db/schema.sql",
-            "reporting.orders::user_id",
-            SymbolKind::Field,
-        );
+        let order_user_id = CapabilitySymbolQuery::new(&forward, "db/schema.sql")
+            .of_kind("reporting.orders::user_id", SymbolKind::Field);
         assert!(forward.documents().iter().any(|document| {
             document.symbol_id() == Some(&order_user_id.symbol_id)
                 && document.code().contains("BIGINT")
@@ -10460,25 +12662,101 @@ mod tests {
         );
     }
 
-    fn assert_named_reference_targets(
-        facts: &CanonicalGenerationFacts,
-        reference_name: &str,
-        target_path: &str,
-        target_qualified_name: &str,
-    ) {
-        let target = capability_symbol(facts, target_path, target_qualified_name);
-        assert!(
-            facts.references().iter().any(|reference| {
-                reference.reference_name == reference_name
-                    && reference.target_symbol_id.as_ref() == Some(&target.symbol_id)
-            }),
-            "missing resolved framework reference {reference_name} -> {target_qualified_name}; refs={:?}",
-            facts
-                .references()
+    struct NamedReferenceAssertion<'facts> {
+        facts: &'facts CanonicalGenerationFacts,
+        reference_name: &'facts str,
+    }
+
+    impl<'facts> NamedReferenceAssertion<'facts> {
+        const fn new(facts: &'facts CanonicalGenerationFacts, reference_name: &'facts str) -> Self {
+            Self {
+                facts,
+                reference_name,
+            }
+        }
+
+        fn targets(self, target_path: &str, target_qualified_name: &str) {
+            let target = capability_symbol(self.facts, target_path, target_qualified_name);
+            let reference_name = self.reference_name;
+            let facts = self.facts;
+            assert!(
+                facts.references().iter().any(|reference| {
+                    reference.reference_name == reference_name
+                        && reference.target_symbol_id.as_ref() == Some(&target.symbol_id)
+                }),
+                "missing resolved framework reference {reference_name} -> {target_qualified_name}; refs={:?}",
+                facts
+                    .references()
+                    .iter()
+                    .filter(|reference| reference.reference_name == reference_name)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    struct CapabilitySymbolQuery<'facts> {
+        facts: &'facts CanonicalGenerationFacts,
+        path: &'facts str,
+    }
+
+    impl<'facts> CapabilitySymbolQuery<'facts> {
+        const fn new(facts: &'facts CanonicalGenerationFacts, path: &'facts str) -> Self {
+            Self { facts, path }
+        }
+
+        fn of_kind(self, qualified_name: &str, kind: SymbolKind) -> &'facts SymbolInput {
+            let file_id = self
+                .facts
+                .files()
                 .iter()
-                .filter(|reference| reference.reference_name == reference_name)
-                .collect::<Vec<_>>()
-        );
+                .find(|file| file.normalized_path == self.path)
+                .map(|file| &file.file_id)
+                .unwrap_or_else(|| panic!("missing capability file {}", self.path));
+            capability_symbol_by(self.facts, file_id, |symbol| {
+                symbol.qualified_name == qualified_name && symbol.symbol_kind == kind.as_str()
+            })
+        }
+
+        fn matching(self, name: &str, qualified_fragment: &str) -> &'facts SymbolInput {
+            let file_id = self
+                .facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == self.path)
+                .map(|file| &file.file_id)
+                .unwrap_or_else(|| panic!("missing capability file {}", self.path));
+            capability_symbol_by(self.facts, file_id, |symbol| {
+                symbol.qualified_name.contains(qualified_fragment)
+                    && symbol.qualified_name.ends_with(&format!("::{name}"))
+            })
+        }
+    }
+
+    struct CapabilityReferenceQuery<'facts> {
+        facts: &'facts CanonicalGenerationFacts,
+        owner: &'facts SymbolInput,
+    }
+
+    impl<'facts> CapabilityReferenceQuery<'facts> {
+        const fn new(facts: &'facts CanonicalGenerationFacts, owner: &'facts SymbolInput) -> Self {
+            Self { facts, owner }
+        }
+
+        fn named(self, name: &str, kind: ReferenceKind) -> &'facts ReferenceInput {
+            let mut references = self.facts.references().iter().filter(|reference| {
+                reference.owner_symbol_id.as_ref() == Some(&self.owner.symbol_id)
+                    && reference.reference_name == name
+                    && reference.reference_kind == kind.as_str()
+            });
+            let reference = references
+                .next()
+                .unwrap_or_else(|| panic!("missing capability reference {name}"));
+            assert!(
+                references.next().is_none(),
+                "ambiguous capability reference {name}"
+            );
+            reference
+        }
     }
 
     fn build_capability_generation(
@@ -10492,6 +12770,20 @@ mod tests {
         fixtures: &[(&str, &str)],
         reverse: bool,
         wider_partial_band: bool,
+    ) -> CanonicalGenerationFacts {
+        build_capability_generation_with_budget(
+            fixtures,
+            reverse,
+            wider_partial_band,
+            TEST_GENERATION_BYTES,
+        )
+    }
+
+    fn build_capability_generation_with_budget(
+        fixtures: &[(&str, &str)],
+        reverse: bool,
+        wider_partial_band: bool,
+        maximum_bytes: u64,
     ) -> CanonicalGenerationFacts {
         let source_limits = SourceLimits::new(TEST_SOURCE_BYTES)
             .unwrap_or_else(|error| panic!("capability source limits failed: {error}"));
@@ -10517,22 +12809,24 @@ mod tests {
         if reverse {
             extracted.reverse();
         }
-        let mut accumulator = NativeFactAccumulator::new(TEST_GENERATION_BYTES);
+        let mut accumulator = NativeFactAccumulator::new(maximum_bytes);
         for file in extracted {
             accumulator
                 .push(file)
                 .unwrap_or_else(|_| panic!("capability facts exceeded the modeled input limit"));
         }
         let (facts, _) = resolve_generation(
-            accumulator,
-            TEST_GENERATION_BYTES,
-            &test_source_root(),
-            test_evidence_policy(true, true, true, true),
-            NativeClonePolicy { wider_partial_band },
+            ResolveGenerationRequest {
+                extracted: accumulator,
+                maximum_bytes,
+                source_root: test_source_root(),
+                evidence_policy: FULL_TEST_EVIDENCE,
+                clone_policy: NativeClonePolicy { wider_partial_band },
+            },
             || false,
         )
         .unwrap_or_else(|_| panic!("capability resolution exceeded its declared budget"));
-        let validation_limits = generation_validation_limits(TEST_GENERATION_BYTES)
+        let validation_limits = generation_validation_limits(maximum_bytes)
             .unwrap_or_else(|error| panic!("capability validation limits failed: {error}"));
         validate_generation_facts(facts, validation_limits, || false)
             .map(|(facts, _)| facts)
@@ -10677,41 +12971,6 @@ mod tests {
         })
     }
 
-    fn capability_symbol_of_kind<'facts>(
-        facts: &'facts CanonicalGenerationFacts,
-        path: &str,
-        qualified_name: &str,
-        kind: SymbolKind,
-    ) -> &'facts SymbolInput {
-        let file_id = facts
-            .files()
-            .iter()
-            .find(|file| file.normalized_path == path)
-            .map(|file| &file.file_id)
-            .unwrap_or_else(|| panic!("missing capability file {path}"));
-        capability_symbol_by(facts, file_id, |symbol| {
-            symbol.qualified_name == qualified_name && symbol.symbol_kind == kind.as_str()
-        })
-    }
-
-    fn capability_symbol_matching<'facts>(
-        facts: &'facts CanonicalGenerationFacts,
-        path: &str,
-        name: &str,
-        qualified_fragment: &str,
-    ) -> &'facts SymbolInput {
-        let file_id = facts
-            .files()
-            .iter()
-            .find(|file| file.normalized_path == path)
-            .map(|file| &file.file_id)
-            .unwrap_or_else(|| panic!("missing capability file {path}"));
-        capability_symbol_by(facts, file_id, |symbol| {
-            symbol.qualified_name.contains(qualified_fragment)
-                && symbol.qualified_name.ends_with(&format!("::{name}"))
-        })
-    }
-
     fn capability_reference_in_file<'facts>(
         facts: &'facts CanonicalGenerationFacts,
         path: &str,
@@ -10762,27 +13021,6 @@ mod tests {
         });
         assert!(symbols.next().is_none(), "ambiguous capability symbol");
         symbol
-    }
-
-    fn capability_reference<'facts>(
-        facts: &'facts CanonicalGenerationFacts,
-        owner: &SymbolInput,
-        name: &str,
-        kind: ReferenceKind,
-    ) -> &'facts ReferenceInput {
-        let mut references = facts.references().iter().filter(|reference| {
-            reference.owner_symbol_id.as_ref() == Some(&owner.symbol_id)
-                && reference.reference_name == name
-                && reference.reference_kind == kind.as_str()
-        });
-        let reference = references
-            .next()
-            .unwrap_or_else(|| panic!("missing capability reference {name}"));
-        assert!(
-            references.next().is_none(),
-            "ambiguous capability reference {name}"
-        );
-        reference
     }
 
     fn assert_generation_projection(
@@ -11021,7 +13259,7 @@ mod tests {
         assert!(package_reference.target_symbol_id.is_none());
         assert_eq!(
             package_reference.resolution_provenance,
-            UNRESOLVED_IMPORT_PROVENANCE
+            EXTERNAL_REFERENCE_UNRESOLVED_PROVENANCE
         );
         let shadow_reference = facts.reference(&shadow_id, "RemoteService");
         assert_eq!(
@@ -11033,6 +13271,66 @@ mod tests {
             EXACT_LEXICAL_PROVENANCE
         );
         facts.assert_use_document_terms(&use_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rust_bare_child_imports_resolve_without_weakening_external_boundaries() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create Rust module fixture: {error}"));
+        fs::create_dir(directory.path().join("local"))
+            .unwrap_or_else(|error| panic!("could not create local module directory: {error}"));
+        for (path, source) in [
+            (
+                "lib.rs",
+                "mod external_consumer;\nmod external_shadow;\nmod local;\n",
+            ),
+            (
+                "local.rs",
+                "mod helper;\nuse helper::{Helper, LIMIT};\npub fn consume() -> usize { Helper::new() + LIMIT }\n",
+            ),
+            (
+                "local/helper.rs",
+                "pub(super) struct Helper;\nimpl Helper { pub(super) fn new() -> usize { 1 } }\npub(super) const LIMIT: usize = 2;\n",
+            ),
+            ("external_shadow.rs", "pub fn request() {}\n"),
+            (
+                "external_consumer.rs",
+                "use missing_package::request;\npub fn consume_external() { request(); }\n",
+            ),
+        ] {
+            fs::write(directory.path().join(path), source)
+                .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+        }
+
+        let generation = build(directory.path(), PARALLEL_WORKERS).await;
+        let facts = ModuleResolverFacts {
+            facts: generation.facts(),
+        };
+        let local_owner = facts.symbol("local.rs", "consume");
+        let helper_constructor = facts.symbol("local/helper.rs", "Helper::new");
+        let constructor_reference = facts.reference(&local_owner, "Helper::new");
+        assert_eq!(
+            constructor_reference.target_symbol_id.as_ref(),
+            Some(&helper_constructor)
+        );
+        assert_eq!(
+            constructor_reference.resolution_provenance,
+            IMPORT_BINDING_PROVENANCE
+        );
+        for name in ["Helper", "LIMIT"] {
+            let target = facts.symbol("local/helper.rs", name);
+            let reference = facts.import_declaration_reference("local.rs", name);
+            assert_eq!(reference.target_symbol_id.as_ref(), Some(&target), "{name}");
+            assert_eq!(reference.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+        }
+
+        let external_owner = facts.symbol("external_consumer.rs", "consume_external");
+        let external_reference = facts.reference(&external_owner, "request");
+        assert!(external_reference.target_symbol_id.is_none());
+        assert_eq!(
+            external_reference.resolution_provenance,
+            RUST_EXTERNAL_UNRESOLVED_PROVENANCE
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11149,12 +13447,15 @@ mod tests {
             .filter(|reference| reference.reference_name == "console.log")
             .collect::<Vec<_>>();
         assert_eq!(console_references.len(), 2);
-        assert!(console_references.iter().all(|reference| {
-            reference.target_symbol_id.is_none()
-                && reference.owner_symbol_id.is_some()
-                && reference.confidence == UNRESOLVED_CONFIDENCE
-                && reference.resolution_provenance == UNRESOLVED_PROVENANCE
-        }));
+        assert!(
+            console_references.iter().all(|reference| {
+                reference.target_symbol_id.is_none()
+                    && reference.owner_symbol_id.is_some()
+                    && reference.confidence == UNRESOLVED_CONFIDENCE
+                    && reference.resolution_provenance == JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE
+            }),
+            "unexpected console references: {console_references:#?}"
+        );
         assert!(
             generation
                 .facts()
@@ -11205,12 +13506,14 @@ mod tests {
             .push(extracted)
             .unwrap_or_else(|_| panic!("long-path facts exceeded the modeled input limit"));
         let (facts, resolve) = resolve_generation(
-            accumulator,
-            TEST_GENERATION_BYTES,
-            &test_source_root(),
-            test_evidence_policy(true, true, true, true),
-            NativeClonePolicy {
-                wider_partial_band: false,
+            ResolveGenerationRequest {
+                extracted: accumulator,
+                maximum_bytes: TEST_GENERATION_BYTES,
+                source_root: test_source_root(),
+                evidence_policy: FULL_TEST_EVIDENCE,
+                clone_policy: NativeClonePolicy {
+                    wider_partial_band: false,
+                },
             },
             || false,
         )
@@ -11273,12 +13576,14 @@ mod tests {
             .unwrap_or_else(|_| panic!("cancellation facts exceeded the modeled input limit"));
         let polls = Cell::new(0_u64);
         let result = resolve_generation(
-            accumulator,
-            TEST_GENERATION_BYTES,
-            &test_source_root(),
-            test_evidence_policy(true, true, true, true),
-            NativeClonePolicy {
-                wider_partial_band: false,
+            ResolveGenerationRequest {
+                extracted: accumulator,
+                maximum_bytes: TEST_GENERATION_BYTES,
+                source_root: test_source_root(),
+                evidence_policy: FULL_TEST_EVIDENCE,
+                clone_policy: NativeClonePolicy {
+                    wider_partial_band: false,
+                },
             },
             || {
                 let next = polls.get().saturating_add(1);
@@ -11346,12 +13651,14 @@ mod tests {
             .push(extracted)
             .unwrap_or_else(|_| panic!("unresolved facts exceeded the modeled input limit"));
         let (facts, report) = resolve_generation(
-            accumulator,
-            TEST_GENERATION_BYTES,
-            &test_source_root(),
-            test_evidence_policy(true, true, true, true),
-            NativeClonePolicy {
-                wider_partial_band: false,
+            ResolveGenerationRequest {
+                extracted: accumulator,
+                maximum_bytes: TEST_GENERATION_BYTES,
+                source_root: test_source_root(),
+                evidence_policy: FULL_TEST_EVIDENCE,
+                clone_policy: NativeClonePolicy {
+                    wider_partial_band: false,
+                },
             },
             || false,
         )
@@ -11389,12 +13696,14 @@ mod tests {
             .push(extracted)
             .unwrap_or_else(|_| panic!("policy facts exceeded the modeled input limit"));
         let (facts, _) = resolve_generation(
-            accumulator,
-            TEST_GENERATION_BYTES,
-            &test_source_root(),
-            test_evidence_policy(true, true, false, false),
-            NativeClonePolicy {
-                wider_partial_band: false,
+            ResolveGenerationRequest {
+                extracted: accumulator,
+                maximum_bytes: TEST_GENERATION_BYTES,
+                source_root: test_source_root(),
+                evidence_policy: STRUCTURAL_TEST_EVIDENCE,
+                clone_policy: NativeClonePolicy {
+                    wider_partial_band: false,
+                },
             },
             || false,
         )
@@ -11576,7 +13885,8 @@ mod tests {
             assert_eq!(
                 reference.target_symbol_id.as_ref(),
                 Some(&target),
-                "{label}"
+                "{label}: {}",
+                reference.resolution_provenance,
             );
             assert_eq!(
                 reference.resolution_provenance, expected.provenance,
@@ -11589,6 +13899,7 @@ mod tests {
         assert_source_reexport_edge(facts);
         assert_local_export_edge(facts);
         assert_commonjs_declaration_edge(facts);
+        assert_rust_import_declaration_edge(facts);
     }
 
     fn assert_source_reexport_edge(facts: &ModuleResolverFacts<'_>) {
@@ -11614,6 +13925,13 @@ mod tests {
         assert_eq!(reference.resolution_provenance, IMPORT_BINDING_PROVENANCE);
     }
 
+    fn assert_rust_import_declaration_edge(facts: &ModuleResolverFacts<'_>) {
+        let target = facts.symbol("rust_helper.rs", "RUST_LIMIT");
+        let reference = facts.import_declaration_reference("grouped_use.rs", "RUST_LIMIT");
+        assert_eq!(reference.target_symbol_id.as_ref(), Some(&target));
+        assert_eq!(reference.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+    }
+
     fn assert_polyglot_rejections(facts: &ModuleResolverFacts<'_>) {
         let bare_go_call = facts.symbol("go_bare.go", "BareGoCall");
         for name in ["Run", "ForeignOnly", "ExternalOnly", "fixture"] {
@@ -11631,6 +13949,17 @@ mod tests {
             reference.resolution_provenance,
             UNRESOLVED_IMPORT_PROVENANCE
         );
+        let external_boundaries = facts.symbol("external_boundary.ts", "externalBoundaries");
+        for (name, provenance) in [
+            ("remote", EXTERNAL_REFERENCE_UNRESOLVED_PROVENANCE),
+            ("value.map", DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE),
+            ("Date.now", JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE),
+            ("Parameters", JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE),
+        ] {
+            let reference = facts.reference(&external_boundaries, name);
+            assert!(reference.target_symbol_id.is_none(), "{name}");
+            assert_eq!(reference.resolution_provenance, provenance, "{name}");
+        }
         let rust_rejected = facts.symbol("lib.rs", "rust_rejected");
         for name in [
             "rust_helper::hidden",
@@ -11646,6 +13975,27 @@ mod tests {
                 reference.resolution_provenance, UNRESOLVED_IMPORT_PROVENANCE,
                 "{name}"
             );
+        }
+        let rust_dynamic_use = facts.symbol("lib.rs", "rust_dynamic_use");
+        let ambiguous = facts.reference(&rust_dynamic_use, "worker.ambiguous_finish");
+        assert!(ambiguous.target_symbol_id.is_none());
+        assert_eq!(
+            ambiguous.resolution_provenance,
+            DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE
+        );
+        let rust_boundaries = facts.symbol("lib.rs", "rust_expected_boundaries");
+        for (name, provenance) in [
+            ("Remote", RUST_EXTERNAL_UNRESOLVED_PROVENANCE),
+            ("Result", RUST_INTRINSIC_UNRESOLVED_PROVENANCE),
+            ("Vec::new", RUST_INTRINSIC_UNRESOLVED_PROVENANCE),
+            ("Ok", RUST_INTRINSIC_UNRESOLVED_PROVENANCE),
+            ("assert", RUST_MACRO_UNRESOLVED_PROVENANCE),
+            ("Remote::default", RUST_EXTERNAL_UNRESOLVED_PROVENANCE),
+            ("serde_json::to_value", RUST_EXTERNAL_UNRESOLVED_PROVENANCE),
+        ] {
+            let reference = facts.reference(&rust_boundaries, name);
+            assert!(reference.target_symbol_id.is_none(), "{name}");
+            assert_eq!(reference.resolution_provenance, provenance, "{name}");
         }
         let use_fake = facts.symbol("use_fake.ts", "useFake");
         let reference = facts.reference(&use_fake, "fake");

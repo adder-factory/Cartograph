@@ -206,9 +206,7 @@ where
 }
 
 #[cfg(test)]
-pub(crate) fn validate_and_reduce(
-    facts: GenerationFacts,
-) -> Result<CanonicalGenerationFacts, StorageError> {
+fn validate_and_reduce(facts: GenerationFacts) -> Result<CanonicalGenerationFacts, StorageError> {
     let limits = GenerationValidationLimits::new(
         MAX_VALIDATION_RETAINED_BYTES / 4,
         MAX_VALIDATION_RETAINED_BYTES,

@@ -21,6 +21,7 @@ mod model;
 mod native;
 mod reader;
 mod snapshot;
+mod source_lines;
 mod tags;
 mod test_names;
 mod walk;
@@ -30,14 +31,16 @@ pub use discovery::{
     DiscoveredSource, DiscoveryLimits, DiscoveryLimitsError, SourceDiscoveryError,
     SourceDiscoveryOptions,
 };
-pub use discovery_policy::{DiscoveryPolicy, DiscoveryPolicyError, V1_DEFAULT_EXCLUDES};
+pub use discovery_policy::{
+    DiscoveryPolicy, DiscoveryPolicyError, NestedRepositoryPolicy, V1_DEFAULT_EXCLUDES,
+};
 pub use grammars::NativeGrammar;
 pub use language::{ExtractionStrategy, LanguageSpec};
 pub use model::{
     CloneTokenCount, CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX,
     DiagnosticCode, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, ExtractedImportBinding,
     ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, ImportBindingKind,
-    SymbolHealthMetrics,
+    RUST_MACRO_RESOLUTION_PREFIX, SymbolHealthMetrics,
 };
 pub use native::{ExtractError, NativeExtractor};
 pub use reader::{SourceReadError, SourceReadOptions, SourceRoot};

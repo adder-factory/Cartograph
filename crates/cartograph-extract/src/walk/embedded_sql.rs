@@ -1,24 +1,24 @@
 use std::collections::BTreeSet;
 
-use cartograph_domain::{
-    ReferenceKind, SourceLanguage, SourcePosition, SourceSpan, SymbolId, SymbolKind,
-};
+use cartograph_domain::{ReferenceKind, SourceLanguage};
 use tree_sitter::Node;
 
 use crate::{
     EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractError, ExtractedReference,
+    source_lines::{LineMap, SourceByteRange},
     walk::{
-        ExtractionBuilder,
+        AstVisitBudget, ExtractionBuilder, owner_for_node,
         syntax::{descendants_including_root, named_children},
     },
 };
 
 const MAX_AST_DEPTH: usize = 256;
-const MAX_AST_VISITS: usize = 500_000;
 const MAX_LITERAL_BYTES: usize = 1024 * 1024;
 const MAX_TOKENS_PER_LITERAL: usize = 65_536;
 const MAX_REFERENCES_PER_FILE: usize = 4_096;
 const MAX_IDENTIFIER_PARTS: usize = 3;
+const INITIAL_SQL_HIT_CAPACITY: usize = 8;
+const TRIPLE_QUOTE_WIDTH: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum SqlOperation {
@@ -76,34 +76,65 @@ struct SqlHit {
     end: usize,
 }
 
+#[derive(Clone, Copy)]
+struct SqlTokenSite<'a> {
+    tokens: &'a [Token],
+    source: &'a str,
+    index: usize,
+    token: Token,
+}
+
+impl SqlTokenSite<'_> {
+    fn keyword_at(self, index: usize, keyword: &str) -> bool {
+        SqlTokenStream {
+            tokens: self.tokens,
+            source: self.source,
+        }
+        .keyword_at(index, keyword)
+    }
+}
+
+struct LiteralScanInput<'tree, 'scan> {
+    node: Node<'tree>,
+    depth: usize,
+    lines: &'scan LineMap,
+    budget: &'scan mut ScanBudget,
+}
+
+struct LiteralInput<'tree, 'scan> {
+    node: Node<'tree>,
+    lines: &'scan LineMap,
+    budget: &'scan mut ScanBudget,
+}
+
+#[derive(Clone, Copy)]
+struct QuotedInput<'source> {
+    bytes: &'source [u8],
+    start: usize,
+    close: u8,
+}
+
+#[derive(Clone, Copy)]
+struct SqlTokenStream<'source> {
+    tokens: &'source [Token],
+    source: &'source str,
+}
+
+impl SqlTokenStream<'_> {
+    fn keyword_at(self, index: usize, keyword: &str) -> bool {
+        self.tokens
+            .get(index)
+            .is_some_and(|token| token.is_keyword(self.source, keyword))
+    }
+}
+
 #[derive(Default)]
 struct ScanBudget {
-    visits: usize,
+    visits: AstVisitBudget<MAX_AST_DEPTH>,
     references: usize,
 }
 
 impl ScanBudget {
-    fn observe(
-        &mut self,
-        builder: &mut ExtractionBuilder<'_, '_>,
-        depth: usize,
-    ) -> Result<(), ExtractError> {
-        if depth > MAX_AST_DEPTH {
-            return Err(ExtractError::NestingLimit);
-        }
-        self.visits = self
-            .visits
-            .checked_add(1)
-            .ok_or(ExtractError::OutputLimit)?;
-        if self.visits > MAX_AST_VISITS {
-            return Err(ExtractError::OutputLimit);
-        }
-        if self.visits.is_multiple_of(256) {
-            builder.context.ensure_active()?;
-        }
-        Ok(())
-    }
-
     fn admit_reference(&mut self) -> Result<(), ExtractError> {
         self.references = self
             .references
@@ -117,55 +148,6 @@ impl ScanBudget {
     }
 }
 
-struct LineIndex {
-    starts: Vec<usize>,
-}
-
-impl LineIndex {
-    fn new(source: &str) -> Result<Self, ExtractError> {
-        let line_count = source
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            .saturating_add(1);
-        let mut starts = Vec::new();
-        starts
-            .try_reserve_exact(line_count)
-            .map_err(|_| ExtractError::OutputLimit)?;
-        starts.push(0);
-        for (index, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
-                starts.push(index.saturating_add(1));
-            }
-        }
-        Ok(Self { starts })
-    }
-
-    fn span(
-        &self,
-        start: usize,
-        end: usize,
-        source_len: usize,
-    ) -> Result<SourceSpan, ExtractError> {
-        if start >= end || end > source_len {
-            return Err(ExtractError::InvalidSpan);
-        }
-        SourceSpan::new(self.position(start)?, self.position(end)?)
-            .map_err(|_| ExtractError::InvalidSpan)
-    }
-
-    fn position(&self, byte: usize) -> Result<SourcePosition, ExtractError> {
-        let line_index = self.starts.partition_point(|start| *start <= byte) - 1;
-        SourcePosition::new(
-            u64::try_from(byte).map_err(|_| ExtractError::InvalidSpan)?,
-            u32::try_from(line_index.saturating_add(1)).map_err(|_| ExtractError::InvalidSpan)?,
-            u32::try_from(byte.saturating_sub(self.starts[line_index]))
-                .map_err(|_| ExtractError::InvalidSpan)?,
-        )
-        .map_err(|_| ExtractError::InvalidSpan)
-    }
-}
-
 pub(super) fn enrich(
     builder: &mut ExtractionBuilder<'_, '_>,
     root: Node<'_>,
@@ -173,9 +155,17 @@ pub(super) fn enrich(
     if !supported_language(builder.context.snapshot.language()) {
         return Ok(());
     }
-    let lines = LineIndex::new(builder.context.source())?;
+    let lines = LineMap::new(builder.context.source())?;
     let mut budget = ScanBudget::default();
-    scan_literals(builder, root, 0, &lines, &mut budget)
+    scan_literals(
+        builder,
+        LiteralScanInput {
+            node: root,
+            depth: 0,
+            lines: &lines,
+            budget: &mut budget,
+        },
+    )
 }
 
 fn supported_language(language: SourceLanguage) -> bool {
@@ -199,24 +189,37 @@ fn supported_language(language: SourceLanguage) -> bool {
 
 fn scan_literals(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    lines: &LineIndex,
-    budget: &mut ScanBudget,
+    input: LiteralScanInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    budget.observe(builder, depth)?;
+    input.budget.visits.observe(builder, input.depth)?;
     let language = builder.context.snapshot.language();
-    if string_literal_node(node, language)
-        && !node
+    if string_literal_node(input.node, language)
+        && !input
+            .node
             .parent()
             .is_some_and(|parent| string_literal_node(parent, language))
-        && !contains_dynamic_fragment(node)
+        && !contains_dynamic_fragment(input.node)
     {
-        scan_literal(builder, node, lines, budget)?;
+        scan_literal(
+            builder,
+            LiteralInput {
+                node: input.node,
+                lines: input.lines,
+                budget: input.budget,
+            },
+        )?;
         return Ok(());
     }
-    for child in named_children(node) {
-        scan_literals(builder, child, depth.saturating_add(1), lines, budget)?;
+    for child in named_children(input.node) {
+        scan_literals(
+            builder,
+            LiteralScanInput {
+                node: child,
+                depth: input.depth.saturating_add(1),
+                lines: input.lines,
+                budget: &mut *input.budget,
+            },
+        )?;
     }
     Ok(())
 }
@@ -253,11 +256,9 @@ fn contains_dynamic_fragment(node: Node<'_>) -> bool {
 
 fn scan_literal(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    lines: &LineIndex,
-    budget: &mut ScanBudget,
+    input: LiteralInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let raw = builder.context.text(node);
+    let raw = builder.context.text(input.node);
     let Some((content_start, content_end)) = literal_content_bounds(raw) else {
         return Ok(());
     };
@@ -275,15 +276,16 @@ fn scan_literal(
         return Ok(());
     }
     let hits = collect_hits(&tokens, content)?;
-    let owner = owner_for_node(builder, node);
+    let owner = owner_for_node(builder, input.node);
     let source_len = builder.context.source().len();
-    let base = node
+    let base = input
+        .node
         .start_byte()
         .checked_add(content_start)
         .ok_or(ExtractError::InvalidSpan)?;
     for hit in hits {
         builder.context.ensure_active()?;
-        budget.admit_reference()?;
+        input.budget.admit_reference()?;
         let start = base
             .checked_add(hit.start)
             .ok_or(ExtractError::InvalidSpan)?;
@@ -294,7 +296,9 @@ fn scan_literal(
             name: hit.name,
             resolution_name: Some(resolution_name),
             kind: ReferenceKind::References,
-            span: lines.span(start, end, source_len)?,
+            span: input
+                .lines
+                .span(SourceByteRange::new(start, end, source_len))?,
         })?;
     }
     Ok(())
@@ -313,18 +317,70 @@ fn literal_content_bounds(raw: &str) -> Option<(usize, usize)> {
     };
     let delimiter = bytes[first];
     let triple = bytes
-        .get(first..first.saturating_add(3))
+        .get(first..first.saturating_add(TRIPLE_QUOTE_WIDTH))
         .is_some_and(|value| value == [delimiter, delimiter, delimiter]);
-    let width = if triple { 3 } else { 1 };
+    let width = if triple { TRIPLE_QUOTE_WIDTH } else { 1 };
     let start = first.checked_add(width)?;
     let end = if triple {
         bytes
-            .windows(3)
+            .windows(TRIPLE_QUOTE_WIDTH)
             .rposition(|window| window == [delimiter, delimiter, delimiter])?
     } else {
         bytes.iter().rposition(|byte| *byte == delimiter)?
     };
     (start <= end).then_some((start, end))
+}
+
+fn skipped_sql_region(bytes: &[u8], index: usize) -> Option<usize> {
+    let byte = bytes[index];
+    if byte.is_ascii_whitespace() || matches!(byte, b',' | b';' | b'(' | b')') {
+        Some(index.saturating_add(1))
+    } else if byte == b'-' && bytes.get(index.saturating_add(1)) == Some(&b'-') {
+        Some(skip_line_comment(bytes, index.saturating_add(2)))
+    } else if byte == b'/' && bytes.get(index.saturating_add(1)) == Some(&b'*') {
+        Some(skip_block_comment(bytes, index.saturating_add(2)))
+    } else if byte == b'\'' {
+        Some(quoted_end(QuotedInput {
+            bytes,
+            start: index,
+            close: b'\'',
+        }))
+    } else {
+        None
+    }
+}
+
+fn sql_punctuation_token(byte: u8, index: usize) -> Option<Token> {
+    (byte == b'.').then_some(Token {
+        kind: TokenKind::Dot,
+        source_start: index,
+        source_end: index.saturating_add(1),
+        value_start: index,
+        value_end: index.saturating_add(1),
+    })
+}
+
+fn quoted_sql_identifier(bytes: &[u8], index: usize) -> Option<(Token, usize)> {
+    let byte = bytes[index];
+    if !matches!(byte, b'"' | b'`' | b'[') {
+        return None;
+    }
+    let close = if byte == b'[' { b']' } else { byte };
+    let end = quoted_end(QuotedInput {
+        bytes,
+        start: index,
+        close,
+    });
+    (end > index.saturating_add(1)).then_some((
+        Token {
+            kind: TokenKind::QuotedIdentifier,
+            source_start: index,
+            source_end: end,
+            value_start: index.saturating_add(1),
+            value_end: end.saturating_sub(1),
+        },
+        end,
+    ))
 }
 
 fn tokenize(source: &str) -> Result<Vec<Token>, ExtractError> {
@@ -339,45 +395,17 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ExtractError> {
             return Err(ExtractError::OutputLimit);
         }
         let byte = bytes[index];
-        if byte.is_ascii_whitespace() || matches!(byte, b',' | b';' | b'(' | b')') {
+        if let Some(next) = skipped_sql_region(bytes, index) {
+            index = next;
+            continue;
+        }
+        if let Some(token) = sql_punctuation_token(byte, index) {
+            tokens.push(token);
             index = index.saturating_add(1);
             continue;
         }
-        if byte == b'-' && bytes.get(index.saturating_add(1)) == Some(&b'-') {
-            index = skip_line_comment(bytes, index.saturating_add(2));
-            continue;
-        }
-        if byte == b'/' && bytes.get(index.saturating_add(1)) == Some(&b'*') {
-            index = skip_block_comment(bytes, index.saturating_add(2));
-            continue;
-        }
-        if byte == b'.' {
-            tokens.push(Token {
-                kind: TokenKind::Dot,
-                source_start: index,
-                source_end: index.saturating_add(1),
-                value_start: index,
-                value_end: index.saturating_add(1),
-            });
-            index = index.saturating_add(1);
-            continue;
-        }
-        if byte == b'\'' {
-            index = skip_quoted(bytes, index, b'\'', b'\'');
-            continue;
-        }
-        if matches!(byte, b'"' | b'`' | b'[') {
-            let close = if byte == b'[' { b']' } else { byte };
-            let end = quoted_end(bytes, index, byte, close);
-            if end > index.saturating_add(1) {
-                tokens.push(Token {
-                    kind: TokenKind::QuotedIdentifier,
-                    source_start: index,
-                    source_end: end,
-                    value_start: index.saturating_add(1),
-                    value_end: end.saturating_sub(1),
-                });
-            }
+        if let Some((token, end)) = quoted_sql_identifier(bytes, index) {
+            tokens.push(token);
             index = end;
             continue;
         }
@@ -421,15 +449,11 @@ fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-fn skip_quoted(bytes: &[u8], start: usize, open: u8, close: u8) -> usize {
-    quoted_end(bytes, start, open, close)
-}
-
-fn quoted_end(bytes: &[u8], start: usize, _open: u8, close: u8) -> usize {
-    let mut index = start.saturating_add(1);
-    while index < bytes.len() {
-        if bytes[index] == close {
-            if bytes.get(index.saturating_add(1)) == Some(&close) {
+fn quoted_end(input: QuotedInput<'_>) -> usize {
+    let mut index = input.start.saturating_add(1);
+    while index < input.bytes.len() {
+        if input.bytes[index] == input.close {
+            if input.bytes.get(index.saturating_add(1)) == Some(&input.close) {
                 index = index.saturating_add(2);
                 continue;
             }
@@ -437,7 +461,7 @@ fn quoted_end(bytes: &[u8], start: usize, _open: u8, close: u8) -> usize {
         }
         index = index.saturating_add(1);
     }
-    bytes.len()
+    input.bytes.len()
 }
 
 fn identifier_start(byte: u8) -> bool {
@@ -460,54 +484,110 @@ fn has_sql_anchor(tokens: &[Token], source: &str) -> bool {
 }
 
 fn collect_hits(tokens: &[Token], source: &str) -> Result<Vec<SqlHit>, ExtractError> {
-    let mut hits = Vec::new();
-    hits.try_reserve(8).map_err(|_| ExtractError::OutputLimit)?;
+    let mut hits = empty_hit_buffer()?;
     let mut seen = BTreeSet::new();
     for (index, token) in tokens.iter().copied().enumerate() {
-        let target = if token.is_keyword(source, "from") || token.is_keyword(source, "join") {
-            Some((SqlOperation::Read, index.saturating_add(1)))
-        } else if token.is_keyword(source, "insert")
-            && keyword_at(tokens, source, index.saturating_add(1), "into")
-        {
-            Some((SqlOperation::Write, index.saturating_add(2)))
-        } else if token.is_keyword(source, "update") {
-            Some((SqlOperation::Write, index.saturating_add(1)))
-        } else if (token.is_keyword(source, "delete")
-            && keyword_at(tokens, source, index.saturating_add(1), "from"))
-            || (token.is_keyword(source, "merge")
-                && keyword_at(tokens, source, index.saturating_add(1), "into"))
-        {
-            Some((SqlOperation::Write, index.saturating_add(2)))
-        } else if token.is_keyword(source, "alter")
-            || token.is_keyword(source, "truncate")
-            || token.is_keyword(source, "drop")
-        {
-            ddl_target(tokens, source, index.saturating_add(1))
-        } else if token.is_keyword(source, "create") {
-            create_target(tokens, source, index.saturating_add(1))
-        } else {
-            None
-        };
-        let Some((operation, start)) = target else {
+        let Some(hit) = sql_hit_at(SqlTokenSite {
+            tokens,
+            source,
+            index,
+            token,
+        })?
+        else {
             continue;
         };
-        let Some((name, span_start, span_end)) = parse_identifier(tokens, source, start)? else {
-            continue;
-        };
-        if reserved_name(name.rsplit('.').next().unwrap_or(&name)) {
-            continue;
-        }
-        let identity = (name.to_ascii_lowercase(), operation);
-        if seen.insert(identity) {
-            hits.push(SqlHit {
-                name,
-                operation,
-                start: span_start,
-                end: span_end,
-            });
+        if seen.insert(sql_hit_identity(&hit)) {
+            hits.push(hit);
         }
     }
     Ok(hits)
+}
+
+fn empty_hit_buffer() -> Result<Vec<SqlHit>, ExtractError> {
+    let mut hits = Vec::new();
+    hits.try_reserve(INITIAL_SQL_HIT_CAPACITY)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    Ok(hits)
+}
+
+fn sql_hit_identity(hit: &SqlHit) -> (String, SqlOperation) {
+    (hit.name.to_ascii_lowercase(), hit.operation)
+}
+
+fn sql_hit_at(site: SqlTokenSite<'_>) -> Result<Option<SqlHit>, ExtractError> {
+    let Some((operation, start)) = sql_target_at(site) else {
+        return Ok(None);
+    };
+    let Some((name, start, end)) = parse_identifier(site.tokens, site.source, start)? else {
+        return Ok(None);
+    };
+    if reserved_name(name.rsplit('.').next().unwrap_or(&name)) {
+        return Ok(None);
+    }
+    Ok(Some(SqlHit {
+        name,
+        operation,
+        start,
+        end,
+    }))
+}
+
+fn sql_target_at(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    read_target(site)
+        .or_else(|| write_target(site))
+        .or_else(|| schema_target(site))
+}
+
+fn read_target(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    (site.token.is_keyword(site.source, "from") || site.token.is_keyword(site.source, "join"))
+        .then_some((SqlOperation::Read, site.index.saturating_add(1)))
+}
+
+fn write_target(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    if site.token.is_keyword(site.source, "update") {
+        return Some((SqlOperation::Write, site.index.saturating_add(1)));
+    }
+    insert_target(site).or_else(|| separated_write_target(site))
+}
+
+fn insert_target(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    let following = site.index.saturating_add(1);
+    (site.token.is_keyword(site.source, "insert") && site.keyword_at(following, "into"))
+        .then_some((SqlOperation::Write, site.index.saturating_add(2)))
+}
+
+fn separated_write_target(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    write_target_has_separator(site).then_some((SqlOperation::Write, site.index.saturating_add(2)))
+}
+
+fn write_target_has_separator(site: SqlTokenSite<'_>) -> bool {
+    let following = site.index.saturating_add(1);
+    (site.token.is_keyword(site.source, "delete") && site.keyword_at(following, "from"))
+        || (site.token.is_keyword(site.source, "merge") && site.keyword_at(following, "into"))
+}
+
+fn schema_target(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    create_schema_target(site).or_else(|| alter_schema_target(site))
+}
+
+fn create_schema_target(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    if site.token.is_keyword(site.source, "create") {
+        create_target(site.tokens, site.source, site.index.saturating_add(1))
+    } else {
+        None
+    }
+}
+
+fn alter_schema_target(site: SqlTokenSite<'_>) -> Option<(SqlOperation, usize)> {
+    let following = site.index.saturating_add(1);
+    let ddl = site.token.is_keyword(site.source, "alter")
+        || site.token.is_keyword(site.source, "truncate")
+        || site.token.is_keyword(site.source, "drop");
+    if ddl {
+        ddl_target(site.tokens, site.source, following)
+    } else {
+        None
+    }
 }
 
 fn create_target(
@@ -515,26 +595,26 @@ fn create_target(
     source: &str,
     mut index: usize,
 ) -> Option<(SqlOperation, usize)> {
-    if keyword_at(tokens, source, index, "or")
-        && keyword_at(tokens, source, index.saturating_add(1), "replace")
-    {
+    let stream = SqlTokenStream { tokens, source };
+    if stream.keyword_at(index, "or") && stream.keyword_at(index.saturating_add(1), "replace") {
         index = index.saturating_add(2);
     }
-    if keyword_at(tokens, source, index, "temp") || keyword_at(tokens, source, index, "temporary") {
+    if stream.keyword_at(index, "temp") || stream.keyword_at(index, "temporary") {
         index = index.saturating_add(1);
     }
     ddl_target(tokens, source, index)
 }
 
 fn ddl_target(tokens: &[Token], source: &str, index: usize) -> Option<(SqlOperation, usize)> {
-    if keyword_at(tokens, source, index, "table") || keyword_at(tokens, source, index, "view") {
+    let stream = SqlTokenStream { tokens, source };
+    if stream.keyword_at(index, "table") || stream.keyword_at(index, "view") {
         let mut target = index.saturating_add(1);
-        if keyword_at(tokens, source, target, "if") {
+        if stream.keyword_at(target, "if") {
             target = target.saturating_add(1);
-            if keyword_at(tokens, source, target, "not") {
+            if stream.keyword_at(target, "not") {
                 target = target.saturating_add(1);
             }
-            if keyword_at(tokens, source, target, "exists") {
+            if stream.keyword_at(target, "exists") {
                 target = target.saturating_add(1);
             }
         }
@@ -542,12 +622,6 @@ fn ddl_target(tokens: &[Token], source: &str, index: usize) -> Option<(SqlOperat
     } else {
         None
     }
-}
-
-fn keyword_at(tokens: &[Token], source: &str, index: usize, keyword: &str) -> bool {
-    tokens
-        .get(index)
-        .is_some_and(|token| token.is_keyword(source, keyword))
 }
 
 fn parse_identifier(
@@ -604,27 +678,6 @@ fn reserved_name(name: &str) -> bool {
     ]
     .iter()
     .any(|reserved| name.eq_ignore_ascii_case(reserved))
-}
-
-fn owner_for_node(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> Option<SymbolId> {
-    let start = u64::try_from(node.start_byte()).ok()?;
-    let end = u64::try_from(node.end_byte()).ok()?;
-    builder
-        .facts
-        .symbols
-        .iter()
-        .filter(|symbol| {
-            symbol.span.start_byte() <= start
-                && end <= symbol.span.end_byte()
-                && !matches!(symbol.kind, SymbolKind::File | SymbolKind::Import)
-        })
-        .min_by_key(|symbol| {
-            symbol
-                .span
-                .end_byte()
-                .saturating_sub(symbol.span.start_byte())
-        })
-        .map(|symbol| symbol.id.clone())
 }
 
 fn resolution_name(

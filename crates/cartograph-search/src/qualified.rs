@@ -162,43 +162,56 @@ pub fn parse_qualified_query(raw: &str) -> ParsedQualifiedQuery {
 }
 
 fn classify_token(token: &str, parsed: &mut ParsedQualifiedQuery) -> bool {
-    let Some((key, raw_value)) = token.split_once(':') else {
+    let Some((key, value)) = qualified_token_parts(token) else {
         return false;
     };
-    if key.is_empty() || raw_value.is_empty() {
-        return false;
-    }
-    let value = unquote(raw_value);
-    if value.is_empty() {
-        return false;
-    }
-    match key.to_ascii_lowercase().as_str() {
+    match key.as_str() {
         "kind" => SymbolKind::from_stable_str(value).is_some() && push(&mut parsed.kinds, value),
-        "lang" | "language" => {
-            let lowered = value.to_ascii_lowercase();
-            SourceLanguage::from_stable_str(&lowered).is_some()
-                && push_owned(&mut parsed.languages, lowered)
-        }
+        "lang" | "language" => classify_language(value, parsed),
         "path" => push(&mut parsed.path_filters, value),
         "name" => push(&mut parsed.name_filters, value),
         "sig" | "signature" => push(&mut parsed.signature_filters, value),
         "callers-of" => push(&mut parsed.callers_of, value),
         "callees-of" => push(&mut parsed.callees_of, value),
         "depends-on" => push(&mut parsed.depends_on, value),
-        "centrality" => parse_centrality(value).is_some_and(|filter| {
-            parsed.centrality = Some(filter);
-            true
-        }),
-        "sort" if value.eq_ignore_ascii_case("centrality") => {
-            parsed.sort = Some(QualifiedSort::Centrality);
-            true
-        }
-        "sort" if value.eq_ignore_ascii_case("relevance") => {
-            parsed.sort = Some(QualifiedSort::Relevance);
-            true
-        }
+        "centrality" => classify_centrality(value, parsed),
+        "sort" => classify_sort(value, parsed),
         _ => false,
     }
+}
+
+fn qualified_token_parts(token: &str) -> Option<(String, &str)> {
+    let (key, raw_value) = token.split_once(':')?;
+    if key.is_empty() || raw_value.is_empty() {
+        return None;
+    }
+    let value = unquote(raw_value);
+    (!value.is_empty()).then(|| (key.to_ascii_lowercase(), value))
+}
+
+fn classify_language(value: &str, parsed: &mut ParsedQualifiedQuery) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    SourceLanguage::from_stable_str(&lowered).is_some()
+        && push_owned(&mut parsed.languages, lowered)
+}
+
+fn classify_centrality(value: &str, parsed: &mut ParsedQualifiedQuery) -> bool {
+    let Some(filter) = parse_centrality(value) else {
+        return false;
+    };
+    parsed.centrality = Some(filter);
+    true
+}
+
+fn classify_sort(value: &str, parsed: &mut ParsedQualifiedQuery) -> bool {
+    parsed.sort = if value.eq_ignore_ascii_case("centrality") {
+        Some(QualifiedSort::Centrality)
+    } else if value.eq_ignore_ascii_case("relevance") {
+        Some(QualifiedSort::Relevance)
+    } else {
+        return false;
+    };
+    true
 }
 
 fn push(values: &mut Vec<String>, value: &str) -> bool {

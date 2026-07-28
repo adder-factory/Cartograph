@@ -6,7 +6,7 @@ use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::PgConnection;
 
-use crate::{CartographDatabase, StorageError};
+use crate::{CartographDatabase, CurrentGenerationLookup, StorageError};
 
 const RELATION_PREFIX: &str = "search_g_";
 const BM25_INDEX_SUFFIX: &str = "_bm25";
@@ -14,6 +14,8 @@ const RELATION_FORMAT_VERSION: i16 = 1;
 const MAXIMUM_PROJECT_SEARCH_RELATIONS: i64 = 256;
 const MAXIMUM_STARTUP_REPAIRS: i64 = 64;
 const SEARCH_RELATION_LOCK_NAMESPACE: &str = "cartograph-v2-generation-search-relation";
+const COMPACT_UUID_LENGTH: usize = 32;
+const UUID_GROUP_BOUNDARIES: [usize; 6] = [0, 8, 12, 16, 20, COMPACT_UUID_LENGTH];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GenerationSearchRelation {
@@ -73,9 +75,10 @@ pub(crate) async fn rebuild_generation_search_relation(
 pub(crate) async fn require_generation_search_relation(
     connection: &mut PgConnection,
     schema: &DatabaseSchema,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    generation: CurrentGenerationLookup<'_>,
 ) -> Result<GenerationSearchRelation, StorageError> {
+    let project_id = generation.project_id();
+    let generation_id = generation.expected_generation_id();
     let relation = GenerationSearchRelation::from_generation(generation_id)?;
     let sql = format!(
         r#"SELECT relations.document_count,
@@ -517,8 +520,7 @@ impl CartographDatabase {
             match require_generation_search_relation(
                 &mut transaction,
                 &self.schema,
-                &project,
-                &generation,
+                CurrentGenerationLookup::new(&project, &generation),
             )
             .await
             {
@@ -621,20 +623,21 @@ impl CartographDatabase {
 
 fn generation_from_table_name(name: &str) -> Option<GenerationId> {
     let compact = name.strip_prefix(RELATION_PREFIX)?;
-    if compact.len() != 32
+    if compact.len() != COMPACT_UUID_LENGTH
         || !compact
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return None;
     }
+    let [start, group_one, group_two, group_three, group_four, end] = UUID_GROUP_BOUNDARIES;
     let canonical = format!(
         "{}-{}-{}-{}-{}",
-        &compact[0..8],
-        &compact[8..12],
-        &compact[12..16],
-        &compact[16..20],
-        &compact[20..32]
+        &compact[start..group_one],
+        &compact[group_one..group_two],
+        &compact[group_two..group_three],
+        &compact[group_three..group_four],
+        &compact[group_four..end]
     );
     GenerationId::parse(&canonical).ok()
 }

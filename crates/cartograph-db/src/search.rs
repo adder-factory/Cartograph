@@ -5,8 +5,11 @@ use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 use crate::{
-    CartographDatabase, StorageError,
-    database::{parse_stored_generation_id, read_stored_string, stored_value_error},
+    CartographDatabase, CurrentGenerationLookup, StorageError,
+    database::{
+        parse_stored_generation_id, read_stored_bool as read_bool, read_stored_string,
+        stored_value_error,
+    },
     search_relation::require_generation_search_relation,
 };
 
@@ -44,14 +47,13 @@ impl SearchQuery {
     /// Build a query request. It is validated immediately before execution.
     #[must_use]
     pub fn new(
-        project_id: ProjectId,
-        expected_generation_id: GenerationId,
+        generation: CurrentGenerationLookup<'_>,
         query: impl Into<String>,
         limit: u16,
     ) -> Self {
         Self {
-            project_id,
-            expected_generation_id,
+            project_id: generation.project_id().clone(),
+            expected_generation_id: generation.expected_generation_id().clone(),
             query: query.into().trim().to_owned(),
             limit,
         }
@@ -227,15 +229,19 @@ impl CartographDatabase {
         crate::retrieval::require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            &input.project_id,
-            &input.expected_generation_id,
+            crate::retrieval::CurrentGenerationLookup::new(
+                &input.project_id,
+                &input.expected_generation_id,
+            ),
         )
         .await?;
         let relation = require_generation_search_relation(
             &mut transaction,
             &self.schema,
-            &input.project_id,
-            &input.expected_generation_id,
+            crate::retrieval::CurrentGenerationLookup::new(
+                &input.project_id,
+                &input.expected_generation_id,
+            ),
         )
         .await?;
         let (matches, qualified_name_match, code_match, natural_text_match, operation) =
@@ -383,14 +389,6 @@ fn parse_document_id(row: &sqlx_postgres::PgRow, index: usize) -> Result<Documen
     DocumentId::parse(&raw).map_err(|_| corrupt("document_id"))
 }
 
-fn read_bool(
-    row: &sqlx_postgres::PgRow,
-    index: usize,
-    field: &'static str,
-) -> Result<bool, StorageError> {
-    row.try_get::<bool, _>(index).map_err(|_| corrupt(field))
-}
-
 const fn corrupt(field: &'static str) -> StorageError {
     stored_value_error(field)
 }
@@ -411,28 +409,28 @@ mod tests {
             .unwrap_or_else(|error| panic!("generation fixture UUID is invalid: {error}"))
     }
 
+    fn search_query(query: impl Into<String>, limit: u16) -> SearchQuery {
+        let project = project_id();
+        let generation = generation_id();
+        SearchQuery::new(
+            CurrentGenerationLookup::new(&project, &generation),
+            query,
+            limit,
+        )
+    }
+
     #[test]
     fn query_bounds_reject_empty_unbounded_and_zero_limit_requests() {
         assert_eq!(
-            validate_query(&SearchQuery::new(project_id(), generation_id(), "   ", 10)),
+            validate_query(&search_query("   ", 10)),
             Err(StorageError::InvalidInput { field: "query" })
         );
         assert_eq!(
-            validate_query(&SearchQuery::new(
-                project_id(),
-                generation_id(),
-                "x".repeat(MAX_QUERY_BYTES + 1),
-                10,
-            )),
+            validate_query(&search_query("x".repeat(MAX_QUERY_BYTES + 1), 10)),
             Err(StorageError::InvalidInput { field: "query" })
         );
         assert_eq!(
-            validate_query(&SearchQuery::new(
-                project_id(),
-                generation_id(),
-                "parser",
-                0,
-            )),
+            validate_query(&search_query("parser", 0)),
             Err(StorageError::InvalidInput { field: "limit" })
         );
     }
@@ -450,12 +448,7 @@ mod tests {
     #[test]
     fn query_validation_errors_never_render_query_text() {
         let untrusted_input = "opaque-caller-query\0";
-        let error = match validate_query(&SearchQuery::new(
-            project_id(),
-            generation_id(),
-            untrusted_input,
-            10,
-        )) {
+        let error = match validate_query(&search_query(untrusted_input, 10)) {
             Ok(()) => panic!("nul-bearing query unexpectedly passed validation"),
             Err(error) => error,
         };

@@ -13,6 +13,8 @@ const MAXIMUM_SEARCH_RELATION_BYTE_BUDGET: u64 = 64 * 1_024 * 1_024 * 1_024;
 const MAXIMUM_DDL_RELATIONS: u32 = 64;
 const DEFAULT_CASCADE_ROW_BUDGET: u64 = 5_000_000;
 const DEFAULT_SEARCH_RELATION_BYTE_BUDGET: u64 = 8 * 1_024 * 1_024 * 1_024;
+const DEFAULT_STALE_STAGING_AGE: Duration = Duration::from_secs(10 * 60);
+const MAXIMUM_STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const RETENTION_LOCK_NAMESPACE: &str = "cartograph-v2-generation-retention";
 const PUBLICATION_LOCK_NAMESPACE: &str = "cartograph-v2-publish";
 const INVALID_DELETE_BATCH: u32 = 0;
@@ -22,6 +24,7 @@ const INVALID_DELETE_BATCH: u32 = 0;
 pub struct GenerationRetentionPolicy {
     recent_superseded: u32,
     maximum_deletions: u32,
+    stale_staging_age: Duration,
     maximum_cascade_rows: u64,
     maximum_search_relation_bytes: u64,
     maximum_ddl_relations: u32,
@@ -62,6 +65,7 @@ impl GenerationRetentionPolicy {
         Ok(Self {
             recent_superseded,
             maximum_deletions,
+            stale_staging_age: DEFAULT_STALE_STAGING_AGE,
             maximum_cascade_rows: DEFAULT_CASCADE_ROW_BUDGET,
             maximum_search_relation_bytes: DEFAULT_SEARCH_RELATION_BYTE_BUDGET,
             maximum_ddl_relations: if maximum_deletions < MAXIMUM_DDL_RELATIONS {
@@ -72,6 +76,18 @@ impl GenerationRetentionPolicy {
         })
     }
 
+    /// Override how old an unleased staging generation must be before collection.
+    pub fn with_stale_staging_age(
+        mut self,
+        stale_staging_age: Duration,
+    ) -> Result<Self, GenerationRetentionError> {
+        if stale_staging_age.is_zero() || stale_staging_age > MAXIMUM_STALE_STAGING_AGE {
+            return Err(GenerationRetentionError::InvalidPolicy);
+        }
+        self.stale_staging_age = stale_staging_age;
+        Ok(self)
+    }
+
     /// Override exact row, physical relation-byte, and DDL-count work caps.
     pub const fn with_work_limits(
         mut self,
@@ -79,10 +95,11 @@ impl GenerationRetentionPolicy {
         maximum_search_relation_bytes: u64,
         maximum_ddl_relations: u32,
     ) -> Result<Self, GenerationRetentionError> {
-        if maximum_cascade_rows == 0
-            || maximum_cascade_rows > MAXIMUM_CASCADE_ROW_BUDGET
-            || maximum_search_relation_bytes == 0
-            || maximum_search_relation_bytes > MAXIMUM_SEARCH_RELATION_BYTE_BUDGET
+        if !valid_positive_limit(maximum_cascade_rows, MAXIMUM_CASCADE_ROW_BUDGET)
+            || !valid_positive_limit(
+                maximum_search_relation_bytes,
+                MAXIMUM_SEARCH_RELATION_BYTE_BUDGET,
+            )
             || maximum_ddl_relations == 0
             || maximum_ddl_relations > MAXIMUM_DDL_RELATIONS
         {
@@ -106,6 +123,12 @@ impl GenerationRetentionPolicy {
         self.maximum_deletions
     }
 
+    /// Minimum database-clock age for collecting an unleased staging generation.
+    #[must_use]
+    pub const fn stale_staging_age(self) -> Duration {
+        self.stale_staging_age
+    }
+
     /// Maximum canonical/cascade rows admitted into one cleanup transaction.
     #[must_use]
     pub const fn maximum_cascade_rows(self) -> u64 {
@@ -125,9 +148,15 @@ impl GenerationRetentionPolicy {
     }
 }
 
+const fn valid_positive_limit(value: u64, maximum: u64) -> bool {
+    value > 0 && value <= maximum
+}
+
 /// Exact bounded cleanup result after cascades committed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct GenerationRetentionReport {
+    /// Stale unleased staging generations deleted in this batch.
+    pub staging_removed: u64,
     /// Superseded generations deleted in this batch.
     pub superseded_removed: u64,
     /// Failed generations deleted in this batch.
@@ -140,6 +169,8 @@ pub struct GenerationRetentionReport {
     pub superseded_preserved: u64,
     /// Failed generations still waiting for a later bounded batch.
     pub failed_remaining: u64,
+    /// Staging generations still present, including recent or leased work.
+    pub staging_remaining: u64,
     /// Canonical and cascading rows admitted under the exact row-work cap.
     pub cascade_rows_removed: u64,
     /// Physical generation search relations removed in the bounded DDL batch.
@@ -152,7 +183,7 @@ impl GenerationRetentionReport {
     /// Total generations deleted by this invocation.
     #[must_use]
     pub const fn removed(self) -> u64 {
-        self.superseded_removed + self.failed_removed
+        self.staging_removed + self.superseded_removed + self.failed_removed
     }
 }
 
@@ -177,11 +208,13 @@ pub enum GenerationRetentionError {
 }
 
 impl CartographDatabase {
-    /// Delete a bounded batch of failed and old superseded generations.
+    /// Delete a bounded batch of stale unleased staging, failed, and old
+    /// superseded generations.
     ///
-    /// The current generation, staging/ready work, and the configured newest
-    /// superseded histories are never candidates. The caller must hold an exact,
-    /// unexpired project `migration` lease that is not generation-bound.
+    /// The current generation, ready work, recent staging, leased staging, and
+    /// the configured newest superseded histories are never candidates. The
+    /// caller must hold an exact, unexpired project `migration` lease that is
+    /// not generation-bound.
     pub async fn cleanup_generations(
         &self,
         request: GenerationRetentionRequest<'_>,
@@ -236,6 +269,7 @@ struct RetentionContext<'a> {
 }
 
 struct RemovedGenerationCounts {
+    staging: u64,
     superseded: u64,
     failed: u64,
     embeddings: u64,
@@ -243,6 +277,7 @@ struct RemovedGenerationCounts {
 
 struct PreservedGenerationCounts {
     current: u64,
+    staging: u64,
     superseded: u64,
     failed: u64,
 }
@@ -289,12 +324,14 @@ async fn cleanup_transaction(
     // Row locks prevent takeover, but they do not freeze database-clock expiry.
     require_live_fence(connection, context).await?;
     Ok(GenerationRetentionReport {
+        staging_removed: removed.staging,
         superseded_removed: removed.superseded,
         failed_removed: removed.failed,
         embeddings_removed: removed.embeddings,
         current_preserved: preserved.current,
         superseded_preserved: preserved.superseded,
         failed_remaining: preserved.failed,
+        staging_remaining: preserved.staging,
         cascade_rows_removed: bounded.cascade_rows,
         search_relations_removed: bounded.search_relations,
         search_relation_bytes_removed: bounded.search_relation_bytes,
@@ -305,9 +342,11 @@ async fn load_terminal_candidates(
     connection: &mut sqlx_postgres::PgConnection,
     context: &RetentionContext<'_>,
 ) -> Result<Vec<RetentionCandidate>, GenerationRetentionError> {
+    let stale_staging_millis = i64::try_from(context.policy.stale_staging_age.as_millis())
+        .map_err(|_| GenerationRetentionError::InvalidPolicy)?;
     let sql = format!(
         r#"WITH ranked AS (
-                SELECT generation_id, generation_sequence, state,
+                SELECT generation_id, generation_sequence, state, started_at,
                        row_number() OVER (
                            PARTITION BY state ORDER BY generation_sequence DESC
                        ) AS state_rank
@@ -324,13 +363,30 @@ async fn load_terminal_candidates(
                       AND import_runs.checkpoint <> 'complete'
                 ))
                OR (state = 'superseded' AND state_rank > $2)
+               OR (state = 'staging'
+                   AND started_at <= clock_timestamp() - $3 * interval '1 millisecond'
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM {}."project_operation_leases" AS leases
+                       WHERE leases.project_id = CAST($1 AS uuid)
+                         AND leases.generation_id = ranked.generation_id
+                         AND leases.expires_at > clock_timestamp()
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM {}."v1_import_runs" AS import_runs
+                       WHERE import_runs.project_id = CAST($1 AS uuid)
+                         AND import_runs.generation_id = ranked.generation_id
+                         AND import_runs.checkpoint <> 'complete'
+                   ))
             ORDER BY generation_sequence ASC
-            LIMIT $3"#,
-        context.quoted_schema, context.quoted_schema
+            LIMIT $4"#,
+        context.quoted_schema, context.quoted_schema, context.quoted_schema, context.quoted_schema
     );
     query(AssertSqlSafe(sql))
         .bind(context.fence.target().project_id().as_str())
         .bind(i64::from(context.policy.recent_superseded))
+        .bind(stale_staging_millis)
         .bind(i64::from(
             context
                 .policy
@@ -523,6 +579,7 @@ async fn delete_terminal_generations(
 ) -> Result<RemovedGenerationCounts, GenerationRetentionError> {
     if candidates.is_empty() {
         return Ok(RemovedGenerationCounts {
+            staging: 0,
             superseded: 0,
             failed: 0,
             embeddings: 0,
@@ -542,10 +599,11 @@ async fn delete_terminal_generations(
                 DELETE FROM {}."index_generations" AS generations
                 WHERE generations.project_id = CAST($1 AS uuid)
                   AND generations.generation_id = ANY(CAST($2 AS uuid[]))
-                  AND generations.state IN ('failed', 'superseded')
+                  AND generations.state IN ('staging', 'failed', 'superseded')
                 RETURNING generations.state
             )
             SELECT
+                count(*) FILTER (WHERE state = 'staging')::bigint AS staging_removed,
                 count(*) FILTER (WHERE state = 'superseded')::bigint AS superseded_removed,
                 count(*) FILTER (WHERE state = 'failed')::bigint AS failed_removed,
                 (SELECT embeddings_removed FROM candidate_embeddings) AS embeddings_removed
@@ -559,6 +617,7 @@ async fn delete_terminal_generations(
         .await
         .map_err(|_| database_error("delete-terminal-generations"))?;
     Ok(RemovedGenerationCounts {
+        staging: read_named_count(&row, "staging_removed")?,
         superseded: read_named_count(&row, "superseded_removed")?,
         failed: read_named_count(&row, "failed_removed")?,
         embeddings: read_named_count(&row, "embeddings_removed")?,
@@ -572,6 +631,7 @@ async fn load_preserved_counts(
     let remaining_sql = format!(
         r#"SELECT
             count(*) FILTER (WHERE state = 'current')::bigint AS current_preserved,
+            count(*) FILTER (WHERE state = 'staging')::bigint AS staging_remaining,
             count(*) FILTER (WHERE state = 'superseded')::bigint AS superseded_preserved,
             count(*) FILTER (WHERE state = 'failed')::bigint AS failed_remaining
         FROM {}."index_generations"
@@ -585,6 +645,7 @@ async fn load_preserved_counts(
         .map_err(|_| database_error("count-retained-generations"))?;
     Ok(PreservedGenerationCounts {
         current: read_named_count(&remaining, "current_preserved")?,
+        staging: read_named_count(&remaining, "staging_remaining")?,
         superseded: read_named_count(&remaining, "superseded_preserved")?,
         failed: read_named_count(&remaining, "failed_remaining")?,
     })
@@ -644,9 +705,11 @@ const fn database_error(operation: &'static str) -> GenerationRetentionError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
-        GenerationRetentionError, GenerationRetentionPolicy, INVALID_DELETE_BATCH,
-        MAXIMUM_DELETE_BATCH,
+        DEFAULT_STALE_STAGING_AGE, GenerationRetentionError, GenerationRetentionPolicy,
+        INVALID_DELETE_BATCH, MAXIMUM_DELETE_BATCH, MAXIMUM_STALE_STAGING_AGE,
     };
 
     const TEST_RETAINED_SUPERSEDED: u32 = 2;
@@ -668,6 +731,25 @@ mod tests {
             Ok(policy)
                 if policy.recent_superseded() == TEST_RETAINED_SUPERSEDED
                     && policy.maximum_deletions() == TEST_DELETE_BATCH
+                    && policy.stale_staging_age() == DEFAULT_STALE_STAGING_AGE
+        ));
+    }
+
+    #[test]
+    fn stale_staging_age_is_nonzero_and_hard_bounded() {
+        let policy = GenerationRetentionPolicy::new(TEST_RETAINED_SUPERSEDED, TEST_DELETE_BATCH)
+            .unwrap_or_else(|error| panic!("base retention policy failed: {error}"));
+        assert_eq!(
+            policy.with_stale_staging_age(Duration::ZERO),
+            Err(GenerationRetentionError::InvalidPolicy)
+        );
+        assert_eq!(
+            policy.with_stale_staging_age(MAXIMUM_STALE_STAGING_AGE + Duration::from_secs(1)),
+            Err(GenerationRetentionError::InvalidPolicy)
+        );
+        assert!(matches!(
+            policy.with_stale_staging_age(Duration::from_secs(60)),
+            Ok(updated) if updated.stale_staging_age() == Duration::from_secs(60)
         ));
     }
 }

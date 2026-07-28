@@ -4,11 +4,53 @@ use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
 
 use crate::{
     ExtractError,
-    framework::{FrameworkBuilder, LandmarkInput},
+    framework::{
+        DelimiterInput, FrameworkBuilder, FrameworkNearReferenceInput, FrameworkReferenceInput,
+        LandmarkInput, Quoted, javascript_identifier_at as identifier_at, matching_delimiter,
+        quoted_after, skip_ascii_whitespace,
+    },
 };
 
 const MAX_BRIDGE_SCAN_BYTES: usize = 4_096;
 const MAX_NATIVE_ALIASES: usize = 256;
+
+#[derive(Clone, Copy)]
+struct BridgeLandmarkInput<'name> {
+    kind: SymbolKind,
+    name: &'name str,
+    category: &'name str,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+struct EventLandmarkInput<'name> {
+    event: &'name str,
+    category: &'name str,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ObjcMethodMacroInput<'source> {
+    source: &'source str,
+    marker: &'source str,
+    module: &'source str,
+    remapped: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SymbolRange<'source> {
+    source: &'source str,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+struct NamedSymbolRange<'source, 'name> {
+    range: SymbolRange<'source>,
+    name: &'name str,
+}
 
 pub(crate) fn scan(
     builder: &mut FrameworkBuilder<'_, '_>,
@@ -65,10 +107,12 @@ fn scan_javascript_event_consumers(
         };
         let event_id = add_event_landmark(
             builder,
-            event.value,
-            "react-native-event-consumer",
-            event.start,
-            event.end,
+            EventLandmarkInput {
+                event: event.value,
+                category: "react-native-event-consumer",
+                start: event.start,
+                end: event.end,
+            },
         )?;
         if let Some(event_id) = event_id
             && let Some(comma) = source[event.end..]
@@ -78,13 +122,14 @@ fn scan_javascript_event_consumers(
         {
             let handler_start = skip_ascii_whitespace(source, comma);
             if let Some((handler_end, handler)) = identifier_at(source, handler_start) {
-                builder.add_reference(
-                    Some(event_id),
-                    handler,
-                    ReferenceKind::Calls,
-                    handler_start,
-                    handler_end,
-                )?;
+                builder.add_reference(FrameworkReferenceInput {
+                    owner: Some(event_id),
+                    name: handler,
+                    resolution_name: None,
+                    kind: ReferenceKind::Calls,
+                    start: handler_start,
+                    end: handler_end,
+                })?;
             }
         }
         cursor = event.end;
@@ -110,10 +155,12 @@ fn scan_native_event_producers(
             if seen.insert((event.start, event.end)) {
                 add_event_landmark(
                     builder,
-                    event.value,
-                    "react-native-event-producer",
-                    event.start,
-                    event.end,
+                    EventLandmarkInput {
+                        event: event.value,
+                        category: "react-native-event-producer",
+                        start: event.start,
+                        end: event.end,
+                    },
                 )?;
             }
             cursor = event.end;
@@ -124,21 +171,21 @@ fn scan_native_event_producers(
 
 fn add_event_landmark(
     builder: &mut FrameworkBuilder<'_, '_>,
-    event: &str,
-    category: &str,
-    start: usize,
-    end: usize,
+    input: EventLandmarkInput<'_>,
 ) -> Result<Option<cartograph_domain::SymbolId>, ExtractError> {
-    if !safe_event_name(event) {
+    if !safe_event_name(input.event) {
         return Ok(None);
     }
     builder.add_landmark_with_id(LandmarkInput {
         kind: SymbolKind::Resource,
-        name: event.to_owned(),
-        identity: format!("{category}::{event}"),
-        start,
-        end,
-        body_search_text: format!("react native event channel {event} {category}"),
+        name: input.event.to_owned(),
+        identity: format!("{}::{}", input.category, input.event),
+        start: input.start,
+        end: input.end,
+        body_search_text: format!(
+            "react native event channel {} {}",
+            input.event, input.category
+        ),
         target: None,
     })
 }
@@ -231,13 +278,13 @@ fn scan_registry_alias_calls(
             };
             let call = skip_ascii_whitespace(source, method_end);
             if source.as_bytes().get(call) == Some(&b'(') && !react_native_blocklisted(method) {
-                builder.add_reference_near_with_resolution(
-                    method,
-                    &format!("{module}::{method}"),
-                    ReferenceKind::Calls,
-                    method_start,
-                    method_end,
-                )?;
+                builder.add_reference_near_with_resolution(FrameworkNearReferenceInput {
+                    name: method,
+                    resolution_name: Some(&format!("{module}::{method}")),
+                    kind: ReferenceKind::Calls,
+                    start: method_start,
+                    end: method_end,
+                })?;
             }
             cursor = method_end;
         }
@@ -293,11 +340,13 @@ fn scan_turbo_module_spec(
             if bytes.get(after_name) == Some(&b'(') && !react_native_blocklisted(name) {
                 add_landmark(
                     builder,
-                    SymbolKind::Method,
-                    name,
-                    &format!("turbo-module-spec-method::{}", module.value),
-                    cursor,
-                    name_end,
+                    BridgeLandmarkInput {
+                        kind: SymbolKind::Method,
+                        name,
+                        category: &format!("turbo-module-spec-method::{}", module.value),
+                        start: cursor,
+                        end: name_end,
+                    },
                 )?;
             }
         }
@@ -352,47 +401,76 @@ fn interface_body(source: &str, expected_name: &str) -> Option<(usize, usize)> {
             continue;
         }
         let open = source[name_end..].find('{')? + name_end;
-        return matching_brace(source, open).map(|close| (open, close));
+        return matching_delimiter(DelimiterInput::braces(source, open)).map(|close| (open, close));
     }
     None
+}
+
+#[derive(Default)]
+struct BridgeDelimiterState {
+    paren: usize,
+    brace: usize,
+    bracket: usize,
+    angle: usize,
+    quote: Option<u8>,
+    escaped: bool,
+}
+
+impl BridgeDelimiterState {
+    fn consume_quote(&mut self, byte: u8, backtick: bool) -> bool {
+        if let Some(active_quote) = self.quote {
+            if self.escaped {
+                self.escaped = false;
+            } else if byte == b'\\' {
+                self.escaped = true;
+            } else if byte == active_quote {
+                self.quote = None;
+            }
+            return true;
+        }
+        if matches!(byte, b'\'' | b'"') || (backtick && byte == b'`') {
+            self.quote = Some(byte);
+            return true;
+        }
+        false
+    }
+
+    fn update_depth(&mut self, byte: u8, track_angle: bool) -> bool {
+        match byte {
+            b'(' => self.paren = self.paren.saturating_add(1),
+            b')' => self.paren = self.paren.saturating_sub(1),
+            b'{' => self.brace = self.brace.saturating_add(1),
+            b'}' => self.brace = self.brace.saturating_sub(1),
+            b'[' => self.bracket = self.bracket.saturating_add(1),
+            b']' => self.bracket = self.bracket.saturating_sub(1),
+            b'<' if track_angle => self.angle = self.angle.saturating_add(1),
+            b'>' if track_angle => self.angle = self.angle.saturating_sub(1),
+            _ => return false,
+        }
+        true
+    }
+
+    const fn top_level(&self) -> bool {
+        self.paren == 0 && self.brace == 0 && self.bracket == 0 && self.angle == 0
+    }
 }
 
 fn next_interface_statement(source: &str, start: usize, close: usize) -> usize {
     let bytes = source.as_bytes();
     let mut cursor = start;
-    let mut paren = 0_usize;
-    let mut brace = 0_usize;
-    let mut bracket = 0_usize;
-    let mut angle = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
+    let mut state = BridgeDelimiterState::default();
     while cursor < close {
         let byte = bytes[cursor];
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
+        if state.consume_quote(byte, true) {
             cursor += 1;
             continue;
         }
-        match byte {
-            b'\'' | b'"' | b'`' => quote = Some(byte),
-            b'(' => paren = paren.saturating_add(1),
-            b')' => paren = paren.saturating_sub(1),
-            b'{' => brace = brace.saturating_add(1),
-            b'}' => brace = brace.saturating_sub(1),
-            b'[' => bracket = bracket.saturating_add(1),
-            b']' => bracket = bracket.saturating_sub(1),
-            b'<' => angle = angle.saturating_add(1),
-            b'>' => angle = angle.saturating_sub(1),
-            b';' if paren == 0 && brace == 0 && bracket == 0 && angle == 0 => {
-                return cursor + 1;
-            }
-            _ => {}
+        if state.update_depth(byte, true) {
+            cursor += 1;
+            continue;
+        }
+        if byte == b';' && state.top_level() {
+            return cursor + 1;
         }
         cursor += 1;
     }
@@ -412,19 +490,25 @@ fn scan_native_modules_calls(
             cursor = module_start;
             continue;
         };
-        builder.add_reference_near(module, ReferenceKind::References, module_start, module_end)?;
+        builder.add_reference_near(FrameworkNearReferenceInput {
+            name: module,
+            resolution_name: None,
+            kind: ReferenceKind::References,
+            start: module_start,
+            end: module_end,
+        })?;
         let method_start = skip_ascii_whitespace(source, module_end);
         if source.as_bytes().get(method_start) == Some(&b'.')
             && let Some((method_end, method)) = identifier_at(source, method_start + 1)
             && !react_native_blocklisted(method)
         {
-            builder.add_reference_near_with_resolution(
-                method,
-                &format!("{module}::{method}"),
-                ReferenceKind::Calls,
-                method_start + 1,
-                method_end,
-            )?;
+            builder.add_reference_near_with_resolution(FrameworkNearReferenceInput {
+                name: method,
+                resolution_name: Some(&format!("{module}::{method}")),
+                kind: ReferenceKind::Calls,
+                start: method_start + 1,
+                end: method_end,
+            })?;
         }
         cursor = module_end;
     }
@@ -461,19 +545,22 @@ fn scan_registry_modules(
                 cursor = module.end;
                 continue;
             }
-            builder.add_reference_near(
-                module.value,
-                ReferenceKind::References,
-                module.start,
-                module.end,
-            )?;
+            builder.add_reference_near(FrameworkNearReferenceInput {
+                name: module.value,
+                resolution_name: None,
+                kind: ReferenceKind::References,
+                start: module.start,
+                end: module.end,
+            })?;
             add_landmark(
                 builder,
-                SymbolKind::Resource,
-                module.value,
-                "native-module-spec",
-                module.start,
-                module.end,
+                BridgeLandmarkInput {
+                    kind: SymbolKind::Resource,
+                    name: module.value,
+                    category: "native-module-spec",
+                    start: module.start,
+                    end: module.end,
+                },
             )?;
             cursor = module.end;
         }
@@ -503,11 +590,13 @@ fn scan_codegen_components(
         };
         add_landmark(
             builder,
-            SymbolKind::Component,
-            component.value,
-            "fabric-component",
-            component.start,
-            component.end,
+            BridgeLandmarkInput {
+                kind: SymbolKind::Component,
+                name: component.value,
+                category: "fabric-component",
+                start: component.start,
+                end: component.end,
+            },
         )?;
         cursor = component.end;
     }
@@ -523,17 +612,19 @@ fn scan_codegen_components(
     else {
         return Ok(());
     };
-    let Some(close) = matching_brace(source, open) else {
+    let Some(close) = matching_delimiter(DelimiterInput::braces(source, open)) else {
         return Ok(());
     };
     for (offset, name) in declaration_names(&source[open + 1..close]) {
         add_landmark(
             builder,
-            SymbolKind::Property,
-            name,
-            "fabric-prop",
-            open + 1 + offset,
-            open + 1 + offset + name.len(),
+            BridgeLandmarkInput {
+                kind: SymbolKind::Property,
+                name,
+                category: "fabric-prop",
+                start: open + 1 + offset,
+                end: open + 1 + offset + name.len(),
+            },
         )?;
     }
     Ok(())
@@ -545,11 +636,13 @@ fn scan_objc(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(),
     if let Some((name, start, end)) = module.as_ref() {
         add_landmark(
             builder,
-            SymbolKind::Resource,
-            name,
-            "react-native-module",
-            *start,
-            *end,
+            BridgeLandmarkInput {
+                kind: SymbolKind::Resource,
+                name,
+                category: "react-native-module",
+                start: *start,
+                end: *end,
+            },
         )?;
     }
     if let Some((module_name, _, _)) = module.as_ref() {
@@ -559,10 +652,26 @@ fn scan_objc(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(),
             "RCT_EXTERN_METHOD(",
             "RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(",
         ] {
-            scan_objc_method_macro(builder, source, marker, module_name, false)?;
+            scan_objc_method_macro(
+                builder,
+                ObjcMethodMacroInput {
+                    source,
+                    marker,
+                    module: module_name,
+                    remapped: false,
+                },
+            )?;
         }
         for marker in ["RCT_REMAP_METHOD(", "RCT_EXTERN_REMAP_METHOD("] {
-            scan_objc_method_macro(builder, source, marker, module_name, true)?;
+            scan_objc_method_macro(
+                builder,
+                ObjcMethodMacroInput {
+                    source,
+                    marker,
+                    module: module_name,
+                    remapped: true,
+                },
+            )?;
         }
     }
     scan_native_view_manager(builder, source, class)?;
@@ -583,48 +692,24 @@ fn scan_objc_message_sends(
     while let Some(relative) = source[cursor..].find('[') {
         builder.check_cancelled()?;
         let open = cursor + relative;
-        let Some(close) = matching_square_bracket(source, open) else {
+        let Some(close) = matching_delimiter(DelimiterInput::square_brackets(source, open)) else {
             cursor = open + 1;
             continue;
         };
         if close.saturating_sub(open) <= MAX_BRIDGE_SCAN_BYTES
             && let Some(reference) = parse_objc_message(&source[open + 1..close])
         {
-            builder.add_reference_near(&reference, ReferenceKind::Calls, open + 1, close)?;
+            builder.add_reference_near(FrameworkNearReferenceInput {
+                name: &reference,
+                resolution_name: None,
+                kind: ReferenceKind::Calls,
+                start: open + 1,
+                end: close,
+            })?;
         }
         cursor = close + 1;
     }
     Ok(())
-}
-
-fn matching_square_bracket(value: &str, open: usize) -> Option<usize> {
-    let bytes = value.as_bytes();
-    let mut depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in bytes.iter().copied().enumerate().skip(open) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-        } else if byte == b'[' {
-            depth = depth.saturating_add(1);
-        } else if byte == b']' {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
 }
 
 fn parse_objc_message(body: &str) -> Option<String> {
@@ -643,68 +728,29 @@ fn parse_objc_message(body: &str) -> Option<String> {
     selector.push(':');
     cursor += 1;
     let bytes = body.as_bytes();
-    let mut paren_depth = 0_usize;
-    let mut brace_depth = 0_usize;
-    let mut bracket_depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
+    let mut state = BridgeDelimiterState::default();
     while cursor < bytes.len() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if bytes[cursor] == b'\\' {
-                escaped = true;
-            } else if bytes[cursor] == active_quote {
-                quote = None;
-            }
+        let byte = bytes[cursor];
+        if state.consume_quote(byte, false) {
             cursor += 1;
             continue;
         }
-        match bytes[cursor] {
-            b'\'' | b'"' => {
-                quote = Some(bytes[cursor]);
-                cursor += 1;
+        if state.update_depth(byte, false) {
+            cursor += 1;
+            continue;
+        }
+        if state.top_level() && (byte == b'_' || byte.is_ascii_alphabetic()) {
+            let (end, keyword) = identifier_at(body, cursor)?;
+            let after = skip_ascii_whitespace(body, end);
+            if bytes.get(after) == Some(&b':') {
+                selector.push_str(keyword);
+                selector.push(':');
+                cursor = after + 1;
+            } else {
+                cursor = end;
             }
-            b'(' => {
-                paren_depth = paren_depth.saturating_add(1);
-                cursor += 1;
-            }
-            b')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b'{' => {
-                brace_depth = brace_depth.saturating_add(1);
-                cursor += 1;
-            }
-            b'}' => {
-                brace_depth = brace_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b'[' => {
-                bracket_depth = bracket_depth.saturating_add(1);
-                cursor += 1;
-            }
-            b']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            byte if paren_depth == 0
-                && brace_depth == 0
-                && bracket_depth == 0
-                && (byte == b'_' || byte.is_ascii_alphabetic()) =>
-            {
-                let (end, keyword) = identifier_at(body, cursor)?;
-                let after = skip_ascii_whitespace(body, end);
-                if bytes.get(after) == Some(&b':') {
-                    selector.push_str(keyword);
-                    selector.push(':');
-                    cursor = after + 1;
-                } else {
-                    cursor = end;
-                }
-            }
-            _ => cursor += 1,
+        } else {
+            cursor += 1;
         }
     }
     Some(format!("{receiver}.{selector}"))
@@ -712,11 +758,14 @@ fn parse_objc_message(body: &str) -> Option<String> {
 
 fn scan_objc_method_macro(
     builder: &mut FrameworkBuilder<'_, '_>,
-    source: &str,
-    marker: &str,
-    module: &str,
-    remapped: bool,
+    input: ObjcMethodMacroInput<'_>,
 ) -> Result<(), ExtractError> {
+    let ObjcMethodMacroInput {
+        source,
+        marker,
+        module,
+        remapped,
+    } = input;
     let mut cursor = 0;
     while let Some(relative) = source[cursor..].find(marker) {
         builder.check_cancelled()?;
@@ -743,11 +792,13 @@ fn scan_objc_method_macro(
         }
         add_landmark(
             builder,
-            SymbolKind::Method,
-            name,
-            &format!("react-native-method::{module}"),
-            start + offset,
-            start + offset + name.len(),
+            BridgeLandmarkInput {
+                kind: SymbolKind::Method,
+                name,
+                category: &format!("react-native-method::{module}"),
+                start: start + offset,
+                end: start + offset + name.len(),
+            },
         )?;
         cursor = start + offset + name.len();
     }
@@ -767,11 +818,13 @@ fn scan_native_view_manager(
     let component = derive_component_name(class);
     add_landmark(
         builder,
-        SymbolKind::Component,
-        &component,
-        "native-view-manager",
-        start,
-        end,
+        BridgeLandmarkInput {
+            kind: SymbolKind::Component,
+            name: &component,
+            category: "native-view-manager",
+            start,
+            end,
+        },
     )?;
     for marker in ["RCT_EXPORT_VIEW_PROPERTY(", "RCT_REMAP_VIEW_PROPERTY("] {
         let mut cursor = 0;
@@ -783,11 +836,13 @@ fn scan_native_view_manager(
             };
             add_landmark(
                 builder,
-                SymbolKind::Property,
-                property,
-                &format!("native-view-prop::{component}"),
-                property_start,
-                property_end,
+                BridgeLandmarkInput {
+                    kind: SymbolKind::Property,
+                    name: property,
+                    category: &format!("native-view-prop::{component}"),
+                    start: property_start,
+                    end: property_end,
+                },
             )?;
             cursor = property_end;
         }
@@ -799,11 +854,13 @@ fn scan_jvm(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(), 
     if let Some((module, start, end)) = react_native_jvm_module(source) {
         add_landmark(
             builder,
-            SymbolKind::Resource,
-            &module,
-            "react-native-module",
-            start,
-            end,
+            BridgeLandmarkInput {
+                kind: SymbolKind::Resource,
+                name: &module,
+                category: "react-native-module",
+                start,
+                end,
+            },
         )?;
         scan_react_methods(builder, source, &module)?;
     }
@@ -859,11 +916,13 @@ fn scan_react_methods(
         if !react_native_blocklisted(method) {
             add_landmark(
                 builder,
-                SymbolKind::Method,
-                method,
-                &format!("react-native-method::{module}"),
-                start + offset,
-                start + offset + method.len(),
+                BridgeLandmarkInput {
+                    kind: SymbolKind::Method,
+                    name: method,
+                    category: &format!("react-native-method::{module}"),
+                    start: start + offset,
+                    end: start + offset + method.len(),
+                },
             )?;
         }
         cursor = start + offset + method.len();
@@ -886,11 +945,13 @@ fn scan_jvm_view_manager(
     let component = derive_component_name(class);
     add_landmark(
         builder,
-        SymbolKind::Component,
-        &component,
-        "native-view-manager",
-        class_start,
-        class_start + class.len(),
+        BridgeLandmarkInput {
+            kind: SymbolKind::Component,
+            name: &component,
+            category: "native-view-manager",
+            start: class_start,
+            end: class_start + class.len(),
+        },
     )?;
     let mut cursor = 0;
     while let Some(relative) = source[cursor..].find("@ReactProp") {
@@ -901,11 +962,13 @@ fn scan_jvm_view_manager(
         };
         add_landmark(
             builder,
-            SymbolKind::Property,
-            property.value,
-            &format!("native-view-prop::{component}"),
-            property.start,
-            property.end,
+            BridgeLandmarkInput {
+                kind: SymbolKind::Property,
+                name: property.value,
+                category: &format!("native-view-prop::{component}"),
+                start: property.start,
+                end: property.end,
+            },
         )?;
         cursor = property.end;
     }
@@ -944,11 +1007,13 @@ fn scan_objc_swift_aliases(
             }
             add_landmark(
                 builder,
-                SymbolKind::Method,
-                &alias,
-                &format!("objc-swift-method::{selector}"),
-                start,
-                end,
+                BridgeLandmarkInput {
+                    kind: SymbolKind::Method,
+                    name: &alias,
+                    category: &format!("objc-swift-method::{selector}"),
+                    start,
+                    end,
+                },
             )?;
         }
     }
@@ -960,7 +1025,7 @@ fn objc_selector_from_declaration(source: &str, start: usize, end: usize) -> Opt
     let header_end = declaration.find(['{', ';']).unwrap_or(declaration.len());
     let header = &declaration[..header_end];
     let return_open = header.find('(')?;
-    let return_close = matching_delimiter(header, return_open, b'(', b')')?;
+    let return_close = matching_delimiter(DelimiterInput::parentheses(header, return_open))?;
     let bytes = header.as_bytes();
     let mut cursor = return_close + 1;
     let mut selector = String::new();
@@ -988,7 +1053,7 @@ fn objc_selector_from_declaration(source: &str, start: usize, end: usize) -> Opt
         cursor += 1;
         cursor = skip_ascii_whitespace(header, cursor);
         if bytes.get(cursor) == Some(&b'(')
-            && let Some(close) = matching_delimiter(header, cursor, b'(', b')')
+            && let Some(close) = matching_delimiter(DelimiterInput::parentheses(header, cursor))
         {
             cursor = close + 1;
         }
@@ -1000,21 +1065,6 @@ fn objc_selector_from_declaration(source: &str, start: usize, end: usize) -> Opt
     (!selector.is_empty())
         .then_some(selector)
         .or_else(|| first_identifier.map(str::to_owned))
-}
-
-fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Option<usize> {
-    let mut depth = 0_usize;
-    for (index, byte) in value.as_bytes().iter().copied().enumerate().skip(open) {
-        if byte == opening {
-            depth = depth.saturating_add(1);
-        } else if byte == closing {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
 }
 
 fn scan_swift_objc_exports(
@@ -1036,14 +1086,21 @@ fn scan_swift_objc_exports(
         }) else {
             continue;
         };
-        if symbol_has_swift_attribute(source, start, end, "nonobjc") {
+        let range = SymbolRange { source, start, end };
+        if symbol_has_swift_attribute(NamedSymbolRange {
+            range,
+            name: "nonobjc",
+        }) {
             continue;
         }
-        let explicit = symbol_has_swift_attribute(source, start, end, "objc");
-        if !explicit && !containing_objc_members_class(builder, source, start, end) {
+        let explicit = symbol_has_swift_attribute(NamedSymbolRange {
+            range,
+            name: "objc",
+        });
+        if !explicit && !containing_objc_members_class(builder, range) {
             continue;
         }
-        let (span_start, span_end) = symbol_name_span(source, start, end, &name);
+        let (span_start, span_end) = symbol_name_span(NamedSymbolRange { range, name: &name });
         let mut aliases = BTreeSet::from([name.clone()]);
         if let Some(selector) = swift_objc_selector_attribute(source, start, end) {
             aliases.extend(swift_base_names_for_objc_selector(&selector));
@@ -1051,11 +1108,13 @@ fn scan_swift_objc_exports(
         for alias in aliases {
             add_landmark(
                 builder,
-                SymbolKind::Method,
-                &alias,
-                &format!("swift-objc-method::{name}"),
-                span_start,
-                span_end,
+                BridgeLandmarkInput {
+                    kind: SymbolKind::Method,
+                    name: &alias,
+                    category: &format!("swift-objc-method::{name}"),
+                    start: span_start,
+                    end: span_end,
+                },
             )?;
         }
     }
@@ -1064,9 +1123,7 @@ fn scan_swift_objc_exports(
 
 fn containing_objc_members_class(
     builder: &FrameworkBuilder<'_, '_>,
-    source: &str,
-    member_start: usize,
-    member_end: usize,
+    member: SymbolRange<'_>,
 ) -> bool {
     let mut containing: Option<(usize, usize)> = None;
     for index in 0..builder.original_symbol_count() {
@@ -1082,8 +1139,8 @@ fn containing_objc_members_class(
         ) else {
             continue;
         };
-        if start <= member_start
-            && member_end <= end
+        if start <= member.start
+            && member.end <= end
             && containing.is_none_or(|(retained_start, retained_end)| {
                 end.saturating_sub(start) < retained_end.saturating_sub(retained_start)
             })
@@ -1091,14 +1148,22 @@ fn containing_objc_members_class(
             containing = Some((start, end));
         }
     }
-    containing
-        .is_some_and(|(start, end)| symbol_has_swift_attribute(source, start, end, "objcMembers"))
+    containing.is_some_and(|(start, end)| {
+        symbol_has_swift_attribute(NamedSymbolRange {
+            range: SymbolRange {
+                source: member.source,
+                start,
+                end,
+            },
+            name: "objcMembers",
+        })
+    })
 }
 
-fn symbol_has_swift_attribute(source: &str, start: usize, end: usize, name: &str) -> bool {
-    swift_symbol_attribute_text(source, start, end)
+fn symbol_has_swift_attribute(input: NamedSymbolRange<'_, '_>) -> bool {
+    swift_symbol_attribute_text(input.range.source, input.range.start, input.range.end)
         .into_iter()
-        .any(|text| contains_swift_attribute(text, name))
+        .any(|text| contains_swift_attribute(text, input.name))
 }
 
 fn swift_objc_selector_attribute(source: &str, start: usize, end: usize) -> Option<String> {
@@ -1165,13 +1230,21 @@ fn contains_swift_attribute(value: &str, name: &str) -> bool {
     false
 }
 
-fn symbol_name_span(source: &str, start: usize, end: usize, name: &str) -> (usize, usize) {
-    let bounded_end = end.min(start.saturating_add(MAX_BRIDGE_SCAN_BYTES));
-    source
-        .get(start..bounded_end)
-        .and_then(|value| value.find(name))
-        .map_or((start, end), |offset| {
-            (start + offset, start + offset + name.len())
+fn symbol_name_span(input: NamedSymbolRange<'_, '_>) -> (usize, usize) {
+    let bounded_end = input
+        .range
+        .end
+        .min(input.range.start.saturating_add(MAX_BRIDGE_SCAN_BYTES));
+    input
+        .range
+        .source
+        .get(input.range.start..bounded_end)
+        .and_then(|value| value.find(input.name))
+        .map_or((input.range.start, input.range.end), |offset| {
+            (
+                input.range.start + offset,
+                input.range.start + offset + input.name.len(),
+            )
         })
 }
 
@@ -1217,32 +1290,33 @@ fn swift_base_names_for_objc_selector(selector: &str) -> BTreeSet<String> {
     candidates
 }
 
+const APPLE_BRIDGE_GENERIC_NAMES: &[&str] = &[
+    "init",
+    "description",
+    "debugDescription",
+    "hash",
+    "isEqual",
+    "copy",
+    "mutableCopy",
+    "class",
+    "self",
+    "count",
+    "length",
+    "value",
+    "name",
+    "data",
+    "string",
+    "object",
+    "load",
+    "save",
+    "dealloc",
+    "release",
+    "retain",
+    "autorelease",
+];
+
 fn apple_bridge_generic_name(name: &str) -> bool {
-    matches!(
-        name,
-        "init"
-            | "description"
-            | "debugDescription"
-            | "hash"
-            | "isEqual"
-            | "copy"
-            | "mutableCopy"
-            | "class"
-            | "self"
-            | "count"
-            | "length"
-            | "value"
-            | "name"
-            | "data"
-            | "string"
-            | "object"
-            | "load"
-            | "save"
-            | "dealloc"
-            | "release"
-            | "retain"
-            | "autorelease"
-    )
+    APPLE_BRIDGE_GENERIC_NAMES.contains(&name)
 }
 
 fn scan_expo_module(
@@ -1269,11 +1343,13 @@ fn scan_expo_module(
     };
     add_landmark(
         builder,
-        SymbolKind::Resource,
-        module,
-        "expo-module",
-        module_start,
-        module_end,
+        BridgeLandmarkInput {
+            kind: SymbolKind::Resource,
+            name: module,
+            category: "expo-module",
+            start: module_start,
+            end: module_end,
+        },
     )?;
     let mut seen = BTreeSet::new();
     for marker in ["AsyncFunction(", "Function(", "Property("] {
@@ -1288,11 +1364,13 @@ fn scan_expo_module(
             if !react_native_blocklisted(member.value) && seen.insert(member.value.to_owned()) {
                 add_landmark(
                     builder,
-                    SymbolKind::Method,
-                    member.value,
-                    &format!("expo-module-method::{module}"),
-                    member.start,
-                    member.end,
+                    BridgeLandmarkInput {
+                        kind: SymbolKind::Method,
+                        name: member.value,
+                        category: &format!("expo-module-method::{module}"),
+                        start: member.start,
+                        end: member.end,
+                    },
                 )?;
             }
             cursor = member.end;
@@ -1303,22 +1381,18 @@ fn scan_expo_module(
 
 fn add_landmark(
     builder: &mut FrameworkBuilder<'_, '_>,
-    kind: SymbolKind,
-    name: &str,
-    category: &str,
-    start: usize,
-    end: usize,
+    input: BridgeLandmarkInput<'_>,
 ) -> Result<(), ExtractError> {
-    if name.is_empty() || start >= end || end > builder.source().len() {
+    if input.name.is_empty() || input.start >= input.end || input.end > builder.source().len() {
         return Ok(());
     }
     builder.add_landmark(LandmarkInput {
-        kind,
-        name: name.to_owned(),
-        identity: format!("{category}::{name}"),
-        start,
-        end,
-        body_search_text: format!("{category} {name}"),
+        kind: input.kind,
+        name: input.name.to_owned(),
+        identity: format!("{}::{}", input.category, input.name),
+        start: input.start,
+        end: input.end,
+        body_search_text: format!("{} {}", input.category, input.name),
         target: None,
     })
 }
@@ -1449,56 +1523,6 @@ fn declaration_names(value: &str) -> Vec<(usize, &str)> {
         .collect()
 }
 
-fn quoted_after(value: &str, from: usize) -> Option<Quoted<'_>> {
-    let bytes = value.as_bytes();
-    let mut cursor = from;
-    while cursor < bytes.len() && !matches!(bytes[cursor], b'\'' | b'"' | b'`') {
-        if bytes[cursor] == b';' {
-            return None;
-        }
-        cursor += 1;
-    }
-    let quote = *bytes.get(cursor)?;
-    let start = cursor + 1;
-    cursor = start;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'\\' {
-            cursor = cursor.saturating_add(2);
-            continue;
-        }
-        if bytes[cursor] == quote {
-            return Some(Quoted {
-                value: &value[start..cursor],
-                start,
-                end: cursor,
-            });
-        }
-        cursor += 1;
-    }
-    None
-}
-
-struct Quoted<'source> {
-    value: &'source str,
-    start: usize,
-    end: usize,
-}
-
-fn identifier_at(value: &str, start: usize) -> Option<(usize, &str)> {
-    let bytes = value.as_bytes();
-    let first = *bytes.get(start)?;
-    if !(first == b'_' || first == b'$' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut end = start + 1;
-    while end < bytes.len()
-        && (bytes[end] == b'_' || bytes[end] == b'$' || bytes[end].is_ascii_alphanumeric())
-    {
-        end += 1;
-    }
-    Some((end, &value[start..end]))
-}
-
 fn first_identifier(value: &str) -> Option<(usize, &str)> {
     all_identifiers(value).next()
 }
@@ -1528,47 +1552,6 @@ fn all_identifiers(value: &str) -> impl Iterator<Item = (usize, &str)> {
         }
         Some((start, &value[start..cursor]))
     })
-}
-
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn matching_brace(value: &str, open: usize) -> Option<usize> {
-    let bytes = value.as_bytes();
-    let mut depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in bytes.iter().copied().enumerate().skip(open) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`') {
-            quote = Some(byte);
-        } else if byte == b'{' {
-            depth = depth.saturating_add(1);
-        } else if byte == b'}' {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
 }
 
 fn react_native_blocklisted(name: &str) -> bool {

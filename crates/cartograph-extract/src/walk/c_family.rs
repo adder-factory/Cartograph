@@ -1,13 +1,14 @@
 use cartograph_domain::{
     ReferenceKind, SourceLanguage, SymbolId, SymbolKind, Visibility,
-    callable_signature_is_literal_free, declaration_value_is_search_safe,
+    callable_signature_is_literal_free,
 };
 use tree_sitter::Node;
 
 use crate::{ExtractError, ExtractedImportBinding, ImportBindingKind};
 
 use super::{
-    ExtractionBuilder, PendingReference, PendingSymbol, references,
+    ChildReferenceKind, ExtractionBuilder, PendingReference, PendingSymbol,
+    capture_child_reference, current_owner_kind_in, references, safe_assignment_signature,
     syntax::{
         children, descendants_including_root, is_call_or_construction_target, named_children,
         span_for,
@@ -17,6 +18,13 @@ use super::{
 const MAX_DECLARATOR_DEPTH: usize = 64;
 const MAX_SIGNATURE_BYTES: usize = 512;
 const MAX_REFERENCE_TARGET_BYTES: usize = 512;
+const C_TYPE_OWNER_KINDS: &[SymbolKind] = &[
+    SymbolKind::Class,
+    SymbolKind::Struct,
+    SymbolKind::Union,
+    SymbolKind::Enum,
+    SymbolKind::TypeAlias,
+];
 
 #[derive(Clone, Copy)]
 struct DeclaratorName<'tree> {
@@ -24,37 +32,111 @@ struct DeclaratorName<'tree> {
     scope: Option<Node<'tree>>,
 }
 
+#[derive(Clone, Copy)]
+struct ContainerVisit<'tree> {
+    node: Node<'tree>,
+    depth: usize,
+    kind: SymbolKind,
+}
+
+#[derive(Clone, Copy)]
+struct NamedContainerVisit<'tree> {
+    node: Node<'tree>,
+    depth: usize,
+    kind: SymbolKind,
+    name_node: Node<'tree>,
+}
+
+#[derive(Clone, Copy)]
+struct DeclaratorVisit<'tree> {
+    node: Node<'tree>,
+    depth: usize,
+    field_declaration: bool,
+}
+
+#[derive(Clone, Copy)]
+struct FunctionPrototypeVisit<'tree> {
+    node: Node<'tree>,
+    declarator: Node<'tree>,
+    field_declaration: bool,
+}
+
+#[derive(Clone, Copy)]
+struct FunctionTypeCapture<'tree, 'owner> {
+    node: Node<'tree>,
+    declarator: Node<'tree>,
+    owner: &'owner SymbolId,
+}
+
+#[derive(Clone, Copy)]
+struct TypeReferenceCapture<'tree, 'owner> {
+    root: Node<'tree>,
+    owner: &'owner SymbolId,
+    kind: ReferenceKind,
+}
+
+#[derive(Clone, Copy)]
+struct MacroFunctionInput<'tree> {
+    node: Node<'tree>,
+    declarator: Node<'tree>,
+    parsed_name: DeclaratorName<'tree>,
+}
+
+struct ScopeSymbolInput<'scope> {
+    name: &'scope str,
+    qualified_name: &'scope str,
+    id: &'scope SymbolId,
+    kind: SymbolKind,
+}
+
 pub(super) fn visit_declaration(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
     depth: usize,
 ) -> Result<bool, ExtractError> {
+    if let Some(kind) = c_container_kind(node.kind()) {
+        visit_container(builder, ContainerVisit { node, depth, kind })?;
+        return Ok(true);
+    }
     match node.kind() {
         "preproc_include" => visit_include(builder, node)?,
         "preproc_def" => visit_macro_constant(builder, node)?,
         "function_definition" => visit_function(builder, node, depth)?,
-        "class_specifier" => {
-            visit_container(builder, node, depth, SymbolKind::Class)?;
-        }
-        "struct_specifier" => {
-            visit_container(builder, node, depth, SymbolKind::Struct)?;
-        }
-        "union_specifier" => {
-            visit_container(builder, node, depth, SymbolKind::Union)?;
-        }
-        "enum_specifier" => {
-            visit_container(builder, node, depth, SymbolKind::Enum)?;
-        }
         "namespace_definition" => visit_namespace(builder, node, depth)?,
         "access_specifier" => visit_access_specifier(builder, node)?,
         "type_definition" => visit_type_definition(builder, node, depth)?,
         "alias_declaration" => visit_alias(builder, node)?,
         "enumerator" => visit_named_leaf(builder, node, SymbolKind::EnumMember)?,
-        "field_declaration" => visit_declarator_symbols(builder, node, depth, true)?,
-        "declaration" => visit_declarator_symbols(builder, node, depth, false)?,
+        "field_declaration" => visit_declarator_symbols(
+            builder,
+            DeclaratorVisit {
+                node,
+                depth,
+                field_declaration: true,
+            },
+        )?,
+        "declaration" => visit_declarator_symbols(
+            builder,
+            DeclaratorVisit {
+                node,
+                depth,
+                field_declaration: false,
+            },
+        )?,
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn c_container_kind(node_kind: &str) -> Option<SymbolKind> {
+    [
+        ("class_specifier", SymbolKind::Class),
+        ("struct_specifier", SymbolKind::Struct),
+        ("union_specifier", SymbolKind::Union),
+        ("enum_specifier", SymbolKind::Enum),
+    ]
+    .into_iter()
+    .find_map(|(candidate, kind)| (candidate == node_kind).then_some(kind))
 }
 
 pub(super) fn capture_usage(
@@ -62,7 +144,7 @@ pub(super) fn capture_usage(
     node: Node<'_>,
 ) -> Result<(), ExtractError> {
     match node.kind() {
-        "call_expression" => capture_call(builder, node),
+        "call_expression" => capture_child_reference(builder, node, ChildReferenceKind::CCall),
         "new_expression" => capture_construction(builder, node),
         "field_expression" => capture_field(builder, node),
         _ => Ok(()),
@@ -124,24 +206,13 @@ fn capture_construction(
     )
 }
 
+const C_BUILTIN_TYPES: &[&str] = &[
+    "bool", "char", "char8_t", "char16_t", "char32_t", "double", "float", "int", "long", "short",
+    "signed", "unsigned", "void", "wchar_t",
+];
+
 fn is_builtin_c_type(name: &str) -> bool {
-    matches!(
-        name,
-        "bool"
-            | "char"
-            | "char8_t"
-            | "char16_t"
-            | "char32_t"
-            | "double"
-            | "float"
-            | "int"
-            | "long"
-            | "short"
-            | "signed"
-            | "unsigned"
-            | "void"
-            | "wchar_t"
-    )
+    C_BUILTIN_TYPES.contains(&name)
 }
 
 fn visit_include(
@@ -222,7 +293,7 @@ fn visit_macro_constant(
         return Ok(());
     };
     let signature = if let Some(value) = node.child_by_field_name("value") {
-        safe_macro_signature(builder, value)?
+        safe_assignment_signature(builder, value)?
     } else {
         None
     };
@@ -244,42 +315,17 @@ fn visit_macro_constant(
     builder.emit_symbol(symbol).map(|_| ())
 }
 
-fn safe_macro_signature(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    value: Node<'_>,
-) -> Result<Option<String>, ExtractError> {
-    let raw = builder.context.text(value).trim();
-    let Some(signature_length) = raw.len().checked_add(2) else {
-        return Err(ExtractError::OutputLimit);
-    };
-    if signature_length > MAX_SIGNATURE_BYTES || !declaration_value_is_search_safe(raw) {
-        return Ok(None);
-    }
-    builder
-        .context
-        .budget
-        .ensure_string_length(signature_length)?;
-    let mut signature = String::new();
-    signature
-        .try_reserve(signature_length)
-        .map_err(|_| ExtractError::OutputLimit)?;
-    signature.push_str("= ");
-    signature.push_str(raw);
-    Ok(Some(signature))
-}
-
 fn macro_decorated_function_name<'tree>(
     builder: &ExtractionBuilder<'_, '_>,
-    node: Node<'tree>,
-    declarator: Node<'tree>,
-    parsed_name: DeclaratorName<'tree>,
+    input: MacroFunctionInput<'tree>,
 ) -> Option<DeclaratorName<'tree>> {
-    node.child_by_field_name("body")?;
-    if node
+    input.node.child_by_field_name("body")?;
+    if input
+        .node
         .prev_named_sibling()
         .is_some_and(|previous| previous.kind() == "declaration")
-        && declarator.kind() == "parenthesized_declarator"
-        && let Some(name) = node.child_by_field_name("type")
+        && input.declarator.kind() == "parenthesized_declarator"
+        && let Some(name) = input.node.child_by_field_name("type")
         && matches!(name.kind(), "identifier" | "type_identifier")
     {
         return Some(DeclaratorName {
@@ -287,7 +333,7 @@ fn macro_decorated_function_name<'tree>(
             scope: None,
         });
     }
-    let type_node = node.child_by_field_name("type")?;
+    let type_node = input.node.child_by_field_name("type")?;
     let type_name = builder.context.text(type_node).trim();
     if !is_uppercase_macro_name(type_name) {
         return None;
@@ -295,11 +341,11 @@ fn macro_decorated_function_name<'tree>(
     let prefix = builder
         .context
         .source()
-        .get(node.start_byte()..parsed_name.node.start_byte())?;
+        .get(input.node.start_byte()..input.parsed_name.node.start_byte())?;
     let mut tokens = prefix
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .filter(|token| !token.is_empty());
-    (tokens.next() == Some(type_name) && tokens.next().is_some()).then_some(parsed_name)
+    (tokens.next() == Some(type_name) && tokens.next().is_some()).then_some(input.parsed_name)
 }
 
 fn macro_obscured_container<'tree>(
@@ -413,7 +459,15 @@ fn visit_function(
     depth: usize,
 ) -> Result<(), ExtractError> {
     if let Some((kind, name_node)) = macro_obscured_container(builder, node)? {
-        return visit_named_container(builder, node, depth, kind, name_node);
+        return visit_named_container(
+            builder,
+            NamedContainerVisit {
+                node,
+                depth,
+                kind,
+                name_node,
+            },
+        );
     }
     let Some(declarator) = node.child_by_field_name("declarator") else {
         return builder.visit_named_children(node, depth);
@@ -421,7 +475,14 @@ fn visit_function(
     let Some(parsed_name) = declarator_name(declarator)? else {
         return builder.visit_named_children(node, depth);
     };
-    let recovered_name = macro_decorated_function_name(builder, node, declarator, parsed_name);
+    let recovered_name = macro_decorated_function_name(
+        builder,
+        MacroFunctionInput {
+            node,
+            declarator,
+            parsed_name,
+        },
+    );
     let name = recovered_name.unwrap_or(parsed_name);
     let local_name = builder.context.owned_text(name.node)?;
     if is_control_keyword(&local_name) {
@@ -431,33 +492,9 @@ fn visit_function(
         .scope
         .map(|scope| owned_declarator_scope(builder, scope, name.node))
         .transpose()?;
-    let scoped_owner = scope_name
-        .as_deref()
-        .map(|scope| find_scope_symbol(builder, scope))
-        .transpose()?
-        .flatten();
-    let existing_owner_depth = builder.owners.len();
-    let existing_kind_depth = builder.native_owner_kinds.len();
-    let existing_qualifier_depth = builder.qualifiers.len();
-    if let Some(scope) = &scope_name
-        && !current_owner_is_type(builder)
-    {
-        let scope_kind = scoped_owner
-            .as_ref()
-            .map_or_else(|| inferred_scope_kind(scope), |(_, kind)| *kind);
-        if let Some((owner, _)) = &scoped_owner
-            && builder.owners.last() != Some(owner)
-        {
-            builder.owners.push(owner.clone());
-        }
-        builder.native_owner_kinds.push(scope_kind);
-        let relative_scope = relative_scope_qualifier(builder, scope)?;
-        if !relative_scope.is_empty() {
-            builder.qualifiers.push(relative_scope);
-        }
-    }
+    let restore = enter_c_function_scope(builder, scope_name.as_deref())?;
 
-    let kind = if current_owner_is_type(builder) {
+    let kind = if current_owner_kind_in(builder, C_TYPE_OWNER_KINDS) {
         SymbolKind::Method
     } else {
         SymbolKind::Function
@@ -481,13 +518,20 @@ fn visit_function(
         exported: has_external_linkage(builder, node),
         default_export: false,
         async_symbol: false,
-        static_member: current_owner_is_type(builder)
+        static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
             && declaration_has_storage(builder, node, "static"),
         visibility,
     };
     let id = builder.emit_symbol(pending)?;
     if recovered_name.is_none() {
-        capture_function_types(builder, node, declarator, &id)?;
+        capture_function_types(
+            builder,
+            FunctionTypeCapture {
+                node,
+                declarator,
+                owner: &id,
+            },
+        )?;
     }
     if let Some(body) = body {
         builder.owners.push(id);
@@ -499,22 +543,68 @@ fn visit_function(
         builder.owners.pop();
         result?;
     }
-    builder.owners.truncate(existing_owner_depth);
-    builder.native_owner_kinds.truncate(existing_kind_depth);
-    builder.qualifiers.truncate(existing_qualifier_depth);
+    restore_c_function_scope(builder, restore);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct CFunctionScopeDepths {
+    owners: usize,
+    kinds: usize,
+    qualifiers: usize,
+}
+
+fn enter_c_function_scope(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    scope: Option<&str>,
+) -> Result<CFunctionScopeDepths, ExtractError> {
+    let depths = CFunctionScopeDepths {
+        owners: builder.owners.len(),
+        kinds: builder.native_owner_kinds.len(),
+        qualifiers: builder.qualifiers.len(),
+    };
+    let Some(scope) = scope.filter(|_| !current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)) else {
+        return Ok(depths);
+    };
+    let scoped_owner = find_scope_symbol(builder, scope)?;
+    let scope_kind = scoped_owner
+        .as_ref()
+        .map_or_else(|| inferred_scope_kind(scope), |(_, kind)| *kind);
+    if let Some((owner, _)) = &scoped_owner
+        && builder.owners.last() != Some(owner)
+    {
+        builder.owners.push(owner.clone());
+    }
+    builder.native_owner_kinds.push(scope_kind);
+    let relative_scope = relative_scope_qualifier(builder, scope)?;
+    if !relative_scope.is_empty() {
+        builder.qualifiers.push(relative_scope);
+    }
+    Ok(depths)
+}
+
+fn restore_c_function_scope(builder: &mut ExtractionBuilder<'_, '_>, depths: CFunctionScopeDepths) {
+    builder.owners.truncate(depths.owners);
+    builder.native_owner_kinds.truncate(depths.kinds);
+    builder.qualifiers.truncate(depths.qualifiers);
 }
 
 fn visit_container(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    kind: SymbolKind,
+    input: ContainerVisit<'_>,
 ) -> Result<(), ExtractError> {
-    let Some(name_node) = node.child_by_field_name("name") else {
-        return builder.visit_named_children(node, depth);
+    let Some(name_node) = input.node.child_by_field_name("name") else {
+        return builder.visit_named_children(input.node, input.depth);
     };
-    visit_named_container(builder, node, depth, kind, name_node)
+    visit_named_container(
+        builder,
+        NamedContainerVisit {
+            node: input.node,
+            depth: input.depth,
+            kind: input.kind,
+            name_node,
+        },
+    )
 }
 
 fn visit_namespace(
@@ -546,7 +636,15 @@ fn visit_namespace(
     };
     let qualified_name = builder.qualified_name(&name)?;
     let id = builder.emit_symbol(pending)?;
-    register_scope_symbol(builder, &name, &qualified_name, &id, SymbolKind::Namespace)?;
+    register_scope_symbol(
+        builder,
+        ScopeSymbolInput {
+            name: &name,
+            qualified_name: &qualified_name,
+            id: &id,
+            kind: SymbolKind::Namespace,
+        },
+    )?;
     builder.owners.push(id);
     builder.native_owner_kinds.push(SymbolKind::Namespace);
     builder.qualifiers.push(name);
@@ -582,7 +680,15 @@ fn visit_alias(
     };
     let qualified_name = builder.qualified_name(&name)?;
     let id = builder.emit_symbol(pending)?;
-    register_scope_symbol(builder, &name, &qualified_name, &id, SymbolKind::TypeAlias)?;
+    register_scope_symbol(
+        builder,
+        ScopeSymbolInput {
+            name: &name,
+            qualified_name: &qualified_name,
+            id: &id,
+            kind: SymbolKind::TypeAlias,
+        },
+    )?;
     if let Some(target) = node.child_by_field_name("type") {
         capture_alias_target_references(builder, target, &id)?;
     }
@@ -591,23 +697,20 @@ fn visit_alias(
 
 fn visit_named_container(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    kind: SymbolKind,
-    name_node: Node<'_>,
+    input: NamedContainerVisit<'_>,
 ) -> Result<(), ExtractError> {
-    let name = builder.context.owned_text(name_node)?;
-    let body = node.child_by_field_name("body");
+    let name = builder.context.owned_text(input.name_node)?;
+    let body = input.node.child_by_field_name("body");
     let pending = PendingSymbol {
-        kind,
+        kind: input.kind,
         name: name.clone(),
-        span_node: node,
-        structural_node: node,
-        doc_anchor: node,
+        span_node: input.node,
+        structural_node: input.node,
+        doc_anchor: input.node,
         body_node: None,
         declaration_only: body.is_none(),
         signature: None,
-        exported: has_external_linkage(builder, node),
+        exported: has_external_linkage(builder, input.node),
         default_export: false,
         async_symbol: false,
         static_member: false,
@@ -615,17 +718,25 @@ fn visit_named_container(
     };
     let qualified_name = builder.qualified_name(&name)?;
     let id = builder.emit_symbol(pending)?;
-    register_scope_symbol(builder, &name, &qualified_name, &id, kind)?;
-    capture_base_classes(builder, node, &id)?;
+    register_scope_symbol(
+        builder,
+        ScopeSymbolInput {
+            name: &name,
+            qualified_name: &qualified_name,
+            id: &id,
+            kind: input.kind,
+        },
+    )?;
+    capture_base_classes(builder, input.node, &id)?;
     let Some(body) = body else {
         return Ok(());
     };
     builder.owners.push(id);
-    builder.native_owner_kinds.push(kind);
-    let visibility = default_cxx_visibility(builder, kind);
+    builder.native_owner_kinds.push(input.kind);
+    let visibility = default_cxx_visibility(builder, input.kind);
     builder.native_visibilities.push(visibility);
     builder.qualifiers.push(name);
-    let result = builder.visit(body, depth.saturating_add(1));
+    let result = builder.visit(body, input.depth.saturating_add(1));
     builder.qualifiers.pop();
     builder.native_visibilities.pop();
     builder.native_owner_kinds.pop();
@@ -684,7 +795,15 @@ fn visit_type_definition(
     };
     let qualified_name = builder.qualified_name(&name)?;
     let id = builder.emit_symbol(pending)?;
-    register_scope_symbol(builder, &name, &qualified_name, &id, kind)?;
+    register_scope_symbol(
+        builder,
+        ScopeSymbolInput {
+            name: &name,
+            qualified_name: &qualified_name,
+            id: &id,
+            kind,
+        },
+    )?;
     let Some(body) = type_node.and_then(|node| node.child_by_field_name("body")) else {
         if let Some(target) = type_node {
             capture_alias_target_references(builder, target, &id)?;
@@ -736,33 +855,38 @@ fn visit_named_leaf(
 
 fn visit_declarator_symbols(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    field_declaration: bool,
+    input: DeclaratorVisit<'_>,
 ) -> Result<(), ExtractError> {
     let inside_callable = matches!(
         builder.native_owner_kinds.last(),
         Some(SymbolKind::Function | SymbolKind::Method)
     );
     if inside_callable {
-        return builder.visit_named_children(node, depth);
+        return builder.visit_named_children(input.node, input.depth);
     }
-    let kind = if field_declaration || current_owner_is_type(builder) {
+    let kind = if input.field_declaration || current_owner_kind_in(builder, C_TYPE_OWNER_KINDS) {
         SymbolKind::Field
-    } else if declaration_is_const(builder, node) {
+    } else if declaration_is_const(builder, input.node) {
         SymbolKind::Constant
     } else {
         SymbolKind::Variable
     };
-    let mut cursor = node.walk();
-    for declarator in node.children_by_field_name("declarator", &mut cursor) {
+    let mut cursor = input.node.walk();
+    for declarator in input.node.children_by_field_name("declarator", &mut cursor) {
         builder.context.ensure_active()?;
         let function_declarator = descendants_including_root(declarator)
             .find(|candidate| candidate.kind() == "function_declarator");
         if let Some(function_declarator) = function_declarator
             && !is_function_pointer_declarator(function_declarator)
         {
-            visit_function_prototype(builder, node, function_declarator, field_declaration)?;
+            visit_function_prototype(
+                builder,
+                FunctionPrototypeVisit {
+                    node: input.node,
+                    declarator: function_declarator,
+                    field_declaration: input.field_declaration,
+                },
+            )?;
             continue;
         }
         let Some(name) = declarator_name(declarator)? else {
@@ -773,24 +897,38 @@ fn visit_declarator_symbols(
             name: builder.context.owned_text(name.node)?,
             span_node: declarator,
             structural_node: declarator,
-            doc_anchor: node,
+            doc_anchor: input.node,
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: has_external_linkage(builder, node),
+            exported: has_external_linkage(builder, input.node),
             default_export: false,
             async_symbol: false,
-            static_member: current_owner_is_type(builder)
-                && declaration_has_storage(builder, node, "static"),
+            static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
+                && declaration_has_storage(builder, input.node, "static"),
             visibility: cxx_visibility(builder),
         };
         let id = builder.emit_symbol(pending)?;
-        if let Some(type_node) = node.child_by_field_name("type") {
-            capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf)?;
+        if let Some(type_node) = input.node.child_by_field_name("type") {
+            capture_type_references(
+                builder,
+                TypeReferenceCapture {
+                    root: type_node,
+                    owner: &id,
+                    kind: ReferenceKind::TypeOf,
+                },
+            )?;
         }
-        capture_type_references(builder, declarator, &id, ReferenceKind::TypeOf)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                root: declarator,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+            },
+        )?;
     }
-    builder.visit_named_children(node, depth)
+    builder.visit_named_children(input.node, input.depth)
 }
 
 fn is_function_pointer_declarator(function_declarator: Node<'_>) -> bool {
@@ -804,11 +942,9 @@ fn is_function_pointer_declarator(function_declarator: Node<'_>) -> bool {
 
 fn visit_function_prototype(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    declarator: Node<'_>,
-    field_declaration: bool,
+    input: FunctionPrototypeVisit<'_>,
 ) -> Result<(), ExtractError> {
-    let Some(name) = declarator_name(declarator)? else {
+    let Some(name) = declarator_name(input.declarator)? else {
         return Ok(());
     };
     let local_name = builder.context.owned_text(name.node)?;
@@ -825,7 +961,7 @@ fn visit_function_prototype(
     let existing_kind_depth = builder.native_owner_kinds.len();
     let existing_qualifier_depth = builder.qualifiers.len();
     if let Some(scope) = &scope_name
-        && !current_owner_is_type(builder)
+        && !current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
     {
         let scope_kind = scoped_owner
             .as_ref()
@@ -841,7 +977,7 @@ fn visit_function_prototype(
             builder.qualifiers.push(relative_scope);
         }
     }
-    let kind = if field_declaration || current_owner_is_type(builder) {
+    let kind = if input.field_declaration || current_owner_kind_in(builder, C_TYPE_OWNER_KINDS) {
         SymbolKind::Method
     } else {
         SymbolKind::Function
@@ -849,21 +985,28 @@ fn visit_function_prototype(
     let pending = PendingSymbol {
         kind,
         name: local_name,
-        span_node: node,
-        structural_node: node,
-        doc_anchor: node,
+        span_node: input.node,
+        structural_node: input.node,
+        doc_anchor: input.node,
         body_node: None,
         declaration_only: true,
-        signature: c_callable_signature(builder, node, declarator)?,
-        exported: has_external_linkage(builder, node),
+        signature: c_callable_signature(builder, input.node, input.declarator)?,
+        exported: has_external_linkage(builder, input.node),
         default_export: false,
         async_symbol: false,
-        static_member: current_owner_is_type(builder)
-            && declaration_has_storage(builder, node, "static"),
+        static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
+            && declaration_has_storage(builder, input.node, "static"),
         visibility: cxx_visibility(builder),
     };
     let id = builder.emit_symbol(pending)?;
-    capture_function_types(builder, node, declarator, &id)?;
+    capture_function_types(
+        builder,
+        FunctionTypeCapture {
+            node: input.node,
+            declarator: input.declarator,
+            owner: &id,
+        },
+    )?;
     builder.owners.truncate(existing_owner_depth);
     builder.native_owner_kinds.truncate(existing_kind_depth);
     builder.qualifiers.truncate(existing_qualifier_depth);
@@ -916,17 +1059,29 @@ fn c_callable_signature(
 
 fn capture_function_types(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    declarator: Node<'_>,
-    owner: &SymbolId,
+    input: FunctionTypeCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
-    if let Some(return_type) = node.child_by_field_name("type") {
-        capture_type_references(builder, return_type, owner, ReferenceKind::Returns)?;
+    if let Some(return_type) = input.node.child_by_field_name("type") {
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                root: return_type,
+                owner: input.owner,
+                kind: ReferenceKind::Returns,
+            },
+        )?;
     }
-    if let Some(parameters) = descendants_including_root(declarator)
+    if let Some(parameters) = descendants_including_root(input.declarator)
         .find(|candidate| candidate.kind() == "parameter_list")
     {
-        capture_type_references(builder, parameters, owner, ReferenceKind::TypeOf)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                root: parameters,
+                owner: input.owner,
+                kind: ReferenceKind::TypeOf,
+            },
+        )?;
     }
     Ok(())
 }
@@ -937,18 +1092,23 @@ fn capture_base_classes(
     owner: &SymbolId,
 ) -> Result<(), ExtractError> {
     for clause in named_children(node).filter(|child| child.kind() == "base_class_clause") {
-        capture_type_references(builder, clause, owner, ReferenceKind::Extends)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                root: clause,
+                owner,
+                kind: ReferenceKind::Extends,
+            },
+        )?;
     }
     Ok(())
 }
 
 fn capture_type_references(
     builder: &mut ExtractionBuilder<'_, '_>,
-    root: Node<'_>,
-    owner: &SymbolId,
-    kind: ReferenceKind,
+    input: TypeReferenceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
-    for target in descendants_including_root(root) {
+    for target in descendants_including_root(input.root) {
         builder.context.ensure_active()?;
         if target.kind() != "type_identifier" {
             continue;
@@ -957,9 +1117,9 @@ fn capture_type_references(
         references::push_reference(
             builder,
             PendingReference {
-                owner: Some(owner.clone()),
+                owner: Some(input.owner.clone()),
                 name,
-                kind,
+                kind: input.kind,
                 node: target,
             },
         )?;
@@ -1006,29 +1166,15 @@ fn capture_alias_target_references(
     if qualified_found {
         Ok(())
     } else {
-        capture_type_references(builder, root, owner, ReferenceKind::TypeOf)
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                root,
+                owner,
+                kind: ReferenceKind::TypeOf,
+            },
+        )
     }
-}
-
-fn capture_call(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-) -> Result<(), ExtractError> {
-    let Some(target) = node.child_by_field_name("function") else {
-        return Ok(());
-    };
-    let Some(name) = safe_call_target(builder, target)? else {
-        return Ok(());
-    };
-    references::push_reference(
-        builder,
-        PendingReference {
-            owner: builder.owners.last().cloned(),
-            name,
-            kind: ReferenceKind::Calls,
-            node: target,
-        },
-    )
 }
 
 fn capture_field(
@@ -1053,7 +1199,7 @@ fn capture_field(
     )
 }
 
-fn safe_call_target(
+pub(super) fn safe_call_target(
     builder: &mut ExtractionBuilder<'_, '_>,
     target: Node<'_>,
 ) -> Result<Option<String>, ExtractError> {
@@ -1195,19 +1341,6 @@ fn declarator_shape(kind: &str) -> bool {
         )
 }
 
-fn current_owner_is_type(builder: &ExtractionBuilder<'_, '_>) -> bool {
-    matches!(
-        builder.native_owner_kinds.last(),
-        Some(
-            SymbolKind::Class
-                | SymbolKind::Struct
-                | SymbolKind::Union
-                | SymbolKind::Enum
-                | SymbolKind::TypeAlias
-        )
-    )
-}
-
 fn find_scope_symbol(
     builder: &ExtractionBuilder<'_, '_>,
     scope: &str,
@@ -1248,25 +1381,28 @@ fn find_scope_symbol(
 
 fn register_scope_symbol(
     builder: &mut ExtractionBuilder<'_, '_>,
-    name: &str,
-    qualified_name: &str,
-    id: &SymbolId,
-    kind: SymbolKind,
+    input: ScopeSymbolInput<'_>,
 ) -> Result<(), ExtractError> {
-    if !builder.native_scope_symbols.contains_key(qualified_name) {
+    if !builder
+        .native_scope_symbols
+        .contains_key(input.qualified_name)
+    {
         builder
             .native_scope_symbols
             .try_reserve(1)
             .map_err(|_| ExtractError::OutputLimit)?;
-        let key = builder.context.copy_text(qualified_name)?;
+        let key = builder.context.copy_text(input.qualified_name)?;
         builder
             .native_scope_symbols
-            .insert(key, Some((id.clone(), kind)));
+            .insert(key, Some((input.id.clone(), input.kind)));
     }
-    if qualified_name != name {
-        match builder.native_scope_symbols.get_mut(name) {
+    if input.qualified_name != input.name {
+        match builder.native_scope_symbols.get_mut(input.name) {
             Some(slot) => {
-                if slot.as_ref().is_some_and(|(candidate, _)| candidate != id) {
+                if slot
+                    .as_ref()
+                    .is_some_and(|(candidate, _)| candidate != input.id)
+                {
                     *slot = None;
                 }
             }
@@ -1275,10 +1411,10 @@ fn register_scope_symbol(
                     .native_scope_symbols
                     .try_reserve(1)
                     .map_err(|_| ExtractError::OutputLimit)?;
-                let key = builder.context.copy_text(name)?;
+                let key = builder.context.copy_text(input.name)?;
                 builder
                     .native_scope_symbols
-                    .insert(key, Some((id.clone(), kind)));
+                    .insert(key, Some((input.id.clone(), input.kind)));
             }
         }
     }
@@ -1378,7 +1514,8 @@ fn has_external_linkage(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> 
     if inside_anonymous_namespace(node) {
         return false;
     }
-    current_owner_is_type(builder) || !declaration_has_storage(builder, node, "static")
+    current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
+        || !declaration_has_storage(builder, node, "static")
 }
 
 fn declaration_has_storage(

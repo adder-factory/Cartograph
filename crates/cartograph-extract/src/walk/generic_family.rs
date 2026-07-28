@@ -64,14 +64,14 @@ pub(super) fn visit_declaration(
     let body = node.child_by_field_name("body");
     let definition = is_definition_node(node.kind());
     let visibility = generic_visibility(node, builder.context.source());
-    let exported = generic_exported(
-        builder.context.snapshot.language(),
-        builder.owners.is_empty(),
+    let exported = generic_exported(GenericExportInput {
+        language: builder.context.snapshot.language(),
+        top_level: builder.owners.is_empty(),
         visibility,
-        &name,
+        name: &name,
         node,
-        builder.context.source(),
-    );
+        source: builder.context.source(),
+    });
     let pending = PendingSymbol {
         kind,
         name: name.clone(),
@@ -133,126 +133,248 @@ fn declaration(
 }
 
 fn declaration_kind(node_kind: &str) -> Option<SymbolKind> {
-    let exact = match node_kind {
-        "function"
-        | "function_declaration"
-        | "function_definition"
-        | "function_item"
-        | "function_statement"
-        | "function_or_value_defn"
-        | "function_binding"
-        | "procedure_declaration"
-        | "procedure_definition"
-        | "defProc"
-        | "subroutine"
-        | "constructor_declaration"
-        | "destructor_declaration" => SymbolKind::Function,
-        "method"
-        | "singleton_method"
-        | "method_declaration"
-        | "method_definition"
-        | "method_implementation"
-        | "method_block"
-        | "method_statement"
-        | "constructor_definition" => SymbolKind::Method,
-        "class"
-        | "class_declaration"
-        | "class_definition"
-        | "class_block"
-        | "class_interface"
-        | "class_implementation"
-        | "object_declaration"
-        | "object_definition"
-        | "contract_declaration" => SymbolKind::Class,
-        "struct_declaration"
-        | "struct_definition"
-        | "structure_declaration"
-        | "record_declaration"
-        | "record_definition"
-        | "model_declaration" => SymbolKind::Struct,
-        "interface_declaration"
-        | "interface_definition"
-        | "protocol_declaration"
-        | "trait_declaration"
-        | "trait_definition"
-        | "object_type_definition" => SymbolKind::Interface,
-        "enum" | "enum_declaration" | "enum_definition" | "enum_type_definition" => {
-            SymbolKind::Enum
-        }
-        "enum_member" | "enum_value_definition" => SymbolKind::EnumMember,
-        "module"
-        | "program"
-        | "module_declaration"
-        | "module_definition"
-        | "module_block"
-        | "namespace_declaration"
-        | "namespace_definition"
-        | "unit_declaration"
-        | "program_declaration"
-        | "package_declaration" => SymbolKind::Module,
-        "type_alias"
-        | "type_alias_declaration"
-        | "type_declaration"
-        | "type_definition"
-        | "alias_declaration" => SymbolKind::TypeAlias,
-        "field"
-        | "field_declaration"
-        | "field_definition"
-        | "property_declaration"
-        | "property_definition"
-        | "property_statement" => SymbolKind::Property,
-        "constant" | "const_declaration" | "constant_declaration" | "constant_definition" => {
-            SymbolKind::Constant
-        }
-        "variable_declaration"
-        | "variable_definition"
-        | "let_declaration"
-        | "value_declaration"
-        | "binding" => SymbolKind::Variable,
-        "event_definition" | "event_declaration" => SymbolKind::Resource,
-        "macro_declaration" | "macro_definition" => SymbolKind::Function,
-        "table_declaration" | "create_table_statement" | "create_table" => SymbolKind::Table,
-        "schema_declaration" | "schema_definition" => SymbolKind::Resource,
-        "resource_declaration" => SymbolKind::Resource,
-        "component_declaration" => SymbolKind::Component,
-        _ => return heuristic_declaration_kind(node_kind),
-    };
-    Some(exact)
+    EXACT_DECLARATION_RULES
+        .iter()
+        .find(|rule| rule.node_kinds.contains(&node_kind))
+        .map(|rule| rule.kind)
+        .or_else(|| heuristic_declaration_kind(node_kind))
 }
 
+struct ExactDeclarationRule {
+    node_kinds: &'static [&'static str],
+    kind: SymbolKind,
+}
+
+const EXACT_DECLARATION_RULES: &[ExactDeclarationRule] = &[
+    ExactDeclarationRule {
+        node_kinds: &[
+            "function",
+            "function_declaration",
+            "function_definition",
+            "function_item",
+            "function_statement",
+            "function_or_value_defn",
+            "function_binding",
+            "procedure_declaration",
+            "procedure_definition",
+            "defProc",
+            "subroutine",
+            "constructor_declaration",
+            "destructor_declaration",
+            "macro_declaration",
+            "macro_definition",
+        ],
+        kind: SymbolKind::Function,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "method",
+            "singleton_method",
+            "method_declaration",
+            "method_definition",
+            "method_implementation",
+            "method_block",
+            "method_statement",
+            "constructor_definition",
+        ],
+        kind: SymbolKind::Method,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "class",
+            "class_declaration",
+            "class_definition",
+            "class_block",
+            "class_interface",
+            "class_implementation",
+            "object_declaration",
+            "object_definition",
+            "contract_declaration",
+        ],
+        kind: SymbolKind::Class,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "struct_declaration",
+            "struct_definition",
+            "structure_declaration",
+            "record_declaration",
+            "record_definition",
+            "model_declaration",
+        ],
+        kind: SymbolKind::Struct,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "interface_declaration",
+            "interface_definition",
+            "protocol_declaration",
+            "trait_declaration",
+            "trait_definition",
+            "object_type_definition",
+        ],
+        kind: SymbolKind::Interface,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "enum",
+            "enum_declaration",
+            "enum_definition",
+            "enum_type_definition",
+        ],
+        kind: SymbolKind::Enum,
+    },
+    ExactDeclarationRule {
+        node_kinds: &["enum_member", "enum_value_definition"],
+        kind: SymbolKind::EnumMember,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "module",
+            "program",
+            "module_declaration",
+            "module_definition",
+            "module_block",
+            "namespace_declaration",
+            "namespace_definition",
+            "unit_declaration",
+            "program_declaration",
+            "package_declaration",
+        ],
+        kind: SymbolKind::Module,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "type_alias",
+            "type_alias_declaration",
+            "type_declaration",
+            "type_definition",
+            "alias_declaration",
+        ],
+        kind: SymbolKind::TypeAlias,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "field",
+            "field_declaration",
+            "field_definition",
+            "property_declaration",
+            "property_definition",
+            "property_statement",
+        ],
+        kind: SymbolKind::Property,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "constant",
+            "const_declaration",
+            "constant_declaration",
+            "constant_definition",
+        ],
+        kind: SymbolKind::Constant,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "variable_declaration",
+            "variable_definition",
+            "let_declaration",
+            "value_declaration",
+            "binding",
+        ],
+        kind: SymbolKind::Variable,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "event_definition",
+            "event_declaration",
+            "schema_declaration",
+            "schema_definition",
+            "resource_declaration",
+        ],
+        kind: SymbolKind::Resource,
+    },
+    ExactDeclarationRule {
+        node_kinds: &[
+            "table_declaration",
+            "create_table_statement",
+            "create_table",
+        ],
+        kind: SymbolKind::Table,
+    },
+    ExactDeclarationRule {
+        node_kinds: &["component_declaration"],
+        kind: SymbolKind::Component,
+    },
+];
+
+struct HeuristicDeclarationRule {
+    fragments: &'static [&'static str],
+    kind: SymbolKind,
+}
+
+const DECLARATION_SUFFIXES: [&str; 4] = ["_declaration", "_definition", "_defn", "_block"];
+const HEURISTIC_DECLARATION_RULES: [HeuristicDeclarationRule; 11] = [
+    HeuristicDeclarationRule {
+        fragments: &["function", "procedure"],
+        kind: SymbolKind::Function,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["method", "constructor"],
+        kind: SymbolKind::Method,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["class", "contract"],
+        kind: SymbolKind::Class,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["interface", "protocol"],
+        kind: SymbolKind::Interface,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["struct", "record"],
+        kind: SymbolKind::Struct,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["enum"],
+        kind: SymbolKind::Enum,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["module", "namespace"],
+        kind: SymbolKind::Module,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["type", "alias"],
+        kind: SymbolKind::TypeAlias,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["field", "property"],
+        kind: SymbolKind::Property,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["constant"],
+        kind: SymbolKind::Constant,
+    },
+    HeuristicDeclarationRule {
+        fragments: &["variable", "value"],
+        kind: SymbolKind::Variable,
+    },
+];
+
 fn heuristic_declaration_kind(node_kind: &str) -> Option<SymbolKind> {
-    let declaration_like = node_kind.ends_with("_declaration")
-        || node_kind.ends_with("_definition")
-        || node_kind.ends_with("_defn")
-        || node_kind.ends_with("_block");
-    if !declaration_like {
+    if !DECLARATION_SUFFIXES
+        .iter()
+        .any(|suffix| node_kind.ends_with(suffix))
+    {
         return None;
     }
-    if node_kind.contains("function") || node_kind.contains("procedure") {
-        Some(SymbolKind::Function)
-    } else if node_kind.contains("method") || node_kind.contains("constructor") {
-        Some(SymbolKind::Method)
-    } else if node_kind.contains("class") || node_kind.contains("contract") {
-        Some(SymbolKind::Class)
-    } else if node_kind.contains("interface") || node_kind.contains("protocol") {
-        Some(SymbolKind::Interface)
-    } else if node_kind.contains("struct") || node_kind.contains("record") {
-        Some(SymbolKind::Struct)
-    } else if node_kind.contains("enum") {
-        Some(SymbolKind::Enum)
-    } else if node_kind.contains("module") || node_kind.contains("namespace") {
-        Some(SymbolKind::Module)
-    } else if node_kind.contains("type") || node_kind.contains("alias") {
-        Some(SymbolKind::TypeAlias)
-    } else if node_kind.contains("field") || node_kind.contains("property") {
-        Some(SymbolKind::Property)
-    } else if node_kind.contains("constant") {
-        Some(SymbolKind::Constant)
-    } else if node_kind.contains("variable") || node_kind.contains("value") {
-        Some(SymbolKind::Variable)
-    } else {
-        None
-    }
+    HEURISTIC_DECLARATION_RULES
+        .iter()
+        .find(|rule| {
+            rule.fragments
+                .iter()
+                .any(|fragment| node_kind.contains(fragment))
+        })
+        .map(|rule| rule.kind)
 }
 
 fn textual_declaration(
@@ -579,14 +701,24 @@ fn generic_visibility(node: Node<'_>, source: &str) -> Option<Visibility> {
     None
 }
 
-fn generic_exported(
+struct GenericExportInput<'a> {
     language: SourceLanguage,
     top_level: bool,
     visibility: Option<Visibility>,
-    name: &str,
-    node: Node<'_>,
-    source: &str,
-) -> bool {
+    name: &'a str,
+    node: Node<'a>,
+    source: &'a str,
+}
+
+fn generic_exported(input: GenericExportInput<'_>) -> bool {
+    let GenericExportInput {
+        language,
+        top_level,
+        visibility,
+        name,
+        node,
+        source,
+    } = input;
     if visibility == Some(Visibility::Private) || name.starts_with('_') {
         return false;
     }

@@ -11,12 +11,44 @@ use crate::{
         ExtractionBudget, containment_budget_bytes, diagnostic_budget_bytes,
         import_binding_budget_bytes, reference_budget_bytes, symbol_budget_bytes,
     },
+    source_lines::{LineMap, SourceByteRange, physical_lines},
 };
 
 const FRAMEWORK_SYMBOL_DOMAIN: &str = "cartograph.v2.framework-symbol.2026-07-24";
 const FRAMEWORK_DIGEST_DOMAIN: &str = "cartograph.v2.framework-digest.2026-07-24";
 const MAX_ROUTE_BYTES: usize = 1_024;
 const MAX_SIGNAL_BYTES: usize = 4_096;
+const OPTIONAL_SEGMENT_MINIMUM_BYTES: usize = 4;
+const CATCH_ALL_SEGMENT_MINIMUM_BYTES: usize = 5;
+const CATCH_ALL_PREFIX_BYTES: usize = 4;
+const PYTHON_MULTILINE_DELIMITER_BYTES: usize = 3;
+
+pub(crate) fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
+    while value
+        .as_bytes()
+        .get(cursor)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+pub(crate) fn javascript_identifier_at(value: &str, start: usize) -> Option<(usize, &str)> {
+    let first = *value.as_bytes().get(start)?;
+    if !(first == b'_' || first == b'$' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut end = start + 1;
+    while value
+        .as_bytes()
+        .get(end)
+        .is_some_and(|byte| *byte == b'_' || *byte == b'$' || byte.is_ascii_alphanumeric())
+    {
+        end += 1;
+    }
+    Some((end, &value[start..end]))
+}
 
 pub(crate) fn enrich(
     snapshot: &SourceSnapshot,
@@ -61,6 +93,254 @@ pub(crate) struct LandmarkInput<'target> {
     pub(crate) end: usize,
     pub(crate) body_search_text: String,
     pub(crate) target: Option<(&'target str, Option<&'target str>, usize, usize)>,
+}
+
+pub(crate) struct FrameworkRouteInput<'target> {
+    pub(crate) method: &'target str,
+    pub(crate) path: &'target str,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) command: bool,
+    pub(crate) handler: Option<(&'target str, usize, usize)>,
+}
+
+pub(crate) struct FrameworkResolvedRouteInput<'target> {
+    pub(crate) method: &'target str,
+    pub(crate) path: &'target str,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) command: bool,
+    pub(crate) target: Option<(&'target str, Option<&'target str>, usize, usize)>,
+}
+
+pub(crate) struct FrameworkReferenceInput<'reference> {
+    pub(crate) owner: Option<SymbolId>,
+    pub(crate) name: &'reference str,
+    pub(crate) resolution_name: Option<&'reference str>,
+    pub(crate) kind: ReferenceKind,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+pub(crate) struct FrameworkNearReferenceInput<'reference> {
+    pub(crate) name: &'reference str,
+    pub(crate) resolution_name: Option<&'reference str>,
+    pub(crate) kind: ReferenceKind,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+struct FrameworkSignalReferenceInput<'reference> {
+    name: &'reference str,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DelimiterInput<'source> {
+    value: &'source str,
+    open: usize,
+    opening: u8,
+    closing: u8,
+    limit: usize,
+}
+
+impl<'source> DelimiterInput<'source> {
+    pub(crate) const fn parentheses(value: &'source str, open: usize) -> Self {
+        Self {
+            value,
+            open,
+            opening: b'(',
+            closing: b')',
+            limit: value.len(),
+        }
+    }
+
+    pub(crate) const fn braces(value: &'source str, open: usize) -> Self {
+        Self {
+            value,
+            open,
+            opening: b'{',
+            closing: b'}',
+            limit: value.len(),
+        }
+    }
+
+    pub(crate) const fn square_brackets(value: &'source str, open: usize) -> Self {
+        Self {
+            value,
+            open,
+            opening: b'[',
+            closing: b']',
+            limit: value.len(),
+        }
+    }
+
+    pub(crate) fn bounded_parentheses(
+        value: &'source str,
+        open: usize,
+        maximum_bytes: usize,
+    ) -> Self {
+        Self {
+            value,
+            open,
+            opening: b'(',
+            closing: b')',
+            limit: value.len().min(open.saturating_add(maximum_bytes)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RouteStatementInput<'source> {
+    hints: FrameworkHints,
+    start: usize,
+    statement: &'source str,
+}
+
+const ROUTE_MARKERS: &[(&str, &str, bool)] = &[
+    ("Route::get(", "GET", false),
+    ("Route::post(", "POST", false),
+    ("Route::put(", "PUT", false),
+    ("Route::patch(", "PATCH", false),
+    ("Route::delete(", "DELETE", false),
+    ("Route::options(", "OPTIONS", false),
+    ("Route::any(", "ANY", false),
+    ("->get(", "GET", false),
+    ("->post(", "POST", false),
+    ("->put(", "PUT", false),
+    ("->patch(", "PATCH", false),
+    ("->delete(", "DELETE", false),
+    ("MapGet(", "GET", false),
+    ("MapPost(", "POST", false),
+    ("MapPut(", "PUT", false),
+    ("MapPatch(", "PATCH", false),
+    ("MapDelete(", "DELETE", false),
+    ("HandleFunc(", "ANY", false),
+    ("path(", "ANY", false),
+    ("re_path(", "ANY", false),
+    (".GET(", "GET", false),
+    (".POST(", "POST", false),
+    (".PUT(", "PUT", false),
+    (".PATCH(", "PATCH", false),
+    (".DELETE(", "DELETE", false),
+    (".OPTIONS(", "OPTIONS", false),
+    (".HEAD(", "HEAD", false),
+    (".Get(", "GET", true),
+    (".Post(", "POST", true),
+    (".Put(", "PUT", true),
+    (".Patch(", "PATCH", true),
+    (".Delete(", "DELETE", true),
+    (".Options(", "OPTIONS", true),
+    (".Head(", "HEAD", true),
+    (".get(", "GET", false),
+    (".post(", "POST", false),
+    (".put(", "PUT", false),
+    (".patch(", "PATCH", false),
+    (".delete(", "DELETE", false),
+    (".options(", "OPTIONS", false),
+    (".head(", "HEAD", false),
+    (".connect(", "CONNECT", false),
+    (".trace(", "TRACE", false),
+    (".all(", "ALL", false),
+    (".use(", "USE", true),
+    ("url(", "ANY", false),
+];
+
+const HONO_GENERIC_ROUTE_MARKERS: &[&str] = &[
+    ".get(",
+    ".post(",
+    ".put(",
+    ".patch(",
+    ".delete(",
+    ".options(",
+    ".head(",
+    ".connect(",
+    ".trace(",
+    ".all(",
+    ".use(",
+];
+
+struct FrameworkSymbolIdentity<'identity> {
+    path: &'identity str,
+    kind: SymbolKind,
+    qualified_name: &'identity str,
+    ordinal: u64,
+}
+
+struct ReservedLandmarkIdentity {
+    source_identity: String,
+    qualified_name: String,
+    ordinal: u64,
+}
+
+fn has_landmark(builder: &FrameworkBuilder<'_, '_>, input: &LandmarkInput<'_>) -> bool {
+    builder.file.symbols[builder.original_symbols..]
+        .iter()
+        .any(|symbol| {
+            symbol.kind == input.kind
+                && symbol.name == input.name
+                && symbol.span.start_byte() == u64::try_from(input.start).unwrap_or(u64::MAX)
+                && symbol.span.end_byte() == u64::try_from(input.end).unwrap_or(u64::MAX)
+        })
+}
+
+fn reserve_landmark_identity(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    kind: SymbolKind,
+    source_identity: &str,
+) -> Option<ReservedLandmarkIdentity> {
+    let base_qualified = format!("{}::{source_identity}", builder.path());
+    let key = (kind, base_qualified.clone());
+    let ordinal = *builder.ordinals.entry(key.clone()).or_default();
+    let qualified_name = if ordinal == 0 {
+        base_qualified
+    } else {
+        format!("{base_qualified}#{ordinal}")
+    };
+    *builder.ordinals.entry(key).or_default() = ordinal.saturating_add(1);
+    builder
+        .symbol_keys
+        .insert((kind, qualified_name.clone()))
+        .then(|| ReservedLandmarkIdentity {
+            source_identity: source_identity.to_owned(),
+            qualified_name,
+            ordinal,
+        })
+}
+
+fn landmark_span(
+    builder: &FrameworkBuilder<'_, '_>,
+    start: usize,
+    end: usize,
+) -> Result<SourceSpan, ExtractError> {
+    if start == end && builder.source().is_empty() {
+        return Ok(SourceSpan::synthetic(
+            SourcePosition::new(0, 1, 0).map_err(|_| ExtractError::InvalidSpan)?,
+        ));
+    }
+    builder
+        .lines
+        .span(SourceByteRange::new(start, end, builder.source().len()))
+}
+
+fn add_landmark_containment(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    owner: Option<SymbolId>,
+    id: &SymbolId,
+) -> Result<(), ExtractError> {
+    let Some(parent) = owner else {
+        return Ok(());
+    };
+    let containment = Containment {
+        parent,
+        child: id.clone(),
+    };
+    builder
+        .budget
+        .reserve_fact(containment_budget_bytes(&containment), std::iter::empty())?;
+    builder.file.containments.push(containment);
+    Ok(())
 }
 
 impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
@@ -169,49 +449,38 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
         self.original_symbols
     }
 
-    pub(crate) fn add_route(
-        &mut self,
-        method: &str,
-        path: &str,
-        start: usize,
-        end: usize,
-        command: bool,
-        handler: Option<(&str, usize, usize)>,
-    ) -> Result<(), ExtractError> {
-        self.add_route_with_target(
-            method,
-            path,
-            start,
-            end,
-            command,
-            handler.map(|(name, start, end)| (name, None, start, end)),
-        )
+    pub(crate) fn add_route(&mut self, input: FrameworkRouteInput<'_>) -> Result<(), ExtractError> {
+        self.add_route_with_target(FrameworkResolvedRouteInput {
+            method: input.method,
+            path: input.path,
+            start: input.start,
+            end: input.end,
+            command: input.command,
+            target: input
+                .handler
+                .map(|(name, start, end)| (name, None, start, end)),
+        })
     }
 
     fn add_route_with_target(
         &mut self,
-        method: &str,
-        path: &str,
-        start: usize,
-        end: usize,
-        command: bool,
-        target: Option<(&str, Option<&str>, usize, usize)>,
+        input: FrameworkResolvedRouteInput<'_>,
     ) -> Result<(), ExtractError> {
-        let Some(path) = safe_route_value(path, command) else {
+        let Some(path) = safe_route_value(input.path, input.command) else {
             return Ok(());
         };
-        let method = if command {
+        let method = if input.command {
             "CMD".to_owned()
         } else {
-            method.to_ascii_uppercase()
+            input.method.to_ascii_uppercase()
         };
-        let name = if command {
+        let name = if input.command {
             format!("cmd {path}")
         } else {
             format!("{method} {path}")
         };
         let identity = format!("{}::{path}", method.to_ascii_lowercase());
-        let search_text = if command {
+        let search_text = if input.command {
             format!("cli command {path}")
         } else {
             format!("route {method} {path}")
@@ -220,10 +489,10 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
             kind: SymbolKind::Route,
             name,
             identity,
-            start,
-            end,
+            start: input.start,
+            end: input.end,
             body_search_text: search_text,
-            target,
+            target: input.target,
         })
     }
 
@@ -235,6 +504,9 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
         &mut self,
         input: LandmarkInput<'_>,
     ) -> Result<Option<SymbolId>, ExtractError> {
+        if has_landmark(self, &input) {
+            return Ok(None);
+        }
         let LandmarkInput {
             kind,
             name,
@@ -244,52 +516,23 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
             body_search_text,
             target,
         } = input;
-        if self.file.symbols[self.original_symbols..]
-            .iter()
-            .any(|symbol| {
-                symbol.kind == kind
-                    && symbol.name == name
-                    && symbol.span.start_byte() == u64::try_from(start).unwrap_or(u64::MAX)
-                    && symbol.span.end_byte() == u64::try_from(end).unwrap_or(u64::MAX)
-            })
-        {
+        let Some(identity) = reserve_landmark_identity(self, kind, &identity) else {
             return Ok(None);
-        }
-        let base_qualified = format!("{}::{identity}", self.path());
-        let key = (kind, base_qualified.clone());
-        let ordinal = *self.ordinals.entry(key).or_default();
-        let qualified_name = if ordinal == 0 {
-            base_qualified
-        } else {
-            format!("{base_qualified}#{ordinal}")
         };
-        *self
-            .ordinals
-            .entry((kind, format!("{}::{identity}", self.path())))
-            .or_default() = ordinal.saturating_add(1);
-        if !self.symbol_keys.insert((kind, qualified_name.clone())) {
-            return Ok(None);
-        }
         let owner = self.owner_near(start);
-        let span = if start == end && self.source().is_empty() {
-            SourceSpan::synthetic(
-                SourcePosition::new(0, 1, 0).map_err(|_| ExtractError::InvalidSpan)?,
-            )
-        } else {
-            self.lines.span(start, end, self.source().len())?
-        };
-        let id = framework_symbol_id(
-            self.snapshot.path().as_str(),
+        let span = landmark_span(self, start, end)?;
+        let id = framework_symbol_id(FrameworkSymbolIdentity {
+            path: self.snapshot.path().as_str(),
             kind,
-            &qualified_name,
-            ordinal,
-        );
-        let structural_digest = framework_digest(kind.as_str(), &identity);
+            qualified_name: &identity.qualified_name,
+            ordinal: identity.ordinal,
+        });
+        let structural_digest = framework_digest(kind.as_str(), &identity.source_identity);
         let symbol = ExtractedSymbol {
             id: id.clone(),
             kind,
             name,
-            qualified_name,
+            qualified_name: identity.qualified_name,
             span,
             signature: None,
             docstring: None,
@@ -297,6 +540,7 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
             body_search_truncated: false,
             health: crate::SymbolHealthMetrics::default(),
             declaration_only: false,
+            test_symbol: false,
             exported: true,
             default_export: false,
             async_symbol: false,
@@ -314,67 +558,59 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
                 symbol.body_search_text.as_str(),
             ],
         )?;
-        if let Some(parent) = owner {
-            let containment = Containment {
-                parent,
-                child: id.clone(),
-            };
-            self.budget
-                .reserve_fact(containment_budget_bytes(&containment), std::iter::empty())?;
-            self.file.containments.push(containment);
-        }
+        add_landmark_containment(self, owner, &id)?;
         self.file.symbols.push(symbol);
         if let Some((target, resolution_name, target_start, target_end)) = target {
-            self.add_reference_with_resolution(
-                Some(id.clone()),
-                target,
+            self.add_reference_with_resolution(FrameworkReferenceInput {
+                owner: Some(id.clone()),
+                name: target,
                 resolution_name,
-                ReferenceKind::Calls,
-                target_start,
-                target_end,
-            )?;
+                kind: ReferenceKind::Calls,
+                start: target_start,
+                end: target_end,
+            })?;
         }
         Ok(Some(id))
     }
 
     fn add_signal_reference(
         &mut self,
-        name: &str,
-        start: usize,
-        end: usize,
+        input: FrameworkSignalReferenceInput<'_>,
     ) -> Result<(), ExtractError> {
-        let owner = self.owner_near(start);
-        self.add_reference(owner, name, ReferenceKind::References, start, end)
+        let owner = self.owner_near(input.start);
+        self.add_reference(FrameworkReferenceInput {
+            owner,
+            name: input.name,
+            resolution_name: None,
+            kind: ReferenceKind::References,
+            start: input.start,
+            end: input.end,
+        })
     }
 
     pub(crate) fn add_reference(
         &mut self,
-        owner: Option<SymbolId>,
-        name: &str,
-        kind: ReferenceKind,
-        start: usize,
-        end: usize,
+        input: FrameworkReferenceInput<'_>,
     ) -> Result<(), ExtractError> {
-        self.add_reference_with_resolution(owner, name, None, kind, start, end)
+        self.add_reference_with_resolution(input)
     }
 
     pub(crate) fn add_reference_with_resolution(
         &mut self,
-        owner: Option<SymbolId>,
-        name: &str,
-        resolution_name: Option<&str>,
-        kind: ReferenceKind,
-        start: usize,
-        end: usize,
+        input: FrameworkReferenceInput<'_>,
     ) -> Result<(), ExtractError> {
-        let Some(name) = safe_signal(name) else {
+        let Some(name) = safe_signal(input.name) else {
             return Ok(());
         };
-        let resolution_name = resolution_name.and_then(safe_signal);
-        let span = self.lines.span(start, end, self.source().len())?;
+        let resolution_name = input.resolution_name.and_then(safe_signal);
+        let span = self.lines.span(SourceByteRange::new(
+            input.start,
+            input.end,
+            self.source().len(),
+        ))?;
         let key = (
-            owner.clone(),
-            kind,
+            input.owner.clone(),
+            input.kind,
             name.clone(),
             span.start_byte(),
             span.end_byte(),
@@ -382,8 +618,8 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
         if !self.reference_keys.insert(key) {
             if let Some(resolution_name) = resolution_name
                 && let Some(reference) = self.file.references.iter_mut().find(|reference| {
-                    reference.owner == owner
-                        && reference.kind == kind
+                    reference.owner == input.owner
+                        && reference.kind == input.kind
                         && reference.name == name
                         && reference.span == span
                 })
@@ -395,10 +631,10 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
             return Ok(());
         }
         let reference = ExtractedReference {
-            owner,
+            owner: input.owner,
             name,
             resolution_name,
-            kind,
+            kind: input.kind,
             span,
         };
         self.budget.reserve_fact(
@@ -414,25 +650,24 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
 
     pub(crate) fn add_reference_near(
         &mut self,
-        name: &str,
-        kind: ReferenceKind,
-        start: usize,
-        end: usize,
+        input: FrameworkNearReferenceInput<'_>,
     ) -> Result<(), ExtractError> {
-        let owner = self.owner_near(start);
-        self.add_reference(owner, name, kind, start, end)
+        let owner = self.owner_near(input.start);
+        self.add_reference(FrameworkReferenceInput {
+            owner,
+            name: input.name,
+            resolution_name: input.resolution_name,
+            kind: input.kind,
+            start: input.start,
+            end: input.end,
+        })
     }
 
     pub(crate) fn add_reference_near_with_resolution(
         &mut self,
-        name: &str,
-        resolution_name: &str,
-        kind: ReferenceKind,
-        start: usize,
-        end: usize,
+        input: FrameworkNearReferenceInput<'_>,
     ) -> Result<(), ExtractError> {
-        let owner = self.owner_near(start);
-        self.add_reference_with_resolution(owner, name, Some(resolution_name), kind, start, end)
+        self.add_reference_near(input)
     }
 
     fn owner_near(&self, offset: usize) -> Option<SymbolId> {
@@ -469,55 +704,6 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
     }
 }
 
-struct LineMap {
-    starts: Vec<usize>,
-}
-
-impl LineMap {
-    fn new(source: &str) -> Result<Self, ExtractError> {
-        let mut starts = Vec::new();
-        starts
-            .try_reserve_exact(
-                source
-                    .bytes()
-                    .filter(|byte| *byte == b'\n')
-                    .count()
-                    .saturating_add(1),
-            )
-            .map_err(|_| ExtractError::OutputLimit)?;
-        starts.push(0);
-        for (index, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
-                starts.push(index + 1);
-            }
-        }
-        Ok(Self { starts })
-    }
-
-    fn span(
-        &self,
-        start: usize,
-        end: usize,
-        source_len: usize,
-    ) -> Result<SourceSpan, ExtractError> {
-        if start >= end || end > source_len {
-            return Err(ExtractError::InvalidSpan);
-        }
-        SourceSpan::new(self.position(start)?, self.position(end)?)
-            .map_err(|_| ExtractError::InvalidSpan)
-    }
-
-    fn position(&self, byte: usize) -> Result<SourcePosition, ExtractError> {
-        let line_index = self.starts.partition_point(|start| *start <= byte) - 1;
-        SourcePosition::new(
-            u64::try_from(byte).map_err(|_| ExtractError::InvalidSpan)?,
-            u32::try_from(line_index + 1).map_err(|_| ExtractError::InvalidSpan)?,
-            u32::try_from(byte - self.starts[line_index]).map_err(|_| ExtractError::InvalidSpan)?,
-        )
-        .map_err(|_| ExtractError::InvalidSpan)
-    }
-}
-
 fn scan_framework_signals(
     builder: &mut FrameworkBuilder<'_, '_>,
     source: &str,
@@ -532,7 +718,14 @@ fn scan_framework_signals(
     for (statement_start, statement) in StatementRanges::new(source) {
         builder.check_cancelled()?;
         if hints.routes {
-            scan_route_statement(builder, hints, statement_start, statement)?;
+            scan_route_statement(
+                builder,
+                RouteStatementInput {
+                    hints,
+                    start: statement_start,
+                    statement,
+                },
+            )?;
             scan_vapor_group_route(builder, statement_start, statement)?;
         }
         scan_cli_line(builder, statement_start, statement)?;
@@ -638,7 +831,7 @@ fn scan_flutter_material_routes(
     let Some(open) = source[routes..].find('{').map(|offset| routes + offset) else {
         return Ok(());
     };
-    let Some(close) = matching_delimiter(source, open, b'{', b'}') else {
+    let Some(close) = matching_delimiter(DelimiterInput::braces(source, open)) else {
         return Ok(());
     };
     let mut cursor = open + 1;
@@ -670,7 +863,14 @@ fn scan_flutter_material_routes(
                     )
                 })
         });
-        builder.add_route("ANY", path.value, path.start, path.end, false, handler)?;
+        builder.add_route(FrameworkRouteInput {
+            method: "ANY",
+            path: path.value,
+            start: path.start,
+            end: path.end,
+            command: false,
+            handler,
+        })?;
         cursor = next_comma.saturating_add(1);
     }
     Ok(())
@@ -718,42 +918,41 @@ fn scan_vapor_group_route(
                 statement_start + start + name.len(),
             )
         });
-        builder.add_route(
+        builder.add_route(FrameworkRouteInput {
             method,
-            &combined,
-            statement_start + path.start,
-            statement_start + path.end,
-            false,
+            path: &combined,
+            start: statement_start + path.start,
+            end: statement_start + path.end,
+            command: false,
             handler,
-        )?;
+        })?;
     }
     Ok(())
 }
 
-fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Option<usize> {
-    if value.as_bytes().get(open) != Some(&opening) {
+pub(crate) fn matching_delimiter(input: DelimiterInput<'_>) -> Option<usize> {
+    if input.value.as_bytes().get(input.open) != Some(&input.opening) {
         return None;
     }
-    let bytes = value.as_bytes();
+    let bytes = input.value.as_bytes();
     let mut depth = 0_usize;
     let mut quote = None;
     let mut escaped = false;
-    for (index, byte) in bytes.iter().copied().enumerate().skip(open) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
+    for (index, byte) in bytes
+        .iter()
+        .copied()
+        .enumerate()
+        .take(input.limit)
+        .skip(input.open)
+    {
+        if consume_quoted_byte(byte, &mut quote, &mut escaped) {
             continue;
         }
         if matches!(byte, b'\'' | b'"' | b'`') {
             quote = Some(byte);
-        } else if byte == opening {
+        } else if byte == input.opening {
             depth = depth.saturating_add(1);
-        } else if byte == closing {
+        } else if byte == input.closing {
             depth = depth.saturating_sub(1);
             if depth == 0 {
                 return Some(index);
@@ -761,6 +960,26 @@ fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Opt
         }
     }
     None
+}
+
+pub(crate) fn join_route_paths(base: &str, subpath: &str) -> Option<String> {
+    if base.len().saturating_add(subpath.len()) > MAX_ROUTE_BYTES {
+        return None;
+    }
+    let mut path = String::new();
+    path.try_reserve(base.len().saturating_add(subpath.len()).saturating_add(1))
+        .ok()?;
+    for segment in base.split('/').chain(subpath.split('/')) {
+        let segment = segment.trim();
+        if !segment.is_empty() {
+            path.push('/');
+            path.push_str(segment);
+        }
+    }
+    if path.is_empty() {
+        path.push('/');
+    }
+    Some(path)
 }
 
 fn scan_path_conventions(builder: &mut FrameworkBuilder<'_, '_>) -> Result<(), ExtractError> {
@@ -927,10 +1146,16 @@ fn route_from_segments<'segment>(
         if raw.is_empty() || raw == "index" {
             continue;
         }
-        let segment = if raw.starts_with("[[") && raw.ends_with("]]") && raw.len() > 4 {
+        let segment = if raw.starts_with("[[")
+            && raw.ends_with("]]")
+            && raw.len() > OPTIONAL_SEGMENT_MINIMUM_BYTES
+        {
             format!(":{}?", &raw[2..raw.len() - 2])
-        } else if raw.starts_with("[...") && raw.ends_with(']') && raw.len() > 5 {
-            format!("*{}", &raw[4..raw.len() - 1])
+        } else if raw.starts_with("[...")
+            && raw.ends_with(']')
+            && raw.len() > CATCH_ALL_SEGMENT_MINIMUM_BYTES
+        {
+            format!("*{}", &raw[CATCH_ALL_PREFIX_BYTES..raw.len() - 1])
         } else if raw.starts_with('[') && raw.ends_with(']') && raw.len() > 2 {
             format!(":{}", &raw[1..raw.len() - 1])
         } else {
@@ -955,70 +1180,9 @@ struct FrameworkHints {
 
 impl FrameworkHints {
     fn detect(language: SourceLanguage, path: &str, source: &str) -> Self {
-        let route_hint = match language {
-            SourceLanguage::TypeScript
-            | SourceLanguage::Tsx
-            | SourceLanguage::JavaScript
-            | SourceLanguage::Jsx => [
-                "express",
-                "hono",
-                "fastify",
-                "Router",
-                "Bun.serve",
-                "@nestjs",
-                "Routes",
-                "RouterModule",
-            ]
-            .into_iter()
-            .any(|hint| source.contains(hint)),
-            SourceLanguage::Python => ["django", "flask", "fastapi", "APIRouter", "urlpatterns"]
-                .into_iter()
-                .any(|hint| source.contains(hint)),
-            SourceLanguage::Php => ["Route::", "Symfony", "$routes", "CodeIgniter", "Drupal"]
-                .into_iter()
-                .any(|hint| source.contains(hint)),
-            SourceLanguage::Ruby => ["Rails.application.routes", "resources ", "namespace "]
-                .into_iter()
-                .any(|hint| source.contains(hint)),
-            SourceLanguage::Java
-            | SourceLanguage::Kotlin
-            | SourceLanguage::Scala
-            | SourceLanguage::CSharp => [
-                "Mapping(",
-                "@RequestMapping",
-                "[Route(",
-                "[HttpGet",
-                "[HttpPost",
-                "MapGet(",
-                "MapPost(",
-            ]
-            .into_iter()
-            .any(|hint| source.contains(hint)),
-            SourceLanguage::Go => ["gin.", "echo.", "chi.", "net/http", "HandleFunc("]
-                .into_iter()
-                .any(|hint| source.contains(hint)),
-            SourceLanguage::Rust => ["actix_web", "axum", "rocket", "warp::"]
-                .into_iter()
-                .any(|hint| source.contains(hint)),
-            SourceLanguage::Dart => source.contains("GoRoute(") || source.contains("MaterialApp("),
-            SourceLanguage::Swift => source.contains("Vapor") || source.contains("routes"),
-            SourceLanguage::Yaml => is_play_route_path(path),
-            _ => false,
-        };
         Self {
-            routes: route_hint,
-            angular_or_flutter: matches!(
-                language,
-                SourceLanguage::TypeScript
-                    | SourceLanguage::Tsx
-                    | SourceLanguage::JavaScript
-                    | SourceLanguage::Jsx
-                    | SourceLanguage::Dart
-            ) && (source.contains("path:")
-                && (source.contains("Routes")
-                    || source.contains("RouterModule")
-                    || source.contains("GoRoute")
-                    || source.contains("MaterialApp"))),
+            routes: framework_route_hint(language, path, source),
+            angular_or_flutter: angular_or_flutter_hint(language, source),
             hono_only: (source.contains("new Hono") || source.contains("new OpenAPIHono"))
                 && !source.contains("express"),
             play_routes: is_play_route_path(path),
@@ -1026,151 +1190,105 @@ impl FrameworkHints {
     }
 }
 
+fn contains_any(source: &str, hints: &[&str]) -> bool {
+    hints.iter().any(|hint| source.contains(hint))
+}
+
+fn framework_route_hint(language: SourceLanguage, path: &str, source: &str) -> bool {
+    let hints: &[&str] = match language {
+        SourceLanguage::TypeScript
+        | SourceLanguage::Tsx
+        | SourceLanguage::JavaScript
+        | SourceLanguage::Jsx => &[
+            "express",
+            "hono",
+            "fastify",
+            "Router",
+            "Bun.serve",
+            "@nestjs",
+            "Routes",
+            "RouterModule",
+        ],
+        SourceLanguage::Python => &["django", "flask", "fastapi", "APIRouter", "urlpatterns"],
+        SourceLanguage::Php => &["Route::", "Symfony", "$routes", "CodeIgniter", "Drupal"],
+        SourceLanguage::Ruby => &["Rails.application.routes", "resources ", "namespace "],
+        SourceLanguage::Java
+        | SourceLanguage::Kotlin
+        | SourceLanguage::Scala
+        | SourceLanguage::CSharp => &[
+            "Mapping(",
+            "@RequestMapping",
+            "[Route(",
+            "[HttpGet",
+            "[HttpPost",
+            "MapGet(",
+            "MapPost(",
+        ],
+        SourceLanguage::Go => &["gin.", "echo.", "chi.", "net/http", "HandleFunc("],
+        SourceLanguage::Rust => &["actix_web", "axum", "rocket", "warp::"],
+        SourceLanguage::Dart => &["GoRoute(", "MaterialApp("],
+        SourceLanguage::Swift => &["Vapor", "routes"],
+        SourceLanguage::Yaml => return is_play_route_path(path),
+        _ => &[],
+    };
+    contains_any(source, hints)
+}
+
+fn angular_or_flutter_hint(language: SourceLanguage, source: &str) -> bool {
+    let supported = matches!(
+        language,
+        SourceLanguage::TypeScript
+            | SourceLanguage::Tsx
+            | SourceLanguage::JavaScript
+            | SourceLanguage::Jsx
+            | SourceLanguage::Dart
+    );
+    supported
+        && source.contains("path:")
+        && contains_any(
+            source,
+            &["Routes", "RouterModule", "GoRoute", "MaterialApp"],
+        )
+}
+
 fn scan_route_statement(
     builder: &mut FrameworkBuilder<'_, '_>,
-    hints: FrameworkHints,
-    statement_start: usize,
-    statement: &str,
+    input: RouteStatementInput<'_>,
 ) -> Result<(), ExtractError> {
+    let RouteStatementInput {
+        hints,
+        start: statement_start,
+        statement,
+    } = input;
     if hints.play_routes
         && let Some(route) = play_route(statement)
     {
-        return builder.add_route(
-            route.method,
-            route.path,
-            statement_start + route.path_start,
-            statement_start + route.path_start + route.path.len(),
-            false,
-            route.handler.map(|(handler, start)| {
+        return builder.add_route(FrameworkRouteInput {
+            method: route.method,
+            path: route.path,
+            start: statement_start + route.path_start,
+            end: statement_start + route.path_start + route.path.len(),
+            command: false,
+            handler: route.handler.map(|(handler, start)| {
                 (
                     handler,
                     statement_start + start,
                     statement_start + start + handler.len(),
                 )
             }),
-        );
+        });
     }
     if let Some(route) = annotation_route(statement) {
-        builder.add_route(
-            route.method,
-            route.path,
-            statement_start + route.path_start,
-            statement_start + route.path_start + route.path.len(),
-            false,
-            None,
-        )?;
+        builder.add_route(FrameworkRouteInput {
+            method: route.method,
+            path: route.path,
+            start: statement_start + route.path_start,
+            end: statement_start + route.path_start + route.path.len(),
+            command: false,
+            handler: None,
+        })?;
     }
-    for (marker, method, slash_required) in [
-        ("Route::get(", "GET", false),
-        ("Route::post(", "POST", false),
-        ("Route::put(", "PUT", false),
-        ("Route::patch(", "PATCH", false),
-        ("Route::delete(", "DELETE", false),
-        ("Route::options(", "OPTIONS", false),
-        ("Route::any(", "ANY", false),
-        ("->get(", "GET", false),
-        ("->post(", "POST", false),
-        ("->put(", "PUT", false),
-        ("->patch(", "PATCH", false),
-        ("->delete(", "DELETE", false),
-        ("MapGet(", "GET", false),
-        ("MapPost(", "POST", false),
-        ("MapPut(", "PUT", false),
-        ("MapPatch(", "PATCH", false),
-        ("MapDelete(", "DELETE", false),
-        ("HandleFunc(", "ANY", false),
-        ("path(", "ANY", false),
-        ("re_path(", "ANY", false),
-        (".GET(", "GET", false),
-        (".POST(", "POST", false),
-        (".PUT(", "PUT", false),
-        (".PATCH(", "PATCH", false),
-        (".DELETE(", "DELETE", false),
-        (".OPTIONS(", "OPTIONS", false),
-        (".HEAD(", "HEAD", false),
-        (".Get(", "GET", true),
-        (".Post(", "POST", true),
-        (".Put(", "PUT", true),
-        (".Patch(", "PATCH", true),
-        (".Delete(", "DELETE", true),
-        (".Options(", "OPTIONS", true),
-        (".Head(", "HEAD", true),
-        (".get(", "GET", false),
-        (".post(", "POST", false),
-        (".put(", "PUT", false),
-        (".patch(", "PATCH", false),
-        (".delete(", "DELETE", false),
-        (".options(", "OPTIONS", false),
-        (".head(", "HEAD", false),
-        (".connect(", "CONNECT", false),
-        (".trace(", "TRACE", false),
-        (".all(", "ALL", false),
-        (".use(", "USE", true),
-        ("url(", "ANY", false),
-    ] {
-        if hints.hono_only
-            && matches!(
-                marker,
-                ".get("
-                    | ".post("
-                    | ".put("
-                    | ".patch("
-                    | ".delete("
-                    | ".options("
-                    | ".head("
-                    | ".connect("
-                    | ".trace("
-                    | ".all("
-                    | ".use("
-            )
-        {
-            continue;
-        }
-        let mut cursor = 0;
-        while let Some(relative) = statement[cursor..].find(marker) {
-            let marker_start = cursor + relative;
-            let after_marker = marker_start + marker.len();
-            if !route_marker_has_identifier_boundary(statement, marker_start, marker) {
-                cursor = after_marker;
-                continue;
-            }
-            let Some(quoted) = quoted_after(statement, after_marker) else {
-                cursor = after_marker;
-                continue;
-            };
-            if slash_required && !quoted.value.starts_with('/') {
-                cursor = quoted.end;
-                continue;
-            }
-            let framework_target =
-                if builder.language() == SourceLanguage::Php && marker.starts_with("Route::") {
-                    laravel_route_target(statement, quoted.end)
-                } else {
-                    handler_after(statement, quoted.end).map(|(start, name)| RouteTarget {
-                        name,
-                        resolution_name: None,
-                        start,
-                        end: start + name.len(),
-                    })
-                };
-            builder.add_route_with_target(
-                method,
-                quoted.value,
-                statement_start + quoted.start,
-                statement_start + quoted.end,
-                false,
-                framework_target.as_ref().map(|target| {
-                    (
-                        target.name,
-                        target.resolution_name.as_deref(),
-                        statement_start + target.start,
-                        statement_start + target.end,
-                    )
-                }),
-            )?;
-            cursor = quoted.end;
-        }
-    }
+    scan_standard_route_markers(builder, input)?;
     if !hints.hono_only {
         scan_on_route(builder, statement_start, statement)?;
         scan_object_route(builder, statement_start, statement)?;
@@ -1180,20 +1298,86 @@ fn scan_route_statement(
     if hints.angular_or_flutter
         && let Some(route) = named_path_route(statement)
     {
-        builder.add_route(
-            "ANY",
-            route.path,
-            statement_start + route.path_start,
-            statement_start + route.path_start + route.path.len(),
-            false,
-            route.handler.map(|(handler, start)| {
+        builder.add_route(FrameworkRouteInput {
+            method: "ANY",
+            path: route.path,
+            start: statement_start + route.path_start,
+            end: statement_start + route.path_start + route.path.len(),
+            command: false,
+            handler: route.handler.map(|(handler, start)| {
                 (
                     handler,
                     statement_start + start,
                     statement_start + start + handler.len(),
                 )
             }),
-        )?;
+        })?;
+    }
+    Ok(())
+}
+
+fn scan_standard_route_markers(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: RouteStatementInput<'_>,
+) -> Result<(), ExtractError> {
+    for &marker in ROUTE_MARKERS {
+        if input.hints.hono_only && HONO_GENERIC_ROUTE_MARKERS.contains(&marker.0) {
+            continue;
+        }
+        scan_standard_route_marker(builder, input, marker)?;
+    }
+    Ok(())
+}
+
+fn scan_standard_route_marker(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: RouteStatementInput<'_>,
+    marker: (&str, &str, bool),
+) -> Result<(), ExtractError> {
+    let (marker, method, slash_required) = marker;
+    let mut cursor = 0;
+    while let Some(relative) = input.statement[cursor..].find(marker) {
+        let marker_start = cursor + relative;
+        let after_marker = marker_start + marker.len();
+        if !marker_has_identifier_boundary(input.statement, marker_start, marker) {
+            cursor = after_marker;
+            continue;
+        }
+        let Some(quoted) = quoted_after(input.statement, after_marker) else {
+            cursor = after_marker;
+            continue;
+        };
+        if slash_required && !quoted.value.starts_with('/') {
+            cursor = quoted.end;
+            continue;
+        }
+        let framework_target =
+            if builder.language() == SourceLanguage::Php && marker.starts_with("Route::") {
+                laravel_route_target(input.statement, quoted.end)
+            } else {
+                handler_after(input.statement, quoted.end).map(|(start, name)| RouteTarget {
+                    name,
+                    resolution_name: None,
+                    start,
+                    end: start + name.len(),
+                })
+            };
+        builder.add_route_with_target(FrameworkResolvedRouteInput {
+            method,
+            path: quoted.value,
+            start: input.start + quoted.start,
+            end: input.start + quoted.end,
+            command: false,
+            target: framework_target.as_ref().map(|target| {
+                (
+                    target.name,
+                    target.resolution_name.as_deref(),
+                    input.start + target.start,
+                    input.start + target.end,
+                )
+            }),
+        })?;
+        cursor = quoted.end;
     }
     Ok(())
 }
@@ -1212,17 +1396,44 @@ struct RouteTarget<'source> {
     end: usize,
 }
 
-struct Quoted<'source> {
-    value: &'source str,
-    start: usize,
-    end: usize,
+pub(crate) struct Quoted<'source> {
+    pub(crate) value: &'source str,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) quote_end: usize,
 }
 
-fn quoted_after(value: &str, from: usize) -> Option<Quoted<'_>> {
+pub(crate) fn quoted_after(value: &str, from: usize) -> Option<Quoted<'_>> {
+    scan_quoted(value, from, QuoteMode::Route)
+}
+
+pub(crate) fn quoted_literal_after(value: &str, from: usize) -> Option<Quoted<'_>> {
+    scan_quoted(value, from, QuoteMode::Literal)
+}
+
+impl Quoted<'_> {
+    pub(crate) fn with_offset(mut self, offset: usize) -> Self {
+        self.start = self.start.saturating_add(offset);
+        self.end = self.end.saturating_add(offset);
+        self.quote_end = self.quote_end.saturating_add(offset);
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+enum QuoteMode {
+    Route,
+    Literal,
+}
+
+fn scan_quoted(value: &str, from: usize, mode: QuoteMode) -> Option<Quoted<'_>> {
     let bytes = value.as_bytes();
     let mut cursor = from;
-    while cursor < bytes.len() && !matches!(bytes[cursor], b'\'' | b'"' | b'`') {
-        if bytes[cursor] == b';' {
+    while cursor < bytes.len()
+        && !matches!(bytes[cursor], b'\'' | b'"')
+        && !(matches!(mode, QuoteMode::Route) && bytes[cursor] == b'`')
+    {
+        if matches!(mode, QuoteMode::Route) && bytes[cursor] == b';' {
             return None;
         }
         cursor += 1;
@@ -1240,6 +1451,7 @@ fn quoted_after(value: &str, from: usize) -> Option<Quoted<'_>> {
                 value: &value[start..cursor],
                 start,
                 end: cursor,
+                quote_end: cursor,
             });
         }
         cursor += 1;
@@ -1404,11 +1616,7 @@ fn php_identifier(value: &str) -> bool {
             .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
-fn route_marker_has_identifier_boundary(
-    statement: &str,
-    marker_start: usize,
-    marker: &str,
-) -> bool {
+fn marker_has_identifier_boundary(statement: &str, marker_start: usize, marker: &str) -> bool {
     let Some(first) = marker.chars().next() else {
         return false;
     };
@@ -1448,14 +1656,14 @@ fn scan_on_route(
                 statement_start + start + handler.len(),
             )
         });
-        builder.add_route(
-            method.value,
-            path.value,
-            statement_start + path.start,
-            statement_start + path.end,
-            false,
+        builder.add_route(FrameworkRouteInput {
+            method: method.value,
+            path: path.value,
+            start: statement_start + path.start,
+            end: statement_start + path.end,
+            command: false,
             handler,
-        )?;
+        })?;
         cursor = path.end;
     }
     Ok(())
@@ -1484,14 +1692,14 @@ fn scan_object_route(
             statement_start + offset + start + handler.len(),
         )
     });
-    builder.add_route(
+    builder.add_route(FrameworkRouteInput {
         method,
-        path.value,
-        statement_start + offset + path.start,
-        statement_start + offset + path.end,
-        false,
+        path: path.value,
+        start: statement_start + offset + path.start,
+        end: statement_start + offset + path.end,
+        command: false,
         handler,
-    )
+    })
 }
 
 fn scan_router_route(
@@ -1542,14 +1750,14 @@ fn scan_router_route(
                         )
                     })
             });
-        builder.add_route(
+        builder.add_route(FrameworkRouteInput {
             method,
-            path.value,
-            statement_start + path.start,
-            statement_start + path.end,
-            false,
+            path: path.value,
+            start: statement_start + path.start,
+            end: statement_start + path.end,
+            command: false,
             handler,
-        )?;
+        })?;
         cursor = path.end;
     }
     Ok(())
@@ -1896,32 +2104,32 @@ fn scan_cli_line(
         let Some(command) = quoted_after(line, marker_start + marker.len()) else {
             continue;
         };
-        builder.add_route(
-            "CMD",
-            command.value,
-            line_start + command.start,
-            line_start + command.end,
-            true,
-            None,
-        )?;
+        builder.add_route(FrameworkRouteInput {
+            method: "CMD",
+            path: command.value,
+            start: line_start + command.start,
+            end: line_start + command.end,
+            command: true,
+            handler: None,
+        })?;
     }
     if builder.language() == SourceLanguage::Go
         && builder.source().contains("cobra.Command")
         && let Some(marker) = line.find("Use:")
         && let Some(command) = quoted_after(line, marker + "Use:".len())
     {
-        builder.add_route(
-            "CMD",
-            command
+        builder.add_route(FrameworkRouteInput {
+            method: "CMD",
+            path: command
                 .value
                 .split_ascii_whitespace()
                 .next()
                 .unwrap_or(command.value),
-            line_start + command.start,
-            line_start + command.end,
-            true,
-            None,
-        )?;
+            start: line_start + command.start,
+            end: line_start + command.end,
+            command: true,
+            handler: None,
+        })?;
     }
     Ok(())
 }
@@ -1930,6 +2138,62 @@ fn scan_config_line(
     builder: &mut FrameworkBuilder<'_, '_>,
     line_start: usize,
     line: &str,
+) -> Result<(), ExtractError> {
+    let input = ConfigSourceLine {
+        start: line_start,
+        text: line,
+    };
+    scan_dotted_config_references(builder, input)?;
+    scan_quoted_config_references(
+        builder,
+        input,
+        &[
+            "process.env[",
+            "Bun.env[",
+            "c.env[",
+            "ctx.env[",
+            "context.env[",
+            "os.environ[",
+            "ENV[",
+            "$_ENV[",
+        ],
+    )?;
+    scan_quoted_config_references(
+        builder,
+        input,
+        &[
+            "Deno.env.get(",
+            "os.getenv(",
+            "os.environ.get(",
+            "getenv(",
+            "os.Getenv(",
+            "os.LookupEnv(",
+            "System.getenv(",
+            "Environment.GetEnvironmentVariable(",
+            "std::env::var(",
+            "std::env::var_os(",
+            "env::var(",
+            "env::var_os(",
+            "env!(",
+            "ENV.fetch(",
+            "env(",
+            "config(",
+            "getProperty(",
+        ],
+    )?;
+    scan_runtime_path_references(builder, input)?;
+    scan_managed_config_placeholders(builder, input)
+}
+
+#[derive(Clone, Copy)]
+struct ConfigSourceLine<'source> {
+    start: usize,
+    text: &'source str,
+}
+
+fn scan_dotted_config_references(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: ConfigSourceLine<'_>,
 ) -> Result<(), ExtractError> {
     for marker in [
         "process.env.",
@@ -1940,79 +2204,56 @@ fn scan_config_line(
         "context.env.",
     ] {
         let mut cursor = 0;
-        while let Some(relative) = line[cursor..].find(marker) {
+        while let Some(relative) = input.text[cursor..].find(marker) {
             let start = cursor + relative + marker.len();
-            let Some((offset, name)) = identifiers(&line[start..]).into_iter().next() else {
+            let Some((offset, name)) = identifiers(&input.text[start..]).into_iter().next() else {
                 break;
             };
             let name_start = start + offset;
-            builder.add_signal_reference(
+            builder.add_signal_reference(FrameworkSignalReferenceInput {
                 name,
-                line_start + name_start,
-                line_start + name_start + name.len(),
-            )?;
+                start: input.start + name_start,
+                end: input.start + name_start + name.len(),
+            })?;
             cursor = name_start + name.len();
         }
     }
-    for marker in [
-        "process.env[",
-        "Bun.env[",
-        "c.env[",
-        "ctx.env[",
-        "context.env[",
-        "os.environ[",
-        "ENV[",
-        "$_ENV[",
-    ] {
+    Ok(())
+}
+
+fn scan_quoted_config_references(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: ConfigSourceLine<'_>,
+    markers: &[&str],
+) -> Result<(), ExtractError> {
+    for marker in markers {
         let mut cursor = 0;
-        while let Some(relative) = line[cursor..].find(marker) {
-            let start = cursor + relative + marker.len();
-            let Some(value) = quoted_after(line, start) else {
+        while let Some(relative) = input.text[cursor..].find(marker) {
+            let marker_start = cursor + relative;
+            let start = marker_start + marker.len();
+            if !marker_has_identifier_boundary(input.text, marker_start, marker) {
+                cursor = start;
+                continue;
+            }
+            let Some(value) = quoted_after(input.text, start) else {
                 cursor = start;
                 continue;
             };
-            builder.add_signal_reference(
-                value.value,
-                line_start + value.start,
-                line_start + value.end,
-            )?;
+            builder.add_signal_reference(FrameworkSignalReferenceInput {
+                name: value.value,
+                start: input.start + value.start,
+                end: input.start + value.end,
+            })?;
             cursor = value.end;
         }
     }
-    for marker in [
-        "Deno.env.get(",
-        "os.getenv(",
-        "os.environ.get(",
-        "getenv(",
-        "os.Getenv(",
-        "os.LookupEnv(",
-        "System.getenv(",
-        "Environment.GetEnvironmentVariable(",
-        "std::env::var(",
-        "std::env::var_os(",
-        "env::var(",
-        "env::var_os(",
-        "env!(",
-        "ENV.fetch(",
-        "env(",
-        "config(",
-        "getProperty(",
-    ] {
-        let mut cursor = 0;
-        while let Some(relative) = line[cursor..].find(marker) {
-            let start = cursor + relative + marker.len();
-            let Some(value) = quoted_after(line, start) else {
-                cursor = start;
-                continue;
-            };
-            builder.add_signal_reference(
-                value.value,
-                line_start + value.start,
-                line_start + value.end,
-            )?;
-            cursor = value.end;
-        }
-    }
+    Ok(())
+}
+
+fn scan_runtime_path_references(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: ConfigSourceLine<'_>,
+) -> Result<(), ExtractError> {
     for marker in [
         "__dirname",
         "__filename",
@@ -2021,43 +2262,55 @@ fn scan_config_line(
         "import.meta.url",
     ] {
         let mut cursor = 0;
-        while let Some(relative) = line[cursor..].find(marker) {
+        while let Some(relative) = input.text[cursor..].find(marker) {
             let start = cursor + relative;
             let end = start + marker.len();
             let boundary_before = start == 0
-                || (!line.as_bytes()[start.saturating_sub(1)].is_ascii_alphanumeric()
-                    && line.as_bytes()[start.saturating_sub(1)] != b'_');
-            let boundary_after = end == line.len()
-                || (!line.as_bytes()[end].is_ascii_alphanumeric() && line.as_bytes()[end] != b'_');
+                || (!input.text.as_bytes()[start.saturating_sub(1)].is_ascii_alphanumeric()
+                    && input.text.as_bytes()[start.saturating_sub(1)] != b'_');
+            let boundary_after = end == input.text.len()
+                || (!input.text.as_bytes()[end].is_ascii_alphanumeric()
+                    && input.text.as_bytes()[end] != b'_');
             if boundary_before && boundary_after {
-                builder.add_signal_reference(marker, line_start + start, line_start + end)?;
+                builder.add_signal_reference(FrameworkSignalReferenceInput {
+                    name: marker,
+                    start: input.start + start,
+                    end: input.start + end,
+                })?;
             }
             cursor = end;
         }
     }
+    Ok(())
+}
+
+fn scan_managed_config_placeholders(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: ConfigSourceLine<'_>,
+) -> Result<(), ExtractError> {
     if matches!(
         builder.language(),
         SourceLanguage::Java | SourceLanguage::Kotlin | SourceLanguage::Scala
     ) {
         let mut cursor = 0;
-        while let Some(relative) = line[cursor..].find("${") {
+        while let Some(relative) = input.text[cursor..].find("${") {
             let open = cursor + relative;
             let start = open + 2;
-            let Some(close_relative) = line[start..].find('}') else {
+            let Some(close_relative) = input.text[start..].find('}') else {
                 break;
             };
             let close = start + close_relative;
-            let raw = line[start..close]
+            let raw = input.text[start..close]
                 .split(':')
                 .next()
                 .unwrap_or_default()
                 .trim();
-            let leading = line[start..close].find(raw).unwrap_or(0);
-            builder.add_signal_reference(
-                raw,
-                line_start + start + leading,
-                line_start + start + leading + raw.len(),
-            )?;
+            let leading = input.text[start..close].find(raw).unwrap_or(0);
+            builder.add_signal_reference(FrameworkSignalReferenceInput {
+                name: raw,
+                start: input.start + start + leading,
+                end: input.start + start + leading + raw.len(),
+            })?;
             cursor = close + 1;
         }
     }
@@ -2070,8 +2323,10 @@ fn safe_route_value(value: &str, command: bool) -> Option<String> {
         || value.len() > MAX_ROUTE_BYTES
         || looks_sensitive(value)
         || value.bytes().any(|byte| byte.is_ascii_control())
-        || (!command && value.bytes().any(|byte| byte.is_ascii_whitespace()))
     {
+        return None;
+    }
+    if !command && value.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return None;
     }
     let value = if command {
@@ -2088,15 +2343,19 @@ fn safe_signal(value: &str) -> Option<String> {
         || value.len() > MAX_SIGNAL_BYTES
         || looks_sensitive(value)
         || value.bytes().any(|byte| byte.is_ascii_control())
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'#' | b'$' | b'@')
-                || byte == b'\\'
-        })
     {
         return None;
     }
+    if !value.bytes().all(valid_signal_byte) {
+        return None;
+    }
     Some(value.to_owned())
+}
+
+fn valid_signal_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'#' | b'$' | b'@')
+        || byte == b'\\'
 }
 
 fn looks_sensitive(value: &str) -> bool {
@@ -2115,22 +2374,17 @@ fn looks_sensitive(value: &str) -> bool {
     .any(|prefix| lower.starts_with(prefix))
 }
 
-fn framework_symbol_id(
-    path: &str,
-    kind: SymbolKind,
-    qualified_name: &str,
-    ordinal: u64,
-) -> SymbolId {
+fn framework_symbol_id(input: FrameworkSymbolIdentity<'_>) -> SymbolId {
     let mut hasher = blake3::Hasher::new_derive_key(FRAMEWORK_SYMBOL_DOMAIN);
     for field in [
-        path.as_bytes(),
-        kind.as_str().as_bytes(),
-        qualified_name.as_bytes(),
+        input.path.as_bytes(),
+        input.kind.as_str().as_bytes(),
+        input.qualified_name.as_bytes(),
     ] {
         hasher.update(&u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(field);
     }
-    hasher.update(&ordinal.to_le_bytes());
+    hasher.update(&input.ordinal.to_le_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
     SymbolId::from_uuid_v8(bytes)
@@ -2178,16 +2432,6 @@ struct StatementRanges<'source> {
     escaped: bool,
 }
 
-fn physical_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut offset = 0_usize;
-    source.split_inclusive('\n').map(move |raw| {
-        let start = offset;
-        offset = offset.saturating_add(raw.len());
-        let line = raw.strip_suffix('\n').unwrap_or(raw);
-        (start, line.strip_suffix('\r').unwrap_or(line))
-    })
-}
-
 impl<'source> StatementRanges<'source> {
     const fn new(source: &'source str) -> Self {
         Self {
@@ -2200,6 +2444,39 @@ impl<'source> StatementRanges<'source> {
             escaped: false,
         }
     }
+
+    fn consume_quote(&mut self, byte: u8) -> bool {
+        if let Some(quote) = self.quote {
+            if self.escaped {
+                self.escaped = false;
+            } else if byte == b'\\' {
+                self.escaped = true;
+            } else if byte == quote {
+                self.quote = None;
+            }
+            return true;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            self.quote = Some(byte);
+            return true;
+        }
+        false
+    }
+
+    fn update_depth(&mut self, byte: u8) -> bool {
+        match byte {
+            b'(' => self.parentheses = self.parentheses.saturating_add(1),
+            b')' => self.parentheses = self.parentheses.saturating_sub(1),
+            b'[' => self.brackets = self.brackets.saturating_add(1),
+            b']' => self.brackets = self.brackets.saturating_sub(1),
+            _ => return false,
+        }
+        true
+    }
+
+    const fn is_boundary(&self, byte: u8) -> bool {
+        matches!(byte, b'\n' | b';') && self.parentheses == 0 && self.brackets == 0
+    }
 }
 
 impl<'source> Iterator for StatementRanges<'source> {
@@ -2210,29 +2487,17 @@ impl<'source> Iterator for StatementRanges<'source> {
         while self.cursor < bytes.len() {
             let byte = bytes[self.cursor];
             self.cursor += 1;
-            if let Some(quote) = self.quote {
-                if self.escaped {
-                    self.escaped = false;
-                } else if byte == b'\\' {
-                    self.escaped = true;
-                } else if byte == quote {
-                    self.quote = None;
-                }
+            if self.consume_quote(byte) {
                 continue;
             }
-            match byte {
-                b'\'' | b'"' | b'`' => self.quote = Some(byte),
-                b'(' => self.parentheses = self.parentheses.saturating_add(1),
-                b')' => self.parentheses = self.parentheses.saturating_sub(1),
-                b'[' => self.brackets = self.brackets.saturating_add(1),
-                b']' => self.brackets = self.brackets.saturating_sub(1),
-                b'\n' | b';' if self.parentheses == 0 && self.brackets == 0 => {
-                    let start = self.start;
-                    let end = self.cursor;
-                    self.start = self.cursor;
-                    return Some((start, &self.source[start..end]));
-                }
-                _ => {}
+            if self.update_depth(byte) {
+                continue;
+            }
+            if self.is_boundary(byte) {
+                let start = self.start;
+                let end = self.cursor;
+                self.start = self.cursor;
+                return Some((start, &self.source[start..end]));
             }
         }
         if self.start < bytes.len() {
@@ -2243,6 +2508,21 @@ impl<'source> Iterator for StatementRanges<'source> {
             None
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct CommentSyntax {
+    python: bool,
+    hash: bool,
+    dash: bool,
+    html: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CommentKind {
+    Line(usize),
+    Block,
+    Html,
 }
 
 fn mask_comments(
@@ -2256,32 +2536,7 @@ fn mask_comments(
         .try_reserve_exact(bytes.len())
         .map_err(|_| ExtractError::OutputLimit)?;
     masked.extend_from_slice(bytes);
-    let hash_comments = matches!(
-        language,
-        SourceLanguage::Python
-            | SourceLanguage::Ruby
-            | SourceLanguage::Yaml
-            | SourceLanguage::Bash
-            | SourceLanguage::Zsh
-            | SourceLanguage::Fish
-            | SourceLanguage::Elixir
-            | SourceLanguage::R
-            | SourceLanguage::Php
-    );
-    let dash_comments = matches!(
-        language,
-        SourceLanguage::Sql | SourceLanguage::Haskell | SourceLanguage::Lua
-    );
-    let html_comments = matches!(
-        language,
-        SourceLanguage::Html
-            | SourceLanguage::Vue
-            | SourceLanguage::Svelte
-            | SourceLanguage::Astro
-            | SourceLanguage::Xml
-            | SourceLanguage::Visualforce
-            | SourceLanguage::Aura
-    );
+    let syntax = comment_syntax(language);
     let mut cursor = 0;
     let mut quote = None;
     let mut escaped = false;
@@ -2289,32 +2544,13 @@ fn mask_comments(
         if cursor % 4_096 == 0 && cancelled() {
             return Err(ExtractError::Cancelled);
         }
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if bytes[cursor] == b'\\' {
-                escaped = true;
-            } else if bytes[cursor] == active_quote {
-                quote = None;
-            }
+        if consume_quoted_byte(bytes[cursor], &mut quote, &mut escaped) {
             cursor += 1;
             continue;
         }
-        if language == SourceLanguage::Python
-            && (bytes[cursor..].starts_with(b"\"\"\"") || bytes[cursor..].starts_with(b"'''"))
-        {
-            let delimiter = &bytes[cursor..cursor + 3];
-            let start = cursor;
-            cursor += 3;
-            while cursor + 2 < bytes.len() && &bytes[cursor..cursor + 3] != delimiter {
-                cursor += 1;
-            }
-            cursor = cursor.saturating_add(3).min(bytes.len());
-            for byte in &mut masked[start..cursor] {
-                if !matches!(*byte, b'\n' | b'\r') {
-                    *byte = b' ';
-                }
-            }
+        if let Some(end) = python_multiline_end(bytes, cursor, syntax.python) {
+            mask_comment_bytes(&mut masked, cursor, end);
+            cursor = end;
             continue;
         }
         if matches!(bytes[cursor], b'\'' | b'"' | b'`') {
@@ -2322,47 +2558,128 @@ fn mask_comments(
             cursor += 1;
             continue;
         }
-        let comment = if bytes[cursor..].starts_with(b"//") {
-            Some((2, b'\n'))
-        } else if bytes[cursor..].starts_with(b"/*") {
-            Some((2, 0))
-        } else if html_comments && bytes[cursor..].starts_with(b"<!--") {
-            Some((4, b'>'))
-        } else if dash_comments && bytes[cursor..].starts_with(b"--") {
-            Some((2, b'\n'))
-        } else if hash_comments && bytes[cursor] == b'#' && bytes.get(cursor + 1) != Some(&b'[') {
-            Some((1, b'\n'))
-        } else {
-            None
-        };
-        let Some((opening, terminator)) = comment else {
+        let Some(kind) = comment_kind_at(bytes, cursor, syntax) else {
             cursor += 1;
             continue;
         };
-        let start = cursor;
-        cursor += opening;
-        if terminator == 0 {
-            while cursor + 1 < bytes.len() && !bytes[cursor..].starts_with(b"*/") {
-                cursor += 1;
-            }
-            cursor = cursor.saturating_add(2).min(bytes.len());
-        } else if terminator == b'>' {
-            while cursor + 2 < bytes.len() && !bytes[cursor..].starts_with(b"-->") {
-                cursor += 1;
-            }
-            cursor = cursor.saturating_add(3).min(bytes.len());
-        } else {
-            while cursor < bytes.len() && bytes[cursor] != terminator {
-                cursor += 1;
-            }
-        }
-        for byte in &mut masked[start..cursor] {
-            if !matches!(*byte, b'\n' | b'\r') {
-                *byte = b' ';
-            }
-        }
+        let end = comment_end(bytes, cursor, kind);
+        mask_comment_bytes(&mut masked, cursor, end);
+        cursor = end;
     }
     String::from_utf8(masked).map_err(|_| ExtractError::InvalidSpan)
+}
+
+fn comment_syntax(language: SourceLanguage) -> CommentSyntax {
+    CommentSyntax {
+        python: language == SourceLanguage::Python,
+        hash: matches!(
+            language,
+            SourceLanguage::Python
+                | SourceLanguage::Ruby
+                | SourceLanguage::Yaml
+                | SourceLanguage::Bash
+                | SourceLanguage::Zsh
+                | SourceLanguage::Fish
+                | SourceLanguage::Elixir
+                | SourceLanguage::R
+                | SourceLanguage::Php
+        ),
+        dash: matches!(
+            language,
+            SourceLanguage::Sql | SourceLanguage::Haskell | SourceLanguage::Lua
+        ),
+        html: matches!(
+            language,
+            SourceLanguage::Html
+                | SourceLanguage::Vue
+                | SourceLanguage::Svelte
+                | SourceLanguage::Astro
+                | SourceLanguage::Xml
+                | SourceLanguage::Visualforce
+                | SourceLanguage::Aura
+        ),
+    }
+}
+
+fn consume_quoted_byte(byte: u8, quote: &mut Option<u8>, escaped: &mut bool) -> bool {
+    let Some(active_quote) = *quote else {
+        return false;
+    };
+    if *escaped {
+        *escaped = false;
+    } else if byte == b'\\' {
+        *escaped = true;
+    } else if byte == active_quote {
+        *quote = None;
+    }
+    true
+}
+
+fn python_multiline_end(bytes: &[u8], cursor: usize, enabled: bool) -> Option<usize> {
+    if !enabled || !(bytes[cursor..].starts_with(b"\"\"\"") || bytes[cursor..].starts_with(b"'''"))
+    {
+        return None;
+    }
+    let delimiter = &bytes[cursor..cursor + PYTHON_MULTILINE_DELIMITER_BYTES];
+    let mut end = cursor.saturating_add(PYTHON_MULTILINE_DELIMITER_BYTES);
+    while end + 2 < bytes.len() && &bytes[end..end + PYTHON_MULTILINE_DELIMITER_BYTES] != delimiter
+    {
+        end += 1;
+    }
+    Some(
+        end.saturating_add(PYTHON_MULTILINE_DELIMITER_BYTES)
+            .min(bytes.len()),
+    )
+}
+
+fn comment_kind_at(bytes: &[u8], cursor: usize, syntax: CommentSyntax) -> Option<CommentKind> {
+    if bytes[cursor..].starts_with(b"//") {
+        Some(CommentKind::Line(2))
+    } else if bytes[cursor..].starts_with(b"/*") {
+        Some(CommentKind::Block)
+    } else if syntax.html && bytes[cursor..].starts_with(b"<!--") {
+        Some(CommentKind::Html)
+    } else if syntax.dash && bytes[cursor..].starts_with(b"--") {
+        Some(CommentKind::Line(2))
+    } else if syntax.hash && bytes[cursor] == b'#' && bytes.get(cursor + 1) != Some(&b'[') {
+        Some(CommentKind::Line(1))
+    } else {
+        None
+    }
+}
+
+fn comment_end(bytes: &[u8], cursor: usize, kind: CommentKind) -> usize {
+    match kind {
+        CommentKind::Line(opening) => {
+            let mut end = cursor.saturating_add(opening);
+            while end < bytes.len() && bytes[end] != b'\n' {
+                end += 1;
+            }
+            end
+        }
+        CommentKind::Block => {
+            let mut end = cursor.saturating_add(2);
+            while end + 1 < bytes.len() && !bytes[end..].starts_with(b"*/") {
+                end += 1;
+            }
+            end.saturating_add(2).min(bytes.len())
+        }
+        CommentKind::Html => {
+            let mut end = cursor.saturating_add(4);
+            while end + 2 < bytes.len() && !bytes[end..].starts_with(b"-->") {
+                end += 1;
+            }
+            end.saturating_add(3).min(bytes.len())
+        }
+    }
+}
+
+fn mask_comment_bytes(masked: &mut [u8], start: usize, end: usize) {
+    for byte in &mut masked[start..end] {
+        if !matches!(*byte, b'\n' | b'\r') {
+            *byte = b' ';
+        }
+    }
 }
 
 fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {

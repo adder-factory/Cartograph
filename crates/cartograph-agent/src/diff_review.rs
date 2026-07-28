@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use cartograph_db::CurrentSymbolRecord;
+use cartograph_db::{CurrentSymbolRecord, FileCochangeQuery};
 use cartograph_domain::{NormalizedPath, ProjectId, SymbolId};
 use cartograph_search::{
     DeterministicRetriever, IndexFreshness, ReviewBudget, ReviewPacket, ReviewRequest,
-    ReviewRequestOptions, SourceRangeQuery, TraversalBudget, TraversalNode, TraversalRequest,
+    ReviewRequestOptions, SourceRangeQuery, SourceRangeQueryInput, SourceRangeResult,
+    TraversalBudget, TraversalNode, TraversalRequest,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -124,6 +125,28 @@ impl DiffReviewOptions {
     pub const fn with_evidence_budget(mut self, value: ReviewBudget) -> Self {
         self.evidence_budget = value;
         self
+    }
+}
+
+/// Caller-supplied patch, bounds, and cooperative cancellation for one review.
+pub struct DiffReviewInput<'review> {
+    diff: &'review str,
+    options: DiffReviewOptions,
+    cancellation: ProjectCancellation,
+}
+
+impl<'review> DiffReviewInput<'review> {
+    #[must_use]
+    pub const fn new(
+        diff: &'review str,
+        options: DiffReviewOptions,
+        cancellation: ProjectCancellation,
+    ) -> Self {
+        Self {
+            diff,
+            options,
+            cancellation,
+        }
     }
 }
 
@@ -296,17 +319,185 @@ impl PendingDiffFile {
     }
 }
 
+struct PendingFinalizeInput<'pending> {
+    files: &'pending mut Vec<UnifiedDiffFile>,
+    pending: &'pending mut PendingDiffFile,
+    max_changed_files: u16,
+    files_truncated: &'pending mut bool,
+    hunks_truncated: &'pending mut bool,
+}
+
+struct DiffCochangeInput<'input> {
+    project_id: &'input ProjectId,
+    comparison: &'input UnifiedDiffComparison,
+    options: DiffReviewOptions,
+    cancellation: &'input ProjectCancellation,
+}
+
+struct SymbolGraphContextInput<'input> {
+    retriever: &'input DeterministicRetriever,
+    project_id: &'input ProjectId,
+    symbol: CurrentSymbolRecord,
+    options: DiffReviewOptions,
+}
+
+struct CallTraversalInput<'input> {
+    retriever: &'input DeterministicRetriever,
+    project_id: &'input ProjectId,
+    symbol_id: &'input SymbolId,
+    limit: u16,
+    incoming: bool,
+}
+
+struct UnifiedDiffParser {
+    files: Vec<UnifiedDiffFile>,
+    pending: PendingDiffFile,
+    active_hunk: Option<usize>,
+    max_changed_files: u16,
+    files_truncated: bool,
+    hunks_truncated: bool,
+    added_lines: u64,
+    removed_lines: u64,
+}
+
+impl UnifiedDiffParser {
+    fn new(max_changed_files: u16) -> Self {
+        Self {
+            files: Vec::new(),
+            pending: PendingDiffFile::default(),
+            active_hunk: None,
+            max_changed_files,
+            files_truncated: false,
+            hunks_truncated: false,
+            added_lines: 0,
+            removed_lines: 0,
+        }
+    }
+
+    fn consume_line(&mut self, line: &str) -> Result<(), DiffReviewError> {
+        if self.consume_file_header(line)? || self.consume_file_metadata(line)? {
+            return Ok(());
+        }
+        self.consume_hunk_line(line)
+    }
+
+    fn consume_file_header(&mut self, line: &str) -> Result<bool, DiffReviewError> {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            self.finalize_pending()?;
+            self.pending = PendingDiffFile::default();
+            if let Some((old, new)) = split_git_header_paths(rest)? {
+                self.pending.old_path = decode_diff_path(&old)?;
+                self.pending.new_path = decode_diff_path(&new)?;
+            }
+            self.active_hunk = None;
+            return Ok(true);
+        }
+        if let Some(rest) = line.strip_prefix("--- ") {
+            if self.pending.saw_new_header {
+                self.finalize_pending()?;
+                self.pending = PendingDiffFile::default();
+            }
+            self.pending.old_path = decode_diff_path(rest)?;
+            self.active_hunk = None;
+            return Ok(true);
+        }
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            self.pending.new_path = decode_diff_path(rest)?;
+            self.pending.saw_new_header = true;
+            self.active_hunk = None;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn consume_file_metadata(&mut self, line: &str) -> Result<bool, DiffReviewError> {
+        if let Some(rest) = line.strip_prefix("rename from ") {
+            self.pending.old_path = decode_diff_path(rest)?;
+            self.pending.kind_hint = Some(DiffFileKind::Renamed);
+        } else if let Some(rest) = line.strip_prefix("rename to ") {
+            self.pending.new_path = decode_diff_path(rest)?;
+            self.pending.kind_hint = Some(DiffFileKind::Renamed);
+        } else if line.starts_with("new file mode ") {
+            self.pending.kind_hint = Some(DiffFileKind::Added);
+        } else if line.starts_with("deleted file mode ") {
+            self.pending.kind_hint = Some(DiffFileKind::Deleted);
+        } else if let Some(rest) = line.strip_prefix("Binary files ") {
+            self.pending.binary = true;
+            if let Some((old, new)) = rest.strip_suffix(" differ").and_then(split_binary_paths) {
+                self.pending.old_path = decode_diff_path(old)?;
+                self.pending.new_path = decode_diff_path(new)?;
+            }
+            self.active_hunk = None;
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn consume_hunk_line(&mut self, line: &str) -> Result<(), DiffReviewError> {
+        if let Some(hunk) = parse_hunk_header(line)? {
+            if self.pending.hunks.len() < MAX_HUNKS_PER_FILE {
+                self.pending.hunks.push(hunk);
+                self.active_hunk = Some(self.pending.hunks.len().saturating_sub(1));
+            } else {
+                self.pending.hunks_truncated = true;
+                self.active_hunk = None;
+            }
+            return Ok(());
+        }
+        let Some(index) = self.active_hunk else {
+            return Ok(());
+        };
+        let hunk = self
+            .pending
+            .hunks
+            .get_mut(index)
+            .ok_or(DiffReviewError::InvalidDiff)?;
+        if line.starts_with('+') && !line.starts_with("+++") {
+            hunk.added_lines = hunk.added_lines.saturating_add(1);
+            self.added_lines = self.added_lines.saturating_add(1);
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            hunk.removed_lines = hunk.removed_lines.saturating_add(1);
+            self.removed_lines = self.removed_lines.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn finalize_pending(&mut self) -> Result<(), DiffReviewError> {
+        finalize_pending(PendingFinalizeInput {
+            files: &mut self.files,
+            pending: &mut self.pending,
+            max_changed_files: self.max_changed_files,
+            files_truncated: &mut self.files_truncated,
+            hunks_truncated: &mut self.hunks_truncated,
+        })
+    }
+
+    fn finish(mut self, diff: &str) -> Result<UnifiedDiffComparison, DiffReviewError> {
+        self.finalize_pending()?;
+        if !diff.trim().is_empty() && self.files.is_empty() && !self.files_truncated {
+            return Err(DiffReviewError::InvalidDiff);
+        }
+        Ok(UnifiedDiffComparison {
+            files: self.files,
+            diff_bytes: diff.len(),
+            added_lines: self.added_lines,
+            removed_lines: self.removed_lines,
+            files_truncated: self.files_truncated,
+            hunks_truncated: self.hunks_truncated,
+        })
+    }
+}
+
 impl crate::ProjectRuntime {
     /// Review caller-supplied unified-diff text without persisting its source body.
     pub async fn review_diff_with_cancellation(
         &self,
-        diff: &str,
-        options: DiffReviewOptions,
-        cancellation: ProjectCancellation,
+        input: DiffReviewInput<'_>,
     ) -> Result<DiffReviewReport, DiffReviewError> {
-        let comparison = parse_unified_diff(diff, options.max_changed_files)?;
+        let comparison = parse_unified_diff(input.diff, input.options.max_changed_files)?;
         let status = self
-            .status_with_cancellation(cancellation.clone())
+            .status_with_cancellation(input.cancellation.clone())
             .await
             .map_err(map_project_error)?;
         let (project_id, freshness) = match status.snapshot {
@@ -323,7 +514,7 @@ impl crate::ProjectRuntime {
         let request = ReviewRequest::new(
             project_id.clone(),
             comparison.files.iter().map(|file| file.path.clone()),
-            ReviewRequestOptions::new(freshness, options.evidence_budget)
+            ReviewRequestOptions::new(freshness, input.options.evidence_budget)
                 .with_changed_files_truncated(comparison.files_truncated),
         )
         .map_err(|_| DiffReviewError::RetrievalUnavailable)?;
@@ -343,11 +534,21 @@ impl crate::ProjectRuntime {
                 cochange_available: true,
             });
         };
-        let (hunks, symbols, context_truncated) =
-            collect_hunk_context(&retriever, &project_id, &comparison, options, &cancellation)
-                .await?;
+        let (hunks, symbols, context_truncated) = collect_hunk_context(HunkContextRequest {
+            retriever: &retriever,
+            project_id: &project_id,
+            comparison: &comparison,
+            options: input.options,
+            cancellation: &input.cancellation,
+        })
+        .await?;
         let (cochange_warnings, cochange_available) = self
-            .collect_diff_cochanges(&project_id, &comparison, options, &cancellation)
+            .collect_diff_cochanges(DiffCochangeInput {
+                project_id: &project_id,
+                comparison: &comparison,
+                options: input.options,
+                cancellation: &input.cancellation,
+            })
             .await?;
         Ok(DiffReviewReport {
             comparison,
@@ -362,32 +563,38 @@ impl crate::ProjectRuntime {
 
     async fn collect_diff_cochanges(
         &self,
-        project_id: &ProjectId,
-        comparison: &UnifiedDiffComparison,
-        options: DiffReviewOptions,
-        cancellation: &ProjectCancellation,
+        input: DiffCochangeInput<'_>,
     ) -> Result<(Vec<DiffCochangeWarning>, bool), DiffReviewError> {
-        if options.cochange_warnings_per_file == 0
-            || comparison.magnitude() < u64::from(options.minimum_diff_magnitude)
+        if input.options.cochange_warnings_per_file == 0
+            || input.comparison.magnitude() < u64::from(input.options.minimum_diff_magnitude)
         {
             return Ok((Vec::new(), true));
         }
-        let changed = comparison
+        let changed = input
+            .comparison
             .files
             .iter()
             .map(|file| file.path.as_str())
             .collect::<BTreeSet<_>>();
         let mut warnings = Vec::new();
-        for file in comparison
+        for file in input
+            .comparison
             .files
             .iter()
             .filter(|file| file.kind != DiffFileKind::Deleted)
         {
-            require_not_cancelled(cancellation)?;
-            let query_limit = options.cochange_warnings_per_file.saturating_mul(3).max(1);
+            require_not_cancelled(input.cancellation)?;
+            let query_limit = input
+                .options
+                .cochange_warnings_per_file
+                .saturating_mul(3)
+                .max(1);
             let partners = match self
                 .database
-                .current_file_cochanges(project_id, &file.path, 2, query_limit)
+                .current_file_cochanges(
+                    FileCochangeQuery::new(input.project_id, &file.path, query_limit)
+                        .with_minimum_commits(2),
+                )
                 .await
             {
                 Ok(partners) => partners,
@@ -396,7 +603,7 @@ impl crate::ProjectRuntime {
             let mut retained = 0_u16;
             for partner in partners {
                 if changed.contains(partner.path())
-                    || (partner.jaccard() < options.minimum_cochange_jaccard
+                    || (partner.jaccard() < input.options.minimum_cochange_jaccard
                         && partner.anchor_ratio() < MIN_COCHANGE_ANCHOR_RATIO)
                 {
                     continue;
@@ -409,7 +616,7 @@ impl crate::ProjectRuntime {
                     anchor_ratio: partner.anchor_ratio(),
                 });
                 retained = retained.saturating_add(1);
-                if retained == options.cochange_warnings_per_file {
+                if retained == input.options.cochange_warnings_per_file {
                     break;
                 }
             }
@@ -418,102 +625,152 @@ impl crate::ProjectRuntime {
     }
 }
 
-async fn collect_hunk_context(
-    retriever: &DeterministicRetriever,
-    project_id: &ProjectId,
-    comparison: &UnifiedDiffComparison,
+struct HunkContextRequest<'request> {
+    retriever: &'request DeterministicRetriever,
+    project_id: &'request ProjectId,
+    comparison: &'request UnifiedDiffComparison,
     options: DiffReviewOptions,
-    cancellation: &ProjectCancellation,
+    cancellation: &'request ProjectCancellation,
+}
+
+struct HunkRangeInput<'hunk> {
+    file: &'hunk UnifiedDiffFile,
+    hunk: &'hunk UnifiedDiffHunk,
+    query_start_line: u32,
+    query_end_line: u32,
+    range_truncated: bool,
+}
+
+struct HunkContextAccumulator {
+    hunks: Vec<DiffHunkContext>,
+    unique_symbols: BTreeMap<SymbolId, CurrentSymbolRecord>,
+    truncated: bool,
+}
+
+impl HunkContextAccumulator {
+    fn new(truncated: bool) -> Self {
+        Self {
+            hunks: Vec::new(),
+            unique_symbols: BTreeMap::new(),
+            truncated,
+        }
+    }
+
+    fn at_capacity(&self) -> bool {
+        self.hunks.len() == MAX_CONTEXT_HUNKS
+    }
+
+    fn push(&mut self, input: HunkRangeInput<'_>, range: Option<SourceRangeResult>) {
+        let mut symbol_ids = Vec::new();
+        let mut symbols_truncated = false;
+        if let Some(range) = range {
+            symbols_truncated = range.truncated();
+            for symbol in range.symbols() {
+                if !self.unique_symbols.contains_key(symbol.symbol_id())
+                    && self.unique_symbols.len() == MAX_CONTEXT_SYMBOLS
+                {
+                    self.truncated = true;
+                    symbols_truncated = true;
+                    continue;
+                }
+                self.unique_symbols
+                    .entry(symbol.symbol_id().clone())
+                    .or_insert_with(|| symbol.clone());
+                symbol_ids.push(symbol.symbol_id().clone());
+            }
+        }
+        self.hunks.push(DiffHunkContext {
+            path: input.file.path.clone(),
+            old_start: input.hunk.old_start,
+            old_lines: input.hunk.old_lines,
+            new_start: input.hunk.new_start,
+            new_lines: input.hunk.new_lines,
+            query_start_line: input.query_start_line,
+            query_end_line: input.query_end_line,
+            symbol_ids,
+            symbols_truncated,
+            range_truncated: input.range_truncated,
+        });
+    }
+}
+
+async fn collect_hunk_context(
+    request: HunkContextRequest<'_>,
 ) -> Result<(Vec<DiffHunkContext>, Vec<DiffSymbolContext>, bool), DiffReviewError> {
-    let mut hunks = Vec::new();
-    let mut unique_symbols = BTreeMap::<SymbolId, CurrentSymbolRecord>::new();
-    let mut context_truncated = comparison.hunks_truncated;
-    'files: for file in comparison
+    let mut accumulator = HunkContextAccumulator::new(request.comparison.hunks_truncated);
+    'files: for file in request
+        .comparison
         .files
         .iter()
         .filter(|file| file.kind != DiffFileKind::Deleted)
     {
         for hunk in &file.hunks {
-            require_not_cancelled(cancellation)?;
-            if hunks.len() == MAX_CONTEXT_HUNKS {
-                context_truncated = true;
+            require_not_cancelled(request.cancellation)?;
+            if accumulator.at_capacity() {
+                accumulator.truncated = true;
                 break 'files;
             }
             let (query_start_line, query_end_line, range_truncated) = hunk_query_range(hunk);
-            let query = SourceRangeQuery::new(
-                file.path.clone(),
-                query_start_line,
-                query_end_line,
-                SYMBOLS_PER_HUNK,
-            )
+            let query = SourceRangeQuery::new(SourceRangeQueryInput {
+                path: file.path.clone(),
+                start_line: query_start_line,
+                end_line: query_end_line,
+                limit: SYMBOLS_PER_HUNK,
+            })
             .map_err(|_| DiffReviewError::InvalidDiff)?;
-            let range = retriever
-                .symbols_at_range(project_id, &query)
+            let range = request
+                .retriever
+                .symbols_at_range(request.project_id, &query)
                 .await
                 .map_err(|_| DiffReviewError::RetrievalUnavailable)?;
-            let mut symbol_ids = Vec::new();
-            let mut symbols_truncated = false;
-            if let Some(range) = range {
-                symbols_truncated = range.truncated();
-                for symbol in range.symbols() {
-                    if !unique_symbols.contains_key(symbol.symbol_id())
-                        && unique_symbols.len() == MAX_CONTEXT_SYMBOLS
-                    {
-                        context_truncated = true;
-                        symbols_truncated = true;
-                        continue;
-                    }
-                    unique_symbols
-                        .entry(symbol.symbol_id().clone())
-                        .or_insert_with(|| symbol.clone());
-                    symbol_ids.push(symbol.symbol_id().clone());
-                }
-            }
-            hunks.push(DiffHunkContext {
-                path: file.path.clone(),
-                old_start: hunk.old_start,
-                old_lines: hunk.old_lines,
-                new_start: hunk.new_start,
-                new_lines: hunk.new_lines,
-                query_start_line,
-                query_end_line,
-                symbol_ids,
-                symbols_truncated,
-                range_truncated,
-            });
+            accumulator.push(
+                HunkRangeInput {
+                    file,
+                    hunk,
+                    query_start_line,
+                    query_end_line,
+                    range_truncated,
+                },
+                range,
+            );
         }
     }
-    let mut symbols = Vec::with_capacity(unique_symbols.len());
-    for symbol in unique_symbols.into_values() {
-        require_not_cancelled(cancellation)?;
-        symbols.push(collect_symbol_graph_context(retriever, project_id, symbol, options).await?);
+    let mut symbols = Vec::with_capacity(accumulator.unique_symbols.len());
+    for symbol in accumulator.unique_symbols.into_values() {
+        require_not_cancelled(request.cancellation)?;
+        symbols.push(
+            collect_symbol_graph_context(SymbolGraphContextInput {
+                retriever: request.retriever,
+                project_id: request.project_id,
+                symbol,
+                options: request.options,
+            })
+            .await?,
+        );
     }
-    Ok((hunks, symbols, context_truncated))
+    Ok((accumulator.hunks, symbols, accumulator.truncated))
 }
 
 async fn collect_symbol_graph_context(
-    retriever: &DeterministicRetriever,
-    project_id: &ProjectId,
-    symbol: CurrentSymbolRecord,
-    options: DiffReviewOptions,
+    input: SymbolGraphContextInput<'_>,
 ) -> Result<DiffSymbolContext, DiffReviewError> {
-    let callers = traverse_calls(
-        retriever,
-        project_id,
-        symbol.symbol_id(),
-        options.callers_per_symbol,
-        true,
-    );
-    let callees = traverse_calls(
-        retriever,
-        project_id,
-        symbol.symbol_id(),
-        options.callees_per_symbol,
-        false,
-    );
+    let callers = traverse_calls(CallTraversalInput {
+        retriever: input.retriever,
+        project_id: input.project_id,
+        symbol_id: input.symbol.symbol_id(),
+        limit: input.options.callers_per_symbol,
+        incoming: true,
+    });
+    let callees = traverse_calls(CallTraversalInput {
+        retriever: input.retriever,
+        project_id: input.project_id,
+        symbol_id: input.symbol.symbol_id(),
+        limit: input.options.callees_per_symbol,
+        incoming: false,
+    });
     let (callers, callees) = tokio::try_join!(callers, callees)?;
     Ok(DiffSymbolContext {
-        symbol,
+        symbol: input.symbol,
         callers: callers.0,
         callees: callees.0,
         callers_truncated: callers.1,
@@ -522,23 +779,23 @@ async fn collect_symbol_graph_context(
 }
 
 async fn traverse_calls(
-    retriever: &DeterministicRetriever,
-    project_id: &ProjectId,
-    symbol_id: &SymbolId,
-    limit: u16,
-    incoming: bool,
+    input: CallTraversalInput<'_>,
 ) -> Result<(Vec<TraversalNode>, bool), DiffReviewError> {
-    if limit == 0 {
+    if input.limit == 0 {
         return Ok((Vec::new(), false));
     }
     let budget =
-        TraversalBudget::new(1, limit).map_err(|_| DiffReviewError::RetrievalUnavailable)?;
-    let request = TraversalRequest::new(project_id.clone(), vec![symbol_id.clone()], budget)
-        .map_err(|_| DiffReviewError::RetrievalUnavailable)?;
-    let result = if incoming {
-        retriever.callers(&request).await
+        TraversalBudget::new(1, input.limit).map_err(|_| DiffReviewError::RetrievalUnavailable)?;
+    let request = TraversalRequest::new(
+        input.project_id.clone(),
+        vec![input.symbol_id.clone()],
+        budget,
+    )
+    .map_err(|_| DiffReviewError::RetrievalUnavailable)?;
+    let result = if input.incoming {
+        input.retriever.callers(&request).await
     } else {
-        retriever.callees(&request).await
+        input.retriever.callees(&request).await
     }
     .map_err(|_| DiffReviewError::RetrievalUnavailable)?;
     Ok((result.nodes().to_vec(), result.truncated()))
@@ -578,165 +835,48 @@ pub fn parse_unified_diff(
     if max_changed_files == 0 || max_changed_files > MAX_CHANGED_FILES {
         return Err(DiffReviewError::InvalidOptions);
     }
-    let mut files = Vec::new();
-    let mut pending = PendingDiffFile::default();
-    let mut active_hunk = None;
-    let mut files_truncated = false;
-    let mut hunks_truncated = false;
-    let mut added_lines = 0_u64;
-    let mut removed_lines = 0_u64;
+    let mut parser = UnifiedDiffParser::new(max_changed_files);
     for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            finalize_pending(
-                &mut files,
-                &mut pending,
-                max_changed_files,
-                &mut files_truncated,
-                &mut hunks_truncated,
-            )?;
-            pending = PendingDiffFile::default();
-            if let Some((old, new)) = split_git_header_paths(rest)? {
-                pending.old_path = decode_diff_path(&old)?;
-                pending.new_path = decode_diff_path(&new)?;
-            }
-            active_hunk = None;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("--- ") {
-            if pending.saw_new_header {
-                finalize_pending(
-                    &mut files,
-                    &mut pending,
-                    max_changed_files,
-                    &mut files_truncated,
-                    &mut hunks_truncated,
-                )?;
-                pending = PendingDiffFile::default();
-            }
-            pending.old_path = decode_diff_path(rest)?;
-            active_hunk = None;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("+++ ") {
-            pending.new_path = decode_diff_path(rest)?;
-            pending.saw_new_header = true;
-            active_hunk = None;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("rename from ") {
-            pending.old_path = decode_diff_path(rest)?;
-            pending.kind_hint = Some(DiffFileKind::Renamed);
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("rename to ") {
-            pending.new_path = decode_diff_path(rest)?;
-            pending.kind_hint = Some(DiffFileKind::Renamed);
-            continue;
-        }
-        if line.starts_with("new file mode ") {
-            pending.kind_hint = Some(DiffFileKind::Added);
-            continue;
-        }
-        if line.starts_with("deleted file mode ") {
-            pending.kind_hint = Some(DiffFileKind::Deleted);
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("Binary files ") {
-            pending.binary = true;
-            if let Some((old, new)) = rest.strip_suffix(" differ").and_then(split_binary_paths) {
-                pending.old_path = decode_diff_path(old)?;
-                pending.new_path = decode_diff_path(new)?;
-            }
-            active_hunk = None;
-            continue;
-        }
-        if let Some(hunk) = parse_hunk_header(line)? {
-            if pending.hunks.len() < MAX_HUNKS_PER_FILE {
-                pending.hunks.push(hunk);
-                active_hunk = Some(pending.hunks.len().saturating_sub(1));
-            } else {
-                pending.hunks_truncated = true;
-                active_hunk = None;
-            }
-            continue;
-        }
-        let Some(index) = active_hunk else {
-            continue;
-        };
-        if line.starts_with('+') && !line.starts_with("+++") {
-            let hunk = pending
-                .hunks
-                .get_mut(index)
-                .ok_or(DiffReviewError::InvalidDiff)?;
-            hunk.added_lines = hunk.added_lines.saturating_add(1);
-            added_lines = added_lines.saturating_add(1);
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            let hunk = pending
-                .hunks
-                .get_mut(index)
-                .ok_or(DiffReviewError::InvalidDiff)?;
-            hunk.removed_lines = hunk.removed_lines.saturating_add(1);
-            removed_lines = removed_lines.saturating_add(1);
-        }
+        parser.consume_line(line)?;
     }
-    finalize_pending(
-        &mut files,
-        &mut pending,
-        max_changed_files,
-        &mut files_truncated,
-        &mut hunks_truncated,
-    )?;
-    if !diff.trim().is_empty() && files.is_empty() && !files_truncated {
-        return Err(DiffReviewError::InvalidDiff);
-    }
-    Ok(UnifiedDiffComparison {
-        files,
-        diff_bytes: diff.len(),
-        added_lines,
-        removed_lines,
-        files_truncated,
-        hunks_truncated,
-    })
+    parser.finish(diff)
 }
 
-fn finalize_pending(
-    files: &mut Vec<UnifiedDiffFile>,
-    pending: &mut PendingDiffFile,
-    max_changed_files: u16,
-    files_truncated: &mut bool,
-    hunks_truncated: &mut bool,
-) -> Result<(), DiffReviewError> {
-    if !pending.has_metadata() {
+fn finalize_pending(input: PendingFinalizeInput<'_>) -> Result<(), DiffReviewError> {
+    if !input.pending.has_metadata() {
         return Ok(());
     }
-    let old_path = pending.old_path.clone();
-    let new_path = pending.new_path.clone();
-    let kind = pending.kind_hint.unwrap_or(match (&old_path, &new_path) {
-        (None, Some(_)) => DiffFileKind::Added,
-        (Some(_), None) => DiffFileKind::Deleted,
-        (Some(old), Some(new)) if old != new => DiffFileKind::Renamed,
-        (Some(_), Some(_)) => DiffFileKind::Modified,
-        (None, None) => return Err(DiffReviewError::InvalidDiff),
-    });
+    let old_path = input.pending.old_path.clone();
+    let new_path = input.pending.new_path.clone();
+    let kind = input
+        .pending
+        .kind_hint
+        .unwrap_or(match (&old_path, &new_path) {
+            (None, Some(_)) => DiffFileKind::Added,
+            (Some(_), None) => DiffFileKind::Deleted,
+            (Some(old), Some(new)) if old != new => DiffFileKind::Renamed,
+            (Some(_), Some(_)) => DiffFileKind::Modified,
+            (None, None) => return Err(DiffReviewError::InvalidDiff),
+        });
     let path = match kind {
         DiffFileKind::Deleted => old_path.clone(),
         _ => new_path.clone().or_else(|| old_path.clone()),
     }
     .ok_or(DiffReviewError::InvalidDiff)?;
-    *hunks_truncated |= pending.hunks_truncated;
-    if files.len() < usize::from(max_changed_files) {
-        files.push(UnifiedDiffFile {
+    *input.hunks_truncated |= input.pending.hunks_truncated;
+    if input.files.len() < usize::from(input.max_changed_files) {
+        input.files.push(UnifiedDiffFile {
             path,
             old_path: old_path.filter(|old| new_path.as_ref() != Some(old)),
             kind,
-            binary: pending.binary,
-            hunks: std::mem::take(&mut pending.hunks),
-            hunks_truncated: pending.hunks_truncated,
+            binary: input.pending.binary,
+            hunks: std::mem::take(&mut input.pending.hunks),
+            hunks_truncated: input.pending.hunks_truncated,
         });
     } else {
-        *files_truncated = true;
+        *input.files_truncated = true;
     }
-    *pending = PendingDiffFile::default();
+    *input.pending = PendingDiffFile::default();
     Ok(())
 }
 

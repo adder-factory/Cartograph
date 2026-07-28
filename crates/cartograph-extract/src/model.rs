@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 #[doc(hidden)]
 pub const DYNAMIC_DISPATCH_RESOLUTION_PREFIX: &str = "cartograph.dynamic-dispatch::";
 
+/// Internal marker for a Rust macro invocation whose declaration would require expansion.
+///
+/// The persisted reference keeps the source-visible macro name. The indexer removes this marker
+/// before lookup and records explicit unexpanded-macro provenance instead of treating expected
+/// macro-expansion uncertainty as a missing project call target.
+#[doc(hidden)]
+pub const RUST_MACRO_RESOLUTION_PREFIX: &str = "cartograph.rust-macro::";
+
 /// Internal lookup marker for a static SQL-literal table reference.
 ///
 /// The suffix is `<operation>::<qualified-table>`. The persisted reference keeps only the
@@ -79,6 +87,8 @@ pub struct ExtractedSymbol {
     pub health: SymbolHealthMetrics,
     /// Whether this declaration has no implementation body, such as an overload signature.
     pub declaration_only: bool,
+    /// Whether this declaration is owned by an inline test scope or test attribute.
+    pub test_symbol: bool,
     /// Explicit module export state.
     pub exported: bool,
     /// Explicit default-export state.
@@ -143,6 +153,8 @@ impl CloneTokenProfile {
 /// Bounded per-symbol metrics retained without source literals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolHealthMetrics {
+    /// Distinct source rows containing owned syntax, with comments and opaque literals collapsed.
+    pub code_lines: u32,
     pub parameter_count: u16,
     pub cyclomatic: u16,
     pub max_nesting: u16,

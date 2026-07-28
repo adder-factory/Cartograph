@@ -1,5 +1,3 @@
-use std::mem;
-
 use cartograph_domain::{
     ReferenceKind, SourceLanguage, SymbolId, SymbolKind, Visibility,
     callable_signature_is_literal_free,
@@ -9,13 +7,59 @@ use tree_sitter::Node;
 use crate::{ExtractError, ExtractedImportBinding, ImportBindingKind};
 
 use super::{
-    ExtractionBuilder, PendingReference, PendingSymbol, references,
+    ChildReferenceKind, ExtractionBuilder, PendingReference, PendingSymbol,
+    capture_child_reference, references,
     syntax::{children, descendants_including_root, named_children, span_for},
+    with_root_scope,
 };
 
 const MAX_SIGNATURE_BYTES: usize = 512;
 const MAX_REFERENCE_TARGET_BYTES: usize = 512;
 const MAX_TYPE_DEPTH: usize = 64;
+
+struct ImportEmission<'tree, 'text> {
+    node: Node<'tree>,
+    name: String,
+    raw_signature: &'text str,
+}
+
+struct BindingEmission<'tree, 'text> {
+    node: Node<'tree>,
+    kind: ImportBindingKind,
+    module: &'text str,
+    imported: &'text str,
+    local: &'text str,
+}
+
+#[derive(Clone, Copy)]
+struct PrimaryConstructor<'tree, 'text> {
+    parameters: Node<'tree>,
+    name: &'text str,
+    visibility: Option<Visibility>,
+}
+
+#[derive(Clone, Copy)]
+struct InheritanceCapture<'tree, 'owner> {
+    node: Node<'tree>,
+    owner: &'owner SymbolId,
+    kind: SymbolKind,
+    name_node: Node<'tree>,
+}
+
+#[derive(Clone, Copy)]
+struct VariableVisit<'tree> {
+    node: Node<'tree>,
+    depth: usize,
+    kind: SymbolKind,
+}
+
+#[derive(Clone, Copy)]
+struct TypeReferenceCapture<'tree, 'owner> {
+    node: Node<'tree>,
+    owner: &'owner SymbolId,
+    kind: ReferenceKind,
+    depth: usize,
+}
 
 pub(super) fn visit_declaration(
     builder: &mut ExtractionBuilder<'_, '_>,
@@ -42,10 +86,24 @@ pub(super) fn visit_declaration(
             visit_property(builder, node, depth)?;
         }
         "field_declaration" | "event_field_declaration" | "constant_declaration" => {
-            visit_variables(builder, node, depth, SymbolKind::Field)?;
+            visit_variables(
+                builder,
+                VariableVisit {
+                    node,
+                    depth,
+                    kind: SymbolKind::Field,
+                },
+            )?;
         }
         "local_variable_declaration" | "local_declaration_statement" => {
-            visit_variables(builder, node, depth, SymbolKind::Variable)?;
+            visit_variables(
+                builder,
+                VariableVisit {
+                    node,
+                    depth,
+                    kind: SymbolKind::Variable,
+                },
+            )?;
         }
         "enum_constant" | "enum_member_declaration" => visit_enum_member(builder, node)?,
         _ => return Ok(false),
@@ -59,7 +117,9 @@ pub(super) fn capture_usage(
 ) -> Result<(), ExtractError> {
     match node.kind() {
         "method_invocation" | "invocation_expression" => capture_call(builder, node),
-        "object_creation_expression" => capture_construction(builder, node),
+        "object_creation_expression" => {
+            capture_child_reference(builder, node, ChildReferenceKind::ManagedConstruction)
+        }
         "field_access" | "member_access_expression" => capture_member_access(builder, node),
         _ => Ok(()),
     }
@@ -119,21 +179,7 @@ fn emit_namespace(
     node: Node<'_>,
     name: String,
 ) -> Result<SymbolId, ExtractError> {
-    builder.emit_symbol(PendingSymbol {
-        kind: SymbolKind::Namespace,
-        name,
-        span_node: node,
-        structural_node: node,
-        doc_anchor: node,
-        body_node: None,
-        declaration_only: false,
-        signature: None,
-        exported: true,
-        default_export: false,
-        async_symbol: false,
-        static_member: false,
-        visibility: None,
-    })
+    builder.emit_symbol(PendingSymbol::namespace(node, name))
 }
 
 fn visit_java_import(
@@ -145,24 +191,35 @@ fn visit_java_import(
         return Ok(());
     };
     let module_name = builder.context.copy_text(parsed.target)?;
-    emit_import(builder, node, module_name.clone(), &raw)?;
+    emit_import(
+        builder,
+        ImportEmission {
+            node,
+            name: module_name.clone(),
+            raw_signature: &raw,
+        },
+    )?;
     if parsed.wildcard {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Namespace,
-            parsed.target,
-            "*",
-            "*",
+            BindingEmission {
+                node,
+                kind: ImportBindingKind::Namespace,
+                module: parsed.target,
+                imported: "*",
+                local: "*",
+            },
         )?;
     } else if let Some((module, imported)) = parsed.target.rsplit_once('.') {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Named,
-            module,
-            imported,
-            imported,
+            BindingEmission {
+                node,
+                kind: ImportBindingKind::Named,
+                module,
+                imported,
+                local: imported,
+            },
         )?;
     }
     Ok(())
@@ -191,24 +248,35 @@ fn visit_csharp_using(
         return Ok(());
     };
     let module_name = builder.context.copy_text(parsed.target)?;
-    emit_import(builder, node, module_name, &raw)?;
+    emit_import(
+        builder,
+        ImportEmission {
+            node,
+            name: module_name,
+            raw_signature: &raw,
+        },
+    )?;
     if let Some(alias) = parsed.alias {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Namespace,
-            parsed.target,
-            "*",
-            alias,
+            BindingEmission {
+                node,
+                kind: ImportBindingKind::Namespace,
+                module: parsed.target,
+                imported: "*",
+                local: alias,
+            },
         )?;
     } else if parsed.static_import {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Namespace,
-            parsed.target,
-            "*",
-            "*",
+            BindingEmission {
+                node,
+                kind: ImportBindingKind::Namespace,
+                module: parsed.target,
+                imported: "*",
+                local: "*",
+            },
         )?;
     }
     Ok(())
@@ -276,24 +344,22 @@ fn safe_identifier(value: &str) -> bool {
 
 fn emit_import(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    name: String,
-    raw_signature: &str,
+    input: ImportEmission<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let signature = if raw_signature.len() <= MAX_SIGNATURE_BYTES {
-        Some(builder.context.copy_text(raw_signature)?)
+    let signature = if input.raw_signature.len() <= MAX_SIGNATURE_BYTES {
+        Some(builder.context.copy_text(input.raw_signature)?)
     } else {
         None
     };
-    let reference_name = name.clone();
+    let reference_name = input.name.clone();
     emit_root_symbol(
         builder,
         PendingSymbol {
             kind: SymbolKind::Import,
-            name,
-            span_node: node,
-            structural_node: node,
-            doc_anchor: node,
+            name: input.name,
+            span_node: input.node,
+            structural_node: input.node,
+            doc_anchor: input.node,
             body_node: None,
             declaration_only: false,
             signature,
@@ -310,7 +376,7 @@ fn emit_import(
             owner: None,
             name: reference_name,
             kind: ReferenceKind::Imports,
-            node,
+            node: input.node,
         },
     )
 }
@@ -319,32 +385,19 @@ fn emit_root_symbol(
     builder: &mut ExtractionBuilder<'_, '_>,
     pending: PendingSymbol<'_>,
 ) -> Result<SymbolId, ExtractError> {
-    let owners = mem::take(&mut builder.owners);
-    let owner_kinds = mem::take(&mut builder.native_owner_kinds);
-    let visibilities = mem::take(&mut builder.native_visibilities);
-    let qualifiers = mem::take(&mut builder.qualifiers);
-    let result = builder.emit_symbol(pending);
-    builder.owners = owners;
-    builder.native_owner_kinds = owner_kinds;
-    builder.native_visibilities = visibilities;
-    builder.qualifiers = qualifiers;
-    result
+    with_root_scope(builder, |builder| builder.emit_symbol(pending))
 }
 
 fn emit_binding(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    kind: ImportBindingKind,
-    module: &str,
-    imported: &str,
-    local: &str,
+    input: BindingEmission<'_, '_>,
 ) -> Result<(), ExtractError> {
     builder.emit_import_binding(ExtractedImportBinding {
-        kind,
-        module_specifier: builder.context.copy_text(module)?,
-        imported_name: builder.context.copy_text(imported)?,
-        local_name: builder.context.copy_text(local)?,
-        span: span_for(node)?,
+        kind: input.kind,
+        module_specifier: builder.context.copy_text(input.module)?,
+        imported_name: builder.context.copy_text(input.imported)?,
+        local_name: builder.context.copy_text(input.local)?,
+        span: span_for(input.node)?,
     })
 }
 
@@ -389,7 +442,15 @@ fn visit_container(
     };
     let id = builder.emit_symbol(pending)?;
     capture_decorators(builder, node, &id)?;
-    capture_inheritance(builder, node, &id, kind, name_node)?;
+    capture_inheritance(
+        builder,
+        InheritanceCapture {
+            node,
+            owner: &id,
+            kind,
+            name_node,
+        },
+    )?;
 
     builder.owners.push(id);
     builder.native_owner_kinds.push(kind);
@@ -400,7 +461,14 @@ fn visit_container(
             "record_declaration" | "class_declaration" | "struct_declaration"
         )
     {
-        emit_primary_constructor(builder, parameters, &name, visibility)?;
+        emit_primary_constructor(
+            builder,
+            PrimaryConstructor {
+                parameters,
+                name: &name,
+                visibility,
+            },
+        )?;
     }
     let result = match body {
         Some(body) => builder.visit(body, depth.saturating_add(1)),
@@ -414,83 +482,120 @@ fn visit_container(
 
 fn emit_primary_constructor(
     builder: &mut ExtractionBuilder<'_, '_>,
-    parameters: Node<'_>,
-    name: &str,
-    visibility: Option<Visibility>,
+    input: PrimaryConstructor<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let signature = managed_signature(builder, None, parameters)?;
+    let signature = managed_signature(builder, None, input.parameters)?;
     let pending = PendingSymbol {
         kind: SymbolKind::Method,
-        name: builder.context.copy_text(name)?,
-        span_node: parameters,
-        structural_node: parameters,
-        doc_anchor: parameters,
+        name: builder.context.copy_text(input.name)?,
+        span_node: input.parameters,
+        structural_node: input.parameters,
+        doc_anchor: input.parameters,
         body_node: None,
         declaration_only: false,
         signature,
-        exported: visibility == Some(Visibility::Public),
+        exported: input.visibility == Some(Visibility::Public),
         default_export: false,
         async_symbol: false,
         static_member: false,
-        visibility,
+        visibility: input.visibility,
     };
     let id = builder.emit_symbol(pending)?;
-    capture_parameter_types(builder, parameters, &id)
+    capture_parameter_types(builder, input.parameters, &id)
 }
 
 fn capture_inheritance(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    kind: SymbolKind,
-    name_node: Node<'_>,
+    input: InheritanceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
     match builder.context.snapshot.language() {
-        SourceLanguage::Java => {
-            if let Some(superclass) = node.child_by_field_name("superclass") {
-                capture_type_references(builder, superclass, owner, ReferenceKind::Extends)?;
-            }
-            let interfaces_kind = if kind == SymbolKind::Interface {
-                ReferenceKind::Extends
-            } else {
-                ReferenceKind::Implements
-            };
-            if let Some(interfaces) = node.child_by_field_name("interfaces") {
-                capture_type_references(builder, interfaces, owner, interfaces_kind)?;
-            }
-            for child in named_children(node) {
-                if child.kind() == "extends_interfaces" {
-                    capture_type_references(builder, child, owner, ReferenceKind::Extends)?;
-                }
-            }
-        }
-        SourceLanguage::CSharp => {
-            let Some(base_list) = named_children(node).find(|child| child.kind() == "base_list")
-            else {
-                return Ok(());
-            };
-            let value_type = node.kind() == "struct_declaration"
-                || (node.kind() == "record_declaration"
-                    && csharp_record_is_struct(builder, node, name_node)?);
-            for target in named_children(base_list) {
-                builder.context.ensure_active()?;
-                if target.kind() == "argument_list" {
-                    continue;
-                }
-                let Some((target_name, target_node)) = csharp_base_target(builder, target)? else {
-                    continue;
-                };
-                let reference_kind = if kind == SymbolKind::Interface {
-                    ReferenceKind::Extends
-                } else if value_type {
-                    ReferenceKind::Implements
-                } else {
-                    ReferenceKind::Inherits
-                };
-                push_named_reference(builder, owner, target_name, reference_kind, target_node)?;
-            }
-        }
+        SourceLanguage::Java => capture_java_inheritance(builder, input)?,
+        SourceLanguage::CSharp => capture_csharp_inheritance(builder, input)?,
         _ => {}
+    }
+    Ok(())
+}
+
+fn capture_java_inheritance(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: InheritanceCapture<'_, '_>,
+) -> Result<(), ExtractError> {
+    if let Some(superclass) = input.node.child_by_field_name("superclass") {
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: superclass,
+                owner: input.owner,
+                kind: ReferenceKind::Extends,
+                depth: 0,
+            },
+        )?;
+    }
+    let interfaces_kind = if input.kind == SymbolKind::Interface {
+        ReferenceKind::Extends
+    } else {
+        ReferenceKind::Implements
+    };
+    if let Some(interfaces) = input.node.child_by_field_name("interfaces") {
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: interfaces,
+                owner: input.owner,
+                kind: interfaces_kind,
+                depth: 0,
+            },
+        )?;
+    }
+    for child in named_children(input.node).filter(|child| child.kind() == "extends_interfaces") {
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: child,
+                owner: input.owner,
+                kind: ReferenceKind::Extends,
+                depth: 0,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn capture_csharp_inheritance(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: InheritanceCapture<'_, '_>,
+) -> Result<(), ExtractError> {
+    let Some(base_list) = named_children(input.node).find(|child| child.kind() == "base_list")
+    else {
+        return Ok(());
+    };
+    let value_type = input.node.kind() == "struct_declaration"
+        || (input.node.kind() == "record_declaration"
+            && csharp_record_is_struct(builder, input.node, input.name_node)?);
+    for target in named_children(base_list) {
+        builder.context.ensure_active()?;
+        if target.kind() == "argument_list" {
+            continue;
+        }
+        let Some((target_name, target_node)) = csharp_base_target(builder, target)? else {
+            continue;
+        };
+        let reference_kind = if input.kind == SymbolKind::Interface {
+            ReferenceKind::Extends
+        } else if value_type {
+            ReferenceKind::Implements
+        } else {
+            ReferenceKind::Inherits
+        };
+        push_named_reference(
+            builder,
+            PendingReference {
+                owner: Some(input.owner.clone()),
+                name: target_name,
+                kind: reference_kind,
+                node: target_node,
+            },
+        )?;
     }
     Ok(())
 }
@@ -566,7 +671,15 @@ fn visit_callable(
     capture_decorators(builder, node, &id)?;
     capture_parameter_types(builder, parameters, &id)?;
     if let Some(return_type) = return_type {
-        capture_type_references(builder, return_type, &id, ReferenceKind::Returns)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: return_type,
+                owner: &id,
+                kind: ReferenceKind::Returns,
+                depth: 0,
+            },
+        )?;
     }
 
     builder.owners.push(id);
@@ -641,7 +754,15 @@ fn capture_parameter_types(
     for parameter in named_children(parameters) {
         builder.context.ensure_active()?;
         if let Some(type_node) = parameter.child_by_field_name("type") {
-            capture_type_references(builder, type_node, owner, ReferenceKind::TypeOf)?;
+            capture_type_references(
+                builder,
+                TypeReferenceCapture {
+                    node: type_node,
+                    owner,
+                    kind: ReferenceKind::TypeOf,
+                    depth: 0,
+                },
+            )?;
         }
     }
     Ok(())
@@ -680,7 +801,15 @@ fn emit_annotated_parameters(
         let id = builder.emit_symbol(pending)?;
         capture_decorators(builder, parameter, &id)?;
         if let Some(type_node) = type_node {
-            capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf)?;
+            capture_type_references(
+                builder,
+                TypeReferenceCapture {
+                    node: type_node,
+                    owner: &id,
+                    kind: ReferenceKind::TypeOf,
+                    depth: 0,
+                },
+            )?;
         }
     }
     Ok(())
@@ -723,7 +852,15 @@ fn visit_property(
     let id = builder.emit_symbol(pending)?;
     capture_decorators(builder, node, &id)?;
     if let Some(type_node) = type_node {
-        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: type_node,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+                depth: 0,
+            },
+        )?;
     }
     let Some(body) = body else {
         return Ok(());
@@ -740,16 +877,14 @@ fn visit_property(
 
 fn visit_variables(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    kind: SymbolKind,
+    input: VariableVisit<'_>,
 ) -> Result<(), ExtractError> {
-    let (declaration, type_node) = variable_declaration_and_type(node);
+    let (declaration, type_node) = variable_declaration_and_type(input.node);
     let Some(declaration) = declaration else {
-        return builder.visit_named_children(node, depth);
+        return builder.visit_named_children(input.node, input.depth);
     };
-    let modifiers = managed_modifiers(builder, node)?;
-    let visibility = (kind == SymbolKind::Field)
+    let modifiers = managed_modifiers(builder, input.node)?;
+    let visibility = (input.kind == SymbolKind::Field)
         .then(|| managed_visibility(builder, modifiers, false))
         .flatten();
     for declarator in
@@ -761,21 +896,21 @@ fn visit_variables(
         };
         let name = builder.context.owned_text(name_node)?;
         let pending = PendingSymbol {
-            kind,
+            kind: input.kind,
             name: name.clone(),
             span_node: declarator,
             structural_node: declarator,
-            doc_anchor: node,
+            doc_anchor: input.node,
             body_node: None,
             declaration_only: false,
-            signature: (kind == SymbolKind::Field)
+            signature: (input.kind == SymbolKind::Field)
                 .then(|| managed_typed_name(builder, type_node, &name))
                 .transpose()?
                 .flatten(),
             exported: visibility == Some(Visibility::Public),
             default_export: false,
             async_symbol: false,
-            static_member: kind == SymbolKind::Field
+            static_member: input.kind == SymbolKind::Field
                 && (modifiers.static_symbol
                     || modifiers.const_symbol
                     || (builder.context.snapshot.language() == SourceLanguage::Java
@@ -786,15 +921,23 @@ fn visit_variables(
             visibility,
         };
         let id = builder.emit_symbol(pending)?;
-        capture_decorators(builder, node, &id)?;
+        capture_decorators(builder, input.node, &id)?;
         if let Some(type_node) = type_node {
-            capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf)?;
+            capture_type_references(
+                builder,
+                TypeReferenceCapture {
+                    node: type_node,
+                    owner: &id,
+                    kind: ReferenceKind::TypeOf,
+                    depth: 0,
+                },
+            )?;
         }
         if let Some(value) = declarator
             .child_by_field_name("value")
             .or_else(|| named_children(declarator).find(|child| is_expression_kind(child.kind())))
         {
-            builder.visit(value, depth.saturating_add(1))?;
+            builder.visit(value, input.depth.saturating_add(1))?;
         }
     }
     Ok(())
@@ -1018,60 +1161,104 @@ fn capture_decorator(
     let Some(name) = name else {
         return Ok(());
     };
-    push_named_reference(builder, owner, name, ReferenceKind::Decorates, name_node)
+    push_named_reference(
+        builder,
+        PendingReference {
+            owner: Some(owner.clone()),
+            name,
+            kind: ReferenceKind::Decorates,
+            node: name_node,
+        },
+    )
 }
 
 fn capture_type_references(
     builder: &mut ExtractionBuilder<'_, '_>,
-    root: Node<'_>,
-    owner: &SymbolId,
-    kind: ReferenceKind,
+    input: TypeReferenceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
     match builder.context.snapshot.language() {
-        SourceLanguage::Java => capture_java_type(builder, root, owner, kind, 0),
-        SourceLanguage::CSharp => capture_csharp_type(builder, root, owner, kind, 0),
+        SourceLanguage::Java => capture_java_type(builder, input),
+        SourceLanguage::CSharp => capture_csharp_type(builder, input),
         _ => Ok(()),
     }
 }
 
 fn capture_java_type(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    kind: ReferenceKind,
-    depth: usize,
+    input: TypeReferenceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
-    if depth > MAX_TYPE_DEPTH {
+    if input.depth > MAX_TYPE_DEPTH {
         return Err(ExtractError::NestingLimit);
     }
     builder.context.ensure_active()?;
-    match node.kind() {
+    match input.node.kind() {
         "scoped_type_identifier" => {
-            if let Some(name) = managed_outer_type_name(builder, node)? {
-                push_named_reference(builder, owner, name, kind, node)?;
+            if let Some(name) = managed_outer_type_name(builder, input.node)? {
+                push_named_reference(
+                    builder,
+                    PendingReference {
+                        owner: Some(input.owner.clone()),
+                        name,
+                        kind: input.kind,
+                        node: input.node,
+                    },
+                )?;
             }
-            for child in named_children(node).filter(|child| child.kind() == "type_arguments") {
-                capture_java_type(builder, child, owner, kind, depth.saturating_add(1))?;
+            for child in named_children(input.node).filter(|child| child.kind() == "type_arguments")
+            {
+                capture_java_type(
+                    builder,
+                    TypeReferenceCapture {
+                        node: child,
+                        owner: input.owner,
+                        kind: input.kind,
+                        depth: input.depth.saturating_add(1),
+                    },
+                )?;
             }
         }
         "generic_type" => {
-            for child in named_children(node) {
+            for child in named_children(input.node) {
                 if matches!(
                     child.kind(),
                     "type_identifier" | "scoped_type_identifier" | "type_arguments"
                 ) {
-                    capture_java_type(builder, child, owner, kind, depth.saturating_add(1))?;
+                    capture_java_type(
+                        builder,
+                        TypeReferenceCapture {
+                            node: child,
+                            owner: input.owner,
+                            kind: input.kind,
+                            depth: input.depth.saturating_add(1),
+                        },
+                    )?;
                 }
             }
         }
         "type_identifier" => {
-            if let Some(name) = managed_outer_type_name(builder, node)? {
-                push_named_reference(builder, owner, name, kind, node)?;
+            if let Some(name) = managed_outer_type_name(builder, input.node)? {
+                push_named_reference(
+                    builder,
+                    PendingReference {
+                        owner: Some(input.owner.clone()),
+                        name,
+                        kind: input.kind,
+                        node: input.node,
+                    },
+                )?;
             }
         }
         _ => {
-            for child in named_children(node) {
-                capture_java_type(builder, child, owner, kind, depth.saturating_add(1))?;
+            for child in named_children(input.node) {
+                capture_java_type(
+                    builder,
+                    TypeReferenceCapture {
+                        node: child,
+                        owner: input.owner,
+                        kind: input.kind,
+                        depth: input.depth.saturating_add(1),
+                    },
+                )?;
             }
         }
     }
@@ -1080,67 +1267,109 @@ fn capture_java_type(
 
 fn capture_csharp_type(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    kind: ReferenceKind,
-    depth: usize,
+    input: TypeReferenceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
-    if depth > MAX_TYPE_DEPTH {
+    if input.depth > MAX_TYPE_DEPTH {
         return Err(ExtractError::NestingLimit);
     }
     builder.context.ensure_active()?;
-    match node.kind() {
-        "qualified_name" | "alias_qualified_name" => {
-            if let Some(name) = managed_outer_type_name(builder, node)? {
-                push_named_reference(builder, owner, name, kind, node)?;
-            }
-            for child in descendants_including_root(node)
-                .filter(|child| child.kind() == "type_argument_list")
-            {
-                for argument in named_children(child) {
-                    capture_csharp_type(builder, argument, owner, kind, depth.saturating_add(1))?;
-                }
-            }
-        }
-        "generic_name" => {
-            for child in named_children(node) {
-                match child.kind() {
-                    "identifier" => {
-                        if let Some(name) = managed_outer_type_name(builder, child)? {
-                            push_named_reference(builder, owner, name, kind, child)?;
-                        }
-                    }
-                    "type_argument_list" => {
-                        for argument in named_children(child) {
-                            capture_csharp_type(
-                                builder,
-                                argument,
-                                owner,
-                                kind,
-                                depth.saturating_add(1),
-                            )?;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        "identifier" => {
-            if let Some(name) = managed_outer_type_name(builder, node)? {
-                push_named_reference(builder, owner, name, kind, node)?;
-            }
-        }
+    match input.node.kind() {
+        "qualified_name" | "alias_qualified_name" => capture_csharp_qualified(builder, input)?,
+        "generic_name" => capture_csharp_generic(builder, input)?,
+        "identifier" => push_csharp_type_name(builder, input)?,
         "predefined_type" | "implicit_type" => {}
-        _ => {
-            for child in named_children(node) {
-                capture_csharp_type(builder, child, owner, kind, depth.saturating_add(1))?;
-            }
+        _ => capture_csharp_children(builder, input)?,
+    }
+    Ok(())
+}
+
+fn capture_csharp_qualified(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: TypeReferenceCapture<'_, '_>,
+) -> Result<(), ExtractError> {
+    push_csharp_type_name(builder, input)?;
+    for child in
+        descendants_including_root(input.node).filter(|child| child.kind() == "type_argument_list")
+    {
+        capture_csharp_arguments(builder, input, child)?;
+    }
+    Ok(())
+}
+
+fn capture_csharp_generic(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: TypeReferenceCapture<'_, '_>,
+) -> Result<(), ExtractError> {
+    for child in named_children(input.node) {
+        match child.kind() {
+            "identifier" => push_csharp_type_name(
+                builder,
+                TypeReferenceCapture {
+                    node: child,
+                    ..input
+                },
+            )?,
+            "type_argument_list" => capture_csharp_arguments(builder, input, child)?,
+            _ => {}
         }
     }
     Ok(())
 }
 
-fn managed_outer_type_name(
+fn capture_csharp_arguments(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: TypeReferenceCapture<'_, '_>,
+    arguments: Node<'_>,
+) -> Result<(), ExtractError> {
+    for argument in named_children(arguments) {
+        capture_csharp_type(
+            builder,
+            TypeReferenceCapture {
+                node: argument,
+                depth: input.depth.saturating_add(1),
+                ..input
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn capture_csharp_children(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: TypeReferenceCapture<'_, '_>,
+) -> Result<(), ExtractError> {
+    for child in named_children(input.node) {
+        capture_csharp_type(
+            builder,
+            TypeReferenceCapture {
+                node: child,
+                depth: input.depth.saturating_add(1),
+                ..input
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn push_csharp_type_name(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: TypeReferenceCapture<'_, '_>,
+) -> Result<(), ExtractError> {
+    if let Some(name) = managed_outer_type_name(builder, input.node)? {
+        push_named_reference(
+            builder,
+            PendingReference {
+                owner: Some(input.owner.clone()),
+                name,
+                kind: input.kind,
+                node: input.node,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn managed_outer_type_name(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
 ) -> Result<Option<String>, ExtractError> {
@@ -1164,31 +1393,14 @@ fn managed_outer_type_name(
     builder.context.copy_text(outer).map(Some)
 }
 
+const MANAGED_BUILTIN_TYPES: &[&str] = &[
+    "bool", "byte", "char", "decimal", "double", "dynamic", "float", "int", "long", "nint",
+    "nuint", "object", "sbyte", "short", "string", "uint", "ulong", "ushort", "var", "void",
+    "boolean",
+];
+
 fn is_managed_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "bool"
-            | "byte"
-            | "char"
-            | "decimal"
-            | "double"
-            | "dynamic"
-            | "float"
-            | "int"
-            | "long"
-            | "nint"
-            | "nuint"
-            | "object"
-            | "sbyte"
-            | "short"
-            | "string"
-            | "uint"
-            | "ulong"
-            | "ushort"
-            | "var"
-            | "void"
-            | "boolean"
-    )
+    MANAGED_BUILTIN_TYPES.contains(&name)
 }
 
 fn capture_call(
@@ -1305,27 +1517,6 @@ fn is_literal_kind(kind: &str) -> bool {
         || kind.contains("number_literal")
 }
 
-fn capture_construction(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-) -> Result<(), ExtractError> {
-    let Some(type_node) = node.child_by_field_name("type") else {
-        return Ok(());
-    };
-    let Some(name) = managed_outer_type_name(builder, type_node)? else {
-        return Ok(());
-    };
-    references::push_reference(
-        builder,
-        PendingReference {
-            owner: builder.owners.last().cloned(),
-            name,
-            kind: ReferenceKind::Instantiates,
-            node: type_node,
-        },
-    )
-}
-
 fn capture_member_access(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
@@ -1371,18 +1562,7 @@ fn is_csharp_invocation_target(node: Node<'_>) -> bool {
 
 fn push_named_reference(
     builder: &mut ExtractionBuilder<'_, '_>,
-    owner: &SymbolId,
-    name: String,
-    kind: ReferenceKind,
-    node: Node<'_>,
+    reference: PendingReference<'_>,
 ) -> Result<(), ExtractError> {
-    references::push_reference(
-        builder,
-        PendingReference {
-            owner: Some(owner.clone()),
-            name,
-            kind,
-            node,
-        },
-    )
+    references::push_reference(builder, reference)
 }

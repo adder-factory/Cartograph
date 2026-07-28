@@ -7,7 +7,10 @@ use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 use crate::{
     CartographDatabase, StorageError,
-    database::{quoted_schema, set_local_statement_timeout},
+    database::{
+        quoted_schema, set_local_statement_timeout, validate_bounded_limit as validate_limit,
+        validate_json_object,
+    },
 };
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -23,6 +26,54 @@ const MAX_MACRO_NAME_BYTES: usize = 256;
 const MAX_MACRO_STEPS: usize = 32;
 const MAX_MACRO_BYTES: usize = 256 * 1_024;
 const MAX_MACRO_LIST: u16 = 100;
+
+trait SessionListRecord: Sized {
+    const MAXIMUM_LIMIT: u16;
+    const OPERATION: &'static str;
+
+    fn statement(schema: &str) -> String;
+    fn decode(row: &sqlx_postgres::PgRow) -> Result<Self, StorageError>;
+}
+
+impl SessionListRecord for McpSessionRecord {
+    const MAXIMUM_LIMIT: u16 = MAX_SESSION_LIST;
+    const OPERATION: &'static str = "list-mcp-sessions";
+
+    fn statement(schema: &str) -> String {
+        format!(
+            r#"SELECT session_id::text, label, objective, session_kind, state,
+                      tool_count, started_at::text, last_activity_at::text
+                FROM {schema}."mcp_sessions"
+                WHERE project_id = CAST($1 AS uuid)
+                ORDER BY last_activity_at DESC, id DESC
+                LIMIT $2"#,
+        )
+    }
+
+    fn decode(row: &sqlx_postgres::PgRow) -> Result<Self, StorageError> {
+        decode_session(row)
+    }
+}
+
+impl SessionListRecord for McpMacroRecord {
+    const MAXIMUM_LIMIT: u16 = MAX_MACRO_LIST;
+    const OPERATION: &'static str = "list-mcp-macros";
+
+    fn statement(schema: &str) -> String {
+        format!(
+            r#"SELECT name, steps::text, created_at::text, updated_at::text,
+                      last_run_at::text, run_count
+                FROM {schema}."mcp_macros"
+                WHERE project_id = CAST($1 AS uuid)
+                ORDER BY updated_at DESC, name
+                LIMIT $2"#,
+        )
+    }
+
+    fn decode(row: &sqlx_postgres::PgRow) -> Result<Self, StorageError> {
+        decode_macro(row)
+    }
+}
 
 /// Durable session origin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -122,25 +173,79 @@ pub struct McpToolCallInput {
     duration_ms: u64,
 }
 
+/// Privacy-redacted values for one validated tool-call trace.
+pub struct McpToolCallData<'input> {
+    pub tool_name: &'input str,
+    pub arguments: Value,
+    pub result_summary: &'input str,
+    pub success: bool,
+    pub duration_ms: u64,
+}
+
 impl McpToolCallInput {
-    pub fn new(
-        tool_name: &str,
-        arguments: Value,
-        result_summary: &str,
-        success: bool,
-        duration_ms: u64,
-    ) -> Result<Self, StorageError> {
-        validate_tool_name(tool_name)?;
-        validate_arguments(&arguments)?;
-        validate_result_summary(result_summary)?;
+    pub fn new(input: McpToolCallData<'_>) -> Result<Self, StorageError> {
+        validate_tool_name(input.tool_name)?;
+        validate_arguments(&input.arguments)?;
+        validate_result_summary(input.result_summary)?;
         Ok(Self {
-            tool_name: tool_name.to_owned(),
-            arguments,
-            result_summary: result_summary.to_owned(),
-            success,
-            duration_ms,
+            tool_name: input.tool_name.to_owned(),
+            arguments: input.arguments,
+            result_summary: input.result_summary.to_owned(),
+            success: input.success,
+            duration_ms: input.duration_ms,
         })
     }
+}
+
+/// Exact or fallback lookup for one project-owned MCP session.
+pub struct McpSessionLookup<'lookup> {
+    pub project_id: &'lookup ProjectId,
+    pub session_id: Option<&'lookup str>,
+    pub label: Option<&'lookup str>,
+    pub require_calls: bool,
+}
+
+/// Atomic append request for one validated tool call.
+pub struct McpToolCallWrite<'write> {
+    pub project_id: &'write ProjectId,
+    pub session_id: &'write str,
+    pub input: &'write McpToolCallInput,
+}
+
+/// Bounded ordered trace query for one session.
+pub struct McpSessionCallsQuery<'query> {
+    pub project_id: &'query ProjectId,
+    pub session_id: &'query str,
+    pub limit: u16,
+}
+
+struct TextValidation<'value> {
+    value: &'value str,
+    maximum: usize,
+    field: &'static str,
+    allow_empty: bool,
+}
+
+enum SessionReadBindings<'binding> {
+    None,
+    Limit(u16),
+    Text(&'binding str),
+    Calls {
+        session_id: &'binding str,
+        limit: u16,
+    },
+    Lookup {
+        session_id: Option<&'binding str>,
+        label: Option<&'binding str>,
+        require_calls: bool,
+    },
+}
+
+struct SessionReadInput<'project> {
+    statement: String,
+    bindings: SessionReadBindings<'project>,
+    project_id: &'project ProjectId,
+    operation: &'static str,
 }
 
 /// One ordered call from a durable session trace.
@@ -317,44 +422,23 @@ impl CartographDatabase {
         project_id: &ProjectId,
         limit: u16,
     ) -> Result<Vec<McpSessionRecord>, StorageError> {
-        validate_limit(limit, MAX_SESSION_LIST)?;
-        let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"SELECT session_id::text, label, objective, session_kind, state,
-                      tool_count, started_at::text, last_activity_at::text
-                FROM {schema}."mcp_sessions"
-                WHERE project_id = CAST($1 AS uuid)
-                ORDER BY last_activity_at DESC, id DESC
-                LIMIT $2"#,
-        );
-        let rows = self
-            .session_read(
-                statement,
-                |statement| statement.bind(i64::from(limit)),
-                project_id,
-                "list-mcp-sessions",
-            )
-            .await?;
-        rows.iter().map(decode_session).collect()
+        self.list_session_records(project_id, limit).await
     }
 
     /// Resolve a project-owned session by exact UUID, newest label, or latest non-empty trace.
     pub async fn find_mcp_session(
         &self,
-        project_id: &ProjectId,
-        session_id: Option<&str>,
-        label: Option<&str>,
-        require_calls: bool,
+        lookup: McpSessionLookup<'_>,
     ) -> Result<Option<McpSessionRecord>, StorageError> {
-        if session_id.is_none() && label.is_none() && !require_calls {
+        if lookup.session_id.is_none() && lookup.label.is_none() && !lookup.require_calls {
             return Err(StorageError::InvalidInput {
                 field: "session_lookup",
             });
         }
-        if let Some(session_id) = session_id {
+        if let Some(session_id) = lookup.session_id {
             validate_uuid(session_id, "session_id")?;
         }
-        if let Some(label) = label {
+        if let Some(label) = lookup.label {
             validate_label(label)?;
         }
         let schema = quoted_schema(&self.schema);
@@ -370,12 +454,16 @@ impl CartographDatabase {
                 LIMIT 1"#,
         );
         let rows = self
-            .session_read(
+            .session_read(SessionReadInput {
                 statement,
-                |statement| statement.bind(session_id).bind(label).bind(require_calls),
-                project_id,
-                "find-mcp-session",
-            )
+                bindings: SessionReadBindings::Lookup {
+                    session_id: lookup.session_id,
+                    label: lookup.label,
+                    require_calls: lookup.require_calls,
+                },
+                project_id: lookup.project_id,
+                operation: "find-mcp-session",
+            })
             .await?;
         rows.first().map(decode_session).transpose()
     }
@@ -405,12 +493,10 @@ impl CartographDatabase {
     /// Atomically allocate a step, append a trace row, and prune oldest project calls.
     pub async fn record_mcp_tool_call(
         &self,
-        project_id: &ProjectId,
-        session_id: &str,
-        input: &McpToolCallInput,
+        request: McpToolCallWrite<'_>,
     ) -> Result<McpToolCallRecord, StorageError> {
-        validate_uuid(session_id, "session_id")?;
-        validate_tool_call(input)?;
+        validate_uuid(request.session_id, "session_id")?;
+        validate_tool_call(request.input)?;
         let schema = quoted_schema(&self.schema);
         let mut transaction = self
             .pool
@@ -429,8 +515,8 @@ impl CartographDatabase {
                 RETURNING tool_count"#,
         );
         let step = query(AssertSqlSafe(update))
-            .bind(project_id.as_str())
-            .bind(session_id)
+            .bind(request.project_id.as_str())
+            .bind(request.session_id)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(|_| database_error("allocate-mcp-call-step"))?
@@ -441,10 +527,11 @@ impl CartographDatabase {
             .map_err(|_| StorageError::CorruptStoredValue {
                 field: "session_step",
             })?;
-        let arguments =
-            serde_json::to_string(&input.arguments).map_err(|_| StorageError::InvalidInput {
+        let arguments = serde_json::to_string(&request.input.arguments).map_err(|_| {
+            StorageError::InvalidInput {
                 field: "tool_arguments",
-            })?;
+            }
+        })?;
         let insert = format!(
             r#"INSERT INTO {schema}."mcp_tool_calls" (
                     project_id, session_id, step, tool_name, arguments,
@@ -457,18 +544,22 @@ impl CartographDatabase {
                           arguments::text, result_summary, result_kind, duration_ms"#,
         );
         let row = query(AssertSqlSafe(insert))
-            .bind(project_id.as_str())
-            .bind(session_id)
+            .bind(request.project_id.as_str())
+            .bind(request.session_id)
             .bind(step)
-            .bind(&input.tool_name)
+            .bind(&request.input.tool_name)
             .bind(arguments)
-            .bind(&input.result_summary)
-            .bind(if input.success { "success" } else { "error" })
-            .bind(
-                i64::try_from(input.duration_ms).map_err(|_| StorageError::InvalidInput {
+            .bind(&request.input.result_summary)
+            .bind(if request.input.success {
+                "success"
+            } else {
+                "error"
+            })
+            .bind(i64::try_from(request.input.duration_ms).map_err(|_| {
+                StorageError::InvalidInput {
                     field: "duration_ms",
-                })?,
-            )
+                }
+            })?)
             .fetch_one(&mut *transaction)
             .await
             .map_err(|_| database_error("insert-mcp-call"))?;
@@ -483,7 +574,7 @@ impl CartographDatabase {
                 )"#,
         );
         query(AssertSqlSafe(prune))
-            .bind(project_id.as_str())
+            .bind(request.project_id.as_str())
             .execute(&mut *transaction)
             .await
             .map_err(|_| database_error("prune-mcp-calls"))?;
@@ -497,12 +588,10 @@ impl CartographDatabase {
     /// Return one session's ordered bounded trace.
     pub async fn mcp_calls_for_session(
         &self,
-        project_id: &ProjectId,
-        session_id: &str,
-        limit: u16,
+        request: McpSessionCallsQuery<'_>,
     ) -> Result<Vec<McpToolCallRecord>, StorageError> {
-        validate_uuid(session_id, "session_id")?;
-        validate_limit(limit, MAX_SESSION_CALLS)?;
+        validate_uuid(request.session_id, "session_id")?;
+        validate_limit(request.limit, MAX_SESSION_CALLS)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r#"SELECT session_id::text, step, called_at::text, tool_name,
@@ -519,12 +608,15 @@ impl CartographDatabase {
                 ORDER BY step"#,
         );
         let rows = self
-            .session_read(
+            .session_read(SessionReadInput {
                 statement,
-                |statement| statement.bind(session_id).bind(i64::from(limit)),
-                project_id,
-                "mcp-calls-for-session",
-            )
+                bindings: SessionReadBindings::Calls {
+                    session_id: request.session_id,
+                    limit: request.limit,
+                },
+                project_id: request.project_id,
+                operation: "mcp-calls-for-session",
+            })
             .await?;
         rows.iter().map(decode_call).collect()
     }
@@ -545,12 +637,12 @@ impl CartographDatabase {
                 WHERE project_id = CAST($1 AS uuid)"#,
         );
         let rows = self
-            .session_read(
-                totals,
-                |statement| statement,
+            .session_read(SessionReadInput {
+                statement: totals,
+                bindings: SessionReadBindings::None,
                 project_id,
-                "mcp-trace-usage-totals",
-            )
+                operation: "mcp-trace-usage-totals",
+            })
             .await?;
         let row = rows.first().ok_or(StorageError::CorruptStoredValue {
             field: "trace_usage",
@@ -570,12 +662,12 @@ impl CartographDatabase {
                 ORDER BY COUNT(*) DESC, tool_name"#,
         );
         let tools = self
-            .session_read(
-                by_tool,
-                |statement| statement,
+            .session_read(SessionReadInput {
+                statement: by_tool,
+                bindings: SessionReadBindings::None,
                 project_id,
-                "mcp-trace-usage-tools",
-            )
+                operation: "mcp-trace-usage-tools",
+            })
             .await?
             .iter()
             .map(|row| {
@@ -643,12 +735,12 @@ impl CartographDatabase {
                 WHERE project_id = CAST($1 AS uuid) AND name = $2"#,
         );
         let rows = self
-            .session_read(
+            .session_read(SessionReadInput {
                 statement,
-                |statement| statement.bind(name),
+                bindings: SessionReadBindings::Text(name),
                 project_id,
-                "get-mcp-macro",
-            )
+                operation: "get-mcp-macro",
+            })
             .await?;
         rows.first().map(decode_macro).transpose()
     }
@@ -659,25 +751,7 @@ impl CartographDatabase {
         project_id: &ProjectId,
         limit: u16,
     ) -> Result<Vec<McpMacroRecord>, StorageError> {
-        validate_limit(limit, MAX_MACRO_LIST)?;
-        let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"SELECT name, steps::text, created_at::text, updated_at::text,
-                      last_run_at::text, run_count
-                FROM {schema}."mcp_macros"
-                WHERE project_id = CAST($1 AS uuid)
-                ORDER BY updated_at DESC, name
-                LIMIT $2"#,
-        );
-        let rows = self
-            .session_read(
-                statement,
-                |statement| statement.bind(i64::from(limit)),
-                project_id,
-                "list-mcp-macros",
-            )
-            .await?;
-        rows.iter().map(decode_macro).collect()
+        self.list_session_records(project_id, limit).await
     }
 
     /// Increment successful macro-run usage metadata.
@@ -723,61 +797,109 @@ impl CartographDatabase {
         Ok(result.rows_affected() == 1)
     }
 
-    async fn session_read<'query, Bind>(
+    async fn list_session_records<Record>(
         &self,
-        statement: String,
-        bind: Bind,
         project_id: &ProjectId,
-        operation: &'static str,
-    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError>
+        limit: u16,
+    ) -> Result<Vec<Record>, StorageError>
     where
-        Bind: FnOnce(
-            sqlx_core::query::Query<'query, sqlx_postgres::Postgres, sqlx_postgres::PgArguments>,
-        ) -> sqlx_core::query::Query<
-            'query,
-            sqlx_postgres::Postgres,
-            sqlx_postgres::PgArguments,
-        >,
+        Record: SessionListRecord,
     {
+        validate_limit(limit, Record::MAXIMUM_LIMIT)?;
+        let schema = quoted_schema(&self.schema);
+        let rows = self
+            .session_read(SessionReadInput {
+                statement: Record::statement(&schema),
+                bindings: SessionReadBindings::Limit(limit),
+                project_id,
+                operation: Record::OPERATION,
+            })
+            .await?;
+        rows.iter().map(Record::decode).collect()
+    }
+
+    async fn session_read(
+        &self,
+        input: SessionReadInput<'_>,
+    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError> {
         let mut transaction = self
             .pool
             .begin()
             .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
         query("SET TRANSACTION READ ONLY")
             .execute(&mut *transaction)
             .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
         set_local_statement_timeout(&mut transaction, SESSION_TIMEOUT)
             .await
-            .map_err(|_| database_error(operation))?;
-        let rows = bind(query(AssertSqlSafe(statement)).bind(project_id.as_str()))
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
+        let statement = query(AssertSqlSafe(input.statement)).bind(input.project_id.as_str());
+        let rows = match input.bindings {
+            SessionReadBindings::None => statement.fetch_all(&mut *transaction).await,
+            SessionReadBindings::Limit(limit) => {
+                statement
+                    .bind(i64::from(limit))
+                    .fetch_all(&mut *transaction)
+                    .await
+            }
+            SessionReadBindings::Text(value) => {
+                statement.bind(value).fetch_all(&mut *transaction).await
+            }
+            SessionReadBindings::Calls { session_id, limit } => {
+                statement
+                    .bind(session_id)
+                    .bind(i64::from(limit))
+                    .fetch_all(&mut *transaction)
+                    .await
+            }
+            SessionReadBindings::Lookup {
+                session_id,
+                label,
+                require_calls,
+            } => {
+                statement
+                    .bind(session_id)
+                    .bind(label)
+                    .bind(require_calls)
+                    .fetch_all(&mut *transaction)
+                    .await
+            }
+        }
+        .map_err(|_| database_error(input.operation))?;
         transaction
             .commit()
             .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
         Ok(rows)
     }
 }
 
 fn validate_label(value: &str) -> Result<(), StorageError> {
-    validate_text(value, MAX_SESSION_LABEL_BYTES, "session_label", false)
+    validate_text(TextValidation {
+        value,
+        maximum: MAX_SESSION_LABEL_BYTES,
+        field: "session_label",
+        allow_empty: false,
+    })
 }
 
 fn validate_objective(value: &str) -> Result<(), StorageError> {
-    validate_text(
+    validate_text(TextValidation {
         value,
-        MAX_SESSION_OBJECTIVE_BYTES,
-        "session_objective",
-        true,
-    )
+        maximum: MAX_SESSION_OBJECTIVE_BYTES,
+        field: "session_objective",
+        allow_empty: true,
+    })
 }
 
 fn validate_tool_name(value: &str) -> Result<(), StorageError> {
-    validate_text(value, MAX_TOOL_NAME_BYTES, "tool_name", false)?;
+    validate_text(TextValidation {
+        value,
+        maximum: MAX_TOOL_NAME_BYTES,
+        field: "tool_name",
+        allow_empty: false,
+    })?;
     if value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
@@ -789,20 +911,16 @@ fn validate_tool_name(value: &str) -> Result<(), StorageError> {
 }
 
 fn validate_arguments(value: &Value) -> Result<(), StorageError> {
-    let encoded = serde_json::to_vec(value).map_err(|_| StorageError::InvalidInput {
-        field: "tool_arguments",
-    })?;
-    if !value.is_object() || encoded.len() > MAX_TOOL_ARGUMENT_BYTES {
-        Err(StorageError::InvalidInput {
-            field: "tool_arguments",
-        })
-    } else {
-        Ok(())
-    }
+    validate_json_object(value, MAX_TOOL_ARGUMENT_BYTES, "tool_arguments")
 }
 
 fn validate_result_summary(value: &str) -> Result<(), StorageError> {
-    validate_text(value, MAX_RESULT_SUMMARY_BYTES, "result_summary", true)
+    validate_text(TextValidation {
+        value,
+        maximum: MAX_RESULT_SUMMARY_BYTES,
+        field: "result_summary",
+        allow_empty: true,
+    })
 }
 
 fn validate_tool_call(input: &McpToolCallInput) -> Result<(), StorageError> {
@@ -812,7 +930,12 @@ fn validate_tool_call(input: &McpToolCallInput) -> Result<(), StorageError> {
 }
 
 fn validate_macro_name(value: &str) -> Result<(), StorageError> {
-    validate_text(value, MAX_MACRO_NAME_BYTES, "macro_name", false)
+    validate_text(TextValidation {
+        value,
+        maximum: MAX_MACRO_NAME_BYTES,
+        field: "macro_name",
+        allow_empty: false,
+    })
 }
 
 fn validate_macro_steps(steps: &[McpMacroStep]) -> Result<(), StorageError> {
@@ -837,22 +960,12 @@ fn validate_macro_steps(steps: &[McpMacroStep]) -> Result<(), StorageError> {
     }
 }
 
-fn validate_text(
-    value: &str,
-    maximum: usize,
-    field: &'static str,
-    allow_empty: bool,
-) -> Result<(), StorageError> {
-    if (!allow_empty && value.is_empty()) || value.len() > maximum || value.contains('\0') {
-        Err(StorageError::InvalidInput { field })
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_limit(limit: u16, maximum: u16) -> Result<(), StorageError> {
-    if limit == 0 || limit > maximum {
-        Err(StorageError::InvalidInput { field: "limit" })
+fn validate_text(input: TextValidation<'_>) -> Result<(), StorageError> {
+    if (!input.allow_empty && input.value.is_empty())
+        || input.value.len() > input.maximum
+        || input.value.contains('\0')
+    {
+        Err(StorageError::InvalidInput { field: input.field })
     } else {
         Ok(())
     }
@@ -872,35 +985,51 @@ fn validate_uuid(value: &str, field: &'static str) -> Result<(), StorageError> {
         .ok_or(StorageError::InvalidInput { field })
 }
 
+const SESSION_KIND_COLUMN: usize = 3;
+const SESSION_STATE_COLUMN: usize = 4;
+const SESSION_TOOL_COUNT_COLUMN: usize = 5;
+const SESSION_STARTED_AT_COLUMN: usize = 6;
+const SESSION_LAST_ACTIVITY_COLUMN: usize = 7;
+const CALL_ARGUMENTS_COLUMN: usize = 4;
+const CALL_RESULT_SUMMARY_COLUMN: usize = 5;
+const CALL_RESULT_KIND_COLUMN: usize = 6;
+const CALL_DURATION_COLUMN: usize = 7;
+const MACRO_UPDATED_AT_COLUMN: usize = 3;
+const MACRO_LAST_RUN_AT_COLUMN: usize = 4;
+const MACRO_RUN_COUNT_COLUMN: usize = 5;
+
 fn decode_session(row: &sqlx_postgres::PgRow) -> Result<McpSessionRecord, StorageError> {
     Ok(McpSessionRecord {
         session_id: text(row, 0)?,
         label: optional_text(row, 1)?,
         objective: text(row, 2)?,
-        kind: McpSessionKind::parse(&text(row, 3)?).ok_or(StorageError::CorruptStoredValue {
-            field: "session_kind",
-        })?,
-        state: text(row, 4)?,
-        tool_count: nonnegative_u64(row, 5)?,
-        started_at: text(row, 6)?,
-        last_activity_at: text(row, 7)?,
+        kind: McpSessionKind::parse(&text(row, SESSION_KIND_COLUMN)?).ok_or(
+            StorageError::CorruptStoredValue {
+                field: "session_kind",
+            },
+        )?,
+        state: text(row, SESSION_STATE_COLUMN)?,
+        tool_count: nonnegative_u64(row, SESSION_TOOL_COUNT_COLUMN)?,
+        started_at: text(row, SESSION_STARTED_AT_COLUMN)?,
+        last_activity_at: text(row, SESSION_LAST_ACTIVITY_COLUMN)?,
     })
 }
 
 fn decode_call(row: &sqlx_postgres::PgRow) -> Result<McpToolCallRecord, StorageError> {
-    let arguments = serde_json::from_str::<Value>(&text(row, 4)?).map_err(|_| {
-        StorageError::CorruptStoredValue {
-            field: "tool_arguments",
-        }
-    })?;
+    let arguments =
+        serde_json::from_str::<Value>(&text(row, CALL_ARGUMENTS_COLUMN)?).map_err(|_| {
+            StorageError::CorruptStoredValue {
+                field: "tool_arguments",
+            }
+        })?;
     Ok(McpToolCallRecord {
         session_id: text(row, 0)?,
         step: nonnegative_u64(row, 1)?,
         called_at: text(row, 2)?,
-        tool_name: text(row, 3)?,
+        tool_name: text(row, SESSION_KIND_COLUMN)?,
         arguments,
-        result_summary: text(row, 5)?,
-        success: match text(row, 6)?.as_str() {
+        result_summary: text(row, CALL_RESULT_SUMMARY_COLUMN)?,
+        success: match text(row, CALL_RESULT_KIND_COLUMN)?.as_str() {
             "success" => true,
             "error" => false,
             _ => {
@@ -909,7 +1038,7 @@ fn decode_call(row: &sqlx_postgres::PgRow) -> Result<McpToolCallRecord, StorageE
                 });
             }
         },
-        duration_ms: nonnegative_u64(row, 7)?,
+        duration_ms: nonnegative_u64(row, CALL_DURATION_COLUMN)?,
     })
 }
 
@@ -926,9 +1055,9 @@ fn decode_macro(row: &sqlx_postgres::PgRow) -> Result<McpMacroRecord, StorageErr
         name: text(row, 0)?,
         steps,
         created_at: text(row, 2)?,
-        updated_at: text(row, 3)?,
-        last_run_at: optional_text(row, 4)?,
-        run_count: nonnegative_u64(row, 5)?,
+        updated_at: text(row, MACRO_UPDATED_AT_COLUMN)?,
+        last_run_at: optional_text(row, MACRO_LAST_RUN_AT_COLUMN)?,
+        run_count: nonnegative_u64(row, MACRO_RUN_COUNT_COLUMN)?,
     })
 }
 
@@ -968,15 +1097,24 @@ mod tests {
 
     #[test]
     fn trace_arguments_must_be_bounded_objects() {
-        assert!(McpToolCallInput::new("cartograph_status", Value::Null, "ok", true, 1).is_err());
         assert!(
-            McpToolCallInput::new(
-                "cartograph_status",
-                Value::Object(Map::new()),
-                "ok",
-                true,
-                1,
-            )
+            McpToolCallInput::new(McpToolCallData {
+                tool_name: "cartograph_status",
+                arguments: Value::Null,
+                result_summary: "ok",
+                success: true,
+                duration_ms: 1,
+            })
+            .is_err()
+        );
+        assert!(
+            McpToolCallInput::new(McpToolCallData {
+                tool_name: "cartograph_status",
+                arguments: Value::Object(Map::new()),
+                result_summary: "ok",
+                success: true,
+                duration_ms: 1,
+            })
             .is_ok()
         );
     }

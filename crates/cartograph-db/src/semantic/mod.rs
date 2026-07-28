@@ -11,7 +11,7 @@ mod types;
 mod upsert;
 
 pub use maintenance::{EmbeddingStorageAudit, RetiredEmbeddingCleanupReport};
-pub use materialize::SimilarityMaterializationReport;
+pub use materialize::{SimilarityMaterializationPolicy, SimilarityMaterializationReport};
 pub use types::{
     EmbeddingBatchUpsertInput, EmbeddingBatchUpsertReport, EmbeddingBatchUpsertRequest,
     EmbeddingHnswStatus, EmbeddingModelRegistration, EmbeddingModelRegistrationInput,

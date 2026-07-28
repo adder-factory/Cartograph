@@ -14,7 +14,7 @@ use crate::{
     codec::decode_scip_index,
     model::{
         SYMBOL_ROLE_DEFINITION, ScipDocument, ScipError, ScipOccurrence, ScipRelationship,
-        ScipSymbolInformation,
+        ScipSymbolInformation, ScipSymbolKind,
     },
     symbol::{DescriptorSuffix, descriptors_to_qualified_name, parse_scip_symbol},
 };
@@ -32,6 +32,141 @@ const MAXIMUM_NATURAL_TEXT_BYTES: usize = 1_024 * 1_024;
 const MAXIMUM_SITE_COUNT: u32 = 100_000_000;
 const MAXIMUM_PROVENANCE_BYTES: usize = 256;
 const SCIP_PROVENANCE_PREFIX: &str = "scip-overlay:";
+const IMPORTED_SCIP_KINDS: [ScipSymbolKind; 36] = [
+    ScipSymbolKind::Unspecified,
+    ScipSymbolKind::Class,
+    ScipSymbolKind::Constant,
+    ScipSymbolKind::Constructor,
+    ScipSymbolKind::Enum,
+    ScipSymbolKind::EnumMember,
+    ScipSymbolKind::Field,
+    ScipSymbolKind::File,
+    ScipSymbolKind::Function,
+    ScipSymbolKind::Getter,
+    ScipSymbolKind::Interface,
+    ScipSymbolKind::Macro,
+    ScipSymbolKind::Method,
+    ScipSymbolKind::Module,
+    ScipSymbolKind::Namespace,
+    ScipSymbolKind::Object,
+    ScipSymbolKind::Package,
+    ScipSymbolKind::Parameter,
+    ScipSymbolKind::Property,
+    ScipSymbolKind::Protocol,
+    ScipSymbolKind::SelfParameter,
+    ScipSymbolKind::Setter,
+    ScipSymbolKind::Struct,
+    ScipSymbolKind::Trait,
+    ScipSymbolKind::Type,
+    ScipSymbolKind::TypeAlias,
+    ScipSymbolKind::TypeParameter,
+    ScipSymbolKind::Variable,
+    ScipSymbolKind::AbstractMethod,
+    ScipSymbolKind::Accessor,
+    ScipSymbolKind::SingletonMethod,
+    ScipSymbolKind::StaticDataMember,
+    ScipSymbolKind::StaticField,
+    ScipSymbolKind::StaticMethod,
+    ScipSymbolKind::StaticProperty,
+    ScipSymbolKind::StaticVariable,
+];
+
+struct ScipKindRule {
+    scip_kinds: &'static [ScipSymbolKind],
+    symbol_kind: SymbolKind,
+}
+
+const SCIP_KIND_RULES: [ScipKindRule; 18] = [
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Class, ScipSymbolKind::Object],
+        symbol_kind: SymbolKind::Class,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Constant],
+        symbol_kind: SymbolKind::Constant,
+    },
+    ScipKindRule {
+        scip_kinds: &[
+            ScipSymbolKind::Constructor,
+            ScipSymbolKind::Getter,
+            ScipSymbolKind::Method,
+            ScipSymbolKind::Setter,
+            ScipSymbolKind::AbstractMethod,
+            ScipSymbolKind::Accessor,
+            ScipSymbolKind::SingletonMethod,
+            ScipSymbolKind::StaticMethod,
+        ],
+        symbol_kind: SymbolKind::Method,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Enum],
+        symbol_kind: SymbolKind::Enum,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::EnumMember],
+        symbol_kind: SymbolKind::EnumMember,
+    },
+    ScipKindRule {
+        scip_kinds: &[
+            ScipSymbolKind::Field,
+            ScipSymbolKind::StaticDataMember,
+            ScipSymbolKind::StaticField,
+        ],
+        symbol_kind: SymbolKind::Field,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::File],
+        symbol_kind: SymbolKind::File,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Function, ScipSymbolKind::Macro],
+        symbol_kind: SymbolKind::Function,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Interface],
+        symbol_kind: SymbolKind::Interface,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Module, ScipSymbolKind::Package],
+        symbol_kind: SymbolKind::Module,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Namespace],
+        symbol_kind: SymbolKind::Namespace,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Parameter, ScipSymbolKind::SelfParameter],
+        symbol_kind: SymbolKind::Parameter,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Property, ScipSymbolKind::StaticProperty],
+        symbol_kind: SymbolKind::Property,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Protocol],
+        symbol_kind: SymbolKind::Protocol,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Struct],
+        symbol_kind: SymbolKind::Struct,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Trait],
+        symbol_kind: SymbolKind::Trait,
+    },
+    ScipKindRule {
+        scip_kinds: &[
+            ScipSymbolKind::Type,
+            ScipSymbolKind::TypeAlias,
+            ScipSymbolKind::TypeParameter,
+        ],
+        symbol_kind: SymbolKind::TypeAlias,
+    },
+    ScipKindRule {
+        scip_kinds: &[ScipSymbolKind::Variable, ScipSymbolKind::StaticVariable],
+        symbol_kind: SymbolKind::Variable,
+    },
+];
 
 /// Accounting for a per-file SCIP replacement overlay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -106,6 +241,29 @@ struct PreparedDocument<'a> {
     line_starts: Vec<usize>,
 }
 
+/// Mutable generation and bounded SCIP payload for one replacement overlay.
+pub struct ScipOverlayRequest<'input> {
+    facts: &'input mut GenerationFacts,
+    bytes: &'input [u8],
+    maximum_rows: usize,
+}
+
+impl<'input> ScipOverlayRequest<'input> {
+    /// Build one bounded overlay request.
+    #[must_use]
+    pub const fn new(
+        facts: &'input mut GenerationFacts,
+        bytes: &'input [u8],
+        maximum_rows: usize,
+    ) -> Self {
+        Self {
+            facts,
+            bytes,
+            maximum_rows,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ImportedSymbolSpan {
     symbol_id: SymbolId,
@@ -124,6 +282,46 @@ struct ImportAccumulator {
     spans_by_path: BTreeMap<String, Vec<ImportedSymbolSpan>>,
     exact_edge_keys: BTreeSet<(SymbolId, SymbolId, String)>,
     report: ScipOverlayReport,
+}
+
+struct DocumentSource<'callbacks, ReadSource, Cancel> {
+    read_source: &'callbacks mut ReadSource,
+    cancelled: &'callbacks mut Cancel,
+}
+
+struct ImportState<'state, Cancel> {
+    imported: &'state mut ImportAccumulator,
+    cancelled: &'state mut Cancel,
+}
+
+struct SymbolBuildLookups<'lookup> {
+    file_symbol_by_id: &'lookup BTreeMap<FileId, SymbolId>,
+    native_candidates: &'lookup NativeSymbolCandidates,
+}
+
+#[derive(Clone, Copy)]
+struct ScipSymbolContext<'context, 'document> {
+    prepared: &'context PreparedDocument<'document>,
+    symbol: &'context ScipSymbolInformation,
+    source_id: &'context SymbolId,
+}
+
+struct ScipOccurrenceContext<'context, 'document> {
+    prepared: &'context PreparedDocument<'document>,
+    occurrence: &'context ScipOccurrence,
+    file_symbol_id: &'context SymbolId,
+}
+
+struct ReplacementInput<'input, 'document> {
+    facts: &'input mut GenerationFacts,
+    prepared: &'input [PreparedDocument<'document>],
+    file_symbol_by_id: &'input BTreeMap<FileId, SymbolId>,
+}
+
+#[derive(Clone, Copy)]
+struct SourceLines<'source> {
+    source: &'source [u8],
+    line_starts: &'source [usize],
 }
 
 impl ImportAccumulator {
@@ -154,13 +352,7 @@ impl ImportAccumulator {
     }
 
     fn push_edge(&mut self, edge: EdgeInput, exact: bool) -> Result<(), ScipError> {
-        if edge.site_count == 0
-            || edge.site_count > MAXIMUM_SITE_COUNT
-            || !edge.confidence.is_finite()
-            || !(0.0..=1.0).contains(&edge.confidence)
-            || edge.provenance.is_empty()
-            || edge.provenance.len() > MAXIMUM_PROVENANCE_BYTES
-        {
+        if invalid_edge_score(&edge) || invalid_edge_provenance(&edge) {
             return Err(ScipError::InvalidData);
         }
         let relation_key = (
@@ -197,24 +389,31 @@ impl ImportAccumulator {
     }
 }
 
+fn invalid_edge_score(edge: &EdgeInput) -> bool {
+    edge.site_count == 0
+        || edge.site_count > MAXIMUM_SITE_COUNT
+        || !edge.confidence.is_finite()
+        || !(0.0..=1.0).contains(&edge.confidence)
+}
+
+fn invalid_edge_provenance(edge: &EdgeInput) -> bool {
+    edge.provenance.is_empty() || edge.provenance.len() > MAXIMUM_PROVENANCE_BYTES
+}
+
 /// Replace native facts only for matching project files covered by one bounded SCIP index.
 pub fn apply_scip_overlay<ReadSource>(
-    facts: &mut GenerationFacts,
-    bytes: &[u8],
-    maximum_rows: usize,
+    input: ScipOverlayRequest<'_>,
     read_source: ReadSource,
 ) -> Result<ScipOverlayReport, ScipError>
 where
     ReadSource: FnMut(&str) -> Option<Vec<u8>>,
 {
-    apply_scip_overlay_with_cancellation(facts, bytes, maximum_rows, read_source, || false)
+    apply_scip_overlay_with_cancellation(input, read_source, || false)
 }
 
 /// Apply a SCIP overlay while cooperatively polling between bounded records.
 pub fn apply_scip_overlay_with_cancellation<ReadSource, Cancel>(
-    facts: &mut GenerationFacts,
-    bytes: &[u8],
-    maximum_rows: usize,
+    input: ScipOverlayRequest<'_>,
     mut read_source: ReadSource,
     mut cancelled: Cancel,
 ) -> Result<ScipOverlayReport, ScipError>
@@ -222,6 +421,11 @@ where
     ReadSource: FnMut(&str) -> Option<Vec<u8>>,
     Cancel: FnMut() -> bool,
 {
+    let ScipOverlayRequest {
+        facts,
+        bytes,
+        maximum_rows,
+    } = input;
     poll(&mut cancelled)?;
     if maximum_rows == 0 || maximum_rows > MAXIMUM_OVERLAY_ROWS {
         return Err(ScipError::LimitExceeded);
@@ -257,31 +461,45 @@ where
         .map(|symbol| (symbol.file_id.clone(), symbol.symbol_id.clone()))
         .collect::<BTreeMap<_, _>>();
     let native_symbol_candidates = native_symbol_candidates(facts);
-    let (prepared, skipped) = prepare_documents(
-        &index.documents,
-        &file_by_path,
-        &mut read_source,
-        &mut cancelled,
-    )?;
+    let (prepared, skipped) = {
+        let mut source = DocumentSource {
+            read_source: &mut read_source,
+            cancelled: &mut cancelled,
+        };
+        prepare_documents(&index.documents, &file_by_path, &mut source)?
+    };
     let mut imported = ImportAccumulator::new(skipped);
-    build_symbols(
-        &prepared,
-        &file_symbol_by_id,
-        &native_symbol_candidates,
-        &mut imported,
-        &mut cancelled,
-    )?;
-    build_edges_and_references(&prepared, &file_symbol_by_id, &mut imported, &mut cancelled)?;
+    {
+        let mut state = ImportState {
+            imported: &mut imported,
+            cancelled: &mut cancelled,
+        };
+        build_symbols(
+            &prepared,
+            SymbolBuildLookups {
+                file_symbol_by_id: &file_symbol_by_id,
+                native_candidates: &native_symbol_candidates,
+            },
+            &mut state,
+        )?;
+        build_edges_and_references(&prepared, &file_symbol_by_id, &mut state)?;
+    }
     poll(&mut cancelled)?;
-    apply_replacement(facts, &prepared, &file_symbol_by_id, &mut imported)?;
+    apply_replacement(
+        ReplacementInput {
+            facts,
+            prepared: &prepared,
+            file_symbol_by_id: &file_symbol_by_id,
+        },
+        &mut imported,
+    )?;
     Ok(imported.report)
 }
 
 fn prepare_documents<'a, ReadSource, Cancel>(
     documents: &'a [ScipDocument],
     file_by_path: &BTreeMap<String, &cartograph_db::FileInput>,
-    read_source: &mut ReadSource,
-    cancelled: &mut Cancel,
+    source: &mut DocumentSource<'_, ReadSource, Cancel>,
 ) -> Result<(Vec<PreparedDocument<'a>>, u64), ScipError>
 where
     ReadSource: FnMut(&str) -> Option<Vec<u8>>,
@@ -291,7 +509,7 @@ where
     let mut seen = BTreeSet::new();
     let mut skipped = 0_u64;
     for document in documents {
-        poll(cancelled)?;
+        poll(source.cancelled)?;
         let Some(path) = NormalizedPath::parse(&document.relative_path)
             .ok()
             .map(NormalizedPath::into_string)
@@ -303,18 +521,19 @@ where
             skipped = checked_increment(skipped)?;
             continue;
         };
-        let Some(source) = read_source(&path) else {
+        let Some(source_bytes) = (source.read_source)(&path) else {
             skipped = checked_increment(skipped)?;
             continue;
         };
         if !seen.insert(path.clone())
-            || std::str::from_utf8(&source).is_err()
-            || ContentDigest::from_bytes(*blake3::hash(&source).as_bytes()) != file.content_hash
+            || std::str::from_utf8(&source_bytes).is_err()
+            || ContentDigest::from_bytes(*blake3::hash(&source_bytes).as_bytes())
+                != file.content_hash
         {
             skipped = checked_increment(skipped)?;
             continue;
         }
-        let line_starts = source_line_starts(&source)?;
+        let line_starts = source_line_starts(&source_bytes)?;
         prepared.push(PreparedDocument {
             document,
             path,
@@ -324,7 +543,7 @@ where
             } else {
                 bounded_text(&document.language, 64)
             },
-            source,
+            source: source_bytes,
             line_starts,
         });
     }
@@ -355,106 +574,31 @@ fn native_symbol_candidates(facts: &GenerationFacts) -> NativeSymbolCandidates {
 
 fn build_symbols<Cancel>(
     documents: &[PreparedDocument<'_>],
-    file_symbol_by_id: &BTreeMap<FileId, SymbolId>,
-    native_candidates: &NativeSymbolCandidates,
-    imported: &mut ImportAccumulator,
-    cancelled: &mut Cancel,
+    lookups: SymbolBuildLookups<'_>,
+    state: &mut ImportState<'_, Cancel>,
 ) -> Result<(), ScipError>
 where
     Cancel: FnMut() -> bool,
 {
     for prepared in documents {
-        poll(cancelled)?;
-        let Some(file_symbol_id) = file_symbol_by_id.get(&prepared.file_id) else {
+        poll(state.cancelled)?;
+        let Some(file_symbol_id) = lookups.file_symbol_by_id.get(&prepared.file_id) else {
             return Err(ScipError::OverlayFailed);
         };
         let definitions = definition_occurrences(prepared);
         for symbol in &prepared.document.symbols {
-            poll(cancelled)?;
-            if symbol.symbol.is_empty() {
-                imported.unresolved()?;
-                continue;
-            }
-            let key = scoped_symbol_key(&prepared.path, &symbol.symbol);
-            let kind = symbol_kind(symbol);
-            if kind == SymbolKind::File {
-                imported.symbol_by_key.insert(key, file_symbol_id.clone());
-                imported
-                    .kind_by_id
-                    .insert(file_symbol_id.clone(), SymbolKind::File);
-                continue;
-            }
-            if imported.symbol_by_key.contains_key(&key) {
-                imported.unresolved()?;
-                continue;
-            }
-            let qualified_name = qualified_name(symbol);
-            let span = definitions
-                .get(&key)
-                .and_then(|occurrence| definition_span(prepared, occurrence))
-                .unwrap_or_else(|| fallback_span(prepared));
-            let candidate_key = (
-                prepared.file_id.clone(),
-                kind.as_str().to_owned(),
-                qualified_name.clone(),
-            );
-            let symbol_id = native_candidates
-                .get(&candidate_key)
-                .filter(|candidates| candidates.len() == 1)
-                .and_then(|candidates| candidates.first())
-                .cloned()
-                .unwrap_or_else(|| deterministic_symbol_id(&key));
-            imported
-                .symbol_by_key
-                .insert(key.clone(), symbol_id.clone());
-            imported.kind_by_id.insert(symbol_id.clone(), kind);
-            imported
-                .spans_by_path
-                .entry(prepared.path.clone())
-                .or_default()
-                .push(ImportedSymbolSpan {
-                    symbol_id: symbol_id.clone(),
-                    start_byte: span.start_byte,
-                    end_byte: span.end_byte,
-                    span_size: span.end_byte.saturating_sub(span.start_byte),
-                });
-            imported.symbols.push(SymbolInput {
-                symbol_id: symbol_id.clone(),
-                file_id: prepared.file_id.clone(),
-                symbol_kind: kind.as_str().to_owned(),
-                qualified_name: qualified_name.clone(),
-                signature: String::new(),
-                start_byte: span.start_byte,
-                end_byte: span.end_byte,
-                start_line: span.start_line,
-                end_line: span.end_line,
-                structural_digest: structural_digest(&key, kind, &span),
-                visibility: None,
-                exported: false,
-                default_export: false,
-                async_symbol: false,
-                static_member: false,
-                declaration_only: false,
-                betweenness_ppb: None,
-                pagerank_ppb: None,
-            });
-            imported.documents.push(SearchDocumentInput {
-                document_id: deterministic_document_id(&key),
-                file_id: Some(prepared.file_id.clone()),
-                symbol_id: Some(symbol_id),
-                path: prepared.path.clone(),
-                language: prepared.language.clone(),
-                kind: document_kind(&prepared.path),
-                qualified_name: qualified_name.clone(),
-                code: qualified_name,
-                natural_text: bounded_documentation(&symbol.documentation),
-                metadata: json!({
-                    "interchange": "scip",
-                    "positionEncoding": "utf8",
-                }),
-            });
+            build_scip_symbol(
+                ScipSymbolBuild {
+                    prepared,
+                    lookups: &lookups,
+                    definitions: &definitions,
+                    symbol,
+                    file_symbol_id,
+                },
+                state,
+            )?;
         }
-        if let Some(spans) = imported.spans_by_path.get_mut(&prepared.path) {
+        if let Some(spans) = state.imported.spans_by_path.get_mut(&prepared.path) {
             spans.sort_by(|left, right| {
                 left.start_byte
                     .cmp(&right.start_byte)
@@ -466,67 +610,210 @@ where
     Ok(())
 }
 
+struct ScipSymbolBuild<'context, 'document, 'lookup> {
+    prepared: &'context PreparedDocument<'document>,
+    lookups: &'context SymbolBuildLookups<'lookup>,
+    definitions: &'context BTreeMap<String, ScipOccurrence>,
+    symbol: &'context ScipSymbolInformation,
+    file_symbol_id: &'context SymbolId,
+}
+
+fn build_scip_symbol<Cancel>(
+    input: ScipSymbolBuild<'_, '_, '_>,
+    state: &mut ImportState<'_, Cancel>,
+) -> Result<(), ScipError>
+where
+    Cancel: FnMut() -> bool,
+{
+    poll(state.cancelled)?;
+    if input.symbol.symbol.is_empty() {
+        state.imported.unresolved()?;
+        return Ok(());
+    }
+    let key = scoped_symbol_key(&input.prepared.path, &input.symbol.symbol);
+    let kind = symbol_kind(input.symbol);
+    if kind == SymbolKind::File {
+        state
+            .imported
+            .symbol_by_key
+            .insert(key, input.file_symbol_id.clone());
+        state
+            .imported
+            .kind_by_id
+            .insert(input.file_symbol_id.clone(), SymbolKind::File);
+        return Ok(());
+    }
+    if state.imported.symbol_by_key.contains_key(&key) {
+        state.imported.unresolved()?;
+        return Ok(());
+    }
+    let qualified_name = qualified_name(input.symbol);
+    let span = input
+        .definitions
+        .get(&key)
+        .and_then(|occurrence| definition_span(input.prepared, occurrence))
+        .unwrap_or_else(|| fallback_span(input.prepared));
+    let candidate_key = (
+        input.prepared.file_id.clone(),
+        kind.as_str().to_owned(),
+        qualified_name.clone(),
+    );
+    let symbol_id = input
+        .lookups
+        .native_candidates
+        .get(&candidate_key)
+        .filter(|candidates| candidates.len() == 1)
+        .and_then(|candidates| candidates.first())
+        .cloned()
+        .unwrap_or_else(|| deterministic_symbol_id(&key));
+    persist_scip_symbol(
+        state.imported,
+        ScipSymbolPersistence {
+            prepared: input.prepared,
+            symbol: input.symbol,
+            key,
+            kind,
+            span,
+            symbol_id,
+            qualified_name,
+        },
+    );
+    Ok(())
+}
+
+struct ScipSymbolPersistence<'context, 'document> {
+    prepared: &'context PreparedDocument<'document>,
+    symbol: &'context ScipSymbolInformation,
+    key: String,
+    kind: SymbolKind,
+    span: ImportedSpan,
+    symbol_id: SymbolId,
+    qualified_name: String,
+}
+
+fn persist_scip_symbol(imported: &mut ImportAccumulator, input: ScipSymbolPersistence<'_, '_>) {
+    imported
+        .symbol_by_key
+        .insert(input.key.clone(), input.symbol_id.clone());
+    imported
+        .kind_by_id
+        .insert(input.symbol_id.clone(), input.kind);
+    imported
+        .spans_by_path
+        .entry(input.prepared.path.clone())
+        .or_default()
+        .push(ImportedSymbolSpan {
+            symbol_id: input.symbol_id.clone(),
+            start_byte: input.span.start_byte,
+            end_byte: input.span.end_byte,
+            span_size: input.span.end_byte.saturating_sub(input.span.start_byte),
+        });
+    imported.symbols.push(SymbolInput {
+        symbol_id: input.symbol_id.clone(),
+        file_id: input.prepared.file_id.clone(),
+        symbol_kind: input.kind.as_str().to_owned(),
+        qualified_name: input.qualified_name.clone(),
+        signature: String::new(),
+        start_byte: input.span.start_byte,
+        end_byte: input.span.end_byte,
+        start_line: input.span.start_line,
+        end_line: input.span.end_line,
+        structural_digest: structural_digest(&input.key, input.kind, &input.span),
+        visibility: None,
+        exported: false,
+        default_export: false,
+        async_symbol: false,
+        static_member: false,
+        declaration_only: false,
+        betweenness_ppb: None,
+        pagerank_ppb: None,
+    });
+    imported.documents.push(SearchDocumentInput {
+        document_id: deterministic_document_id(&input.key),
+        file_id: Some(input.prepared.file_id.clone()),
+        symbol_id: Some(input.symbol_id),
+        path: input.prepared.path.clone(),
+        language: input.prepared.language.clone(),
+        kind: document_kind(&input.prepared.path),
+        qualified_name: input.qualified_name.clone(),
+        code: input.qualified_name,
+        natural_text: bounded_documentation(&input.symbol.documentation),
+        metadata: json!({
+            "interchange": "scip",
+            "positionEncoding": "utf8",
+        }),
+    });
+}
+
 fn build_edges_and_references<Cancel>(
     documents: &[PreparedDocument<'_>],
     file_symbol_by_id: &BTreeMap<FileId, SymbolId>,
-    imported: &mut ImportAccumulator,
-    cancelled: &mut Cancel,
+    state: &mut ImportState<'_, Cancel>,
 ) -> Result<(), ScipError>
 where
     Cancel: FnMut() -> bool,
 {
     for prepared in documents {
-        poll(cancelled)?;
+        poll(state.cancelled)?;
         let Some(file_symbol_id) = file_symbol_by_id.get(&prepared.file_id) else {
             return Err(ScipError::OverlayFailed);
         };
         for symbol in &prepared.document.symbols {
-            poll(cancelled)?;
+            poll(state.cancelled)?;
             let source_key = scoped_symbol_key(&prepared.path, &symbol.symbol);
-            let Some(source_id) = imported.symbol_by_key.get(&source_key).cloned() else {
+            let Some(source_id) = state.imported.symbol_by_key.get(&source_key).cloned() else {
                 continue;
             };
-            add_custom_edges(prepared, symbol, &source_id, imported, cancelled)?;
-            add_enclosing_edge(prepared, symbol, file_symbol_id, &source_id, imported)?;
-            add_standard_relationships(prepared, symbol, &source_id, imported)?;
+            let symbol_context = ScipSymbolContext {
+                prepared,
+                symbol,
+                source_id: &source_id,
+            };
+            add_custom_edges(symbol_context, state)?;
+            add_enclosing_edge(symbol_context, file_symbol_id, state.imported)?;
+            add_standard_relationships(symbol_context, state.imported)?;
         }
         for occurrence in &prepared.document.occurrences {
-            poll(cancelled)?;
+            poll(state.cancelled)?;
             if occurrence.symbol_roles & SYMBOL_ROLE_DEFINITION != 0 {
                 continue;
             }
-            add_reference_occurrence(prepared, occurrence, file_symbol_id, imported)?;
+            add_reference_occurrence(
+                ScipOccurrenceContext {
+                    prepared,
+                    occurrence,
+                    file_symbol_id,
+                },
+                state.imported,
+            )?;
         }
     }
-    imported.report.imported_edges = usize_to_u64(imported.edges.len());
+    state.imported.report.imported_edges = usize_to_u64(state.imported.edges.len());
     Ok(())
 }
 
 fn add_custom_edges<Cancel>(
-    prepared: &PreparedDocument<'_>,
-    symbol: &ScipSymbolInformation,
-    source_id: &SymbolId,
-    imported: &mut ImportAccumulator,
-    cancelled: &mut Cancel,
+    context: ScipSymbolContext<'_, '_>,
+    state: &mut ImportState<'_, Cancel>,
 ) -> Result<(), ScipError>
 where
     Cancel: FnMut() -> bool,
 {
-    for edge in &symbol.cartograph_edges {
-        poll(cancelled)?;
-        let target_key = scoped_symbol_key(&prepared.path, &edge.target_symbol);
-        let Some(target_id) = imported.symbol_by_key.get(&target_key).cloned() else {
-            imported.unresolved()?;
+    for edge in &context.symbol.cartograph_edges {
+        poll(state.cancelled)?;
+        let target_key = scoped_symbol_key(&context.prepared.path, &edge.target_symbol);
+        let Some(target_id) = state.imported.symbol_by_key.get(&target_key).cloned() else {
+            state.imported.unresolved()?;
             continue;
         };
         let Some(kind) = edge_kind(&edge.edge_kind) else {
-            imported.unresolved()?;
+            state.imported.unresolved()?;
             continue;
         };
         let provenance = imported_provenance(&edge.provenance)?;
-        imported.push_edge(
+        state.imported.push_edge(
             EdgeInput {
-                source_symbol_id: source_id.clone(),
+                source_symbol_id: context.source_id.clone(),
                 target_symbol_id: target_id,
                 kind,
                 confidence: f32::from_bits(edge.confidence_bits),
@@ -535,36 +822,36 @@ where
             },
             true,
         )?;
-        imported.report.exact_typed_edges = checked_increment(imported.report.exact_typed_edges)?;
+        state.imported.report.exact_typed_edges =
+            checked_increment(state.imported.report.exact_typed_edges)?;
     }
     Ok(())
 }
 
 fn add_enclosing_edge(
-    prepared: &PreparedDocument<'_>,
-    symbol: &ScipSymbolInformation,
+    context: ScipSymbolContext<'_, '_>,
     file_symbol_id: &SymbolId,
-    source_id: &SymbolId,
     imported: &mut ImportAccumulator,
 ) -> Result<(), ScipError> {
-    if symbol_kind(symbol) == SymbolKind::File {
+    if symbol_kind(context.symbol) == SymbolKind::File {
         return Ok(());
     }
-    let parent_id = if symbol.enclosing_symbol.is_empty() {
+    let parent_id = if context.symbol.enclosing_symbol.is_empty() {
         Some(file_symbol_id.clone())
     } else {
-        let parent_key = scoped_symbol_key(&prepared.path, &symbol.enclosing_symbol);
+        let parent_key =
+            scoped_symbol_key(&context.prepared.path, &context.symbol.enclosing_symbol);
         imported.symbol_by_key.get(&parent_key).cloned()
     };
     let Some(parent_id) = parent_id else {
         imported.unresolved()?;
         return Ok(());
     };
-    if parent_id != *source_id {
+    if parent_id != *context.source_id {
         imported.push_edge(
             EdgeInput {
                 source_symbol_id: parent_id,
-                target_symbol_id: source_id.clone(),
+                target_symbol_id: context.source_id.clone(),
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
                 provenance: SCIP_FOREIGN_PROVENANCE.to_owned(),
@@ -577,27 +864,25 @@ fn add_enclosing_edge(
 }
 
 fn add_standard_relationships(
-    prepared: &PreparedDocument<'_>,
-    symbol: &ScipSymbolInformation,
-    source_id: &SymbolId,
+    context: ScipSymbolContext<'_, '_>,
     imported: &mut ImportAccumulator,
 ) -> Result<(), ScipError> {
-    for relationship in &symbol.relationships {
-        let target_key = scoped_symbol_key(&prepared.path, &relationship.symbol);
+    for relationship in &context.symbol.relationships {
+        let target_key = scoped_symbol_key(&context.prepared.path, &relationship.symbol);
         let Some(target_id) = imported.symbol_by_key.get(&target_key).cloned() else {
             imported.unresolved()?;
             continue;
         };
         let Some(kind) = relationship_edge_kind(
             relationship,
-            imported.kind_by_id.get(source_id).copied(),
+            imported.kind_by_id.get(context.source_id).copied(),
             imported.kind_by_id.get(&target_id).copied(),
         ) else {
             continue;
         };
         imported.push_edge(
             EdgeInput {
-                source_symbol_id: source_id.clone(),
+                source_symbol_id: context.source_id.clone(),
                 target_symbol_id: target_id,
                 kind,
                 confidence: 1.0,
@@ -611,28 +896,32 @@ fn add_standard_relationships(
 }
 
 fn add_reference_occurrence(
-    prepared: &PreparedDocument<'_>,
-    occurrence: &ScipOccurrence,
-    file_symbol_id: &SymbolId,
+    context: ScipOccurrenceContext<'_, '_>,
     imported: &mut ImportAccumulator,
 ) -> Result<(), ScipError> {
-    let target_key = scoped_symbol_key(&prepared.path, &occurrence.symbol);
+    let target_key = scoped_symbol_key(&context.prepared.path, &context.occurrence.symbol);
     let Some(target_id) = imported.symbol_by_key.get(&target_key).cloned() else {
         imported.unresolved()?;
         return Ok(());
     };
-    let Some(span) = occurrence_span(prepared, occurrence) else {
+    let Some(span) = occurrence_span(context.prepared, context.occurrence) else {
         imported.unresolved()?;
         return Ok(());
     };
-    let owner_id = smallest_owner(imported.spans_by_path.get(&prepared.path), span.start_byte)
-        .unwrap_or_else(|| file_symbol_id.clone());
+    let owner_id = smallest_owner(
+        imported.spans_by_path.get(&context.prepared.path),
+        span.start_byte,
+    )
+    .unwrap_or_else(|| context.file_symbol_id.clone());
     let kind = exact_edge_kind(imported, &owner_id, &target_id).unwrap_or(EdgeKind::References);
     imported.references.push(ReferenceInput {
-        file_id: prepared.file_id.clone(),
+        file_id: context.prepared.file_id.clone(),
         owner_symbol_id: Some(owner_id.clone()),
         target_symbol_id: Some(target_id.clone()),
-        reference_name: bounded_text(&reference_name(occurrence), MAXIMUM_REFERENCE_NAME_BYTES),
+        reference_name: bounded_text(
+            &reference_name(context.occurrence),
+            MAXIMUM_REFERENCE_NAME_BYTES,
+        ),
         reference_kind: kind.as_str().to_owned(),
         start_byte: span.start_byte,
         end_byte: span.end_byte,
@@ -656,16 +945,16 @@ fn add_reference_occurrence(
 }
 
 fn apply_replacement(
-    facts: &mut GenerationFacts,
-    prepared: &[PreparedDocument<'_>],
-    file_symbol_by_id: &BTreeMap<FileId, SymbolId>,
+    input: ReplacementInput<'_, '_>,
     imported: &mut ImportAccumulator,
 ) -> Result<(), ScipError> {
-    let covered = prepared
+    let covered = input
+        .prepared
         .iter()
         .map(|document| document.file_id.clone())
         .collect::<BTreeSet<_>>();
-    let removed = facts
+    let removed = input
+        .facts
         .symbols
         .iter()
         .filter(|symbol| {
@@ -678,17 +967,21 @@ fn apply_replacement(
         .iter()
         .map(|symbol| symbol.symbol_id.clone())
         .collect::<BTreeSet<_>>();
-    let file_symbol_ids = file_symbol_by_id.values().cloned().collect::<BTreeSet<_>>();
+    let file_symbol_ids = input
+        .file_symbol_by_id
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let retained_targets = imported_ids
         .iter()
         .cloned()
         .chain(file_symbol_ids.iter().cloned())
         .collect::<BTreeSet<_>>();
 
-    facts.symbols.retain(|symbol| {
+    input.facts.symbols.retain(|symbol| {
         !covered.contains(&symbol.file_id) || symbol.symbol_kind == SymbolKind::File.as_str()
     });
-    facts.documents.retain(|document| {
+    input.facts.documents.retain(|document| {
         document
             .file_id
             .as_ref()
@@ -698,7 +991,7 @@ fn apply_replacement(
                 .as_ref()
                 .is_some_and(|symbol_id| file_symbol_ids.contains(symbol_id))
     });
-    facts.references.retain_mut(|reference| {
+    input.facts.references.retain_mut(|reference| {
         if covered.contains(&reference.file_id) {
             return false;
         }
@@ -713,7 +1006,7 @@ fn apply_replacement(
         }
         true
     });
-    facts.edges.retain(|edge| {
+    input.facts.edges.retain(|edge| {
         !removed.contains(&edge.source_symbol_id)
             && (!removed.contains(&edge.target_symbol_id)
                 || retained_targets.contains(&edge.target_symbol_id))
@@ -723,10 +1016,11 @@ fn apply_replacement(
     imported.report.replaced_native_symbols = usize_to_u64(removed.len());
     imported.report.imported_symbols = usize_to_u64(imported.symbols.len());
     imported.report.imported_references = usize_to_u64(imported.references.len());
-    facts.symbols.append(&mut imported.symbols);
-    facts.documents.append(&mut imported.documents);
-    facts.references.append(&mut imported.references);
-    facts
+    input.facts.symbols.append(&mut imported.symbols);
+    input.facts.documents.append(&mut imported.documents);
+    input.facts.references.append(&mut imported.references);
+    input
+        .facts
         .edges
         .extend(std::mem::take(&mut imported.edges).into_values());
     Ok(())
@@ -780,8 +1074,12 @@ fn scip_range_to_span(range: &[u32], source: &[u8], line_starts: &[usize]) -> Op
         [start_line, start, end_line, end] => (*start_line, *start, *end_line, *end),
         _ => return None,
     };
-    let start = line_column_to_byte(source, line_starts, start_line, start_column)?;
-    let end = line_column_to_byte(source, line_starts, end_line, end_column)?;
+    let lines = SourceLines {
+        source,
+        line_starts,
+    };
+    let start = line_column_to_byte(lines, start_line, start_column)?;
+    let end = line_column_to_byte(lines, end_line, end_column)?;
     if start >= end {
         return None;
     }
@@ -803,26 +1101,26 @@ fn source_line_starts(source: &[u8]) -> Result<Vec<usize>, ScipError> {
     Ok(starts)
 }
 
-fn line_column_to_byte(
-    source: &[u8],
-    line_starts: &[usize],
-    line: u32,
-    column: u32,
-) -> Option<usize> {
+fn line_column_to_byte(lines: SourceLines<'_>, line: u32, column: u32) -> Option<usize> {
     let line = usize::try_from(line).ok()?;
     let column = usize::try_from(column).ok()?;
-    let start = *line_starts.get(line)?;
-    let next_line = line_starts
+    let start = *lines.line_starts.get(line)?;
+    let next_line = lines
+        .line_starts
         .get(line.checked_add(1)?)
         .copied()
-        .unwrap_or(source.len());
-    let line_end = if next_line > start && source.get(next_line - 1) == Some(&b'\n') {
+        .unwrap_or(lines.source.len());
+    let line_end = if next_line > start && lines.source.get(next_line - 1) == Some(&b'\n') {
         next_line - 1
     } else {
         next_line
     };
     let position = start.checked_add(column)?;
-    if position > line_end || !std::str::from_utf8(source).ok()?.is_char_boundary(position) {
+    if position > line_end
+        || !std::str::from_utf8(lines.source)
+            .ok()?
+            .is_char_boundary(position)
+    {
         return None;
     }
     Some(position)
@@ -894,28 +1192,14 @@ fn symbol_kind(symbol: &ScipSymbolInformation) -> SymbolKind {
 }
 
 fn scip_kind_to_symbol_kind(kind: u32) -> Option<SymbolKind> {
-    match kind {
-        7 => Some(SymbolKind::Class),
-        8 => Some(SymbolKind::Constant),
-        9 | 18 | 26 | 45 | 66 | 72 | 76 | 80 => Some(SymbolKind::Method),
-        11 => Some(SymbolKind::Enum),
-        12 => Some(SymbolKind::EnumMember),
-        15 | 77 | 79 => Some(SymbolKind::Field),
-        16 => Some(SymbolKind::File),
-        17 | 25 => Some(SymbolKind::Function),
-        21 => Some(SymbolKind::Interface),
-        29 | 35 => Some(SymbolKind::Module),
-        30 => Some(SymbolKind::Namespace),
-        33 => Some(SymbolKind::Class),
-        37 | 44 => Some(SymbolKind::Parameter),
-        41 | 81 => Some(SymbolKind::Property),
-        42 => Some(SymbolKind::Protocol),
-        49 => Some(SymbolKind::Struct),
-        53 => Some(SymbolKind::Trait),
-        54 | 55 | 58 => Some(SymbolKind::TypeAlias),
-        61 | 82 => Some(SymbolKind::Variable),
-        _ => None,
-    }
+    let scip_kind = IMPORTED_SCIP_KINDS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate as u32 == kind)?;
+    SCIP_KIND_RULES
+        .iter()
+        .find(|rule| rule.scip_kinds.contains(&scip_kind))
+        .map(|rule| rule.symbol_kind)
 }
 
 fn suffix_to_symbol_kind(suffix: DescriptorSuffix) -> SymbolKind {
@@ -930,24 +1214,7 @@ fn suffix_to_symbol_kind(suffix: DescriptorSuffix) -> SymbolKind {
 }
 
 fn edge_kind(value: &str) -> Option<EdgeKind> {
-    match value {
-        "calls" => Some(EdgeKind::Calls),
-        "imports" => Some(EdgeKind::Imports),
-        "references" => Some(EdgeKind::References),
-        "implements" => Some(EdgeKind::Implements),
-        "extends" => Some(EdgeKind::Extends),
-        "tests" => Some(EdgeKind::Tests),
-        "type_of" => Some(EdgeKind::TypeOf),
-        "returns" => Some(EdgeKind::Returns),
-        "instantiates" => Some(EdgeKind::Instantiates),
-        "overrides" => Some(EdgeKind::Overrides),
-        "decorates" => Some(EdgeKind::Decorates),
-        "field_access" => Some(EdgeKind::FieldAccess),
-        "def_use" => Some(EdgeKind::DefUse),
-        "exports" => Some(EdgeKind::Exports),
-        "contains" => Some(EdgeKind::Contains),
-        _ => None,
-    }
+    EdgeKind::parse(value)
 }
 
 fn relationship_edge_kind(
@@ -1101,7 +1368,7 @@ mod tests {
     use cartograph_db::{FileInput, GenerationValidationLimits, validate_generation_facts};
     use cartograph_domain::{FileParseStatus, GenerationId};
 
-    use crate::{ScipExportOptions, export_snapshot};
+    use crate::{ScipExportOptions, ScipExportOptionsInput, export_snapshot};
 
     use super::*;
 
@@ -1206,13 +1473,21 @@ mod tests {
             }],
             references: Vec::new(),
         };
-        let options = ScipExportOptions::new("demo", "1", "2", "cartograph://demo")
-            .unwrap_or_else(|error| panic!("options failed: {error}"));
+        let options = ScipExportOptions::new(ScipExportOptionsInput {
+            project_name: "demo",
+            project_version: "1",
+            tool_version: "2",
+            project_root_uri: "cartograph://demo",
+        })
+        .unwrap_or_else(|error| panic!("options failed: {error}"));
         let export = export_snapshot(&snapshot, &options, |_| Some(source.clone()))
             .unwrap_or_else(|error| panic!("export failed: {error}"));
         let mut facts = native_facts(&source);
-        let report = apply_scip_overlay(&mut facts, export.bytes(), 100, |_| Some(source.clone()))
-            .unwrap_or_else(|error| panic!("overlay failed: {error}"));
+        let report = apply_scip_overlay(
+            ScipOverlayRequest::new(&mut facts, export.bytes(), 100),
+            |_| Some(source.clone()),
+        )
+        .unwrap_or_else(|error| panic!("overlay failed: {error}"));
         assert_eq!(report.exact_typed_edges(), 1);
         let imported_edge = facts
             .edges
@@ -1248,8 +1523,10 @@ mod tests {
         };
         let bytes = crate::encode_scip_index(&index)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
-        let report = apply_scip_overlay(&mut facts, &bytes, 10, |_| Some(b"stale".to_vec()))
-            .unwrap_or_else(|error| panic!("overlay failed: {error}"));
+        let report = apply_scip_overlay(ScipOverlayRequest::new(&mut facts, &bytes, 10), |_| {
+            Some(b"stale".to_vec())
+        })
+        .unwrap_or_else(|error| panic!("overlay failed: {error}"));
         assert_eq!(report.skipped_documents(), 1);
         assert_eq!(facts.symbols, before);
     }

@@ -9,8 +9,8 @@ use std::{
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{CartographDatabase, DEFAULT_MANAGED_DATABASE_PORT, ManagedDatabase};
 use cartograph_llm::{
-    ChatSettings, EmbeddingSettings, InstallModelsOptions, OpenAiChatClient, OpenAiEmbeddingClient,
-    OpenAiRerankClient, ProjectLlmTier, ProjectLlmTierInput, RerankSettings,
+    ChatMessageRequest, ChatSettings, EmbeddingSettings, InstallModelsOptions, OpenAiChatClient,
+    OpenAiEmbeddingClient, OpenAiRerankClient, ProjectLlmTier, ProjectLlmTierInput, RerankSettings,
     install_recommended_models, load_exact_project_llm_tier, probe_openai_compatible_endpoint,
     write_project_llm_configuration,
 };
@@ -20,6 +20,18 @@ use serde::Serialize;
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAXIMUM_TIMEOUT_MS: u64 = 600_000;
 const DEFAULT_MODEL_CONCURRENCY: u16 = 2;
+const LLAMA_EMBED_ENDPOINT: &str = "http://127.0.0.1:8080";
+const LLAMA_CHAT_ENDPOINT: &str = "http://127.0.0.1:8081";
+const LLAMA_ASK_ENDPOINT: &str = "http://127.0.0.1:8082";
+const LLAMA_RERANK_ENDPOINT: &str = "http://127.0.0.1:8083";
+const OLLAMA_ENDPOINT: &str = "http://127.0.0.1:11434";
+const VLLM_ENDPOINT: &str = "http://127.0.0.1:8000";
+const LM_STUDIO_ENDPOINT: &str = "http://127.0.0.1:1234";
+#[cfg(test)]
+const UNREACHABLE_LOOPBACK_ENDPOINT: &str = "http://127.0.0.1:1";
+const OPENAI_ENDPOINT: &str = "https://api.openai.com";
+#[cfg(test)]
+const OPENAI_V1_ENDPOINT: &str = "https://api.openai.com/v1";
 
 #[derive(Debug, Subcommand)]
 pub(super) enum LlmCommand {
@@ -198,6 +210,117 @@ struct SmokeRow {
     duration_ms: u64,
     detail: String,
 }
+
+struct SmokeRowInput {
+    tier: &'static str,
+    model: Option<String>,
+    endpoint: Option<String>,
+    started: Instant,
+    detail: String,
+}
+
+impl SmokeRowInput {
+    fn new(tier: &'static str, started: Instant, detail: impl Into<String>) -> Self {
+        Self {
+            tier,
+            model: None,
+            endpoint: None,
+            started,
+            detail: detail.into(),
+        }
+    }
+
+    fn with_configuration(mut self, model: Option<String>, endpoint: Option<String>) -> Self {
+        self.model = model;
+        self.endpoint = endpoint;
+        self
+    }
+
+    fn into_row(self, status: SmokeStatus) -> SmokeRow {
+        SmokeRow {
+            tier: self.tier,
+            status,
+            model: self.model,
+            endpoint: self.endpoint,
+            duration_ms: elapsed_ms(self.started),
+            detail: self.detail,
+        }
+    }
+}
+
+struct TierInputRequest<'endpoint> {
+    tier: ProjectLlmTier,
+    endpoint: &'endpoint str,
+    model: String,
+    concurrency: u16,
+}
+
+impl<'endpoint> TierInputRequest<'endpoint> {
+    fn new(tier: ProjectLlmTier, endpoint: &'endpoint str, model: impl Into<String>) -> Self {
+        Self {
+            tier,
+            endpoint,
+            model: model.into(),
+            concurrency: DEFAULT_MODEL_CONCURRENCY,
+        }
+    }
+
+    const fn with_concurrency(mut self, concurrency: u16) -> Self {
+        self.concurrency = concurrency;
+        self
+    }
+
+    fn build(self) -> Result<ProjectLlmTierInput, String> {
+        ProjectLlmTierInput::new(self.tier, self.endpoint, self.model)
+            .and_then(|input| input.with_concurrency(self.concurrency))
+            .map(ProjectLlmTierInput::without_credentials)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ChatSmokeTarget {
+    tier: ProjectLlmTier,
+    label: &'static str,
+    required: bool,
+}
+
+struct ChatSmokeRequest<'project> {
+    project: &'project Path,
+    target: ChatSmokeTarget,
+    timeout: Duration,
+}
+
+impl<'project> ChatSmokeRequest<'project> {
+    const fn new(project: &'project Path, target: ChatSmokeTarget, timeout: Duration) -> Self {
+        Self {
+            project,
+            target,
+            timeout,
+        }
+    }
+}
+
+const SUMMARIZE_SMOKE: ChatSmokeTarget = ChatSmokeTarget {
+    tier: ProjectLlmTier::Summarize,
+    label: "summarize",
+    required: true,
+};
+const ASK_SMOKE: ChatSmokeTarget = ChatSmokeTarget {
+    tier: ProjectLlmTier::Ask,
+    label: "ask",
+    required: false,
+};
+const LOCAL_SMOKE: ChatSmokeTarget = ChatSmokeTarget {
+    tier: ProjectLlmTier::Local,
+    label: "local",
+    required: false,
+};
+const CLASSIFY_SMOKE: ChatSmokeTarget = ChatSmokeTarget {
+    tier: ProjectLlmTier::Classify,
+    label: "classify",
+    required: false,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -395,35 +518,21 @@ fn local_inputs(minimal: bool) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectL
 }
 
 fn ollama_inputs(minimal: bool) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
-    let endpoint = "http://127.0.0.1:11434";
+    let endpoint = OLLAMA_ENDPOINT;
     let mut inputs = vec![
-        tier_input(ProjectLlmTier::Embedding, endpoint, "nomic-embed-text", 4)?,
-        tier_input(
-            ProjectLlmTier::Summarize,
-            endpoint,
-            "qwen2.5-coder:3b",
-            DEFAULT_MODEL_CONCURRENCY,
-        )?,
-        tier_input(
-            ProjectLlmTier::Local,
-            endpoint,
-            "qwen2.5-coder:3b",
-            DEFAULT_MODEL_CONCURRENCY,
-        )?,
-        tier_input(
-            ProjectLlmTier::Classify,
-            endpoint,
-            "qwen2.5-coder:3b",
-            DEFAULT_MODEL_CONCURRENCY,
-        )?,
+        TierInputRequest::new(ProjectLlmTier::Embedding, endpoint, "nomic-embed-text")
+            .with_concurrency(4)
+            .build()?,
+        TierInputRequest::new(ProjectLlmTier::Summarize, endpoint, "qwen2.5-coder:3b").build()?,
+        TierInputRequest::new(ProjectLlmTier::Local, endpoint, "qwen2.5-coder:3b").build()?,
+        TierInputRequest::new(ProjectLlmTier::Classify, endpoint, "qwen2.5-coder:3b").build()?,
     ];
     if !minimal {
-        inputs.push(tier_input(
-            ProjectLlmTier::Ask,
-            endpoint,
-            "qwen2.5-coder:7b",
-            1,
-        )?);
+        inputs.push(
+            TierInputRequest::new(ProjectLlmTier::Ask, endpoint, "qwen2.5-coder:7b")
+                .with_concurrency(1)
+                .build()?,
+        );
     }
     Ok((
         inputs,
@@ -476,10 +585,7 @@ fn cloud_openai_inputs(
         .ok_or_else(|| "--preset cloud-open-ai requires --model".to_owned())?;
     let mut input = ProjectLlmTierInput::new(
         tier.into(),
-        arguments
-            .endpoint
-            .as_deref()
-            .unwrap_or("https://api.openai.com"),
+        arguments.endpoint.as_deref().unwrap_or(OPENAI_ENDPOINT),
         model,
     )
     .map_err(|error| error.to_string())?;
@@ -563,28 +669,18 @@ fn hybrid_embedding_input() -> Result<ProjectLlmTierInput, String> {
         .join("jina-embeddings-v2-base-code.Q4_K_M.gguf")
         .to_string_lossy()
         .into_owned();
-    tier_input(ProjectLlmTier::Embedding, "http://127.0.0.1:8080", model, 4)
-}
-
-fn tier_input(
-    tier: ProjectLlmTier,
-    endpoint: &str,
-    model: impl Into<String>,
-    concurrency: u16,
-) -> Result<ProjectLlmTierInput, String> {
-    ProjectLlmTierInput::new(tier, endpoint, model)
-        .and_then(|input| input.with_concurrency(concurrency))
-        .map(ProjectLlmTierInput::without_credentials)
-        .map_err(|error| error.to_string())
+    TierInputRequest::new(ProjectLlmTier::Embedding, LLAMA_EMBED_ENDPOINT, model)
+        .with_concurrency(4)
+        .build()
 }
 
 async fn detect_endpoints() -> Vec<DetectedEndpoint> {
     let (llama_embed, llama_chat, ollama, mlx, studio) = tokio::join!(
-        detect_one("http://127.0.0.1:8080"),
-        detect_one("http://127.0.0.1:8081"),
-        detect_one("http://127.0.0.1:11434"),
-        detect_one("http://127.0.0.1:8000"),
-        detect_one("http://127.0.0.1:1234"),
+        detect_one(LLAMA_EMBED_ENDPOINT),
+        detect_one(LLAMA_CHAT_ENDPOINT),
+        detect_one(OLLAMA_ENDPOINT),
+        detect_one(VLLM_ENDPOINT),
+        detect_one(LM_STUDIO_ENDPOINT),
     );
     vec![llama_embed, llama_chat, ollama, mlx, studio]
 }
@@ -675,28 +771,18 @@ async fn run_smoke(arguments: SmokeArguments) -> Result<ExitCode, String> {
     let timeout = Duration::from_millis(arguments.timeout_ms);
     let (embedding, summarize, ask, local, classify, rerank) = tokio::join!(
         smoke_embedding(&arguments.path, timeout),
-        smoke_chat(
+        smoke_chat(ChatSmokeRequest::new(
             &arguments.path,
-            ProjectLlmTier::Summarize,
-            "summarize",
-            true,
-            timeout
-        ),
-        smoke_chat(&arguments.path, ProjectLlmTier::Ask, "ask", false, timeout),
-        smoke_chat(
+            SUMMARIZE_SMOKE,
+            timeout,
+        )),
+        smoke_chat(ChatSmokeRequest::new(&arguments.path, ASK_SMOKE, timeout,)),
+        smoke_chat(ChatSmokeRequest::new(&arguments.path, LOCAL_SMOKE, timeout,)),
+        smoke_chat(ChatSmokeRequest::new(
             &arguments.path,
-            ProjectLlmTier::Local,
-            "local",
-            false,
-            timeout
-        ),
-        smoke_chat(
-            &arguments.path,
-            ProjectLlmTier::Classify,
-            "classify",
-            false,
-            timeout
-        ),
+            CLASSIFY_SMOKE,
+            timeout,
+        )),
         smoke_rerank(&arguments.path, timeout),
     );
     let rows = vec![embedding, summarize, ask, local, classify, rerank];
@@ -729,7 +815,9 @@ async fn smoke_embedding(project: &Path, timeout: Duration) -> SmokeRow {
     let configured = match load_exact_project_llm_tier(project, ProjectLlmTier::Embedding) {
         Ok(Some(config)) => config,
         Ok(None) => return missing_row("embedding", true, started),
-        Err(error) => return failed_row("embedding", None, None, started, error.to_string()),
+        Err(error) => {
+            return failed_row(SmokeRowInput::new("embedding", started, error.to_string()));
+        }
     };
     let model = Some(configured.model().to_owned());
     let endpoint = Some(configured.endpoint().to_owned());
@@ -749,35 +837,41 @@ async fn smoke_embedding(project: &Path, timeout: Duration) -> SmokeRow {
     };
     match tokio::time::timeout(timeout, result).await {
         Ok(Ok(dimension)) => ok_row(
-            "embedding",
-            model,
-            endpoint,
-            started,
-            format!("one finite vector returned ({dimension} dimensions)"),
+            SmokeRowInput::new(
+                "embedding",
+                started,
+                format!("one finite vector returned ({dimension} dimensions)"),
+            )
+            .with_configuration(model, endpoint),
         ),
-        Ok(Err(error)) => failed_row("embedding", model, endpoint, started, error),
+        Ok(Err(error)) => failed_row(
+            SmokeRowInput::new("embedding", started, error).with_configuration(model, endpoint),
+        ),
         Err(_) => failed_row(
-            "embedding",
-            model,
-            endpoint,
-            started,
-            "request timed out".to_owned(),
+            SmokeRowInput::new("embedding", started, "request timed out")
+                .with_configuration(model, endpoint),
         ),
     }
 }
 
-async fn smoke_chat(
-    project: &Path,
-    tier: ProjectLlmTier,
-    label: &'static str,
-    required: bool,
-    timeout: Duration,
-) -> SmokeRow {
+async fn smoke_chat(request: ChatSmokeRequest<'_>) -> SmokeRow {
+    let ChatSmokeRequest {
+        project,
+        target:
+            ChatSmokeTarget {
+                tier,
+                label,
+                required,
+            },
+        timeout,
+    } = request;
     let started = Instant::now();
     let configured = match load_exact_project_llm_tier(project, tier) {
         Ok(Some(config)) => config,
         Ok(None) => return missing_row(label, required, started),
-        Err(error) => return failed_row(label, None, None, started, error.to_string()),
+        Err(error) => {
+            return failed_row(SmokeRowInput::new(label, started, error.to_string()));
+        }
     };
     let model = Some(configured.model().to_owned());
     let endpoint = Some(configured.endpoint().to_owned());
@@ -786,32 +880,32 @@ async fn smoke_chat(
             ChatSettings::from_project_config(&configured).map_err(|error| error.to_string())?;
         OpenAiChatClient::new(settings)
             .map_err(|error| error.to_string())?
-            .complete_message(
+            .complete_message(ChatMessageRequest::new(
                 "Reply with a short acknowledgement.",
                 "Cartograph LLM smoke test",
                 Some(24),
-            )
+            ))
             .await
             .map_err(|error| error.to_string())
     };
     match tokio::time::timeout(timeout, result).await {
         Ok(Ok(completion)) => ok_row(
-            label,
-            model,
-            endpoint,
-            started,
-            format!(
-                "chat completion returned {} UTF-8 bytes",
-                completion.content().len()
-            ),
+            SmokeRowInput::new(
+                label,
+                started,
+                format!(
+                    "chat completion returned {} UTF-8 bytes",
+                    completion.content().len()
+                ),
+            )
+            .with_configuration(model, endpoint),
         ),
-        Ok(Err(error)) => failed_row(label, model, endpoint, started, error),
+        Ok(Err(error)) => failed_row(
+            SmokeRowInput::new(label, started, error).with_configuration(model, endpoint),
+        ),
         Err(_) => failed_row(
-            label,
-            model,
-            endpoint,
-            started,
-            "request timed out".to_owned(),
+            SmokeRowInput::new(label, started, "request timed out")
+                .with_configuration(model, endpoint),
         ),
     }
 }
@@ -821,7 +915,9 @@ async fn smoke_rerank(project: &Path, timeout: Duration) -> SmokeRow {
     let configured = match load_exact_project_llm_tier(project, ProjectLlmTier::Reranker) {
         Ok(Some(config)) => config,
         Ok(None) => return missing_row("rerank", false, started),
-        Err(error) => return failed_row("rerank", None, None, started, error.to_string()),
+        Err(error) => {
+            return failed_row(SmokeRowInput::new("rerank", started, error.to_string()));
+        }
     };
     let model = Some(configured.model().to_owned());
     let endpoint = Some(configured.endpoint().to_owned());
@@ -843,55 +939,29 @@ async fn smoke_rerank(project: &Path, timeout: Duration) -> SmokeRow {
     };
     match tokio::time::timeout(timeout, result).await {
         Ok(Ok(batch)) => ok_row(
-            "rerank",
-            model,
-            endpoint,
-            started,
-            format!("{} finite normalized scores returned", batch.scores().len()),
+            SmokeRowInput::new(
+                "rerank",
+                started,
+                format!("{} finite normalized scores returned", batch.scores().len()),
+            )
+            .with_configuration(model, endpoint),
         ),
-        Ok(Err(error)) => failed_row("rerank", model, endpoint, started, error),
+        Ok(Err(error)) => failed_row(
+            SmokeRowInput::new("rerank", started, error).with_configuration(model, endpoint),
+        ),
         Err(_) => failed_row(
-            "rerank",
-            model,
-            endpoint,
-            started,
-            "request timed out".to_owned(),
+            SmokeRowInput::new("rerank", started, "request timed out")
+                .with_configuration(model, endpoint),
         ),
     }
 }
 
-fn ok_row(
-    tier: &'static str,
-    model: Option<String>,
-    endpoint: Option<String>,
-    started: Instant,
-    detail: String,
-) -> SmokeRow {
-    SmokeRow {
-        tier,
-        status: SmokeStatus::Ok,
-        model,
-        endpoint,
-        duration_ms: elapsed_ms(started),
-        detail,
-    }
+fn ok_row(input: SmokeRowInput) -> SmokeRow {
+    input.into_row(SmokeStatus::Ok)
 }
 
-fn failed_row(
-    tier: &'static str,
-    model: Option<String>,
-    endpoint: Option<String>,
-    started: Instant,
-    detail: String,
-) -> SmokeRow {
-    SmokeRow {
-        tier,
-        status: SmokeStatus::Fail,
-        model,
-        endpoint,
-        duration_ms: elapsed_ms(started),
-        detail,
-    }
+fn failed_row(input: SmokeRowInput) -> SmokeRow {
+    input.into_row(SmokeStatus::Fail)
 }
 
 fn missing_row(tier: &'static str, required: bool, started: Instant) -> SmokeRow {
@@ -937,6 +1007,34 @@ fn render_smoke(report: &SmokeReport) {
 }
 
 async fn run_install(arguments: InstallArguments) -> Result<ExitCode, String> {
+    let project = prepare_install_project(&arguments)?;
+    let database = prepare_install_database(&project, &arguments).await?;
+    let model_state = prepare_install_models(&project, &arguments).await?;
+    let doctor = crate::build_doctor_report_with_settings(crate::DoctorReportInput {
+        project_path: project.clone(),
+        fix: false,
+        skip_project_checks: false,
+        explicit_database_settings: database.doctor_settings.as_ref(),
+    })
+    .await?;
+    let report = InstallReport {
+        models: model_state.models,
+        config_written: model_state.config_written,
+        minimal: arguments.minimal,
+        database: database.kind,
+        database_migrations_applied: database.migrations_applied,
+        doctor,
+        next_steps: install_next_steps(&project, model_state.config_written),
+    };
+    render_install_report(&report, arguments.json)?;
+    Ok(if report.doctor.ready {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+fn prepare_install_project(arguments: &InstallArguments) -> Result<PathBuf, String> {
     let project = arguments
         .path
         .canonicalize()
@@ -946,40 +1044,71 @@ async fn run_install(arguments: InstallArguments) -> Result<ExitCode, String> {
     }
     let mut state_fixes = Vec::new();
     let mut state_checks = Vec::new();
-    crate::check_or_fix_project_state(&project, true, &mut state_fixes, &mut state_checks)?;
+    crate::check_or_fix_project_state(crate::ProjectStateCheckInput {
+        project_path: &project,
+        fix: true,
+        fixes: &mut state_fixes,
+        checks: &mut state_checks,
+    })?;
     if state_checks
         .iter()
         .any(|check| check.status == crate::DoctorStatus::Fail)
     {
         return Err("LLM install could not initialize private project state".to_owned());
     }
-    let explicit_database = resolve_install_database_settings(&arguments)?;
-    let (database, database_migrations_applied, doctor_settings) =
-        if let Some(settings) = explicit_database {
-            let pool = cartograph_db::connect(&settings)
-                .await
-                .map_err(|error| error.to_string())?;
-            let database = CartographDatabase::new(pool, settings.schema().clone());
-            let migrations = database
-                .migrate()
-                .await
-                .map_err(|error| error.to_string())?;
-            database.close().await;
-            (
-                "external",
-                migrations.applied_versions.len(),
-                Some(settings),
-            )
-        } else {
-            let report = ManagedDatabase::new(&project, DEFAULT_MANAGED_DATABASE_PORT)
-                .map_err(|error| error.to_string())?
-                .lifecycle()
-                .start()
-                .await
-                .map_err(|error| error.to_string())?;
-            ("managed", report.migrations.applied_versions.len(), None)
-        };
-    let directory = arguments.dir.unwrap_or(default_models_directory()?);
+    Ok(project)
+}
+
+struct InstallDatabaseState {
+    kind: &'static str,
+    migrations_applied: usize,
+    doctor_settings: Option<DatabaseSettings>,
+}
+
+async fn prepare_install_database(
+    project: &Path,
+    arguments: &InstallArguments,
+) -> Result<InstallDatabaseState, String> {
+    let explicit_database = resolve_install_database_settings(arguments)?;
+    if let Some(settings) = explicit_database {
+        let pool = cartograph_db::connect(&settings)
+            .await
+            .map_err(|error| error.to_string())?;
+        let database = CartographDatabase::new(pool, settings.schema().clone());
+        let migrations = database
+            .migrate()
+            .await
+            .map_err(|error| error.to_string())?;
+        database.close().await;
+        return Ok(InstallDatabaseState {
+            kind: "external",
+            migrations_applied: migrations.applied_versions.len(),
+            doctor_settings: Some(settings),
+        });
+    }
+    let report = ManagedDatabase::new(project, DEFAULT_MANAGED_DATABASE_PORT)
+        .map_err(|error| error.to_string())?
+        .lifecycle()
+        .start()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(InstallDatabaseState {
+        kind: "managed",
+        migrations_applied: report.migrations.applied_versions.len(),
+        doctor_settings: None,
+    })
+}
+
+struct InstallModelState {
+    models: Option<cartograph_llm::InstallModelsReport>,
+    config_written: bool,
+}
+
+async fn prepare_install_models(
+    project: &Path,
+    arguments: &InstallArguments,
+) -> Result<InstallModelState, String> {
+    let directory = arguments.dir.clone().unwrap_or(default_models_directory()?);
     let models = if arguments.no_models {
         None
     } else {
@@ -999,36 +1128,31 @@ async fn run_install(arguments: InstallArguments) -> Result<ExitCode, String> {
     let config_written = !arguments.no_models;
     if config_written {
         let (inputs, cleared) = local_inputs_in(&directory, arguments.minimal)?;
-        write_project_llm_configuration(&project, &inputs, &cleared)
+        write_project_llm_configuration(project, &inputs, &cleared)
             .map_err(|error| error.to_string())?;
     }
-    let doctor = crate::build_doctor_report_with_settings(
-        project.clone(),
-        false,
-        false,
-        doctor_settings.as_ref(),
-    )
-    .await?;
-    let report = InstallReport {
+    Ok(InstallModelState {
         models,
         config_written,
-        minimal: arguments.minimal,
-        database,
-        database_migrations_applied,
-        doctor,
-        next_steps: if config_written {
-            vec![
-                format!("Run `cartograph backend start {}`.", project.display()),
-                format!("Run `cartograph llm smoke {}`.", project.display()),
-            ]
-        } else {
-            vec![format!(
-                "Run `cartograph llm setup {}` to select the externally managed provider.",
-                project.display()
-            )]
-        },
-    };
-    if arguments.json {
+    })
+}
+
+fn install_next_steps(project: &Path, config_written: bool) -> Vec<String> {
+    if config_written {
+        vec![
+            format!("Run `cartograph backend start {}`.", project.display()),
+            format!("Run `cartograph llm smoke {}`.", project.display()),
+        ]
+    } else {
+        vec![format!(
+            "Run `cartograph llm setup {}` to select the externally managed provider.",
+            project.display()
+        )]
+    }
+}
+
+fn render_install_report(report: &InstallReport, json: bool) -> Result<(), String> {
+    if json {
         print_json(&report)?;
     } else {
         println!(
@@ -1043,16 +1167,21 @@ async fn run_install(arguments: InstallArguments) -> Result<ExitCode, String> {
         println!();
         print!("{}", crate::render_doctor_report(&report.doctor));
     }
-    Ok(if report.doctor.ready {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(2)
-    })
+    Ok(())
 }
 
 fn resolve_install_database_settings(
     arguments: &InstallArguments,
 ) -> Result<Option<DatabaseSettings>, String> {
+    validate_install_database_modes(arguments)?;
+    let connection_override = install_has_connection_override(arguments);
+    let Some(settings) = base_install_database_settings(arguments, connection_override)? else {
+        return Ok(None);
+    };
+    apply_install_database_overrides(settings, arguments).map(Some)
+}
+
+fn validate_install_database_modes(arguments: &InstallArguments) -> Result<(), String> {
     match arguments.database_provider.as_deref() {
         None | Some("postgres" | "postgresql") => {}
         Some("sqlite") => {
@@ -1070,25 +1199,44 @@ fn resolve_install_database_settings(
         }
         Some(_) => return Err("database pgvector mode must be auto or require".to_owned()),
     }
+    Ok(())
+}
 
-    let connection_override = arguments.database_url.is_some()
+fn install_has_connection_override(arguments: &InstallArguments) -> bool {
+    arguments.database_url.is_some()
         || arguments.database_schema.is_some()
         || arguments.database_max_connections.is_some()
         || arguments.database_query_timeout_ms.is_some()
         || arguments.database_connection_timeout_seconds.is_some()
-        || arguments.database_ssl;
-    let mut settings = if let Some(url) = arguments.database_url.as_deref() {
-        DatabaseSettings::parse(url, None, None).map_err(|error| error.to_string())?
+        || arguments.database_ssl
+}
+
+fn base_install_database_settings(
+    arguments: &InstallArguments,
+    connection_override: bool,
+) -> Result<Option<DatabaseSettings>, String> {
+    if let Some(url) = arguments.database_url.as_deref() {
+        DatabaseSettings::parse(url, None, None)
+            .map(Some)
+            .map_err(|error| error.to_string())
     } else if env::var_os(DATABASE_URL_ENV).is_some() {
-        DatabaseSettings::from_env().map_err(|error| error.to_string())?
+        DatabaseSettings::from_env()
+            .map(Some)
+            .map_err(|error| error.to_string())
     } else if connection_override {
-        return Err(
+        Err(
             "--database-url or CARTOGRAPH_DATABASE_URL is required with external PostgreSQL connection overrides"
                 .to_owned(),
-        );
+        )
     } else {
-        return Ok(None);
-    };
+        Ok(None)
+    }
+}
+
+fn apply_install_database_overrides(
+    mut settings: DatabaseSettings,
+    arguments: &InstallArguments,
+) -> Result<DatabaseSettings, String> {
     if let Some(max_connections) = arguments.database_max_connections {
         settings = settings
             .with_max_connections(max_connections)
@@ -1113,7 +1261,7 @@ fn resolve_install_database_settings(
     if arguments.database_ssl {
         settings = settings.with_require_ssl(true);
     }
-    Ok(Some(settings))
+    Ok(settings)
 }
 
 fn local_inputs_in(
@@ -1122,46 +1270,52 @@ fn local_inputs_in(
 ) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
     let model = |filename: &str| directory.join(filename).to_string_lossy().into_owned();
     let mut inputs = vec![
-        tier_input(
+        TierInputRequest::new(
             ProjectLlmTier::Embedding,
-            "http://127.0.0.1:8080",
+            LLAMA_EMBED_ENDPOINT,
             model("jina-embeddings-v2-base-code.Q4_K_M.gguf"),
-            4,
-        )?,
-        tier_input(
+        )
+        .with_concurrency(4)
+        .build()?,
+        TierInputRequest::new(
             ProjectLlmTier::Summarize,
-            "http://127.0.0.1:8081",
+            LLAMA_CHAT_ENDPOINT,
             model("qwen2.5-coder-3b-instruct-q4_k_m.gguf"),
-            2,
-        )?,
-        tier_input(
+        )
+        .build()?,
+        TierInputRequest::new(
             ProjectLlmTier::Local,
-            "http://127.0.0.1:8081",
+            LLAMA_CHAT_ENDPOINT,
             model("qwen2.5-coder-3b-instruct-q4_k_m.gguf"),
-            2,
-        )?,
-        tier_input(
+        )
+        .build()?,
+        TierInputRequest::new(
             ProjectLlmTier::Classify,
-            "http://127.0.0.1:8081",
+            LLAMA_CHAT_ENDPOINT,
             model("qwen2.5-coder-3b-instruct-q4_k_m.gguf"),
-            2,
-        )?,
+        )
+        .build()?,
     ];
     let cleared = if minimal {
         vec![ProjectLlmTier::Ask, ProjectLlmTier::Reranker]
     } else {
-        inputs.push(tier_input(
-            ProjectLlmTier::Ask,
-            "http://127.0.0.1:8082",
-            model("qwen2.5-coder-7b-instruct-q4_k_m.gguf"),
-            1,
-        )?);
-        inputs.push(tier_input(
-            ProjectLlmTier::Reranker,
-            "http://127.0.0.1:8083",
-            model("bge-reranker-v2-m3-Q4_K_M.gguf"),
-            2,
-        )?);
+        inputs.push(
+            TierInputRequest::new(
+                ProjectLlmTier::Ask,
+                LLAMA_ASK_ENDPOINT,
+                model("qwen2.5-coder-7b-instruct-q4_k_m.gguf"),
+            )
+            .with_concurrency(1)
+            .build()?,
+        );
+        inputs.push(
+            TierInputRequest::new(
+                ProjectLlmTier::Reranker,
+                LLAMA_RERANK_ENDPOINT,
+                model("bge-reranker-v2-m3-Q4_K_M.gguf"),
+            )
+            .build()?,
+        );
         Vec::new()
     };
     Ok((inputs, cleared))
@@ -1340,7 +1494,7 @@ mod tests {
         );
 
         arguments.tier = Some(LlmTierArgument::Chat);
-        arguments.endpoint = Some("https://api.openai.com/v1".to_owned());
+        arguments.endpoint = Some(OPENAI_V1_ENDPOINT.to_owned());
         arguments.model = Some("gpt-fixture".to_owned());
         arguments.api_key_env = Some("OPENAI_FIXTURE_KEY".to_owned());
         let (custom, cleared) = setup_inputs(&arguments, SetupPreset::Custom)
@@ -1357,7 +1511,7 @@ mod tests {
         arguments.tier = Some(LlmTierArgument::Embed);
         arguments.endpoint = None;
         assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
-        arguments.endpoint = Some("https://api.openai.com".to_owned());
+        arguments.endpoint = Some(OPENAI_ENDPOINT.to_owned());
         arguments.model = None;
         assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
         arguments.model = Some("text-embedding-3-small".to_owned());
@@ -1391,7 +1545,7 @@ mod tests {
     #[test]
     fn detection_recommendation_and_smoke_rows_keep_required_failures_explicit() {
         let detected = vec![DetectedEndpoint {
-            endpoint: "http://127.0.0.1:11434".to_owned(),
+            endpoint: OLLAMA_ENDPOINT.to_owned(),
             reachable: true,
             openai_compatible: true,
             models: vec!["fixture".to_owned()],
@@ -1407,19 +1561,16 @@ mod tests {
         assert_eq!(optional.status, SmokeStatus::Skip);
         assert!(optional.detail.contains("fallback"));
         let ok = ok_row(
-            "summarize",
-            Some("fixture".to_owned()),
-            Some("http://127.0.0.1:8081".to_owned()),
-            Instant::now(),
-            "bounded response".to_owned(),
+            SmokeRowInput::new("summarize", Instant::now(), "bounded response").with_configuration(
+                Some("fixture".to_owned()),
+                Some(LLAMA_CHAT_ENDPOINT.to_owned()),
+            ),
         );
-        let failed = failed_row(
+        let failed = failed_row(SmokeRowInput::new(
             "rerank",
-            None,
-            None,
             Instant::now(),
-            "bounded failure".to_owned(),
-        );
+            "bounded failure",
+        ));
         let report = SmokeReport {
             overall_status: OverallSmokeStatus::Fail,
             rows: vec![required, optional, ok, failed],
@@ -1447,7 +1598,7 @@ mod tests {
             .await,
             Ok(ExitCode::FAILURE)
         );
-        let unreachable = detect_one("http://127.0.0.1:1").await;
+        let unreachable = detect_one(UNREACHABLE_LOOPBACK_ENDPOINT).await;
         assert!(!unreachable.reachable);
         assert!(!unreachable.openai_compatible);
         assert!(unreachable.models.is_empty());

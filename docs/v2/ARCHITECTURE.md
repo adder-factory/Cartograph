@@ -342,14 +342,18 @@ Legacy multiplicity is retained. A span is exact only when the stored/current
 source proves the full token; otherwise it is explicitly coarse. SCIP
 placeholder hashes cannot prove historical bytes v1 never stored.
 
-`db prune` removes only a bounded batch of failed/old superseded generations,
-always preserving current, staging/ready, failed generations referenced by
-non-complete v1 import runs, and configured recent histories. That import-run
-exception preserves exact stale-publication retry evidence. Prune locks
-publication/retention and rechecks its lease after deletion before commit. It
-also drops each selected generation's derived BM25 relation under the same
-transaction and reports admitted cascade rows, relation count, and physical
-relation bytes.
+Every successful index or no-op reconciliation attempts a bounded retention
+batch after publication/no-op detection. Pre-supervisor failures terminalize
+their exact staging generation under the same project advisory lock used by
+lease acquisition. A later batch can collect staging only when it is old,
+unleased, and not referenced by an incomplete import. `db prune` uses the same
+bounded engine for larger explicit batches of stale staging, failed, and old
+superseded generations, always preserving current, ready, recent/leased
+staging, import recovery state, and configured recent histories. Retention locks
+publication, rechecks its exact migration lease before commit, drops selected
+derived BM25 relations transactionally, and reports admitted cascade rows,
+relation count, and physical relation bytes. Status and doctor expose all
+generation-state counts and a conservative retained-byte estimate.
 
 ## Security, durability, and licensing
 

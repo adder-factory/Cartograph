@@ -57,6 +57,15 @@ pub struct ProjectPurgeReport {
     pub cascade_rows_removed: u64,
 }
 
+/// Hard bounds and exact project identity for one destructive purge transaction.
+#[derive(Clone, Copy, Debug)]
+pub struct ProjectPurgeRequest<'a> {
+    pub project_id: &'a ProjectId,
+    pub maximum_generations: u16,
+    pub maximum_cascade_rows: u64,
+    pub statement_timeout: Duration,
+}
+
 /// Safe, actionable reasons a project purge did not run.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProjectPurgeError {
@@ -91,6 +100,35 @@ pub struct GenerationCounts {
     pub documents: i64,
 }
 
+/// Project-wide generation retention counts and a conservative physical-size estimate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GenerationStorageSummary {
+    /// Generations staged but not yet prepared.
+    pub staging: u64,
+    /// Prepared generations awaiting publication or recovery.
+    pub ready: u64,
+    /// Visible generations; valid project state is zero or one.
+    pub current: u64,
+    /// Historical generations replaced by a newer publication.
+    pub superseded: u64,
+    /// Terminal failed generations awaiting bounded cleanup.
+    pub failed: u64,
+    /// Sum of source byte sizes represented by all retained generations.
+    pub source_bytes: u64,
+    /// Exact physical bytes occupied by generation-scoped search tables and indexes.
+    pub search_relation_bytes: u64,
+    /// Conservative lower-bound estimate: source bytes plus search-relation bytes.
+    pub estimated_retained_bytes: u64,
+}
+
+impl GenerationStorageSummary {
+    /// Total durable generation rows retained for the project.
+    #[must_use]
+    pub const fn generations(self) -> u64 {
+        self.staging + self.ready + self.current + self.superseded + self.failed
+    }
+}
+
 /// Durable metadata for one project's visible generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProjectCurrentGeneration {
@@ -115,6 +153,8 @@ pub struct ProjectSnapshot {
     pub project_id: ProjectId,
     /// The currently visible generation, absent before first publication.
     pub current: Option<ProjectCurrentGeneration>,
+    /// Project-wide generation retention and storage pressure evidence.
+    pub generation_storage: GenerationStorageSummary,
 }
 
 impl CartographDatabase {
@@ -159,7 +199,69 @@ impl CartographDatabase {
             .fetch_optional(&self.pool)
             .await
             .map_err(|_| database_error("project-status"))?;
-        row.as_ref().map(decode_snapshot).transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut snapshot = decode_snapshot(&row)?;
+        snapshot.generation_storage = self
+            .generation_storage_summary(&snapshot.project_id)
+            .await?;
+        Ok(Some(snapshot))
+    }
+
+    /// Count all retained generation states and estimate their dominant physical bytes.
+    pub async fn generation_storage_summary(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<GenerationStorageSummary, StorageError> {
+        let schema = crate::database::quoted_schema(&self.schema);
+        let statement = format!(
+            r#"SELECT
+                    count(*) FILTER (WHERE state = 'staging')::bigint AS staging,
+                    count(*) FILTER (WHERE state = 'ready')::bigint AS ready,
+                    count(*) FILTER (WHERE state = 'current')::bigint AS current,
+                    count(*) FILTER (WHERE state = 'superseded')::bigint AS superseded,
+                    count(*) FILTER (WHERE state = 'failed')::bigint AS failed,
+                    COALESCE((
+                        SELECT sum(files.byte_size)::bigint
+                        FROM {schema}."files" AS files
+                        WHERE files.project_id = CAST($1 AS uuid)
+                    ), 0)::bigint AS source_bytes,
+                    COALESCE((
+                        SELECT sum(pg_total_relation_size(tables.oid))::bigint
+                        FROM {schema}."generation_search_relations" AS relations
+                        INNER JOIN pg_catalog.pg_namespace AS namespaces
+                          ON namespaces.nspname = $2
+                        INNER JOIN pg_catalog.pg_class AS tables
+                          ON tables.relnamespace = namespaces.oid
+                         AND tables.relname = 'search_g_'
+                             || replace(relations.generation_id::text, '-', '')
+                        WHERE relations.project_id = CAST($1 AS uuid)
+                    ), 0)::bigint AS search_relation_bytes
+                FROM {schema}."index_generations"
+                WHERE project_id = CAST($1 AS uuid)"#
+        );
+        let row = query(AssertSqlSafe(statement))
+            .bind(project_id.as_str())
+            .bind(self.schema.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| database_error("generation-storage-summary"))?;
+        let source_bytes = read_named_nonnegative(&row, "source_bytes")?;
+        let search_relation_bytes = read_named_nonnegative(&row, "search_relation_bytes")?;
+        let estimated_retained_bytes = source_bytes
+            .checked_add(search_relation_bytes)
+            .ok_or_else(|| corrupt("estimated_retained_bytes"))?;
+        Ok(GenerationStorageSummary {
+            staging: read_named_nonnegative(&row, "staging")?,
+            ready: read_named_nonnegative(&row, "ready")?,
+            current: read_named_nonnegative(&row, "current")?,
+            superseded: read_named_nonnegative(&row, "superseded")?,
+            failed: read_named_nonnegative(&row, "failed")?,
+            source_bytes,
+            search_relation_bytes,
+            estimated_retained_bytes,
+        })
     }
 
     /// Remove one project and every generation-scoped physical BM25 relation.
@@ -168,12 +270,12 @@ impl CartographDatabase {
     /// blocks deletion; expired leases are removed by the project cascade.
     pub async fn purge_project(
         &self,
-        project_id: &ProjectId,
-        maximum_generations: u16,
-        maximum_cascade_rows: u64,
-        statement_timeout: Duration,
+        input: ProjectPurgeRequest<'_>,
     ) -> Result<ProjectPurgeReport, ProjectPurgeError> {
-        if maximum_generations == 0 || maximum_cascade_rows == 0 || statement_timeout.is_zero() {
+        if input.maximum_generations == 0
+            || input.maximum_cascade_rows == 0
+            || input.statement_timeout.is_zero()
+        {
             return Err(ProjectPurgeError::InvalidBounds);
         }
         let mut transaction = self
@@ -181,17 +283,10 @@ impl CartographDatabase {
             .begin()
             .await
             .map_err(|_| purge_database_error("begin"))?;
-        crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+        crate::database::set_local_statement_timeout(&mut transaction, input.statement_timeout)
             .await
             .map_err(|()| ProjectPurgeError::InvalidBounds)?;
-        let result = purge_project_transaction(
-            &mut transaction,
-            self,
-            project_id,
-            maximum_generations,
-            maximum_cascade_rows,
-        )
-        .await;
+        let result = purge_project_transaction(&mut transaction, self, input).await;
         match result {
             Ok(report) => {
                 transaction
@@ -214,10 +309,46 @@ impl CartographDatabase {
 async fn purge_project_transaction(
     connection: &mut PgConnection,
     database: &CartographDatabase,
-    project_id: &ProjectId,
-    maximum_generations: u16,
-    maximum_cascade_rows: u64,
+    input: ProjectPurgeRequest<'_>,
 ) -> Result<ProjectPurgeReport, ProjectPurgeError> {
+    let ProjectPurgeRequest {
+        project_id,
+        maximum_generations,
+        maximum_cascade_rows,
+        statement_timeout: _,
+    } = input;
+    acquire_project_purge_locks(connection, database, project_id).await?;
+    let schema = crate::database::quoted_schema(&database.schema);
+    require_purgeable_project(connection, &schema, project_id).await?;
+    let generations = locked_project_generations(
+        connection,
+        ProjectGenerationQuery {
+            schema: &schema,
+            project_id,
+            maximum_generations,
+        },
+    )
+    .await?;
+    let cascade_rows = count_project_rows(connection, &schema, project_id).await?;
+    if cascade_rows > maximum_cascade_rows {
+        return Err(ProjectPurgeError::RowBoundExceeded);
+    }
+    let search_relations_removed =
+        drop_project_search_relations(connection, database, &generations).await?;
+    delete_project_row(connection, &schema, project_id).await?;
+    Ok(ProjectPurgeReport {
+        generations_removed: u64::try_from(generations.len())
+            .map_err(|_| purge_corrupt("generation_count"))?,
+        search_relations_removed,
+        cascade_rows_removed: cascade_rows,
+    })
+}
+
+async fn acquire_project_purge_locks(
+    connection: &mut PgConnection,
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+) -> Result<(), ProjectPurgeError> {
     for lock in [
         crate::leases::project_lock_key(&database.schema, project_id),
         format!(
@@ -235,7 +366,14 @@ async fn purge_project_transaction(
             .await
             .map_err(|_| purge_database_error("lock"))?;
     }
-    let schema = crate::database::quoted_schema(&database.schema);
+    Ok(())
+}
+
+async fn require_purgeable_project(
+    connection: &mut PgConnection,
+    schema: &str,
+    project_id: &ProjectId,
+) -> Result<(), ProjectPurgeError> {
     let project_sql = format!(
         r#"SELECT 1 FROM {schema}."projects"
             WHERE project_id = CAST($1 AS uuid) FOR UPDATE"#
@@ -264,38 +402,54 @@ async fn purge_project_transaction(
     if live_leases > 0 {
         return Err(ProjectPurgeError::LiveLeases { count: live_leases });
     }
+    Ok(())
+}
+
+struct ProjectGenerationQuery<'project> {
+    schema: &'project str,
+    project_id: &'project ProjectId,
+    maximum_generations: u16,
+}
+
+async fn locked_project_generations(
+    connection: &mut PgConnection,
+    input: ProjectGenerationQuery<'_>,
+) -> Result<Vec<GenerationId>, ProjectPurgeError> {
     let generations_sql = format!(
         r#"SELECT generation_id::text AS generation_id
-            FROM {schema}."index_generations"
+            FROM {}."index_generations"
             WHERE project_id = CAST($1 AS uuid)
             ORDER BY generation_sequence
             LIMIT $2
-            FOR UPDATE"#
+            FOR UPDATE"#,
+        input.schema
     );
     let rows = query(AssertSqlSafe(generations_sql))
-        .bind(project_id.as_str())
-        .bind(i64::from(maximum_generations) + 1)
+        .bind(input.project_id.as_str())
+        .bind(i64::from(input.maximum_generations) + 1)
         .fetch_all(&mut *connection)
         .await
         .map_err(|_| purge_database_error("generations"))?;
-    if rows.len() > usize::from(maximum_generations) {
+    if rows.len() > usize::from(input.maximum_generations) {
         return Err(ProjectPurgeError::GenerationBoundExceeded);
     }
-    let generations = rows
-        .iter()
+    rows.iter()
         .map(|row| {
             let raw = row
                 .try_get::<String, _>("generation_id")
                 .map_err(|_| purge_corrupt("generation_id"))?;
             GenerationId::parse(&raw).map_err(|_| purge_corrupt("generation_id"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let cascade_rows = count_project_rows(connection, &schema, project_id).await?;
-    if cascade_rows > maximum_cascade_rows {
-        return Err(ProjectPurgeError::RowBoundExceeded);
-    }
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn drop_project_search_relations(
+    connection: &mut PgConnection,
+    database: &CartographDatabase,
+    generations: &[GenerationId],
+) -> Result<u64, ProjectPurgeError> {
     let mut search_relations_removed = 0_u64;
-    for generation_id in &generations {
+    for generation_id in generations {
         if generation_search_relation_exists(connection, database, generation_id).await? {
             search_relations_removed = search_relations_removed
                 .checked_add(1)
@@ -309,6 +463,14 @@ async fn purge_project_transaction(
         .await
         .map_err(|_| purge_database_error("drop-search-relation"))?;
     }
+    Ok(search_relations_removed)
+}
+
+async fn delete_project_row(
+    connection: &mut PgConnection,
+    schema: &str,
+    project_id: &ProjectId,
+) -> Result<(), ProjectPurgeError> {
     let delete_sql = format!(
         r#"DELETE FROM {schema}."projects"
             WHERE project_id = CAST($1 AS uuid)"#
@@ -321,12 +483,7 @@ async fn purge_project_transaction(
     if deleted.rows_affected() != 1 {
         return Err(ProjectPurgeError::ProjectNotFound);
     }
-    Ok(ProjectPurgeReport {
-        generations_removed: u64::try_from(generations.len())
-            .map_err(|_| purge_corrupt("generation_count"))?,
-        search_relations_removed,
-        cascade_rows_removed: cascade_rows,
-    })
+    Ok(())
 }
 
 async fn generation_search_relation_exists(
@@ -444,7 +601,18 @@ fn decode_snapshot(row: &sqlx_postgres::PgRow) -> Result<ProjectSnapshot, Storag
     Ok(ProjectSnapshot {
         project_id,
         current,
+        generation_storage: GenerationStorageSummary::default(),
     })
+}
+
+fn read_named_nonnegative(
+    row: &sqlx_postgres::PgRow,
+    field: &'static str,
+) -> Result<u64, StorageError> {
+    row.try_get::<i64, _>(field)
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| corrupt(field))
 }
 
 fn read_nonnegative(
