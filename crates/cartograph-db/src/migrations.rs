@@ -29,7 +29,8 @@ const SYMBOL_ISSUE_HISTORY_SCHEMA_VERSION: i64 = 18;
 const SYMBOL_PAGERANK_SCHEMA_VERSION: i64 = 19;
 const SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION: i64 = 21;
-const LATEST_SCHEMA_VERSION: i64 = DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION;
+const NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION: i64 = 22;
+const LATEST_SCHEMA_VERSION: i64 = NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
@@ -967,7 +968,16 @@ const DETERMINISTIC_COCHANGE_ORDER_SCHEMA: Migration = Migration {
     ],
 };
 
-const MIGRATIONS: [&Migration; 21] = [
+const NATIVE_INDEX_DIGEST_V5_SCHEMA: Migration = Migration {
+    version: NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION,
+    name: "native_framework_resolver_and_test_ownership_digest_v5",
+    statements: &[r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5))"#],
+};
+
+const MIGRATIONS: [&Migration; 22] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -989,6 +999,7 @@ const MIGRATIONS: [&Migration; 21] = [
     &SYMBOL_PAGERANK_SCHEMA,
     &SUMMARY_PRIORITY_QUEUE_SCHEMA,
     &DETERMINISTIC_COCHANGE_ORDER_SCHEMA,
+    &NATIVE_INDEX_DIGEST_V5_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1304,7 +1315,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 21] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 22] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1326,9 +1337,10 @@ mod tests {
         SYMBOL_PAGERANK_SCHEMA_VERSION,
         SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION,
         DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION,
+        NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 21] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 22] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1413,6 +1425,10 @@ mod tests {
             21,
             "5cbc965cc09530332f8c320c70aac3b083324a21f78fe6ed8edb23057d6af518",
         ),
+        (
+            22,
+            "ac9255910ba9dcd7babba294440758ee3bdee9ed3f142b9cd8291cc3e1128edb",
+        ),
     ];
 
     #[test]
@@ -1456,10 +1472,7 @@ mod tests {
                 .windows(CHECKSUM_COMPARISON_WINDOW)
                 .all(|pair| pair[0] != pair[1])
         );
-        assert_eq!(
-            LATEST_SCHEMA_VERSION,
-            DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION
-        );
+        assert_eq!(LATEST_SCHEMA_VERSION, NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION);
     }
 
     #[test]

@@ -1629,10 +1629,14 @@ mod tests {
             panic!("could not remove password fixture: {error}");
         }
 
-        assert!(matches!(
-            database.lifecycle().start().await,
-            Err(ManagedDatabaseError::CredentialsMissingForVolume)
-        ));
+        let missing_credentials = database.lifecycle().start().await;
+        assert!(
+            matches!(
+                missing_credentials,
+                Err(ManagedDatabaseError::CredentialsMissingForVolume)
+            ),
+            "unexpected missing-credentials result: {missing_credentials:?}"
+        );
         let status = match database.lifecycle().status().await {
             Ok(status) => status,
             Err(error) => panic!("missing-container status failed: {error}"),

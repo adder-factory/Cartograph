@@ -427,11 +427,24 @@ mod tests {
             refreshed.is_ok(),
             "watcher did not refresh within its bound"
         );
-        let watcher_status = watcher.status();
+        let watcher_status = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let status = watcher.status();
+                if status.publications > 0 || status.noops > 0 || status.errors > 0 {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("watcher did not record its terminal outcome within its bound"));
         assert!(watcher_status.active);
         assert!(watcher_status.events >= 1 || watcher_status.reconciliations >= 1);
         assert!(watcher_status.sync_attempts >= 1);
-        assert!(watcher_status.publications >= 1);
+        assert!(
+            watcher_status.publications >= 1,
+            "watcher did not record its publication: {watcher_status:?}"
+        );
         assert_eq!(watcher_status.errors, 0);
         drop(watcher);
         drop(runtime);

@@ -81,6 +81,8 @@ enum BenchmarkError {
     MissingDatabase,
     #[error("index scaling benchmark failed during {operation}")]
     Operation { operation: &'static str },
+    #[error("index scaling benchmark supervisor failed: {failure}")]
+    Supervisor { failure: String },
     #[error("index scaling benchmark invariant failed: {name}")]
     Invariant { name: &'static str },
     #[error("index scaling benchmark logical digest changed to {actual}")]
@@ -596,7 +598,9 @@ async fn run_supervised_pipeline(
     let current = supervisor
         .run(request, move |context| run_pipeline_work(context, work))
         .await
-        .map_err(|_| operation("supervised-index-publication"))?;
+        .map_err(|failure| BenchmarkError::Supervisor {
+            failure: failure.to_string(),
+        })?;
     Ok(CompletedSample {
         current,
         generation_id,
@@ -1350,6 +1354,7 @@ impl BenchmarkError {
         match self {
             Self::MissingDatabase => "database-url",
             Self::Operation { operation } => operation,
+            Self::Supervisor { .. } => "supervised-index-publication",
             Self::Invariant { name } => name,
             Self::LogicalDigestChanged { .. } => "logical-digest-changed",
             Self::FixtureFingerprintChanged { .. } => "fixture-fingerprint-changed",

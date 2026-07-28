@@ -507,6 +507,20 @@ impl CartographDatabase {
                 Err(_) => Err(database_error("heartbeat-rollback")),
             };
         }
+        // A heartbeat is transactional liveness evidence, not mutation authority after a
+        // database restart: every prepare and publish still checks the exact live fence. Keeping
+        // this commit asynchronous avoids a local WAL fsync stall consuming the whole heartbeat
+        // request bound; a crash can only lose the newest extension and therefore fails closed.
+        if query("SET LOCAL synchronous_commit = off")
+            .execute(&mut *transaction)
+            .await
+            .is_err()
+        {
+            return match transaction.rollback().await {
+                Ok(()) => Err(database_error("heartbeat-commit-mode")),
+                Err(_) => Err(database_error("heartbeat-rollback")),
+            };
+        }
         let schema = crate::database::quoted_schema(&self.schema);
         let expires_at = audited_query(heartbeat_sql(&schema))
             .bind(lease.target.project_id().as_str())

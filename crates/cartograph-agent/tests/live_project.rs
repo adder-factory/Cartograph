@@ -30,7 +30,8 @@ use cartograph_db::{
     SymbolIssuePeerQuery, SymbolIssueQuery,
 };
 use cartograph_domain::{
-    ContentDigest, EdgeKind, NormalizedPath, ProjectOperation, SourceLanguage,
+    ContentDigest, EdgeKind, GenerationDigestVersion, NormalizedPath, ProjectOperation,
+    SourceLanguage,
 };
 use cartograph_extract::native_extractor_contract_digest;
 use cartograph_llm::{ChatSettings, EmbeddingSettings, OpenAiChatClient, OpenAiEmbeddingClient};
@@ -233,12 +234,13 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
                 .unwrap_or_else(|error| panic!("exact cache lookup failed: {error}"))
                 .is_some()
         );
+        let changed_contract = ContentDigest::from_bytes(*blake3::hash(
+            b"changed-extractor-contract",
+        )
+        .as_bytes());
         let changed_contract_key = NativeParseCacheKey::new(NativeParseCacheKeyInput {
             project_id: first.project_id.clone(),
-            extractor_contract_digest: ContentDigest::from_bytes(*blake3::hash(
-                b"changed-extractor-contract",
-            )
-            .as_bytes()),
+            extractor_contract_digest: changed_contract.clone(),
             path: service_path,
             language: SourceLanguage::TypeScript,
             content_hash: service_hash,
@@ -259,6 +261,66 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             .unwrap_or_else(|error| panic!("incremental no-op failed: {error}"));
         assert!(!unchanged.published);
         assert!(unchanged.native.is_none());
+
+        let upgrade_pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("contract-upgrade connection failed: {error}"));
+        let downgrade_generation = format!(
+            r#"UPDATE "{schema}"."index_generations"
+               SET content_digest_version = $1
+               WHERE project_id = CAST($2 AS uuid) AND state = 'current'"#
+        );
+        let downgraded = query(AssertSqlSafe(downgrade_generation))
+            .bind(GenerationDigestVersion::V4.database_value())
+            .bind(first.project_id.as_str())
+            .execute(&upgrade_pool)
+            .await
+            .unwrap_or_else(|_| panic!("generation contract downgrade fixture failed"));
+        assert_eq!(downgraded.rows_affected(), 1);
+        let downgrade_parse_cache = format!(
+            r#"UPDATE "{schema}"."native_parse_cache"
+               SET extractor_contract_digest = $1
+               WHERE project_id = CAST($2 AS uuid)"#
+        );
+        let downgraded_cache = query(AssertSqlSafe(downgrade_parse_cache))
+            .bind(changed_contract.as_str())
+            .bind(first.project_id.as_str())
+            .execute(&upgrade_pool)
+            .await
+            .unwrap_or_else(|_| panic!("parse-cache contract downgrade fixture failed"));
+        assert_eq!(downgraded_cache.rows_affected(), 3);
+        upgrade_pool.close().await;
+
+        let stale_contract = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("stale-contract status failed: {error}"));
+        assert!(!stale_contract.fresh);
+        let contract_upgrade = runtime
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("contract-upgrade index failed: {error}"));
+        assert!(contract_upgrade.published);
+        let upgrade_metrics = contract_upgrade
+            .native
+            .as_ref()
+            .unwrap_or_else(|| panic!("contract-upgrade native metrics were missing"));
+        assert_eq!(upgrade_metrics.parse_cache.hits, 0);
+        assert_eq!(upgrade_metrics.parse_cache.misses, 3);
+        assert_eq!(upgrade_metrics.parse_cache.parsed_files, 3);
+        assert_eq!(upgrade_metrics.parse_cache.writes, 3);
+        let upgraded_status = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("upgraded-contract status failed: {error}"));
+        assert!(upgraded_status.fresh);
+        assert!(matches!(
+            upgraded_status
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.current.as_ref()),
+            Some(current) if current.digest_version == GenerationDigestVersion::CURRENT
+        ));
 
         std::fs::write(
             source.join("service.ts"),
@@ -284,7 +346,8 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
         let corrupt_sql = format!(
             r#"UPDATE "{schema}"."native_parse_cache"
                SET payload = $1, payload_digest = $2
-               WHERE project_id = $3::uuid AND normalized_path = 'src/caller.ts'"#
+               WHERE project_id = $3::uuid AND normalized_path = 'src/caller.ts'
+                 AND extractor_contract_digest = $4"#
         );
         let corruption_pool = cartograph_db::connect(&settings)
             .await
@@ -293,6 +356,7 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             .bind(corrupt_payload.as_slice())
             .bind(corrupt_digest.as_str())
             .bind(one_changed.project_id.as_str())
+            .bind(native_extractor_contract_digest().as_str())
             .execute(&corruption_pool)
             .await
             .unwrap_or_else(|_| panic!("cache corruption fixture failed"));

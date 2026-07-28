@@ -49,6 +49,13 @@ path/content-digest pairs in deterministic order. The encoding lives in
 `cartograph-domain::SourceManifestDigestBuilder` and is shared by agent status,
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
+Generation freshness additionally requires the current native generation-digest
+contract. Contract V5 fences framework, resolver, and test-ownership semantics:
+after an upgrade from an older contract, unchanged source remains stale until a
+normal index publishes current-contract facts. This contract check stays
+separate from the source-manifest digest so v1 import still compares exact
+checkout bytes rather than a binary-specific identity.
+
 ## Parsing and facts
 
 `NativeExtractor` chooses either the pinned tree-sitter grammar or the bounded

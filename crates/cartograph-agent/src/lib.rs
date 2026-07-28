@@ -22,8 +22,8 @@ use cartograph_db::{
     ProjectSnapshot, StagedGeneration,
 };
 use cartograph_domain::{
-    ContentDigest, NormalizedPath, ProjectId, ProjectOperation, SourceManifestDigestBuilder,
-    project_root_identity,
+    ContentDigest, GenerationDigestVersion, NormalizedPath, ProjectId, ProjectOperation,
+    SourceManifestDigestBuilder, project_root_identity,
 };
 use cartograph_extract::{
     DiscoveryLimits, DiscoveryPolicy, NestedRepositoryPolicy, SourceDiscoveryOptions, SourceLimits,
@@ -365,7 +365,7 @@ pub struct IndexReport {
     pub content_digest: ContentDigest,
     /// Number of workers selected from the bounded corpus policy.
     pub workers: u16,
-    /// False when an identical current source revision made the request a no-op.
+    /// False when an identical source revision under the current digest contract made this a no-op.
     pub published: bool,
     /// Native pipeline metrics, absent for a no-op publication.
     pub native: Option<NativeIndexMetrics>,
@@ -439,7 +439,7 @@ pub struct ProjectStatus {
     pub snapshot: Option<ProjectSnapshot>,
     /// Current supported-source manifest digest.
     pub live_source_revision: ContentDigest,
-    /// True only when the durable generation recorded this exact manifest.
+    /// True only when the durable generation recorded this exact manifest and digest contract.
     pub fresh: bool,
 }
 
@@ -705,7 +705,10 @@ async fn project_status_with_cancellation(
     let fresh = snapshot
         .as_ref()
         .and_then(|project| project.current.as_ref())
-        .is_some_and(|current| current.source_revision == source.digest.as_str());
+        .is_some_and(|current| {
+            current.source_revision == source.digest.as_str()
+                && current.digest_version == GenerationDigestVersion::CURRENT
+        });
     Ok(ProjectStatus {
         snapshot,
         live_source_revision: source.digest,
@@ -1076,6 +1079,7 @@ impl ProjectRuntime {
         if !options.force
             && let Some(current) = prior.as_ref().and_then(|project| project.current.as_ref())
             && current.source_revision == source.digest.as_str()
+            && current.digest_version == GenerationDigestVersion::CURRENT
         {
             return Ok(IndexPreparation::Unchanged(Box::new(IndexReport {
                 project_id: prior

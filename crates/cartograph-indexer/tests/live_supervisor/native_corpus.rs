@@ -892,7 +892,8 @@ async fn execute_native_pipeline(
         )
         .await;
     let supervised_pipeline_nanos = duration_nanos(supervised_pipeline_started.elapsed());
-    let current = current.map_err(|_| error("supervised-native-pipeline"))?;
+    let current = current
+        .map_err(|failure| format!("native corpus supervised pipeline failed: {failure}"))?;
     let (native, native_nanos) = report_receiver
         .await
         .map_err(|_| error("native-report-missing"))?;

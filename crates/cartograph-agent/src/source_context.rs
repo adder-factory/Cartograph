@@ -1,7 +1,7 @@
 use cartograph_db::{
     CurrentFileLookup, CurrentFileRecord, CurrentSymbolRecord, CurrentSymbolSetLookup, StorageError,
 };
-use cartograph_domain::{ContentDigest, NormalizedPath, SymbolId};
+use cartograph_domain::{ContentDigest, GenerationDigestVersion, NormalizedPath, SymbolId};
 use serde::Serialize;
 
 use crate::{ProjectCancellation, ProjectError, ProjectRuntime, utf8_boundary};
@@ -303,7 +303,8 @@ impl ProjectRuntime {
                 .captured_content_hash
                 .as_ref()
                 .is_some_and(|digest| digest == indexed_file.content_hash());
-            let fresh = current.source_revision == source.digest.as_str();
+            let fresh = current.source_revision == source.digest.as_str()
+                && current.digest_version == GenerationDigestVersion::CURRENT;
             let live_source = !file_fresh && options.allow_stale_live_source;
             let excerpt = if file_fresh || live_source {
                 let captured = source
@@ -383,7 +384,8 @@ impl ProjectRuntime {
                 }
                 return Err(ProjectError::SourceContextUnavailable);
             }
-            let fresh = current.source_revision == source.digest.as_str();
+            let fresh = current.source_revision == source.digest.as_str()
+                && current.digest_version == GenerationDigestVersion::CURRENT;
             let file_fresh = source
                 .captured_content_hash
                 .as_ref()

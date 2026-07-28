@@ -59,7 +59,7 @@ Before migration or normal work, Cartograph proves:
 - pgvector availability;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns twenty-one versions. Core relations:
+The append-only migration ledger currently owns twenty-two versions. Core relations:
 
 | Relation | Purpose |
 | --- | --- |
@@ -103,8 +103,11 @@ schema must contain exactly the checkout's supported path/content set; missing,
 extra, or substituted paths fail before durable mutation.
 
 `fresh=true` means the current generation recorded exactly that complete live
-manifest. Unknown or stale state lowers confidence and is never treated as a
-clean result.
+manifest under the native generation-digest contract emitted by the running
+binary. A newer extractor, resolver, or test-ownership contract therefore marks
+an unchanged checkout stale and makes an ordinary index publish a replacement;
+it cannot reuse older graph semantics as a source-only no-op. Unknown or stale
+state lowers confidence and is never treated as a clean result.
 
 ## Native extraction
 
