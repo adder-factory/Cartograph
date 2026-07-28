@@ -177,7 +177,7 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
             asset_target: windows-x64
             shell: pwsh
-            cache_key: v2-windows
+            cache_key: release-windows-x64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -199,6 +199,7 @@ jobs:
           add-job-id-key: 'false'
           cache-bin: 'false'
           cache-workspace-crates: 'true'
+          save-if: 'true'
 
       - name: Build, audit, and smoke Unix archive
         if: matrix.shell == 'bash' && !startsWith(matrix.asset_target, 'linux-')

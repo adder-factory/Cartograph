@@ -12,6 +12,16 @@ fail() {
   exit 1
 }
 
+job_block() {
+  local workflow="$1"
+  local job="$2"
+  awk -v header="  $job:" '
+    $0 == header { capture = 1; next }
+    capture && /^  [[:alnum:]_-]+:$/ { exit }
+    capture { print }
+  ' "$workflow"
+}
+
 grep -Fq 'attest-main-gate:' "$VALIDATION" || fail 'main-gate attestation job is missing'
 grep -Fq 'actions/attest-build-provenance@' "$VALIDATION" || fail 'main-gate provenance is missing'
 # GitHub evaluates this expression; the local contract test needs the literal bytes.
@@ -26,6 +36,11 @@ push_branches="$(awk '
   in_push && in_branches { print }
 ' "$VALIDATION" | sed '/^[[:space:]]*$/d')"
 [[ "$push_branches" == '      - main' ]] || fail 'push validation must be scoped only to main'
+for parallel_job in linux-release-portability paradedb; do
+  if job_block "$VALIDATION" "$parallel_job" | grep -Fq 'needs: quality'; then
+    fail "independent gate $parallel_job is serialized behind quality"
+  fi
+done
 grep -Fq 'strategy:' "$VALIDATION" || fail 'live PostgreSQL shards are missing'
 for shard in database runtime operations; do
   grep -Fq -- "- $shard" "$VALIDATION" || fail "live shard $shard is missing"
@@ -42,6 +57,12 @@ grep -Fq 'verify-main-gate:' "$RELEASE" || fail 'release main-gate verification 
 grep -Fq 'gh attestation verify' "$RELEASE" || fail 'release does not verify main-gate provenance'
 grep -Fq -- '--source-ref refs/heads/main' "$RELEASE" || fail 'release does not bind evidence to main'
 grep -Fq 'needs: verify-main-gate' "$RELEASE" || fail 'release builds do not depend on exact main evidence'
+grep -Fq 'cache_key: release-windows-x64' "$RELEASE" || \
+  fail 'Windows release artifacts do not use a release-profile cache'
+if grep -Fq 'cache_key: v2-windows' "$RELEASE"; then
+  fail 'Windows release build still shares the dev and Clippy cache'
+fi
+grep -Fq "save-if: 'true'" "$RELEASE" || fail 'release-profile cache is not persisted'
 grep -Fq 'scripts/pull-pinned-image.sh' "$VALIDATION" || fail 'ParadeDB pulls do not use bounded retries'
 grep -Fq 'PostgreSQL init process complete; ready for start up.' "$VALIDATION" || \
   fail 'ParadeDB readiness can accept the temporary bootstrap server'
