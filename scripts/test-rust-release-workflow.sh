@@ -17,6 +17,15 @@ grep -Fq 'actions/attest-build-provenance@' "$VALIDATION" || fail 'main-gate pro
 # GitHub evaluates this expression; the local contract test needs the literal bytes.
 # shellcheck disable=SC2016
 grep -Fq 'v2-main-gate-${{ github.sha }}' "$VALIDATION" || fail 'main-gate artifact is not SHA-bound'
+grep -Eq '^  pull_request:$' "$VALIDATION" || fail 'pull-request validation trigger is missing'
+push_branches="$(awk '
+  /^  push:$/ { in_push = 1; next }
+  in_push && /^    branches:$/ { in_branches = 1; next }
+  in_push && in_branches && /^    [[:alnum:]_-]+:$/ { exit }
+  in_push && /^  [[:alnum:]_-]+:$/ { exit }
+  in_push && in_branches { print }
+' "$VALIDATION" | sed '/^[[:space:]]*$/d')"
+[[ "$push_branches" == '      - main' ]] || fail 'push validation must be scoped only to main'
 grep -Fq 'strategy:' "$VALIDATION" || fail 'live PostgreSQL shards are missing'
 for shard in database runtime operations; do
   grep -Fq -- "- $shard" "$VALIDATION" || fail "live shard $shard is missing"
@@ -34,6 +43,10 @@ grep -Fq 'gh attestation verify' "$RELEASE" || fail 'release does not verify mai
 grep -Fq -- '--source-ref refs/heads/main' "$RELEASE" || fail 'release does not bind evidence to main'
 grep -Fq 'needs: verify-main-gate' "$RELEASE" || fail 'release builds do not depend on exact main evidence'
 grep -Fq 'scripts/pull-pinned-image.sh' "$VALIDATION" || fail 'ParadeDB pulls do not use bounded retries'
+grep -Fq 'PostgreSQL init process complete; ready for start up.' "$VALIDATION" || \
+  fail 'ParadeDB readiness can accept the temporary bootstrap server'
+grep -Fq -- "--command 'SELECT 1;'" "$VALIDATION" || \
+  fail 'ParadeDB readiness does not prove a live SQL connection'
 grep -Fq "cache-workspace-crates: 'true'" "$VALIDATION" || fail 'live shards do not reuse the compiled workspace'
 
 unpinned_actions="$({
