@@ -86,6 +86,14 @@ const RECONCILE_PROGRESS_TIMEOUT: Duration = Duration::from_secs(1);
 const RECONCILE_CANCELLATION_GRACE: Duration = Duration::from_millis(300);
 const RECONCILE_COPY_TIMEOUT: Duration = Duration::from_millis(200);
 const FIRST_MUTATION_DELAY_SECONDS: &str = "0.25";
+const TRANSIENT_HEARTBEAT_OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
+const TRANSIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+const TRANSIENT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(1);
+const TRANSIENT_HEARTBEAT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
+const TRANSIENT_HEARTBEAT_LEASE_DURATION: Duration = Duration::from_secs(6);
+const TRANSIENT_HEARTBEAT_DELAY_SECONDS: &str = "0.60";
+const TRANSIENT_HEARTBEAT_DELAY_ATTEMPTS: i64 = 2;
+const EXPECTED_TRANSIENT_HEARTBEAT_ATTEMPTS: i64 = 3;
 const ABORT_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_200);
 const ABORT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 const ABORT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(100);
@@ -546,6 +554,56 @@ async fn successful_supervision_renews_releases_and_requires_publication() {
     );
     assert!(!supervisor.cancel());
     assert!(supervisor.status().await.heartbeat_count() >= EXPECTED_MINIMUM_HEARTBEATS);
+    assert!(matches!(
+        fixture.database.lease_status(&target).await,
+        Ok(None)
+    ));
+
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn transient_heartbeat_timeouts_retry_within_the_bounded_reap_horizon() {
+    let fixture = open_fixture().await;
+    let staged = begin_generation(&fixture).await;
+    let target = target(&fixture.project, staged.generation_id());
+    install_one_shot_heartbeat_delay(&fixture).await;
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), transient_heartbeat_config());
+    let current = supervisor
+        .run(
+            request_with_duration(target.clone(), TRANSIENT_HEARTBEAT_LEASE_DURATION),
+            move |context| async move {
+                assert!(
+                    context
+                        .progress()
+                        .begin_stage(PipelineStage::Discover)
+                        .await
+                        .is_ok()
+                );
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                assert!(context.progress().advance(1, 1).await.is_ok());
+                context
+                    .prepare_generation(GenerationContents::new(
+                        staged,
+                        canonical(GenerationFacts::default()),
+                    ))
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+            },
+        )
+        .await;
+    let current = match current {
+        Ok(current) => current,
+        Err(error) => panic!("transient heartbeat timeouts were not retried: {error}"),
+    };
+    assert_eq!(current.project_id(), &fixture.project);
+    assert_eq!(
+        supervisor.status().await.state(),
+        SupervisorState::Completed
+    );
+    assert!(supervisor.status().await.heartbeat_count() > 0);
+    assert!(heartbeat_delay_attempts(&fixture).await >= EXPECTED_TRANSIENT_HEARTBEAT_ATTEMPTS);
     assert!(matches!(
         fixture.database.lease_status(&target).await,
         Ok(None)
@@ -1727,13 +1785,16 @@ async fn operation_deadline_cancels_despite_continuous_progress() {
             }
         })
         .await;
-    assert!(matches!(
-        result,
-        Err(SupervisorError::Cancelled {
-            reason: CancellationReason::OperationDeadline,
-            grace_exceeded: false
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(SupervisorError::Cancelled {
+                reason: CancellationReason::OperationDeadline,
+                grace_exceeded: false
+            })
+        ),
+        "unexpected operation-deadline result: {result:?}"
+    );
     assert_eq!(
         supervisor.status().await.state(),
         SupervisorState::Cancelled
@@ -2257,13 +2318,16 @@ async fn heartbeat_uncertainty_drops_root_and_reaps_registered_children_without_
         },
         Err(_) => panic!("heartbeat uncertainty incorrectly waited for cancellation grace"),
     };
-    assert!(matches!(
-        result,
-        Err(SupervisorError::Cancelled {
-            reason: CancellationReason::LeaseHeartbeatFailed,
-            grace_exceeded: false
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(SupervisorError::Cancelled {
+                reason: CancellationReason::LeaseHeartbeatFailed,
+                grace_exceeded: false
+            })
+        ),
+        "unexpected uncertain-heartbeat result: {result:?}"
+    );
     assert!(root_dropped.load(Ordering::Acquire));
     assert!(child_dropped.load(Ordering::Acquire));
     assert_generation_state(&fixture, &generation_id, GenerationState::Staging).await;
@@ -2361,13 +2425,16 @@ async fn heartbeat_uncertainty_reaps_concurrent_copy_before_returning() {
         },
         Err(_) => panic!("heartbeat uncertainty did not reap blocked COPY before its bound"),
     };
-    assert!(matches!(
-        result,
-        Err(SupervisorError::Cancelled {
-            reason: CancellationReason::LeaseHeartbeatFailed,
-            grace_exceeded: false
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(SupervisorError::Cancelled {
+                reason: CancellationReason::LeaseHeartbeatFailed,
+                grace_exceeded: false
+            })
+        ),
+        "unexpected combined-uncertainty result: {result:?}"
+    );
     assert_no_active_schema_work(&fixture).await;
     assert_generation_advisories_available(&fixture, &target).await;
     assert!(lease_lock.rollback().await.is_ok());
@@ -2428,6 +2495,15 @@ fn reconcile_config() -> SupervisorConfig {
         .with_progress_timeout(RECONCILE_PROGRESS_TIMEOUT)
         .with_cancellation_grace(RECONCILE_CANCELLATION_GRACE)
         .with_copy_timeout(RECONCILE_COPY_TIMEOUT)
+}
+
+fn transient_heartbeat_config() -> SupervisorConfig {
+    SupervisorConfig::new(TRANSIENT_HEARTBEAT_OPERATION_TIMEOUT)
+        .with_heartbeat_interval(TRANSIENT_HEARTBEAT_INTERVAL)
+        .with_heartbeat_timeout(TRANSIENT_HEARTBEAT_TIMEOUT)
+        .with_progress_timeout(TRANSIENT_HEARTBEAT_PROGRESS_TIMEOUT)
+        .with_cancellation_grace(STANDARD_CANCELLATION_GRACE)
+        .with_copy_timeout(STANDARD_COPY_TIMEOUT)
 }
 
 fn abort_config() -> SupervisorConfig {
@@ -2763,6 +2839,56 @@ async fn install_one_shot_acquisition_delay(fixture: &DatabaseFixture) {
         if let Err(error) = query(AssertSqlSafe(statement)).execute(&fixture.pool).await {
             panic!("could not install one-shot acquisition delay: {error}");
         }
+    }
+}
+
+async fn install_one_shot_heartbeat_delay(fixture: &DatabaseFixture) {
+    let sequence = format!(
+        r#"CREATE SEQUENCE "{}"."heartbeat_delay_sequence""#,
+        fixture.schema
+    );
+    let function = format!(
+        r#"CREATE FUNCTION "{}"."delay_first_heartbeat"()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $delay$
+            BEGIN
+                IF nextval('"{}"."heartbeat_delay_sequence"'::regclass)
+                   <= {TRANSIENT_HEARTBEAT_DELAY_ATTEMPTS} THEN
+                    PERFORM pg_sleep({TRANSIENT_HEARTBEAT_DELAY_SECONDS});
+                END IF;
+                RETURN NEW;
+            END
+            $delay$"#,
+        fixture.schema, fixture.schema
+    );
+    let trigger = format!(
+        r#"CREATE TRIGGER delay_first_heartbeat
+            BEFORE UPDATE OF heartbeat_at
+            ON "{}"."project_operation_leases"
+            FOR EACH ROW EXECUTE FUNCTION "{}"."delay_first_heartbeat"()"#,
+        fixture.schema, fixture.schema
+    );
+    for statement in [sequence, function, trigger] {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(&fixture.pool).await {
+            panic!("could not install one-shot heartbeat delay: {error}");
+        }
+    }
+}
+
+async fn heartbeat_delay_attempts(fixture: &DatabaseFixture) -> i64 {
+    let statement = format!(
+        r#"SELECT last_value::bigint FROM "{}"."heartbeat_delay_sequence""#,
+        fixture.schema
+    );
+    match query(AssertSqlSafe(statement))
+        .fetch_one(&fixture.pool)
+        .await
+    {
+        Ok(row) => row
+            .try_get::<i64, _>(0)
+            .unwrap_or_else(|error| panic!("heartbeat delay sequence was invalid: {error}")),
+        Err(error) => panic!("heartbeat delay attempts were unavailable: {error}"),
     }
 }
 

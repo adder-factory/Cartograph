@@ -26,6 +26,9 @@ use crate::{
     task_scope::{ReapReport, TaskScope},
 };
 
+const HEARTBEAT_DATABASE_ATTEMPTS: u8 = 3;
+const MIN_HEARTBEAT_RETRY_BUDGET: Duration = Duration::from_secs(1);
+
 /// Lease acquisition boundary for one supervised project operation.
 #[derive(Clone, Debug)]
 pub struct SupervisorRequest {
@@ -782,12 +785,12 @@ impl DurableCoordinator<'_> {
         let result = attempt.result;
         owned.lease = Some(attempt.lease);
         match (late, result) {
-            (false, Ok(())) => {
+            (_, Ok(())) => {
                 self.progress.mark_heartbeat().await;
                 Ok(())
             }
             (_, Err(LeaseError::Lost)) => Err(SupervisorError::OwnershipLost { operation }),
-            (true, _) | (_, Err(LeaseError::DatabaseOperation { .. })) => {
+            (true, Err(_)) | (false, Err(LeaseError::DatabaseOperation { .. })) => {
                 let reconciliation = self.reconcile(owned, operation).await?;
                 if reconciliation.lease() == ObservedLease::Owned {
                     Ok(())
@@ -1236,13 +1239,13 @@ impl WorkMonitor<'_> {
         })
         .await?;
         self.lease = Some(attempt.lease);
-        match (attempt.late, attempt.result) {
-            (false, Ok(())) => {
+        match attempt.result {
+            Ok(()) => {
                 self.progress.mark_heartbeat().await;
                 Ok(None)
             }
-            (_, Err(LeaseError::Lost)) => Ok(Some(CancellationReason::LeaseLost)),
-            _ => Ok(Some(CancellationReason::LeaseHeartbeatFailed)),
+            Err(LeaseError::Lost) => Ok(Some(CancellationReason::LeaseLost)),
+            Err(_) => Ok(Some(CancellationReason::LeaseHeartbeatFailed)),
         }
     }
 
@@ -1331,9 +1334,30 @@ async fn run_bounded_heartbeat(
     } = request;
     let request_deadline = budget.database_deadline(config, ceiling)?;
     let mut task = tokio::spawn(async move {
-        let result = database
-            .heartbeat_lease_bounded(&mut lease, config.deadlines.statement_timeout())
-            .await;
+        let statement_timeout = config.deadlines.statement_timeout();
+        let mut attempts_remaining =
+            if config.deadlines.heartbeat_request >= MIN_HEARTBEAT_RETRY_BUDGET {
+                HEARTBEAT_DATABASE_ATTEMPTS
+            } else {
+                1
+            };
+        // Each exact-token update is idempotent and server-capped at half one request. Three
+        // attempts consume at most one and a half requests, leaving half of the already-bounded
+        // request-plus-reap horizon for transaction setup and rollback. Sub-second custom
+        // budgets use one attempt because their fixed transaction overhead cannot safely reserve
+        // that margin. Lost ownership is never retried, and the outer deadlines still abort and
+        // reap exhaustion.
+        let result = loop {
+            let result = database
+                .heartbeat_lease_bounded(&mut lease, statement_timeout)
+                .await;
+            attempts_remaining = attempts_remaining.saturating_sub(1);
+            if attempts_remaining == 0
+                || !matches!(&result, Err(LeaseError::DatabaseOperation { .. }))
+            {
+                break result;
+            }
+        };
         (lease, result)
     });
     match timeout_at(request_deadline, &mut task).await {
