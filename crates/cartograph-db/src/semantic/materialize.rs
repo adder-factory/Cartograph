@@ -28,10 +28,47 @@ pub struct SimilarityMaterializationReport {
     pub minimum_score_millionths: u32,
 }
 
+/// Validated neighbor, score, and timeout policy for one similarity-cache rebuild.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SimilarityMaterializationPolicy {
+    neighbors: u16,
+    minimum_score: f64,
+    statement_timeout: Duration,
+}
+
+impl SimilarityMaterializationPolicy {
+    /// Validate the complete rebuild policy before opening a transaction.
+    pub fn new(
+        neighbors: u16,
+        minimum_score: f64,
+        statement_timeout: Duration,
+    ) -> Result<Self, SemanticStorageError> {
+        validate_timeout(statement_timeout)?;
+        if neighbors == 0
+            || neighbors > MAXIMUM_NEIGHBORS
+            || !minimum_score.is_finite()
+            || !(0.0..=1.0).contains(&minimum_score)
+        {
+            return Err(invalid("similarity_materialization"));
+        }
+        Ok(Self {
+            neighbors,
+            minimum_score,
+            statement_timeout,
+        })
+    }
+}
+
 struct MaterializationModel {
     model_id: ModelId,
     dimension: u16,
     source_symbols: u64,
+}
+
+struct MaterializationGeneration<'value> {
+    schema: &'value str,
+    project_id: &'value ProjectId,
+    generation_id: &'value str,
 }
 
 impl CartographDatabase {
@@ -43,18 +80,13 @@ impl CartographDatabase {
     pub async fn rebuild_current_similarity_edges(
         &self,
         project_id: &ProjectId,
-        neighbors: u16,
-        minimum_score: f64,
-        statement_timeout: Duration,
+        policy: SimilarityMaterializationPolicy,
     ) -> Result<SimilarityMaterializationReport, SemanticStorageError> {
-        validate_timeout(statement_timeout)?;
-        if neighbors == 0
-            || neighbors > MAXIMUM_NEIGHBORS
-            || !minimum_score.is_finite()
-            || !(0.0..=1.0).contains(&minimum_score)
-        {
-            return Err(invalid("similarity_materialization"));
-        }
+        let SimilarityMaterializationPolicy {
+            neighbors,
+            minimum_score,
+            statement_timeout,
+        } = policy;
         let mut transaction = self
             .pool
             .begin()
@@ -81,7 +113,7 @@ impl CartographDatabase {
                   AND current_generation_id IS NOT NULL
                 FOR SHARE"#
         );
-        let generation = query(AssertSqlSafe(generation_sql))
+        let generation_id = query(AssertSqlSafe(generation_sql))
             .bind(project_id.as_str())
             .fetch_optional(&mut *transaction)
             .await
@@ -92,8 +124,12 @@ impl CartographDatabase {
                 field: "generation_id",
             })?;
 
-        let models =
-            load_materialization_models(&mut transaction, &schema, project_id, &generation).await?;
+        let generation = MaterializationGeneration {
+            schema: &schema,
+            project_id,
+            generation_id: &generation_id,
+        };
+        let models = load_materialization_models(&mut transaction, &generation).await?;
         let model_symbol_pairs = models.iter().try_fold(0_u64, |total, model| {
             total
                 .checked_add(model.source_symbols)
@@ -102,39 +138,26 @@ impl CartographDatabase {
         if model_symbol_pairs > MAXIMUM_MODEL_SYMBOL_PAIRS {
             return Err(invalid("similarity_source_symbols"));
         }
-        let source_symbols =
-            count_distinct_source_symbols(&mut transaction, &schema, project_id, &generation)
-                .await?;
+        let source_symbols = count_distinct_source_symbols(&mut transaction, &generation).await?;
 
-        clear_current_materialization(&mut transaction, &schema, project_id, &generation).await?;
+        clear_current_materialization(&mut transaction, &generation).await?;
         configure_filtered_hnsw_scan(&mut transaction).await?;
 
         let mut edges_written = 0_u64;
         for model in &models {
-            let written = materialize_model(
-                &mut transaction,
-                &schema,
+            let context = MaterializationContext {
+                schema: &schema,
                 project_id,
-                &generation,
+                generation: &generation_id,
                 model,
                 neighbors,
                 minimum_score,
-            )
-            .await?;
+            };
+            let written = materialize_model(&mut transaction, &context).await?;
             edges_written = edges_written
                 .checked_add(written)
                 .ok_or_else(|| database_error("similarity-materialize-edge-count"))?;
-            record_materialization(
-                &mut transaction,
-                &schema,
-                project_id,
-                &generation,
-                model,
-                neighbors,
-                minimum_score,
-                written,
-            )
-            .await?;
+            record_materialization(&mut transaction, &context, written).await?;
         }
         transaction
             .commit()
@@ -154,10 +177,13 @@ impl CartographDatabase {
 
 async fn load_materialization_models(
     connection: &mut PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation: &str,
+    generation: &MaterializationGeneration<'_>,
 ) -> Result<Vec<MaterializationModel>, SemanticStorageError> {
+    let MaterializationGeneration {
+        schema,
+        project_id,
+        generation_id,
+    } = generation;
     let sql = format!(
         r#"SELECT models.model_id::text AS model_id, models.dimension
             FROM {schema}."embedding_models" AS models
@@ -180,7 +206,7 @@ async fn load_materialization_models(
     );
     let rows = query(AssertSqlSafe(sql))
         .bind(project_id.as_str())
-        .bind(generation)
+        .bind(*generation_id)
         .fetch_all(&mut *connection)
         .await
         .map_err(|_| database_error("similarity-materialize-models"))?;
@@ -211,7 +237,7 @@ async fn load_materialization_models(
             .ok_or_else(|| corrupt("dimension"))?;
         let count_row = query(AssertSqlSafe(count_sql.as_str()))
             .bind(project_id.as_str())
-            .bind(generation)
+            .bind(*generation_id)
             .bind(model_id.as_str())
             .fetch_one(&mut *connection)
             .await
@@ -227,10 +253,13 @@ async fn load_materialization_models(
 
 async fn count_distinct_source_symbols(
     connection: &mut PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation: &str,
+    generation: &MaterializationGeneration<'_>,
 ) -> Result<u64, SemanticStorageError> {
+    let MaterializationGeneration {
+        schema,
+        project_id,
+        generation_id,
+    } = generation;
     let sql = format!(
         r#"SELECT count(DISTINCT documents.symbol_id)::bigint AS source_symbols
             FROM {schema}."search_documents" AS documents
@@ -247,7 +276,7 @@ async fn count_distinct_source_symbols(
     );
     let row = query(AssertSqlSafe(sql))
         .bind(project_id.as_str())
-        .bind(generation)
+        .bind(*generation_id)
         .fetch_one(connection)
         .await
         .map_err(|_| database_error("similarity-materialize-source-count"))?;
@@ -256,10 +285,13 @@ async fn count_distinct_source_symbols(
 
 async fn clear_current_materialization(
     connection: &mut PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation: &str,
+    generation: &MaterializationGeneration<'_>,
 ) -> Result<(), SemanticStorageError> {
+    let MaterializationGeneration {
+        schema,
+        project_id,
+        generation_id,
+    } = generation;
     for table in ["symbol_similarity_edges", "symbol_similarity_builds"] {
         let sql = format!(
             r#"DELETE FROM {schema}."{table}"
@@ -268,7 +300,7 @@ async fn clear_current_materialization(
         );
         query(AssertSqlSafe(sql))
             .bind(project_id.as_str())
-            .bind(generation)
+            .bind(*generation_id)
             .execute(&mut *connection)
             .await
             .map_err(|_| database_error("similarity-materialize-clear"))?;
@@ -276,15 +308,27 @@ async fn clear_current_materialization(
     Ok(())
 }
 
-async fn materialize_model(
-    connection: &mut PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation: &str,
-    model: &MaterializationModel,
+struct MaterializationContext<'value> {
+    schema: &'value str,
+    project_id: &'value ProjectId,
+    generation: &'value str,
+    model: &'value MaterializationModel,
     neighbors: u16,
     minimum_score: f64,
+}
+
+async fn materialize_model(
+    connection: &mut PgConnection,
+    context: &MaterializationContext<'_>,
 ) -> Result<u64, SemanticStorageError> {
+    let MaterializationContext {
+        schema,
+        project_id,
+        generation,
+        model,
+        neighbors,
+        minimum_score,
+    } = context;
     let dimension = model.dimension;
     let model_id = model.model_id.as_str();
     let sql = format!(
@@ -344,25 +388,27 @@ async fn materialize_model(
     query(AssertSqlSafe(sql))
         .bind(project_id.as_str())
         .bind(generation)
-        .bind(minimum_score)
-        .bind(i64::from(neighbors))
+        .bind(*minimum_score)
+        .bind(i64::from(*neighbors))
         .execute(connection)
         .await
         .map(|result| result.rows_affected())
         .map_err(|_| database_error("similarity-materialize-write"))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn record_materialization(
     connection: &mut PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation: &str,
-    model: &MaterializationModel,
-    neighbors: u16,
-    minimum_score: f64,
+    context: &MaterializationContext<'_>,
     edges_written: u64,
 ) -> Result<(), SemanticStorageError> {
+    let MaterializationContext {
+        schema,
+        project_id,
+        generation,
+        model,
+        neighbors,
+        minimum_score,
+    } = context;
     let sql = format!(
         r#"INSERT INTO {schema}."symbol_similarity_builds" (
                 project_id, generation_id, model_id, neighbors_per_symbol,
@@ -376,8 +422,8 @@ async fn record_materialization(
         .bind(project_id.as_str())
         .bind(generation)
         .bind(model.model_id.as_str())
-        .bind(i16::try_from(neighbors).map_err(|_| invalid("neighbors"))?)
-        .bind(minimum_score)
+        .bind(i16::try_from(*neighbors).map_err(|_| invalid("neighbors"))?)
+        .bind(*minimum_score)
         .bind(i64::try_from(model.source_symbols).map_err(|_| corrupt("source_symbols"))?)
         .bind(i64::try_from(edges_written).map_err(|_| corrupt("edges_written"))?)
         .execute(connection)

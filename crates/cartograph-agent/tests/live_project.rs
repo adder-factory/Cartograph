@@ -8,33 +8,39 @@ use std::{
 };
 
 use cartograph_agent::{
-    DeadCodeJudgeOptions, DeadCodeVerdict, DiffReviewOptions, EmbeddingClientRequest,
-    EmbeddingOptions, FileDriftOptions, FileSourceOptions, FileSourceRequest,
-    GenerationRetentionStatus, HistoryIndexOptions, ImportAuditError, ImportAuditOptions,
-    ImportAuditSource, ImportAuditTarget, IndexOptions, LcovLoadOptions, ProjectCancellation,
-    ProjectError, ProjectRuntime, RenamePlanError, RenamePlanOptions, RetrievalClientRequest,
-    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportRequest,
-    SourceContextOptions, SourceContextRequest, SourceSearchOptions, TestEvidenceOptions,
-    WorkingTreeOverlayRequest, judge_dead_code_candidates,
+    DeadCodeJudgeOptions, DeadCodeJudgeRequest, DeadCodeVerdict, DiffReviewInput,
+    DiffReviewOptions, EmbeddingClientRequest, EmbeddingOptions, FileDriftOptions,
+    FileSourceOptions, FileSourceRequest, GenerationRetentionStatus, HistoryIndexOptions,
+    ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
+    IndexOptions, LcovLoadOptions, ProjectCancellation, ProjectError, ProjectRuntime,
+    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalClientRequest,
+    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportLimits,
+    ScipImportRequest, SourceContextOptions, SourceContextRequest, SourceSearchOptions,
+    TestEvidenceOptions, WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    DeadCodeQuery, ExactTextLookup, FileDependencyDirection, FileDependencyQuery, FileSurfaceQuery,
-    GroupedPathInput, GroupedSymbolQuery, IssueAttributionKind, LeaseOwner, LeaseRequest,
-    LeaseTarget, NativeParseCacheKey, SearchQuery, SemanticStorageError,
+    CurrentGenerationLookup, DeadCodeQuery, ExactTextLookup, FileCochangeQuery,
+    FileDependencyDirection, FileDependencyQuery, FileHistoryQuery, FileSurfaceQuery,
+    FileTestImpactQuery, GroupedPathInput, GroupedSymbolQuery, InterchangeSnapshotRequest,
+    IssueAttributionKind, IssueCommitSymbolPeerQuery, LeaseOwner, LeaseRequest, LeaseTarget,
+    NativeParseCacheKey, NativeParseCacheKeyInput, SearchQuery, SemanticStorageError,
     StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
     StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort, SymbolCoverageQuery,
+    SymbolIssuePeerQuery, SymbolIssueQuery,
 };
 use cartograph_domain::{
-    ContentDigest, EdgeKind, NormalizedPath, ProjectOperation, SourceLanguage,
+    ContentDigest, EdgeKind, GenerationDigestVersion, NormalizedPath, ProjectOperation,
+    SourceLanguage,
 };
 use cartograph_extract::native_extractor_contract_digest;
 use cartograph_llm::{ChatSettings, EmbeddingSettings, OpenAiChatClient, OpenAiEmbeddingClient};
 use cartograph_scip::{decode_scip_index, encode_scip_index};
 use cartograph_search::{
-    DeterministicRetriever, EntryPointBucket, EntryPointsQuery, GraphPathRequest, IndexFreshness,
-    RetrievalConfidence, RetrievalError, RetrievalExecution, ReviewAbstention, SearchMode,
-    SemanticReadiness, SimilarRequest, TraversalBudget, WorkingTreeOverlayStatus,
+    DeterministicRetriever, EntryPointBucket, EntryPointsQuery, GraphPathRequest,
+    GraphPathRequestInput, IndexFreshness, RetrievalConfidence, RetrievalError, RetrievalExecution,
+    ReviewAbstention, SearchMode, SemanticReadiness, SimilarRequest, TraversalBudget,
+    WorkingTreeOverlayStatus,
 };
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -212,14 +218,14 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
         let service_path = NormalizedPath::parse("src/service.ts")
             .unwrap_or_else(|error| panic!("service cache path failed: {error}"));
         let service_hash = ContentDigest::from_bytes(*blake3::hash(&service_bytes).as_bytes());
-        let exact_key = NativeParseCacheKey::new(
-            first.project_id.clone(),
-            native_extractor_contract_digest(),
-            service_path.clone(),
-            SourceLanguage::TypeScript,
-            service_hash.clone(),
-            u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
-        );
+        let exact_key = NativeParseCacheKey::new(NativeParseCacheKeyInput {
+            project_id: first.project_id.clone(),
+            extractor_contract_digest: native_extractor_contract_digest(),
+            path: service_path.clone(),
+            language: SourceLanguage::TypeScript,
+            content_hash: service_hash.clone(),
+            source_bytes: u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
+        });
         assert!(
             runtime
                 .database()
@@ -228,14 +234,18 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
                 .unwrap_or_else(|error| panic!("exact cache lookup failed: {error}"))
                 .is_some()
         );
-        let changed_contract_key = NativeParseCacheKey::new(
-            first.project_id.clone(),
-            ContentDigest::from_bytes(*blake3::hash(b"changed-extractor-contract").as_bytes()),
-            service_path,
-            SourceLanguage::TypeScript,
-            service_hash,
-            u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
-        );
+        let changed_contract = ContentDigest::from_bytes(*blake3::hash(
+            b"changed-extractor-contract",
+        )
+        .as_bytes());
+        let changed_contract_key = NativeParseCacheKey::new(NativeParseCacheKeyInput {
+            project_id: first.project_id.clone(),
+            extractor_contract_digest: changed_contract.clone(),
+            path: service_path,
+            language: SourceLanguage::TypeScript,
+            content_hash: service_hash,
+            source_bytes: u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
+        });
         assert!(
             runtime
                 .database()
@@ -251,6 +261,66 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             .unwrap_or_else(|error| panic!("incremental no-op failed: {error}"));
         assert!(!unchanged.published);
         assert!(unchanged.native.is_none());
+
+        let upgrade_pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("contract-upgrade connection failed: {error}"));
+        let downgrade_generation = format!(
+            r#"UPDATE "{schema}"."index_generations"
+               SET content_digest_version = $1
+               WHERE project_id = CAST($2 AS uuid) AND state = 'current'"#
+        );
+        let downgraded = query(AssertSqlSafe(downgrade_generation))
+            .bind(GenerationDigestVersion::V4.database_value())
+            .bind(first.project_id.as_str())
+            .execute(&upgrade_pool)
+            .await
+            .unwrap_or_else(|_| panic!("generation contract downgrade fixture failed"));
+        assert_eq!(downgraded.rows_affected(), 1);
+        let downgrade_parse_cache = format!(
+            r#"UPDATE "{schema}"."native_parse_cache"
+               SET extractor_contract_digest = $1
+               WHERE project_id = CAST($2 AS uuid)"#
+        );
+        let downgraded_cache = query(AssertSqlSafe(downgrade_parse_cache))
+            .bind(changed_contract.as_str())
+            .bind(first.project_id.as_str())
+            .execute(&upgrade_pool)
+            .await
+            .unwrap_or_else(|_| panic!("parse-cache contract downgrade fixture failed"));
+        assert_eq!(downgraded_cache.rows_affected(), 3);
+        upgrade_pool.close().await;
+
+        let stale_contract = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("stale-contract status failed: {error}"));
+        assert!(!stale_contract.fresh);
+        let contract_upgrade = runtime
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("contract-upgrade index failed: {error}"));
+        assert!(contract_upgrade.published);
+        let upgrade_metrics = contract_upgrade
+            .native
+            .as_ref()
+            .unwrap_or_else(|| panic!("contract-upgrade native metrics were missing"));
+        assert_eq!(upgrade_metrics.parse_cache.hits, 0);
+        assert_eq!(upgrade_metrics.parse_cache.misses, 3);
+        assert_eq!(upgrade_metrics.parse_cache.parsed_files, 3);
+        assert_eq!(upgrade_metrics.parse_cache.writes, 3);
+        let upgraded_status = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("upgraded-contract status failed: {error}"));
+        assert!(upgraded_status.fresh);
+        assert!(matches!(
+            upgraded_status
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.current.as_ref()),
+            Some(current) if current.digest_version == GenerationDigestVersion::CURRENT
+        ));
 
         std::fs::write(
             source.join("service.ts"),
@@ -276,7 +346,8 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
         let corrupt_sql = format!(
             r#"UPDATE "{schema}"."native_parse_cache"
                SET payload = $1, payload_digest = $2
-               WHERE project_id = $3::uuid AND normalized_path = 'src/caller.ts'"#
+               WHERE project_id = $3::uuid AND normalized_path = 'src/caller.ts'
+                 AND extractor_contract_digest = $4"#
         );
         let corruption_pool = cartograph_db::connect(&settings)
             .await
@@ -285,6 +356,7 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             .bind(corrupt_payload.as_slice())
             .bind(corrupt_digest.as_str())
             .bind(one_changed.project_id.as_str())
+            .bind(native_extractor_contract_digest().as_str())
             .execute(&corruption_pool)
             .await
             .unwrap_or_else(|_| panic!("cache corruption fixture failed"));
@@ -339,7 +411,11 @@ async fn assert_complete_checkout_call(
 ) {
     let snapshot = runtime
         .database()
-        .current_interchange_snapshot(project_id, 10_000, Duration::from_secs(30))
+        .current_interchange_snapshot(InterchangeSnapshotRequest {
+            project_id,
+            maximum_rows: 10_000,
+            statement_timeout: Duration::from_secs(30),
+        })
         .await
         .unwrap_or_else(|error| panic!("incremental graph snapshot failed: {error}"));
     let caller = snapshot
@@ -398,8 +474,7 @@ export function verifyJwtSignature(token: string): boolean {
             .database()
             .search_current_names_fuzzy(
                 SearchQuery::new(
-                    indexed.project_id.clone(),
-                    indexed.generation_id.clone(),
+                    CurrentGenerationLookup::new(&indexed.project_id, &indexed.generation_id),
                     "verfyJwtSignatre",
                     10,
                 ),
@@ -499,8 +574,12 @@ async fn scip_export_and_persistent_partial_import_preserve_exact_graph_and_unco
 
         let imported = runtime
             .import_scip_with_cancellation(
-                ScipImportRequest::new("partial.scip", 1024 * 1024, 10_000, 4)
-                    .unwrap_or_else(|error| panic!("SCIP import request failed: {error}")),
+                ScipImportRequest::new(
+                    "partial.scip",
+                    ScipImportLimits::new(1024 * 1024, 10_000, 4)
+                        .unwrap_or_else(|error| panic!("SCIP import limits failed: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("SCIP import request failed: {error}")),
                 ProjectCancellation::new(),
             )
             .await
@@ -517,11 +596,11 @@ async fn scip_export_and_persistent_partial_import_preserve_exact_graph_and_unco
         assert!(overlay.exact_typed_edges > 0);
         let snapshot = runtime
             .database()
-            .current_interchange_snapshot(
-                &imported.index.project_id,
-                10_000,
-                Duration::from_secs(30),
-            )
+            .current_interchange_snapshot(InterchangeSnapshotRequest {
+                project_id: &imported.index.project_id,
+                maximum_rows: 10_000,
+                statement_timeout: Duration::from_secs(30),
+            })
             .await
             .unwrap_or_else(|error| panic!("SCIP current snapshot failed: {error}"));
         assert_eq!(snapshot.files.len(), 2);
@@ -607,8 +686,7 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
         let hits = runtime
             .database()
             .search_current_code(SearchQuery::new(
-                first.project_id.clone(),
-                first.generation_id.clone(),
+                CurrentGenerationLookup::new(&first.project_id, &first.generation_id),
                 "verify jwt signature",
                 5,
             ))
@@ -802,12 +880,12 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
             .unwrap_or_else(|error| panic!("graph path budget failed: {error}"));
         let calls_path = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize.clone(),
-                    parse.clone(),
-                    path_budget,
-                )
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize.clone(),
+                    target: parse.clone(),
+                    budget: path_budget,
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -833,12 +911,12 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
 
         let filtered_out = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize.clone(),
-                    parse.clone(),
-                    path_budget,
-                )
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize.clone(),
+                    target: parse.clone(),
+                    budget: path_budget,
+                })
                 .with_edge_kind(EdgeKind::Imports),
             )
             .await
@@ -848,13 +926,13 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
 
         let depth_limited = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize.clone(),
-                    parse.clone(),
-                    TraversalBudget::new(1, 20)
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize.clone(),
+                    target: parse.clone(),
+                    budget: TraversalBudget::new(1, 20)
                         .unwrap_or_else(|error| panic!("depth path budget failed: {error}")),
-                )
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -864,13 +942,13 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
 
         let node_limited = retriever
             .path(
-                &GraphPathRequest::new(
-                    first.project_id.clone(),
-                    authorize,
-                    parse,
-                    TraversalBudget::new(4, 1)
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: first.project_id.clone(),
+                    start: authorize,
+                    target: parse,
+                    budget: TraversalBudget::new(4, 1)
                         .unwrap_or_else(|error| panic!("node path budget failed: {error}")),
-                )
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -896,8 +974,8 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
             .await
             .unwrap_or_else(|error| panic!("embedding sweep failed: {error}"));
         assert!(embedded.readiness().ready());
-        assert_eq!(embedded.readiness().documents(), 4);
-        assert_eq!(embedded.readiness().embedded(), 4);
+        assert_eq!(embedded.readiness().documents(), 7);
+        assert_eq!(embedded.readiness().embedded(), 7);
         let similar = retriever
             .similar(
                 &SimilarRequest::new(first.project_id.clone(), symbol_id.clone(), 2)
@@ -921,7 +999,7 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
                 .iter()
                 .all(|hit| hit.symbol().symbol_id() != Some(&symbol_id))
         );
-        assert!(!similar.truncated());
+        assert!(similar.truncated());
         let model_a_id = similar.model().model_id().clone();
         let hybrid = runtime
             .search_with_client(RetrievalClientRequest::new(
@@ -1056,11 +1134,11 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
         );
         let supplied_diff = "diff --git a/auth.ts b/auth.ts\n--- a/auth.ts\n+++ b/auth.ts\n@@ -1,3 +1 @@\n-export function parseToken(token: string): boolean { return token.length > 0; }\n-export function verifyJwtSignature(token: string): boolean { return parseToken(token); }\n-export function authorizeRequest(token: string): boolean { return verifyJwtSignature(token); }\n+export function rejectExpiredJwt(token: string): boolean { return token.length === 0; }\n";
         let diff_review = runtime
-            .review_diff_with_cancellation(
+            .review_diff_with_cancellation(DiffReviewInput::new(
                 supplied_diff,
                 DiffReviewOptions::default(),
                 ProjectCancellation::new(),
-            )
+            ))
             .await
             .unwrap_or_else(|error| panic!("supplied-diff review failed: {error}"));
         let diff_review = serde_json::to_value(diff_review)
@@ -1184,8 +1262,10 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             runtime
                 .database()
                 .exact_current_references_by_name(ExactTextLookup::new(
-                    &disabled.project_id,
-                    &disabled.generation_id,
+                    CurrentGenerationLookup::new(
+                        &disabled.project_id,
+                        &disabled.generation_id,
+                    ),
                     "target",
                     10,
                 ))
@@ -1197,8 +1277,7 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             runtime
                 .database()
                 .search_current_intent(SearchQuery::new(
-                    disabled.project_id.clone(),
-                    disabled.generation_id.clone(),
+                    CurrentGenerationLookup::new(&disabled.project_id, &disabled.generation_id),
                     "sensitive implementation notes",
                     10,
                 ))
@@ -1209,13 +1288,13 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
         let retriever = DeterministicRetriever::new(runtime.database().clone());
         let path = retriever
             .path(
-                &GraphPathRequest::new(
-                    disabled.project_id.clone(),
-                    caller,
+                &GraphPathRequest::new(GraphPathRequestInput {
+                    project_id: disabled.project_id.clone(),
+                    start: caller,
                     target,
-                    TraversalBudget::new(2, 10)
+                    budget: TraversalBudget::new(2, 10)
                         .unwrap_or_else(|error| panic!("graph policy budget failed: {error}")),
-                )
+                })
                 .with_edge_kind(EdgeKind::Calls),
             )
             .await
@@ -1264,8 +1343,7 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             !runtime
                 .database()
                 .exact_current_references_by_name(ExactTextLookup::new(
-                    &enabled.project_id,
-                    &enabled.generation_id,
+                    CurrentGenerationLookup::new(&enabled.project_id, &enabled.generation_id),
                     "target",
                     10,
                 ))
@@ -1277,8 +1355,7 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
             !runtime
                 .database()
                 .search_current_intent(SearchQuery::new(
-                    enabled.project_id.clone(),
-                    enabled.generation_id.clone(),
+                    CurrentGenerationLookup::new(&enabled.project_id, &enabled.generation_id),
                     "sensitive implementation notes",
                     10,
                 ))
@@ -1657,13 +1734,13 @@ export function partialBeta(input: number, limit: number): number {
                 .unwrap_or_else(|error| panic!("chat settings failed: {error}")),
         )
         .unwrap_or_else(|error| panic!("chat client failed: {error}"));
-        let judged = judge_dead_code_candidates(
-            &chat,
-            vec![abandoned],
-            DeadCodeJudgeOptions::new(1)
+        let judged = judge_dead_code_candidates(DeadCodeJudgeRequest {
+            client: &chat,
+            candidates: vec![abandoned],
+            options: DeadCodeJudgeOptions::new(1)
                 .unwrap_or_else(|error| panic!("judge options failed: {error}")),
-            ProjectCancellation::new(),
-        )
+            cancellation: ProjectCancellation::new(),
+        })
         .await
         .unwrap_or_else(|error| panic!("dead-code judge failed: {error}"));
         assert_eq!(judged.results().len(), 1);
@@ -1889,7 +1966,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
             .unwrap_or_else(|error| panic!("history anchor path failed: {error}"));
         let history = runtime
             .database()
-            .current_file_history(&indexed.project_id, Some(&a), 0, 10)
+            .current_file_history(FileHistoryQuery::new(&indexed.project_id, 10).for_path(&a))
             .await
             .unwrap_or_else(|error| panic!("history rows failed: {error}"));
         let history = serde_json::to_value(history)
@@ -1898,7 +1975,9 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         assert_eq!(history[0]["authorCount"], 1);
         let partners = runtime
             .database()
-            .current_file_cochanges(&indexed.project_id, &a, 2, 10)
+            .current_file_cochanges(
+                FileCochangeQuery::new(&indexed.project_id, &a, 10).with_minimum_commits(2),
+            )
             .await
             .unwrap_or_else(|error| panic!("cochange rows failed: {error}"));
         let partners = serde_json::to_value(partners)
@@ -2004,7 +2083,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         assert!(
             runtime
                 .database()
-                .current_file_history(&indexed.project_id, None, 0, 10)
+                .current_file_history(FileHistoryQuery::new(&indexed.project_id, 10))
                 .await
                 .unwrap_or_else(|error| panic!("disabled history query failed: {error}"))
                 .is_empty()
@@ -2012,7 +2091,9 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
         assert!(
             runtime
                 .database()
-                .current_file_cochanges(&indexed.project_id, &a, 1, 10)
+                .current_file_cochanges(
+                    FileCochangeQuery::new(&indexed.project_id, &a, 10).with_minimum_commits(1),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("disabled cochange query failed: {error}"))
                 .is_empty()
@@ -2113,7 +2194,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         .await;
         let alpha_issues = runtime
             .database()
-            .current_symbol_issues(&indexed.project_id, &alpha, 50)
+            .current_symbol_issues(SymbolIssueQuery {
+                project_id: &indexed.project_id,
+                symbol_id: &alpha,
+                limit: 50,
+            })
             .await
             .unwrap_or_else(|error| panic!("alpha issue read failed: {error}"));
         assert_eq!(
@@ -2130,7 +2215,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         );
         let added = runtime
             .database()
-            .current_symbol_issues(&indexed.project_id, &brand_new, 50)
+            .current_symbol_issues(SymbolIssueQuery {
+                project_id: &indexed.project_id,
+                symbol_id: &brand_new,
+                limit: 50,
+            })
             .await
             .unwrap_or_else(|error| panic!("added issue read failed: {error}"));
         assert!(added.iter().any(|issue| {
@@ -2138,7 +2227,12 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         }));
         let peers = runtime
             .database()
-            .current_symbol_issue_peers(&indexed.project_id, &alpha, 2, 10)
+            .current_symbol_issue_peers(SymbolIssuePeerQuery {
+                project_id: &indexed.project_id,
+                symbol_id: &alpha,
+                minimum_shared: 2,
+                limit: 10,
+            })
             .await
             .unwrap_or_else(|error| panic!("issue peer read failed: {error}"));
         assert_eq!(peers.len(), 1);
@@ -2147,12 +2241,12 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         assert_eq!(peers[0].shared_commits.len(), 2);
         let commit_groups = runtime
             .database()
-            .current_issue_commit_symbol_peers(
-                &indexed.project_id,
-                &alpha,
-                &peers[0].shared_commits,
-                10,
-            )
+            .current_issue_commit_symbol_peers(IssueCommitSymbolPeerQuery {
+                project_id: &indexed.project_id,
+                excluded_symbol_id: &alpha,
+                commits: &peers[0].shared_commits,
+                per_commit_limit: 10,
+            })
             .await
             .unwrap_or_else(|error| panic!("issue commit peer read failed: {error}"));
         assert_eq!(commit_groups.len(), 2);
@@ -2181,7 +2275,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         assert_ne!(refreshed.generation_id, indexed.generation_id);
         let current_alpha_issues = runtime
             .database()
-            .current_symbol_issues(&refreshed.project_id, &alpha, 50)
+            .current_symbol_issues(SymbolIssueQuery {
+                project_id: &refreshed.project_id,
+                symbol_id: &alpha,
+                limit: 50,
+            })
             .await
             .unwrap_or_else(|error| panic!("refreshed alpha issue read failed: {error}"));
         assert!(
@@ -2192,7 +2290,11 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
         assert!(
             runtime
                 .database()
-                .current_symbol_issues(&refreshed.project_id, &brand_new, 50)
+                .current_symbol_issues(SymbolIssueQuery {
+                    project_id: &refreshed.project_id,
+                    symbol_id: &brand_new,
+                    limit: 50,
+                })
                 .await
                 .unwrap_or_else(|error| panic!("removed symbol issue read failed: {error}"))
                 .is_empty()
@@ -2307,11 +2409,11 @@ async fn import_audit_classifies_and_filters_complete_fresh_evidence() {
             .await
             .unwrap_or_else(|error| panic!("import fixture index failed: {error}"));
         let report = runtime
-            .audit_imports(
+            .audit_imports(ImportAuditRequest::new(
                 indexed.project_id.clone(),
                 ImportAuditOptions::default().with_source(ImportAuditSource::All),
                 ProjectCancellation::new(),
-            )
+            ))
             .await
             .unwrap_or_else(|error| panic!("import audit failed: {error}"));
         let report = serde_json::to_value(report)
@@ -2356,11 +2458,11 @@ async fn import_audit_classifies_and_filters_complete_fresh_evidence() {
             .and_then(|options| options.with_language(Some("TypeScript")))
             .unwrap_or_else(|error| panic!("import filters failed: {error}"));
         let filtered = runtime
-            .audit_imports(
+            .audit_imports(ImportAuditRequest::new(
                 indexed.project_id.clone(),
                 filtered_options,
                 ProjectCancellation::new(),
-            )
+            ))
             .await
             .unwrap_or_else(|error| panic!("filtered import audit failed: {error}"));
         let filtered = serde_json::to_value(filtered)
@@ -2371,11 +2473,11 @@ async fn import_audit_classifies_and_filters_complete_fresh_evidence() {
         std::fs::write(project.path().join("src/direct.ts"), "export default 2;\n")
             .unwrap_or_else(|error| panic!("stale import fixture failed: {error}"));
         let stale = runtime
-            .audit_imports(
+            .audit_imports(ImportAuditRequest::new(
                 indexed.project_id,
                 ImportAuditOptions::default(),
                 ProjectCancellation::new(),
-            )
+            ))
             .await;
         assert_eq!(stale, Err(ImportAuditError::SourceChanged));
         runtime.close().await;
@@ -2437,13 +2539,13 @@ async fn rename_plan_combines_exact_references_and_attributed_textual_mentions()
             .pop()
             .unwrap_or_else(|| panic!("rename definition was missing"));
         let plan = runtime
-            .plan_rename(
-                indexed.project_id.clone(),
+            .plan_rename(RenamePlanRequest {
+                project_id: indexed.project_id.clone(),
                 definition,
-                RenamePlanOptions::new(500, 30)
+                options: RenamePlanOptions::new(500, 30)
                     .unwrap_or_else(|error| panic!("rename options failed: {error}")),
-                ProjectCancellation::new(),
-            )
+                cancellation: ProjectCancellation::new(),
+            })
             .await
             .unwrap_or_else(|error| panic!("rename plan failed: {error}"));
         let plan = serde_json::to_value(plan)
@@ -2493,13 +2595,13 @@ async fn rename_plan_combines_exact_references_and_attributed_textual_mentions()
             .pop()
             .unwrap_or_else(|| panic!("stale definition was missing"));
         let stale = runtime
-            .plan_rename(
-                indexed.project_id,
-                stale_definition,
-                RenamePlanOptions::new(500, 30)
+            .plan_rename(RenamePlanRequest {
+                project_id: indexed.project_id,
+                definition: stale_definition,
+                options: RenamePlanOptions::new(500, 30)
                     .unwrap_or_else(|error| panic!("stale rename options failed: {error}")),
-                ProjectCancellation::new(),
-            )
+                cancellation: ProjectCancellation::new(),
+            })
             .await;
         assert_eq!(stale, Err(RenamePlanError::SourceChanged));
         runtime.close().await;
@@ -2554,8 +2656,7 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
         let title_hits = runtime
             .database()
             .search_current_code(SearchQuery::new(
-                indexed.project_id.clone(),
-                indexed.generation_id.clone(),
+                CurrentGenerationLookup::new(&indexed.project_id, &indexed.generation_id),
                 "returns leaf value",
                 10,
             ))
@@ -2574,7 +2675,13 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
             .unwrap_or_else(|error| panic!("missing path fixture failed: {error}"));
         let impact = runtime
             .database()
-            .current_file_test_impact(&indexed.project_id, &[leaf.clone(), missing], 5, 40, None)
+            .current_file_test_impact(FileTestImpactQuery {
+                project_id: &indexed.project_id,
+                paths: &[leaf.clone(), missing],
+                max_depth: 5,
+                limit: 40,
+                test_path_regex: None,
+            })
             .await
             .unwrap_or_else(|error| panic!("test-impact query failed: {error}"))
             .unwrap_or_else(|| panic!("test-impact generation was missing"));
@@ -2615,7 +2722,13 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
 
         let filtered = runtime
             .database()
-            .current_file_test_impact(&indexed.project_id, &[leaf], 5, 40, Some(".*\\.spec\\.ts"))
+            .current_file_test_impact(FileTestImpactQuery {
+                project_id: &indexed.project_id,
+                paths: &[leaf],
+                max_depth: 5,
+                limit: 40,
+                test_path_regex: Some(".*\\.spec\\.ts"),
+            })
             .await
             .unwrap_or_else(|error| panic!("filtered test-impact query failed: {error}"))
             .unwrap_or_else(|| panic!("filtered test-impact generation was missing"));
@@ -2756,7 +2869,11 @@ async fn profiled_index_skips_oversized_sources_without_weakening_the_published_
         }
         let graph = runtime
             .database()
-            .current_interchange_snapshot(&first.project_id, 100, Duration::from_secs(30))
+            .current_interchange_snapshot(InterchangeSnapshotRequest {
+                project_id: &first.project_id,
+                maximum_rows: 100,
+                statement_timeout: Duration::from_secs(30),
+            })
             .await
             .unwrap_or_else(|error| panic!("profile graph snapshot failed: {error}"));
         assert_eq!(graph.files.len(), 1);
@@ -2803,8 +2920,7 @@ async fn exact_symbol_id(
     let matches = runtime
         .database()
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            project_id,
-            generation_id,
+            CurrentGenerationLookup::new(project_id, generation_id),
             qualified_name,
             10,
         ))

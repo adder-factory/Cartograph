@@ -25,16 +25,27 @@ pub struct NativeParseCacheKey {
     source_bytes: u64,
 }
 
+/// Source and extractor identity used to construct one native parse-cache key.
+pub struct NativeParseCacheKeyInput {
+    pub project_id: ProjectId,
+    pub extractor_contract_digest: ContentDigest,
+    pub path: NormalizedPath,
+    pub language: SourceLanguage,
+    pub content_hash: ContentDigest,
+    pub source_bytes: u64,
+}
+
 impl NativeParseCacheKey {
     #[must_use]
-    pub const fn new(
-        project_id: ProjectId,
-        extractor_contract_digest: ContentDigest,
-        path: NormalizedPath,
-        language: SourceLanguage,
-        content_hash: ContentDigest,
-        source_bytes: u64,
-    ) -> Self {
+    pub fn new(input: NativeParseCacheKeyInput) -> Self {
+        let NativeParseCacheKeyInput {
+            project_id,
+            extractor_contract_digest,
+            path,
+            language,
+            content_hash,
+            source_bytes,
+        } = input;
         Self {
             project_id,
             extractor_contract_digest,

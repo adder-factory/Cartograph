@@ -60,3 +60,11 @@ AGENTS.local.md
 .claude/skills/cartograph/SKILL.md
 .codex/config.toml
 .codex/skills/cartograph/SKILL.md
+# Cartograph private agent configuration
+/.codex/config.toml
+/.codex/skills/cartograph/SKILL.md
+/.claude/settings.local.json
+/.claude/skills/cartograph/SKILL.md
+/CLAUDE.local.md
+/.mcp.json
+/.kimi-code/mcp.json

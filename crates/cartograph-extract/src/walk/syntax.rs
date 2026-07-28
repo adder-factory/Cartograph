@@ -20,14 +20,86 @@ const HEALTH_POLL_STRIDE: usize = 1_024;
 const MAX_HEALTH_AST_NODES: usize = 1_000_000;
 const MAX_CLONE_PROFILE_DISTINCT_TOKENS: usize = 32 * 1_024;
 const MAX_CLONE_PROFILE_TOTAL_TOKENS: u32 = 1_000_000;
-const SECRET_API_KEY: u16 = 1 << 0;
-const SECRET_JWT: u16 = 1 << 1;
-const SECRET_PASSWORD: u16 = 1 << 2;
-const SECRET_CRYPTO: u16 = 1 << 3;
-const SECRET_AWS: u16 = 1 << 4;
-const SECRET_ENV: u16 = 1 << 5;
-const SECRET_PII: u16 = 1 << 6;
-const SECRET_LITERAL: u16 = 1 << 7;
+const SIGNAL_CATEGORY_CREDENTIAL: u16 = 1 << 0;
+const SIGNAL_CATEGORY_SIGNED_CLAIM: u16 = 1 << 1;
+const SIGNAL_CATEGORY_LOGIN_MATERIAL: u16 = 1 << 2;
+const SIGNAL_CATEGORY_CRYPTOGRAPHY: u16 = 1 << 3;
+const SIGNAL_CATEGORY_CLOUD: u16 = 1 << 4;
+const SIGNAL_CATEGORY_ENVIRONMENT: u16 = 1 << 5;
+const SIGNAL_CATEGORY_PERSONAL_DATA: u16 = 1 << 6;
+const SIGNAL_CATEGORY_LITERAL: u16 = 1 << 7;
+const MAX_SENSITIVE_SCORE: u16 = 100;
+const IDENTIFIER_SIGNAL_WEIGHT: u16 = 30;
+const SIGNED_CLAIM_SIGNAL_WEIGHT: u16 = 30;
+const SIGNED_CLAIM_LITERAL_WEIGHT: u16 = 50;
+const LOGIN_MATERIAL_SIGNAL_WEIGHT: u16 = 30;
+const CRYPTOGRAPHIC_SIGNAL_WEIGHT: u16 = 20;
+const CLOUD_SIGNAL_WEIGHT: u16 = 40;
+const CLOUD_LITERAL_WEIGHT: u16 = 60;
+const ENVIRONMENT_SIGNAL_WEIGHT: u16 = 30;
+const PERSONAL_DATA_SIGNAL_WEIGHT: u16 = 20;
+const LONG_LITERAL_SIGNAL_WEIGHT: u16 = 20;
+const CREDENTIAL_IDENTIFIER_SUBSTRINGS: &[&str] = &[
+    "api_key",
+    "api-key",
+    "apikey",
+    "access_key",
+    "accesskey",
+    "client_secret",
+    "clientsecret",
+];
+const CREDENTIAL_IDENTIFIER_WORDS: &[&str] = &["secret", "token"];
+const SIGNED_CLAIM_SUBSTRINGS: &[&str] = &[
+    "verifyjwt",
+    "decodejwt",
+    "signjwt",
+    "jwt.sign",
+    "jwt.verify",
+    "jwt.decode",
+];
+const LOGIN_MATERIAL_WORDS: &[&str] = &["password", "passwd", "pwd", "passphrase"];
+const CRYPTOGRAPHIC_OPERATION_COMPONENTS: &[&str] =
+    &["hmac", "encrypt", "decrypt", "sign", "verify"];
+const CRYPTOGRAPHIC_MATERIAL_COMPONENTS: &[&str] = &["secret", "key"];
+const CLOUD_IDENTIFIER_SUBSTRINGS: &[&str] = &[
+    "aws_secret_access_key",
+    "aws_access_key_id",
+    "aws-secret-access-key",
+    "aws-access-key-id",
+];
+const ENVIRONMENT_ACCESS_SUBSTRINGS: &[&str] = &["process.env.", "env[", "getenv("];
+const ENVIRONMENT_MATERIAL_SUBSTRINGS: &[&str] = &["secret", "token", "key", "password"];
+const PERSONAL_DATA_SUBSTRINGS: &[&str] = &[
+    "ssn",
+    "social_security",
+    "social-security",
+    "credit_card",
+    "credit-card",
+    "date_of_birth",
+    "phone_number",
+    "email_address",
+];
+const INCOMPLETE_COMMENT_MARKERS: &[&str] = &["todo", "fixme", "xxx", "hack"];
+const INCOMPLETE_COMMENT_PHRASE: &str = "not implemented";
+const INCOMPLETE_SYNTAX_MARKERS: &[&str] = &[
+    "todo!",
+    "unimplemented!",
+    "not implemented",
+    "notimplementederror",
+    "unsupportedoperationexception",
+];
+const INTEGER_LITERAL_SUFFIXES: &[&str] = &[
+    "usize", "isize", "u128", "i128", "u64", "i64", "u32", "i32", "u16", "i16", "u8", "i8", "ull",
+    "llu", "ul", "lu", "ll", "u", "l",
+];
+const DECIMAL_LITERAL_SUFFIXES: &[&str] = &[
+    "usize", "isize", "u128", "i128", "u64", "i64", "u32", "i32", "u16", "i16", "u8", "i8", "f32",
+    "f64", "ull", "llu", "ul", "lu", "ll", "u", "l", "f", "d", "m", "n",
+];
+const HEX_RADIX: u32 = 16;
+const OCTAL_RADIX: u32 = 8;
+const BINARY_RADIX: u32 = 2;
+const GO_NON_MAGIC_INTEGERS: &[u128] = &[7, 24, 30, 60, 365, 1_000, 1_024, 86_400];
 
 struct SensitiveMetricInput<'tree, 'source> {
     declaration: Node<'tree>,
@@ -37,6 +109,71 @@ struct SensitiveMetricInput<'tree, 'source> {
     signature: Option<&'source str>,
     docstring: Option<&'source str>,
     source: &'source str,
+}
+
+#[derive(Clone, Copy)]
+struct ParameterMetricInput<'tree, 'source> {
+    declaration: Node<'tree>,
+    symbol_kind: SymbolKind,
+    language: SourceLanguage,
+    source: &'source str,
+}
+
+#[derive(Default)]
+struct SensitiveBodyEvidence<'source> {
+    code_fields: Vec<&'source str>,
+    literal_fields: Vec<&'source str>,
+}
+
+#[derive(Default)]
+struct SensitiveScore {
+    value: u16,
+    signal_mask: u16,
+}
+
+#[derive(Clone, Copy)]
+struct SensitiveSignal {
+    matched: bool,
+    category: u16,
+    weight: u16,
+}
+
+#[derive(Clone, Copy)]
+struct HealthWalkInput<'tree, 'source> {
+    body: Node<'tree>,
+    language: SourceLanguage,
+    async_symbol: bool,
+    source: &'source str,
+}
+
+#[derive(Clone, Copy)]
+struct HealthNodeInput<'tree, 'source> {
+    node: Node<'tree>,
+    nesting: u16,
+    root: bool,
+    source: &'source str,
+    language: SourceLanguage,
+}
+
+#[derive(Clone, Copy)]
+struct LiteralHealthInput<'tree, 'source> {
+    node: Node<'tree>,
+    source: &'source str,
+    language: SourceLanguage,
+}
+
+#[derive(Clone, Copy)]
+struct ControlHealthInput<'tree, 'source> {
+    node: Node<'tree>,
+    nesting: u16,
+    source: &'source str,
+}
+
+#[derive(Clone, Copy)]
+struct TextMetricInput<'source> {
+    raw: &'source str,
+    language: SourceLanguage,
+    async_symbol: bool,
 }
 
 pub(crate) struct SymbolHealthInput<'tree, 'source> {
@@ -67,7 +204,13 @@ pub(crate) fn symbol_health_metrics(
         source,
     } = input;
     let mut metrics = SymbolHealthMetrics {
-        parameter_count: parameter_count(declaration),
+        code_lines: code_line_count(declaration, cancelled)?,
+        parameter_count: parameter_count(ParameterMetricInput {
+            declaration,
+            symbol_kind,
+            language,
+            source,
+        }),
         cyclomatic: u16::from(body.is_some()),
         ..SymbolHealthMetrics::default()
     };
@@ -86,7 +229,83 @@ pub(crate) fn symbol_health_metrics(
     let Some(body) = body else {
         return Ok(metrics);
     };
-    let mut stack = vec![(body, 0_u16, true)];
+    walk_symbol_health(
+        &mut metrics,
+        HealthWalkInput {
+            body,
+            language,
+            async_symbol,
+            source,
+        },
+        cancelled,
+    )?;
+    Ok(metrics)
+}
+
+fn code_line_count(
+    declaration: Node<'_>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<u32, ExtractError> {
+    let mut cursor = declaration.walk();
+    let mut depth = 0_usize;
+    let mut root = true;
+    let mut previous_row = None;
+    let mut lines = 0_u32;
+    let mut visited = 0_usize;
+    loop {
+        let node = cursor.node();
+        visited = visited.saturating_add(1);
+        if visited > MAX_HEALTH_AST_NODES {
+            return Err(ExtractError::OutputLimit);
+        }
+        if visited.is_multiple_of(HEALTH_POLL_STRIDE) && cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        let comment = record_health_line(node, &mut previous_row, &mut lines);
+        let descend = !comment
+            && !is_opaque_string_literal(node.kind())
+            && (root || !is_callable_node(node.kind()));
+        root = false;
+        if descend && cursor.goto_first_child() {
+            depth = depth.saturating_add(1);
+            continue;
+        }
+        if !advance_health_cursor(&mut cursor, &mut depth) {
+            return Ok(lines);
+        }
+    }
+}
+
+fn record_health_line(node: Node<'_>, previous_row: &mut Option<usize>, lines: &mut u32) -> bool {
+    let comment = is_comment_node(node.kind());
+    if !comment {
+        let row = node.start_position().row;
+        if *previous_row != Some(row) {
+            *lines = lines.saturating_add(1);
+            *previous_row = Some(row);
+        }
+    }
+    comment
+}
+
+fn advance_health_cursor(cursor: &mut TreeCursor<'_>, depth: &mut usize) -> bool {
+    loop {
+        if cursor.goto_next_sibling() {
+            return true;
+        }
+        if *depth == 0 || !cursor.goto_parent() {
+            return false;
+        }
+        *depth = depth.saturating_sub(1);
+    }
+}
+
+fn walk_symbol_health(
+    metrics: &mut SymbolHealthMetrics,
+    input: HealthWalkInput<'_, '_>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), ExtractError> {
+    let mut stack = vec![(input.body, 0_u16, true)];
     let mut visited = 0_usize;
     while let Some((node, nesting, root)) = stack.pop() {
         visited = visited.saturating_add(1);
@@ -96,71 +315,260 @@ pub(crate) fn symbol_health_metrics(
         if visited.is_multiple_of(HEALTH_POLL_STRIDE) && cancelled() {
             return Err(ExtractError::Cancelled);
         }
-        if !root && is_callable_node(node.kind()) {
+        let Some(child_nesting) = inspect_health_node(
+            metrics,
+            HealthNodeInput {
+                node,
+                nesting,
+                root,
+                source: input.source,
+                language: input.language,
+            },
+        ) else {
             continue;
-        }
-        let node_text = text_for(source, node);
-        let outermost_string_literal = is_string_literal(node.kind())
-            && node
-                .parent()
-                .is_none_or(|parent| !is_string_literal(parent.kind()));
-        if outermost_string_literal || is_numeric_literal(node.kind()) {
-            metrics.literal_bytes = metrics.literal_bytes.saturating_add(
-                u32::try_from(node.end_byte().saturating_sub(node.start_byte()))
-                    .unwrap_or(u32::MAX),
-            );
-        }
-        if is_numeric_literal(node.kind()) && is_magic_number(node_text, language) {
-            metrics.magic_numbers = metrics.magic_numbers.saturating_add(1);
-        }
-        if is_string_literal(node.kind()) && contains_hardcoded_url(node_text) {
-            metrics.hardcoded_urls = metrics.hardcoded_urls.saturating_add(1);
-        }
-        let control = is_control_node(node.kind());
-        let next_nesting = if control {
-            metrics.cyclomatic = metrics.cyclomatic.saturating_add(1);
-            let depth = nesting.saturating_add(1);
-            metrics.max_nesting = metrics.max_nesting.max(depth);
-            if let Some(condition) = condition_node(node) {
-                metrics.max_conditional_operands = metrics
-                    .max_conditional_operands
-                    .max(logical_operator_count(condition, source).saturating_add(1));
-            }
-            depth
-        } else {
-            nesting
         };
-        let logical = direct_logical_operator_count(node, source);
-        metrics.cyclomatic = metrics.cyclomatic.saturating_add(logical);
-        if node.kind() == "catch_clause" && catch_is_empty(node, source) {
-            metrics.empty_catches = metrics.empty_catches.saturating_add(1);
-        }
-        if is_loop_node(node.kind()) {
-            let text = text_for(source, node);
-            if contains_ascii_case_insensitive(text, "await")
-                && !contains_ascii_case_insensitive(text, "for await")
-            {
-                metrics.sequential_await_loops = metrics.sequential_await_loops.saturating_add(1);
-            }
-            if text.contains("namedChildCount") && text.contains("namedChild(") {
-                metrics.accidental_quadratic = metrics.accidental_quadratic.saturating_add(1);
-            }
-        }
-        let child_nesting = if control { next_nesting } else { nesting };
         for child in named_children(node) {
             stack.push((child, child_nesting, false));
         }
     }
-    let raw = text_for(source, body);
-    populate_text_metrics(&mut metrics, raw, language, async_symbol);
-    Ok(metrics)
+    metrics.incomplete_markers = incomplete_marker_count(input.body, input.source);
+    let raw = text_for(input.source, input.body);
+    populate_text_metrics(
+        metrics,
+        TextMetricInput {
+            raw,
+            language: input.language,
+            async_symbol: input.async_symbol,
+        },
+    );
+    Ok(())
 }
 
-fn parameter_count(declaration: Node<'_>) -> u16 {
-    declaration.child_by_field_name("parameters").map_or_else(
-        || u16::from(declaration.child_by_field_name("parameter").is_some()),
-        |parameters| u16::try_from(parameters.named_child_count()).unwrap_or(u16::MAX),
+fn inspect_health_node(
+    metrics: &mut SymbolHealthMetrics,
+    input: HealthNodeInput<'_, '_>,
+) -> Option<u16> {
+    if !input.root && is_callable_node(input.node.kind()) {
+        return None;
+    }
+    record_literal_health(
+        metrics,
+        LiteralHealthInput {
+            node: input.node,
+            source: input.source,
+            language: input.language,
+        },
+    );
+    let child_nesting = record_control_health(
+        metrics,
+        ControlHealthInput {
+            node: input.node,
+            nesting: input.nesting,
+            source: input.source,
+        },
+    );
+    metrics.cyclomatic = metrics
+        .cyclomatic
+        .saturating_add(direct_logical_operator_count(input.node, input.source));
+    if input.node.kind() == "catch_clause" && catch_is_empty(input.node, input.source) {
+        metrics.empty_catches = metrics.empty_catches.saturating_add(1);
+    }
+    if is_loop_node(input.node.kind()) {
+        record_loop_health(
+            metrics,
+            LiteralHealthInput {
+                node: input.node,
+                source: input.source,
+                language: input.language,
+            },
+        );
+    }
+    Some(child_nesting)
+}
+
+fn record_literal_health(metrics: &mut SymbolHealthMetrics, input: LiteralHealthInput<'_, '_>) {
+    let node_text = text_for(input.source, input.node);
+    let string_literal = is_string_literal(input.node.kind());
+    let numeric_literal = is_numeric_literal(input.node.kind());
+    let outermost_string_literal = string_literal
+        && input
+            .node
+            .parent()
+            .is_none_or(|parent| !is_string_literal(parent.kind()));
+    if outermost_string_literal || numeric_literal {
+        metrics.literal_bytes = metrics.literal_bytes.saturating_add(
+            u32::try_from(
+                input
+                    .node
+                    .end_byte()
+                    .saturating_sub(input.node.start_byte()),
+            )
+            .unwrap_or(u32::MAX),
+        );
+    }
+    if numeric_literal && is_magic_number(node_text, input.language) {
+        metrics.magic_numbers = metrics.magic_numbers.saturating_add(1);
+    }
+    if string_literal && contains_hardcoded_url(node_text) {
+        metrics.hardcoded_urls = metrics.hardcoded_urls.saturating_add(1);
+    }
+}
+
+fn record_control_health(
+    metrics: &mut SymbolHealthMetrics,
+    input: ControlHealthInput<'_, '_>,
+) -> u16 {
+    if !is_control_node(input.node.kind()) {
+        return input.nesting;
+    }
+    metrics.cyclomatic = metrics.cyclomatic.saturating_add(1);
+    let depth = if is_else_if_branch(input.node) {
+        input.nesting
+    } else {
+        input.nesting.saturating_add(1)
+    };
+    metrics.max_nesting = metrics.max_nesting.max(depth);
+    if let Some(condition) = condition_node(input.node) {
+        metrics.max_conditional_operands = metrics
+            .max_conditional_operands
+            .max(logical_operator_count(condition, input.source).saturating_add(1));
+    }
+    depth
+}
+
+fn is_else_if_branch(node: Node<'_>) -> bool {
+    matches!(node.kind(), "elif_clause" | "else_if_clause")
+        || (matches!(node.kind(), "if_expression" | "if_statement")
+            && node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "else_clause"))
+}
+
+fn record_loop_health(metrics: &mut SymbolHealthMetrics, input: LiteralHealthInput<'_, '_>) {
+    let text = text_for(input.source, input.node);
+    if is_javascript_for_of(input.node, input.source, input.language)
+        && loop_contains_owned_await(input.node)
+    {
+        metrics.sequential_await_loops = metrics.sequential_await_loops.saturating_add(1);
+    }
+    if text.contains("namedChildCount") && text.contains("namedChild(") {
+        metrics.accidental_quadratic = metrics.accidental_quadratic.saturating_add(1);
+    }
+}
+
+fn is_javascript_for_of(node: Node<'_>, source: &str, language: SourceLanguage) -> bool {
+    matches!(
+        language,
+        SourceLanguage::TypeScript
+            | SourceLanguage::Tsx
+            | SourceLanguage::JavaScript
+            | SourceLanguage::Jsx
+    ) && node.kind() == "for_in_statement"
+        && children(node).any(|child| text_for(source, child) == "of")
+        && !children(node).any(|child| text_for(source, child) == "await")
+}
+
+fn loop_contains_owned_await(node: Node<'_>) -> bool {
+    let mut stack = named_children(node).collect::<Vec<_>>();
+    while let Some(descendant) = stack.pop() {
+        if is_callable_node(descendant.kind()) || is_loop_node(descendant.kind()) {
+            continue;
+        }
+        if descendant.kind() == "await_expression" {
+            return true;
+        }
+        stack.extend(named_children(descendant));
+    }
+    false
+}
+
+fn incomplete_marker_count(body: Node<'_>, source: &str) -> u16 {
+    let mut count = 0_u16;
+    let mut stack = named_children(body).collect::<Vec<_>>();
+    while let Some(node) = stack.pop() {
+        if is_callable_node(node.kind()) {
+            continue;
+        }
+        let text = text_for(source, node);
+        if is_comment_node(node.kind()) {
+            count = INCOMPLETE_COMMENT_MARKERS
+                .iter()
+                .fold(count, |total, marker| {
+                    total.saturating_add(count_word_ascii_case_insensitive(text, marker))
+                });
+            count = count.saturating_add(u16::from(contains_ascii_case_insensitive(
+                text,
+                INCOMPLETE_COMMENT_PHRASE,
+            )));
+            continue;
+        }
+        if is_incomplete_syntax_node(node.kind())
+            && INCOMPLETE_SYNTAX_MARKERS
+                .iter()
+                .any(|marker| contains_ascii_case_insensitive(text, marker))
+        {
+            count = count.saturating_add(1);
+            continue;
+        }
+        stack.extend(named_children(node));
+    }
+    count
+}
+
+fn is_incomplete_syntax_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "call_expression" | "macro_invocation" | "raise_statement" | "throw_statement"
     )
+}
+
+fn parameter_count(input: ParameterMetricInput<'_, '_>) -> u16 {
+    input
+        .declaration
+        .child_by_field_name("parameters")
+        .map_or_else(
+            || u16::from(input.declaration.child_by_field_name("parameter").is_some()),
+            |parameters| {
+                u16::try_from(
+                    named_children(parameters)
+                        .enumerate()
+                        .filter(|(index, parameter)| {
+                            !is_implicit_receiver_parameter(*parameter, *index, input)
+                        })
+                        .count(),
+                )
+                .unwrap_or(u16::MAX)
+            },
+        )
+}
+
+fn is_implicit_receiver_parameter(
+    parameter: Node<'_>,
+    index: usize,
+    input: ParameterMetricInput<'_, '_>,
+) -> bool {
+    if parameter.kind() == "self_parameter" {
+        return true;
+    }
+    let Some(name) = leading_parameter_identifier(text_for(input.source, parameter)) else {
+        return false;
+    };
+    matches!(
+        input.language,
+        SourceLanguage::TypeScript | SourceLanguage::Tsx
+    ) && name == "this"
+        || (input.language == SourceLanguage::Python
+            && input.symbol_kind == SymbolKind::Method
+            && index == 0
+            && matches!(name, "self" | "cls"))
+}
+
+fn leading_parameter_identifier(parameter: &str) -> Option<&str> {
+    parameter
+        .trim_start_matches(|character: char| character.is_whitespace() || character == '*')
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .next()
+        .filter(|name| !name.is_empty())
 }
 
 fn populate_sensitive_and_documentation_metrics(
@@ -171,17 +579,21 @@ fn populate_sensitive_and_documentation_metrics(
     let body_text = input
         .body
         .map_or(declaration_text, |body| text_for(input.source, body));
-    let fields = [
-        input.symbol_name,
-        input.signature.unwrap_or_default(),
-        input.docstring.unwrap_or_default(),
-        body_text,
-    ];
-    let (mut score, signal_mask) = secret_score(&fields);
+    let mut code_fields = vec![input.symbol_name];
+    if let Some(signature) = input.signature {
+        code_fields.push(signature);
+    }
+    let evidence = input
+        .body
+        .map_or_else(SensitiveBodyEvidence::default, |body| {
+            sensitive_body_evidence(body, input.source)
+        });
+    code_fields.extend(evidence.code_fields);
+    let (mut score, signal_mask) = sensitive_material_score(&code_fields, &evidence.literal_fields);
     if is_test_symbol_name(input.symbol_name) {
         score /= 2;
     }
-    metrics.secrets_score = score.min(100);
+    metrics.secrets_score = score.min(MAX_SENSITIVE_SCORE);
     metrics.secrets_signal_mask = signal_mask;
     if input.symbol_kind == SymbolKind::Constant
         && let Some(docstring) = input.docstring
@@ -198,122 +610,167 @@ fn populate_sensitive_and_documentation_metrics(
     }
 }
 
-fn secret_score(fields: &[&str]) -> (u16, u16) {
-    let mut score = 0_u16;
-    let mut signal_mask = 0_u16;
-    let api_key = fields.iter().any(|field| {
-        contains_ascii_case_insensitive(field, "api_key")
-            || contains_ascii_case_insensitive(field, "api-key")
-            || contains_ascii_case_insensitive(field, "apikey")
-            || contains_ascii_case_insensitive(field, "access_key")
-            || contains_ascii_case_insensitive(field, "accesskey")
-            || contains_ascii_case_insensitive(field, "client_secret")
-            || contains_ascii_case_insensitive(field, "clientsecret")
-            || contains_word_ascii_case_insensitive(field, "secret")
-            || contains_word_ascii_case_insensitive(field, "token")
-    });
-    add_secret_signal(&mut score, &mut signal_mask, api_key, SECRET_API_KEY, 30);
-
-    let literal_jwt = fields.iter().any(|field| contains_jwt_literal(field));
-    let jwt = literal_jwt
-        || fields.iter().any(|field| {
-            contains_ascii_case_insensitive(field, "verifyjwt")
-                || contains_ascii_case_insensitive(field, "decodejwt")
-                || contains_ascii_case_insensitive(field, "signjwt")
-                || contains_ascii_case_insensitive(field, "jwt.sign")
-                || contains_ascii_case_insensitive(field, "jwt.verify")
-                || contains_ascii_case_insensitive(field, "jwt.decode")
-        });
-    add_secret_signal(
-        &mut score,
-        &mut signal_mask,
-        jwt,
-        SECRET_JWT,
-        if literal_jwt { 50 } else { 30 },
-    );
-
-    let password = fields.iter().any(|field| {
-        ["password", "passwd", "pwd", "passphrase"]
-            .iter()
-            .any(|term| contains_word_ascii_case_insensitive(field, term))
-    });
-    add_secret_signal(&mut score, &mut signal_mask, password, SECRET_PASSWORD, 30);
-
-    let crypto = fields.iter().any(|field| {
-        ["hmac", "encrypt", "decrypt", "sign", "verify"]
-            .iter()
-            .any(|term| contains_ascii_case_insensitive(field, term))
-            && ["secret", "key"]
-                .iter()
-                .any(|term| contains_ascii_case_insensitive(field, term))
-    });
-    add_secret_signal(&mut score, &mut signal_mask, crypto, SECRET_CRYPTO, 20);
-
-    let literal_aws = fields
-        .iter()
-        .any(|field| contains_aws_access_key_literal(field));
-    let aws = literal_aws
-        || fields.iter().any(|field| {
-            contains_ascii_case_insensitive(field, "aws_secret_access_key")
-                || contains_ascii_case_insensitive(field, "aws_access_key_id")
-                || contains_ascii_case_insensitive(field, "aws-secret-access-key")
-                || contains_ascii_case_insensitive(field, "aws-access-key-id")
-        });
-    add_secret_signal(
-        &mut score,
-        &mut signal_mask,
-        aws,
-        SECRET_AWS,
-        if literal_aws { 60 } else { 40 },
-    );
-
-    let env_secret = fields.iter().any(|field| {
-        (contains_ascii_case_insensitive(field, "process.env.")
-            || contains_ascii_case_insensitive(field, "env[")
-            || contains_ascii_case_insensitive(field, "getenv("))
-            && ["secret", "token", "key", "password"]
-                .iter()
-                .any(|term| contains_ascii_case_insensitive(field, term))
-    });
-    add_secret_signal(&mut score, &mut signal_mask, env_secret, SECRET_ENV, 30);
-
-    let pii = fields.iter().any(|field| {
-        [
-            "ssn",
-            "social_security",
-            "social-security",
-            "credit_card",
-            "credit-card",
-            "date_of_birth",
-            "phone_number",
-            "email_address",
-        ]
-        .iter()
-        .any(|term| contains_ascii_case_insensitive(field, term))
-    });
-    add_secret_signal(&mut score, &mut signal_mask, pii, SECRET_PII, 20);
-
-    let literal = fields
-        .iter()
-        .any(|field| contains_long_token_literal(field));
-    add_secret_signal(&mut score, &mut signal_mask, literal, SECRET_LITERAL, 20);
-    (score.min(100), signal_mask)
-}
-
-fn add_secret_signal(
-    score: &mut u16,
-    signal_mask: &mut u16,
-    matched: bool,
-    signal: u16,
-    weight: u16,
-) {
-    if matched {
-        *score = score.saturating_add(weight);
-        *signal_mask |= signal;
+fn sensitive_body_evidence<'source>(
+    body: Node<'_>,
+    source: &'source str,
+) -> SensitiveBodyEvidence<'source> {
+    let mut excluded_ranges = Vec::new();
+    let mut literal_fields = Vec::new();
+    let mut stack = named_children(body).collect::<Vec<_>>();
+    while let Some(node) = stack.pop() {
+        if is_callable_node(node.kind()) || is_comment_node(node.kind()) {
+            excluded_ranges.push((node.start_byte(), node.end_byte()));
+            continue;
+        }
+        if is_opaque_string_literal(node.kind()) {
+            if let Some(literal) = source.get(node.start_byte()..node.end_byte()) {
+                literal_fields.push(literal);
+            }
+            excluded_ranges.push((node.start_byte(), node.end_byte()));
+            continue;
+        }
+        stack.extend(named_children(node));
+    }
+    excluded_ranges.sort_unstable();
+    let mut code_fields = Vec::new();
+    let mut cursor = body.start_byte();
+    for (start, end) in excluded_ranges {
+        let start = start.max(cursor).min(body.end_byte());
+        let end = end.max(start).min(body.end_byte());
+        if cursor < start
+            && let Some(code) = source.get(cursor..start)
+        {
+            code_fields.push(code);
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < body.end_byte()
+        && let Some(code) = source.get(cursor..body.end_byte())
+    {
+        code_fields.push(code);
+    }
+    SensitiveBodyEvidence {
+        code_fields,
+        literal_fields,
     }
 }
 
-fn contains_word_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+fn sensitive_material_score(code_fields: &[&str], literal_fields: &[&str]) -> (u16, u16) {
+    let mut score = SensitiveScore::default();
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: contains_identifier_signal(code_fields),
+            category: SIGNAL_CATEGORY_CREDENTIAL,
+            weight: IDENTIFIER_SIGNAL_WEIGHT,
+        },
+    );
+    let signed_claim_literal = literal_fields
+        .iter()
+        .any(|field| contains_jwt_literal(field));
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: signed_claim_literal
+                || fields_contain_substring(code_fields, SIGNED_CLAIM_SUBSTRINGS),
+            category: SIGNAL_CATEGORY_SIGNED_CLAIM,
+            weight: if signed_claim_literal {
+                SIGNED_CLAIM_LITERAL_WEIGHT
+            } else {
+                SIGNED_CLAIM_SIGNAL_WEIGHT
+            },
+        },
+    );
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: fields_contain_identifier_component(code_fields, LOGIN_MATERIAL_WORDS),
+            category: SIGNAL_CATEGORY_LOGIN_MATERIAL,
+            weight: LOGIN_MATERIAL_SIGNAL_WEIGHT,
+        },
+    );
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: fields_contain_identifier_component(
+                code_fields,
+                CRYPTOGRAPHIC_OPERATION_COMPONENTS,
+            ) && fields_contain_identifier_component(
+                code_fields,
+                CRYPTOGRAPHIC_MATERIAL_COMPONENTS,
+            ),
+            category: SIGNAL_CATEGORY_CRYPTOGRAPHY,
+            weight: CRYPTOGRAPHIC_SIGNAL_WEIGHT,
+        },
+    );
+    let cloud_literal = literal_fields
+        .iter()
+        .any(|field| contains_aws_access_key_literal(field));
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: cloud_literal
+                || fields_contain_substring(code_fields, CLOUD_IDENTIFIER_SUBSTRINGS),
+            category: SIGNAL_CATEGORY_CLOUD,
+            weight: if cloud_literal {
+                CLOUD_LITERAL_WEIGHT
+            } else {
+                CLOUD_SIGNAL_WEIGHT
+            },
+        },
+    );
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: fields_contain_substring(code_fields, ENVIRONMENT_ACCESS_SUBSTRINGS)
+                && fields_contain_substring(code_fields, ENVIRONMENT_MATERIAL_SUBSTRINGS),
+            category: SIGNAL_CATEGORY_ENVIRONMENT,
+            weight: ENVIRONMENT_SIGNAL_WEIGHT,
+        },
+    );
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: fields_contain_substring(code_fields, PERSONAL_DATA_SUBSTRINGS),
+            category: SIGNAL_CATEGORY_PERSONAL_DATA,
+            weight: PERSONAL_DATA_SIGNAL_WEIGHT,
+        },
+    );
+    add_sensitive_signal(
+        &mut score,
+        SensitiveSignal {
+            matched: literal_fields
+                .iter()
+                .any(|field| contains_long_token_literal(field)),
+            category: SIGNAL_CATEGORY_LITERAL,
+            weight: LONG_LITERAL_SIGNAL_WEIGHT,
+        },
+    );
+    (score.value.min(MAX_SENSITIVE_SCORE), score.signal_mask)
+}
+
+fn contains_identifier_signal(fields: &[&str]) -> bool {
+    fields_contain_substring(fields, CREDENTIAL_IDENTIFIER_SUBSTRINGS)
+        || fields_contain_identifier_component(fields, CREDENTIAL_IDENTIFIER_WORDS)
+}
+
+fn fields_contain_substring(fields: &[&str], terms: &[&str]) -> bool {
+    fields.iter().any(|field| {
+        terms
+            .iter()
+            .any(|term| contains_ascii_case_insensitive(field, term))
+    })
+}
+
+fn fields_contain_identifier_component(fields: &[&str], terms: &[&str]) -> bool {
+    fields.iter().any(|field| {
+        terms
+            .iter()
+            .any(|term| contains_identifier_component_ascii_case_insensitive(field, term))
+    })
+}
+
+fn contains_identifier_component_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() || haystack.len() < needle.len() {
         return false;
     }
@@ -322,15 +779,51 @@ fn contains_word_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .windows(needle.len())
         .enumerate()
         .any(|(index, window)| {
+            let before = index
+                .checked_sub(1)
+                .and_then(|previous| haystack.as_bytes().get(previous));
+            let after = haystack.as_bytes().get(index.saturating_add(needle.len()));
             window.eq_ignore_ascii_case(needle.as_bytes())
-                && index
-                    .checked_sub(1)
-                    .and_then(|previous| haystack.as_bytes().get(previous))
-                    .is_none_or(|byte| !is_identifier_byte(*byte))
-                && haystack
-                    .as_bytes()
-                    .get(index.saturating_add(needle.len()))
-                    .is_none_or(|byte| !is_identifier_byte(*byte))
+                && before.is_none_or(|byte| {
+                    !byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'_' | b'$')
+                        || window.first().is_some_and(u8::is_ascii_uppercase)
+                })
+                && after.is_none_or(|byte| {
+                    !byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'_' | b'$')
+                        || byte.is_ascii_uppercase()
+                })
+        })
+}
+
+fn add_sensitive_signal(score: &mut SensitiveScore, signal: SensitiveSignal) {
+    if signal.matched {
+        score.value = score.value.saturating_add(signal.weight);
+        score.signal_mask |= signal.category;
+    }
+}
+
+fn count_word_ascii_case_insensitive(haystack: &str, needle: &str) -> u16 {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .enumerate()
+        .fold(0_u16, |count, (index, window)| {
+            count.saturating_add(u16::from(
+                window.eq_ignore_ascii_case(needle.as_bytes())
+                    && index
+                        .checked_sub(1)
+                        .and_then(|previous| haystack.as_bytes().get(previous))
+                        .is_none_or(|byte| !is_identifier_byte(*byte))
+                    && haystack
+                        .as_bytes()
+                        .get(index.saturating_add(needle.len()))
+                        .is_none_or(|byte| !is_identifier_byte(*byte)),
+            ))
         })
 }
 
@@ -568,21 +1061,49 @@ fn is_magic_number(raw: &str, language: SourceLanguage) -> bool {
     {
         return false;
     }
-    if matches!(
-        normalized.as_str(),
-        "0" | "1" | "-1" | "2" | "0.0" | "1.0" | "-1.0"
-    ) {
-        return false;
-    }
-    if language == SourceLanguage::Go
-        && matches!(
-            normalized.as_str(),
-            "7" | "24" | "30" | "60" | "365" | "1000" | "1024" | "86400"
-        )
-    {
+    let unsigned = normalized.trim_start_matches(['-', '+']);
+    let normalized_value = strip_numeric_literal_suffix(unsigned);
+    if benign_numeric_value(normalized_value, language) {
         return false;
     }
     true
+}
+
+fn strip_numeric_literal_suffix(value: &str) -> &str {
+    let suffixes = if value.starts_with("0x") {
+        INTEGER_LITERAL_SUFFIXES
+    } else {
+        DECIMAL_LITERAL_SUFFIXES
+    };
+    suffixes
+        .iter()
+        .find_map(|suffix| {
+            value
+                .strip_suffix(suffix)
+                .filter(|number| !number.is_empty())
+        })
+        .unwrap_or(value)
+}
+
+fn benign_numeric_value(value: &str, language: SourceLanguage) -> bool {
+    let integer = value
+        .strip_prefix("0x")
+        .map(|digits| (digits, HEX_RADIX))
+        .or_else(|| value.strip_prefix("0o").map(|digits| (digits, OCTAL_RADIX)))
+        .or_else(|| {
+            value
+                .strip_prefix("0b")
+                .map(|digits| (digits, BINARY_RADIX))
+        })
+        .and_then(|(digits, radix)| u128::from_str_radix(digits, radix).ok())
+        .or_else(|| value.parse::<u128>().ok());
+    if let Some(integer) = integer {
+        return matches!(integer, 0..=2)
+            || (language == SourceLanguage::Go && GO_NON_MAGIC_INTEGERS.contains(&integer));
+    }
+    value
+        .parse::<f64>()
+        .is_ok_and(|number| matches!(number, 0.0 | 1.0 | 2.0))
 }
 
 fn is_string_literal(kind: &str) -> bool {
@@ -595,6 +1116,10 @@ fn is_string_literal(kind: &str) -> bool {
             | "template_string"
             | "string_content"
     )
+}
+
+fn is_opaque_string_literal(kind: &str) -> bool {
+    is_string_literal(kind) && kind != "template_string"
 }
 
 fn contains_hardcoded_url(raw: &str) -> bool {
@@ -712,92 +1237,104 @@ fn catch_is_empty(node: Node<'_>, source: &str) -> bool {
         .is_some_and(body_is_empty)
 }
 
-fn populate_text_metrics(
-    metrics: &mut SymbolHealthMetrics,
-    raw: &str,
-    language: SourceLanguage,
-    async_symbol: bool,
-) {
+fn populate_text_metrics(metrics: &mut SymbolHealthMetrics, input: TextMetricInput<'_>) {
     let javascript = matches!(
-        language,
+        input.language,
         SourceLanguage::TypeScript
             | SourceLanguage::Tsx
             | SourceLanguage::JavaScript
             | SourceLanguage::Jsx
     );
-    let typescript = matches!(language, SourceLanguage::TypeScript | SourceLanguage::Tsx);
+    let typescript = matches!(
+        input.language,
+        SourceLanguage::TypeScript | SourceLanguage::Tsx
+    );
     if typescript {
-        metrics.ts_any_casts = count_ascii_case_insensitive(raw, " as any")
-            .saturating_add(count_ascii_case_insensitive(raw, " as unknown as "));
-        metrics.ts_suppressions = count_ascii_case_insensitive(raw, "@ts-ignore")
-            .saturating_add(count_ascii_case_insensitive(raw, "@ts-expect-error"));
+        populate_typescript_metrics(metrics, input.raw);
     }
     if javascript {
-        let diagnostic_gate = ["process.env", "debug", "verbose", "trace"]
-            .iter()
-            .any(|needle| contains_ascii_case_insensitive(raw, needle));
-        if !diagnostic_gate {
-            metrics.debug_logs = [
+        populate_javascript_metrics(metrics, input);
+    }
+    metrics.empty_body = u16::from(body_is_empty(input.raw));
+}
+
+fn populate_typescript_metrics(metrics: &mut SymbolHealthMetrics, raw: &str) {
+    metrics.ts_any_casts = count_ascii_case_insensitive(raw, " as any")
+        .saturating_add(count_ascii_case_insensitive(raw, " as unknown as "));
+    metrics.ts_suppressions = count_ascii_case_insensitive(raw, "@ts-ignore")
+        .saturating_add(count_ascii_case_insensitive(raw, "@ts-expect-error"));
+}
+
+fn populate_javascript_metrics(metrics: &mut SymbolHealthMetrics, input: TextMetricInput<'_>) {
+    let diagnostic_gate = ["process.env", "debug", "verbose", "trace"]
+        .iter()
+        .any(|needle| contains_ascii_case_insensitive(input.raw, needle));
+    if !diagnostic_gate {
+        metrics.debug_logs = count_javascript_signals(
+            input.raw,
+            &[
                 "console.log(",
                 "console.error(",
                 "console.warn(",
                 "console.info(",
                 "console.debug(",
-            ]
-            .iter()
-            .fold(0_u16, |count, needle| {
-                count.saturating_add(count_ascii_case_insensitive(raw, needle))
-            });
-        }
-        metrics.dynamic_eval = count_ascii_case_insensitive(raw, "eval(")
-            .saturating_add(count_ascii_case_insensitive(raw, "new function("));
-        metrics.insecure_hash = count_ascii_case_insensitive(raw, "createhash('md5'")
-            .saturating_add(count_ascii_case_insensitive(raw, "createhash(\"md5\""))
-            .saturating_add(count_ascii_case_insensitive(raw, "createhash('sha1'"))
-            .saturating_add(count_ascii_case_insensitive(raw, "createhash(\"sha1\""));
-        if contains_security_word(raw) {
-            metrics.insecure_random = count_ascii_case_insensitive(raw, "math.random(");
-        }
-        let network_calls = count_ascii_case_insensitive(raw, "fetch(")
-            .saturating_add(count_ascii_case_insensitive(raw, "axios."));
-        if network_calls > 0
-            && !contains_ascii_case_insensitive(raw, "timeout")
-            && !contains_ascii_case_insensitive(raw, "signal")
-        {
-            metrics.http_without_timeout = network_calls;
-        }
-        if contains_sql_word(raw) && (raw.contains("${") || raw.contains(" + ")) {
-            metrics.sql_string_concatenation = 1;
-        }
-        let json_parse = count_ascii_case_insensitive(raw, "json.parse(");
-        if json_parse > 0 && !contains_ascii_case_insensitive(raw, "try") {
-            metrics.unsafe_json_parse = json_parse;
-        }
-        let env_reads = count_ascii_case_insensitive(raw, "process.env.");
-        if env_reads > 0 && !contains_ascii_case_insensitive(raw, "z.") {
-            metrics.unvalidated_env = env_reads;
-        }
-        if async_symbol {
-            metrics.sync_io_in_async = [
+            ],
+        );
+    }
+    metrics.dynamic_eval = count_javascript_signals(input.raw, &["eval(", "new function("]);
+    metrics.insecure_hash = count_javascript_signals(
+        input.raw,
+        &[
+            "createhash('md5'",
+            "createhash(\"md5\"",
+            "createhash('sha1'",
+            "createhash(\"sha1\"",
+        ],
+    );
+    populate_javascript_safety_metrics(metrics, input.raw);
+    if input.async_symbol {
+        metrics.sync_io_in_async = count_javascript_signals(
+            input.raw,
+            &[
                 "readfilesync(",
                 "writefilesync(",
                 "appendfilesync(",
                 "execsync(",
                 "execfilesync(",
                 "spawnsync(",
-            ]
-            .iter()
-            .fold(0_u16, |count, needle| {
-                count.saturating_add(count_ascii_case_insensitive(raw, needle))
-            });
-        }
+            ],
+        );
     }
-    metrics.incomplete_markers = ["todo", "fixme", "xxx", "hack", "not implemented"]
-        .iter()
-        .fold(0_u16, |count, needle| {
-            count.saturating_add(count_ascii_case_insensitive(raw, needle))
-        });
-    metrics.empty_body = u16::from(body_is_empty(raw));
+}
+
+fn count_javascript_signals(raw: &str, signals: &[&str]) -> u16 {
+    signals.iter().fold(0_u16, |count, signal| {
+        count.saturating_add(count_ascii_case_insensitive(raw, signal))
+    })
+}
+
+fn populate_javascript_safety_metrics(metrics: &mut SymbolHealthMetrics, raw: &str) {
+    if contains_security_word(raw) {
+        metrics.insecure_random = count_ascii_case_insensitive(raw, "math.random(");
+    }
+    let network_calls = count_javascript_signals(raw, &["fetch(", "axios."]);
+    if network_calls > 0
+        && !contains_ascii_case_insensitive(raw, "timeout")
+        && !contains_ascii_case_insensitive(raw, "signal")
+    {
+        metrics.http_without_timeout = network_calls;
+    }
+    if contains_sql_word(raw) && (raw.contains("${") || raw.contains(" + ")) {
+        metrics.sql_string_concatenation = 1;
+    }
+    let json_parse = count_ascii_case_insensitive(raw, "json.parse(");
+    if json_parse > 0 && !contains_ascii_case_insensitive(raw, "try") {
+        metrics.unsafe_json_parse = json_parse;
+    }
+    let env_reads = count_ascii_case_insensitive(raw, "process.env.");
+    if env_reads > 0 && !contains_ascii_case_insensitive(raw, "z.") {
+        metrics.unvalidated_env = env_reads;
+    }
 }
 
 fn body_is_empty(raw: &str) -> bool {
@@ -1053,20 +1590,21 @@ pub(super) fn body_search_text(
     Ok(BodySearchText { text, truncated })
 }
 
+const SEARCH_IDENTIFIER_KINDS: &[&str] = &[
+    "identifier",
+    "field_identifier",
+    "jsx_identifier",
+    "package_identifier",
+    "private_property_identifier",
+    "property_identifier",
+    "shorthand_property_identifier",
+    "shorthand_property_identifier_pattern",
+    "statement_identifier",
+    "type_identifier",
+];
+
 fn is_search_identifier(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier"
-            | "field_identifier"
-            | "jsx_identifier"
-            | "package_identifier"
-            | "private_property_identifier"
-            | "property_identifier"
-            | "shorthand_property_identifier"
-            | "shorthand_property_identifier_pattern"
-            | "statement_identifier"
-            | "type_identifier"
-    )
+    SEARCH_IDENTIFIER_KINDS.contains(&kind)
 }
 
 fn is_search_keyword(kind: &str) -> bool {
@@ -1259,8 +1797,14 @@ pub(crate) fn clone_token_profile(
             Some(total) if total <= MAX_CLONE_PROFILE_TOTAL_TOKENS => total,
             _ => return Ok(None),
         };
-        let fingerprint =
-            clone_token_fingerprint(class, node.kind(), text_for(source, node), cancelled)?;
+        let fingerprint = clone_token_fingerprint(
+            CloneFingerprintInput {
+                class,
+                kind: node.kind(),
+                text: text_for(source, node),
+            },
+            cancelled,
+        )?;
         if let Some(count) = counts.get_mut(&fingerprint) {
             *count = count.saturating_add(1);
             continue;
@@ -1293,6 +1837,13 @@ enum CloneTokenClass {
     Structural,
 }
 
+#[derive(Clone, Copy)]
+struct CloneFingerprintInput<'text> {
+    class: CloneTokenClass,
+    kind: &'text str,
+    text: &'text str,
+}
+
 fn clone_token_class(kind: &str) -> CloneTokenClass {
     if contains_ascii_case_insensitive(kind, "comment") {
         CloneTokenClass::Comment
@@ -1311,16 +1862,14 @@ fn clone_token_class(kind: &str) -> CloneTokenClass {
 }
 
 fn clone_token_fingerprint(
-    class: CloneTokenClass,
-    kind: &str,
-    text: &str,
+    input: CloneFingerprintInput<'_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<u64, ExtractError> {
     let mut hasher = blake3::Hasher::new_derive_key("cartograph.v2.clone-token.2026-07-24");
-    match class {
+    match input.class {
         CloneTokenClass::Identifier => {
             hasher.update(b"identifier\0");
-            for chunk in text.as_bytes().chunks(HASH_CHUNK_BYTES) {
+            for chunk in input.text.as_bytes().chunks(HASH_CHUNK_BYTES) {
                 if cancelled() {
                     return Err(ExtractError::Cancelled);
                 }
@@ -1332,7 +1881,7 @@ fn clone_token_fingerprint(
         }
         CloneTokenClass::Structural => {
             hasher.update(b"structural\0");
-            hasher.update(kind.as_bytes());
+            hasher.update(input.kind.as_bytes());
         }
         CloneTokenClass::Comment => return Ok(0),
     }
@@ -1388,7 +1937,14 @@ pub(super) fn jsdoc(
     while let Some(comment) = sibling {
         if comments.len() >= MAX_DOC_COMMENT_NODES
             || !is_comment_node(comment.kind())
-            || !has_contiguous_comment_gap(source, comment, closer, cancelled)?
+            || !has_contiguous_comment_gap(
+                CommentGapInput {
+                    source,
+                    left: comment,
+                    right: closer,
+                },
+                cancelled,
+            )?
         {
             break;
         }
@@ -1414,23 +1970,45 @@ pub(super) fn jsdoc(
         return Ok(None);
     }
     comments.reverse();
-    normalize_preceding_comments(&comments, source, retained_bytes, cancelled)
+    normalize_preceding_comments(
+        CommentNormalizationInput {
+            comments: &comments,
+            source,
+            retained_bytes,
+        },
+        cancelled,
+    )
 }
 
 fn is_comment_node(kind: &str) -> bool {
     matches!(
         kind,
         "comment" | "line_comment" | "block_comment" | "documentation_comment"
-    )
+    ) || kind.ends_with("_comment")
+}
+
+#[derive(Clone, Copy)]
+struct CommentGapInput<'tree, 'source> {
+    source: &'source str,
+    left: Node<'tree>,
+    right: Node<'tree>,
+}
+
+#[derive(Clone, Copy)]
+struct CommentNormalizationInput<'tree, 'source> {
+    comments: &'source [Node<'tree>],
+    source: &'source str,
+    retained_bytes: usize,
 }
 
 fn has_contiguous_comment_gap(
-    source: &str,
-    left: Node<'_>,
-    right: Node<'_>,
+    input: CommentGapInput<'_, '_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<bool, ExtractError> {
-    let Some(gap) = source.get(left.end_byte()..right.start_byte()) else {
+    let Some(gap) = input
+        .source
+        .get(input.left.end_byte()..input.right.start_byte())
+    else {
         return Ok(false);
     };
     if ensure_fact_string_length(gap.len()).is_err() {
@@ -1466,21 +2044,19 @@ fn has_contiguous_comment_gap(
 }
 
 fn normalize_preceding_comments(
-    comments: &[Node<'_>],
-    source: &str,
-    retained_bytes: usize,
+    input: CommentNormalizationInput<'_, '_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Option<String>, ExtractError> {
     let mut normalized = String::new();
     normalized
-        .try_reserve(retained_bytes)
+        .try_reserve(input.retained_bytes)
         .map_err(|_| ExtractError::OutputLimit)?;
     let mut pending_blank_lines = 0_usize;
-    for comment in comments {
+    for comment in input.comments {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
-        let raw = text_for(source, *comment);
+        let raw = text_for(input.source, *comment);
         let mut lines = raw.lines().peekable();
         let mut first = true;
         while let Some(line) = lines.next() {
@@ -1624,6 +2200,31 @@ pub(crate) fn collect_diagnostics(
 
 pub(super) fn descendants_including_root(node: Node<'_>) -> Descendants<'_> {
     Descendants::new(node, true)
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DescendantQuery<'tree, 'kind> {
+    pub(super) node: Node<'tree>,
+    pub(super) kind: &'kind str,
+    pub(super) depth: usize,
+    pub(super) maximum_depth: usize,
+}
+
+pub(super) fn descendant_of_kind<'tree>(query: DescendantQuery<'tree, '_>) -> Option<Node<'tree>> {
+    if query.depth > query.maximum_depth {
+        return None;
+    }
+    if query.node.kind() == query.kind {
+        return Some(query.node);
+    }
+    named_children(query.node).find_map(|child| {
+        descendant_of_kind(DescendantQuery {
+            node: child,
+            kind: query.kind,
+            depth: query.depth.saturating_add(1),
+            maximum_depth: query.maximum_depth,
+        })
+    })
 }
 
 pub(super) fn descendants(node: Node<'_>) -> Descendants<'_> {

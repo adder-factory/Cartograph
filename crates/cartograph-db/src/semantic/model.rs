@@ -49,16 +49,17 @@ impl CartographDatabase {
         let mut transaction =
             begin_bounded(self, request.statement_timeout, "retire-model-begin").await?;
         let result = retire_model_transaction(&mut transaction, self, &request).await;
-        match result {
-            Ok(model) => {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| database_error("retire-model-commit"))?;
-                Ok(model)
+        let model = match result {
+            Ok(model) => model,
+            Err(error) => {
+                return Err(rollback_error(transaction, error, "retire-model-rollback").await);
             }
-            Err(error) => Err(rollback_error(transaction, error, "retire-model-rollback").await),
-        }
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("retire-model-commit"))?;
+        Ok(model)
     }
 }
 

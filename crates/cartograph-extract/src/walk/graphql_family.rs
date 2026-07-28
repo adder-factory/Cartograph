@@ -6,8 +6,8 @@ use tree_sitter::Node;
 use crate::{
     ExtractError, ExtractedReference,
     walk::{
-        ExtractionBuilder, ExtractionContext, PendingSymbol,
-        syntax::{named_children, span_for},
+        ExtractionBuilder, ExtractionContext, JoinedSignature, PendingSymbol, joined_signature,
+        syntax::{DescendantQuery, descendant_of_kind, named_children, span_for},
     },
 };
 
@@ -17,18 +17,18 @@ const MAX_RELATION_TARGETS: usize = 1024;
 pub(super) fn visit_declaration(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
-    depth: usize,
+    _depth: usize,
 ) -> Result<bool, ExtractError> {
     match node.kind() {
         "type_definition" => {
             if let Some(definition) = first_supported_definition(node) {
-                emit_definition(builder, definition, false, depth)?;
+                emit_definition(builder, definition, false)?;
             }
             Ok(true)
         }
         "type_extension" => {
             if let Some(extension) = first_supported_extension(node) {
-                emit_definition(builder, extension, true, depth)?;
+                emit_definition(builder, extension, true)?;
             }
             Ok(true)
         }
@@ -41,22 +41,15 @@ pub(super) fn visit_declaration(
         | "operation_definition"
         | "fragment_definition" => Ok(true),
         kind if is_supported_definition(kind) => {
-            emit_definition(builder, node, false, depth)?;
+            emit_definition(builder, node, false)?;
             Ok(true)
         }
         kind if is_supported_extension(kind) => {
-            emit_definition(builder, node, true, depth)?;
+            emit_definition(builder, node, true)?;
             Ok(true)
         }
         _ => Ok(false),
     }
-}
-
-pub(super) fn capture_usage(
-    _builder: &mut ExtractionBuilder<'_, '_>,
-    _node: Node<'_>,
-) -> Result<(), ExtractError> {
-    Ok(())
 }
 
 pub(super) fn description_from_context(
@@ -119,35 +112,37 @@ fn emit_definition(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
     extension: bool,
-    depth: usize,
 ) -> Result<(), ExtractError> {
     match node.kind() {
         "object_type_definition" | "object_type_extension" => emit_fields_container(
             builder,
-            node,
-            extension,
-            SymbolKind::Class,
-            "type",
-            "fields_definition",
-            depth,
+            FieldsContainerInput {
+                node,
+                extension,
+                kind: SymbolKind::Class,
+                keyword: "type",
+                block_kind: "fields_definition",
+            },
         ),
         "interface_type_definition" | "interface_type_extension" => emit_fields_container(
             builder,
-            node,
-            extension,
-            SymbolKind::Interface,
-            "interface",
-            "fields_definition",
-            depth,
+            FieldsContainerInput {
+                node,
+                extension,
+                kind: SymbolKind::Interface,
+                keyword: "interface",
+                block_kind: "fields_definition",
+            },
         ),
         "input_object_type_definition" | "input_object_type_extension" => emit_fields_container(
             builder,
-            node,
-            extension,
-            SymbolKind::Class,
-            "input",
-            "input_fields_definition",
-            depth,
+            FieldsContainerInput {
+                node,
+                extension,
+                kind: SymbolKind::Class,
+                keyword: "input",
+                block_kind: "input_fields_definition",
+            },
         ),
         "enum_type_definition" | "enum_type_extension" => emit_enum(builder, node, extension),
         "union_type_definition" | "union_type_extension" => emit_union(builder, node, extension),
@@ -156,20 +151,37 @@ fn emit_definition(
     }
 }
 
-fn emit_fields_container(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
+struct FieldsContainerInput<'tree> {
+    node: Node<'tree>,
     extension: bool,
     kind: SymbolKind,
-    keyword: &str,
-    block_kind: &str,
-    _depth: usize,
+    keyword: &'static str,
+    block_kind: &'static str,
+}
+
+fn emit_fields_container(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: FieldsContainerInput<'_>,
 ) -> Result<(), ExtractError> {
+    let FieldsContainerInput {
+        node,
+        extension,
+        kind,
+        keyword,
+        block_kind,
+    } = input;
     let Some(name_node) = direct_child(node, "name") else {
         return Ok(());
     };
     let name = builder.context.owned_text(name_node)?;
-    let signature = declaration_signature(builder, extension, keyword, &name)?;
+    let signature = declaration_signature(
+        builder,
+        DeclarationSignature {
+            extension,
+            keyword,
+            name: &name,
+        },
+    )?;
     let pending = PendingSymbol {
         kind,
         name: name.clone(),
@@ -187,14 +199,24 @@ fn emit_fields_container(
     };
     let owner = builder.emit_symbol(pending)?;
     if extension {
-        emit_reference(builder, &owner, name_node, &name, ReferenceKind::Extends)?;
+        emit_reference(
+            builder,
+            GraphqlReference {
+                owner: &owner,
+                node: name_node,
+                name: &name,
+                kind: ReferenceKind::Extends,
+            },
+        )?;
     }
     emit_named_relations(
         builder,
-        node,
-        "implements_interfaces",
-        &owner,
-        ReferenceKind::Implements,
+        NamedRelations {
+            node,
+            container_kind: "implements_interfaces",
+            owner: &owner,
+            kind: ReferenceKind::Implements,
+        },
     )?;
 
     builder.owners.push(owner);
@@ -248,10 +270,12 @@ fn emit_field(builder: &mut ExtractionBuilder<'_, '_>, node: Node<'_>) -> Result
     {
         emit_reference(
             builder,
-            &field,
-            base_node,
-            &base_name,
-            ReferenceKind::TypeOf,
+            GraphqlReference {
+                owner: &field,
+                node: base_node,
+                name: &base_name,
+                kind: ReferenceKind::TypeOf,
+            },
         )?;
     }
     Ok(())
@@ -266,7 +290,14 @@ fn emit_enum(
         return Ok(());
     };
     let name = builder.context.owned_text(name_node)?;
-    let signature = declaration_signature(builder, extension, "enum", &name)?;
+    let signature = declaration_signature(
+        builder,
+        DeclarationSignature {
+            extension,
+            keyword: "enum",
+            name: &name,
+        },
+    )?;
     let pending = PendingSymbol {
         kind: SymbolKind::Enum,
         name: name.clone(),
@@ -284,7 +315,15 @@ fn emit_enum(
     };
     let owner = builder.emit_symbol(pending)?;
     if extension {
-        emit_reference(builder, &owner, name_node, &name, ReferenceKind::Extends)?;
+        emit_reference(
+            builder,
+            GraphqlReference {
+                owner: &owner,
+                node: name_node,
+                name: &name,
+                kind: ReferenceKind::Extends,
+            },
+        )?;
     }
     builder.owners.push(owner);
     builder.native_owner_kinds.push(SymbolKind::Enum);
@@ -296,11 +335,16 @@ fn emit_enum(
             if value.kind() != "enum_value_definition" {
                 continue;
             }
-            let Some(value_node) = descendant_of_kind(value, "name", 0) else {
+            let Some(value_node) = descendant_of_kind(DescendantQuery {
+                node: value,
+                kind: "name",
+                depth: 0,
+                maximum_depth: MAX_TYPE_DEPTH,
+            }) else {
                 continue;
             };
             let member = builder.context.owned_text(value_node)?;
-            let signature = dotted_signature(builder, &name, &member)?;
+            let signature = joined_signature(builder, JoinedSignature::dotted(&name, &member))?;
             builder.emit_symbol(PendingSymbol {
                 kind: SymbolKind::EnumMember,
                 name: member,
@@ -334,7 +378,14 @@ fn emit_union(
         return Ok(());
     };
     let name = builder.context.owned_text(name_node)?;
-    let signature = declaration_signature(builder, extension, "union", &name)?;
+    let signature = declaration_signature(
+        builder,
+        DeclarationSignature {
+            extension,
+            keyword: "union",
+            name: &name,
+        },
+    )?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::TypeAlias,
         name: name.clone(),
@@ -351,14 +402,24 @@ fn emit_union(
         visibility: None,
     })?;
     if extension {
-        emit_reference(builder, &owner, name_node, &name, ReferenceKind::Extends)?;
+        emit_reference(
+            builder,
+            GraphqlReference {
+                owner: &owner,
+                node: name_node,
+                name: &name,
+                kind: ReferenceKind::Extends,
+            },
+        )?;
     }
     emit_named_relations(
         builder,
-        node,
-        "union_member_types",
-        &owner,
-        ReferenceKind::References,
+        NamedRelations {
+            node,
+            container_kind: "union_member_types",
+            owner: &owner,
+            kind: ReferenceKind::References,
+        },
     )
 }
 
@@ -371,7 +432,14 @@ fn emit_scalar(
         return Ok(());
     };
     let name = builder.context.owned_text(name_node)?;
-    let signature = declaration_signature(builder, extension, "scalar", &name)?;
+    let signature = declaration_signature(
+        builder,
+        DeclarationSignature {
+            extension,
+            keyword: "scalar",
+            name: &name,
+        },
+    )?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::TypeAlias,
         name: name.clone(),
@@ -388,7 +456,15 @@ fn emit_scalar(
         visibility: None,
     })?;
     if extension {
-        emit_reference(builder, &owner, name_node, &name, ReferenceKind::Extends)?;
+        emit_reference(
+            builder,
+            GraphqlReference {
+                owner: &owner,
+                node: name_node,
+                name: &name,
+                kind: ReferenceKind::Extends,
+            },
+        )?;
     }
     Ok(())
 }
@@ -421,14 +497,18 @@ fn emit_directive(
     Ok(())
 }
 
+struct NamedRelations<'tree, 'owner> {
+    node: Node<'tree>,
+    container_kind: &'static str,
+    owner: &'owner SymbolId,
+    kind: ReferenceKind,
+}
+
 fn emit_named_relations(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    container_kind: &str,
-    owner: &SymbolId,
-    kind: ReferenceKind,
+    input: NamedRelations<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let Some(container) = direct_child(node, container_kind) else {
+    let Some(container) = direct_child(input.node, input.container_kind) else {
         return Ok(());
     };
     let mut targets = Vec::new();
@@ -444,7 +524,15 @@ fn emit_named_relations(
         };
         let name = builder.context.owned_text(name_node)?;
         if seen.insert(name.clone()) {
-            emit_reference(builder, owner, name_node, &name, kind)?;
+            emit_reference(
+                builder,
+                GraphqlReference {
+                    owner: input.owner,
+                    node: name_node,
+                    name: &name,
+                    kind: input.kind,
+                },
+            )?;
         }
     }
     Ok(())
@@ -494,33 +582,41 @@ fn base_named_type<'tree>(
     Ok(None)
 }
 
+struct GraphqlReference<'tree, 'value> {
+    owner: &'value SymbolId,
+    node: Node<'tree>,
+    name: &'value str,
+    kind: ReferenceKind,
+}
+
 fn emit_reference(
     builder: &mut ExtractionBuilder<'_, '_>,
-    owner: &SymbolId,
-    node: Node<'_>,
-    name: &str,
-    kind: ReferenceKind,
+    input: GraphqlReference<'_, '_>,
 ) -> Result<(), ExtractError> {
     builder.emit_reference(ExtractedReference {
-        owner: Some(owner.clone()),
-        name: builder.context.copy_text(name)?,
+        owner: Some(input.owner.clone()),
+        name: builder.context.copy_text(input.name)?,
         resolution_name: None,
-        kind,
-        span: span_for(node)?,
+        kind: input.kind,
+        span: span_for(input.node)?,
     })
+}
+
+struct DeclarationSignature<'value> {
+    extension: bool,
+    keyword: &'value str,
+    name: &'value str,
 }
 
 fn declaration_signature(
     builder: &ExtractionBuilder<'_, '_>,
-    extension: bool,
-    keyword: &str,
-    name: &str,
+    input: DeclarationSignature<'_>,
 ) -> Result<String, ExtractError> {
-    let prefix = if extension { "extend " } else { "" };
+    let prefix = if input.extension { "extend " } else { "" };
     let length = prefix
         .len()
-        .checked_add(keyword.len())
-        .and_then(|length| length.checked_add(name.len()))
+        .checked_add(input.keyword.len())
+        .and_then(|length| length.checked_add(input.name.len()))
         .and_then(|length| length.checked_add(1))
         .ok_or(ExtractError::OutputLimit)?;
     let mut signature = String::new();
@@ -528,9 +624,9 @@ fn declaration_signature(
         .try_reserve(length)
         .map_err(|_| ExtractError::OutputLimit)?;
     signature.push_str(prefix);
-    signature.push_str(keyword);
+    signature.push_str(input.keyword);
     signature.push(' ');
-    signature.push_str(name);
+    signature.push_str(input.name);
     builder.context.copy_text(&signature)
 }
 
@@ -555,32 +651,19 @@ fn field_signature(
     builder.context.copy_text(&signature)
 }
 
-fn dotted_signature(
-    builder: &ExtractionBuilder<'_, '_>,
-    owner: &str,
-    member: &str,
-) -> Result<String, ExtractError> {
-    let length = owner
-        .len()
-        .checked_add(member.len())
-        .and_then(|length| length.checked_add(1))
-        .ok_or(ExtractError::OutputLimit)?;
-    let mut signature = String::new();
-    signature
-        .try_reserve(length)
-        .map_err(|_| ExtractError::OutputLimit)?;
-    signature.push_str(owner);
-    signature.push('.');
-    signature.push_str(member);
-    builder.context.copy_text(&signature)
-}
-
 fn directive_signature(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
     name: &str,
 ) -> Result<String, ExtractError> {
-    let mut signature = declaration_signature(builder, false, "directive", name)?;
+    let mut signature = declaration_signature(
+        builder,
+        DeclarationSignature {
+            extension: false,
+            keyword: "directive",
+            name,
+        },
+    )?;
     let Some(arguments) = direct_child(node, "arguments_definition") else {
         return Ok(signature);
     };
@@ -641,17 +724,6 @@ fn is_builtin(name: &str) -> bool {
 
 fn direct_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     direct_named_children(node).find(|child| child.kind() == kind)
-}
-
-fn descendant_of_kind<'tree>(node: Node<'tree>, kind: &str, depth: usize) -> Option<Node<'tree>> {
-    if depth > MAX_TYPE_DEPTH {
-        return None;
-    }
-    if node.kind() == kind {
-        return Some(node);
-    }
-    direct_named_children(node)
-        .find_map(|child| descendant_of_kind(child, kind, depth.saturating_add(1)))
 }
 
 fn direct_named_children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {

@@ -52,6 +52,7 @@ URL. Use the narrowest MCP profile that supports the task.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[repr(usize)]
 pub(crate) enum InstallTarget {
     Claude,
     Cursor,
@@ -75,6 +76,28 @@ pub(crate) enum InstallTarget {
 }
 
 impl InstallTarget {
+    const LABELS: [&'static str; 19] = [
+        "claude",
+        "cursor",
+        "codex",
+        "codebuddy",
+        "copilot",
+        "codewhale",
+        "zed",
+        "opencode",
+        "hermes",
+        "gemini",
+        "antigravity",
+        "kiro",
+        "factory",
+        "rovo",
+        "qoder",
+        "bob",
+        "kimi",
+        "pi",
+        "reasonix",
+    ];
+
     pub(crate) const ALL: [Self; 19] = [
         Self::Claude,
         Self::Cursor,
@@ -98,27 +121,7 @@ impl InstallTarget {
     ];
 
     pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Cursor => "cursor",
-            Self::Codex => "codex",
-            Self::Codebuddy => "codebuddy",
-            Self::Copilot => "copilot",
-            Self::Codewhale => "codewhale",
-            Self::Zed => "zed",
-            Self::Opencode => "opencode",
-            Self::Hermes => "hermes",
-            Self::Gemini => "gemini",
-            Self::Antigravity => "antigravity",
-            Self::Kiro => "kiro",
-            Self::Factory => "factory",
-            Self::Rovo => "rovo",
-            Self::Qoder => "qoder",
-            Self::Bob => "bob",
-            Self::Kimi => "kimi",
-            Self::Pi => "pi",
-            Self::Reasonix => "reasonix",
-        }
+        Self::LABELS[self as usize]
     }
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -141,6 +144,187 @@ pub(crate) enum InstallLocation {
     Local,
 }
 
+#[derive(Clone, Copy)]
+enum StaticConfigRoot {
+    Home,
+    Project,
+}
+
+#[derive(Clone, Copy)]
+struct StaticConfigRule {
+    target: InstallTarget,
+    location: InstallLocation,
+    root: StaticConfigRoot,
+    suffix: &'static str,
+}
+
+macro_rules! static_config {
+    ($target:expr, $location:expr, $root:expr, $suffix:expr $(,)?) => {
+        StaticConfigRule {
+            target: $target,
+            location: $location,
+            root: $root,
+            suffix: $suffix,
+        }
+    };
+}
+
+const STATIC_CONFIG_RULES: [StaticConfigRule; 24] = [
+    static_config!(
+        InstallTarget::Claude,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".claude.json",
+    ),
+    static_config!(
+        InstallTarget::Claude,
+        InstallLocation::Local,
+        StaticConfigRoot::Home,
+        ".claude.json",
+    ),
+    static_config!(
+        InstallTarget::Cursor,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".cursor/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Cursor,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".cursor/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Codex,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".codex/config.toml",
+    ),
+    static_config!(
+        InstallTarget::Codex,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".codex/config.toml",
+    ),
+    static_config!(
+        InstallTarget::Codewhale,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".codewhale/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Codewhale,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".codewhale/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Zed,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".zed/settings.json",
+    ),
+    static_config!(
+        InstallTarget::Opencode,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        "opencode.json",
+    ),
+    static_config!(
+        InstallTarget::Gemini,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".gemini/settings.json",
+    ),
+    static_config!(
+        InstallTarget::Gemini,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".gemini/settings.json",
+    ),
+    static_config!(
+        InstallTarget::Kiro,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".kiro/settings/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Kiro,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".kiro/settings/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Factory,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".factory/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Factory,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".factory/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Qoder,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".qoder/settings.json",
+    ),
+    static_config!(
+        InstallTarget::Qoder,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".qoder/settings.local.json",
+    ),
+    static_config!(
+        InstallTarget::Bob,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".bob/mcp_settings.json",
+    ),
+    static_config!(
+        InstallTarget::Bob,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".bob/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Kimi,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".kimi-code/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Pi,
+        InstallLocation::Local,
+        StaticConfigRoot::Project,
+        ".pi/mcp.json",
+    ),
+    static_config!(
+        InstallTarget::Reasonix,
+        InstallLocation::Global,
+        StaticConfigRoot::Home,
+        ".reasonix/config.json",
+    ),
+    static_config!(
+        InstallTarget::Reasonix,
+        InstallLocation::Local,
+        StaticConfigRoot::Home,
+        ".reasonix/config.json",
+    ),
+];
+
+pub(crate) struct InstallRequestInput<'path> {
+    pub(crate) project_root: &'path Path,
+    pub(crate) executable: &'path Path,
+    pub(crate) target: InstallTarget,
+    pub(crate) location: InstallLocation,
+    pub(crate) command_override: Option<&'path str>,
+    pub(crate) permissions: bool,
+}
+
 pub(crate) struct InstallRequest {
     project_root: PathBuf,
     executable: String,
@@ -154,17 +338,17 @@ pub(crate) struct InstallRequest {
 }
 
 impl InstallRequest {
-    pub(crate) fn new(
-        project_root: impl AsRef<Path>,
-        executable: impl AsRef<Path>,
-        target: InstallTarget,
-        location: InstallLocation,
-        command_override: Option<&str>,
-        permissions: bool,
-    ) -> Result<Self, InstallError> {
-        let project_root = canonical_directory(project_root.as_ref(), InstallError::ProjectRoot)?;
+    pub(crate) fn new(input: InstallRequestInput<'_>) -> Result<Self, InstallError> {
+        let InstallRequestInput {
+            project_root,
+            executable,
+            target,
+            location,
+            command_override,
+            permissions,
+        } = input;
+        let project_root = canonical_directory(project_root, InstallError::ProjectRoot)?;
         let executable_path = executable
-            .as_ref()
             .canonicalize()
             .map_err(|_| InstallError::Executable)?;
         if !executable_path.is_file() {
@@ -191,14 +375,14 @@ impl InstallRequest {
 
     #[cfg(test)]
     fn new_for_test(input: TestInstallRequest<'_>) -> Result<Self, InstallError> {
-        let mut request = Self::new(
-            input.project_root,
-            input.executable,
-            input.target,
-            input.location,
-            input.command_override,
-            input.permissions,
-        )?;
+        let mut request = Self::new(InstallRequestInput {
+            project_root: input.project_root,
+            executable: input.executable,
+            target: input.target,
+            location: input.location,
+            command_override: input.command_override,
+            permissions: input.permissions,
+        })?;
         request.home = canonical_directory(input.home, InstallError::HostHome)?;
         request.use_environment = false;
         Ok(request)
@@ -238,82 +422,74 @@ impl InstallRequest {
     }
 
     fn config_location(&self) -> Result<ConfigLocation, InstallError> {
-        let project = &self.project_root;
-        let home = &self.home;
-        let local = self.local();
-        let under = |root: &Path, suffix: &str| ConfigLocation {
-            path: root.join(suffix),
-            allowed_root: root.to_owned(),
-        };
-        let dynamic_under = |root: PathBuf, suffix: &str| -> ConfigLocation {
-            let allowed_root = if root.starts_with(home) {
-                home.to_owned()
-            } else if root.starts_with(project) {
-                project.to_owned()
-            } else {
-                root.clone()
-            };
-            ConfigLocation {
-                path: root.join(suffix),
-                allowed_root,
-            }
-        };
-        let location = match self.target {
-            InstallTarget::Claude => under(home, ".claude.json"),
-            InstallTarget::Cursor if local => under(project, ".cursor/mcp.json"),
-            InstallTarget::Cursor => under(home, ".cursor/mcp.json"),
-            InstallTarget::Codex if local => under(project, ".codex/config.toml"),
-            InstallTarget::Codex => under(home, ".codex/config.toml"),
-            InstallTarget::Codebuddy => self.codebuddy_location(),
-            InstallTarget::Copilot if local => {
-                let direct = project.join(".mcp.json");
-                let github = project.join(".github/mcp.json");
-                ConfigLocation {
-                    path: if github.exists() && !direct.exists() {
-                        github
-                    } else {
-                        direct
-                    },
-                    allowed_root: project.to_owned(),
-                }
-            }
-            InstallTarget::Copilot => dynamic_under(
+        if let Some(location) = self.static_config_location() {
+            return Ok(location);
+        }
+        match self.target {
+            InstallTarget::Codebuddy => Ok(self.codebuddy_location()),
+            InstallTarget::Copilot if self.local() => Ok(self.copilot_local_location()),
+            InstallTarget::Copilot => Ok(self.dynamic_config_location(
                 self.env_root("COPILOT_HOME", ".copilot")?,
                 "mcp-config.json",
-            ),
-            InstallTarget::Codewhale if local => under(project, ".codewhale/mcp.json"),
-            InstallTarget::Codewhale => under(home, ".codewhale/mcp.json"),
-            InstallTarget::Zed if local => under(project, ".zed/settings.json"),
-            InstallTarget::Zed => dynamic_under(self.xdg_root()?, "zed/settings.json"),
-            InstallTarget::Opencode if local => under(project, "opencode.json"),
-            InstallTarget::Opencode => dynamic_under(self.xdg_root()?, "opencode/opencode.json"),
-            InstallTarget::Hermes => {
-                dynamic_under(self.env_root("HERMES_HOME", ".hermes")?, "config.yaml")
+            )),
+            InstallTarget::Zed => {
+                Ok(self.dynamic_config_location(self.xdg_root()?, "zed/settings.json"))
             }
-            InstallTarget::Gemini if local => under(project, ".gemini/settings.json"),
-            InstallTarget::Gemini => under(home, ".gemini/settings.json"),
-            InstallTarget::Antigravity => self.antigravity_location(),
-            InstallTarget::Kiro if local => under(project, ".kiro/settings/mcp.json"),
-            InstallTarget::Kiro => under(home, ".kiro/settings/mcp.json"),
-            InstallTarget::Factory if local => under(project, ".factory/mcp.json"),
-            InstallTarget::Factory => under(home, ".factory/mcp.json"),
-            InstallTarget::Rovo => self.rovo_location()?,
-            InstallTarget::Qoder if local => under(project, ".qoder/settings.local.json"),
-            InstallTarget::Qoder => under(home, ".qoder/settings.json"),
-            InstallTarget::Bob if local => under(project, ".bob/mcp.json"),
-            InstallTarget::Bob => under(home, ".bob/mcp_settings.json"),
-            InstallTarget::Kimi if local => under(project, ".kimi-code/mcp.json"),
-            InstallTarget::Kimi => {
-                dynamic_under(self.env_root("KIMI_CODE_HOME", ".kimi-code")?, "mcp.json")
+            InstallTarget::Opencode => {
+                Ok(self.dynamic_config_location(self.xdg_root()?, "opencode/opencode.json"))
             }
-            InstallTarget::Pi if local => under(project, ".pi/mcp.json"),
-            InstallTarget::Pi => dynamic_under(
+            InstallTarget::Hermes => Ok(self
+                .dynamic_config_location(self.env_root("HERMES_HOME", ".hermes")?, "config.yaml")),
+            InstallTarget::Antigravity => Ok(self.antigravity_location()),
+            InstallTarget::Rovo => self.rovo_location(),
+            InstallTarget::Kimi => Ok(self.dynamic_config_location(
+                self.env_root("KIMI_CODE_HOME", ".kimi-code")?,
+                "mcp.json",
+            )),
+            InstallTarget::Pi => Ok(self.dynamic_config_location(
                 self.env_root("PI_CODING_AGENT_DIR", ".pi/agent")?,
                 "mcp.json",
-            ),
-            InstallTarget::Reasonix => under(home, ".reasonix/config.json"),
+            )),
+            _ => Err(InstallError::InvalidConfig),
+        }
+    }
+
+    fn static_config_location(&self) -> Option<ConfigLocation> {
+        let rule = STATIC_CONFIG_RULES
+            .iter()
+            .find(|rule| rule.target == self.target && rule.location == self.location)?;
+        let root = match rule.root {
+            StaticConfigRoot::Home => &self.home,
+            StaticConfigRoot::Project => &self.project_root,
         };
-        Ok(location)
+        Some(config_under(root, rule.suffix))
+    }
+
+    fn dynamic_config_location(&self, root: PathBuf, suffix: &str) -> ConfigLocation {
+        let allowed_root = if root.starts_with(&self.home) {
+            self.home.clone()
+        } else if root.starts_with(&self.project_root) {
+            self.project_root.clone()
+        } else {
+            root.clone()
+        };
+        ConfigLocation {
+            path: root.join(suffix),
+            allowed_root,
+        }
+    }
+
+    fn copilot_local_location(&self) -> ConfigLocation {
+        let direct = self.project_root.join(".mcp.json");
+        let github = self.project_root.join(".github/mcp.json");
+        ConfigLocation {
+            path: if github.exists() && !direct.exists() {
+                github
+            } else {
+                direct
+            },
+            allowed_root: self.project_root.clone(),
+        }
     }
 
     fn env_root(&self, name: &str, fallback: &str) -> Result<PathBuf, InstallError> {
@@ -439,6 +615,13 @@ struct TestInstallRequest<'path> {
 struct ConfigLocation {
     path: PathBuf,
     allowed_root: PathBuf,
+}
+
+fn config_under(root: &Path, suffix: &str) -> ConfigLocation {
+    ConfigLocation {
+        path: root.join(suffix),
+        allowed_root: root.to_owned(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -929,10 +1112,8 @@ fn install_hermes(
     }
     let without_server = remove_yaml_top_child(&prior, "mcp_servers", "cartograph")?;
     let with_server = append_yaml_child(&without_server, "mcp_servers", &desired_server);
-    let without_tool =
-        remove_yaml_list_item(&with_server, "platform_toolsets", "cli", "mcp-cartograph")?;
-    let rendered =
-        append_yaml_list_item(&without_tool, "platform_toolsets", "cli", "mcp-cartograph");
+    let without_tool = remove_yaml_list_item(&with_server, HERMES_TOOLSET)?;
+    let rendered = append_yaml_list_item(&without_tool, HERMES_TOOLSET);
     if rendered == prior {
         return Ok(file_report(&config.path, InstallAction::Unchanged));
     }
@@ -950,12 +1131,7 @@ fn uninstall_hermes(config: &ConfigLocation) -> Result<InstallFileReport, Instal
         return Ok(file_report(&config.path, InstallAction::NotFound));
     };
     let without_server = remove_yaml_top_child(&prior, "mcp_servers", "cartograph")?;
-    let rendered = remove_yaml_list_item(
-        &without_server,
-        "platform_toolsets",
-        "cli",
-        "mcp-cartograph",
-    )?;
+    let rendered = remove_yaml_list_item(&without_server, HERMES_TOOLSET)?;
     if rendered == prior {
         return Ok(file_report(&config.path, InstallAction::NotFound));
     }
@@ -1014,12 +1190,25 @@ fn append_yaml_child(text: &str, parent: &str, child_block: &str) -> String {
     join_lines(lines)
 }
 
-fn remove_yaml_list_item(
-    text: &str,
-    parent: &str,
-    child: &str,
-    item: &str,
-) -> Result<String, InstallError> {
+#[derive(Clone, Copy)]
+struct YamlListItem<'value> {
+    parent: &'value str,
+    child: &'value str,
+    item: &'value str,
+}
+
+const HERMES_TOOLSET: YamlListItem<'static> = YamlListItem {
+    parent: "platform_toolsets",
+    child: "cli",
+    item: "mcp-cartograph",
+};
+
+fn remove_yaml_list_item(text: &str, input: YamlListItem<'_>) -> Result<String, InstallError> {
+    let YamlListItem {
+        parent,
+        child,
+        item,
+    } = input;
     let mut lines = normalized_lines(text);
     let Some((parent_start, parent_end)) = yaml_top_range(&lines, parent) else {
         return Ok(ensure_trailing_newline(text));
@@ -1046,7 +1235,12 @@ fn remove_yaml_list_item(
     Ok(join_lines(lines))
 }
 
-fn append_yaml_list_item(text: &str, parent: &str, child: &str, item: &str) -> String {
+fn append_yaml_list_item(text: &str, input: YamlListItem<'_>) -> String {
+    let YamlListItem {
+        parent,
+        child,
+        item,
+    } = input;
     let mut lines = normalized_lines(text);
     if let Some((parent_start, parent_end)) = yaml_top_range(&lines, parent) {
         let child_line = format!("  {child}:");
@@ -1126,93 +1320,130 @@ fn yaml_quote(value: &str) -> String {
     format!("{:?}", value)
 }
 
-fn install_artifacts(request: &InstallRequest) -> Result<Vec<InstallFileReport>, InstallError> {
+fn install_claude_artifacts(
+    request: &InstallRequest,
+) -> Result<Vec<InstallFileReport>, InstallError> {
     let mut files = Vec::new();
-    match request.target {
-        InstallTarget::Claude => {
-            if request.permissions {
-                files.push(upsert_permissions(request, claude_settings_path(request)?)?);
-            }
-            files.push(write_marked(
-                request,
-                claude_instructions_path(request),
-                None,
-            )?);
-            files.push(write_owned(
-                request,
-                claude_skill_path(request),
-                SKILL_TEMPLATE,
-            )?);
-        }
-        InstallTarget::Cursor if request.local() => {
-            let prefix = "---\ndescription: Cartograph MCP usage guide\nalwaysApply: true\n---\n\n";
-            files.push(write_marked(
-                request,
-                request.project_root.join(".cursor/rules/cartograph.mdc"),
-                Some(prefix),
-            )?);
-        }
-        InstallTarget::Codex => {
-            if !request.local() {
-                files.push(write_marked(
-                    request,
-                    request.home.join(".codex/AGENTS.md"),
-                    None,
-                )?);
-            }
-            let root = if request.local() {
-                &request.project_root
-            } else {
-                &request.home
-            };
-            files.push(write_owned(
-                request,
-                root.join(".codex/skills/cartograph/SKILL.md"),
-                SKILL_TEMPLATE,
-            )?);
-        }
-        InstallTarget::Opencode => {
-            let path = if request.local() {
-                request
-                    .project_root
-                    .join(".opencode/commands/cartograph.md")
-            } else {
-                request.xdg_root()?.join("opencode/commands/cartograph.md")
-            };
-            let body = format!(
-                "---\ndescription: Load Cartograph v2 code-graph guidance\n---\n\nApply this guidance for the current session.\n\n{INSTRUCTIONS}\n"
-            );
-            files.push(write_owned(request, path, &body)?);
-        }
-        InstallTarget::Gemini => {
-            let path = if request.local() {
-                request.project_root.join("GEMINI.md")
-            } else {
-                request.home.join(".gemini/GEMINI.md")
-            };
-            files.push(write_marked(request, path, None)?);
-        }
-        InstallTarget::Kiro => {
-            let root = if request.local() {
-                &request.project_root
-            } else {
-                &request.home
-            };
-            files.push(write_owned(
-                request,
-                root.join(".kiro/steering/cartograph.md"),
-                &format!("{INSTRUCTIONS}\n"),
-            )?);
-        }
-        InstallTarget::Qoder if request.permissions => {
-            files.push(upsert_permissions(
-                request,
-                request.config_location()?.path,
-            )?);
-        }
-        _ => {}
+    if request.permissions {
+        files.push(upsert_permissions(request, claude_settings_path(request)?)?);
     }
+    files.push(write_marked(
+        request,
+        claude_instructions_path(request),
+        None,
+    )?);
+    files.push(write_owned(
+        request,
+        claude_skill_path(request),
+        SKILL_TEMPLATE,
+    )?);
     Ok(files)
+}
+
+fn install_cursor_artifacts(
+    request: &InstallRequest,
+) -> Result<Vec<InstallFileReport>, InstallError> {
+    if !request.local() {
+        return Ok(Vec::new());
+    }
+    let prefix = "---\ndescription: Cartograph MCP usage guide\nalwaysApply: true\n---\n\n";
+    Ok(vec![write_marked(
+        request,
+        request.project_root.join(".cursor/rules/cartograph.mdc"),
+        Some(prefix),
+    )?])
+}
+
+fn install_codex_artifacts(
+    request: &InstallRequest,
+) -> Result<Vec<InstallFileReport>, InstallError> {
+    let mut files = Vec::new();
+    if !request.local() {
+        files.push(write_marked(
+            request,
+            request.home.join(".codex/AGENTS.md"),
+            None,
+        )?);
+    }
+    let root = if request.local() {
+        &request.project_root
+    } else {
+        &request.home
+    };
+    files.push(write_owned(
+        request,
+        root.join(".codex/skills/cartograph/SKILL.md"),
+        SKILL_TEMPLATE,
+    )?);
+    Ok(files)
+}
+
+fn install_opencode_artifacts(
+    request: &InstallRequest,
+) -> Result<Vec<InstallFileReport>, InstallError> {
+    let path = if request.local() {
+        request
+            .project_root
+            .join(".opencode/commands/cartograph.md")
+    } else {
+        request.xdg_root()?.join("opencode/commands/cartograph.md")
+    };
+    let body = format!(
+        "---\ndescription: Load Cartograph v2 code-graph guidance\n---\n\nApply this guidance for the current session.\n\n{INSTRUCTIONS}\n"
+    );
+    Ok(vec![write_owned(request, path, &body)?])
+}
+
+fn install_gemini_artifacts(
+    request: &InstallRequest,
+) -> Result<Vec<InstallFileReport>, InstallError> {
+    let path = if request.local() {
+        request.project_root.join("GEMINI.md")
+    } else {
+        request.home.join(".gemini/GEMINI.md")
+    };
+    Ok(vec![write_marked(request, path, None)?])
+}
+
+fn install_kiro_artifacts(
+    request: &InstallRequest,
+) -> Result<Vec<InstallFileReport>, InstallError> {
+    let root = if request.local() {
+        &request.project_root
+    } else {
+        &request.home
+    };
+    Ok(vec![write_owned(
+        request,
+        root.join(".kiro/steering/cartograph.md"),
+        &format!("{INSTRUCTIONS}\n"),
+    )?])
+}
+
+fn install_qoder_artifacts(
+    request: &InstallRequest,
+) -> Result<Vec<InstallFileReport>, InstallError> {
+    if request.permissions {
+        Ok(vec![upsert_permissions(
+            request,
+            request.config_location()?.path,
+        )?])
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn install_artifacts(request: &InstallRequest) -> Result<Vec<InstallFileReport>, InstallError> {
+    match request.target {
+        InstallTarget::Claude => install_claude_artifacts(request),
+        InstallTarget::Cursor => install_cursor_artifacts(request),
+        InstallTarget::Codex => install_codex_artifacts(request),
+        InstallTarget::Opencode => install_opencode_artifacts(request),
+        InstallTarget::Gemini => install_gemini_artifacts(request),
+        InstallTarget::Kiro => install_kiro_artifacts(request),
+        InstallTarget::Qoder => install_qoder_artifacts(request),
+        _ => Ok(Vec::new()),
+    }
 }
 
 fn uninstall_artifacts(request: &InstallRequest) -> Result<Vec<InstallFileReport>, InstallError> {

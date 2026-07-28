@@ -3,6 +3,7 @@
 mod chat;
 mod client;
 mod config;
+mod endpoint;
 mod model;
 mod models;
 mod project_config;
@@ -10,8 +11,8 @@ mod rerank;
 mod tls;
 
 pub use chat::{
-    CHAT_API_KEY_ENV, CHAT_ENDPOINT_ENV, CHAT_MODEL_ENV, ChatCompletion, ChatError, ChatSettings,
-    OpenAiChatClient,
+    CHAT_API_KEY_ENV, CHAT_ENDPOINT_ENV, CHAT_MODEL_ENV, ChatCompletion, ChatError,
+    ChatMessageRequest, ChatSettings, GroundedChatRequest, OpenAiChatClient,
 };
 pub use client::OpenAiEmbeddingClient;
 pub use config::{

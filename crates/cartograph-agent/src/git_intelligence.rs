@@ -47,6 +47,39 @@ pub struct GitLineHistory {
     truncated: bool,
 }
 
+/// Inclusive source-line range in one canonical project-relative path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitLineRange {
+    path: NormalizedPath,
+    start_line: u32,
+    end_line: u32,
+}
+
+impl GitLineRange {
+    #[must_use]
+    pub const fn new(path: NormalizedPath, start_line: u32, end_line: u32) -> Self {
+        Self {
+            path,
+            start_line,
+            end_line,
+        }
+    }
+}
+
+/// Bounded line-log request for one exact source range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitLineHistoryRequest {
+    range: GitLineRange,
+    limit: u16,
+}
+
+impl GitLineHistoryRequest {
+    #[must_use]
+    pub const fn new(range: GitLineRange, limit: u16) -> Self {
+        Self { range, limit }
+    }
+}
+
 /// Rename-aware file-history evidence used to label `git log -L` limitations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -201,24 +234,16 @@ impl ProjectRuntime {
     }
 
     /// Attribute an inclusive bounded source-line range to Git commits.
-    pub async fn git_blame(
-        &self,
-        path: NormalizedPath,
-        start_line: u32,
-        end_line: u32,
-    ) -> Result<Vec<GitBlameLine>, ReviewError> {
-        discover_git_blame(&self.root, path, start_line, end_line).await
+    pub async fn git_blame(&self, range: GitLineRange) -> Result<Vec<GitBlameLine>, ReviewError> {
+        discover_git_blame(&self.root, range).await
     }
 
     /// Read a bounded symbol/range history through Git's line-log engine.
     pub async fn git_line_history(
         &self,
-        path: NormalizedPath,
-        start_line: u32,
-        end_line: u32,
-        limit: u16,
+        request: GitLineHistoryRequest,
     ) -> Result<GitLineHistory, ReviewError> {
-        discover_git_line_history(&self.root, path, start_line, end_line, limit).await
+        discover_git_line_history(&self.root, request).await
     }
 
     /// Detect whether rename-aware file history predates a line-log timeline.
@@ -270,29 +295,24 @@ pub async fn discover_git_history(
 /// Attribute an inclusive bounded line range in an explicit Git worktree.
 pub async fn discover_git_blame(
     root: impl AsRef<Path>,
-    path: NormalizedPath,
-    start_line: u32,
-    end_line: u32,
+    range: GitLineRange,
 ) -> Result<Vec<GitBlameLine>, ReviewError> {
-    validate_line_range(start_line, end_line)?;
+    validate_line_range(range.start_line, range.end_line)?;
     let root = canonical_root(root.as_ref())?;
-    blame_path(&root, path, start_line, end_line).await
+    blame_path(&root, range).await
 }
 
 /// Read bounded line-range history in an explicit Git worktree.
 pub async fn discover_git_line_history(
     root: impl AsRef<Path>,
-    path: NormalizedPath,
-    start_line: u32,
-    end_line: u32,
-    limit: u16,
+    request: GitLineHistoryRequest,
 ) -> Result<GitLineHistory, ReviewError> {
-    validate_line_range(start_line, end_line)?;
-    if limit == 0 || limit > MAX_HISTORY_COMMITS {
+    validate_line_range(request.range.start_line, request.range.end_line)?;
+    if request.limit == 0 || request.limit > MAX_HISTORY_COMMITS {
         return Err(ReviewError::InvalidOptions);
     }
     let root = canonical_root(root.as_ref())?;
-    line_history_for_path(&root, path, start_line, end_line, limit).await
+    line_history_for_path(&root, request).await
 }
 
 /// Inspect rename-aware path/timestamp evidence in an explicit worktree.
@@ -366,7 +386,7 @@ pub async fn trace_git_culprits_with_limit(
         .map(|(path, line)| {
             let root = tasks_root.clone();
             async move {
-                let blamed = blame_path(&root, path.clone(), line, line).await;
+                let blamed = blame_path(&root, GitLineRange::new(path.clone(), line, line)).await;
                 match blamed {
                     Ok(mut rows) => Ok(TraceCulprit {
                         path,
@@ -450,14 +470,16 @@ async fn history_for_path(
 
 async fn line_history_for_path(
     root: &Path,
-    path: NormalizedPath,
-    start_line: u32,
-    end_line: u32,
-    limit: u16,
+    request: GitLineHistoryRequest,
 ) -> Result<GitLineHistory, ReviewError> {
-    let requested = limit.saturating_add(1);
+    let requested = request.limit.saturating_add(1);
     let count = requested.to_string();
-    let range = format!("{start_line},{end_line}:{}", path.as_str());
+    let range = format!(
+        "{},{}:{}",
+        request.range.start_line,
+        request.range.end_line,
+        request.range.path.as_str()
+    );
     let output = run_git(
         root,
         &[
@@ -476,12 +498,12 @@ async fn line_history_for_path(
         return Err(ReviewError::GitCommandFailed);
     }
     let mut commits = parse_history(&output.stdout)?;
-    let truncated = commits.len() > usize::from(limit);
-    commits.truncate(usize::from(limit));
+    let truncated = commits.len() > usize::from(request.limit);
+    commits.truncate(usize::from(request.limit));
     Ok(GitLineHistory {
-        path,
-        start_line,
-        end_line,
+        path: request.range.path,
+        start_line: request.range.start_line,
+        end_line: request.range.end_line,
         commits,
         truncated,
     })
@@ -561,7 +583,7 @@ fn parse_nul_paths(output: &[u8]) -> Result<BTreeSet<NormalizedPath>, ReviewErro
     output
         .split(|byte| *byte == 0)
         .filter_map(|field| {
-            let field = trim_ascii(field);
+            let field = crate::trim_ascii_bytes(field);
             (!field.is_empty()).then_some(field)
         })
         .map(|field| {
@@ -579,7 +601,7 @@ fn parse_history(output: &[u8]) -> Result<Vec<GitHistoryCommit>, ReviewError> {
     let mut commits = Vec::new();
     let mut index = 0;
     while index < fields.len() {
-        while index < fields.len() && trim_ascii(fields[index]).is_empty() {
+        while index < fields.len() && crate::trim_ascii_bytes(fields[index]).is_empty() {
             index += 1;
         }
         if index == fields.len() {
@@ -600,30 +622,25 @@ fn parse_history(output: &[u8]) -> Result<Vec<GitHistoryCommit>, ReviewError> {
     Ok(commits)
 }
 
-async fn blame_path(
-    root: &Path,
-    path: NormalizedPath,
-    start_line: u32,
-    end_line: u32,
-) -> Result<Vec<GitBlameLine>, ReviewError> {
-    validate_line_range(start_line, end_line)?;
-    let range = format!("{start_line},{end_line}");
+async fn blame_path(root: &Path, range: GitLineRange) -> Result<Vec<GitBlameLine>, ReviewError> {
+    validate_line_range(range.start_line, range.end_line)?;
+    let line_range = format!("{},{}", range.start_line, range.end_line);
     let output = run_git(
         root,
         &[
             "blame",
             "--line-porcelain",
             "-L",
-            &range,
+            &line_range,
             "--",
-            path.as_str(),
+            range.path.as_str(),
         ],
     )
     .await?;
     if !output.success {
         return Err(ReviewError::GitCommandFailed);
     }
-    parse_blame(&output.stdout, &path)
+    parse_blame(&output.stdout, &range.path)
 }
 
 fn parse_blame(output: &[u8], path: &NormalizedPath) -> Result<Vec<GitBlameLine>, ReviewError> {
@@ -765,14 +782,14 @@ fn normalize_commit(value: &str) -> Result<String, ReviewError> {
 
 fn parse_commit_field(value: Option<&[u8]>) -> Result<String, ReviewError> {
     let value = value.ok_or(ReviewError::GitOutputInvalid)?;
-    let value =
-        std::str::from_utf8(trim_ascii(value)).map_err(|_| ReviewError::GitOutputInvalid)?;
+    let value = std::str::from_utf8(crate::trim_ascii_bytes(value))
+        .map_err(|_| ReviewError::GitOutputInvalid)?;
     normalize_commit(value)
 }
 
 fn parse_u64_field(value: Option<&[u8]>) -> Result<u64, ReviewError> {
     let value = value.ok_or(ReviewError::GitOutputInvalid)?;
-    std::str::from_utf8(trim_ascii(value))
+    std::str::from_utf8(crate::trim_ascii_bytes(value))
         .ok()
         .and_then(|value| value.parse().ok())
         .ok_or(ReviewError::GitOutputInvalid)
@@ -780,8 +797,8 @@ fn parse_u64_field(value: Option<&[u8]>) -> Result<u64, ReviewError> {
 
 fn parse_metadata_field(value: Option<&[u8]>) -> Result<String, ReviewError> {
     let value = value.ok_or(ReviewError::GitOutputInvalid)?;
-    let value =
-        std::str::from_utf8(trim_ascii(value)).map_err(|_| ReviewError::GitOutputInvalid)?;
+    let value = std::str::from_utf8(crate::trim_ascii_bytes(value))
+        .map_err(|_| ReviewError::GitOutputInvalid)?;
     clean_metadata(value)
 }
 
@@ -799,18 +816,6 @@ fn clean_metadata(value: &str) -> Result<String, ReviewError> {
             }
         })
         .collect())
-}
-
-fn trim_ascii(value: &[u8]) -> &[u8] {
-    let start = value
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(value.len());
-    let end = value
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map_or(start, |index| index + 1);
-    &value[start..end]
 }
 
 const fn trace_path_byte(byte: u8) -> bool {

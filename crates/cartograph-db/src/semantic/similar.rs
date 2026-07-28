@@ -13,7 +13,7 @@ use super::{
     types::{
         EmbeddingModelSelector, EmbeddingModelState, RegisteredEmbeddingModel,
         SemanticReadinessState, SemanticStorageError, SimilarSymbolHit, SimilarSymbolsRequest,
-        SimilarSymbolsResult, database_error,
+        SimilarSymbolsResult, SimilarSymbolsResultInput, database_error,
     },
 };
 
@@ -37,6 +37,12 @@ impl CartographDatabase {
             Err(error) => Err(rollback_error(transaction, error, "similar-symbols-rollback").await),
         }
     }
+}
+
+struct SimilarQueryContext<'value> {
+    database: &'value CartographDatabase,
+    request: &'value SimilarSymbolsRequest,
+    model: &'value EmbeddingModelSelector,
 }
 
 async fn similar_symbols_transaction(
@@ -66,31 +72,34 @@ async fn similar_symbols_transaction(
     if generation != &request.expected_generation_id {
         return Err(SemanticStorageError::CurrentGenerationChanged);
     }
+    let query = SimilarQueryContext {
+        database,
+        request,
+        model: model.selector(),
+    };
     if !request.same_language
-        && let Some(mut hits) =
-            query_materialized_neighbors(connection, database, request, model.selector()).await?
+        && let Some(mut hits) = query_materialized_neighbors(connection, &query).await?
     {
         let truncated = hits.len() > usize::from(request.limit);
         hits.truncate(usize::from(request.limit));
-        return Ok(SimilarSymbolsResult::new(
-            model.selector().clone(),
-            request.source_symbol_id.clone(),
+        return Ok(SimilarSymbolsResult::new(SimilarSymbolsResultInput {
+            model: model.selector().clone(),
+            source_symbol_id: request.source_symbol_id.clone(),
             hits,
             truncated,
-        ));
+        }));
     }
-    let source = read_source_vector(connection, database, request, model.selector()).await?;
+    let source = read_source_vector(connection, &query).await?;
     configure_filtered_hnsw_scan(connection).await?;
-    let mut hits =
-        query_neighbors(connection, database, request, model.selector(), &source).await?;
+    let mut hits = query_neighbors(connection, &query, &source).await?;
     let truncated = hits.len() > usize::from(request.limit);
     hits.truncate(usize::from(request.limit));
-    Ok(SimilarSymbolsResult::new(
-        model.selector().clone(),
-        request.source_symbol_id.clone(),
+    Ok(SimilarSymbolsResult::new(SimilarSymbolsResultInput {
+        model: model.selector().clone(),
+        source_symbol_id: request.source_symbol_id.clone(),
         hits,
         truncated,
-    ))
+    }))
 }
 
 /// Read a materialized Top-K only when its build contract is strong enough for
@@ -99,10 +108,13 @@ async fn similar_symbols_transaction(
 /// global Top-K cache cannot prove it retained the next same-language neighbor.
 async fn query_materialized_neighbors(
     connection: &mut sqlx_postgres::PgConnection,
-    database: &CartographDatabase,
-    request: &SimilarSymbolsRequest,
-    model: &EmbeddingModelSelector,
+    context: &SimilarQueryContext<'_>,
 ) -> Result<Option<Vec<SimilarSymbolHit>>, SemanticStorageError> {
+    let SimilarQueryContext {
+        database,
+        request,
+        model,
+    } = context;
     let fetch_limit = request
         .limit
         .checked_add(1)
@@ -258,10 +270,13 @@ struct SourceVector {
 
 async fn read_source_vector(
     connection: &mut sqlx_postgres::PgConnection,
-    database: &CartographDatabase,
-    request: &SimilarSymbolsRequest,
-    model: &EmbeddingModelSelector,
+    context: &SimilarQueryContext<'_>,
 ) -> Result<SourceVector, SemanticStorageError> {
+    let SimilarQueryContext {
+        database,
+        request,
+        model,
+    } = context;
     let schema = crate::database::quoted_schema(&database.schema);
     let sql = format!(
         r#"SELECT documents.document_id::text AS document_id,
@@ -304,11 +319,14 @@ async fn read_source_vector(
 
 async fn query_neighbors(
     connection: &mut sqlx_postgres::PgConnection,
-    database: &CartographDatabase,
-    request: &SimilarSymbolsRequest,
-    model: &EmbeddingModelSelector,
+    context: &SimilarQueryContext<'_>,
     source: &SourceVector,
 ) -> Result<Vec<SimilarSymbolHit>, SemanticStorageError> {
+    let SimilarQueryContext {
+        database,
+        request,
+        model,
+    } = context;
     let schema = crate::database::quoted_schema(&database.schema);
     let dimension = model.dimension();
     let model_id = model.model_id().as_str();

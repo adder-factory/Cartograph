@@ -16,6 +16,11 @@ const PATH_COUNT_CEILING: f64 = 1.0e200;
 const PAGERANK_DAMPING: f64 = 0.85;
 const PAGERANK_ITERATIONS: usize = 40;
 const PAGERANK_PARALLEL_EDGE_THRESHOLD: usize = 500_000;
+const MULBERRY_INCREMENT: u32 = 0x6d2b_79f5;
+const MULBERRY_FIRST_SHIFT: u32 = 15;
+const MULBERRY_MIX_SHIFT: u32 = 7;
+const MULBERRY_FINAL_SHIFT: u32 = 14;
+const MULBERRY_MIX_MULTIPLIER: u32 = 61;
 
 /// Fixed-size evidence describing one sampled Brandes computation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -80,6 +85,34 @@ pub struct SymbolPageRankScore {
     pub score: Option<f64>,
 }
 
+trait CentralityRecord: Sized {
+    const COLUMN: &'static str;
+    const OPERATION: &'static str;
+    const SCORE_FIELD: &'static str;
+
+    fn new(symbol_id: SymbolId, score: Option<f64>) -> Self;
+}
+
+impl CentralityRecord for SymbolBetweennessScore {
+    const COLUMN: &'static str = "betweenness";
+    const OPERATION: &'static str = "symbol-betweenness-read";
+    const SCORE_FIELD: &'static str = "betweenness";
+
+    fn new(symbol_id: SymbolId, score: Option<f64>) -> Self {
+        Self { symbol_id, score }
+    }
+}
+
+impl CentralityRecord for SymbolPageRankScore {
+    const COLUMN: &'static str = "pagerank";
+    const OPERATION: &'static str = "symbol-pagerank-read";
+    const SCORE_FIELD: &'static str = "pagerank";
+
+    fn new(symbol_id: SymbolId, score: Option<f64>) -> Self {
+        Self { symbol_id, score }
+    }
+}
+
 impl CartographDatabase {
     /// Read persisted sampled Brandes scores for a small exact symbol set under
     /// the project's current-generation fence.
@@ -89,6 +122,30 @@ impl CartographDatabase {
         expected_generation_id: &GenerationId,
         symbol_ids: &[SymbolId],
     ) -> Result<Vec<SymbolBetweennessScore>, StorageError> {
+        self.current_centrality(project_id, expected_generation_id, symbol_ids)
+            .await
+    }
+
+    /// Read persisted PageRank scores for a small exact current-generation symbol set.
+    pub async fn current_symbol_pagerank(
+        &self,
+        project_id: &ProjectId,
+        expected_generation_id: &GenerationId,
+        symbol_ids: &[SymbolId],
+    ) -> Result<Vec<SymbolPageRankScore>, StorageError> {
+        self.current_centrality(project_id, expected_generation_id, symbol_ids)
+            .await
+    }
+
+    async fn current_centrality<Record>(
+        &self,
+        project_id: &ProjectId,
+        expected_generation_id: &GenerationId,
+        symbol_ids: &[SymbolId],
+    ) -> Result<Vec<Record>, StorageError>
+    where
+        Record: CentralityRecord,
+    {
         if symbol_ids.len() > 500 {
             return Err(StorageError::InvalidInput {
                 field: "symbol_ids",
@@ -98,8 +155,9 @@ impl CartographDatabase {
             return Ok(Vec::new());
         }
         let schema = quoted_schema(&self.schema);
+        let column = Record::COLUMN;
         let sql = format!(
-            r#"SELECT symbols.symbol_id::text, symbols.betweenness
+            r#"SELECT symbols.symbol_id::text, symbols.{column}
                 FROM {schema}."projects" AS projects
                 JOIN {schema}."symbols" AS symbols
                   ON symbols.project_id = projects.project_id
@@ -120,7 +178,7 @@ impl CartographDatabase {
             .fetch_all(&self.pool)
             .await
             .map_err(|_| StorageError::DatabaseOperation {
-                operation: "symbol-betweenness-read",
+                operation: Record::OPERATION,
             })?;
         if rows.len() != symbol_ids.len() {
             return Err(StorageError::CurrentGenerationChanged);
@@ -134,76 +192,15 @@ impl CartographDatabase {
                     .map_err(|_| StorageError::CorruptStoredValue { field: "symbol_id" })?;
                 let score = row.try_get::<Option<f64>, _>(1).map_err(|_| {
                     StorageError::CorruptStoredValue {
-                        field: "betweenness",
+                        field: Record::SCORE_FIELD,
                     }
                 })?;
                 if score.is_some_and(|score| !score.is_finite() || !(0.0..=1.0).contains(&score)) {
                     return Err(StorageError::CorruptStoredValue {
-                        field: "betweenness",
+                        field: Record::SCORE_FIELD,
                     });
                 }
-                Ok(SymbolBetweennessScore { symbol_id, score })
-            })
-            .collect()
-    }
-
-    /// Read persisted PageRank scores for a small exact current-generation symbol set.
-    pub async fn current_symbol_pagerank(
-        &self,
-        project_id: &ProjectId,
-        expected_generation_id: &GenerationId,
-        symbol_ids: &[SymbolId],
-    ) -> Result<Vec<SymbolPageRankScore>, StorageError> {
-        if symbol_ids.len() > 500 {
-            return Err(StorageError::InvalidInput {
-                field: "symbol_ids",
-            });
-        }
-        if symbol_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let schema = quoted_schema(&self.schema);
-        let sql = format!(
-            r#"SELECT symbols.symbol_id::text, symbols.pagerank
-                FROM {schema}."projects" AS projects
-                JOIN {schema}."symbols" AS symbols
-                  ON symbols.project_id = projects.project_id
-                 AND symbols.generation_id = projects.current_generation_id
-                WHERE projects.project_id = $1::uuid
-                  AND projects.current_generation_id = $2::uuid
-                  AND symbols.symbol_id = ANY(CAST($3 AS uuid[]))
-                ORDER BY symbols.symbol_id"#
-        );
-        let ids = symbol_ids
-            .iter()
-            .map(|symbol_id| symbol_id.as_str().to_owned())
-            .collect::<Vec<_>>();
-        let rows = query(AssertSqlSafe(sql))
-            .bind(project_id.as_str())
-            .bind(expected_generation_id.as_str())
-            .bind(ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|_| StorageError::DatabaseOperation {
-                operation: "symbol-pagerank-read",
-            })?;
-        if rows.len() != symbol_ids.len() {
-            return Err(StorageError::CurrentGenerationChanged);
-        }
-        rows.iter()
-            .map(|row| {
-                let raw_id = row
-                    .try_get::<String, _>(0)
-                    .map_err(|_| StorageError::CorruptStoredValue { field: "symbol_id" })?;
-                let symbol_id = SymbolId::parse(&raw_id)
-                    .map_err(|_| StorageError::CorruptStoredValue { field: "symbol_id" })?;
-                let score = row
-                    .try_get::<Option<f64>, _>(1)
-                    .map_err(|_| StorageError::CorruptStoredValue { field: "pagerank" })?;
-                if score.is_some_and(|score| !score.is_finite() || !(0.0..=1.0).contains(&score)) {
-                    return Err(StorageError::CorruptStoredValue { field: "pagerank" });
-                }
-                Ok(SymbolPageRankScore { symbol_id, score })
+                Ok(Record::new(symbol_id, score))
             })
             .collect()
     }
@@ -247,7 +244,12 @@ where
             .map(|index| scores[*index])
             .sum::<f64>();
         let uniform = baseline + (PAGERANK_DAMPING * dangling_sum / node_count as f64);
-        scores = page_rank_step(&graph, &partitions, &scores, uniform)?;
+        scores = page_rank_step(PageRankStep {
+            graph: &graph,
+            partitions: &partitions,
+            scores: &scores,
+            uniform,
+        })?;
     }
     if cancelled() {
         return Err(PageRankError::Cancelled);
@@ -378,12 +380,20 @@ fn page_rank_partitions(graph: &PageRankGraph, workers: usize) -> Vec<Vec<usize>
     partitions
 }
 
-fn page_rank_step(
-    graph: &PageRankGraph,
-    partitions: &[Vec<usize>],
-    scores: &[f64],
+struct PageRankStep<'a> {
+    graph: &'a PageRankGraph,
+    partitions: &'a [Vec<usize>],
+    scores: &'a [f64],
     uniform: f64,
-) -> Result<Vec<f64>, PageRankError> {
+}
+
+fn page_rank_step(input: PageRankStep<'_>) -> Result<Vec<f64>, PageRankError> {
+    let PageRankStep {
+        graph,
+        partitions,
+        scores,
+        uniform,
+    } = input;
     if partitions.len() == 1 {
         return Ok((0..graph.out_degree.len())
             .map(|target| graph.target_score(target, scores, uniform))
@@ -661,11 +671,13 @@ struct Mulberry32(u32);
 
 impl Mulberry32 {
     fn next_unit(&mut self) -> f64 {
-        self.0 = self.0.wrapping_add(0x6d2b_79f5);
+        self.0 = self.0.wrapping_add(MULBERRY_INCREMENT);
         let mut value = self.0;
-        value = (value ^ (value >> 15)).wrapping_mul(value | 1);
-        value ^= value.wrapping_add((value ^ (value >> 7)).wrapping_mul(value | 61));
-        f64::from(value ^ (value >> 14)) / (f64::from(u32::MAX) + 1.0)
+        value = (value ^ (value >> MULBERRY_FIRST_SHIFT)).wrapping_mul(value | 1);
+        value ^= value.wrapping_add(
+            (value ^ (value >> MULBERRY_MIX_SHIFT)).wrapping_mul(value | MULBERRY_MIX_MULTIPLIER),
+        );
+        f64::from(value ^ (value >> MULBERRY_FINAL_SHIFT)) / (f64::from(u32::MAX) + 1.0)
     }
 }
 
@@ -675,6 +687,9 @@ mod tests {
 
     use super::*;
     use crate::{EdgeInput, SymbolInput};
+
+    const TEST_UUID_BYTES: usize = 16;
+    const TEST_UUID_LAYOUT: (usize, usize, u8, u8, u8, u8) = (6, 8, 0x0f, 0x80, 0x3f, 0x80);
 
     #[test]
     fn directed_chain_marks_only_the_structural_bridge() {
@@ -783,10 +798,12 @@ mod tests {
         }
     }
 
-    fn id_bytes(seed: u8) -> [u8; 16] {
-        let mut bytes = [seed; 16];
-        bytes[6] = (bytes[6] & 0x0f) | 0x80;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    fn id_bytes(seed: u8) -> [u8; TEST_UUID_BYTES] {
+        let (version_byte, variant_byte, version_mask, version_bits, variant_mask, variant_bits) =
+            TEST_UUID_LAYOUT;
+        let mut bytes = [seed; TEST_UUID_BYTES];
+        bytes[version_byte] = (bytes[version_byte] & version_mask) | version_bits;
+        bytes[variant_byte] = (bytes[variant_byte] & variant_mask) | variant_bits;
         bytes
     }
 }

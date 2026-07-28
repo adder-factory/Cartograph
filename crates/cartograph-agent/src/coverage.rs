@@ -4,7 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use cartograph_db::{CoverageLoadReport, CoverageLoadRequest, CoverageTarget, SymbolCoverageFact};
+use cartograph_db::{
+    CoverageCount, CoverageLoadInput, CoverageLoadReport, CoverageLoadRequest, CoverageTarget,
+    SymbolCoverageFact,
+};
 use cartograph_domain::{ContentDigest, NormalizedPath};
 use serde::Serialize;
 use thiserror::Error;
@@ -126,10 +129,12 @@ impl ProjectRuntime {
         let matched_symbols = facts.len();
         let project_id = current_project_id(self).await?;
         let request = CoverageLoadRequest::new(
-            project_id,
-            generation_id,
-            options.source,
-            parsed.digest,
+            CoverageLoadInput {
+                project_id,
+                generation_id,
+                source_label: options.source,
+                report_digest: parsed.digest,
+            },
             facts,
         )
         .and_then(|request| {
@@ -246,7 +251,12 @@ fn parse_reports(
         hasher.update(path.as_os_str().as_encoded_bytes());
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
-        parse_report(root, &bytes, &mut lines, cancellation)?;
+        parse_report(CoverageReportInput {
+            root,
+            bytes: &bytes,
+            output: &mut lines,
+            cancellation,
+        })?;
     }
     Ok(ParsedCoverage {
         lines,
@@ -254,12 +264,20 @@ fn parse_reports(
     })
 }
 
-fn parse_report(
-    root: &Path,
-    bytes: &[u8],
-    output: &mut BTreeMap<NormalizedPath, BTreeMap<u32, u64>>,
-    cancellation: &ProjectCancellation,
-) -> Result<(), CoverageError> {
+struct CoverageReportInput<'a> {
+    root: &'a Path,
+    bytes: &'a [u8],
+    output: &'a mut BTreeMap<NormalizedPath, BTreeMap<u32, u64>>,
+    cancellation: &'a ProjectCancellation,
+}
+
+fn parse_report(input: CoverageReportInput<'_>) -> Result<(), CoverageError> {
+    let CoverageReportInput {
+        root,
+        bytes,
+        output,
+        cancellation,
+    } = input;
     let source = std::str::from_utf8(bytes).map_err(|_| CoverageError::InvalidReport)?;
     let mut current = None;
     let mut total_lines = output.values().map(BTreeMap::len).sum::<usize>();
@@ -366,10 +384,12 @@ fn join_target_chunk(
             found += 1;
             hit += u64::from(*count > 0);
         }
-        facts.push(
-            SymbolCoverageFact::new(target.symbol_id().clone(), found, hit, 0, 0)
-                .map_err(|_| CoverageError::InvalidReport)?,
-        );
+        let lines = CoverageCount::new(found, hit).map_err(|_| CoverageError::InvalidReport)?;
+        facts.push(SymbolCoverageFact::new(
+            target.symbol_id().clone(),
+            lines,
+            CoverageCount::ZERO,
+        ));
     }
     Ok(facts)
 }
@@ -407,17 +427,25 @@ mod tests {
         let root = Path::new("/workspace");
         let cancellation = ProjectCancellation::new();
         let mut output = BTreeMap::new();
-        parse_report(
+        parse_report(CoverageReportInput {
             root,
-            b"SF:/workspace/src/lib.rs\nDA:2,0\nDA:2,3\nDA:3,1\nend_of_record\n",
-            &mut output,
-            &cancellation,
-        )
+            bytes: b"SF:/workspace/src/lib.rs\nDA:2,0\nDA:2,3\nDA:3,1\nend_of_record\n",
+            output: &mut output,
+            cancellation: &cancellation,
+        })
         .unwrap_or_else(|error| panic!("LCOV fixture failed: {error}"));
         let path = NormalizedPath::parse("src/lib.rs")
             .unwrap_or_else(|error| panic!("fixture path failed: {error}"));
         assert_eq!(output[&path][&2], 3);
-        assert!(parse_report(root, b"DA:1,1\n", &mut output, &cancellation).is_err());
+        assert!(
+            parse_report(CoverageReportInput {
+                root,
+                bytes: b"DA:1,1\n",
+                output: &mut output,
+                cancellation: &cancellation,
+            })
+            .is_err()
+        );
     }
 
     #[test]

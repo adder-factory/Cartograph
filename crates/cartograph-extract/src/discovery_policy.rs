@@ -139,6 +139,24 @@ pub struct DiscoveryPolicy {
     index_embedded_repositories: bool,
 }
 
+/// Fail-closed admission policy for nested Git repositories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedRepositoryPolicy {
+    index_submodules: bool,
+    index_embedded_repositories: bool,
+}
+
+impl NestedRepositoryPolicy {
+    /// Admit configured submodules and, only when submodules are enabled, embedded repositories.
+    #[must_use]
+    pub const fn new(index_submodules: bool, index_embedded_repositories: bool) -> Self {
+        Self {
+            index_submodules,
+            index_embedded_repositories: index_submodules && index_embedded_repositories,
+        }
+    }
+}
+
 impl std::fmt::Debug for DiscoveryPolicy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -168,23 +186,16 @@ impl DiscoveryPolicy {
     /// Merge project exclusions over the immutable v1 defaults.
     pub fn new(
         project_excludes: &[String],
-        index_submodules: bool,
-        index_embedded_repositories: bool,
+        nested_repositories: NestedRepositoryPolicy,
     ) -> Result<Self, DiscoveryPolicyError> {
-        Self::new_with_languages(
-            project_excludes,
-            index_submodules,
-            index_embedded_repositories,
-            &[],
-        )
+        Self::new_with_languages(project_excludes, nested_repositories, &[])
     }
 
     /// Merge exclusions and an optional exact language allow-list. Empty
     /// preserves v1's automatic all-language behavior.
     pub fn new_with_languages(
         project_excludes: &[String],
-        index_submodules: bool,
-        index_embedded_repositories: bool,
+        nested_repositories: NestedRepositoryPolicy,
         languages: &[SourceLanguage],
     ) -> Result<Self, DiscoveryPolicyError> {
         if project_excludes.len() > MAXIMUM_CONFIGURED_EXCLUDES {
@@ -226,14 +237,14 @@ impl DiscoveryPolicy {
             duplicate_code_allowlist_patterns: 0,
             enabled_languages: (!languages.is_empty())
                 .then(|| Arc::new(languages.iter().copied().collect())),
-            index_submodules,
-            index_embedded_repositories: index_submodules && index_embedded_repositories,
+            index_submodules: nested_repositories.index_submodules,
+            index_embedded_repositories: nested_repositories.index_embedded_repositories,
         })
     }
 
     /// Exact v1 default policy.
     pub fn v1_defaults() -> Result<Self, DiscoveryPolicyError> {
-        Self::new(&[], true, true)
+        Self::new(&[], NestedRepositoryPolicy::new(true, true))
     }
 
     /// Apply an exact file include-glob allow-list. `None` retains automatic
@@ -395,8 +406,11 @@ mod tests {
 
     #[test]
     fn project_excludes_extend_defaults_and_nested_repositories_are_fail_closed() {
-        let policy = DiscoveryPolicy::new(&["private/**".to_owned()], false, true)
-            .unwrap_or_else(|error| panic!("project policy failed: {error}"));
+        let policy = DiscoveryPolicy::new(
+            &["private/**".to_owned()],
+            NestedRepositoryPolicy::new(false, true),
+        )
+        .unwrap_or_else(|error| panic!("project policy failed: {error}"));
         assert!(policy.excludes("private/key.ts"));
         assert!(policy.excludes("node_modules/pkg/index.js"));
         assert!(!policy.index_submodules());
@@ -407,8 +421,7 @@ mod tests {
     fn language_allow_list_filters_exact_paths_and_keeps_ambiguous_candidates() {
         let policy = DiscoveryPolicy::new_with_languages(
             &[],
-            true,
-            true,
+            NestedRepositoryPolicy::new(true, true),
             &[SourceLanguage::Cpp, SourceLanguage::Rust],
         )
         .unwrap_or_else(|error| panic!("language policy failed: {error}"));

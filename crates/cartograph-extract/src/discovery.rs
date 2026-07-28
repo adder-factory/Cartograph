@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Read,
     mem::size_of,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -23,6 +23,8 @@ const MIN_NESTED_DIRECTORY_SCAN_LIMIT: usize = 4_096;
 const NESTED_DIRECTORY_MULTIPLIER: usize = 64;
 const MAX_NESTED_DIRECTORY_SCAN_LIMIT: usize = 10_000_000;
 const MAX_GITMODULES_BYTES: u64 = 1024 * 1024;
+const TRACKED_PATH_OUTPUT_MULTIPLIER: u64 = 8;
+const MINIMUM_GIT_PATH_OUTPUT_BYTES: u64 = 1024 * 1024;
 
 /// One deterministic project-relative native source candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,13 +153,27 @@ impl SourceRoot {
             return Ok(Vec::new());
         }
         let policy = self.discovery_policy();
-        let nested = find_nested_repositories(root, policy, limits, &mut cancelled)?;
+        let nested = find_nested_repositories(
+            NestedRepositoryScan {
+                root,
+                policy,
+                limits,
+            },
+            &mut cancelled,
+        )?;
         let nested_roots = nested
             .iter()
             .map(|repository| repository.path.clone())
             .collect::<BTreeSet<_>>();
         let mut collector = SourceCollector::new(root, policy, limits);
-        collector.collect_walk(root, None, &nested_roots, &mut cancelled)?;
+        collector.collect_walk(
+            WalkRequest {
+                root,
+                prefix: None,
+                nested_roots: &nested_roots,
+            },
+            &mut cancelled,
+        )?;
         collector.collect_tracked(root, None, &mut cancelled)?;
         for repository in nested {
             if !repository.allowed(policy) {
@@ -165,9 +181,11 @@ impl SourceRoot {
             }
             let nested_root = root.join(repository.path.as_str());
             collector.collect_walk(
-                &nested_root,
-                Some(&repository.path),
-                &nested_roots,
+                WalkRequest {
+                    root: &nested_root,
+                    prefix: Some(&repository.path),
+                    nested_roots: &nested_roots,
+                },
                 &mut cancelled,
             )?;
             collector.collect_tracked(&nested_root, Some(&repository.path), &mut cancelled)?;
@@ -207,6 +225,12 @@ struct SourceCollector<'a> {
     retained_bytes: u64,
 }
 
+struct WalkRequest<'a> {
+    root: &'a Path,
+    prefix: Option<&'a NormalizedPath>,
+    nested_roots: &'a BTreeSet<NormalizedPath>,
+}
+
 impl<'a> SourceCollector<'a> {
     fn new(project_root: &'a Path, policy: &'a DiscoveryPolicy, limits: DiscoveryLimits) -> Self {
         Self {
@@ -220,33 +244,30 @@ impl<'a> SourceCollector<'a> {
 
     fn collect_walk<Cancel>(
         &mut self,
-        walk_root: &Path,
-        prefix: Option<&NormalizedPath>,
-        nested_roots: &BTreeSet<NormalizedPath>,
+        input: WalkRequest<'_>,
         cancelled: &mut Cancel,
     ) -> Result<(), SourceDiscoveryError>
     where
         Cancel: FnMut() -> bool,
     {
+        let WalkRequest {
+            root: walk_root,
+            prefix,
+            nested_roots,
+        } = input;
         let mut builder = WalkBuilder::new(walk_root);
-        let filter_root = walk_root.to_path_buf();
-        let filter_prefix = prefix.cloned();
-        let filter_policy = self.policy.clone();
-        let filter_nested = nested_roots.clone();
+        let filter = WalkFilter {
+            root: walk_root.to_path_buf(),
+            prefix: prefix.cloned(),
+            policy: self.policy.clone(),
+            nested_roots: nested_roots.clone(),
+        };
         builder
             .standard_filters(true)
             .hidden(false)
             .follow_links(false)
             .sort_by_file_name(|left, right| left.cmp(right))
-            .filter_entry(move |entry| {
-                include_walk_entry(
-                    entry,
-                    &filter_root,
-                    filter_prefix.as_ref(),
-                    &filter_policy,
-                    &filter_nested,
-                )
-            });
+            .filter_entry(move |entry| filter.includes(entry));
         for entry in builder.build() {
             if cancelled() {
                 return Err(SourceDiscoveryError::Cancelled);
@@ -281,8 +302,8 @@ impl<'a> SourceCollector<'a> {
         let maximum_output = self
             .limits
             .max_retained_path_bytes
-            .saturating_mul(8)
-            .clamp(1024 * 1024, MAX_GIT_PATH_OUTPUT_BYTES);
+            .saturating_mul(TRACKED_PATH_OUTPUT_MULTIPLIER)
+            .clamp(MINIMUM_GIT_PATH_OUTPUT_BYTES, MAX_GIT_PATH_OUTPUT_BYTES);
         let Some(paths) = git_tracked_paths(repository_root, maximum_output, cancelled)? else {
             return Ok(());
         };
@@ -349,6 +370,12 @@ struct NestedRepository {
     kind: NestedRepositoryKind,
 }
 
+struct NestedRepositoryScan<'a> {
+    root: &'a Path,
+    policy: &'a DiscoveryPolicy,
+    limits: DiscoveryLimits,
+}
+
 impl NestedRepository {
     const fn allowed(&self, policy: &DiscoveryPolicy) -> bool {
         match self.kind {
@@ -359,14 +386,17 @@ impl NestedRepository {
 }
 
 fn find_nested_repositories<Cancel>(
-    root: &Path,
-    policy: &DiscoveryPolicy,
-    limits: DiscoveryLimits,
+    input: NestedRepositoryScan<'_>,
     cancelled: &mut Cancel,
 ) -> Result<Vec<NestedRepository>, SourceDiscoveryError>
 where
     Cancel: FnMut() -> bool,
 {
+    let NestedRepositoryScan {
+        root,
+        policy,
+        limits,
+    } = input;
     let submodules = read_gitmodule_paths(root)?;
     let maximum_directories = limits
         .max_files
@@ -541,36 +571,39 @@ where
     Ok(Some(paths))
 }
 
-fn include_walk_entry(
-    entry: &DirEntry,
-    walk_root: &Path,
-    prefix: Option<&NormalizedPath>,
-    policy: &DiscoveryPolicy,
-    nested_roots: &BTreeSet<NormalizedPath>,
-) -> bool {
-    if entry.depth() == 0 {
-        return true;
+struct WalkFilter {
+    root: PathBuf,
+    prefix: Option<NormalizedPath>,
+    policy: DiscoveryPolicy,
+    nested_roots: BTreeSet<NormalizedPath>,
+}
+
+impl WalkFilter {
+    fn includes(&self, entry: &DirEntry) -> bool {
+        if entry.depth() == 0 {
+            return true;
+        }
+        let name = entry.file_name();
+        if name == GIT_DIRECTORY || name == CARTOGRAPH_DIRECTORY {
+            return false;
+        }
+        let is_directory = entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir());
+        if is_directory && has_ignore_marker(entry.path()) {
+            return false;
+        }
+        let Ok(local) = entry.path().strip_prefix(&self.root) else {
+            return true;
+        };
+        let Ok(path) = prefixed_path(self.prefix.as_ref(), local) else {
+            return true;
+        };
+        if is_directory && self.nested_roots.contains(&path) {
+            return false;
+        }
+        !policy_excludes(&self.policy, &path, is_directory)
     }
-    let name = entry.file_name();
-    if name == GIT_DIRECTORY || name == CARTOGRAPH_DIRECTORY {
-        return false;
-    }
-    let is_directory = entry
-        .file_type()
-        .is_some_and(|file_type| file_type.is_dir());
-    if is_directory && has_ignore_marker(entry.path()) {
-        return false;
-    }
-    let Ok(local) = entry.path().strip_prefix(walk_root) else {
-        return true;
-    };
-    let Ok(path) = prefixed_path(prefix, local) else {
-        return true;
-    };
-    if is_directory && nested_roots.contains(&path) {
-        return false;
-    }
-    !policy_excludes(policy, &path, is_directory)
 }
 
 fn prefixed_path(
@@ -628,6 +661,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::NestedRepositoryPolicy;
 
     const DISCOVERY_FILES: usize = 32;
     const DISCOVERY_PATH_BYTES: u64 = 64 * 1024;
@@ -776,8 +810,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(paths, ["restored.ts", "tracked.ts"]);
 
-        let policy = DiscoveryPolicy::new(&["tracked.ts".to_owned()], true, true)
-            .unwrap_or_else(|error| panic!("custom discovery policy failed: {error}"));
+        let policy = DiscoveryPolicy::new(
+            &["tracked.ts".to_owned()],
+            NestedRepositoryPolicy::new(true, true),
+        )
+        .unwrap_or_else(|error| panic!("custom discovery policy failed: {error}"));
         let source_root = SourceRoot::open_with_policy(root, policy)
             .unwrap_or_else(|error| panic!("custom source root failed: {error}"));
         let paths = source_root
@@ -833,7 +870,7 @@ mod tests {
     }
 
     fn nested_paths(root: &Path, submodules: bool, embedded: bool) -> Vec<String> {
-        let policy = DiscoveryPolicy::new(&[], submodules, embedded)
+        let policy = DiscoveryPolicy::new(&[], NestedRepositoryPolicy::new(submodules, embedded))
             .unwrap_or_else(|error| panic!("nested policy failed: {error}"));
         SourceRoot::open_with_policy(root, policy)
             .unwrap_or_else(|error| panic!("nested source root failed: {error}"))

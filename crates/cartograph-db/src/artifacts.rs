@@ -5,11 +5,14 @@ use cartograph_domain::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{column::ColumnIndex, query::query, row::Row, sql_str::AssertSqlSafe};
 
 use crate::{
     CartographDatabase, StorageError,
-    database::{quoted_schema, set_local_statement_timeout},
+    database::{
+        ProjectReadRequest, quoted_schema, read_project_rows, set_local_statement_timeout,
+        validate_bounded_limit as validate_limit, validate_json_object,
+    },
 };
 
 const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,12 +65,9 @@ impl SummaryCandidatePolicy {
     ) -> Result<Self, StorageError> {
         if minimum_body_lines > MAX_SUMMARY_MINIMUM_BODY_LINES
             || minimum_body_lines_by_kind.len() > MAX_SUMMARY_KIND_OVERRIDES
-            || minimum_body_lines_by_kind.iter().any(|(kind, floor)| {
-                kind.is_empty()
-                    || kind.len() > MAX_SUMMARY_KIND_BYTES
-                    || kind.chars().any(char::is_control)
-                    || *floor > MAX_SUMMARY_MINIMUM_BODY_LINES
-            })
+            || minimum_body_lines_by_kind
+                .iter()
+                .any(|(kind, floor)| !valid_summary_kind_override(kind, *floor))
         {
             return Err(StorageError::InvalidInput {
                 field: "summary_candidate_policy",
@@ -87,6 +87,13 @@ impl SummaryCandidatePolicy {
             }
         })
     }
+}
+
+fn valid_summary_kind_override(kind: &str, floor: u32) -> bool {
+    !kind.is_empty()
+        && kind.len() <= MAX_SUMMARY_KIND_BYTES
+        && !kind.chars().any(char::is_control)
+        && floor <= MAX_SUMMARY_MINIMUM_BODY_LINES
 }
 
 /// Durable agent-memory family.
@@ -201,16 +208,30 @@ pub struct NewAgentArtifact {
     state: AgentArtifactState,
 }
 
+/// Bounded textual scope and body for a new durable agent artifact.
+pub struct AgentArtifactContent {
+    scope_key: String,
+    body: String,
+}
+
+impl AgentArtifactContent {
+    #[must_use]
+    pub fn new(scope_key: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            scope_key: scope_key.into(),
+            body: body.into(),
+        }
+    }
+}
+
 impl NewAgentArtifact {
     /// Create a bounded active artifact without generation coupling.
     pub fn new(
         kind: AgentArtifactKind,
         scope: AgentArtifactScope,
-        scope_key: impl Into<String>,
-        body: impl Into<String>,
+        content: AgentArtifactContent,
     ) -> Result<Self, StorageError> {
-        let scope_key = scope_key.into();
-        let body = body.into();
+        let AgentArtifactContent { scope_key, body } = content;
         validate_scope_key(&scope_key)?;
         validate_body(&body, AgentArtifactState::Active)?;
         Ok(Self {
@@ -460,15 +481,54 @@ pub struct PendingFileSummary {
     items_truncated: bool,
 }
 
+/// Bounded, generation-current file or module summary roll-up query.
+pub struct PendingSummaryRollupQuery<'input> {
+    project_id: &'input ProjectId,
+    model: &'input str,
+    anchor_digest: &'input ContentDigest,
+    after: Option<&'input str>,
+    limit: u16,
+    item_limit: u16,
+}
+
+impl<'input> PendingSummaryRollupQuery<'input> {
+    /// Bind the project, model, and prompt anchor used to validate cached summaries.
+    #[must_use]
+    pub const fn new(
+        project_id: &'input ProjectId,
+        model: &'input str,
+        anchor_digest: &'input ContentDigest,
+    ) -> Self {
+        Self {
+            project_id,
+            model,
+            anchor_digest,
+            after: None,
+            limit: 0,
+            item_limit: 0,
+        }
+    }
+
+    /// Continue after one validated file path or module directory.
+    #[must_use]
+    pub const fn after(mut self, after: Option<&'input str>) -> Self {
+        self.after = after;
+        self
+    }
+
+    /// Apply the result-page and per-roll-up evidence bounds.
+    #[must_use]
+    pub const fn page(mut self, limit: u16, item_limit: u16) -> Self {
+        self.limit = limit;
+        self.item_limit = item_limit;
+        self
+    }
+}
+
 /// Digest-fenced file-summary publication request.
 pub struct FileSummarySaveRequest<'a> {
     path: &'a NormalizedPath,
-    expected_digest: &'a ContentDigest,
-    anchor_digest: &'a ContentDigest,
-    summary: &'a str,
-    model: &'a str,
-    item_limit: u16,
-    generation_mode: &'static str,
+    fields: SummarySaveFields<'a>,
 }
 
 /// Exact semantic-neighbor publication request. The database revalidates the
@@ -483,16 +543,27 @@ pub struct NeighborSummarySaveRequest<'a> {
     similarity: f64,
 }
 
+pub struct NeighborSummarySaveInput<'a> {
+    pub symbol_id: &'a SymbolId,
+    pub source_digest: &'a ContentDigest,
+    pub neighbor_symbol_id: &'a SymbolId,
+    pub neighbor_summary: &'a str,
+    pub summary: &'a str,
+    pub embedding_model_id: &'a ModelId,
+    pub similarity: f64,
+}
+
 impl<'a> NeighborSummarySaveRequest<'a> {
-    pub fn new(
-        symbol_id: &'a SymbolId,
-        source_digest: &'a ContentDigest,
-        neighbor_symbol_id: &'a SymbolId,
-        neighbor_summary: &'a str,
-        summary: &'a str,
-        embedding_model_id: &'a ModelId,
-        similarity: f64,
-    ) -> Result<Self, StorageError> {
+    pub fn new(input: NeighborSummarySaveInput<'a>) -> Result<Self, StorageError> {
+        let NeighborSummarySaveInput {
+            symbol_id,
+            source_digest,
+            neighbor_symbol_id,
+            neighbor_summary,
+            summary,
+            embedding_model_id,
+            similarity,
+        } = input;
         if symbol_id == neighbor_symbol_id
             || !similarity.is_finite()
             || !(0.0..=1.0).contains(&similarity)
@@ -541,6 +612,11 @@ pub struct PendingModuleSummary {
 /// Digest-fenced module-summary publication request.
 pub struct ModuleSummarySaveRequest<'a> {
     directory: &'a NormalizedPath,
+    fields: SummarySaveFields<'a>,
+}
+
+#[derive(Clone, Copy)]
+struct SummarySaveFields<'a> {
     expected_digest: &'a ContentDigest,
     anchor_digest: &'a ContentDigest,
     summary: &'a str,
@@ -549,63 +625,320 @@ pub struct ModuleSummarySaveRequest<'a> {
     generation_mode: &'static str,
 }
 
-impl<'a> ModuleSummarySaveRequest<'a> {
-    pub fn new(
-        directory: &'a NormalizedPath,
+/// Shared digest fence, text, model, and evidence bound for a file or module summary write.
+pub struct SummarySaveInput<'a> {
+    expected_digest: &'a ContentDigest,
+    anchor_digest: &'a ContentDigest,
+    summary: &'a str,
+    model: &'a str,
+    item_limit: u16,
+}
+
+impl<'a> SummarySaveInput<'a> {
+    #[must_use]
+    pub const fn new(
         expected_digest: &'a ContentDigest,
         anchor_digest: &'a ContentDigest,
         summary: &'a str,
-        model: &'a str,
-        item_limit: u16,
-    ) -> Result<Self, StorageError> {
-        validate_body(summary, AgentArtifactState::Complete)?;
-        validate_model(model)?;
-        validate_limit(item_limit, MAX_MODULE_SUMMARY_ROLLUP_ITEMS)?;
-        Ok(Self {
-            directory,
+    ) -> Self {
+        Self {
             expected_digest,
             anchor_digest,
             summary,
+            model: "",
+            item_limit: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_model(mut self, model: &'a str) -> Self {
+        self.model = model;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_item_limit(mut self, item_limit: u16) -> Self {
+        self.item_limit = item_limit;
+        self
+    }
+}
+
+pub struct PendingStructuralSummaryQuery<'a> {
+    project_id: &'a ProjectId,
+    after_symbol_id: Option<&'a SymbolId>,
+    limit: u16,
+    policy: &'a SummaryCandidatePolicy,
+}
+
+impl<'a> PendingStructuralSummaryQuery<'a> {
+    #[must_use]
+    pub const fn new(
+        project_id: &'a ProjectId,
+        limit: u16,
+        policy: &'a SummaryCandidatePolicy,
+    ) -> Self {
+        Self {
+            project_id,
+            after_symbol_id: None,
+            limit,
+            policy,
+        }
+    }
+
+    #[must_use]
+    pub const fn after_symbol(mut self, symbol_id: Option<&'a SymbolId>) -> Self {
+        self.after_symbol_id = symbol_id;
+        self
+    }
+}
+
+pub struct PendingNeighborSummaryQuery<'a> {
+    project_id: &'a ProjectId,
+    expected_generation_id: &'a GenerationId,
+    model_id: &'a ModelId,
+    after_symbol_id: Option<&'a SymbolId>,
+    limit: u16,
+}
+
+impl<'a> PendingNeighborSummaryQuery<'a> {
+    #[must_use]
+    pub const fn new(
+        project_id: &'a ProjectId,
+        expected_generation_id: &'a GenerationId,
+        model_id: &'a ModelId,
+    ) -> Self {
+        Self {
+            project_id,
+            expected_generation_id,
+            model_id,
+            after_symbol_id: None,
+            limit: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn after_symbol(mut self, symbol_id: Option<&'a SymbolId>) -> Self {
+        self.after_symbol_id = symbol_id;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_limit(mut self, limit: u16) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+pub struct PendingModelSummaryQuery<'a> {
+    project_id: &'a ProjectId,
+    model: &'a str,
+    limit: u16,
+    policy: &'a SummaryCandidatePolicy,
+}
+
+impl<'a> PendingModelSummaryQuery<'a> {
+    #[must_use]
+    pub const fn new(
+        project_id: &'a ProjectId,
+        model: &'a str,
+        policy: &'a SummaryCandidatePolicy,
+    ) -> Self {
+        Self {
+            project_id,
             model,
-            item_limit,
+            limit: 0,
+            policy,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_limit(mut self, limit: u16) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+pub struct SymbolSummarySaveInput<'a> {
+    project_id: &'a ProjectId,
+    symbol_id: &'a SymbolId,
+    source_digest: &'a ContentDigest,
+    summary: &'a str,
+    model: &'a str,
+}
+
+impl<'a> SymbolSummarySaveInput<'a> {
+    #[must_use]
+    pub const fn new(
+        project_id: &'a ProjectId,
+        symbol_id: &'a SymbolId,
+        source_digest: &'a ContentDigest,
+    ) -> Self {
+        Self {
+            project_id,
+            symbol_id,
+            source_digest,
+            summary: "",
+            model: "",
+        }
+    }
+
+    #[must_use]
+    pub const fn with_summary(mut self, summary: &'a str) -> Self {
+        self.summary = summary;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_model(mut self, model: &'a str) -> Self {
+        self.model = model;
+        self
+    }
+}
+
+pub struct StructuralSymbolSummarySaveInput<'a> {
+    project_id: &'a ProjectId,
+    symbol_id: &'a SymbolId,
+    source_digest: &'a ContentDigest,
+    summary: &'a str,
+}
+
+impl<'a> StructuralSymbolSummarySaveInput<'a> {
+    #[must_use]
+    pub const fn new(
+        project_id: &'a ProjectId,
+        symbol_id: &'a SymbolId,
+        source_digest: &'a ContentDigest,
+    ) -> Self {
+        Self {
+            project_id,
+            symbol_id,
+            source_digest,
+            summary: "",
+        }
+    }
+
+    #[must_use]
+    pub const fn with_summary(mut self, summary: &'a str) -> Self {
+        self.summary = summary;
+        self
+    }
+}
+
+pub struct SymbolRoleSaveInput<'a> {
+    project_id: &'a ProjectId,
+    symbol_id: &'a SymbolId,
+    role: &'a str,
+    metadata: Value,
+}
+
+impl<'a> SymbolRoleSaveInput<'a> {
+    #[must_use]
+    pub const fn new(project_id: &'a ProjectId, symbol_id: &'a SymbolId, role: &'a str) -> Self {
+        Self {
+            project_id,
+            symbol_id,
+            role,
+            metadata: Value::Null,
+        }
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = metadata;
+        self
+    }
+}
+
+struct PendingSymbolSummaryRequest<'a> {
+    project_id: &'a ProjectId,
+    model: Option<&'a str>,
+    limit: u16,
+    policy: &'a SummaryCandidatePolicy,
+}
+
+struct ArtifactReadRequest<'a> {
+    statement: String,
+    project_id: &'a ProjectId,
+    operation: &'static str,
+}
+
+struct SummaryRollupDigestInput<'a> {
+    domain: &'a str,
+    scope_key: &'a str,
+    source_hash: &'a str,
+    total_items: u64,
+    items: &'a [SummaryRollupItem],
+    anchor_digest: &'a ContentDigest,
+}
+
+struct ModuleSummaryRollupDigestInput<'a> {
+    directory: &'a str,
+    total_items: u64,
+    tool_export_constants: u64,
+    items: &'a [ModuleSummaryRollupItem],
+    anchor_digest: &'a ContentDigest,
+}
+
+fn validate_summary_generation_mode(generation_mode: &str) -> Result<(), StorageError> {
+    if matches!(generation_mode, "llm" | "structural_rule") {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidInput {
+            field: "summary_generation_mode",
+        })
+    }
+}
+
+impl<'a> SummarySaveFields<'a> {
+    fn new(input: SummarySaveInput<'a>, maximum_items: u16) -> Result<Self, StorageError> {
+        validate_body(input.summary, AgentArtifactState::Complete)?;
+        validate_model(input.model)?;
+        validate_limit(input.item_limit, maximum_items)?;
+        Ok(Self {
+            expected_digest: input.expected_digest,
+            anchor_digest: input.anchor_digest,
+            summary: input.summary,
+            model: input.model,
+            item_limit: input.item_limit,
             generation_mode: "llm",
         })
     }
 
-    pub fn with_generation_mode(
-        mut self,
-        generation_mode: &'static str,
-    ) -> Result<Self, StorageError> {
-        if !matches!(generation_mode, "llm" | "structural_rule") {
-            return Err(StorageError::InvalidInput {
-                field: "summary_generation_mode",
-            });
-        }
+    fn with_generation_mode(mut self, generation_mode: &'static str) -> Result<Self, StorageError> {
+        validate_summary_generation_mode(generation_mode)?;
         self.generation_mode = generation_mode;
         Ok(self)
+    }
+}
+
+impl<'a> ModuleSummarySaveRequest<'a> {
+    pub fn new(
+        directory: &'a NormalizedPath,
+        input: SummarySaveInput<'a>,
+    ) -> Result<Self, StorageError> {
+        Ok(Self {
+            directory,
+            fields: SummarySaveFields::new(input, MAX_MODULE_SUMMARY_ROLLUP_ITEMS)?,
+        })
+    }
+
+    pub fn with_generation_mode(self, generation_mode: &'static str) -> Result<Self, StorageError> {
+        validate_summary_generation_mode(generation_mode)?;
+        Ok(Self {
+            fields: self.fields.with_generation_mode(generation_mode)?,
+            ..self
+        })
     }
 }
 
 impl<'a> FileSummarySaveRequest<'a> {
     pub fn new(
         path: &'a NormalizedPath,
-        expected_digest: &'a ContentDigest,
-        anchor_digest: &'a ContentDigest,
-        summary: &'a str,
-        model: &'a str,
-        item_limit: u16,
+        input: SummarySaveInput<'a>,
     ) -> Result<Self, StorageError> {
-        validate_body(summary, AgentArtifactState::Complete)?;
-        validate_model(model)?;
-        validate_limit(item_limit, MAX_SUMMARY_ROLLUP_ITEMS)?;
         Ok(Self {
             path,
-            expected_digest,
-            anchor_digest,
-            summary,
-            model,
-            item_limit,
-            generation_mode: "llm",
+            fields: SummarySaveFields::new(input, MAX_SUMMARY_ROLLUP_ITEMS)?,
         })
     }
 
@@ -613,12 +946,7 @@ impl<'a> FileSummarySaveRequest<'a> {
         mut self,
         generation_mode: &'static str,
     ) -> Result<Self, StorageError> {
-        if !matches!(generation_mode, "llm" | "structural_rule") {
-            return Err(StorageError::InvalidInput {
-                field: "summary_generation_mode",
-            });
-        }
-        self.generation_mode = generation_mode;
+        self.fields = self.fields.with_generation_mode(generation_mode)?;
         Ok(self)
     }
 }
@@ -1282,7 +1610,11 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "list-agent-artifacts",
+                },
                 |statement| {
                     statement
                         .bind(request.kind.map(AgentArtifactKind::as_str))
@@ -1295,8 +1627,6 @@ impl CartographDatabase {
                         .bind(request.current_generation_only)
                         .bind(i64::from(request.limit))
                 },
-                project_id,
-                "list-agent-artifacts",
             )
             .await?;
         rows.iter().map(decode_artifact).collect()
@@ -1340,10 +1670,12 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "current-file-summary-texts",
+                },
                 |statement| statement.bind(encoded),
-                project_id,
-                "current-file-summary-texts",
             )
             .await?;
         rows.iter()
@@ -1377,14 +1709,16 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "current-module-summaries",
+                },
                 |statement| {
                     statement
                         .bind(directory.map(NormalizedPath::as_str))
                         .bind(i64::from(limit))
                 },
-                project_id,
-                "current-module-summaries",
             )
             .await?;
         let total = rows.first().map_or(Ok(0), |row| nonnegative_u64(row, 3))?;
@@ -1491,10 +1825,12 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "agent-role-distribution",
+                },
                 |statement| statement,
-                project_id,
-                "agent-role-distribution",
             )
             .await?;
         rows.iter()
@@ -1581,15 +1917,17 @@ impl CartographDatabase {
         );
         let mut rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "current-summary-coverage",
+                },
                 |statement| {
                     statement
                         .bind(body_lines_by_kind)
                         .bind(i64::from(policy.minimum_body_lines))
                         .bind(i64::from(policy.existing_docstring_char_threshold))
                 },
-                project_id,
-                "current-summary-coverage",
             )
             .await?;
         let row = rows.pop().ok_or(StorageError::CorruptStoredValue {
@@ -1628,11 +1966,14 @@ impl CartographDatabase {
     /// LLM or agent race safely with the structural pass without being downgraded.
     pub async fn pending_structural_summaries(
         &self,
-        project_id: &ProjectId,
-        after_symbol_id: Option<&SymbolId>,
-        limit: u16,
-        policy: &SummaryCandidatePolicy,
+        request: PendingStructuralSummaryQuery<'_>,
     ) -> Result<Vec<PendingStructuralSummary>, StorageError> {
+        let PendingStructuralSummaryQuery {
+            project_id,
+            after_symbol_id,
+            limit,
+            policy,
+        } = request;
         validate_limit(limit, MAX_STRUCTURAL_SUMMARY_BATCH)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
@@ -1677,18 +2018,18 @@ impl CartographDatabase {
                     ORDER BY symbols.symbol_id
                     LIMIT $3
                 )
-                SELECT candidates.generation_id::text,
-                       candidates.symbol_id::text,
-                       candidates.normalized_path,
-                       candidates.symbol_kind,
-                       candidates.name,
-                       candidates.qualified_name,
-                       left(candidates.signature, $4),
-                       left(candidates.code, $6),
-                       candidates.start_line,
-                       candidates.end_line,
-                       candidates.structural_digest,
-                       candidates.declaration_only,
+                SELECT candidates.generation_id::text AS generation_id,
+                       candidates.symbol_id::text AS symbol_id,
+                       candidates.normalized_path AS path,
+                       candidates.symbol_kind AS symbol_kind,
+                       candidates.name AS name,
+                       candidates.qualified_name AS qualified_name,
+                       left(candidates.signature, $4) AS signature,
+                       left(candidates.code, $6) AS code,
+                       candidates.start_line AS start_line,
+                       candidates.end_line AS end_line,
+                       candidates.structural_digest AS content_hash,
+                       candidates.declaration_only AS declaration_only,
                        COALESCE((
                            SELECT jsonb_agg(
                                jsonb_build_object(
@@ -1737,13 +2078,17 @@ impl CartographDatabase {
                            WHERE edges.project_id = CAST($1 AS uuid)
                              AND edges.generation_id = candidates.generation_id
                              AND edges.source_symbol_id = candidates.symbol_id
-                       ), '[]'::jsonb)::text
+                       ), '[]'::jsonb)::text AS edges
                 FROM candidates
                 ORDER BY candidates.symbol_id"#,
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "pending-structural-summaries",
+                },
                 |statement| {
                     statement
                         .bind(after_symbol_id.map(SymbolId::as_str))
@@ -1753,8 +2098,6 @@ impl CartographDatabase {
                         .bind(SUMMARY_SOURCE_MAXIMUM_CHARACTERS)
                         .bind(i64::from(policy.existing_docstring_char_threshold))
                 },
-                project_id,
-                "pending-structural-summaries",
             )
             .await?;
         rows.iter().map(decode_pending_structural_summary).collect()
@@ -1763,12 +2106,15 @@ impl CartographDatabase {
     /// Page current embedded symbols which still lack an exact summary.
     pub async fn pending_neighbor_summaries(
         &self,
-        project_id: &ProjectId,
-        expected_generation_id: &GenerationId,
-        model_id: &ModelId,
-        after_symbol_id: Option<&SymbolId>,
-        limit: u16,
+        request: PendingNeighborSummaryQuery<'_>,
     ) -> Result<Vec<PendingNeighborSummary>, StorageError> {
+        let PendingNeighborSummaryQuery {
+            project_id,
+            expected_generation_id,
+            model_id,
+            after_symbol_id,
+            limit,
+        } = request;
         validate_limit(limit, MAX_NEIGHBOR_SUMMARY_BATCH)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
@@ -1813,7 +2159,11 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "pending-neighbor-summaries",
+                },
                 |statement| {
                     statement
                         .bind(expected_generation_id.as_str())
@@ -1821,8 +2171,6 @@ impl CartographDatabase {
                         .bind(after_symbol_id.map(SymbolId::as_str))
                         .bind(i64::from(limit))
                 },
-                project_id,
-                "pending-neighbor-summaries",
             )
             .await?;
         rows.iter().map(decode_pending_neighbor_summary).collect()
@@ -1881,10 +2229,12 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "neighbor-summary-sources",
+                },
                 |statement| statement.bind(expected_generation_id.as_str()).bind(ids),
-                project_id,
-                "neighbor-summary-sources",
             )
             .await?;
         rows.iter().map(decode_neighbor_summary_source).collect()
@@ -1897,30 +2247,46 @@ impl CartographDatabase {
         limit: u16,
         policy: &SummaryCandidatePolicy,
     ) -> Result<Vec<PendingSummarySymbol>, StorageError> {
-        self.pending_symbol_summaries_internal(project_id, None, limit, policy)
-            .await
+        self.pending_symbol_summaries_internal(PendingSymbolSummaryRequest {
+            project_id,
+            model: None,
+            limit,
+            policy,
+        })
+        .await
     }
 
     /// Pull candidates whose structural digest and exact model do not both match.
     pub async fn pending_symbol_summaries_for_model_with_policy(
         &self,
-        project_id: &ProjectId,
-        model: &str,
-        limit: u16,
-        policy: &SummaryCandidatePolicy,
+        request: PendingModelSummaryQuery<'_>,
     ) -> Result<Vec<PendingSummarySymbol>, StorageError> {
+        let PendingModelSummaryQuery {
+            project_id,
+            model,
+            limit,
+            policy,
+        } = request;
         validate_model(model)?;
-        self.pending_symbol_summaries_internal(project_id, Some(model), limit, policy)
-            .await
+        self.pending_symbol_summaries_internal(PendingSymbolSummaryRequest {
+            project_id,
+            model: Some(model),
+            limit,
+            policy,
+        })
+        .await
     }
 
     async fn pending_symbol_summaries_internal(
         &self,
-        project_id: &ProjectId,
-        model: Option<&str>,
-        limit: u16,
-        policy: &SummaryCandidatePolicy,
+        request: PendingSymbolSummaryRequest<'_>,
     ) -> Result<Vec<PendingSummarySymbol>, StorageError> {
+        let PendingSymbolSummaryRequest {
+            project_id,
+            model,
+            limit,
+            policy,
+        } = request;
         validate_limit(limit, MAX_SUMMARY_BATCH)?;
         let body_lines_by_kind = policy.minimum_body_lines_json()?;
         let schema = quoted_schema(&self.schema);
@@ -1930,19 +2296,19 @@ impl CartographDatabase {
                     FROM {schema}."projects"
                     WHERE project_id = CAST($1 AS uuid)
                 )
-                SELECT symbols.generation_id::text,
-                       symbols.symbol_id::text,
-                       files.normalized_path,
-                       files.language,
-                       symbols.symbol_kind,
-                       symbols.qualified_name,
-                       left(symbols.signature, $3),
-                       symbols.start_line,
-                       symbols.end_line,
-                       symbols.structural_digest,
-                       COALESCE(left(documents.code, $4), ''),
-                       COALESCE(length(documents.code) > $4, false),
-                       priority.symbol_id IS NOT NULL
+                SELECT symbols.generation_id::text AS generation_id,
+                       symbols.symbol_id::text AS symbol_id,
+                       files.normalized_path AS path,
+                       files.language AS language,
+                       symbols.symbol_kind AS symbol_kind,
+                       symbols.qualified_name AS qualified_name,
+                       left(symbols.signature, $3) AS signature,
+                       symbols.start_line AS start_line,
+                       symbols.end_line AS end_line,
+                       symbols.structural_digest AS content_hash,
+                       COALESCE(left(documents.code, $4), '') AS code,
+                       COALESCE(length(documents.code) > $4, false) AS code_truncated,
+                       priority.symbol_id IS NOT NULL AS priority
                 FROM {schema}."symbols" AS symbols
                 JOIN current ON current.generation_id = symbols.generation_id
                 JOIN {schema}."files" AS files
@@ -1993,7 +2359,11 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "pending-symbol-summaries",
+                },
                 |statement| {
                     statement
                         .bind(i64::from(limit))
@@ -2004,8 +2374,6 @@ impl CartographDatabase {
                         .bind(i64::from(policy.existing_docstring_char_threshold))
                         .bind(model)
                 },
-                project_id,
-                "pending-symbol-summaries",
             )
             .await?;
         rows.iter().map(decode_pending_summary).collect()
@@ -2015,13 +2383,16 @@ impl CartographDatabase {
     /// model, source, anchor, and evidence-compatible cached paragraph.
     pub async fn pending_file_summaries(
         &self,
-        project_id: &ProjectId,
-        model: &str,
-        anchor_digest: &ContentDigest,
-        after_path: Option<&str>,
-        limit: u16,
-        item_limit: u16,
+        request: PendingSummaryRollupQuery<'_>,
     ) -> Result<Vec<PendingFileSummary>, StorageError> {
+        let PendingSummaryRollupQuery {
+            project_id,
+            model,
+            anchor_digest,
+            after: after_path,
+            limit,
+            item_limit,
+        } = request;
         validate_model(model)?;
         validate_limit(limit, MAX_FILE_SUMMARY_BATCH)?;
         validate_limit(item_limit, MAX_SUMMARY_ROLLUP_ITEMS)?;
@@ -2116,7 +2487,11 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "pending-file-summaries",
+                },
                 |statement| {
                     statement
                         .bind(model)
@@ -2126,8 +2501,6 @@ impl CartographDatabase {
                         .bind(SUMMARY_ROLLUP_ITEM_MAXIMUM_CHARACTERS)
                         .bind(anchor_digest.as_str())
                 },
-                project_id,
-                "pending-file-summaries",
             )
             .await?;
         rows.iter()
@@ -2139,13 +2512,16 @@ impl CartographDatabase {
     /// exact model, anchor, generation, and evidence-compatible paragraph.
     pub async fn pending_module_summaries(
         &self,
-        project_id: &ProjectId,
-        model: &str,
-        anchor_digest: &ContentDigest,
-        after_directory: Option<&str>,
-        limit: u16,
-        item_limit: u16,
+        request: PendingSummaryRollupQuery<'_>,
     ) -> Result<Vec<PendingModuleSummary>, StorageError> {
+        let PendingSummaryRollupQuery {
+            project_id,
+            model,
+            anchor_digest,
+            after: after_directory,
+            limit,
+            item_limit,
+        } = request;
         validate_model(model)?;
         validate_limit(limit, MAX_FILE_SUMMARY_BATCH)?;
         validate_limit(item_limit, MAX_MODULE_SUMMARY_ROLLUP_ITEMS)?;
@@ -2235,12 +2611,13 @@ impl CartographDatabase {
                     GROUP BY generation_id, directory
                     HAVING MAX(summarized_symbols) >= $8
                 )
-                SELECT rollups.generation_id::text,
-                       rollups.directory,
-                       rollups.summarized_symbols,
-                       COALESCE(tool_counts.tool_export_constants, 0),
-                       rollups.items::text,
-                       rollups.summarized_symbols > $5
+                SELECT rollups.generation_id::text AS generation_id,
+                       rollups.directory AS directory,
+                       rollups.summarized_symbols AS summarized_symbols,
+                       COALESCE(tool_counts.tool_export_constants, 0)
+                           AS tool_export_constants,
+                       rollups.items::text AS items,
+                       rollups.summarized_symbols > $5 AS items_truncated
                 FROM rollups
                 LEFT JOIN tool_counts
                   ON tool_counts.generation_id = rollups.generation_id
@@ -2269,7 +2646,11 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "pending-module-summaries",
+                },
                 |statement| {
                     statement
                         .bind(model)
@@ -2280,8 +2661,6 @@ impl CartographDatabase {
                         .bind(anchor_digest.as_str())
                         .bind(i64::try_from(MIN_MODULE_SUMMARY_SYMBOLS).unwrap_or(i64::MAX))
                 },
-                project_id,
-                "pending-module-summaries",
             )
             .await?;
         rows.iter()
@@ -2365,7 +2744,11 @@ impl CartographDatabase {
         );
         let rows = self
             .artifact_read(
-                statement,
+                ArtifactReadRequest {
+                    statement,
+                    project_id,
+                    operation: "pending-symbol-roles",
+                },
                 |statement| {
                     statement
                         .bind(model)
@@ -2373,8 +2756,6 @@ impl CartographDatabase {
                         .bind(SUMMARY_SIGNATURE_MAXIMUM_CHARACTERS)
                         .bind(ROLE_EVIDENCE_MAXIMUM_CHARACTERS)
                 },
-                project_id,
-                "pending-symbol-roles",
             )
             .await?;
         rows.iter().map(decode_pending_role).collect()
@@ -2383,12 +2764,15 @@ impl CartographDatabase {
     /// Save a summary only when its echoed structural digest still matches current source.
     pub async fn save_symbol_summary(
         &self,
-        project_id: &ProjectId,
-        symbol_id: &SymbolId,
-        source_digest: &ContentDigest,
-        summary: &str,
-        model: &str,
+        input: SymbolSummarySaveInput<'_>,
     ) -> Result<AgentArtifactRecord, StorageError> {
+        let SymbolSummarySaveInput {
+            project_id,
+            symbol_id,
+            source_digest,
+            summary,
+            model,
+        } = input;
         validate_body(summary, AgentArtifactState::Complete)?;
         validate_model(model)?;
         let schema = quoted_schema(&self.schema);
@@ -2464,11 +2848,14 @@ impl CartographDatabase {
     /// either the source generation changed or a higher-quality writer won.
     pub async fn save_structural_symbol_summary(
         &self,
-        project_id: &ProjectId,
-        symbol_id: &SymbolId,
-        source_digest: &ContentDigest,
-        summary: &str,
+        input: StructuralSymbolSummarySaveInput<'_>,
     ) -> Result<Option<AgentArtifactRecord>, StorageError> {
+        let StructuralSymbolSummarySaveInput {
+            project_id,
+            symbol_id,
+            source_digest,
+            summary,
+        } = input;
         validate_body(summary, AgentArtifactState::Complete)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
@@ -2659,40 +3046,42 @@ impl CartographDatabase {
             .bind(project_id.as_str())
             .bind(&generation_id)
             .bind(request.path.as_str())
-            .bind(i64::from(request.item_limit))
+            .bind(i64::from(request.fields.item_limit))
             .bind(SUMMARY_ROLLUP_ITEM_MAXIMUM_CHARACTERS)
             .fetch_all(&mut *transaction)
             .await
             .map_err(|_| database_error("save-file-summary"))?;
-        let pending = pending_file_summary_from_evidence_rows(&rows, request.anchor_digest)?
+        let pending = pending_file_summary_from_evidence_rows(&rows, request.fields.anchor_digest)?
             .ok_or(StorageError::CurrentGenerationChanged)?;
-        if pending.content_hash() != request.expected_digest.as_str() {
+        if pending.content_hash() != request.fields.expected_digest.as_str() {
             return Err(StorageError::CurrentGenerationChanged);
         }
         let metadata = serde_json::to_string(&serde_json::json!({
-            "model": request.model,
-            "anchorDigest": request.anchor_digest.as_str(),
+            "model": request.fields.model,
+            "anchorDigest": request.fields.anchor_digest.as_str(),
             "fileContentHash": pending.file_content_hash(),
             "summarizedSymbols": pending.summarized_symbols(),
             "evidenceItems": pending.items().len(),
             "itemsTruncated": pending.items_truncated(),
-            "rollupDigest": request.expected_digest.as_str(),
-            "generationMode": request.generation_mode,
+            "rollupDigest": request.fields.expected_digest.as_str(),
+            "generationMode": request.fields.generation_mode,
             "protocol": "symbol_to_file_v2",
         }))
         .map_err(|_| StorageError::InvalidInput {
             field: "artifact_metadata",
         })?;
-        let upsert =
-            scoped_summary_upsert_statement(&schema, request.generation_mode == "structural_rule");
+        let upsert = scoped_summary_upsert_statement(
+            &schema,
+            request.fields.generation_mode == "structural_rule",
+        );
         let row = query(AssertSqlSafe(upsert))
             .bind(project_id.as_str())
             .bind(AgentArtifactScope::File.as_str())
             .bind(request.path.as_str())
-            .bind(request.summary)
+            .bind(request.fields.summary)
             .bind(metadata)
             .bind(&generation_id)
-            .bind(request.expected_digest.as_str())
+            .bind(request.fields.expected_digest.as_str())
             .fetch_optional(&mut *transaction)
             .await
             .map_err(|_| database_error("save-file-summary"))?;
@@ -2766,41 +3155,44 @@ impl CartographDatabase {
             .bind(project_id.as_str())
             .bind(&generation_id)
             .bind(request.directory.as_str())
-            .bind(i64::from(request.item_limit))
+            .bind(i64::from(request.fields.item_limit))
             .bind(SUMMARY_ROLLUP_ITEM_MAXIMUM_CHARACTERS)
             .fetch_all(&mut *transaction)
             .await
             .map_err(|_| database_error("save-module-summary"))?;
-        let pending = pending_module_summary_from_evidence_rows(&rows, request.anchor_digest)?
-            .filter(|pending| pending.summarized_symbols() >= MIN_MODULE_SUMMARY_SYMBOLS)
-            .ok_or(StorageError::CurrentGenerationChanged)?;
-        if pending.content_hash() != request.expected_digest.as_str() {
+        let pending =
+            pending_module_summary_from_evidence_rows(&rows, request.fields.anchor_digest)?
+                .filter(|pending| pending.summarized_symbols() >= MIN_MODULE_SUMMARY_SYMBOLS)
+                .ok_or(StorageError::CurrentGenerationChanged)?;
+        if pending.content_hash() != request.fields.expected_digest.as_str() {
             return Err(StorageError::CurrentGenerationChanged);
         }
         let metadata = serde_json::to_string(&serde_json::json!({
-            "model": request.model,
-            "anchorDigest": request.anchor_digest.as_str(),
+            "model": request.fields.model,
+            "anchorDigest": request.fields.anchor_digest.as_str(),
             "summarizedSymbols": pending.summarized_symbols(),
             "toolExportConstants": pending.tool_export_constants(),
-            "generationMode": request.generation_mode,
+            "generationMode": request.fields.generation_mode,
             "evidenceItems": pending.items().len(),
             "itemsTruncated": pending.items_truncated(),
-            "rollupDigest": request.expected_digest.as_str(),
+            "rollupDigest": request.fields.expected_digest.as_str(),
             "protocol": "symbol_to_module_v2",
         }))
         .map_err(|_| StorageError::InvalidInput {
             field: "artifact_metadata",
         })?;
-        let upsert =
-            scoped_summary_upsert_statement(&schema, request.generation_mode == "structural_rule");
+        let upsert = scoped_summary_upsert_statement(
+            &schema,
+            request.fields.generation_mode == "structural_rule",
+        );
         let row = query(AssertSqlSafe(upsert))
             .bind(project_id.as_str())
             .bind(AgentArtifactScope::Module.as_str())
             .bind(request.directory.as_str())
-            .bind(request.summary)
+            .bind(request.fields.summary)
             .bind(metadata)
             .bind(&generation_id)
-            .bind(request.expected_digest.as_str())
+            .bind(request.fields.expected_digest.as_str())
             .fetch_optional(&mut *transaction)
             .await
             .map_err(|_| database_error("save-module-summary"))?;
@@ -2827,11 +3219,14 @@ impl CartographDatabase {
     /// the old artifact generation-bound and pending reclassification.
     pub async fn save_symbol_role(
         &self,
-        project_id: &ProjectId,
-        symbol_id: &SymbolId,
-        role: &str,
-        metadata: serde_json::Value,
+        input: SymbolRoleSaveInput<'_>,
     ) -> Result<AgentArtifactRecord, StorageError> {
+        let SymbolRoleSaveInput {
+            project_id,
+            symbol_id,
+            role,
+            metadata,
+        } = input;
         validate_body(role, AgentArtifactState::Complete)?;
         validate_metadata(&metadata)?;
         let metadata =
@@ -2879,10 +3274,8 @@ impl CartographDatabase {
 
     async fn artifact_read<'query, Bind>(
         &self,
-        statement: String,
+        request: ArtifactReadRequest<'_>,
         bind: Bind,
-        project_id: &ProjectId,
-        operation: &'static str,
     ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError>
     where
         Bind: FnOnce(
@@ -2893,28 +3286,22 @@ impl CartographDatabase {
             sqlx_postgres::PgArguments,
         >,
     {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| database_error(operation))?;
-        query("SET TRANSACTION READ ONLY")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        set_local_statement_timeout(&mut transaction, ARTIFACT_TIMEOUT)
-            .await
-            .map_err(|_| database_error(operation))?;
-        let statement = query(AssertSqlSafe(statement)).bind(project_id.as_str());
-        let rows = bind(statement)
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| database_error(operation))?;
-        Ok(rows)
+        let ArtifactReadRequest {
+            statement,
+            project_id,
+            operation,
+        } = request;
+        read_project_rows(
+            self,
+            ProjectReadRequest {
+                statement,
+                project_id,
+                operation,
+                statement_timeout: ARTIFACT_TIMEOUT,
+            },
+            bind,
+        )
+        .await
     }
 }
 
@@ -3065,14 +3452,14 @@ fn pending_file_summary_from_evidence_rows(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let content_hash = summary_rollup_digest(
-        "cartograph:file-summary:v2",
-        &path,
-        &file_content_hash,
-        summarized_symbols,
-        &items,
+    let content_hash = summary_rollup_digest(SummaryRollupDigestInput {
+        domain: "cartograph:file-summary:v2",
+        scope_key: &path,
+        source_hash: &file_content_hash,
+        total_items: summarized_symbols,
+        items: &items,
         anchor_digest,
-    );
+    });
     Ok(Some(PendingFileSummary {
         generation_id,
         path,
@@ -3124,13 +3511,13 @@ fn pending_module_summary_from_evidence_rows(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let content_hash = module_summary_rollup_digest(
-        &directory,
-        summarized_symbols,
+    let content_hash = module_summary_rollup_digest(ModuleSummaryRollupDigestInput {
+        directory: &directory,
+        total_items: summarized_symbols,
         tool_export_constants,
-        &items,
+        items: &items,
         anchor_digest,
-    );
+    });
     Ok(Some(PendingModuleSummary {
         generation_id,
         directory,
@@ -3145,6 +3532,16 @@ fn pending_module_summary_from_evidence_rows(
     }))
 }
 
+const FILE_SUMMARY_SYMBOL_COUNT_COLUMN: usize = 3;
+const FILE_SUMMARY_ITEMS_COLUMN: usize = 4;
+const FILE_SUMMARY_TRUNCATED_COLUMN: usize = 5;
+const ROLE_SYMBOL_KIND_COLUMN: usize = 3;
+const ROLE_QUALIFIED_NAME_COLUMN: usize = 4;
+const ROLE_SIGNATURE_COLUMN: usize = 5;
+const ROLE_DESCRIPTION_COLUMN: usize = 6;
+const ROLE_CODE_COLUMN: usize = 7;
+const ROLE_EXPORTED_COLUMN: usize = 8;
+
 fn decode_pending_file_summary(
     row: &sqlx_postgres::PgRow,
     anchor_digest: &ContentDigest,
@@ -3152,40 +3549,33 @@ fn decode_pending_file_summary(
     let generation_id = text(row, 0)?;
     let path = text(row, 1)?;
     let file_content_hash = text(row, 2)?;
-    let summarized_symbols = nonnegative_u64(row, 3)?;
-    let items = serde_json::from_str::<Vec<SummaryRollupItem>>(&text(row, 4)?).map_err(|_| {
-        StorageError::CorruptStoredValue {
-            field: "file_summary_evidence",
-        }
-    })?;
+    let summarized_symbols = nonnegative_u64(row, FILE_SUMMARY_SYMBOL_COUNT_COLUMN)?;
+    let items =
+        serde_json::from_str::<Vec<SummaryRollupItem>>(&text(row, FILE_SUMMARY_ITEMS_COLUMN)?)
+            .map_err(|_| StorageError::CorruptStoredValue {
+                field: "file_summary_evidence",
+            })?;
     if items.is_empty()
         || items.len() > usize::from(MAX_SUMMARY_ROLLUP_ITEMS)
-        || items.iter().any(|item| {
-            item.symbol_id.is_empty()
-                || item.qualified_name.is_empty()
-                || item.symbol_kind.is_empty()
-                || item.summary.is_empty()
-                || item.summary.len()
-                    > usize::try_from(SUMMARY_ROLLUP_ITEM_MAXIMUM_CHARACTERS).unwrap_or(usize::MAX)
-        })
+        || items.iter().any(invalid_summary_rollup_item)
     {
         return Err(StorageError::CorruptStoredValue {
             field: "file_summary_evidence",
         });
     }
-    let items_truncated =
-        row.try_get::<bool, _>(5)
-            .map_err(|_| StorageError::CorruptStoredValue {
-                field: "file_summary_evidence",
-            })?;
-    let content_hash = summary_rollup_digest(
-        "cartograph:file-summary:v2",
-        &path,
-        &file_content_hash,
-        summarized_symbols,
-        &items,
+    let items_truncated = row
+        .try_get::<bool, _>(FILE_SUMMARY_TRUNCATED_COLUMN)
+        .map_err(|_| StorageError::CorruptStoredValue {
+            field: "file_summary_evidence",
+        })?;
+    let content_hash = summary_rollup_digest(SummaryRollupDigestInput {
+        domain: "cartograph:file-summary:v2",
+        scope_key: &path,
+        source_hash: &file_content_hash,
+        total_items: summarized_symbols,
+        items: &items,
         anchor_digest,
-    );
+    });
     Ok(PendingFileSummary {
         generation_id,
         path,
@@ -3197,52 +3587,47 @@ fn decode_pending_file_summary(
     })
 }
 
+fn invalid_summary_rollup_item(item: &SummaryRollupItem) -> bool {
+    item.symbol_id.is_empty()
+        || item.qualified_name.is_empty()
+        || item.symbol_kind.is_empty()
+        || item.summary.is_empty()
+        || item.summary.len()
+            > usize::try_from(SUMMARY_ROLLUP_ITEM_MAXIMUM_CHARACTERS).unwrap_or(usize::MAX)
+}
+
 fn decode_pending_module_summary(
     row: &sqlx_postgres::PgRow,
     anchor_digest: &ContentDigest,
 ) -> Result<PendingModuleSummary, StorageError> {
-    let generation_id = text(row, 0)?;
-    let directory = text(row, 1)?;
+    let generation_id = text(row, "generation_id")?;
+    let directory = text(row, "directory")?;
     NormalizedPath::parse(&directory).map_err(|_| StorageError::CorruptStoredValue {
         field: "module_summary_evidence",
     })?;
-    let summarized_symbols = nonnegative_u64(row, 2)?;
-    let tool_export_constants = nonnegative_u64(row, 3)?;
-    let items =
-        serde_json::from_str::<Vec<ModuleSummaryRollupItem>>(&text(row, 4)?).map_err(|_| {
-            StorageError::CorruptStoredValue {
-                field: "module_summary_evidence",
-            }
-        })?;
+    let summarized_symbols = nonnegative_u64(row, "summarized_symbols")?;
+    let tool_export_constants = nonnegative_u64(row, "tool_export_constants")?;
+    let items = decode_module_summary_items(row, &directory)?;
     if summarized_symbols < MIN_MODULE_SUMMARY_SYMBOLS
         || items.is_empty()
         || items.len() > usize::from(MAX_MODULE_SUMMARY_ROLLUP_ITEMS)
-        || items.iter().any(|item| {
-            immediate_parent_directory(&item.path).as_deref() != Some(directory.as_str())
-                || item.symbol_id.is_empty()
-                || item.qualified_name.is_empty()
-                || item.symbol_kind.is_empty()
-                || item.summary.is_empty()
-                || item.summary.len()
-                    > usize::try_from(SUMMARY_ROLLUP_ITEM_MAXIMUM_CHARACTERS).unwrap_or(usize::MAX)
-        })
     {
         return Err(StorageError::CorruptStoredValue {
             field: "module_summary_evidence",
         });
     }
-    let items_truncated =
-        row.try_get::<bool, _>(5)
-            .map_err(|_| StorageError::CorruptStoredValue {
-                field: "module_summary_evidence",
-            })?;
-    let content_hash = module_summary_rollup_digest(
-        &directory,
-        summarized_symbols,
+    let items_truncated = row.try_get::<bool, _>("items_truncated").map_err(|_| {
+        StorageError::CorruptStoredValue {
+            field: "module_summary_evidence",
+        }
+    })?;
+    let content_hash = module_summary_rollup_digest(ModuleSummaryRollupDigestInput {
+        directory: &directory,
+        total_items: summarized_symbols,
         tool_export_constants,
-        &items,
+        items: &items,
         anchor_digest,
-    );
+    });
     Ok(PendingModuleSummary {
         generation_id,
         directory,
@@ -3254,14 +3639,54 @@ fn decode_pending_module_summary(
     })
 }
 
-fn summary_rollup_digest(
-    domain: &str,
-    scope_key: &str,
-    source_hash: &str,
-    total_items: u64,
-    items: &[SummaryRollupItem],
-    anchor_digest: &ContentDigest,
-) -> ContentDigest {
+fn decode_module_summary_items(
+    row: &sqlx_postgres::PgRow,
+    directory: &str,
+) -> Result<Vec<ModuleSummaryRollupItem>, StorageError> {
+    let items = serde_json::from_str::<Vec<ModuleSummaryRollupItem>>(&text(row, "items")?)
+        .map_err(|_| StorageError::CorruptStoredValue {
+            field: "module_summary_evidence",
+        })?;
+    if items
+        .iter()
+        .all(|item| valid_module_summary_item(item, directory))
+    {
+        Ok(items)
+    } else {
+        Err(StorageError::CorruptStoredValue {
+            field: "module_summary_evidence",
+        })
+    }
+}
+
+fn valid_module_summary_item(item: &ModuleSummaryRollupItem, directory: &str) -> bool {
+    if immediate_parent_directory(&item.path).as_deref() != Some(directory) {
+        return false;
+    }
+    if !module_summary_item_has_required_text(item) {
+        return false;
+    }
+    let maximum_characters =
+        usize::try_from(SUMMARY_ROLLUP_ITEM_MAXIMUM_CHARACTERS).unwrap_or(usize::MAX);
+    item.summary.len() <= maximum_characters
+}
+
+fn module_summary_item_has_required_text(item: &ModuleSummaryRollupItem) -> bool {
+    !item.symbol_id.is_empty()
+        && !item.qualified_name.is_empty()
+        && !item.symbol_kind.is_empty()
+        && !item.summary.is_empty()
+}
+
+fn summary_rollup_digest(input: SummaryRollupDigestInput<'_>) -> ContentDigest {
+    let SummaryRollupDigestInput {
+        domain,
+        scope_key,
+        source_hash,
+        total_items,
+        items,
+        anchor_digest,
+    } = input;
     let mut hasher = blake3::Hasher::new();
     for field in [domain, scope_key, source_hash, anchor_digest.as_str()] {
         hash_rollup_field(&mut hasher, field.as_bytes());
@@ -3280,13 +3705,14 @@ fn summary_rollup_digest(
     ContentDigest::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn module_summary_rollup_digest(
-    directory: &str,
-    total_items: u64,
-    tool_export_constants: u64,
-    items: &[ModuleSummaryRollupItem],
-    anchor_digest: &ContentDigest,
-) -> ContentDigest {
+fn module_summary_rollup_digest(input: ModuleSummaryRollupDigestInput<'_>) -> ContentDigest {
+    let ModuleSummaryRollupDigestInput {
+        directory,
+        total_items,
+        tool_export_constants,
+        items,
+        anchor_digest,
+    } = input;
     let mut hasher = blake3::Hasher::new();
     for field in [
         "cartograph:module-summary:v2",
@@ -3359,24 +3785,7 @@ fn validate_body(value: &str, state: AgentArtifactState) -> Result<(), StorageEr
 }
 
 fn validate_metadata(value: &Value) -> Result<(), StorageError> {
-    let encoded = serde_json::to_vec(value).map_err(|_| StorageError::InvalidInput {
-        field: "artifact_metadata",
-    })?;
-    if !value.is_object() || encoded.len() > MAX_ARTIFACT_METADATA_BYTES {
-        Err(StorageError::InvalidInput {
-            field: "artifact_metadata",
-        })
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_limit(limit: u16, maximum: u16) -> Result<(), StorageError> {
-    if limit == 0 || limit > maximum {
-        Err(StorageError::InvalidInput { field: "limit" })
-    } else {
-        Ok(())
-    }
+    validate_json_object(value, MAX_ARTIFACT_METADATA_BYTES, "artifact_metadata")
 }
 
 fn canonical_uuid(value: &str) -> bool {
@@ -3391,47 +3800,68 @@ fn canonical_uuid(value: &str) -> bool {
 }
 
 fn decode_artifact(row: &sqlx_postgres::PgRow) -> Result<AgentArtifactRecord, StorageError> {
+    let id = decode_artifact_id(row)?;
+    let kind = decode_artifact_kind(row)?;
+    let scope = decode_artifact_scope(row)?;
+    let state = decode_artifact_state(row)?;
+    let metadata = decode_artifact_metadata(row)?;
+    Ok(AgentArtifactRecord {
+        id,
+        artifact_id: text(row, "artifact_id")?,
+        kind,
+        scope,
+        scope_key: text(row, "scope_key")?,
+        body: text(row, "body")?,
+        metadata,
+        generation_id: optional_text(row, "generation_id")?,
+        source_digest: optional_text(row, "source_digest")?,
+        state,
+        created_at: text(row, "created_at")?,
+        updated_at: text(row, "updated_at")?,
+    })
+}
+
+fn decode_artifact_id(row: &sqlx_postgres::PgRow) -> Result<u64, StorageError> {
     let id = row
-        .try_get::<i64, _>(0)
+        .try_get::<i64, _>("id")
         .ok()
         .and_then(|id| u64::try_from(id).ok())
         .filter(|id| *id > 0)
         .ok_or(StorageError::CorruptStoredValue {
             field: "artifact_id",
         })?;
-    let kind = text(row, 2).and_then(|value| {
+    Ok(id)
+}
+
+fn decode_artifact_kind(row: &sqlx_postgres::PgRow) -> Result<AgentArtifactKind, StorageError> {
+    text(row, "artifact_kind").and_then(|value| {
         AgentArtifactKind::parse(&value).ok_or(StorageError::CorruptStoredValue {
             field: "artifact_kind",
         })
-    })?;
-    let scope = text(row, 3).and_then(|value| {
+    })
+}
+
+fn decode_artifact_scope(row: &sqlx_postgres::PgRow) -> Result<AgentArtifactScope, StorageError> {
+    text(row, "scope_kind").and_then(|value| {
         AgentArtifactScope::parse(&value).ok_or(StorageError::CorruptStoredValue {
             field: "artifact_scope",
         })
-    })?;
-    let state = text(row, 9).and_then(|value| {
+    })
+}
+
+fn decode_artifact_state(row: &sqlx_postgres::PgRow) -> Result<AgentArtifactState, StorageError> {
+    text(row, "state").and_then(|value| {
         AgentArtifactState::parse(&value).ok_or(StorageError::CorruptStoredValue {
             field: "artifact_state",
         })
-    })?;
-    let metadata = text(row, 6).and_then(|value| {
+    })
+}
+
+fn decode_artifact_metadata(row: &sqlx_postgres::PgRow) -> Result<Value, StorageError> {
+    text(row, "metadata").and_then(|value| {
         serde_json::from_str(&value).map_err(|_| StorageError::CorruptStoredValue {
             field: "artifact_metadata",
         })
-    })?;
-    Ok(AgentArtifactRecord {
-        id,
-        artifact_id: text(row, 1)?,
-        kind,
-        scope,
-        scope_key: text(row, 4)?,
-        body: text(row, 5)?,
-        metadata,
-        generation_id: optional_text(row, 7)?,
-        source_digest: optional_text(row, 8)?,
-        state,
-        created_at: text(row, 10)?,
-        updated_at: text(row, 11)?,
     })
 }
 
@@ -3439,22 +3869,22 @@ fn decode_pending_summary(
     row: &sqlx_postgres::PgRow,
 ) -> Result<PendingSummarySymbol, StorageError> {
     Ok(PendingSummarySymbol {
-        generation_id: text(row, 0)?,
-        symbol_id: text(row, 1)?,
-        path: text(row, 2)?,
-        language: text(row, 3)?,
-        symbol_kind: text(row, 4)?,
-        qualified_name: text(row, 5)?,
-        signature: text(row, 6)?,
-        start_line: positive_u32(row, 7)?,
-        end_line: positive_u32(row, 8)?,
-        content_hash: text(row, 9)?,
-        code: text(row, 10)?,
+        generation_id: text(row, "generation_id")?,
+        symbol_id: text(row, "symbol_id")?,
+        path: text(row, "path")?,
+        language: text(row, "language")?,
+        symbol_kind: text(row, "symbol_kind")?,
+        qualified_name: text(row, "qualified_name")?,
+        signature: text(row, "signature")?,
+        start_line: positive_u32(row, "start_line")?,
+        end_line: positive_u32(row, "end_line")?,
+        content_hash: text(row, "content_hash")?,
+        code: text(row, "code")?,
         code_truncated: row
-            .try_get::<bool, _>(11)
+            .try_get::<bool, _>("code_truncated")
             .map_err(|_| StorageError::CorruptStoredValue { field: "artifact" })?,
         priority: row
-            .try_get::<bool, _>(12)
+            .try_get::<bool, _>("priority")
             .map_err(|_| StorageError::CorruptStoredValue { field: "artifact" })?,
     })
 }
@@ -3462,23 +3892,24 @@ fn decode_pending_summary(
 fn decode_pending_structural_summary(
     row: &sqlx_postgres::PgRow,
 ) -> Result<PendingStructuralSummary, StorageError> {
-    let edges =
-        serde_json::from_str(&text(row, 12)?).map_err(|_| StorageError::CorruptStoredValue {
+    let edges = serde_json::from_str(&text(row, "edges")?).map_err(|_| {
+        StorageError::CorruptStoredValue {
             field: "structural_summary_edges",
-        })?;
+        }
+    })?;
     Ok(PendingStructuralSummary {
-        generation_id: text(row, 0)?,
-        symbol_id: text(row, 1)?,
-        path: text(row, 2)?,
-        symbol_kind: text(row, 3)?,
-        name: text(row, 4)?,
-        qualified_name: text(row, 5)?,
-        signature: text(row, 6)?,
-        code: text(row, 7)?,
-        start_line: positive_u32(row, 8)?,
-        end_line: positive_u32(row, 9)?,
-        content_hash: text(row, 10)?,
-        declaration_only: row.try_get::<bool, _>(11).map_err(|_| {
+        generation_id: text(row, "generation_id")?,
+        symbol_id: text(row, "symbol_id")?,
+        path: text(row, "path")?,
+        symbol_kind: text(row, "symbol_kind")?,
+        name: text(row, "name")?,
+        qualified_name: text(row, "qualified_name")?,
+        signature: text(row, "signature")?,
+        code: text(row, "code")?,
+        start_line: positive_u32(row, "start_line")?,
+        end_line: positive_u32(row, "end_line")?,
+        content_hash: text(row, "content_hash")?,
+        declaration_only: row.try_get::<bool, _>("declaration_only").map_err(|_| {
             StorageError::CorruptStoredValue {
                 field: "structural_summary",
             }
@@ -3516,28 +3947,40 @@ fn decode_pending_role(row: &sqlx_postgres::PgRow) -> Result<PendingRoleSymbol, 
         symbol_id: text(row, 0)?,
         path: text(row, 1)?,
         language: text(row, 2)?,
-        symbol_kind: text(row, 3)?,
-        qualified_name: text(row, 4)?,
-        signature: text(row, 5)?,
-        description: text(row, 6)?,
-        code: text(row, 7)?,
+        symbol_kind: text(row, ROLE_SYMBOL_KIND_COLUMN)?,
+        qualified_name: text(row, ROLE_QUALIFIED_NAME_COLUMN)?,
+        signature: text(row, ROLE_SIGNATURE_COLUMN)?,
+        description: text(row, ROLE_DESCRIPTION_COLUMN)?,
+        code: text(row, ROLE_CODE_COLUMN)?,
         exported: row
-            .try_get::<bool, _>(8)
+            .try_get::<bool, _>(ROLE_EXPORTED_COLUMN)
             .map_err(|_| StorageError::CorruptStoredValue { field: "artifact" })?,
     })
 }
 
-fn text(row: &sqlx_postgres::PgRow, index: usize) -> Result<String, StorageError> {
+fn text<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<String, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "artifact" })
 }
 
-fn optional_text(row: &sqlx_postgres::PgRow, index: usize) -> Result<Option<String>, StorageError> {
+fn optional_text<Index>(
+    row: &sqlx_postgres::PgRow,
+    index: Index,
+) -> Result<Option<String>, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get(index)
         .map_err(|_| StorageError::CorruptStoredValue { field: "artifact" })
 }
 
-fn positive_u32(row: &sqlx_postgres::PgRow, index: usize) -> Result<u32, StorageError> {
+fn positive_u32<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<u32, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get::<i32, _>(index)
         .ok()
         .and_then(|value| u32::try_from(value).ok())
@@ -3545,7 +3988,10 @@ fn positive_u32(row: &sqlx_postgres::PgRow, index: usize) -> Result<u32, Storage
         .ok_or(StorageError::CorruptStoredValue { field: "artifact" })
 }
 
-fn nonnegative_u64(row: &sqlx_postgres::PgRow, index: usize) -> Result<u64, StorageError> {
+fn nonnegative_u64<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<u64, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get::<i64, _>(index)
         .ok()
         .and_then(|value| u64::try_from(value).ok())
@@ -3566,8 +4012,7 @@ mod tests {
             NewAgentArtifact::new(
                 AgentArtifactKind::Note,
                 AgentArtifactScope::Project,
-                "project",
-                "remember this"
+                AgentArtifactContent::new("project", "remember this")
             )
             .is_ok()
         );
@@ -3575,8 +4020,7 @@ mod tests {
             NewAgentArtifact::new(
                 AgentArtifactKind::Note,
                 AgentArtifactScope::Project,
-                "",
-                "remember this"
+                AgentArtifactContent::new("", "remember this")
             )
             .is_err()
         );
@@ -3589,8 +4033,7 @@ mod tests {
         let artifact = NewAgentArtifact::new(
             AgentArtifactKind::Role,
             AgentArtifactScope::Symbol,
-            "symbol",
-            "business_logic",
+            AgentArtifactContent::new("symbol", "business_logic"),
         )
         .unwrap_or_else(|error| panic!("valid artifact failed: {error}"));
         assert!(

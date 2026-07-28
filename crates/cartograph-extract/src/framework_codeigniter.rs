@@ -1,6 +1,12 @@
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind, Visibility};
 
-use crate::{ExtractError, framework::FrameworkBuilder};
+use crate::{
+    ExtractError,
+    framework::{
+        DelimiterInput, FrameworkBuilder, FrameworkNearReferenceInput, FrameworkRouteInput,
+        matching_delimiter, skip_ascii_whitespace,
+    },
+};
 
 const MAX_LOADED_RESOURCES: usize = 256;
 const MAX_SCAN_BYTES: usize = 4_096;
@@ -77,14 +83,14 @@ fn scan_controller_routes(
             .map_or((start, end), |offset| {
                 (start + offset, start + offset + name.len())
             });
-        builder.add_route(
-            "ANY",
-            &route,
-            name_start,
-            name_end,
-            false,
-            Some((&name, name_start, name_end)),
-        )?;
+        builder.add_route(FrameworkRouteInput {
+            method: "ANY",
+            path: &route,
+            start: name_start,
+            end: name_end,
+            command: false,
+            handler: Some((&name, name_start, name_end)),
+        })?;
     }
     Ok(())
 }
@@ -104,8 +110,11 @@ fn scan_loaded_resources(
         {
             builder.check_cancelled()?;
             let call = cursor + relative;
-            let Some(close) = matching_delimiter(source, call + marker.len() - 1, b'(', b')')
-            else {
+            let Some(close) = matching_delimiter(DelimiterInput::bounded_parentheses(
+                source,
+                call + marker.len() - 1,
+                MAX_SCAN_BYTES,
+            )) else {
                 cursor = call + marker.len();
                 continue;
             };
@@ -124,13 +133,13 @@ fn scan_loaded_resources(
                         .to_owned()
                 });
             let class = ci_class_name(resource.value);
-            builder.add_reference_near_with_resolution(
-                resource.value,
-                &class,
-                ReferenceKind::References,
-                resource.start,
-                resource.end,
-            )?;
+            builder.add_reference_near_with_resolution(FrameworkNearReferenceInput {
+                name: resource.value,
+                resolution_name: Some(&class),
+                kind: ReferenceKind::References,
+                start: resource.start,
+                end: resource.end,
+            })?;
             resources.push(LoadedResource { alias, class });
             cursor = close + 1;
         }
@@ -147,13 +156,13 @@ fn scan_loaded_resources(
             };
             let open = skip_ascii_whitespace(source, method_end);
             if source.as_bytes().get(open) == Some(&b'(') {
-                builder.add_reference_near_with_resolution(
-                    method,
-                    &format!("{}::{method}", resource.class),
-                    ReferenceKind::Calls,
-                    method_start,
-                    method_end,
-                )?;
+                builder.add_reference_near_with_resolution(FrameworkNearReferenceInput {
+                    name: method,
+                    resolution_name: Some(&format!("{}::{method}", resource.class)),
+                    kind: ReferenceKind::Calls,
+                    start: method_start,
+                    end: method_end,
+                })?;
             }
             cursor = method_end;
         }
@@ -229,52 +238,4 @@ fn identifier_at(value: &str, start: usize) -> Option<(usize, &str)> {
         end += 1;
     }
     Some((end, &value[start..end]))
-}
-
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Option<usize> {
-    let mut depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    let limit = value.len().min(open.saturating_add(MAX_SCAN_BYTES));
-    for (index, byte) in value
-        .as_bytes()
-        .iter()
-        .copied()
-        .enumerate()
-        .take(limit)
-        .skip(open)
-    {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-        } else if byte == opening {
-            depth = depth.saturating_add(1);
-        } else if byte == closing {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
 }

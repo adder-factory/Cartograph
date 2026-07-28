@@ -98,6 +98,101 @@ struct DigestFrame<'tree> {
 
 type DefinitionDigests = HashMap<usize, Option<ContentDigest>>;
 
+pub(crate) struct TagExtractionInput<'tree, 'input> {
+    pub(crate) snapshot: &'input SourceSnapshot,
+    pub(crate) root: Node<'tree>,
+    pub(crate) parse_status: FileParseStatus,
+    pub(crate) query: &'input Query,
+}
+
+#[derive(Clone, Copy)]
+struct TagQueryInput<'tree, 'source> {
+    query: &'source Query,
+    root: Node<'tree>,
+    source: &'source str,
+}
+
+struct RecordBuildInput<'tree, 'source> {
+    raw: Vec<RawMatch<'tree>>,
+    source: &'source str,
+}
+
+struct PreparedTagRecords<'tree> {
+    definitions: Vec<Definition<'tree>>,
+    calls: Vec<CallReference<'tree>>,
+    parent_indices: Vec<Option<usize>>,
+    call_owner_indices: Vec<Option<usize>>,
+    structural_digests: DefinitionDigests,
+}
+
+struct DefinitionEmissionInput<'tree, 'input> {
+    snapshot: &'input SourceSnapshot,
+    source: &'input str,
+    definitions: Vec<Definition<'tree>>,
+    parent_indices: Vec<Option<usize>>,
+    structural_digests: DefinitionDigests,
+}
+
+struct DefinitionBuildInput<'tree, 'snapshot, 'source, 'parent> {
+    snapshot: &'snapshot SourceSnapshot,
+    source: &'source str,
+    definition: Definition<'tree>,
+    parent: Option<&'parent EmittedDefinition>,
+    structural_digest: ContentDigest,
+}
+
+struct BuiltTagDefinition {
+    symbol: ExtractedSymbol,
+    emitted: EmittedDefinition,
+    parent_id: Option<SymbolId>,
+}
+
+struct TagDefinitionFacts {
+    symbols: Vec<ExtractedSymbol>,
+    containments: Vec<Containment>,
+    emitted: Vec<EmittedDefinition>,
+}
+
+struct ReferenceEmissionInput<'tree, 'emitted> {
+    calls: Vec<CallReference<'tree>>,
+    owner_indices: Vec<Option<usize>>,
+    emitted: &'emitted [EmittedDefinition],
+}
+
+#[derive(Clone, Copy)]
+struct StructuralDigestInput<'tree, 'source, 'definitions> {
+    root: Node<'tree>,
+    source: &'source str,
+    definitions: &'definitions [Definition<'tree>],
+}
+
+struct NextDigestChildInput<'frame, 'tree> {
+    frame: &'frame mut DigestFrame<'tree>,
+    visited: &'frame mut usize,
+    node_limit: usize,
+}
+
+#[derive(Clone, Copy)]
+struct FinishTagDigestInput<'frame, 'tree, 'source, 'digest> {
+    frame: &'frame DigestFrame<'tree>,
+    source: &'source str,
+    child_digests: &'digest [[u8; 32]],
+}
+
+#[derive(Clone, Copy)]
+struct CallOwnerInput<'tree, 'definitions, 'calls> {
+    definitions: &'definitions [Definition<'tree>],
+    calls: &'calls [CallReference<'tree>],
+}
+
+#[derive(Clone, Copy)]
+struct DeclarationSignatureInput<'tree, 'source> {
+    language: SourceLanguage,
+    node: Node<'tree>,
+    source: &'source str,
+    kind: SymbolKind,
+}
+
 struct TagTransientBudget {
     retained: usize,
     maximum: usize,
@@ -207,19 +302,98 @@ fn ocaml_interface_source() -> Result<&'static str, ExtractError> {
 }
 
 pub(crate) fn extract(
-    snapshot: &SourceSnapshot,
-    root: Node<'_>,
-    parse_status: FileParseStatus,
-    query: &Query,
+    input: TagExtractionInput<'_, '_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ExtractedFile, ExtractError> {
+    let TagExtractionInput {
+        snapshot,
+        root,
+        parse_status,
+        query,
+    } = input;
     if cancelled() {
         return Err(ExtractError::Cancelled);
     }
     let source = snapshot.source();
     let mut transient = TagTransientBudget::new(snapshot)?;
-    let raw = collect_matches(query, root, source, &mut transient, cancelled)?;
-    let (mut definitions, mut calls) = build_records(raw, source, &mut transient, cancelled)?;
+    let prepared = prepare_tag_records(
+        TagQueryInput {
+            query,
+            root,
+            source,
+        },
+        &mut transient,
+        cancelled,
+    )?;
+    let PreparedTagRecords {
+        definitions,
+        calls,
+        parent_indices,
+        call_owner_indices,
+        structural_digests,
+    } = prepared;
+    let (facts, mut budget) = emit_tag_definitions(
+        DefinitionEmissionInput {
+            snapshot,
+            source,
+            definitions,
+            parent_indices,
+            structural_digests,
+        },
+        cancelled,
+    )?;
+    let references = emit_tag_references(
+        ReferenceEmissionInput {
+            calls,
+            owner_indices: call_owner_indices,
+            emitted: &facts.emitted,
+        },
+        &mut budget,
+        cancelled,
+    )?;
+
+    let diagnostics = diagnostics(root, parse_status, cancelled)?;
+    for _ in &diagnostics {
+        budget.reserve_fact(diagnostic_budget_bytes(), std::iter::empty())?;
+    }
+    let output_limit = budget.output_limit();
+    let extracted = ExtractedFile {
+        file_id: snapshot.file_id().clone(),
+        path: snapshot.path().clone(),
+        language: snapshot.language(),
+        content_hash: snapshot.content_hash().clone(),
+        byte_size: snapshot.byte_size(),
+        line_count: snapshot.line_count(),
+        parse_status,
+        symbols: facts.symbols,
+        containments: facts.containments,
+        references,
+        import_bindings: Vec::new(),
+        has_inline_tests: false,
+        test_search_text: String::new(),
+        test_search_truncated: false,
+        diagnostics,
+    };
+    if extracted.modeled_retained_bytes() > output_limit {
+        return Err(ExtractError::OutputLimit);
+    }
+    Ok(extracted)
+}
+
+fn prepare_tag_records<'tree>(
+    input: TagQueryInput<'tree, '_>,
+    transient: &mut TagTransientBudget,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<PreparedTagRecords<'tree>, ExtractError> {
+    let raw = collect_matches(input, transient, cancelled)?;
+    let (mut definitions, mut calls) = build_records(
+        RecordBuildInput {
+            raw,
+            source: input.source,
+        },
+        transient,
+        cancelled,
+    )?;
     if definitions.len() > MAX_TAG_RECORDS || calls.len() > MAX_TAG_RECORDS {
         return Err(ExtractError::OutputLimit);
     }
@@ -244,11 +418,44 @@ pub(crate) fn extract(
     if cancelled() {
         return Err(ExtractError::Cancelled);
     }
-    let parent_indices = definition_parents(&definitions, &mut transient, cancelled)?;
-    let call_owner_indices = call_owners(&definitions, &calls, &mut transient, cancelled)?;
-    let structural_digests =
-        tag_structural_digests(root, source, &definitions, &mut transient, cancelled)?;
+    let parent_indices = definition_parents(&definitions, transient, cancelled)?;
+    let call_owner_indices = call_owners(
+        CallOwnerInput {
+            definitions: &definitions,
+            calls: &calls,
+        },
+        transient,
+        cancelled,
+    )?;
+    let structural_digests = tag_structural_digests(
+        StructuralDigestInput {
+            root: input.root,
+            source: input.source,
+            definitions: &definitions,
+        },
+        transient,
+        cancelled,
+    )?;
+    Ok(PreparedTagRecords {
+        definitions,
+        calls,
+        parent_indices,
+        call_owner_indices,
+        structural_digests,
+    })
+}
 
+fn emit_tag_definitions(
+    input: DefinitionEmissionInput<'_, '_>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(TagDefinitionFacts, ExtractionBudget), ExtractError> {
+    let DefinitionEmissionInput {
+        snapshot,
+        source,
+        definitions,
+        parent_indices,
+        mut structural_digests,
+    } = input;
     let mut budget = ExtractionBudget::new(snapshot)?;
     let mut identities = SymbolIdentity::new(snapshot.path());
     let mut symbols = Vec::new();
@@ -260,102 +467,39 @@ pub(crate) fn extract(
     emitted
         .try_reserve(definitions.len())
         .map_err(|_| ExtractError::OutputLimit)?;
-
     for (index, definition) in definitions.into_iter().enumerate() {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
         let parent = parent_indices[index].and_then(|parent| emitted.get(parent));
-        let qualified_name = if let Some(parent) = parent {
-            let mut qualified = String::new();
-            qualified
-                .try_reserve(
-                    parent
-                        .qualified_name
-                        .len()
-                        .saturating_add(1)
-                        .saturating_add(definition.name.len()),
-                )
-                .map_err(|_| ExtractError::OutputLimit)?;
-            qualified.push_str(&parent.qualified_name);
-            qualified.push('.');
-            qualified.push_str(&definition.name);
-            qualified
-        } else {
-            definition.name.clone()
-        };
-        let id = identities.next(definition.kind, &qualified_name)?;
-        let signature = safe_declaration_signature(
-            snapshot.language(),
-            definition.node,
-            source,
-            definition.kind,
-        )?;
-        let health_body = matches!(
-            definition.kind,
-            SymbolKind::Function | SymbolKind::Method | SymbolKind::Component
-        )
-        .then_some(definition.node);
-        let health = symbol_health_metrics(
-            SymbolHealthInput {
-                declaration: definition.node,
-                body: health_body,
-                symbol_kind: definition.kind,
-                symbol_name: &definition.name,
-                signature: signature.as_deref(),
-                docstring: definition.docstring.as_deref(),
-                language: snapshot.language(),
-                async_symbol: false,
+        let structural_digest = structural_digests
+            .remove(&definition.node.id())
+            .flatten()
+            .ok_or(ExtractError::GrammarUnavailable)?;
+        let built = build_tag_definition(
+            DefinitionBuildInput {
+                snapshot,
                 source,
+                definition,
+                parent,
+                structural_digest,
             },
+            &mut identities,
             cancelled,
         )?;
-        let clone_shape_digest = clone_shape_digest(definition.node, cancelled)?;
-        let clone_token_profile = matches!(
-            definition.kind,
-            SymbolKind::Function | SymbolKind::Method | SymbolKind::Component
-        )
-        .then(|| clone_token_profile(definition.node, source, cancelled))
-        .transpose()?
-        .flatten();
-        let symbol = ExtractedSymbol {
-            id: id.clone(),
-            kind: definition.kind,
-            name: definition.name,
-            qualified_name: qualified_name.clone(),
-            span: span_for(definition.node)?,
-            signature,
-            docstring: definition.docstring,
-            body_search_text: String::new(),
-            body_search_truncated: false,
-            health,
-            declaration_only: false,
-            exported: false,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
-            visibility: None,
-            structural_digest: structural_digests
-                .get(&definition.node.id())
-                .and_then(Option::as_ref)
-                .cloned()
-                .ok_or(ExtractError::GrammarUnavailable)?,
-            clone_shape_digest,
-            clone_token_profile,
-        };
         budget.reserve_fact(
-            symbol_budget_bytes(&symbol),
+            symbol_budget_bytes(&built.symbol),
             [
-                symbol.name.as_str(),
-                symbol.qualified_name.as_str(),
-                symbol.signature.as_deref().unwrap_or_default(),
-                symbol.docstring.as_deref().unwrap_or_default(),
+                built.symbol.name.as_str(),
+                built.symbol.qualified_name.as_str(),
+                built.symbol.signature.as_deref().unwrap_or_default(),
+                built.symbol.docstring.as_deref().unwrap_or_default(),
             ],
         )?;
-        if let Some(parent) = parent {
+        if let Some(parent_id) = built.parent_id {
             let containment = Containment {
-                parent: parent.id.clone(),
-                child: id.clone(),
+                parent: parent_id,
+                child: built.emitted.id.clone(),
             };
             budget.reserve_fact(containment_budget_bytes(&containment), std::iter::empty())?;
             containments
@@ -363,21 +507,126 @@ pub(crate) fn extract(
                 .map_err(|_| ExtractError::OutputLimit)?;
             containments.push(containment);
         }
-        symbols.push(symbol);
-        emitted.push(EmittedDefinition { id, qualified_name });
+        symbols.push(built.symbol);
+        emitted.push(built.emitted);
     }
+    Ok((
+        TagDefinitionFacts {
+            symbols,
+            containments,
+            emitted,
+        },
+        budget,
+    ))
+}
 
+fn build_tag_definition(
+    input: DefinitionBuildInput<'_, '_, '_, '_>,
+    identities: &mut SymbolIdentity,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<BuiltTagDefinition, ExtractError> {
+    let qualified_name = if let Some(parent) = input.parent {
+        let mut qualified = String::new();
+        qualified
+            .try_reserve(
+                parent
+                    .qualified_name
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(input.definition.name.len()),
+            )
+            .map_err(|_| ExtractError::OutputLimit)?;
+        qualified.push_str(&parent.qualified_name);
+        qualified.push('.');
+        qualified.push_str(&input.definition.name);
+        qualified
+    } else {
+        input.definition.name.clone()
+    };
+    let id = identities.next(input.definition.kind, &qualified_name)?;
+    let signature = safe_declaration_signature(DeclarationSignatureInput {
+        language: input.snapshot.language(),
+        node: input.definition.node,
+        source: input.source,
+        kind: input.definition.kind,
+    })?;
+    let health_body = matches!(
+        input.definition.kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Component
+    )
+    .then_some(input.definition.node);
+    let health = symbol_health_metrics(
+        SymbolHealthInput {
+            declaration: input.definition.node,
+            body: health_body,
+            symbol_kind: input.definition.kind,
+            symbol_name: &input.definition.name,
+            signature: signature.as_deref(),
+            docstring: input.definition.docstring.as_deref(),
+            language: input.snapshot.language(),
+            async_symbol: false,
+            source: input.source,
+        },
+        cancelled,
+    )?;
+    let clone_shape_digest = clone_shape_digest(input.definition.node, cancelled)?;
+    let clone_token_profile = matches!(
+        input.definition.kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Component
+    )
+    .then(|| clone_token_profile(input.definition.node, input.source, cancelled))
+    .transpose()?
+    .flatten();
+    let parent_id = input.parent.map(|parent| parent.id.clone());
+    let symbol = ExtractedSymbol {
+        id: id.clone(),
+        kind: input.definition.kind,
+        name: input.definition.name,
+        qualified_name: qualified_name.clone(),
+        span: span_for(input.definition.node)?,
+        signature,
+        docstring: input.definition.docstring,
+        body_search_text: String::new(),
+        body_search_truncated: false,
+        health,
+        declaration_only: false,
+        test_symbol: false,
+        exported: false,
+        default_export: false,
+        async_symbol: false,
+        static_member: false,
+        visibility: None,
+        structural_digest: input.structural_digest,
+        clone_shape_digest,
+        clone_token_profile,
+    };
+    Ok(BuiltTagDefinition {
+        symbol,
+        emitted: EmittedDefinition { id, qualified_name },
+        parent_id,
+    })
+}
+
+fn emit_tag_references(
+    input: ReferenceEmissionInput<'_, '_>,
+    budget: &mut ExtractionBudget,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Vec<ExtractedReference>, ExtractError> {
     let mut references = Vec::new();
     references
-        .try_reserve(calls.len())
+        .try_reserve(input.calls.len())
         .map_err(|_| ExtractError::OutputLimit)?;
-    for (call, owner) in calls.into_iter().zip(call_owner_indices) {
+    for (call, owner) in input.calls.into_iter().zip(input.owner_indices) {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
         let reference = ExtractedReference {
-            owner: owner
-                .and_then(|index| emitted.get(index).map(|definition| definition.id.clone())),
+            owner: owner.and_then(|index| {
+                input
+                    .emitted
+                    .get(index)
+                    .map(|definition| definition.id.clone())
+            }),
             name: call.name,
             resolution_name: None,
             kind: ReferenceKind::Calls,
@@ -389,54 +638,25 @@ pub(crate) fn extract(
         )?;
         references.push(reference);
     }
-
-    let diagnostics = diagnostics(root, parse_status, cancelled)?;
-    for _ in &diagnostics {
-        budget.reserve_fact(diagnostic_budget_bytes(), std::iter::empty())?;
-    }
-    let output_limit = budget.output_limit();
-    let extracted = ExtractedFile {
-        file_id: snapshot.file_id().clone(),
-        path: snapshot.path().clone(),
-        language: snapshot.language(),
-        content_hash: snapshot.content_hash().clone(),
-        byte_size: snapshot.byte_size(),
-        line_count: snapshot.line_count(),
-        parse_status,
-        symbols,
-        containments,
-        references,
-        import_bindings: Vec::new(),
-        has_inline_tests: false,
-        test_search_text: String::new(),
-        test_search_truncated: false,
-        diagnostics,
-    };
-    if extracted.modeled_retained_bytes() > output_limit {
-        return Err(ExtractError::OutputLimit);
-    }
-    Ok(extracted)
+    Ok(references)
 }
 
 fn collect_matches<'tree>(
-    query: &Query,
-    root: Node<'tree>,
-    source: &str,
+    input: TagQueryInput<'tree, '_>,
     transient: &mut TagTransientBudget,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<RawMatch<'tree>>, ExtractError> {
-    let capture_limit = source
+    let capture_limit = input
+        .source
         .len()
         .saturating_mul(CAPTURES_PER_SOURCE_BYTE)
         .saturating_add(MINIMUM_CAPTURE_LIMIT)
         .min(MAX_TAG_RECORDS);
-    let capture_names = query.capture_names();
+    let capture_names = input.query.capture_names();
     let mut cursor = QueryCursor::new();
     cursor.set_match_limit(QUERY_MATCH_LIMIT);
     let mut interrupted = false;
-    let mut raw = Vec::new();
-    let mut ignored_node_ids = BTreeSet::new();
-    let mut definition_name_ids = BTreeSet::new();
+    let mut collector = RawMatchCollector::new(transient, capture_limit);
     {
         let mut progress = |_state: &tree_sitter::QueryCursorState| {
             if cancelled() {
@@ -447,64 +667,17 @@ fn collect_matches<'tree>(
             }
         };
         let options = QueryCursorOptions::new().progress_callback(&mut progress);
-        let mut matches = cursor.matches_with_options(query, root, source.as_bytes(), options);
+        let mut matches =
+            cursor.matches_with_options(input.query, input.root, input.source.as_bytes(), options);
         while let Some(query_match) = matches.next() {
-            let mut role = None;
-            let mut role_node = None;
-            let mut name_node = None;
-            let mut doc_node = None;
+            let mut state = RawCaptureState::default();
             for capture in query_match.captures {
                 let Some(capture_name) = capture_names.get(capture.index as usize) else {
                     return Err(ExtractError::GrammarUnavailable);
                 };
-                match *capture_name {
-                    "ignore" => {
-                        if ignored_node_ids.insert(capture.node.id()) {
-                            transient.charge(MODELED_TREE_ENTRY_BYTES)?;
-                        }
-                        if ignored_node_ids.len() > capture_limit {
-                            return Err(ExtractError::OutputLimit);
-                        }
-                    }
-                    "name" => name_node = Some(capture.node),
-                    "doc" => doc_node = Some(capture.node),
-                    name if name.starts_with("definition.") => {
-                        role =
-                            definition_kind(&name["definition.".len()..]).map(RawRole::Definition);
-                        role_node = Some(capture.node);
-                    }
-                    "reference.call" => {
-                        role = Some(RawRole::Call);
-                        role_node = Some(capture.node);
-                    }
-                    _ => {}
-                }
+                collector.apply_capture(&mut state, capture_name, capture.node)?;
             }
-            if matches!(role, Some(RawRole::Definition(_)))
-                && let Some(name_node) = name_node
-                && definition_name_ids.insert(name_node.id())
-            {
-                transient.charge(MODELED_TREE_ENTRY_BYTES)?;
-                if definition_name_ids.len() > capture_limit {
-                    return Err(ExtractError::OutputLimit);
-                }
-            }
-            if let (Some(role), Some(role_node), Some(name_node)) = (role, role_node, name_node) {
-                if raw.len() >= capture_limit
-                    || ignored_node_ids.len() > capture_limit
-                    || definition_name_ids.len() > capture_limit
-                {
-                    return Err(ExtractError::OutputLimit);
-                }
-                transient.vector_entry::<RawMatch<'tree>>()?;
-                raw.try_reserve(1).map_err(|_| ExtractError::OutputLimit)?;
-                raw.push(RawMatch {
-                    role,
-                    role_node,
-                    name_node,
-                    doc_node,
-                });
-            }
+            collector.push_state(state)?;
         }
     }
     if interrupted || cancelled() {
@@ -513,29 +686,22 @@ fn collect_matches<'tree>(
     if cursor.did_exceed_match_limit() {
         return Err(ExtractError::OutputLimit);
     }
-    raw.retain(|record| {
-        let ignored = ignored_node_ids.contains(&record.name_node.id());
-        let definition_self_match = matches!(record.role, RawRole::Call)
-            && definition_name_ids.contains(&record.name_node.id());
-        !ignored && !definition_self_match
-    });
-    Ok(raw)
+    Ok(collector.finish())
 }
 
 fn build_records<'tree>(
-    raw: Vec<RawMatch<'tree>>,
-    source: &str,
+    input: RecordBuildInput<'tree, '_>,
     transient: &mut TagTransientBudget,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(Vec<Definition<'tree>>, Vec<CallReference<'tree>>), ExtractError> {
     let mut definitions = Vec::new();
     let mut calls = Vec::new();
     let mut seen_definitions = BTreeSet::new();
-    for record in raw {
+    for record in input.raw {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
-        let name = node_text(record.name_node, source).trim();
+        let name = node_text(record.name_node, input.source).trim();
         if name.is_empty() {
             continue;
         }
@@ -559,7 +725,7 @@ fn build_records<'tree>(
                 transient.charge(owned_name.capacity())?;
                 transient.vector_entry::<Definition<'tree>>()?;
                 let docstring = if let Some(node) = record.doc_node {
-                    clean_doc(node_text(node, source))?
+                    clean_doc(node_text(node, input.source))?
                 } else {
                     None
                 };
@@ -599,22 +765,21 @@ fn build_records<'tree>(
 }
 
 fn tag_structural_digests(
-    root: Node<'_>,
-    source: &str,
-    definitions: &[Definition<'_>],
+    input: StructuralDigestInput<'_, '_, '_>,
     transient: &mut TagTransientBudget,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<DefinitionDigests, ExtractError> {
     let mut targets = DefinitionDigests::new();
     targets
-        .try_reserve(definitions.len())
+        .try_reserve(input.definitions.len())
         .map_err(|_| ExtractError::OutputLimit)?;
     transient.charge(targets.capacity().saturating_mul(MODELED_TREE_ENTRY_BYTES))?;
-    for definition in definitions {
+    for definition in input.definitions {
         targets.entry(definition.node.id()).or_insert(None);
     }
 
-    let node_limit = source
+    let node_limit = input
+        .source
         .len()
         .saturating_mul(TAG_AST_NODES_PER_SOURCE_BYTE)
         .saturating_add(MINIMUM_TAG_AST_NODES)
@@ -624,7 +789,7 @@ fn tag_structural_digests(
     let mut child_digests = Vec::<[u8; 32]>::new();
     transient.reserve_vector_slot(&mut frames)?;
     frames.push(DigestFrame {
-        node: root,
+        node: input.root,
         next_child: 0,
         child_digest_start: 0,
         child_count: 0,
@@ -635,9 +800,11 @@ fn tag_structural_digests(
             return Err(ExtractError::Cancelled);
         }
         let next_child = next_digest_child(
-            frames.last_mut().ok_or(ExtractError::GrammarUnavailable)?,
-            &mut visited,
-            node_limit,
+            NextDigestChildInput {
+                frame: frames.last_mut().ok_or(ExtractError::GrammarUnavailable)?,
+                visited: &mut visited,
+                node_limit,
+            },
             cancelled,
         )?;
         if let Some(child) = next_child {
@@ -656,7 +823,14 @@ fn tag_structural_digests(
         }
 
         let frame = frames.pop().ok_or(ExtractError::GrammarUnavailable)?;
-        let digest = finish_tag_structural_digest(&frame, source, &child_digests, cancelled)?;
+        let digest = finish_tag_structural_digest(
+            FinishTagDigestInput {
+                frame: &frame,
+                source: input.source,
+                child_digests: &child_digests,
+            },
+            cancelled,
+        )?;
         if let Some(target) = targets.get_mut(&frame.node.id()) {
             *target = Some(ContentDigest::from_bytes(digest));
         }
@@ -672,57 +846,57 @@ fn tag_structural_digests(
 }
 
 fn next_digest_child<'tree>(
-    frame: &mut DigestFrame<'tree>,
-    visited: &mut usize,
-    node_limit: usize,
+    input: NextDigestChildInput<'_, 'tree>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Option<Node<'tree>>, ExtractError> {
-    while frame.next_child < frame.node.child_count() {
+    while input.frame.next_child < input.frame.node.child_count() {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
-        let child_index = frame.next_child;
-        frame.next_child = frame.next_child.saturating_add(1);
-        *visited = visited.checked_add(1).ok_or(ExtractError::OutputLimit)?;
-        if *visited > node_limit {
+        let child_index = input.frame.next_child;
+        input.frame.next_child = input.frame.next_child.saturating_add(1);
+        *input.visited = input
+            .visited
+            .checked_add(1)
+            .ok_or(ExtractError::OutputLimit)?;
+        if *input.visited > input.node_limit {
             return Err(ExtractError::OutputLimit);
         }
         let child_index = u32::try_from(child_index).map_err(|_| ExtractError::OutputLimit)?;
-        let Some(child) = frame.node.child(child_index) else {
+        let Some(child) = input.frame.node.child(child_index) else {
             continue;
         };
         if is_comment_node(child) {
             continue;
         }
-        frame.child_count = frame.child_count.saturating_add(1);
+        input.frame.child_count = input.frame.child_count.saturating_add(1);
         return Ok(Some(child));
     }
     Ok(None)
 }
 
 fn finish_tag_structural_digest(
-    frame: &DigestFrame<'_>,
-    source: &str,
-    child_digests: &[[u8; 32]],
+    input: FinishTagDigestInput<'_, '_, '_, '_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<[u8; 32], ExtractError> {
-    let children = child_digests
-        .get(frame.child_digest_start..)
+    let children = input
+        .child_digests
+        .get(input.frame.child_digest_start..)
         .ok_or(ExtractError::GrammarUnavailable)?;
-    if children.len() != frame.child_count {
+    if children.len() != input.frame.child_count {
         return Err(ExtractError::GrammarUnavailable);
     }
     let mut hasher = blake3::Hasher::new_derive_key(TAG_STRUCTURAL_DIGEST_DOMAIN);
-    hash_tag_field(&mut hasher, frame.node.kind().as_bytes());
+    hash_tag_field(&mut hasher, input.frame.node.kind().as_bytes());
     hasher.update(
-        &u64::try_from(frame.child_count)
+        &u64::try_from(input.frame.child_count)
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
-    if frame.child_count == 0 {
+    if input.frame.child_count == 0 {
         hash_tag_cancellable_field(
             &mut hasher,
-            node_text(frame.node, source).as_bytes(),
+            node_text(input.frame.node, input.source).as_bytes(),
             cancelled,
         )?;
     } else {
@@ -760,25 +934,132 @@ fn is_comment_node(node: Node<'_>) -> bool {
     node.kind().contains("comment")
 }
 
-fn definition_kind(suffix: &str) -> Option<SymbolKind> {
-    match suffix {
-        "class" => Some(SymbolKind::Class),
-        "function" | "macro" | "operator" => Some(SymbolKind::Function),
-        "method" => Some(SymbolKind::Method),
-        "module" => Some(SymbolKind::Module),
-        "interface" => Some(SymbolKind::Interface),
-        "constant" => Some(SymbolKind::Constant),
-        "struct" => Some(SymbolKind::Struct),
-        "type" => Some(SymbolKind::TypeAlias),
-        "enum" => Some(SymbolKind::Enum),
-        "enum_variant" => Some(SymbolKind::EnumMember),
-        "field" => Some(SymbolKind::Field),
-        "variable" => Some(SymbolKind::Variable),
-        "namespace" => Some(SymbolKind::Namespace),
-        "protocol" => Some(SymbolKind::Protocol),
-        "trait" => Some(SymbolKind::Trait),
-        _ => None,
+#[derive(Default)]
+struct RawCaptureState<'tree> {
+    role: Option<RawRole>,
+    role_node: Option<Node<'tree>>,
+    name_node: Option<Node<'tree>>,
+    doc_node: Option<Node<'tree>>,
+}
+
+struct RawMatchCollector<'tree, 'budget> {
+    raw: Vec<RawMatch<'tree>>,
+    ignored_node_ids: BTreeSet<usize>,
+    definition_name_ids: BTreeSet<usize>,
+    transient: &'budget mut TagTransientBudget,
+    capture_limit: usize,
+}
+
+impl<'tree, 'budget> RawMatchCollector<'tree, 'budget> {
+    fn new(transient: &'budget mut TagTransientBudget, capture_limit: usize) -> Self {
+        Self {
+            raw: Vec::new(),
+            ignored_node_ids: BTreeSet::new(),
+            definition_name_ids: BTreeSet::new(),
+            transient,
+            capture_limit,
+        }
     }
+
+    fn apply_capture(
+        &mut self,
+        state: &mut RawCaptureState<'tree>,
+        capture_name: &str,
+        node: Node<'tree>,
+    ) -> Result<(), ExtractError> {
+        match capture_name {
+            "ignore" => {
+                if self.ignored_node_ids.insert(node.id()) {
+                    self.transient.charge(MODELED_TREE_ENTRY_BYTES)?;
+                }
+                if self.ignored_node_ids.len() > self.capture_limit {
+                    return Err(ExtractError::OutputLimit);
+                }
+            }
+            "name" => state.name_node = Some(node),
+            "doc" => state.doc_node = Some(node),
+            name if name.starts_with("definition.") => {
+                state.role = definition_kind(&name["definition.".len()..]).map(RawRole::Definition);
+                state.role_node = Some(node);
+            }
+            "reference.call" => {
+                state.role = Some(RawRole::Call);
+                state.role_node = Some(node);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn push_state(&mut self, state: RawCaptureState<'tree>) -> Result<(), ExtractError> {
+        if matches!(state.role, Some(RawRole::Definition(_)))
+            && let Some(name_node) = state.name_node
+            && self.definition_name_ids.insert(name_node.id())
+        {
+            self.transient.charge(MODELED_TREE_ENTRY_BYTES)?;
+            if self.definition_name_ids.len() > self.capture_limit {
+                return Err(ExtractError::OutputLimit);
+            }
+        }
+        let (Some(role), Some(role_node), Some(name_node)) =
+            (state.role, state.role_node, state.name_node)
+        else {
+            return Ok(());
+        };
+        if self.raw.len() >= self.capture_limit
+            || self.ignored_node_ids.len() > self.capture_limit
+            || self.definition_name_ids.len() > self.capture_limit
+        {
+            return Err(ExtractError::OutputLimit);
+        }
+        self.transient.vector_entry::<RawMatch<'tree>>()?;
+        self.raw
+            .try_reserve(1)
+            .map_err(|_| ExtractError::OutputLimit)?;
+        self.raw.push(RawMatch {
+            role,
+            role_node,
+            name_node,
+            doc_node: state.doc_node,
+        });
+        Ok(())
+    }
+
+    fn finish(mut self) -> Vec<RawMatch<'tree>> {
+        self.raw.retain(|record| {
+            let ignored = self.ignored_node_ids.contains(&record.name_node.id());
+            let definition_self_match = matches!(record.role, RawRole::Call)
+                && self.definition_name_ids.contains(&record.name_node.id());
+            !ignored && !definition_self_match
+        });
+        self.raw
+    }
+}
+
+const DEFINITION_KINDS: &[(&str, SymbolKind)] = &[
+    ("class", SymbolKind::Class),
+    ("function", SymbolKind::Function),
+    ("macro", SymbolKind::Function),
+    ("operator", SymbolKind::Function),
+    ("method", SymbolKind::Method),
+    ("module", SymbolKind::Module),
+    ("interface", SymbolKind::Interface),
+    ("constant", SymbolKind::Constant),
+    ("struct", SymbolKind::Struct),
+    ("type", SymbolKind::TypeAlias),
+    ("enum", SymbolKind::Enum),
+    ("enum_variant", SymbolKind::EnumMember),
+    ("field", SymbolKind::Field),
+    ("variable", SymbolKind::Variable),
+    ("namespace", SymbolKind::Namespace),
+    ("protocol", SymbolKind::Protocol),
+    ("trait", SymbolKind::Trait),
+];
+
+fn definition_kind(suffix: &str) -> Option<SymbolKind> {
+    DEFINITION_KINDS
+        .iter()
+        .find_map(|(candidate, kind)| (*candidate == suffix).then_some(*kind))
 }
 
 fn definition_parents(
@@ -837,13 +1118,12 @@ fn definition_parents(
 }
 
 fn call_owners(
-    definitions: &[Definition<'_>],
-    calls: &[CallReference<'_>],
+    input: CallOwnerInput<'_, '_, '_>,
     transient: &mut TagTransientBudget,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<Option<usize>>, ExtractError> {
     let mut intervals = Vec::<DefinitionInterval>::new();
-    for (index, definition) in definitions.iter().enumerate() {
+    for (index, definition) in input.definitions.iter().enumerate() {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
@@ -869,13 +1149,14 @@ fn call_owners(
     let mut owners = Vec::new();
     let mut active = Vec::<DefinitionInterval>::new();
     owners
-        .try_reserve(calls.len())
+        .try_reserve(input.calls.len())
         .map_err(|_| ExtractError::OutputLimit)?;
     active
         .try_reserve(intervals.len().min(MAX_TAG_RECORDS))
         .map_err(|_| ExtractError::OutputLimit)?;
     transient.charge(
-        calls
+        input
+            .calls
             .len()
             .saturating_mul(size_of::<Option<usize>>())
             .saturating_add(
@@ -885,7 +1166,7 @@ fn call_owners(
             ),
     )?;
     let mut next_interval = 0;
-    for call in calls {
+    for call in input.calls {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
@@ -927,22 +1208,19 @@ fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
 }
 
 fn safe_declaration_signature(
-    language: SourceLanguage,
-    node: Node<'_>,
-    source: &str,
-    kind: SymbolKind,
+    input: DeclarationSignatureInput<'_, '_>,
 ) -> Result<Option<String>, ExtractError> {
-    if !matches!(kind, SymbolKind::Function | SymbolKind::Method) {
+    if !matches!(input.kind, SymbolKind::Function | SymbolKind::Method) {
         return Ok(None);
     }
-    let Some(line) = node_text(node, source)
+    let Some(line) = node_text(input.node, input.source)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
     else {
         return Ok(None);
     };
-    let header = match language {
+    let header = match input.language {
         SourceLanguage::Elixir => {
             let without_inline_body = line.split_once(", do:").map_or(line, |(header, _)| header);
             without_inline_body

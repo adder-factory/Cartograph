@@ -56,25 +56,27 @@ pub struct SymbolIssueAttribution {
     kind: IssueAttributionKind,
 }
 
+/// Validated inputs for one symbol attribution.
+pub struct SymbolIssueAttributionInput {
+    pub symbol_id: SymbolId,
+    pub issue_number: u64,
+    pub commit_sha: String,
+    pub kind: IssueAttributionKind,
+}
+
 impl SymbolIssueAttribution {
-    pub fn new(
-        symbol_id: SymbolId,
-        issue_number: u64,
-        commit_sha: impl Into<String>,
-        kind: IssueAttributionKind,
-    ) -> Result<Self, IssueHistoryError> {
-        let commit_sha = commit_sha.into();
-        if issue_number == 0
-            || issue_number > 9_223_372_036_854_775_807_u64
-            || !valid_commit_sha(&commit_sha)
+    pub fn new(input: SymbolIssueAttributionInput) -> Result<Self, IssueHistoryError> {
+        if input.issue_number == 0
+            || input.issue_number > 9_223_372_036_854_775_807_u64
+            || !valid_commit_sha(&input.commit_sha)
         {
             return Err(IssueHistoryError::InvalidInput);
         }
         Ok(Self {
-            symbol_id,
-            issue_number,
-            commit_sha,
-            kind,
+            symbol_id: input.symbol_id,
+            issue_number: input.issue_number,
+            commit_sha: input.commit_sha,
+            kind: input.kind,
         })
     }
 }
@@ -90,30 +92,32 @@ pub struct IssueHistoryRefreshMetadata {
     truncated: bool,
 }
 
+/// Git-scan provenance for one issue-history refresh.
+pub struct IssueHistoryRefreshMetadataInput {
+    pub head_commit: String,
+    pub commits_scanned: u64,
+    pub tagged_commits: u64,
+    pub oversized_commits_skipped: u64,
+    pub comparison_failures_skipped: u64,
+    pub truncated: bool,
+}
+
 impl IssueHistoryRefreshMetadata {
-    pub fn new(
-        head_commit: impl Into<String>,
-        commits_scanned: u64,
-        tagged_commits: u64,
-        oversized_commits_skipped: u64,
-        comparison_failures_skipped: u64,
-        truncated: bool,
-    ) -> Result<Self, IssueHistoryError> {
-        let head_commit = head_commit.into();
-        if !valid_commit_sha(&head_commit)
-            || tagged_commits > commits_scanned
-            || oversized_commits_skipped > tagged_commits
-            || comparison_failures_skipped > tagged_commits
+    pub fn new(input: IssueHistoryRefreshMetadataInput) -> Result<Self, IssueHistoryError> {
+        if !valid_commit_sha(&input.head_commit)
+            || input.tagged_commits > input.commits_scanned
+            || input.oversized_commits_skipped > input.tagged_commits
+            || input.comparison_failures_skipped > input.tagged_commits
         {
             return Err(IssueHistoryError::InvalidInput);
         }
         Ok(Self {
-            head_commit,
-            commits_scanned,
-            tagged_commits,
-            oversized_commits_skipped,
-            comparison_failures_skipped,
-            truncated,
+            head_commit: input.head_commit,
+            commits_scanned: input.commits_scanned,
+            tagged_commits: input.tagged_commits,
+            oversized_commits_skipped: input.oversized_commits_skipped,
+            comparison_failures_skipped: input.comparison_failures_skipped,
+            truncated: input.truncated,
         })
     }
 }
@@ -126,21 +130,26 @@ pub struct IssueHistoryRefreshRequest {
     attributions: Vec<SymbolIssueAttribution>,
 }
 
+/// Bounded issue rows and provenance supplied by one Git scan.
+pub struct IssueHistoryRefreshInput {
+    pub metadata: IssueHistoryRefreshMetadata,
+    pub attributions: Vec<SymbolIssueAttribution>,
+}
+
 impl IssueHistoryRefreshRequest {
     pub fn new(
         project_id: ProjectId,
         generation_id: GenerationId,
-        metadata: IssueHistoryRefreshMetadata,
-        attributions: Vec<SymbolIssueAttribution>,
+        input: IssueHistoryRefreshInput,
     ) -> Result<Self, IssueHistoryError> {
-        if attributions.len() > MAXIMUM_ATTRIBUTIONS {
+        if input.attributions.len() > MAXIMUM_ATTRIBUTIONS {
             return Err(IssueHistoryError::InvalidInput);
         }
         Ok(Self {
             project_id,
             generation_id,
-            metadata,
-            attributions,
+            metadata: input.metadata,
+            attributions: input.attributions,
         })
     }
 }
@@ -200,6 +209,29 @@ pub struct SymbolIssueCommitPeers {
     pub truncated: bool,
 }
 
+/// Bounded issue evidence query for one current symbol.
+pub struct SymbolIssueQuery<'query> {
+    pub project_id: &'query ProjectId,
+    pub symbol_id: &'query SymbolId,
+    pub limit: u16,
+}
+
+/// Bounded co-attribution query for one current symbol.
+pub struct SymbolIssuePeerQuery<'query> {
+    pub project_id: &'query ProjectId,
+    pub symbol_id: &'query SymbolId,
+    pub minimum_shared: u16,
+    pub limit: u16,
+}
+
+/// Bounded current-symbol query for exact issue-tagged commits.
+pub struct IssueCommitSymbolPeerQuery<'query> {
+    pub project_id: &'query ProjectId,
+    pub excluded_symbol_id: &'query SymbolId,
+    pub commits: &'query [String],
+    pub per_commit_limit: u16,
+}
+
 /// Safe issue-history persistence/query failure.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum IssueHistoryError {
@@ -211,6 +243,13 @@ pub enum IssueHistoryError {
     DatabaseOperation { operation: &'static str },
     #[error("Cartograph PostgreSQL issue-history row violates its durable contract")]
     CorruptStoredValue,
+}
+
+struct CurrentGenerationFence<'fence> {
+    connection: &'fence mut sqlx_postgres::PgConnection,
+    schema: &'fence str,
+    project_id: &'fence ProjectId,
+    generation_id: &'fence GenerationId,
 }
 
 impl CartographDatabase {
@@ -229,7 +268,13 @@ impl CartographDatabase {
         set_local_statement_timeout(&mut transaction, ISSUE_HISTORY_TIMEOUT)
             .await
             .map_err(|()| database_error("clear-timeout"))?;
-        require_current_generation(&mut transaction, &schema, project_id, generation_id).await?;
+        require_current_generation(CurrentGenerationFence {
+            connection: &mut transaction,
+            schema: &schema,
+            project_id,
+            generation_id,
+        })
+        .await?;
         for (relation, operation) in [
             ("symbol_issues", "clear-disabled-attributions"),
             ("issue_history_refreshes", "clear-disabled-refresh"),
@@ -242,7 +287,13 @@ impl CartographDatabase {
                 .await
                 .map_err(|_| database_error(operation))?;
         }
-        require_current_generation(&mut transaction, &schema, project_id, generation_id).await?;
+        require_current_generation(CurrentGenerationFence {
+            connection: &mut transaction,
+            schema: &schema,
+            project_id,
+            generation_id,
+        })
+        .await?;
         transaction
             .commit()
             .await
@@ -263,12 +314,12 @@ impl CartographDatabase {
         set_local_statement_timeout(&mut transaction, ISSUE_HISTORY_TIMEOUT)
             .await
             .map_err(|()| database_error("timeout"))?;
-        require_current_generation(
-            &mut transaction,
-            &schema,
-            &request.project_id,
-            &request.generation_id,
-        )
+        require_current_generation(CurrentGenerationFence {
+            connection: &mut transaction,
+            schema: &schema,
+            project_id: &request.project_id,
+            generation_id: &request.generation_id,
+        })
         .await?;
         let delete = format!(r#"DELETE FROM {schema}."symbol_issues" WHERE project_id = $1::uuid"#);
         query(AssertSqlSafe(delete))
@@ -276,90 +327,22 @@ impl CartographDatabase {
             .execute(&mut *transaction)
             .await
             .map_err(|_| database_error("clear"))?;
-        let insert = format!(
-            r#"INSERT INTO {schema}."symbol_issues" (
-                   project_id, generation_id, symbol_id, issue_number,
-                   commit_sha, attribution_kind
-               )
-               SELECT $1::uuid, $2::uuid, input.symbol_id::uuid, input.issue_number,
-                      input.commit_sha, input.attribution_kind
-               FROM UNNEST($3::text[], $4::bigint[], $5::text[], $6::text[])
-                    AS input(symbol_id, issue_number, commit_sha, attribution_kind)
-               JOIN {schema}."symbols" AS symbols
-                 ON symbols.project_id = $1::uuid
-                AND symbols.generation_id = $2::uuid
-                AND symbols.symbol_id = input.symbol_id::uuid
-               ON CONFLICT DO NOTHING"#
-        );
-        let mut written = 0_u64;
-        for chunk in request.attributions.chunks(INSERT_CHUNK) {
-            let symbol_ids = chunk
-                .iter()
-                .map(|attribution| attribution.symbol_id.as_str().to_owned())
-                .collect::<Vec<_>>();
-            let issue_numbers = chunk
-                .iter()
-                .map(|attribution| i64::try_from(attribution.issue_number))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| IssueHistoryError::InvalidInput)?;
-            let commits = chunk
-                .iter()
-                .map(|attribution| attribution.commit_sha.clone())
-                .collect::<Vec<_>>();
-            let kinds = chunk
-                .iter()
-                .map(|attribution| attribution.kind.as_str().to_owned())
-                .collect::<Vec<_>>();
-            written = written.saturating_add(
-                query(AssertSqlSafe(insert.clone()))
-                    .bind(request.project_id.as_str())
-                    .bind(request.generation_id.as_str())
-                    .bind(symbol_ids)
-                    .bind(issue_numbers)
-                    .bind(commits)
-                    .bind(kinds)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|_| database_error("insert"))?
-                    .rows_affected(),
-            );
-        }
-        let refresh = format!(
-            r#"INSERT INTO {schema}."issue_history_refreshes" (
-                   project_id, generation_id, head_commit, commits_scanned,
-                   tagged_commits, oversized_commits_skipped,
-                   comparison_failures_skipped, attributions_written, truncated
-               ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT (project_id) DO UPDATE SET
-                   generation_id = EXCLUDED.generation_id,
-                   head_commit = EXCLUDED.head_commit,
-                   commits_scanned = EXCLUDED.commits_scanned,
-                   tagged_commits = EXCLUDED.tagged_commits,
-                   oversized_commits_skipped = EXCLUDED.oversized_commits_skipped,
-                   comparison_failures_skipped = EXCLUDED.comparison_failures_skipped,
-                   attributions_written = EXCLUDED.attributions_written,
-                   truncated = EXCLUDED.truncated,
-                   refreshed_at = clock_timestamp()"#
-        );
-        query(AssertSqlSafe(refresh))
-            .bind(request.project_id.as_str())
-            .bind(request.generation_id.as_str())
-            .bind(&request.metadata.head_commit)
-            .bind(to_i64(request.metadata.commits_scanned)?)
-            .bind(to_i64(request.metadata.tagged_commits)?)
-            .bind(to_i64(request.metadata.oversized_commits_skipped)?)
-            .bind(to_i64(request.metadata.comparison_failures_skipped)?)
-            .bind(to_i64(written)?)
-            .bind(request.metadata.truncated)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| database_error("record-refresh"))?;
-        require_current_generation(
+        let written = insert_issue_attributions(&mut transaction, &schema, &request).await?;
+        record_issue_refresh(
             &mut transaction,
-            &schema,
-            &request.project_id,
-            &request.generation_id,
+            IssueRefreshWrite {
+                schema: &schema,
+                request: &request,
+                written,
+            },
         )
+        .await?;
+        require_current_generation(CurrentGenerationFence {
+            connection: &mut transaction,
+            schema: &schema,
+            project_id: &request.project_id,
+            generation_id: &request.generation_id,
+        })
         .await?;
         transaction
             .commit()
@@ -381,11 +364,9 @@ impl CartographDatabase {
     /// Read bounded issue evidence for one current symbol.
     pub async fn current_symbol_issues(
         &self,
-        project_id: &ProjectId,
-        symbol_id: &SymbolId,
-        limit: u16,
+        request: SymbolIssueQuery<'_>,
     ) -> Result<Vec<SymbolIssueRecord>, IssueHistoryError> {
-        if limit == 0 || limit > MAXIMUM_ISSUES_PER_SYMBOL {
+        if request.limit == 0 || request.limit > MAXIMUM_ISSUES_PER_SYMBOL {
             return Err(IssueHistoryError::InvalidInput);
         }
         let schema = quoted_schema(&self.schema);
@@ -401,9 +382,9 @@ impl CartographDatabase {
                LIMIT $3"#
         );
         let rows = query(AssertSqlSafe(statement))
-            .bind(project_id.as_str())
-            .bind(symbol_id.as_str())
-            .bind(i64::from(limit))
+            .bind(request.project_id.as_str())
+            .bind(request.symbol_id.as_str())
+            .bind(i64::from(request.limit))
             .fetch_all(&self.pool)
             .await
             .map_err(|_| database_error("read-symbol"))?;
@@ -413,12 +394,9 @@ impl CartographDatabase {
     /// Rank current symbols by issue-tagged commits shared with one anchor.
     pub async fn current_symbol_issue_peers(
         &self,
-        project_id: &ProjectId,
-        symbol_id: &SymbolId,
-        minimum_shared: u16,
-        limit: u16,
+        request: SymbolIssuePeerQuery<'_>,
     ) -> Result<Vec<SymbolIssuePeer>, IssueHistoryError> {
-        if minimum_shared == 0 || limit == 0 || limit > MAXIMUM_PEERS {
+        if request.minimum_shared == 0 || request.limit == 0 || request.limit > MAXIMUM_PEERS {
             return Err(IssueHistoryError::InvalidInput);
         }
         let schema = quoted_schema(&self.schema);
@@ -474,10 +452,10 @@ impl CartographDatabase {
                LIMIT $4"#
         );
         let rows = query(AssertSqlSafe(statement))
-            .bind(project_id.as_str())
-            .bind(symbol_id.as_str())
-            .bind(i64::from(minimum_shared))
-            .bind(i64::from(limit))
+            .bind(request.project_id.as_str())
+            .bind(request.symbol_id.as_str())
+            .bind(i64::from(request.minimum_shared))
+            .bind(i64::from(request.limit))
             .fetch_all(&self.pool)
             .await
             .map_err(|_| database_error("read-peers"))?;
@@ -513,18 +491,9 @@ impl CartographDatabase {
     /// Fetch current modified-symbol peers for many exact issue-tagged commits in one query.
     pub async fn current_issue_commit_symbol_peers(
         &self,
-        project_id: &ProjectId,
-        excluded_symbol_id: &SymbolId,
-        commits: &[String],
-        per_commit_limit: u16,
+        request: IssueCommitSymbolPeerQuery<'_>,
     ) -> Result<Vec<SymbolIssueCommitPeers>, IssueHistoryError> {
-        if commits.is_empty()
-            || commits.len() > MAXIMUM_COMMIT_GROUPS
-            || per_commit_limit == 0
-            || per_commit_limit > MAXIMUM_PEERS
-            || commits.iter().any(|commit| !valid_commit_sha(commit))
-            || commits.iter().collect::<BTreeSet<_>>().len() != commits.len()
-        {
+        if !valid_issue_commit_peer_query(&request) {
             return Err(IssueHistoryError::InvalidInput);
         }
         let schema = quoted_schema(&self.schema);
@@ -572,14 +541,15 @@ impl CartographDatabase {
                ORDER BY ordinality, rank"#
         );
         let rows = query(AssertSqlSafe(statement))
-            .bind(project_id.as_str())
-            .bind(commits)
-            .bind(excluded_symbol_id.as_str())
-            .bind(i64::from(per_commit_limit))
+            .bind(request.project_id.as_str())
+            .bind(request.commits)
+            .bind(request.excluded_symbol_id.as_str())
+            .bind(i64::from(request.per_commit_limit))
             .fetch_all(&self.pool)
             .await
             .map_err(|_| database_error("read-commit-peers"))?;
-        let mut groups = commits
+        let mut groups = request
+            .commits
             .iter()
             .cloned()
             .map(|commit_sha| SymbolIssueCommitPeers {
@@ -619,25 +589,137 @@ impl CartographDatabase {
     }
 }
 
-async fn require_current_generation(
-    connection: &mut sqlx_postgres::PgConnection,
+async fn insert_issue_attributions(
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
     schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    request: &IssueHistoryRefreshRequest,
+) -> Result<u64, IssueHistoryError> {
+    let insert = format!(
+        r#"INSERT INTO {schema}."symbol_issues" (
+               project_id, generation_id, symbol_id, issue_number,
+               commit_sha, attribution_kind
+           )
+           SELECT $1::uuid, $2::uuid, input.symbol_id::uuid, input.issue_number,
+                  input.commit_sha, input.attribution_kind
+           FROM UNNEST($3::text[], $4::bigint[], $5::text[], $6::text[])
+                AS input(symbol_id, issue_number, commit_sha, attribution_kind)
+           JOIN {schema}."symbols" AS symbols
+             ON symbols.project_id = $1::uuid
+            AND symbols.generation_id = $2::uuid
+            AND symbols.symbol_id = input.symbol_id::uuid
+           ON CONFLICT DO NOTHING"#
+    );
+    let mut written = 0_u64;
+    for chunk in request.attributions.chunks(INSERT_CHUNK) {
+        let symbol_ids = chunk
+            .iter()
+            .map(|attribution| attribution.symbol_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let issue_numbers = chunk
+            .iter()
+            .map(|attribution| i64::try_from(attribution.issue_number))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| IssueHistoryError::InvalidInput)?;
+        let commits = chunk
+            .iter()
+            .map(|attribution| attribution.commit_sha.clone())
+            .collect::<Vec<_>>();
+        let kinds = chunk
+            .iter()
+            .map(|attribution| attribution.kind.as_str().to_owned())
+            .collect::<Vec<_>>();
+        written = written.saturating_add(
+            query(AssertSqlSafe(insert.clone()))
+                .bind(request.project_id.as_str())
+                .bind(request.generation_id.as_str())
+                .bind(symbol_ids)
+                .bind(issue_numbers)
+                .bind(commits)
+                .bind(kinds)
+                .execute(&mut **transaction)
+                .await
+                .map_err(|_| database_error("insert"))?
+                .rows_affected(),
+        );
+    }
+    Ok(written)
+}
+
+struct IssueRefreshWrite<'request> {
+    schema: &'request str,
+    request: &'request IssueHistoryRefreshRequest,
+    written: u64,
+}
+
+async fn record_issue_refresh(
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    input: IssueRefreshWrite<'_>,
+) -> Result<(), IssueHistoryError> {
+    let refresh = format!(
+        r#"INSERT INTO {}."issue_history_refreshes" (
+               project_id, generation_id, head_commit, commits_scanned,
+               tagged_commits, oversized_commits_skipped,
+               comparison_failures_skipped, attributions_written, truncated
+           ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (project_id) DO UPDATE SET
+               generation_id = EXCLUDED.generation_id,
+               head_commit = EXCLUDED.head_commit,
+               commits_scanned = EXCLUDED.commits_scanned,
+               tagged_commits = EXCLUDED.tagged_commits,
+               oversized_commits_skipped = EXCLUDED.oversized_commits_skipped,
+               comparison_failures_skipped = EXCLUDED.comparison_failures_skipped,
+               attributions_written = EXCLUDED.attributions_written,
+               truncated = EXCLUDED.truncated,
+               refreshed_at = clock_timestamp()"#,
+        input.schema
+    );
+    query(AssertSqlSafe(refresh))
+        .bind(input.request.project_id.as_str())
+        .bind(input.request.generation_id.as_str())
+        .bind(&input.request.metadata.head_commit)
+        .bind(to_i64(input.request.metadata.commits_scanned)?)
+        .bind(to_i64(input.request.metadata.tagged_commits)?)
+        .bind(to_i64(input.request.metadata.oversized_commits_skipped)?)
+        .bind(to_i64(input.request.metadata.comparison_failures_skipped)?)
+        .bind(to_i64(input.written)?)
+        .bind(input.request.metadata.truncated)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| database_error("record-refresh"))?;
+    Ok(())
+}
+
+fn valid_issue_commit_peer_query(request: &IssueCommitSymbolPeerQuery<'_>) -> bool {
+    if request.commits.is_empty() || request.commits.len() > MAXIMUM_COMMIT_GROUPS {
+        return false;
+    }
+    if request.per_commit_limit == 0 || request.per_commit_limit > MAXIMUM_PEERS {
+        return false;
+    }
+    request
+        .commits
+        .iter()
+        .all(|commit| valid_commit_sha(commit))
+        && request.commits.iter().collect::<BTreeSet<_>>().len() == request.commits.len()
+}
+
+async fn require_current_generation(
+    fence: CurrentGenerationFence<'_>,
 ) -> Result<(), IssueHistoryError> {
     let statement = format!(
         r#"SELECT current_generation_id::text
-           FROM {schema}."projects"
+           FROM {}."projects"
            WHERE project_id = $1::uuid
-           FOR UPDATE"#
+           FOR UPDATE"#,
+        fence.schema
     );
     let current = query(AssertSqlSafe(statement))
-        .bind(project_id.as_str())
-        .fetch_optional(&mut *connection)
+        .bind(fence.project_id.as_str())
+        .fetch_optional(&mut *fence.connection)
         .await
         .map_err(|_| database_error("fence"))?
         .and_then(|row| row.try_get::<Option<String>, _>(0).ok().flatten());
-    if current.as_deref() == Some(generation_id.as_str()) {
+    if current.as_deref() == Some(fence.generation_id.as_str()) {
         Ok(())
     } else {
         Err(IssueHistoryError::CurrentGenerationChanged)
@@ -704,6 +786,10 @@ fn decode_peer(row: sqlx_postgres::PgRow) -> Result<SymbolIssuePeer, IssueHistor
     })
 }
 
+const COMMIT_PEER_PATH_COLUMN: usize = 3;
+const COMMIT_PEER_QUALIFIED_NAME_COLUMN: usize = 4;
+const COMMIT_PEER_SYMBOL_KIND_COLUMN: usize = 5;
+
 fn decode_commit_peer(
     row: &sqlx_postgres::PgRow,
 ) -> Result<SymbolIssueCommitPeer, IssueHistoryError> {
@@ -713,17 +799,17 @@ fn decode_commit_peer(
         .and_then(|value| SymbolId::parse(&value).ok())
         .ok_or(IssueHistoryError::CorruptStoredValue)?;
     let path = row
-        .try_get::<String, _>(3)
+        .try_get::<String, _>(COMMIT_PEER_PATH_COLUMN)
         .ok()
         .filter(|value| !value.is_empty())
         .ok_or(IssueHistoryError::CorruptStoredValue)?;
     let qualified_name = row
-        .try_get::<String, _>(4)
+        .try_get::<String, _>(COMMIT_PEER_QUALIFIED_NAME_COLUMN)
         .ok()
         .filter(|value| !value.is_empty())
         .ok_or(IssueHistoryError::CorruptStoredValue)?;
     let symbol_kind = row
-        .try_get::<String, _>(5)
+        .try_get::<String, _>(COMMIT_PEER_SYMBOL_KIND_COLUMN)
         .ok()
         .filter(|value| !value.is_empty())
         .ok_or(IssueHistoryError::CorruptStoredValue)?;
@@ -759,25 +845,30 @@ mod tests {
         let symbol = SymbolId::parse("11111111-1111-4111-8111-111111111111")
             .unwrap_or_else(|error| panic!("symbol failed: {error}"));
         assert!(
-            SymbolIssueAttribution::new(
-                symbol.clone(),
-                42,
-                "a".repeat(40),
-                IssueAttributionKind::Modified
-            )
+            SymbolIssueAttribution::new(SymbolIssueAttributionInput {
+                symbol_id: symbol.clone(),
+                issue_number: 42,
+                commit_sha: "a".repeat(40),
+                kind: IssueAttributionKind::Modified,
+            })
             .is_ok()
         );
         assert!(
-            SymbolIssueAttribution::new(
-                symbol.clone(),
-                42,
-                "b".repeat(64),
-                IssueAttributionKind::Added
-            )
+            SymbolIssueAttribution::new(SymbolIssueAttributionInput {
+                symbol_id: symbol.clone(),
+                issue_number: 42,
+                commit_sha: "b".repeat(64),
+                kind: IssueAttributionKind::Added,
+            })
             .is_ok()
         );
         assert_eq!(
-            SymbolIssueAttribution::new(symbol, 0, "c".repeat(40), IssueAttributionKind::Removed),
+            SymbolIssueAttribution::new(SymbolIssueAttributionInput {
+                symbol_id: symbol,
+                issue_number: 0,
+                commit_sha: "c".repeat(40),
+                kind: IssueAttributionKind::Removed,
+            }),
             Err(IssueHistoryError::InvalidInput)
         );
     }
@@ -785,7 +876,14 @@ mod tests {
     #[test]
     fn refresh_request_rejects_skip_counts_larger_than_tagged_history() {
         assert!(matches!(
-            IssueHistoryRefreshMetadata::new("a".repeat(40), 1, 1, 2, 0, false),
+            IssueHistoryRefreshMetadata::new(IssueHistoryRefreshMetadataInput {
+                head_commit: "a".repeat(40),
+                commits_scanned: 1,
+                tagged_commits: 1,
+                oversized_commits_skipped: 2,
+                comparison_failures_skipped: 0,
+                truncated: false,
+            }),
             Err(IssueHistoryError::InvalidInput)
         ));
     }

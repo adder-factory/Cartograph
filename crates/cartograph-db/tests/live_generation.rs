@@ -7,18 +7,20 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope, AgentArtifactState,
-    CanonicalGenerationFacts, CartographDatabase, CurrentFileLookup, CurrentFilesLookup,
-    CurrentGeneration, CurrentGraphLookup, CurrentSourceRangeLookup, CurrentSymbolSetLookup,
-    DerivedStorePrunePolicy, DerivedStorePruneRequest, EdgeInput, ExactTextLookup,
-    FailGenerationError, FailedGeneration, FileInput, GenerationContents, GenerationFacts,
-    GenerationRecoveryRequest, GenerationRetentionPolicy, GenerationRetentionRequest,
-    GenerationValidationError, GenerationValidationLimits, GraphDirection, LeaseOwner,
-    LeaseRequest, LeaseTarget, McpMacroStep, McpToolCallInput, MigrationError, NewAgentArtifact,
-    NewGeneration, NewMcpMacro, NewMcpSession, NewProject, PrepareGenerationError, ProjectLease,
-    PublishGenerationError, ReadOnlySqlRequest, ReadyGeneration, RecoverableGeneration,
-    ReferenceInput, SearchDocumentInput, SearchQuery, StorageError, SummaryCandidatePolicy,
-    SymbolInput, validate_generation_facts,
+    AgentArtifactContent, AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope,
+    AgentArtifactState, CanonicalGenerationFacts, CartographDatabase, CurrentFileLookup,
+    CurrentFilesLookup, CurrentGeneration, CurrentGenerationLookup, CurrentGraphLookup,
+    CurrentSourceRangeLookup, CurrentSymbolSetLookup, DerivedStorePrunePolicy,
+    DerivedStorePruneRequest, EdgeInput, ExactTextLookup, FailGenerationError, FailedGeneration,
+    FileInput, GenerationContents, GenerationFacts, GenerationRecoveryRequest,
+    GenerationRetentionPolicy, GenerationRetentionRequest, GenerationValidationError,
+    GenerationValidationLimits, GraphDirection, LeaseOwner, LeaseRequest, LeaseTarget,
+    McpMacroStep, McpSessionCallsQuery, McpSessionLookup, McpToolCallData, McpToolCallInput,
+    McpToolCallWrite, MigrationError, NewAgentArtifact, NewGeneration, NewMcpMacro, NewMcpSession,
+    NewProject, PrepareGenerationError, ProjectLease, PublishGenerationError, ReadOnlySqlRequest,
+    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
+    SourceLineRange, StorageError, SummaryCandidatePolicy, SymbolInput, SymbolRoleSaveInput,
+    SymbolSummarySaveInput, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
@@ -62,8 +64,9 @@ const SYMBOL_ISSUE_HISTORY_MIGRATION_VERSION: i64 = 18;
 const SYMBOL_PAGERANK_MIGRATION_VERSION: i64 = 19;
 const SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION: i64 = 21;
-const LATEST_MIGRATION_VERSION: i64 = DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 21] = [
+const NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION: i64 = 22;
+const LATEST_MIGRATION_VERSION: i64 = NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 22] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -85,6 +88,7 @@ const EXPECTED_MIGRATIONS: [i64; 21] = [
     SYMBOL_PAGERANK_MIGRATION_VERSION,
     SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
     DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION,
+    NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -98,6 +102,9 @@ const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
 const LOCK_OBSERVATION_INTERVAL: Duration = Duration::from_millis(20);
 const INTERACTIVE_STALL_TIMEOUT: Duration = Duration::from_millis(75);
+const HEARTBEAT_LOCK_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const RELEASE_LOCK_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const READY_TRANSITION_DELAY_SECONDS: &str = "3.0";
 const EXACT_LOOKUP_SCALE_ROWS: i32 = 20_000;
 const EXACT_LOOKUP_TARGET_NAME: &str = "tagscanary";
 const EXACT_LOOKUP_MIGRATION_CHECKSUM: &str =
@@ -112,6 +119,8 @@ const AGENT_SESSION_MIGRATION_CHECKSUM: &str =
     "687d57c314fb32a6a16b6c892b6b04494384e651a575c9342ce0f0d22974168d";
 const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_CHECKSUM: &str =
     "5cbc965cc09530332f8c320c70aac3b083324a21f78fe6ed8edb23057d6af518";
+const NATIVE_INDEX_DIGEST_V5_MIGRATION_CHECKSUM: &str =
+    "ac9255910ba9dcd7babba294440758ee3bdee9ed3f142b9cd8291cc3e1128edb";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -251,6 +260,7 @@ async fn migrations_are_idempotent_and_only_published_generations_are_searchable
     let (database, pool, schema) = open_isolated_database().await;
     assert_migration_ledger(&database).await;
     assert_deterministic_cochange_order_migration(&pool, &schema).await;
+    assert_native_index_digest_v5_migration(&pool, &schema).await;
     let project = register_project(&database).await;
     let current_one = publish_initial_generation(&database, &project).await;
     let ready_older =
@@ -469,41 +479,58 @@ async fn agent_sessions_trace_usage_and_macros_are_durable() {
         .create_mcp_session(&project, &named_input)
         .await
         .unwrap_or_else(|error| panic!("could not create named session: {error}"));
-    let first_call = McpToolCallInput::new(
-        "cartograph_status",
-        serde_json::json!({"mode": "diagnostics"}),
-        "status current",
-        true,
-        12,
-    )
+    let first_call = McpToolCallInput::new(McpToolCallData {
+        tool_name: "cartograph_status",
+        arguments: serde_json::json!({"mode": "diagnostics"}),
+        result_summary: "status current",
+        success: true,
+        duration_ms: 12,
+    })
     .unwrap_or_else(|error| panic!("could not build first trace call: {error}"));
-    let second_call = McpToolCallInput::new(
-        "cartograph_find",
-        serde_json::json!({"query": "missing"}),
-        "not_found: symbol was not found",
-        false,
-        48,
-    )
+    let second_call = McpToolCallInput::new(McpToolCallData {
+        tool_name: "cartograph_find",
+        arguments: serde_json::json!({"query": "missing"}),
+        result_summary: "not_found: symbol was not found",
+        success: false,
+        duration_ms: 48,
+    })
     .unwrap_or_else(|error| panic!("could not build second trace call: {error}"));
     let recorded_one = database
-        .record_mcp_tool_call(&project, named.session_id(), &first_call)
+        .record_mcp_tool_call(McpToolCallWrite {
+            project_id: &project,
+            session_id: named.session_id(),
+            input: &first_call,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not record first trace call: {error}"));
     let recorded_two = database
-        .record_mcp_tool_call(&project, named.session_id(), &second_call)
+        .record_mcp_tool_call(McpToolCallWrite {
+            project_id: &project,
+            session_id: named.session_id(),
+            input: &second_call,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not record second trace call: {error}"));
     assert_eq!(recorded_one.step(), 1);
     assert_eq!(recorded_two.step(), 2);
     let calls = database
-        .mcp_calls_for_session(&project, named.session_id(), 100)
+        .mcp_calls_for_session(McpSessionCallsQuery {
+            project_id: &project,
+            session_id: named.session_id(),
+            limit: 100,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not read trace calls: {error}"));
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].tool_name(), "cartograph_status");
     assert!(!calls[1].success());
     let found = database
-        .find_mcp_session(&project, None, Some("postgres-review"), false)
+        .find_mcp_session(McpSessionLookup {
+            project_id: &project,
+            session_id: None,
+            label: Some("postgres-review"),
+            require_calls: false,
+        })
         .await
         .unwrap_or_else(|error| panic!("could not find named session: {error}"))
         .unwrap_or_else(|| panic!("named session was missing"));
@@ -564,7 +591,11 @@ async fn agent_sessions_trace_usage_and_macros_are_durable() {
     );
     assert!(
         database
-            .mcp_calls_for_session(&project, named.session_id(), 100)
+            .mcp_calls_for_session(McpSessionCallsQuery {
+                project_id: &project,
+                session_id: named.session_id(),
+                limit: 100,
+            })
             .await
             .unwrap_or_else(|error| panic!("could not verify cascade: {error}"))
             .is_empty()
@@ -591,8 +622,7 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     let note = NewAgentArtifact::new(
         AgentArtifactKind::Note,
         AgentArtifactScope::Project,
-        "project",
-        "Review the public API boundary before editing.",
+        AgentArtifactContent::new("project", "Review the public API boundary before editing."),
     )
     .unwrap_or_else(|error| panic!("could not build note fixture: {error}"));
     let created = database
@@ -612,8 +642,7 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     let question = NewAgentArtifact::new(
         AgentArtifactKind::Note,
         AgentArtifactScope::Project,
-        "project",
-        "Does this boundary need an integration test?",
+        AgentArtifactContent::new("project", "Does this boundary need an integration test?"),
     )
     .and_then(|artifact| {
         artifact.with_metadata(serde_json::json!({
@@ -655,8 +684,7 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     let role = NewAgentArtifact::new(
         AgentArtifactKind::Role,
         AgentArtifactScope::Symbol,
-        symbol_id.as_str(),
-        "business_logic",
+        AgentArtifactContent::new(symbol_id.as_str(), "business_logic"),
     )
     .unwrap_or_else(|error| panic!("could not build role fixture: {error}"))
     .with_generation(current.generation_id().clone())
@@ -720,11 +748,9 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     assert_eq!(explain_json["explain"], true);
     database
         .save_symbol_summary(
-            &project,
-            &symbol_id,
-            &source_digest,
-            "Handles the live artifact fixture.",
-            "integration-test",
+            SymbolSummarySaveInput::new(&project, &symbol_id, &source_digest)
+                .with_summary("Handles the live artifact fixture.")
+                .with_model("integration-test"),
         )
         .await
         .unwrap_or_else(|error| panic!("could not save current summary: {error}"));
@@ -737,11 +763,9 @@ async fn agent_artifacts_and_summary_digest_fences_are_durable() {
     assert!(matches!(
         database
             .save_symbol_summary(
-                &project,
-                &symbol_id,
-                &stale_digest,
-                "This must not overwrite current evidence.",
-                "integration-test",
+                SymbolSummarySaveInput::new(&project, &symbol_id, &stale_digest)
+                    .with_summary("This must not overwrite current evidence.")
+                    .with_model("integration-test"),
             )
             .await,
         Err(StorageError::CurrentGenerationChanged)
@@ -789,20 +813,16 @@ async fn publication_carries_only_digest_identical_derived_evidence() {
 
     database
         .save_symbol_role(
-            &project,
-            &symbol_id,
-            "business_logic",
-            serde_json::json!({"via": "integration-test"}),
+            SymbolRoleSaveInput::new(&project, &symbol_id, "business_logic")
+                .with_metadata(serde_json::json!({"via": "integration-test"})),
         )
         .await
         .unwrap_or_else(|error| panic!("could not save role evidence: {error}"));
     database
         .save_symbol_summary(
-            &project,
-            &symbol_id,
-            &structural_digest,
-            "Decodes a JSON payload.",
-            "integration-test",
+            SymbolSummarySaveInput::new(&project, &symbol_id, &structural_digest)
+                .with_summary("Decodes a JSON payload.")
+                .with_model("integration-test"),
         )
         .await
         .unwrap_or_else(|error| panic!("could not save summary evidence: {error}"));
@@ -905,28 +925,26 @@ async fn cold_derived_prune_removes_only_unreferenced_artifacts_and_terminal_vec
     let structural_digest = digest(DIGEST_ONE);
     database
         .save_symbol_role(
-            &project,
-            &symbol_id,
-            "business_logic",
-            serde_json::json!({"via": "integration-test"}),
+            SymbolRoleSaveInput::new(&project, &symbol_id, "business_logic")
+                .with_metadata(serde_json::json!({"via": "integration-test"})),
         )
         .await
         .unwrap_or_else(|error| panic!("could not seed prune role: {error}"));
     database
         .save_symbol_summary(
-            &project,
-            &symbol_id,
-            &structural_digest,
-            "Decodes a cold JSON payload.",
-            "integration-test",
+            SymbolSummarySaveInput::new(&project, &symbol_id, &structural_digest)
+                .with_summary("Decodes a cold JSON payload.")
+                .with_model("integration-test"),
         )
         .await
         .unwrap_or_else(|error| panic!("could not seed prune summary: {error}"));
     let note = NewAgentArtifact::new(
         AgentArtifactKind::Note,
         AgentArtifactScope::Project,
-        "project",
-        "This operator note must survive derived-store pruning.",
+        AgentArtifactContent::new(
+            "project",
+            "This operator note must survive derived-store pruning.",
+        ),
     )
     .unwrap_or_else(|error| panic!("could not build prune note: {error}"));
     database
@@ -1081,8 +1099,7 @@ async fn expected_generation_reads_survive_publication_without_mixing_snapshots(
     let lookup = tokio::spawn(async move {
         lookup_database
             .exact_current_symbols_by_name(ExactTextLookup::new(
-                &lookup_project,
-                &expected_generation,
+                CurrentGenerationLookup::new(&lookup_project, &expected_generation),
                 "fencedCanary",
                 SEARCH_LIMIT,
             ))
@@ -1107,8 +1124,7 @@ async fn expected_generation_reads_survive_publication_without_mixing_snapshots(
     assert_eq!(
         database
             .exact_current_symbols_by_name(ExactTextLookup::new(
-                &project,
-                current.generation_id(),
+                CurrentGenerationLookup::new(&project, current.generation_id()),
                 "fencedCanary",
                 SEARCH_LIMIT,
             ))
@@ -1117,8 +1133,7 @@ async fn expected_generation_reads_survive_publication_without_mixing_snapshots(
     );
     let replacement_rows = database
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            &project,
-            replacement.generation_id(),
+            CurrentGenerationLookup::new(&project, replacement.generation_id()),
             "fencedCanary",
             SEARCH_LIMIT,
         ))
@@ -1229,8 +1244,7 @@ async fn concurrent_bm25_reader_observes_one_complete_generation_relation() {
     let reader = tokio::spawn(async move {
         reader_database
             .search_current_code(SearchQuery::new(
-                reader_project,
-                reader_generation,
+                CurrentGenerationLookup::new(&reader_project, &reader_generation),
                 "http response",
                 SEARCH_LIMIT,
             ))
@@ -1255,8 +1269,7 @@ async fn concurrent_bm25_reader_observes_one_complete_generation_relation() {
     assert_eq!(
         database
             .search_current_code(SearchQuery::new(
-                project.clone(),
-                current.generation_id().clone(),
+                CurrentGenerationLookup::new(&project, current.generation_id()),
                 "http response",
                 SEARCH_LIMIT,
             ))
@@ -1265,8 +1278,7 @@ async fn concurrent_bm25_reader_observes_one_complete_generation_relation() {
     );
     let new_hits = database
         .search_current_code(SearchQuery::new(
-            project,
-            replacement.generation_id().clone(),
+            CurrentGenerationLookup::new(&project, replacement.generation_id()),
             "json payload",
             SEARCH_LIMIT,
         ))
@@ -1298,8 +1310,7 @@ async fn startup_rebuilds_crash_lost_search_relation_and_removes_trusted_orphan(
     assert_eq!(
         database
             .search_current_code(SearchQuery::new(
-                project.clone(),
-                current.generation_id().clone(),
+                CurrentGenerationLookup::new(&project, current.generation_id()),
                 "isolationtoken",
                 SEARCH_LIMIT,
             ))
@@ -1631,6 +1642,97 @@ async fn concurrent_prepare_and_cleanup_share_one_pre_copy_lock_order() {
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn ready_transition_fence_allows_heartbeats_but_blocks_release() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let generation_id = staged.generation_id().clone();
+    let mut lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    install_ready_transition_delay(&pool, &schema).await;
+
+    let prepare_database = database.clone();
+    let prepare_fence = lease.fence();
+    let prepare = tokio::spawn(async move {
+        prepare_database
+            .prepare_generation(
+                GenerationContents::new(staged, canonical(GenerationFacts::default())),
+                &prepare_fence,
+            )
+            .await
+    });
+    wait_for_ready_transition_delay(&pool, &schema).await;
+
+    database
+        .heartbeat_lease_bounded(&mut lease, HEARTBEAT_LOCK_PROBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("ready transition blocked its lease heartbeat: {error}"));
+    assert!(
+        database
+            .release_lease_bounded(&lease, RELEASE_LOCK_PROBE_TIMEOUT)
+            .await
+            .is_err(),
+        "ready transition did not protect its exact lease from release"
+    );
+
+    let ready = tokio::time::timeout(LOCK_ORDER_TIMEOUT, prepare)
+        .await
+        .unwrap_or_else(|_| panic!("delayed ready transition did not finish"))
+        .unwrap_or_else(|error| panic!("ready transition task failed: {error}"))
+        .unwrap_or_else(|error| panic!("ready transition failed: {error}"));
+    assert_eq!(ready.generation_id(), &generation_id);
+    database
+        .release_lease(&lease)
+        .await
+        .unwrap_or_else(|error| panic!("ready transition lease release failed: {error}"));
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn bounded_heartbeat_avoids_synchronous_commit_stalls() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let mut lease = acquire_generation_lease(&database, &project, staged.generation_id()).await;
+    install_heartbeat_commit_mode_guard(&pool, &schema).await;
+
+    database
+        .heartbeat_lease_bounded(&mut lease, HEARTBEAT_LOCK_PROBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("bounded heartbeat used a blocking commit mode: {error}"));
+    database
+        .release_lease(&lease)
+        .await
+        .unwrap_or_else(|error| panic!("heartbeat fixture lease release failed: {error}"));
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
 async fn stale_publish_and_post_index_retention_share_one_lock_order() {
     let (database, pool, schema) = open_isolated_database().await;
     assert_migration_ledger(&database).await;
@@ -1818,6 +1920,87 @@ async fn install_copy_barrier(pool: &sqlx_postgres::PgPool, schema: &str, barrie
     if let Err(error) = query(AssertSqlSafe(trigger)).execute(pool).await {
         panic!("could not install COPY barrier trigger: {error}");
     }
+}
+
+async fn install_ready_transition_delay(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let function = format!(
+        r#"CREATE FUNCTION "{schema}"."delay_generation_ready"()
+            RETURNS trigger LANGUAGE plpgsql AS $body$
+            BEGIN
+                IF OLD.state = 'staging' AND NEW.state = 'ready' THEN
+                    PERFORM pg_sleep({READY_TRANSITION_DELAY_SECONDS});
+                END IF;
+                RETURN NEW;
+            END
+            $body$"#
+    );
+    query(AssertSqlSafe(function))
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not install ready-transition delay: {error}"));
+    let trigger = format!(
+        r#"CREATE TRIGGER "delay_generation_ready"
+            BEFORE UPDATE OF state ON "{schema}"."index_generations"
+            FOR EACH ROW
+            EXECUTE FUNCTION "{schema}"."delay_generation_ready"()"#
+    );
+    query(AssertSqlSafe(trigger))
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not install ready-transition trigger: {error}"));
+}
+
+async fn install_heartbeat_commit_mode_guard(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let function = format!(
+        r#"CREATE FUNCTION "{schema}"."require_async_heartbeat_commit"()
+            RETURNS trigger LANGUAGE plpgsql AS $body$
+            BEGIN
+                IF current_setting('synchronous_commit') <> 'off' THEN
+                    RAISE EXCEPTION 'heartbeat commit mode was synchronous';
+                END IF;
+                RETURN NEW;
+            END
+            $body$"#
+    );
+    query(AssertSqlSafe(function))
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not install heartbeat commit guard: {error}"));
+    let trigger = format!(
+        r#"CREATE TRIGGER "require_async_heartbeat_commit"
+            BEFORE UPDATE ON "{schema}"."project_operation_leases"
+            FOR EACH ROW
+            EXECUTE FUNCTION "{schema}"."require_async_heartbeat_commit"()"#
+    );
+    query(AssertSqlSafe(trigger))
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not install heartbeat commit trigger: {error}"));
+}
+
+async fn wait_for_ready_transition_delay(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let query_pattern = format!("%{schema}%index_generations%");
+    for _ in 0..LOCK_OBSERVATION_ATTEMPTS {
+        let row = query(
+            r#"SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE application_name = 'cartograph-v2'
+                      AND wait_event = 'PgSleep'
+                      AND query LIKE $1
+                ) AS waiting"#,
+        )
+        .bind(&query_pattern)
+        .fetch_one(pool)
+        .await;
+        if matches!(
+            row.and_then(|row| row.try_get::<bool, _>("waiting")),
+            Ok(true)
+        ) {
+            return;
+        }
+        tokio::time::sleep(LOCK_OBSERVATION_INTERVAL).await;
+    }
+    panic!("prepare did not reach its delayed ready transition");
 }
 
 async fn install_copy_rejection_sentinel(pool: &sqlx_postgres::PgPool, schema: &str) {
@@ -2183,8 +2366,7 @@ async fn bm25_signature(
 ) -> Vec<(String, u64)> {
     database
         .search_current_code(SearchQuery::new(
-            project.clone(),
-            generation.clone(),
+            CurrentGenerationLookup::new(project, generation),
             "isolationtoken",
             SEARCH_LIMIT,
         ))
@@ -2571,11 +2753,8 @@ async fn assert_deterministic_retrieval(
 
     let symbols_at_range = database
         .current_symbols_at_range(CurrentSourceRangeLookup::new(
-            project,
-            generation_id,
-            &path,
-            2,
-            2,
+            CurrentGenerationLookup::new(project, generation_id),
+            SourceLineRange::new(&path, 2, 2),
             SEARCH_LIMIT,
         ))
         .await;
@@ -2591,8 +2770,7 @@ async fn assert_deterministic_retrieval(
 
     let named = database
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            project,
-            generation_id,
+            CurrentGenerationLookup::new(project, generation_id),
             "decodeJSONPayload",
             SEARCH_LIMIT,
         ))
@@ -2611,8 +2789,7 @@ async fn assert_deterministic_retrieval(
 
     let references = database
         .exact_current_references_by_name(ExactTextLookup::new(
-            project,
-            generation_id,
+            CurrentGenerationLookup::new(project, generation_id),
             "decodeJSONPayload",
             SEARCH_LIMIT,
         ))
@@ -2630,8 +2807,7 @@ async fn assert_deterministic_retrieval(
     let incoming = database
         .current_graph_edges(
             CurrentGraphLookup::new(
-                project,
-                generation_id,
+                CurrentGenerationLookup::new(project, generation_id),
                 std::slice::from_ref(&target_id),
                 GraphDirection::Incoming,
             )
@@ -2683,8 +2859,7 @@ async fn assert_interactive_reads_timeout_and_pool_recovers(
     let search = database
         .search_current_code_bounded(
             SearchQuery::new(
-                project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(project, generation_id),
                 "json payload",
                 SEARCH_LIMIT,
             ),
@@ -2708,8 +2883,7 @@ async fn assert_interactive_reads_timeout_and_pool_recovers(
     assert!(matches!(
         database
             .search_current_code(SearchQuery::new(
-                project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(project, generation_id),
                 "json payload",
                 SEARCH_LIMIT,
             ))
@@ -2819,8 +2993,7 @@ async fn assert_search(database: &CartographDatabase, expected: SearchExpectatio
         .unwrap_or_else(|| panic!("search fixture has no current generation"));
     let hits = database
         .search_current_code(SearchQuery::new(
-            expected.project.clone(),
-            current.generation_id().clone(),
+            CurrentGenerationLookup::new(expected.project, current.generation_id()),
             expected.query,
             SEARCH_LIMIT,
         ))
@@ -3230,6 +3403,38 @@ async fn assert_deterministic_cochange_order_migration(pool: &sqlx_postgres::PgP
     .and_then(|row| row.try_get::<String, _>("definition"))
     .unwrap_or_else(|error| panic!("could not inspect cochange-order constraint: {error}"));
     assert!(definition.contains("COLLATE \"C\""), "{definition}");
+}
+
+async fn assert_native_index_digest_v5_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 22"#
+    );
+    let checksum = query(AssertSqlSafe(ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify digest-v5 migration: {error}"));
+    assert_eq!(checksum, NATIVE_INDEX_DIGEST_V5_MIGRATION_CHECKSUM);
+
+    let definition = query(
+        r#"SELECT pg_get_constraintdef(constraints.oid) AS definition
+            FROM pg_catalog.pg_constraint AS constraints
+            JOIN pg_catalog.pg_class AS relations
+              ON relations.oid = constraints.conrelid
+            JOIN pg_catalog.pg_namespace AS namespaces
+              ON namespaces.oid = relations.relnamespace
+            WHERE namespaces.nspname = $1
+              AND relations.relname = 'index_generations'
+              AND constraints.conname = 'index_generations_digest_version_check'"#,
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<String, _>("definition"))
+    .unwrap_or_else(|error| panic!("could not inspect digest-v5 constraint: {error}"));
+    assert!(definition.contains("ARRAY[1, 2, 3, 4, 5]"), "{definition}");
 }
 
 async fn seed_exact_lookup_scale(

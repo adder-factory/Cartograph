@@ -4,7 +4,8 @@ use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolId, SymbolKind};
 
 use crate::{
     ExtractError,
-    framework::{FrameworkBuilder, LandmarkInput},
+    framework::{FrameworkBuilder, FrameworkReferenceInput, LandmarkInput, skip_ascii_whitespace},
+    source_lines::physical_lines,
 };
 
 const MAX_SIGNAL_BYTES: usize = 4_096;
@@ -37,91 +38,180 @@ struct ServiceState {
     indent: usize,
 }
 
+struct ServiceLine<'a> {
+    service: &'a ServiceState,
+    start: usize,
+    text: &'a str,
+}
+
+struct ServiceReference<'a> {
+    service: &'a ServiceState,
+    value: &'a str,
+    start: usize,
+    end: usize,
+}
+
 fn scan_services(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(), ExtractError> {
-    let mut in_services = false;
-    let mut services_indent = 0_usize;
-    let mut service_indent = None;
-    let mut current = None;
-    let mut section: Option<(&str, usize)> = None;
-    let mut tag_facts = BTreeSet::new();
+    let mut state = ServiceScanState::default();
     for (line_start, line) in physical_lines(source) {
         builder.check_cancelled()?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let indent = line.len().saturating_sub(line.trim_start().len());
-        if !in_services {
-            if trimmed == "services:" {
-                in_services = true;
-                services_indent = indent;
-            }
-            continue;
-        }
-        if indent <= services_indent && !trimmed.starts_with(['-', '{', '[']) {
+        if !scan_service_line(
+            builder,
+            &mut state,
+            ServiceSourceLine::new(line_start, line),
+        )? {
             break;
         }
-        if let Some((id, key_start, key_end)) = yaml_mapping_key(line)
-            && indent > services_indent
-            && service_indent.is_none_or(|expected| indent == expected)
-        {
-            service_indent.get_or_insert(indent);
-            if id.starts_with('_') {
-                current = None;
-                section = None;
-                continue;
-            }
-            let identity = format!("drupal-service::{id}");
-            let symbol_id = builder.add_landmark_with_id(LandmarkInput {
-                kind: SymbolKind::Resource,
-                name: id.to_owned(),
-                identity,
-                start: line_start + key_start,
-                end: line_start + key_end,
-                body_search_text: format!("drupal service {id}"),
-                target: None,
-            })?;
-            current = symbol_id.map(|symbol_id| ServiceState {
-                id: id.to_owned(),
-                symbol_id,
-                indent,
-            });
-            section = None;
-            continue;
-        }
-        let Some(service) = current.as_ref() else {
-            continue;
-        };
-        if indent <= service.indent {
-            current = None;
-            section = None;
-            continue;
-        }
-        if let Some((key, _, _)) = yaml_mapping_key(line) {
-            section = Some((key, indent));
-        }
-        scan_service_direct_references(builder, service, line_start, line)?;
-        if section.is_some_and(|(name, section_indent)| name == "tags" && indent > section_indent)
-            && let Some((tag, start, end)) = yaml_value_for_key(line, "name")
-        {
-            tag_facts.insert((
-                service.id.clone(),
-                tag.to_owned(),
-                true,
-                line_start + start,
-                line_start + end,
-            ));
-        }
-        if let Some((tag, start, end)) = tagged_iterator(line) {
-            tag_facts.insert((
-                service.id.clone(),
-                tag.to_owned(),
-                false,
-                line_start + start,
-                line_start + end,
-            ));
+    }
+    publish_service_tags(builder, state.tag_facts)
+}
+
+type ServiceTagFact = (String, String, bool, usize, usize);
+
+#[derive(Default)]
+struct ServiceScanState {
+    in_services: bool,
+    services_indent: usize,
+    service_indent: Option<usize>,
+    current: Option<ServiceState>,
+    tag_section_indent: Option<usize>,
+    tag_facts: BTreeSet<ServiceTagFact>,
+}
+
+#[derive(Clone, Copy)]
+struct ServiceSourceLine<'source> {
+    start: usize,
+    text: &'source str,
+    indent: usize,
+}
+
+impl<'source> ServiceSourceLine<'source> {
+    fn new(start: usize, text: &'source str) -> Self {
+        Self {
+            start,
+            text,
+            indent: text.len().saturating_sub(text.trim_start().len()),
         }
     }
+}
+
+fn scan_service_line(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    state: &mut ServiceScanState,
+    line: ServiceSourceLine<'_>,
+) -> Result<bool, ExtractError> {
+    let trimmed = line.text.trim();
+    if trimmed.is_empty() {
+        return Ok(true);
+    }
+    if !state.in_services {
+        if trimmed == "services:" {
+            state.in_services = true;
+            state.services_indent = line.indent;
+        }
+        return Ok(true);
+    }
+    if line.indent <= state.services_indent && !trimmed.starts_with(['-', '{', '[']) {
+        return Ok(false);
+    }
+    if is_service_declaration(state, line.text, line.indent) {
+        begin_service(builder, state, line)?;
+        return Ok(true);
+    }
+    let Some(service) = state.current.as_ref() else {
+        return Ok(true);
+    };
+    if line.indent <= service.indent {
+        state.current = None;
+        state.tag_section_indent = None;
+        return Ok(true);
+    }
+    if let Some((key, _, _)) = yaml_mapping_key(line.text) {
+        state.tag_section_indent = (key == "tags").then_some(line.indent);
+    }
+    scan_service_direct_references(
+        builder,
+        ServiceLine {
+            service,
+            start: line.start,
+            text: line.text,
+        },
+    )?;
+    collect_service_tags(state, line);
+    Ok(true)
+}
+
+fn is_service_declaration(state: &ServiceScanState, line: &str, indent: usize) -> bool {
+    yaml_mapping_key(line).is_some()
+        && indent > state.services_indent
+        && state
+            .service_indent
+            .is_none_or(|expected| indent == expected)
+}
+
+fn begin_service(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    state: &mut ServiceScanState,
+    line: ServiceSourceLine<'_>,
+) -> Result<(), ExtractError> {
+    let Some((id, key_start, key_end)) = yaml_mapping_key(line.text) else {
+        return Ok(());
+    };
+    state.service_indent.get_or_insert(line.indent);
+    state.tag_section_indent = None;
+    if id.starts_with('_') {
+        state.current = None;
+        return Ok(());
+    }
+    let symbol_id = builder.add_landmark_with_id(LandmarkInput {
+        kind: SymbolKind::Resource,
+        name: id.to_owned(),
+        identity: format!("drupal-service::{id}"),
+        start: line.start + key_start,
+        end: line.start + key_end,
+        body_search_text: format!("drupal service {id}"),
+        target: None,
+    })?;
+    state.current = symbol_id.map(|symbol_id| ServiceState {
+        id: id.to_owned(),
+        symbol_id,
+        indent: line.indent,
+    });
+    Ok(())
+}
+
+fn collect_service_tags(state: &mut ServiceScanState, line: ServiceSourceLine<'_>) {
+    let Some(service) = state.current.as_ref() else {
+        return;
+    };
+    if state
+        .tag_section_indent
+        .is_some_and(|section_indent| line.indent > section_indent)
+        && let Some((tag, start, end)) = yaml_value_for_key(line.text, "name")
+    {
+        state.tag_facts.insert((
+            service.id.clone(),
+            tag.to_owned(),
+            true,
+            line.start + start,
+            line.start + end,
+        ));
+    }
+    if let Some((tag, start, end)) = tagged_iterator(line.text) {
+        state.tag_facts.insert((
+            service.id.clone(),
+            tag.to_owned(),
+            false,
+            line.start + start,
+            line.start + end,
+        ));
+    }
+}
+
+fn publish_service_tags(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    tag_facts: BTreeSet<ServiceTagFact>,
+) -> Result<(), ExtractError> {
     if tag_facts.len() > MAX_TAGS_PER_FILE {
         return Err(ExtractError::OutputLimit);
     }
@@ -147,18 +237,23 @@ fn scan_services(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result
 
 fn scan_service_direct_references(
     builder: &mut FrameworkBuilder<'_, '_>,
-    service: &ServiceState,
-    line_start: usize,
-    line: &str,
+    input: ServiceLine<'_>,
 ) -> Result<(), ExtractError> {
+    let ServiceLine {
+        service,
+        start: line_start,
+        text: line,
+    } = input;
     for key in ["class", "alias", "parent"] {
         if let Some((value, start, end)) = yaml_value_for_key(line, key) {
             add_service_reference(
                 builder,
-                service,
-                value,
-                line_start + start,
-                line_start + end,
+                ServiceReference {
+                    service,
+                    value,
+                    start: line_start + start,
+                    end: line_start + end,
+                },
             )?;
         }
     }
@@ -172,10 +267,12 @@ fn scan_service_direct_references(
             let target_len = target.len().min(end.saturating_sub(start));
             add_service_reference(
                 builder,
-                service,
-                &target,
-                line_start + start,
-                line_start + start + target_len,
+                ServiceReference {
+                    service,
+                    value: &target,
+                    start: line_start + start,
+                    end: line_start + start + target_len,
+                },
             )?;
         }
     }
@@ -196,10 +293,12 @@ fn scan_service_direct_references(
         if end > name_start {
             add_service_reference(
                 builder,
-                service,
-                &line[name_start..end],
-                line_start + name_start,
-                line_start + end,
+                ServiceReference {
+                    service,
+                    value: &line[name_start..end],
+                    start: line_start + name_start,
+                    end: line_start + end,
+                },
             )?;
         }
         cursor = end.max(marker + 1);
@@ -209,23 +308,26 @@ fn scan_service_direct_references(
 
 fn add_service_reference(
     builder: &mut FrameworkBuilder<'_, '_>,
-    service: &ServiceState,
-    value: &str,
-    start: usize,
-    end: usize,
+    input: ServiceReference<'_>,
 ) -> Result<(), ExtractError> {
+    let ServiceReference {
+        service,
+        value,
+        start,
+        end,
+    } = input;
     let value = value.trim();
     if value.is_empty() || value.len() > MAX_SIGNAL_BYTES || start >= end {
         return Ok(());
     }
-    builder.add_reference_with_resolution(
-        Some(service.symbol_id.clone()),
-        value,
-        None,
-        ReferenceKind::References,
+    builder.add_reference_with_resolution(FrameworkReferenceInput {
+        owner: Some(service.symbol_id.clone()),
+        name: value,
+        resolution_name: None,
+        kind: ReferenceKind::References,
         start,
         end,
-    )
+    })
 }
 
 fn scan_hook_contracts(builder: &mut FrameworkBuilder<'_, '_>) -> Result<(), ExtractError> {
@@ -501,23 +603,4 @@ fn quoted_after(value: &str, from: usize) -> Option<Quoted<'_>> {
         cursor += 1;
     }
     None
-}
-
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn physical_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
-    source.split_inclusive('\n').scan(0_usize, |offset, line| {
-        let start = *offset;
-        *offset = offset.saturating_add(line.len());
-        Some((start, line.trim_end_matches(['\n', '\r'])))
-    })
 }

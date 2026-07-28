@@ -47,19 +47,25 @@ pub(super) fn run_install_hooks(request: InstallHooksRequest) -> Result<String, 
     }
     let mut changes = Vec::new();
     for hook in &hooks {
-        changes.push(change_hook(
-            &target.directory,
+        changes.push(change_hook(HookChangeRequest {
+            directory: &target.directory,
             hook,
-            &command,
-            request.remove,
-            request.dry_run,
-        )?);
+            command: &command,
+            remove: request.remove,
+            dry_run: request.dry_run,
+        })?);
     }
 
     let default_directory = default_hooks_directory(&root)?;
     if target.source != "default" && default_directory != target.directory {
         for hook in &hooks {
-            let cleanup = change_hook(&default_directory, hook, &command, true, request.dry_run)?;
+            let cleanup = change_hook(HookChangeRequest {
+                directory: &default_directory,
+                hook,
+                command: &command,
+                remove: true,
+                dry_run: request.dry_run,
+            })?;
             if cleanup.status == "removed" {
                 changes.push(cleanup);
             }
@@ -175,13 +181,22 @@ fn require_safe_redirected_target(root: &Path, target: &Path) -> Result<(), Stri
     Ok(())
 }
 
-fn change_hook(
-    directory: &Path,
-    hook: &str,
-    command: &str,
+struct HookChangeRequest<'a> {
+    directory: &'a Path,
+    hook: &'a str,
+    command: &'a str,
     remove: bool,
     dry_run: bool,
-) -> Result<HookChange, String> {
+}
+
+fn change_hook(input: HookChangeRequest<'_>) -> Result<HookChange, String> {
+    let HookChangeRequest {
+        directory,
+        hook,
+        command,
+        remove,
+        dry_run,
+    } = input;
     let path = directory.join(hook);
     let existing = read_hook(&path)?;
     let (next, status) = if remove {

@@ -54,14 +54,7 @@ pub struct ReadOnlySqlRequest {
 impl ReadOnlySqlRequest {
     /// Validate one SELECT/WITH or simple EXPLAIN SELECT/WITH statement.
     pub fn new(query: &str, limit: u16, timeout: Duration) -> Result<Self, ReadOnlySqlError> {
-        if query.trim().is_empty()
-            || query.len() > MAX_QUERY_BYTES
-            || query.contains('\0')
-            || limit == 0
-            || limit > MAX_QUERY_ROWS
-            || timeout.is_zero()
-            || timeout > MAX_QUERY_TIMEOUT
-        {
+        if invalid_read_only_query(query) || invalid_read_only_bounds(limit, timeout) {
             return Err(ReadOnlySqlError::InvalidInput);
         }
         let query = strip_trailing_semicolon(query)?;
@@ -88,6 +81,14 @@ impl ReadOnlySqlRequest {
             explain,
         })
     }
+}
+
+fn invalid_read_only_query(query: &str) -> bool {
+    query.trim().is_empty() || query.len() > MAX_QUERY_BYTES || query.contains('\0')
+}
+
+fn invalid_read_only_bounds(limit: u16, timeout: Duration) -> bool {
+    limit == 0 || limit > MAX_QUERY_ROWS || timeout.is_zero() || timeout > MAX_QUERY_TIMEOUT
 }
 
 /// One bounded row from the SQL escape hatch.
@@ -163,7 +164,15 @@ impl CartographDatabase {
                 "EXPLAIN (FORMAT TEXT) WITH {logical}, cartograph_user_query AS ({}) SELECT * FROM cartograph_user_query",
                 request.query
             );
-            execute_explain(&mut transaction, statement, project_id, request.limit).await
+            execute_explain(
+                &mut transaction,
+                SqlExecution {
+                    statement,
+                    project_id,
+                    limit: request.limit,
+                },
+            )
+            .await
         } else {
             let statement = format!(
                 r#"WITH {logical}, cartograph_user_query AS ({}),
@@ -176,7 +185,15 @@ impl CartographDatabase {
                     FROM cartograph_bounded_rows"#,
                 request.query
             );
-            execute_rows(&mut transaction, statement, project_id, request.limit).await
+            execute_rows(
+                &mut transaction,
+                SqlExecution {
+                    statement,
+                    project_id,
+                    limit: request.limit,
+                },
+            )
+            .await
         };
         match result {
             Ok(result) => {
@@ -197,7 +214,7 @@ impl CartographDatabase {
 /// Stable schema offered to SQL callers instead of physical cross-project tables.
 #[must_use]
 pub fn read_only_sql_schema() -> Vec<ReadOnlySqlRelation> {
-    vec![
+    let mut relations = vec![
         relation(
             "project",
             &[
@@ -262,6 +279,13 @@ pub fn read_only_sql_schema() -> Vec<ReadOnlySqlRelation> {
                 "span_precision",
             ],
         ),
+    ];
+    relations.extend(read_only_analysis_relations());
+    relations
+}
+
+fn read_only_analysis_relations() -> Vec<ReadOnlySqlRelation> {
+    vec![
         relation(
             "search_documents",
             &[
@@ -327,10 +351,13 @@ pub fn read_only_sql_schema() -> Vec<ReadOnlySqlRelation> {
 
 async fn execute_rows(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    statement: String,
-    project_id: &ProjectId,
-    limit: u16,
+    input: SqlExecution<'_>,
 ) -> Result<ReadOnlySqlResult, ReadOnlySqlError> {
+    let SqlExecution {
+        statement,
+        project_id,
+        limit,
+    } = input;
     let fetch_limit = i64::from(limit) + 1;
     let rows = query(AssertSqlSafe(statement))
         .bind(project_id.as_str())
@@ -369,15 +396,23 @@ async fn execute_rows(
         output_bytes += bytes;
         output.push(value);
     }
-    Ok(result(output, truncated, limit, false))
+    Ok(result(ReadOnlySqlOutput {
+        rows: output,
+        truncated,
+        row_limit: limit,
+        explain: false,
+    }))
 }
 
 async fn execute_explain(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    statement: String,
-    project_id: &ProjectId,
-    limit: u16,
+    input: SqlExecution<'_>,
 ) -> Result<ReadOnlySqlResult, ReadOnlySqlError> {
+    let SqlExecution {
+        statement,
+        project_id,
+        limit,
+    } = input;
     let rows = query(AssertSqlSafe(statement))
         .bind(project_id.as_str())
         .fetch_all(&mut **transaction)
@@ -405,15 +440,34 @@ async fn execute_explain(
         output_bytes += bytes;
         output.push(value);
     }
-    Ok(result(output, truncated, limit, true))
+    Ok(result(ReadOnlySqlOutput {
+        rows: output,
+        truncated,
+        row_limit: limit,
+        explain: true,
+    }))
 }
 
-const fn result(
+struct SqlExecution<'a> {
+    statement: String,
+    project_id: &'a ProjectId,
+    limit: u16,
+}
+
+struct ReadOnlySqlOutput {
     rows: Vec<ReadOnlySqlRow>,
     truncated: bool,
     row_limit: u16,
     explain: bool,
-) -> ReadOnlySqlResult {
+}
+
+fn result(input: ReadOnlySqlOutput) -> ReadOnlySqlResult {
+    let ReadOnlySqlOutput {
+        rows,
+        truncated,
+        row_limit,
+        explain,
+    } = input;
     ReadOnlySqlResult {
         rows,
         truncated,
@@ -565,48 +619,101 @@ fn tokenize(query: &str) -> Result<Vec<Token>, ReadOnlySqlError> {
     let mut tokens = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
-        let byte = bytes[index];
-        if byte.is_ascii_whitespace() {
-            index += 1;
-        } else if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
-            index += 2;
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index = skip_block_comment(bytes, index + 2)?;
-        } else if byte == b'\'' {
-            index = skip_string(bytes, index + 1)?;
-        } else if byte == b'"' || byte == b'$' || byte == b';' || byte.is_ascii_control() {
-            return Err(ReadOnlySqlError::Forbidden);
-        } else if byte.is_ascii_alphabetic() || byte == b'_' {
-            let start = index;
-            index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-            {
-                index += 1;
-            }
-            let word = std::str::from_utf8(&bytes[start..index])
-                .map_err(|_| ReadOnlySqlError::InvalidInput)?
-                .to_ascii_lowercase();
-            tokens.push(Token::Word(word));
-        } else if byte.is_ascii_digit() {
-            index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric()
-                    || matches!(bytes[index], b'.' | b'_' | b'+' | b'-'))
-            {
-                index += 1;
-            }
-        } else if byte.is_ascii() {
-            tokens.push(Token::Symbol(char::from(byte)));
-            index += 1;
-        } else {
-            index += utf8_character_width(byte).ok_or(ReadOnlySqlError::InvalidInput)?;
+        let (next_index, token) = scan_token(bytes, index)?;
+        if let Some(token) = token {
+            tokens.push(token);
         }
+        index = next_index;
     }
     Ok(tokens)
+}
+
+fn scan_token(bytes: &[u8], index: usize) -> Result<(usize, Option<Token>), ReadOnlySqlError> {
+    let byte = bytes[index];
+    if byte.is_ascii_whitespace() {
+        return Ok((index.saturating_add(1), None));
+    }
+    if byte == b'\'' {
+        return skip_string(bytes, index.saturating_add(1)).map(|next| (next, None));
+    }
+    if let Some(next) = comment_end(bytes, index, byte)? {
+        return Ok((next, None));
+    }
+    if forbidden_token_byte(byte) {
+        return Err(ReadOnlySqlError::Forbidden);
+    }
+    scan_value_token(bytes, index, byte)
+}
+
+fn comment_end(bytes: &[u8], index: usize, byte: u8) -> Result<Option<usize>, ReadOnlySqlError> {
+    if byte == b'-' && bytes.get(index.saturating_add(1)) == Some(&b'-') {
+        return Ok(Some(skip_line_comment(bytes, index.saturating_add(2))));
+    }
+    if byte == b'/' && bytes.get(index.saturating_add(1)) == Some(&b'*') {
+        return skip_block_comment(bytes, index.saturating_add(2)).map(Some);
+    }
+    Ok(None)
+}
+
+fn forbidden_token_byte(byte: u8) -> bool {
+    matches!(byte, b'"' | b'$' | b';') || byte.is_ascii_control()
+}
+
+fn scan_value_token(
+    bytes: &[u8],
+    index: usize,
+    byte: u8,
+) -> Result<(usize, Option<Token>), ReadOnlySqlError> {
+    if byte.is_ascii_alphabetic() || byte == b'_' {
+        return scan_word(bytes, index).map(|(next, word)| (next, Some(Token::Word(word))));
+    }
+    scan_nonword_token(bytes, index, byte)
+}
+
+fn scan_nonword_token(
+    bytes: &[u8],
+    index: usize,
+    byte: u8,
+) -> Result<(usize, Option<Token>), ReadOnlySqlError> {
+    if byte.is_ascii_digit() {
+        return Ok((skip_number(bytes, index), None));
+    }
+    if byte.is_ascii() {
+        return Ok((
+            index.saturating_add(1),
+            Some(Token::Symbol(char::from(byte))),
+        ));
+    }
+    let width = utf8_character_width(byte).ok_or(ReadOnlySqlError::InvalidInput)?;
+    Ok((index.saturating_add(width), None))
+}
+
+fn skip_line_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index = index.saturating_add(1);
+    }
+    index
+}
+
+fn scan_word(bytes: &[u8], start: usize) -> Result<(usize, String), ReadOnlySqlError> {
+    let mut end = start.saturating_add(1);
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end = end.saturating_add(1);
+    }
+    let word = std::str::from_utf8(&bytes[start..end])
+        .map_err(|_| ReadOnlySqlError::InvalidInput)?
+        .to_ascii_lowercase();
+    Ok((end, word))
+}
+
+fn skip_number(bytes: &[u8], start: usize) -> usize {
+    let mut end = start.saturating_add(1);
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'.' | b'_' | b'+' | b'-'))
+    {
+        end = end.saturating_add(1);
+    }
+    end
 }
 
 fn skip_string(bytes: &[u8], mut index: usize) -> Result<usize, ReadOnlySqlError> {
@@ -803,11 +910,21 @@ fn comma_is_from_separator(tokens: &[Token], depths: &[u32], comma: usize) -> bo
     false
 }
 
+const UTF8_TWO_BYTE_LEAD_START: u8 = 0xC2;
+const UTF8_TWO_BYTE_LEAD_END: u8 = 0xDF;
+const UTF8_THREE_BYTE_LEAD_START: u8 = 0xE0;
+const UTF8_THREE_BYTE_LEAD_END: u8 = 0xEF;
+const UTF8_FOUR_BYTE_LEAD_START: u8 = 0xF0;
+const UTF8_FOUR_BYTE_LEAD_END: u8 = 0xF4;
+const UTF8_TWO_BYTE_WIDTH: usize = 2;
+const UTF8_THREE_BYTE_WIDTH: usize = 3;
+const UTF8_FOUR_BYTE_WIDTH: usize = 4;
+
 const fn utf8_character_width(first: u8) -> Option<usize> {
     match first {
-        0xC2..=0xDF => Some(2),
-        0xE0..=0xEF => Some(3),
-        0xF0..=0xF4 => Some(4),
+        UTF8_TWO_BYTE_LEAD_START..=UTF8_TWO_BYTE_LEAD_END => Some(UTF8_TWO_BYTE_WIDTH),
+        UTF8_THREE_BYTE_LEAD_START..=UTF8_THREE_BYTE_LEAD_END => Some(UTF8_THREE_BYTE_WIDTH),
+        UTF8_FOUR_BYTE_LEAD_START..=UTF8_FOUR_BYTE_LEAD_END => Some(UTF8_FOUR_BYTE_WIDTH),
         _ => None,
     }
 }

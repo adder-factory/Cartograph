@@ -8,6 +8,11 @@ use crate::{CartographDatabase, database::set_local_statement_timeout};
 
 use super::types::{SemanticStorageError, database_error, validate_timeout};
 
+const AUDIT_CURRENT_EMBEDDINGS_COLUMN: usize = 3;
+const AUDIT_HISTORICAL_EMBEDDINGS_COLUMN: usize = 4;
+const AUDIT_RETIRED_MODEL_EMBEDDINGS_COLUMN: usize = 5;
+const AUDIT_MODEL_INDEXES_COLUMN: usize = 6;
+
 /// Database-only semantic storage evidence; no endpoint or credential is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,10 +95,10 @@ impl CartographDatabase {
             active_models: count(&row, 0)?,
             retired_models: count(&row, 1)?,
             current_documents: count(&row, 2)?,
-            current_embeddings: count(&row, 3)?,
-            historical_embeddings: count(&row, 4)?,
-            retired_model_embeddings: count(&row, 5)?,
-            model_indexes: count(&row, 6)?,
+            current_embeddings: count(&row, AUDIT_CURRENT_EMBEDDINGS_COLUMN)?,
+            historical_embeddings: count(&row, AUDIT_HISTORICAL_EMBEDDINGS_COLUMN)?,
+            retired_model_embeddings: count(&row, AUDIT_RETIRED_MODEL_EMBEDDINGS_COLUMN)?,
+            model_indexes: count(&row, AUDIT_MODEL_INDEXES_COLUMN)?,
         };
         transaction
             .commit()

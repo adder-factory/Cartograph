@@ -49,6 +49,13 @@ path/content-digest pairs in deterministic order. The encoding lives in
 `cartograph-domain::SourceManifestDigestBuilder` and is shared by agent status,
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
+Generation freshness additionally requires the current native generation-digest
+contract. Contract V5 fences framework, resolver, and test-ownership semantics:
+after an upgrade from an older contract, unchanged source remains stale until a
+normal index publishes current-contract facts. This contract check stays
+separate from the source-manifest digest so v1 import still compares exact
+checkout bytes rather than a binary-specific identity.
+
 ## Parsing and facts
 
 `NativeExtractor` chooses either the pinned tree-sitter grammar or the bounded
@@ -75,6 +82,14 @@ secret or source-literal dump.
 
 Resolution runs after extraction. It prefers exact module/path and qualified
 scope evidence and keeps ambiguous or dynamic cases unresolved.
+
+Unresolved evidence remains typed by provenance. In particular, Rust macro
+invocations that would require expansion, dynamic receiver/member access,
+language intrinsics, and explicit non-local imports remain targetless rather
+than being guessed as project declarations. Static embedded-SQL references
+resolve to indexed SQL tables when available and otherwise retain typed
+external-schema read/write/DDL provenance. Project-actionable unresolved
+pressure is computed separately from those expected language boundaries.
 
 Implemented language-level behavior includes:
 

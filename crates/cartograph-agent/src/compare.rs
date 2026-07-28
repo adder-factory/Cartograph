@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{
     ProjectCancellation, ProjectRuntime,
-    review::{run_git, run_git_bounded, valid_git_ref},
+    review::{GitCommandBounds, run_git, run_git_bounded, valid_git_ref},
     source_limits,
 };
 
@@ -25,6 +25,42 @@ const MAX_PATH_FILTER_BYTES: usize = 4_096;
 const COMPARE_CONCURRENCY: usize = 8;
 const GIT_SOURCE_OUTPUT_BYTES: usize = 64 * 1_024 * 1_024;
 const GIT_SOURCE_TIMEOUT: Duration = Duration::from_secs(30);
+const LARGE_METHOD_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(100.0, 200.0);
+const COMPLEX_METHOD_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(15.0, 25.0);
+const NESTED_COMPLEXITY_THRESHOLDS: CompareFindingThreshold =
+    CompareFindingThreshold::new(5.0, 7.0);
+const COMPLEX_CONDITIONAL_THRESHOLDS: CompareFindingThreshold =
+    CompareFindingThreshold::new(6.0, 8.0);
+const LONG_PARAMETER_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(5.0, 7.0);
+const ONE_TO_ONE_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(1.0, 1.0);
+const ONE_TO_THREE_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(1.0, 3.0);
+const ONE_TO_FIVE_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(1.0, 5.0);
+const TWO_TO_FIVE_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(2.0, 5.0);
+const THREE_TO_FIVE_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(3.0, 5.0);
+const FIVE_TO_FIFTY_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(5.0, 50.0);
+const EMPTY_BODY_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(1.0, f64::MAX);
+const BRAIN_METHOD_THRESHOLDS: CompareFindingThreshold = CompareFindingThreshold::new(4.0, 6.0);
+const BRAIN_CYCLOMATIC_NORMALIZER: f64 = 15.0;
+const BRAIN_NESTING_NORMALIZER: f64 = 5.0;
+
+#[derive(Clone, Copy)]
+struct CompareFindingThreshold {
+    warning: f64,
+    error: f64,
+}
+
+impl CompareFindingThreshold {
+    const fn new(warning: f64, error: f64) -> Self {
+        Self { warning, error }
+    }
+}
+
+struct SourceFindingInput<'symbol> {
+    symbol: &'symbol ExtractedSymbol,
+    finding: &'static str,
+    metric: f64,
+    thresholds: CompareFindingThreshold,
+}
 
 /// Validated structural comparison policy for a worktree or two Git refs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -279,7 +315,7 @@ pub(crate) async fn compare_sources_at(
     let repository = run_git(&root, &["rev-parse", "--is-inside-work-tree"])
         .await
         .map_err(map_git_error)?;
-    if !repository.success || trim_ascii(&repository.stdout) != b"true" {
+    if !repository.success || crate::trim_ascii_bytes(&repository.stdout) != b"true" {
         return Err(SourceCompareError::NotGitRepository);
     }
     let base_commit = resolve_commit(&root, &options.base_ref).await?;
@@ -319,7 +355,14 @@ pub(crate) async fn compare_sources_at(
                     return Err(SourceCompareError::Cancelled);
                 }
                 tokio::task::spawn_blocking(move || {
-                    compare_one_file(path, baseline, current, &options)
+                    compare_one_file(
+                        SourceFileComparison {
+                            path,
+                            baseline,
+                            current,
+                        },
+                        &options,
+                    )
                 })
                 .await
                 .map_err(|_| SourceCompareError::InvalidOutput)?
@@ -394,7 +437,7 @@ async fn resolve_commit(root: &Path, reference: &str) -> Result<String, SourceCo
     if !output.success {
         return Err(SourceCompareError::RefNotFound);
     }
-    let commit = std::str::from_utf8(trim_ascii(&output.stdout))
+    let commit = std::str::from_utf8(crate::trim_ascii_bytes(&output.stdout))
         .ok()
         .filter(|value| {
             matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -487,8 +530,7 @@ async fn git_blob(
     let output = run_git_bounded(
         root,
         &["cat-file", "blob", &object],
-        GIT_SOURCE_OUTPUT_BYTES,
-        GIT_SOURCE_TIMEOUT,
+        GitCommandBounds::new(GIT_SOURCE_OUTPUT_BYTES, GIT_SOURCE_TIMEOUT),
     )
     .await
     .map_err(map_git_error)?;
@@ -530,12 +572,21 @@ fn read_bounded_worktree_file(
         .map_err(|_| SourceCompareError::InvalidOutput)
 }
 
-fn compare_one_file(
+struct SourceFileComparison {
     path: NormalizedPath,
     baseline: Option<Vec<u8>>,
     current: Option<Vec<u8>>,
+}
+
+fn compare_one_file(
+    input: SourceFileComparison,
     options: &SourceCompareOptions,
 ) -> Result<SourceFileDelta, SourceCompareError> {
+    let SourceFileComparison {
+        path,
+        baseline,
+        current,
+    } = input;
     let limits = source_limits().map_err(|_| SourceCompareError::InvalidOutput)?;
     let baseline = extract_side(&path, baseline, limits);
     let current = extract_side(&path, current, limits);
@@ -546,22 +597,32 @@ fn compare_one_file(
         (Some(Ok(baseline)), None) => (Some(baseline), None),
         (None, Some(Ok(current))) => (None, Some(current)),
         (None, None) => {
-            return Ok(skipped_file(path, false, false, "source_unavailable"));
+            return Ok(skipped_file(SkippedSourceFile {
+                path,
+                had_baseline: false,
+                had_current: false,
+                reason: "source_unavailable",
+            }));
         }
         (Some(Err(reason)), _) | (_, Some(Err(reason))) => {
-            return Ok(skipped_file(path, had_baseline, had_current, reason));
+            return Ok(skipped_file(SkippedSourceFile {
+                path,
+                had_baseline,
+                had_current,
+                reason,
+            }));
         }
     };
     let language = current
         .as_ref()
         .or(baseline.as_ref())
         .map(|file| file.language.as_str().to_owned());
-    let symbol_diff = diff_symbols(
-        baseline.as_ref(),
-        current.as_ref(),
-        options.include_findings,
-        options.suppress_line_range_only,
-    );
+    let symbol_diff = diff_symbols(SymbolDiffInput {
+        baseline: baseline.as_ref(),
+        current: current.as_ref(),
+        include_findings: options.include_findings,
+        suppress_line_range_only: options.suppress_line_range_only,
+    });
     let findings_delta = options.findings_delta.then(|| {
         diff_findings(
             baseline
@@ -609,12 +670,20 @@ fn extract_side(
     })
 }
 
-fn skipped_file(
+struct SkippedSourceFile {
     path: NormalizedPath,
     had_baseline: bool,
     had_current: bool,
     reason: &'static str,
-) -> SourceFileDelta {
+}
+
+fn skipped_file(input: SkippedSourceFile) -> SourceFileDelta {
+    let SkippedSourceFile {
+        path,
+        had_baseline,
+        had_current,
+        reason,
+    } = input;
     SourceFileDelta {
         path,
         had_baseline,
@@ -639,12 +708,20 @@ struct SymbolDiff {
     line_range_only_count: u64,
 }
 
-fn diff_symbols(
-    baseline: Option<&ExtractedFile>,
-    current: Option<&ExtractedFile>,
+struct SymbolDiffInput<'a> {
+    baseline: Option<&'a ExtractedFile>,
+    current: Option<&'a ExtractedFile>,
     include_findings: bool,
     suppress_line_range_only: bool,
-) -> SymbolDiff {
+}
+
+fn diff_symbols(input: SymbolDiffInput<'_>) -> SymbolDiff {
+    let SymbolDiffInput {
+        baseline,
+        current,
+        include_findings,
+        suppress_line_range_only,
+    } = input;
     let before = grouped_symbols(baseline.map_or(&[][..], |file| file.symbols.as_slice()));
     let after = grouped_symbols(current.map_or(&[][..], |file| file.symbols.as_slice()));
     let keys = before
@@ -658,26 +735,47 @@ fn diff_symbols(
         let before_group = before.get(&key).unwrap_or(&empty);
         let after_group = after.get(&key).unwrap_or(&empty);
         for index in 0..before_group.len().max(after_group.len()) {
-            match (before_group.get(index), after_group.get(index)) {
-                (None, Some(after)) => diff.added.push(symbol_delta(after, &[], include_findings)),
-                (Some(before), None) => diff.removed.push(symbol_delta(before, &[], false)),
-                (Some(before), Some(after)) => {
-                    let reasons = modification_reasons(before, after);
-                    if reasons.is_empty() {
-                        continue;
-                    }
-                    if suppress_line_range_only && reasons == ["line_range_changed"] {
-                        diff.line_range_only_count = diff.line_range_only_count.saturating_add(1);
-                    } else {
-                        diff.modified
-                            .push(symbol_delta(after, &reasons, include_findings));
-                    }
-                }
-                (None, None) => {}
-            }
+            record_symbol_pair(
+                &mut diff,
+                SymbolPairInput {
+                    before: before_group.get(index).copied(),
+                    after: after_group.get(index).copied(),
+                    include_findings,
+                    suppress_line_range_only,
+                },
+            );
         }
     }
     diff
+}
+
+struct SymbolPairInput<'symbol> {
+    before: Option<&'symbol ExtractedSymbol>,
+    after: Option<&'symbol ExtractedSymbol>,
+    include_findings: bool,
+    suppress_line_range_only: bool,
+}
+
+fn record_symbol_pair(diff: &mut SymbolDiff, input: SymbolPairInput<'_>) {
+    match (input.before, input.after) {
+        (None, Some(after)) => diff
+            .added
+            .push(symbol_delta(after, &[], input.include_findings)),
+        (Some(before), None) => diff.removed.push(symbol_delta(before, &[], false)),
+        (Some(before), Some(after)) => {
+            let reasons = modification_reasons(before, after);
+            if reasons.is_empty() {
+                return;
+            }
+            if input.suppress_line_range_only && reasons == ["line_range_changed"] {
+                diff.line_range_only_count = diff.line_range_only_count.saturating_add(1);
+            } else {
+                diff.modified
+                    .push(symbol_delta(after, &reasons, input.include_findings));
+            }
+        }
+        (None, None) => {}
+    }
 }
 
 type SymbolKey = (String, String);
@@ -762,150 +860,151 @@ fn findings_for_symbol(symbol: &ExtractedSymbol) -> Vec<SourceFinding> {
         .saturating_add(1);
     let health = symbol.health;
     let mut findings = Vec::new();
-    push_finding(
-        &mut findings,
-        symbol,
-        "large_method",
-        f64::from(lines),
-        100.0,
-        200.0,
-    );
-    push_finding(
-        &mut findings,
-        symbol,
-        "complex_method",
-        f64::from(health.cyclomatic),
-        15.0,
-        25.0,
-    );
-    push_finding(
-        &mut findings,
-        symbol,
-        "nested_complexity",
-        f64::from(health.max_nesting),
-        5.0,
-        7.0,
-    );
-    push_finding(
-        &mut findings,
-        symbol,
-        "complex_conditional",
-        f64::from(health.max_conditional_operands),
-        6.0,
-        8.0,
-    );
-    push_finding(
-        &mut findings,
-        symbol,
-        "long_parameter_list",
-        f64::from(health.parameter_count),
-        5.0,
-        7.0,
-    );
-    for (finding, metric, warning, error) in health_findings(health) {
-        push_finding(&mut findings, symbol, finding, metric, warning, error);
+    for (finding, metric, thresholds) in [
+        ("large_method", f64::from(lines), LARGE_METHOD_THRESHOLDS),
+        (
+            "complex_method",
+            f64::from(health.cyclomatic),
+            COMPLEX_METHOD_THRESHOLDS,
+        ),
+        (
+            "nested_complexity",
+            f64::from(health.max_nesting),
+            NESTED_COMPLEXITY_THRESHOLDS,
+        ),
+        (
+            "complex_conditional",
+            f64::from(health.max_conditional_operands),
+            COMPLEX_CONDITIONAL_THRESHOLDS,
+        ),
+        (
+            "long_parameter_list",
+            f64::from(health.parameter_count),
+            LONG_PARAMETER_THRESHOLDS,
+        ),
+    ]
+    .into_iter()
+    .chain(health_findings(health))
+    {
+        push_finding(
+            &mut findings,
+            SourceFindingInput {
+                symbol,
+                finding,
+                metric,
+                thresholds,
+            },
+        );
     }
     findings
 }
 
-fn health_findings(health: SymbolHealthMetrics) -> [(&'static str, f64, f64, f64); 17] {
+fn health_findings(
+    health: SymbolHealthMetrics,
+) -> [(&'static str, f64, CompareFindingThreshold); 17] {
     [
         (
             "accidental_quadratic",
             f64::from(health.accidental_quadratic),
-            1.0,
-            5.0,
+            ONE_TO_FIVE_THRESHOLDS,
         ),
-        ("empty_catch", f64::from(health.empty_catches), 1.0, 3.0),
+        (
+            "empty_catch",
+            f64::from(health.empty_catches),
+            ONE_TO_THREE_THRESHOLDS,
+        ),
         (
             "sync_io_in_async",
             f64::from(health.sync_io_in_async),
-            1.0,
-            3.0,
+            ONE_TO_THREE_THRESHOLDS,
         ),
         (
             "forof_await",
             f64::from(health.sequential_await_loops),
-            2.0,
-            5.0,
+            TWO_TO_FIVE_THRESHOLDS,
         ),
-        ("ts_any_cast", f64::from(health.ts_any_casts), 3.0, 5.0),
+        (
+            "ts_any_cast",
+            f64::from(health.ts_any_casts),
+            THREE_TO_FIVE_THRESHOLDS,
+        ),
         (
             "ts_ignore_suppression",
             f64::from(health.ts_suppressions),
-            1.0,
-            3.0,
+            ONE_TO_THREE_THRESHOLDS,
         ),
-        ("agent_debug_log", f64::from(health.debug_logs), 1.0, 5.0),
+        (
+            "agent_debug_log",
+            f64::from(health.debug_logs),
+            ONE_TO_FIVE_THRESHOLDS,
+        ),
         (
             "incomplete_marker",
             f64::from(health.incomplete_markers),
-            5.0,
-            50.0,
+            FIVE_TO_FIFTY_THRESHOLDS,
         ),
-        ("dynamic_eval", f64::from(health.dynamic_eval), 1.0, 1.0),
-        ("insecure_hash", f64::from(health.insecure_hash), 1.0, 3.0),
+        (
+            "dynamic_eval",
+            f64::from(health.dynamic_eval),
+            ONE_TO_ONE_THRESHOLDS,
+        ),
+        (
+            "insecure_hash",
+            f64::from(health.insecure_hash),
+            ONE_TO_THREE_THRESHOLDS,
+        ),
         (
             "random_for_security",
             f64::from(health.insecure_random),
-            1.0,
-            1.0,
+            ONE_TO_ONE_THRESHOLDS,
         ),
         (
             "http_no_timeout",
             f64::from(health.http_without_timeout),
-            1.0,
-            3.0,
+            ONE_TO_THREE_THRESHOLDS,
         ),
         (
             "sql_string_concat",
             f64::from(health.sql_string_concatenation),
-            1.0,
-            1.0,
+            ONE_TO_ONE_THRESHOLDS,
         ),
         (
             "unsafe_json_parse",
             f64::from(health.unsafe_json_parse),
-            1.0,
-            3.0,
+            ONE_TO_THREE_THRESHOLDS,
         ),
         (
             "env_no_validation",
             f64::from(health.unvalidated_env),
-            1.0,
-            3.0,
+            ONE_TO_THREE_THRESHOLDS,
         ),
         (
             "empty_function_body",
             f64::from(health.empty_body),
-            1.0,
-            f64::MAX,
+            EMPTY_BODY_THRESHOLDS,
         ),
         (
             "brain_method",
-            f64::from(health.cyclomatic) / 15.0 + f64::from(health.max_nesting) / 5.0,
-            4.0,
-            6.0,
+            f64::from(health.cyclomatic) / BRAIN_CYCLOMATIC_NORMALIZER
+                + f64::from(health.max_nesting) / BRAIN_NESTING_NORMALIZER,
+            BRAIN_METHOD_THRESHOLDS,
         ),
     ]
 }
 
-fn push_finding(
-    findings: &mut Vec<SourceFinding>,
-    symbol: &ExtractedSymbol,
-    finding: &'static str,
-    metric: f64,
-    warning: f64,
-    error: f64,
-) {
-    if metric < warning {
+fn push_finding(findings: &mut Vec<SourceFinding>, input: SourceFindingInput<'_>) {
+    if input.metric < input.thresholds.warning {
         return;
     }
     findings.push(SourceFinding {
-        qualified_name: symbol.qualified_name.clone(),
-        finding,
-        severity: if metric >= error { "error" } else { "warning" },
-        metric,
+        qualified_name: input.symbol.qualified_name.clone(),
+        finding: input.finding,
+        severity: if input.metric >= input.thresholds.error {
+            "error"
+        } else {
+            "warning"
+        },
+        metric: input.metric,
     });
 }
 
@@ -989,18 +1088,6 @@ fn sum_lengths(lengths: impl IntoIterator<Item = usize>) -> u64 {
     })
 }
 
-fn trim_ascii(output: &[u8]) -> &[u8] {
-    let start = output
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(output.len());
-    let end = output
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map_or(start, |index| index + 1);
-    &output[start..end]
-}
-
 fn map_git_error(_error: crate::ReviewError) -> SourceCompareError {
     SourceCompareError::GitUnavailable
 }
@@ -1023,7 +1110,12 @@ mod tests {
     fn structural_digest_detects_body_only_edits_and_line_only_noise_can_collapse() {
         let before = extract("src/a.ts", "export function value() { return 1; }\n");
         let after = extract("src/a.ts", "export function value() { return 2; }\n");
-        let diff = diff_symbols(Some(&before), Some(&after), false, true);
+        let diff = diff_symbols(SymbolDiffInput {
+            baseline: Some(&before),
+            current: Some(&after),
+            include_findings: false,
+            suppress_line_range_only: true,
+        });
         assert_eq!(diff.modified.len(), 1);
         assert!(
             diff.modified[0]
@@ -1032,7 +1124,12 @@ mod tests {
         );
 
         let shifted = extract("src/a.ts", "\nexport function value() { return 1; }\n");
-        let shifted = diff_symbols(Some(&before), Some(&shifted), false, true);
+        let shifted = diff_symbols(SymbolDiffInput {
+            baseline: Some(&before),
+            current: Some(&shifted),
+            include_findings: false,
+            suppress_line_range_only: true,
+        });
         assert!(shifted.modified.is_empty());
         assert_eq!(shifted.line_range_only_count, 1);
     }

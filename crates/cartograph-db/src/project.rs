@@ -57,6 +57,15 @@ pub struct ProjectPurgeReport {
     pub cascade_rows_removed: u64,
 }
 
+/// Hard bounds and exact project identity for one destructive purge transaction.
+#[derive(Clone, Copy, Debug)]
+pub struct ProjectPurgeRequest<'a> {
+    pub project_id: &'a ProjectId,
+    pub maximum_generations: u16,
+    pub maximum_cascade_rows: u64,
+    pub statement_timeout: Duration,
+}
+
 /// Safe, actionable reasons a project purge did not run.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProjectPurgeError {
@@ -261,12 +270,12 @@ impl CartographDatabase {
     /// blocks deletion; expired leases are removed by the project cascade.
     pub async fn purge_project(
         &self,
-        project_id: &ProjectId,
-        maximum_generations: u16,
-        maximum_cascade_rows: u64,
-        statement_timeout: Duration,
+        input: ProjectPurgeRequest<'_>,
     ) -> Result<ProjectPurgeReport, ProjectPurgeError> {
-        if maximum_generations == 0 || maximum_cascade_rows == 0 || statement_timeout.is_zero() {
+        if input.maximum_generations == 0
+            || input.maximum_cascade_rows == 0
+            || input.statement_timeout.is_zero()
+        {
             return Err(ProjectPurgeError::InvalidBounds);
         }
         let mut transaction = self
@@ -274,17 +283,10 @@ impl CartographDatabase {
             .begin()
             .await
             .map_err(|_| purge_database_error("begin"))?;
-        crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+        crate::database::set_local_statement_timeout(&mut transaction, input.statement_timeout)
             .await
             .map_err(|()| ProjectPurgeError::InvalidBounds)?;
-        let result = purge_project_transaction(
-            &mut transaction,
-            self,
-            project_id,
-            maximum_generations,
-            maximum_cascade_rows,
-        )
-        .await;
+        let result = purge_project_transaction(&mut transaction, self, input).await;
         match result {
             Ok(report) => {
                 transaction
@@ -307,10 +309,46 @@ impl CartographDatabase {
 async fn purge_project_transaction(
     connection: &mut PgConnection,
     database: &CartographDatabase,
-    project_id: &ProjectId,
-    maximum_generations: u16,
-    maximum_cascade_rows: u64,
+    input: ProjectPurgeRequest<'_>,
 ) -> Result<ProjectPurgeReport, ProjectPurgeError> {
+    let ProjectPurgeRequest {
+        project_id,
+        maximum_generations,
+        maximum_cascade_rows,
+        statement_timeout: _,
+    } = input;
+    acquire_project_purge_locks(connection, database, project_id).await?;
+    let schema = crate::database::quoted_schema(&database.schema);
+    require_purgeable_project(connection, &schema, project_id).await?;
+    let generations = locked_project_generations(
+        connection,
+        ProjectGenerationQuery {
+            schema: &schema,
+            project_id,
+            maximum_generations,
+        },
+    )
+    .await?;
+    let cascade_rows = count_project_rows(connection, &schema, project_id).await?;
+    if cascade_rows > maximum_cascade_rows {
+        return Err(ProjectPurgeError::RowBoundExceeded);
+    }
+    let search_relations_removed =
+        drop_project_search_relations(connection, database, &generations).await?;
+    delete_project_row(connection, &schema, project_id).await?;
+    Ok(ProjectPurgeReport {
+        generations_removed: u64::try_from(generations.len())
+            .map_err(|_| purge_corrupt("generation_count"))?,
+        search_relations_removed,
+        cascade_rows_removed: cascade_rows,
+    })
+}
+
+async fn acquire_project_purge_locks(
+    connection: &mut PgConnection,
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+) -> Result<(), ProjectPurgeError> {
     for lock in [
         crate::leases::project_lock_key(&database.schema, project_id),
         format!(
@@ -328,7 +366,14 @@ async fn purge_project_transaction(
             .await
             .map_err(|_| purge_database_error("lock"))?;
     }
-    let schema = crate::database::quoted_schema(&database.schema);
+    Ok(())
+}
+
+async fn require_purgeable_project(
+    connection: &mut PgConnection,
+    schema: &str,
+    project_id: &ProjectId,
+) -> Result<(), ProjectPurgeError> {
     let project_sql = format!(
         r#"SELECT 1 FROM {schema}."projects"
             WHERE project_id = CAST($1 AS uuid) FOR UPDATE"#
@@ -357,38 +402,54 @@ async fn purge_project_transaction(
     if live_leases > 0 {
         return Err(ProjectPurgeError::LiveLeases { count: live_leases });
     }
+    Ok(())
+}
+
+struct ProjectGenerationQuery<'project> {
+    schema: &'project str,
+    project_id: &'project ProjectId,
+    maximum_generations: u16,
+}
+
+async fn locked_project_generations(
+    connection: &mut PgConnection,
+    input: ProjectGenerationQuery<'_>,
+) -> Result<Vec<GenerationId>, ProjectPurgeError> {
     let generations_sql = format!(
         r#"SELECT generation_id::text AS generation_id
-            FROM {schema}."index_generations"
+            FROM {}."index_generations"
             WHERE project_id = CAST($1 AS uuid)
             ORDER BY generation_sequence
             LIMIT $2
-            FOR UPDATE"#
+            FOR UPDATE"#,
+        input.schema
     );
     let rows = query(AssertSqlSafe(generations_sql))
-        .bind(project_id.as_str())
-        .bind(i64::from(maximum_generations) + 1)
+        .bind(input.project_id.as_str())
+        .bind(i64::from(input.maximum_generations) + 1)
         .fetch_all(&mut *connection)
         .await
         .map_err(|_| purge_database_error("generations"))?;
-    if rows.len() > usize::from(maximum_generations) {
+    if rows.len() > usize::from(input.maximum_generations) {
         return Err(ProjectPurgeError::GenerationBoundExceeded);
     }
-    let generations = rows
-        .iter()
+    rows.iter()
         .map(|row| {
             let raw = row
                 .try_get::<String, _>("generation_id")
                 .map_err(|_| purge_corrupt("generation_id"))?;
             GenerationId::parse(&raw).map_err(|_| purge_corrupt("generation_id"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let cascade_rows = count_project_rows(connection, &schema, project_id).await?;
-    if cascade_rows > maximum_cascade_rows {
-        return Err(ProjectPurgeError::RowBoundExceeded);
-    }
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn drop_project_search_relations(
+    connection: &mut PgConnection,
+    database: &CartographDatabase,
+    generations: &[GenerationId],
+) -> Result<u64, ProjectPurgeError> {
     let mut search_relations_removed = 0_u64;
-    for generation_id in &generations {
+    for generation_id in generations {
         if generation_search_relation_exists(connection, database, generation_id).await? {
             search_relations_removed = search_relations_removed
                 .checked_add(1)
@@ -402,6 +463,14 @@ async fn purge_project_transaction(
         .await
         .map_err(|_| purge_database_error("drop-search-relation"))?;
     }
+    Ok(search_relations_removed)
+}
+
+async fn delete_project_row(
+    connection: &mut PgConnection,
+    schema: &str,
+    project_id: &ProjectId,
+) -> Result<(), ProjectPurgeError> {
     let delete_sql = format!(
         r#"DELETE FROM {schema}."projects"
             WHERE project_id = CAST($1 AS uuid)"#
@@ -414,12 +483,7 @@ async fn purge_project_transaction(
     if deleted.rows_affected() != 1 {
         return Err(ProjectPurgeError::ProjectNotFound);
     }
-    Ok(ProjectPurgeReport {
-        generations_removed: u64::try_from(generations.len())
-            .map_err(|_| purge_corrupt("generation_count"))?,
-        search_relations_removed,
-        cascade_rows_removed: cascade_rows,
-    })
+    Ok(())
 }
 
 async fn generation_search_relation_exists(

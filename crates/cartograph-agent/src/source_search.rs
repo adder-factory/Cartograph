@@ -1,7 +1,10 @@
 use std::{path::Path, sync::Arc};
 
-use cartograph_db::{CurrentSourceRangeLookup, FileSurfaceQuery, FileSurfaceRow, StorageError};
-use cartograph_domain::{NormalizedPath, ProjectId, SourceLanguage};
+use cartograph_db::{
+    CartographDatabase, CurrentGenerationLookup, CurrentSourceRangeLookup, FileSurfaceQuery,
+    FileSurfaceRow, SourceLineRange, StorageError,
+};
+use cartograph_domain::{GenerationId, NormalizedPath, ProjectId, SourceLanguage};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
@@ -19,6 +22,7 @@ const MAXIMUM_SNIPPET_CHARACTERS: usize = 200;
 const SCAN_CONCURRENCY: usize = 8;
 const ATTRIBUTION_CONCURRENCY: usize = 16;
 const ENCLOSING_SYMBOL_LIMIT: u16 = 20;
+const REGEX_SIZE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Validated bounded live-source regex search over only current indexed files.
 #[derive(Clone)]
@@ -178,8 +182,8 @@ impl ProjectRuntime {
         let regex = RegexBuilder::new(&options.pattern)
             .case_insensitive(!options.case_sensitive)
             .multi_line(false)
-            .size_limit(4 * 1024 * 1024)
-            .dfa_size_limit(4 * 1024 * 1024)
+            .size_limit(REGEX_SIZE_LIMIT_BYTES)
+            .dfa_size_limit(REGEX_SIZE_LIMIT_BYTES)
             .build()
             .map_err(|_| SourceSearchError::InvalidRegex)?;
         let generation = self
@@ -229,7 +233,12 @@ impl ProjectRuntime {
                 let cancellation = cancellation.clone();
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        scan_file(&root, &file, &regex, &cancellation)
+                        scan_file(FileScanRequest {
+                            root: &root,
+                            file: &file,
+                            regex: &regex,
+                            cancellation: &cancellation,
+                        })
                     })
                     .await
                     .map_err(|_| SourceSearchError::WorkerFailed)
@@ -241,107 +250,136 @@ impl ProjectRuntime {
         if cancellation.is_cancelled() {
             return Err(SourceSearchError::Cancelled);
         }
-        let files_scanned = scan_results.iter().filter(|result| result.scanned).count() as u64;
-        let files_skipped_large = scan_results
-            .iter()
-            .filter(|result| result.skipped_large)
-            .count() as u64;
-        let files_unreadable_or_unsafe = scan_results
-            .iter()
-            .filter(|result| result.unreadable_or_unsafe)
-            .count() as u64;
-        let total_matches_in_scanned_files = scan_results
-            .iter()
-            .map(|result| result.matched)
-            .sum::<u64>();
-        let maximum_depth = scan_results
-            .iter()
-            .map(|result| result.hits.len())
-            .max()
-            .unwrap_or_default();
-        let mut interleaved = Vec::new();
-        'depth: for depth in 0..maximum_depth {
-            for result in &scan_results {
-                if let Some(hit) = result.hits.get(depth) {
-                    if interleaved.len() == usize::from(options.limit) {
-                        break 'depth;
-                    }
-                    interleaved.push(hit.clone());
-                }
-            }
-        }
-        let result_truncated =
-            total_matches_in_scanned_files > u64::try_from(interleaved.len()).unwrap_or(u64::MAX);
-        let database = self.database.clone();
-        let project_id = project_id.clone();
-        let generation_id = generation.generation_id().clone();
-        let attributed = stream::iter(interleaved)
-            .map(|mut hit| {
-                let database = database.clone();
-                let project_id = project_id.clone();
-                let generation_id = generation_id.clone();
-                async move {
-                    let symbols = database
-                        .current_symbols_at_range(CurrentSourceRangeLookup::new(
-                            &project_id,
-                            &generation_id,
-                            &hit.path,
-                            hit.line,
-                            hit.line,
-                            ENCLOSING_SYMBOL_LIMIT,
-                        ))
-                        .await
-                        .map_err(map_storage)?;
-                    hit.enclosing_symbol = symbols
-                        .iter()
-                        .find(|symbol| {
-                            matches!(
-                                symbol.symbol_kind(),
-                                "function"
-                                    | "method"
-                                    | "class"
-                                    | "interface"
-                                    | "trait"
-                                    | "component"
-                            )
-                        })
-                        .or_else(|| symbols.iter().find(|symbol| symbol.symbol_kind() != "file"))
-                        .map(|symbol| SourceSearchSymbol {
-                            symbol_id: symbol.symbol_id().as_str().to_owned(),
-                            qualified_name: symbol.qualified_name().to_owned(),
-                            symbol_kind: symbol.symbol_kind().to_owned(),
-                            start_line: symbol.start_line(),
-                            end_line: symbol.end_line(),
-                        });
-                    Ok::<_, SourceSearchError>(hit)
-                }
-            })
-            .buffered(ATTRIBUTION_CONCURRENCY)
-            .try_collect::<Vec<_>>()
-            .await?;
+        let summary = summarize_source_scans(&scan_results, options.limit);
+        let attributed = attribute_source_hits(SourceAttributionRequest {
+            database: self.database.clone(),
+            project_id: project_id.clone(),
+            generation_id: generation.generation_id().clone(),
+            hits: summary.hits,
+        })
+        .await?;
         Ok(SourceSearchReport {
             hits: attributed,
-            total_matches_in_scanned_files,
+            total_matches_in_scanned_files: summary.total_matches,
             indexed_files: surface.total_files(),
-            files_scanned,
-            files_skipped_large,
-            files_unreadable_or_unsafe,
+            files_scanned: summary.files_scanned,
+            files_skipped_large: summary.files_skipped_large,
+            files_unreadable_or_unsafe: summary.files_unreadable_or_unsafe,
             bytes_considered,
             file_inventory_truncated: surface.truncated(),
             byte_budget_truncated,
-            result_truncated,
+            result_truncated: summary.result_truncated,
             regex_engine: "rust_regex_linear_time",
             attribution: "smallest_current_generation_enclosing_symbol",
         })
     }
 }
 
-fn scan_file(
-    root: &Path,
-    file: &FileSurfaceRow,
-    regex: &Regex,
-    cancellation: &ProjectCancellation,
-) -> FileScanResult {
+struct SourceScanSummary {
+    hits: Vec<SourceSearchHit>,
+    total_matches: u64,
+    files_scanned: u64,
+    files_skipped_large: u64,
+    files_unreadable_or_unsafe: u64,
+    result_truncated: bool,
+}
+
+fn summarize_source_scans(results: &[FileScanResult], limit: u16) -> SourceScanSummary {
+    let files_scanned = results.iter().filter(|result| result.scanned).count() as u64;
+    let files_skipped_large = results.iter().filter(|result| result.skipped_large).count() as u64;
+    let files_unreadable_or_unsafe = results
+        .iter()
+        .filter(|result| result.unreadable_or_unsafe)
+        .count() as u64;
+    let total_matches = results.iter().map(|result| result.matched).sum::<u64>();
+    let maximum_depth = results
+        .iter()
+        .map(|result| result.hits.len())
+        .max()
+        .unwrap_or_default();
+    let mut hits = Vec::new();
+    'depth: for depth in 0..maximum_depth {
+        for result in results {
+            if let Some(hit) = result.hits.get(depth) {
+                if hits.len() == usize::from(limit) {
+                    break 'depth;
+                }
+                hits.push(hit.clone());
+            }
+        }
+    }
+    SourceScanSummary {
+        result_truncated: total_matches > u64::try_from(hits.len()).unwrap_or(u64::MAX),
+        hits,
+        total_matches,
+        files_scanned,
+        files_skipped_large,
+        files_unreadable_or_unsafe,
+    }
+}
+
+struct SourceAttributionRequest {
+    database: CartographDatabase,
+    project_id: ProjectId,
+    generation_id: GenerationId,
+    hits: Vec<SourceSearchHit>,
+}
+
+async fn attribute_source_hits(
+    request: SourceAttributionRequest,
+) -> Result<Vec<SourceSearchHit>, SourceSearchError> {
+    stream::iter(request.hits)
+        .map(|mut hit| {
+            let database = request.database.clone();
+            let project_id = request.project_id.clone();
+            let generation_id = request.generation_id.clone();
+            async move {
+                let symbols = database
+                    .current_symbols_at_range(CurrentSourceRangeLookup::new(
+                        CurrentGenerationLookup::new(&project_id, &generation_id),
+                        SourceLineRange::new(&hit.path, hit.line, hit.line),
+                        ENCLOSING_SYMBOL_LIMIT,
+                    ))
+                    .await
+                    .map_err(map_storage)?;
+                hit.enclosing_symbol = symbols
+                    .iter()
+                    .find(|symbol| {
+                        matches!(
+                            symbol.symbol_kind(),
+                            "function" | "method" | "class" | "interface" | "trait" | "component"
+                        )
+                    })
+                    .or_else(|| symbols.iter().find(|symbol| symbol.symbol_kind() != "file"))
+                    .map(|symbol| SourceSearchSymbol {
+                        symbol_id: symbol.symbol_id().as_str().to_owned(),
+                        qualified_name: symbol.qualified_name().to_owned(),
+                        symbol_kind: symbol.symbol_kind().to_owned(),
+                        start_line: symbol.start_line(),
+                        end_line: symbol.end_line(),
+                    });
+                Ok::<_, SourceSearchError>(hit)
+            }
+        })
+        .buffered(ATTRIBUTION_CONCURRENCY)
+        .try_collect()
+        .await
+}
+
+struct FileScanRequest<'a> {
+    root: &'a Path,
+    file: &'a FileSurfaceRow,
+    regex: &'a Regex,
+    cancellation: &'a ProjectCancellation,
+}
+
+fn scan_file(input: FileScanRequest<'_>) -> FileScanResult {
+    let FileScanRequest {
+        root,
+        file,
+        regex,
+        cancellation,
+    } = input;
     if cancellation.is_cancelled() {
         return FileScanResult {
             hits: Vec::new(),

@@ -7,10 +7,9 @@ use tree_sitter::Node;
 
 use crate::{ExtractError, ExtractedReference};
 
-use super::{ExtractionBuilder, PendingSymbol, syntax::span_for};
+use super::{AstVisitBudget, ExtractionBuilder, PendingSymbol, owner_for_node, syntax::span_for};
 
 const MAX_SCHEMA_AST_DEPTH: usize = 256;
-const MAX_SCHEMA_VISITS: usize = 500_000;
 const MAX_SCHEMA_CANDIDATES: usize = 1_024;
 const MAX_FIELDS_PER_SCHEMA: usize = 512;
 const MAX_ENUM_MEMBERS_PER_FIELD: usize = 128;
@@ -19,32 +18,11 @@ const MAX_SCHEMA_NAME_BYTES: usize = 512;
 
 #[derive(Default)]
 struct ScanBudget {
-    visits: usize,
+    visits: AstVisitBudget<MAX_SCHEMA_AST_DEPTH>,
     candidates: usize,
 }
 
 impl ScanBudget {
-    fn observe(
-        &mut self,
-        builder: &mut ExtractionBuilder<'_, '_>,
-        depth: usize,
-    ) -> Result<(), ExtractError> {
-        if depth > MAX_SCHEMA_AST_DEPTH {
-            return Err(ExtractError::NestingLimit);
-        }
-        self.visits = self
-            .visits
-            .checked_add(1)
-            .ok_or(ExtractError::OutputLimit)?;
-        if self.visits > MAX_SCHEMA_VISITS {
-            return Err(ExtractError::OutputLimit);
-        }
-        if self.visits.is_multiple_of(256) {
-            builder.context.ensure_active()?;
-        }
-        Ok(())
-    }
-
     fn admit_candidate(&mut self) -> Result<(), ExtractError> {
         self.candidates = self
             .candidates
@@ -70,6 +48,65 @@ struct ZodSchemaInput<'tree, 'scan> {
     nested_depth: usize,
     budget: &'scan mut ScanBudget,
     consumed_objects: &'scan mut BTreeSet<(usize, usize)>,
+}
+
+#[derive(Clone, Copy)]
+struct SchemaWalk<'tree> {
+    node: Node<'tree>,
+    depth: usize,
+}
+
+struct ZodDeclarationScan<'scan> {
+    budget: &'scan mut ScanBudget,
+    consumed_objects: &'scan mut BTreeSet<(usize, usize)>,
+    schemas: &'scan mut ZodSchemas,
+}
+
+struct ZodInlineScan<'scan> {
+    budget: &'scan mut ScanBudget,
+    consumed_objects: &'scan mut BTreeSet<(usize, usize)>,
+}
+
+struct ZodConsumerScan<'scan> {
+    budget: &'scan mut ScanBudget,
+    schemas: &'scan ZodSchemas,
+}
+
+struct ZodFieldsInput<'tree, 'scan> {
+    object: Node<'tree>,
+    nested_depth: usize,
+    budget: &'scan mut ScanBudget,
+    consumed_objects: &'scan mut BTreeSet<(usize, usize)>,
+}
+
+#[derive(Clone, Copy)]
+struct SchemaFieldInput<'tree, 'field> {
+    node: Node<'tree>,
+    owner: &'field SymbolId,
+    name: &'field str,
+}
+
+#[derive(Clone, Copy)]
+struct SchemaSymbolInput<'tree, 'text> {
+    kind: SymbolKind,
+    name: &'text str,
+    span_node: Node<'tree>,
+    structural_node: Node<'tree>,
+    signature: Option<&'text str>,
+}
+
+struct SchemaReferenceInput<'tree, 'text> {
+    node: Node<'tree>,
+    name: &'text str,
+    resolution_name: Option<String>,
+    kind: ReferenceKind,
+}
+
+#[derive(Clone, Copy)]
+struct SchemaScope<'scope> {
+    owner: &'scope SymbolId,
+    kind: SymbolKind,
+    qualifier: Option<&'scope str>,
 }
 
 impl ZodSchemas {
@@ -135,66 +172,88 @@ fn enrich_zod(builder: &mut ExtractionBuilder<'_, '_>, root: Node<'_>) -> Result
     let mut schemas = ZodSchemas::default();
     scan_zod_declarations(
         builder,
-        root,
-        0,
-        &mut budget,
-        &mut consumed_objects,
-        &mut schemas,
+        SchemaWalk {
+            node: root,
+            depth: 0,
+        },
+        &mut ZodDeclarationScan {
+            budget: &mut budget,
+            consumed_objects: &mut consumed_objects,
+            schemas: &mut schemas,
+        },
     )?;
-    scan_zod_inline(builder, root, 0, &mut budget, &mut consumed_objects)?;
+    scan_zod_inline(
+        builder,
+        SchemaWalk {
+            node: root,
+            depth: 0,
+        },
+        &mut ZodInlineScan {
+            budget: &mut budget,
+            consumed_objects: &mut consumed_objects,
+        },
+    )?;
     if !schemas.fields.is_empty() {
-        scan_zod_consumers(builder, root, 0, &mut budget, &schemas)?;
+        scan_zod_consumers(
+            builder,
+            SchemaWalk {
+                node: root,
+                depth: 0,
+            },
+            &mut ZodConsumerScan {
+                budget: &mut budget,
+                schemas: &schemas,
+            },
+        )?;
     }
     Ok(())
 }
 
 fn scan_zod_declarations(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    budget: &mut ScanBudget,
-    consumed_objects: &mut BTreeSet<(usize, usize)>,
-    schemas: &mut ZodSchemas,
+    walk: SchemaWalk<'_>,
+    scan: &mut ZodDeclarationScan<'_>,
 ) -> Result<(), ExtractError> {
-    budget.observe(builder, depth)?;
-    if node.kind() == "variable_declarator" {
-        let name_node = node.child_by_field_name("name");
-        let value_node = node.child_by_field_name("value");
+    scan.budget.visits.observe(builder, walk.depth)?;
+    if walk.node.kind() == "variable_declarator" {
+        let name_node = walk.node.child_by_field_name("name");
+        let value_node = walk.node.child_by_field_name("value");
         if let (Some(name_node), Some(value_node)) = (name_node, value_node)
             && name_node.kind() == "identifier"
             && let Some(call) = find_zod_call(value_node, "object", builder.context.source())
             && let Some(object) = first_named_argument(call)
             && object.kind() == "object"
         {
-            budget.admit_candidate()?;
+            scan.budget.admit_candidate()?;
             let name = builder.context.owned_text(name_node)?;
             if safe_schema_name(&name, false) {
-                consumed_objects.insert((object.start_byte(), object.end_byte()));
+                scan.consumed_objects
+                    .insert((object.start_byte(), object.end_byte()));
                 let (struct_id, fields) = emit_zod_schema(
                     builder,
                     ZodSchemaInput {
-                        span_node: node,
+                        span_node: walk.node,
                         structural_node: value_node,
                         object,
                         name: &name,
                         nested_depth: 0,
-                        budget,
-                        consumed_objects,
+                        budget: scan.budget,
+                        consumed_objects: scan.consumed_objects,
                     },
                 )?;
                 let _ = struct_id;
-                schemas.insert(name, fields);
+                scan.schemas.insert(name, fields);
             }
         }
     }
-    for child in super::syntax::named_children(node) {
+    for child in super::syntax::named_children(walk.node) {
         scan_zod_declarations(
             builder,
-            child,
-            depth.saturating_add(1),
-            budget,
-            consumed_objects,
-            schemas,
+            SchemaWalk {
+                node: child,
+                depth: walk.depth.saturating_add(1),
+            },
+            scan,
         )?;
     }
     Ok(())
@@ -215,29 +274,46 @@ fn emit_zod_schema(
     } = input;
     let struct_id = emit_schema_symbol(
         builder,
-        SymbolKind::Struct,
-        name,
-        span_node,
-        structural_node,
-        Some("z.object"),
+        SchemaSymbolInput {
+            kind: SymbolKind::Struct,
+            name,
+            span_node,
+            structural_node,
+            signature: Some("z.object"),
+        },
     )?;
     let fields = with_scope(
         builder,
-        &struct_id,
-        SymbolKind::Struct,
-        Some(name),
-        |builder| emit_zod_fields(builder, object, nested_depth, budget, consumed_objects),
+        SchemaScope {
+            owner: &struct_id,
+            kind: SymbolKind::Struct,
+            qualifier: Some(name),
+        },
+        |builder| {
+            emit_zod_fields(
+                builder,
+                ZodFieldsInput {
+                    object,
+                    nested_depth,
+                    budget,
+                    consumed_objects,
+                },
+            )
+        },
     )?;
     Ok((struct_id, fields))
 }
 
 fn emit_zod_fields(
     builder: &mut ExtractionBuilder<'_, '_>,
-    object: Node<'_>,
-    nested_depth: usize,
-    budget: &mut ScanBudget,
-    consumed_objects: &mut BTreeSet<(usize, usize)>,
+    input: ZodFieldsInput<'_, '_>,
 ) -> Result<BTreeSet<String>, ExtractError> {
+    let ZodFieldsInput {
+        object,
+        nested_depth,
+        budget,
+        consumed_objects,
+    } = input;
     let mut fields = BTreeSet::new();
     for pair in super::syntax::named_children(object) {
         if pair.kind() != "pair" {
@@ -260,14 +336,23 @@ fn emit_zod_fields(
         let signature = leaf.as_deref().map(|leaf| format!("z.{leaf}"));
         let field_id = emit_schema_symbol(
             builder,
-            SymbolKind::Field,
-            &field_name,
-            pair,
-            pair,
-            signature.as_deref(),
+            SchemaSymbolInput {
+                kind: SymbolKind::Field,
+                name: &field_name,
+                span_node: pair,
+                structural_node: pair,
+                signature: signature.as_deref(),
+            },
         )?;
         if leaf.as_deref() == Some("enum") {
-            emit_zod_enum_members(builder, value, &field_id, &field_name)?;
+            emit_zod_enum_members(
+                builder,
+                SchemaFieldInput {
+                    node: value,
+                    owner: &field_id,
+                    name: &field_name,
+                },
+            )?;
         } else if leaf.as_deref() == Some("object") && nested_depth < MAX_ZOD_NESTING {
             let nested = find_zod_call(value, "object", builder.context.source())
                 .and_then(first_named_argument)
@@ -276,22 +361,30 @@ fn emit_zod_fields(
                 let key = (nested.start_byte(), nested.end_byte());
                 if consumed_objects.insert(key) {
                     budget.admit_candidate()?;
-                    with_scope(builder, &field_id, SymbolKind::Field, None, |builder| {
-                        let (nested_id, _) = emit_zod_schema(
-                            builder,
-                            ZodSchemaInput {
-                                span_node: pair,
-                                structural_node: value,
-                                object: nested,
-                                name: &field_name,
-                                nested_depth: nested_depth.saturating_add(1),
-                                budget,
-                                consumed_objects,
-                            },
-                        )?;
-                        let _ = nested_id;
-                        Ok(())
-                    })?;
+                    with_scope(
+                        builder,
+                        SchemaScope {
+                            owner: &field_id,
+                            kind: SymbolKind::Field,
+                            qualifier: None,
+                        },
+                        |builder| {
+                            let (nested_id, _) = emit_zod_schema(
+                                builder,
+                                ZodSchemaInput {
+                                    span_node: pair,
+                                    structural_node: value,
+                                    object: nested,
+                                    name: &field_name,
+                                    nested_depth: nested_depth.saturating_add(1),
+                                    budget,
+                                    consumed_objects,
+                                },
+                            )?;
+                            let _ = nested_id;
+                            Ok(())
+                        },
+                    )?;
                 }
             }
         }
@@ -301,11 +394,9 @@ fn emit_zod_fields(
 
 fn emit_zod_enum_members(
     builder: &mut ExtractionBuilder<'_, '_>,
-    value: Node<'_>,
-    field_id: &SymbolId,
-    field_name: &str,
+    field: SchemaFieldInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let Some(array) = find_zod_call(value, "enum", builder.context.source())
+    let Some(array) = find_zod_call(field.node, "enum", builder.context.source())
         .and_then(first_named_argument)
         .filter(|argument| argument.kind() == "array")
     else {
@@ -314,9 +405,11 @@ fn emit_zod_enum_members(
     let mut seen = BTreeSet::new();
     with_scope(
         builder,
-        field_id,
-        SymbolKind::Field,
-        Some(field_name),
+        SchemaScope {
+            owner: field.owner,
+            kind: SymbolKind::Field,
+            qualifier: Some(field.name),
+        },
         |builder| {
             for element in super::syntax::named_children(array) {
                 if !matches!(element.kind(), "string" | "string_fragment") {
@@ -331,11 +424,13 @@ fn emit_zod_enum_members(
                 }
                 emit_schema_symbol(
                     builder,
-                    SymbolKind::EnumMember,
-                    &member,
-                    element,
-                    element,
-                    None,
+                    SchemaSymbolInput {
+                        kind: SymbolKind::EnumMember,
+                        name: &member,
+                        span_node: element,
+                        structural_node: element,
+                        signature: None,
+                    },
                 )?;
             }
             Ok(())
@@ -345,45 +440,44 @@ fn emit_zod_enum_members(
 
 fn scan_zod_inline(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    budget: &mut ScanBudget,
-    consumed_objects: &mut BTreeSet<(usize, usize)>,
+    walk: SchemaWalk<'_>,
+    scan: &mut ZodInlineScan<'_>,
 ) -> Result<(), ExtractError> {
-    budget.observe(builder, depth)?;
-    if node.kind() == "call_expression"
-        && direct_zod_method(node, "object", builder.context.source())
+    scan.budget.visits.observe(builder, walk.depth)?;
+    if walk.node.kind() == "call_expression"
+        && direct_zod_method(walk.node, "object", builder.context.source())
         && let Some(object) =
-            first_named_argument(node).filter(|argument| argument.kind() == "object")
+            first_named_argument(walk.node).filter(|argument| argument.kind() == "object")
     {
         let object_key = (object.start_byte(), object.end_byte());
-        if !consumed_objects.contains(&object_key)
-            && let Some((name_node, name)) = inline_zod_schema_name(builder, node)?
+        if !scan.consumed_objects.contains(&object_key)
+            && let Some((name_node, name)) = inline_zod_schema_name(builder, walk.node)?
             && safe_schema_name(&name, false)
         {
-            budget.admit_candidate()?;
-            consumed_objects.insert(object_key);
+            scan.budget.admit_candidate()?;
+            scan.consumed_objects.insert(object_key);
             let _ = emit_zod_schema(
                 builder,
                 ZodSchemaInput {
                     span_node: name_node,
-                    structural_node: node,
+                    structural_node: walk.node,
                     object,
                     name: &name,
                     nested_depth: 0,
-                    budget,
-                    consumed_objects,
+                    budget: scan.budget,
+                    consumed_objects: scan.consumed_objects,
                 },
             )?;
         }
     }
-    for child in super::syntax::named_children(node) {
+    for child in super::syntax::named_children(walk.node) {
         scan_zod_inline(
             builder,
-            child,
-            depth.saturating_add(1),
-            budget,
-            consumed_objects,
+            SchemaWalk {
+                node: child,
+                depth: walk.depth.saturating_add(1),
+            },
+            scan,
         )?;
     }
     Ok(())
@@ -427,45 +521,62 @@ fn inline_zod_schema_name<'tree>(
 
 fn scan_zod_consumers(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    budget: &mut ScanBudget,
-    schemas: &ZodSchemas,
+    walk: SchemaWalk<'_>,
+    scan: &mut ZodConsumerScan<'_>,
 ) -> Result<(), ExtractError> {
-    budget.observe(builder, depth)?;
-    if matches!(node.kind(), "generic_type" | "type_arguments")
-        && builder.context.text(node).contains("z.infer")
-        && let Some(schema_node) = typeof_identifier(node, builder.context.source())
+    scan.budget.visits.observe(builder, walk.depth)?;
+    if matches!(walk.node.kind(), "generic_type" | "type_arguments")
+        && builder.context.text(walk.node).contains("z.infer")
+        && let Some(schema_node) = typeof_identifier(walk.node, builder.context.source())
     {
         let schema = builder.context.owned_text(schema_node)?;
-        if schemas.unique_fields(&schema).is_some() {
-            emit_schema_reference(builder, schema_node, &schema, None, ReferenceKind::TypeOf)?;
+        if scan.schemas.unique_fields(&schema).is_some() {
+            emit_schema_reference(
+                builder,
+                SchemaReferenceInput {
+                    node: schema_node,
+                    name: &schema,
+                    resolution_name: None,
+                    kind: ReferenceKind::TypeOf,
+                },
+            )?;
         }
     }
-    if node.kind() == "member_expression"
-        && let Some((schema_node, field_node)) = zod_shape_reference(node, builder.context.source())
+    if walk.node.kind() == "member_expression"
+        && let Some((schema_node, field_node)) =
+            zod_shape_reference(walk.node, builder.context.source())
     {
         let schema = builder.context.owned_text(schema_node)?;
         let field = builder.context.owned_text(field_node)?;
-        if schemas
+        if scan
+            .schemas
             .unique_fields(&schema)
             .is_some_and(|fields| fields.contains(&field))
         {
             let resolution_name = format!("{schema}::{field}");
             emit_schema_reference(
                 builder,
-                field_node,
-                &field,
-                Some(resolution_name),
-                ReferenceKind::References,
+                SchemaReferenceInput {
+                    node: field_node,
+                    name: &field,
+                    resolution_name: Some(resolution_name),
+                    kind: ReferenceKind::References,
+                },
             )?;
         }
     }
-    if node.kind() == "call_expression" {
-        emit_zod_selection_references(builder, node, schemas)?;
+    if walk.node.kind() == "call_expression" {
+        emit_zod_selection_references(builder, walk.node, scan.schemas)?;
     }
-    for child in super::syntax::named_children(node) {
-        scan_zod_consumers(builder, child, depth.saturating_add(1), budget, schemas)?;
+    for child in super::syntax::named_children(walk.node) {
+        scan_zod_consumers(
+            builder,
+            SchemaWalk {
+                node: child,
+                depth: walk.depth.saturating_add(1),
+            },
+            scan,
+        )?;
     }
     Ok(())
 }
@@ -511,10 +622,12 @@ fn emit_zod_selection_references(
         let resolution_name = format!("{schema}::{field}");
         emit_schema_reference(
             builder,
-            key,
-            &field,
-            Some(resolution_name),
-            ReferenceKind::References,
+            SchemaReferenceInput {
+                node: key,
+                name: &field,
+                resolution_name: Some(resolution_name),
+                kind: ReferenceKind::References,
+            },
         )?;
     }
     Ok(())
@@ -522,34 +635,15 @@ fn emit_zod_selection_references(
 
 fn emit_schema_reference(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    name: &str,
-    resolution_name: Option<String>,
-    kind: ReferenceKind,
+    input: SchemaReferenceInput<'_, '_>,
 ) -> Result<(), ExtractError> {
     builder.emit_reference(ExtractedReference {
-        owner: owner_for_node(builder, node),
-        name: name.to_owned(),
-        resolution_name,
-        kind,
-        span: span_for(node)?,
+        owner: owner_for_node(builder, input.node),
+        name: input.name.to_owned(),
+        resolution_name: input.resolution_name,
+        kind: input.kind,
+        span: span_for(input.node)?,
     })
-}
-
-fn owner_for_node(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> Option<SymbolId> {
-    let start = u64::try_from(node.start_byte()).ok()?;
-    let end = u64::try_from(node.end_byte()).ok()?;
-    builder
-        .facts
-        .symbols
-        .iter()
-        .filter(|symbol| {
-            symbol.span.start_byte() <= start
-                && end <= symbol.span.end_byte()
-                && !matches!(symbol.kind, SymbolKind::File | SymbolKind::Import)
-        })
-        .min_by_key(|symbol| symbol.span.end_byte() - symbol.span.start_byte())
-        .map(|symbol| symbol.id.clone())
 }
 
 fn enrich_pydantic(
@@ -557,22 +651,37 @@ fn enrich_pydantic(
     root: Node<'_>,
 ) -> Result<(), ExtractError> {
     let mut budget = ScanBudget::default();
-    scan_pydantic_models(builder, root, 0, &mut budget)
+    scan_pydantic_models(
+        builder,
+        SchemaWalk {
+            node: root,
+            depth: 0,
+        },
+        &mut budget,
+    )
 }
 
 fn scan_pydantic_models(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
+    walk: SchemaWalk<'_>,
     budget: &mut ScanBudget,
 ) -> Result<(), ExtractError> {
-    budget.observe(builder, depth)?;
-    if node.kind() == "class_definition" && is_pydantic_model(node, builder.context.source()) {
+    budget.visits.observe(builder, walk.depth)?;
+    if walk.node.kind() == "class_definition"
+        && is_pydantic_model(walk.node, builder.context.source())
+    {
         budget.admit_candidate()?;
-        emit_pydantic_model(builder, node)?;
+        emit_pydantic_model(builder, walk.node)?;
     }
-    for child in super::syntax::named_children(node) {
-        scan_pydantic_models(builder, child, depth.saturating_add(1), budget)?;
+    for child in super::syntax::named_children(walk.node) {
+        scan_pydantic_models(
+            builder,
+            SchemaWalk {
+                node: child,
+                depth: walk.depth.saturating_add(1),
+            },
+            budget,
+        )?;
     }
     Ok(())
 }
@@ -610,17 +719,21 @@ fn emit_pydantic_model(
     }
     let struct_id = emit_schema_symbol(
         builder,
-        SymbolKind::Struct,
-        &name,
-        class_definition,
-        class_definition,
-        Some("pydantic.BaseModel"),
+        SchemaSymbolInput {
+            kind: SymbolKind::Struct,
+            name: &name,
+            span_node: class_definition,
+            structural_node: class_definition,
+            signature: Some("pydantic.BaseModel"),
+        },
     )?;
     with_scope(
         builder,
-        &struct_id,
-        SymbolKind::Struct,
-        Some(&name),
+        SchemaScope {
+            owner: &struct_id,
+            kind: SymbolKind::Struct,
+            qualifier: Some(&name),
+        },
         |builder| {
             let mut fields = BTreeSet::new();
             for statement in super::syntax::named_children(body) {
@@ -647,13 +760,22 @@ fn emit_pydantic_model(
                 let signature = safe_type_signature(builder, annotation)?;
                 let field_id = emit_schema_symbol(
                     builder,
-                    SymbolKind::Field,
-                    &field_name,
-                    statement,
-                    assignment,
-                    signature.as_deref(),
+                    SchemaSymbolInput {
+                        kind: SymbolKind::Field,
+                        name: &field_name,
+                        span_node: statement,
+                        structural_node: assignment,
+                        signature: signature.as_deref(),
+                    },
                 )?;
-                emit_pydantic_literals(builder, annotation, &field_id, &field_name)?;
+                emit_pydantic_literals(
+                    builder,
+                    SchemaFieldInput {
+                        node: annotation,
+                        owner: &field_id,
+                        name: &field_name,
+                    },
+                )?;
             }
             Ok(())
         },
@@ -700,11 +822,9 @@ fn safe_type_signature(
 
 fn emit_pydantic_literals(
     builder: &mut ExtractionBuilder<'_, '_>,
-    annotation: Node<'_>,
-    field_id: &SymbolId,
-    field_name: &str,
+    field: SchemaFieldInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let Some(literal) = descendants(annotation, 0).find(|node| {
+    let Some(literal) = descendants(field.node, 0).find(|node| {
         if node.kind() != "generic_type" {
             return false;
         }
@@ -724,9 +844,11 @@ fn emit_pydantic_literals(
     let mut members = BTreeSet::new();
     with_scope(
         builder,
-        field_id,
-        SymbolKind::Field,
-        Some(field_name),
+        SchemaScope {
+            owner: field.owner,
+            kind: SymbolKind::Field,
+            qualifier: Some(field.name),
+        },
         |builder| {
             for node in descendants(literal, 0) {
                 if !matches!(node.kind(), "string" | "string_content") {
@@ -742,7 +864,16 @@ fn emit_pydantic_literals(
                 if !safe_schema_name(&member, true) || !members.insert(member.clone()) {
                     continue;
                 }
-                emit_schema_symbol(builder, SymbolKind::EnumMember, &member, node, node, None)?;
+                emit_schema_symbol(
+                    builder,
+                    SchemaSymbolInput {
+                        kind: SymbolKind::EnumMember,
+                        name: &member,
+                        span_node: node,
+                        structural_node: node,
+                        signature: None,
+                    },
+                )?;
             }
             Ok(())
         },
@@ -751,21 +882,17 @@ fn emit_pydantic_literals(
 
 fn emit_schema_symbol(
     builder: &mut ExtractionBuilder<'_, '_>,
-    kind: SymbolKind,
-    name: &str,
-    span_node: Node<'_>,
-    structural_node: Node<'_>,
-    signature: Option<&str>,
+    input: SchemaSymbolInput<'_, '_>,
 ) -> Result<SymbolId, ExtractError> {
     builder.emit_symbol(PendingSymbol {
-        kind,
-        name: name.to_owned(),
-        span_node,
-        structural_node,
-        doc_anchor: span_node,
+        kind: input.kind,
+        name: input.name.to_owned(),
+        span_node: input.span_node,
+        structural_node: input.structural_node,
+        doc_anchor: input.span_node,
         body_node: None,
         declaration_only: false,
-        signature: signature.map(str::to_owned),
+        signature: input.signature.map(str::to_owned),
         exported: false,
         default_export: false,
         async_symbol: false,
@@ -776,18 +903,16 @@ fn emit_schema_symbol(
 
 fn with_scope<T>(
     builder: &mut ExtractionBuilder<'_, '_>,
-    owner: &SymbolId,
-    kind: SymbolKind,
-    qualifier: Option<&str>,
+    scope: SchemaScope<'_>,
     operation: impl FnOnce(&mut ExtractionBuilder<'_, '_>) -> Result<T, ExtractError>,
 ) -> Result<T, ExtractError> {
-    builder.owners.push(owner.clone());
-    builder.native_owner_kinds.push(kind);
-    if let Some(qualifier) = qualifier {
+    builder.owners.push(scope.owner.clone());
+    builder.native_owner_kinds.push(scope.kind);
+    if let Some(qualifier) = scope.qualifier {
         builder.qualifiers.push(qualifier.to_owned());
     }
     let result = operation(builder);
-    if qualifier.is_some() {
+    if scope.qualifier.is_some() {
         builder.qualifiers.pop();
     }
     builder.native_owner_kinds.pop();
@@ -853,28 +978,25 @@ fn zod_leaf_type(value: Node<'_>, source: &str) -> Option<String> {
         let node = current?;
         if node.kind() == "call_expression" {
             let function = node.child_by_field_name("function")?;
-            if function.kind() == "member_expression" {
-                let object = function.child_by_field_name("object")?;
-                let property = function.child_by_field_name("property")?;
-                if object.kind() == "identifier"
-                    && source
-                        .get(object.start_byte()..object.end_byte())
-                        .is_some_and(|name| name == "z")
-                {
-                    let method = source.get(property.start_byte()..property.end_byte())?;
-                    if method
-                        .bytes()
-                        .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-                    {
-                        return Some(method.to_owned());
-                    }
-                    return None;
-                }
+            if function.kind() != "member_expression" {
+                current = Some(function);
+                continue;
+            }
+            let object = function.child_by_field_name("object")?;
+            let property = function.child_by_field_name("property")?;
+            if object.kind() != "identifier"
+                || source
+                    .get(object.start_byte()..object.end_byte())
+                    .is_none_or(|name| name != "z")
+            {
                 current = Some(object);
                 continue;
             }
-            current = Some(function);
-            continue;
+            let method = source.get(property.start_byte()..property.end_byte())?;
+            return method
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+                .then(|| method.to_owned());
         }
         if node.kind() == "member_expression" {
             current = node.child_by_field_name("object");

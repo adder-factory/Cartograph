@@ -1,7 +1,7 @@
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolId};
 use tree_sitter::Node;
 
-use crate::{ExtractError, ExtractedReference};
+use crate::{DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractError, ExtractedReference};
 
 use super::{
     ExtractionBuilder, PendingReference, module_system,
@@ -11,7 +11,7 @@ use super::{
     },
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum InvocationKind {
     Call,
     Construction,
@@ -232,6 +232,43 @@ pub(super) fn capture_invocation(
     if module_system::is_static_commonjs_binding_call(builder, node) {
         return Ok(());
     }
+    if invocation == InvocationKind::Call
+        && builder.context.snapshot.language() == SourceLanguage::Rust
+        && let Some(resolution_name) = rust_receiver_call_resolution(builder, target)?
+    {
+        let owner = builder.owners.last().cloned();
+        let name = builder.context.owned_text(target)?;
+        builder.emit_reference(ExtractedReference {
+            owner,
+            name,
+            resolution_name: Some(resolution_name),
+            kind: reference_kind,
+            span: span_for(target)?,
+        })?;
+        return Ok(());
+    }
+    if invocation == InvocationKind::Call
+        && matches!(
+            builder.context.snapshot.language(),
+            SourceLanguage::TypeScript
+                | SourceLanguage::Tsx
+                | SourceLanguage::JavaScript
+                | SourceLanguage::Jsx
+        )
+        && let Some((property, resolution_name)) =
+            javascript_dynamic_member_call_resolution(builder, target)?
+    {
+        let owner = builder.owners.last().cloned();
+        let name = builder.context.owned_text(property)?;
+        builder.emit_reference(ExtractedReference {
+            owner,
+            name,
+            resolution_name: Some(resolution_name),
+            kind: reference_kind,
+            span: span_for(property)?,
+        })?;
+        return Ok(());
+    }
     let (name_node, reference_node) = match invocation {
         InvocationKind::Call
             if matches!(
@@ -260,6 +297,76 @@ pub(super) fn capture_invocation(
             span: reference_node,
         },
     )
+}
+
+fn rust_receiver_call_resolution(
+    builder: &ExtractionBuilder<'_, '_>,
+    target: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    let Some(target) = rust_receiver_target(target, 0) else {
+        return Ok(None);
+    };
+    let Some(field) = target.child_by_field_name("field") else {
+        return Ok(None);
+    };
+    let field = builder.context.text(field).trim();
+    if field.is_empty() {
+        return Ok(None);
+    }
+    dynamic_dispatch_resolution(builder, field).map(Some)
+}
+
+fn rust_receiver_target(target: Node<'_>, depth: usize) -> Option<Node<'_>> {
+    if depth > 8 {
+        return None;
+    }
+    match target.kind() {
+        "field_expression" => Some(target),
+        "generic_function" => target
+            .child_by_field_name("function")
+            .or_else(|| named_children(target).next())
+            .and_then(|function| rust_receiver_target(function, depth.saturating_add(1))),
+        _ => None,
+    }
+}
+
+fn javascript_dynamic_member_call_resolution<'tree>(
+    builder: &ExtractionBuilder<'_, '_>,
+    target: Node<'tree>,
+) -> Result<Option<(Node<'tree>, String)>, ExtractError> {
+    if target.kind() != "member_expression" || static_javascript_member_chain(target, 0) {
+        return Ok(None);
+    }
+    let Some(property) = target
+        .child_by_field_name("property")
+        .and_then(|property| normalized_javascript_call_target(property, 0))
+    else {
+        return Ok(None);
+    };
+    let name = builder.context.text(property).trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let resolution_name = dynamic_dispatch_resolution(builder, name)?;
+    Ok(Some((property, resolution_name)))
+}
+
+pub(super) fn dynamic_dispatch_resolution(
+    builder: &ExtractionBuilder<'_, '_>,
+    name: &str,
+) -> Result<String, ExtractError> {
+    let capacity = DYNAMIC_DISPATCH_RESOLUTION_PREFIX
+        .len()
+        .checked_add(name.len())
+        .ok_or(ExtractError::OutputLimit)?;
+    builder.context.budget.ensure_string_length(capacity)?;
+    let mut resolution_name = String::new();
+    resolution_name
+        .try_reserve_exact(capacity)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    resolution_name.push_str(DYNAMIC_DISPATCH_RESOLUTION_PREFIX);
+    resolution_name.push_str(name);
+    Ok(resolution_name)
 }
 
 fn normalized_javascript_call_target(target: Node<'_>, depth: usize) -> Option<Node<'_>> {

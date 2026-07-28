@@ -50,15 +50,26 @@ pub(super) struct McpBudgetReport {
     top_schema_contributors: Vec<Contributor>,
 }
 
-pub(super) fn measure(
-    definitions: Vec<ToolDefinition>,
-    profile: ToolProfile,
-    read_only_only: bool,
-    disabled: &[String],
-    top: usize,
-    instructions: &str,
-    playbook: &str,
-) -> Result<McpBudgetReport, String> {
+pub(super) struct McpBudgetInput<'value> {
+    pub(super) definitions: Vec<ToolDefinition>,
+    pub(super) profile: ToolProfile,
+    pub(super) read_only_only: bool,
+    pub(super) disabled: &'value [String],
+    pub(super) top: usize,
+    pub(super) instructions: &'value str,
+    pub(super) playbook: &'value str,
+}
+
+pub(super) fn measure(input: McpBudgetInput<'_>) -> Result<McpBudgetReport, String> {
+    let McpBudgetInput {
+        definitions,
+        profile,
+        read_only_only,
+        disabled,
+        top,
+        instructions,
+        playbook,
+    } = input;
     let disabled_set = disabled.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut tools = definitions
         .into_iter()
@@ -252,26 +263,27 @@ mod tests {
             .with_profiles(ToolProfiles::CORE),
         )
         .unwrap_or_else(|error| panic!("write contract failed: {error}"));
-        let report = measure(
-            vec![read.clone(), write],
-            ToolProfile::Core,
-            true,
-            &[],
-            10,
-            "instructions",
-            "playbook",
-        )
+        let report = measure(McpBudgetInput {
+            definitions: vec![read.clone(), write],
+            profile: ToolProfile::Core,
+            read_only_only: true,
+            disabled: &[],
+            top: 10,
+            instructions: "instructions",
+            playbook: "playbook",
+        })
         .unwrap_or_else(|error| panic!("budget failed: {error}"));
         assert_eq!(report.tool_count, 1);
-        let disabled = measure(
-            vec![read],
-            ToolProfile::Core,
-            false,
-            &["cartograph_read".to_owned()],
-            10,
-            "instructions",
-            "playbook",
-        )
+        let disabled_names = ["cartograph_read".to_owned()];
+        let disabled = measure(McpBudgetInput {
+            definitions: vec![read],
+            profile: ToolProfile::Core,
+            read_only_only: false,
+            disabled: &disabled_names,
+            top: 10,
+            instructions: "instructions",
+            playbook: "playbook",
+        })
         .unwrap_or_else(|error| panic!("disabled budget failed: {error}"));
         assert_eq!(disabled.tool_count, 0);
     }

@@ -1248,38 +1248,41 @@ impl_stable_as_str!(
     Self::Resource => "resource",
 );
 
+const STABLE_SYMBOL_KINDS: [SymbolKind; 25] = [
+    SymbolKind::File,
+    SymbolKind::Module,
+    SymbolKind::Class,
+    SymbolKind::Struct,
+    SymbolKind::Union,
+    SymbolKind::Interface,
+    SymbolKind::Trait,
+    SymbolKind::Protocol,
+    SymbolKind::Function,
+    SymbolKind::Method,
+    SymbolKind::Property,
+    SymbolKind::Field,
+    SymbolKind::Variable,
+    SymbolKind::Constant,
+    SymbolKind::Enum,
+    SymbolKind::EnumMember,
+    SymbolKind::TypeAlias,
+    SymbolKind::Namespace,
+    SymbolKind::Parameter,
+    SymbolKind::Import,
+    SymbolKind::Export,
+    SymbolKind::Route,
+    SymbolKind::Component,
+    SymbolKind::Table,
+    SymbolKind::Resource,
+];
+
 impl SymbolKind {
     /// Parse the stable storage/protocol spelling of a symbol kind.
     #[must_use]
     pub fn from_stable_str(value: &str) -> Option<Self> {
-        match value {
-            "file" => Some(Self::File),
-            "module" => Some(Self::Module),
-            "class" => Some(Self::Class),
-            "struct" => Some(Self::Struct),
-            "union" => Some(Self::Union),
-            "interface" => Some(Self::Interface),
-            "trait" => Some(Self::Trait),
-            "protocol" => Some(Self::Protocol),
-            "function" => Some(Self::Function),
-            "method" => Some(Self::Method),
-            "property" => Some(Self::Property),
-            "field" => Some(Self::Field),
-            "variable" => Some(Self::Variable),
-            "constant" => Some(Self::Constant),
-            "enum" => Some(Self::Enum),
-            "enum_member" => Some(Self::EnumMember),
-            "type_alias" => Some(Self::TypeAlias),
-            "namespace" => Some(Self::Namespace),
-            "parameter" => Some(Self::Parameter),
-            "import" => Some(Self::Import),
-            "export" => Some(Self::Export),
-            "route" => Some(Self::Route),
-            "component" => Some(Self::Component),
-            "table" => Some(Self::Table),
-            "resource" => Some(Self::Resource),
-            _ => None,
-        }
+        STABLE_SYMBOL_KINDS
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
     }
 }
 
@@ -1388,10 +1391,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        NormalizedPath, ReferenceKind, SourceLanguage, SourcePosition, SourceSpan, SymbolKind,
-        callable_signature_is_literal_free, declaration_value_is_search_safe,
-        is_candidate_path_with, symbol_signature_is_search_safe, v1_language_registry_digest,
-        v2_language_additions_digest,
+        NormalizedPath, ReferenceKind, STABLE_SYMBOL_KINDS, SourceLanguage, SourcePosition,
+        SourceSpan, SymbolKind, callable_signature_is_literal_free,
+        declaration_value_is_search_safe, is_candidate_path_with, symbol_signature_is_search_safe,
+        v1_language_registry_digest, v2_language_additions_digest,
     };
 
     const SPAN_START_BYTE: u64 = 7;
@@ -1457,6 +1460,10 @@ mod tests {
             Some(SymbolKind::Union)
         );
         assert_eq!(SymbolKind::EnumMember.as_str(), "enum_member");
+        for kind in STABLE_SYMBOL_KINDS {
+            assert_eq!(SymbolKind::from_stable_str(kind.as_str()), Some(kind));
+        }
+        assert_eq!(SymbolKind::from_stable_str("unknown"), None);
         assert_eq!(ReferenceKind::TypeOf.as_str(), "type_of");
         assert_eq!(ReferenceKind::FieldAccess.as_str(), "field_access");
     }

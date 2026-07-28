@@ -270,11 +270,13 @@ pub enum GenerationDigestVersion {
     V3 = 3,
     /// Symbol-semantics-complete digest including visibility and declaration flags.
     V4 = 4,
+    /// Native-index semantics including framework, resolver, and test-ownership evidence.
+    V5 = 5,
 }
 
 impl GenerationDigestVersion {
     /// Current digest contract emitted by this Cartograph v2 binary.
-    pub const CURRENT: Self = Self::V4;
+    pub const CURRENT: Self = Self::V5;
 
     /// Stable PostgreSQL `smallint` representation.
     #[must_use]
@@ -285,10 +287,11 @@ impl GenerationDigestVersion {
     /// Validate a PostgreSQL value before it enters generation type-state.
     pub const fn from_database_value(value: i16) -> Result<Self, InvalidGenerationDigestVersion> {
         match value {
-            1 => Ok(Self::V1),
-            2 => Ok(Self::V2),
-            3 => Ok(Self::V3),
-            4 => Ok(Self::V4),
+            candidate if candidate == Self::V1.database_value() => Ok(Self::V1),
+            candidate if candidate == Self::V2.database_value() => Ok(Self::V2),
+            candidate if candidate == Self::V3.database_value() => Ok(Self::V3),
+            candidate if candidate == Self::V4.database_value() => Ok(Self::V4),
+            candidate if candidate == Self::V5.database_value() => Ok(Self::V5),
             _ => Err(InvalidGenerationDigestVersion),
         }
     }
@@ -479,11 +482,35 @@ const EDGE_KIND_VALUES: [&str; EdgeKind::Contains as usize + 1] = [
     "contains",
 ];
 
+const EDGE_KINDS: [EdgeKind; EdgeKind::Contains as usize + 1] = [
+    EdgeKind::Calls,
+    EdgeKind::Imports,
+    EdgeKind::References,
+    EdgeKind::Implements,
+    EdgeKind::Extends,
+    EdgeKind::Tests,
+    EdgeKind::TypeOf,
+    EdgeKind::Returns,
+    EdgeKind::Instantiates,
+    EdgeKind::Overrides,
+    EdgeKind::Decorates,
+    EdgeKind::FieldAccess,
+    EdgeKind::DefUse,
+    EdgeKind::Exports,
+    EdgeKind::Contains,
+];
+
 impl EdgeKind {
     /// Stable PostgreSQL representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         EDGE_KIND_VALUES[self as usize]
+    }
+
+    /// Parse the stable PostgreSQL and wire representation.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        EDGE_KINDS.into_iter().find(|kind| kind.as_str() == value)
     }
 }
 
@@ -539,7 +566,8 @@ mod tests {
     const DIGEST_V2_DATABASE_VALUE: i16 = 2;
     const DIGEST_V3_DATABASE_VALUE: i16 = 3;
     const DIGEST_V4_DATABASE_VALUE: i16 = 4;
-    const UNKNOWN_DIGEST_DATABASE_VALUE: i16 = 5;
+    const DIGEST_V5_DATABASE_VALUE: i16 = 5;
+    const UNKNOWN_DIGEST_DATABASE_VALUE: i16 = 6;
 
     #[test]
     fn branded_ids_canonicalize_and_validate_deserialized_values() {
@@ -572,7 +600,7 @@ mod tests {
         );
         assert_eq!(
             GenerationDigestVersion::CURRENT.database_value(),
-            DIGEST_V4_DATABASE_VALUE
+            DIGEST_V5_DATABASE_VALUE
         );
         assert_eq!(
             GenerationDigestVersion::from_database_value(DIGEST_V1_DATABASE_VALUE),
@@ -589,6 +617,10 @@ mod tests {
         assert_eq!(
             GenerationDigestVersion::from_database_value(DIGEST_V4_DATABASE_VALUE),
             Ok(GenerationDigestVersion::V4)
+        );
+        assert_eq!(
+            GenerationDigestVersion::from_database_value(DIGEST_V5_DATABASE_VALUE),
+            Ok(GenerationDigestVersion::V5)
         );
         assert!(
             GenerationDigestVersion::from_database_value(UNKNOWN_DIGEST_DATABASE_VALUE).is_err()

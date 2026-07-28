@@ -2,7 +2,10 @@ use cartograph_domain::{SourceLanguage, SymbolKind};
 
 use crate::{
     ExtractError,
-    framework::{FrameworkBuilder, LandmarkInput},
+    framework::{
+        DelimiterInput, FrameworkBuilder, LandmarkInput, javascript_identifier_at as identifier_at,
+        join_route_paths, matching_delimiter, skip_ascii_whitespace,
+    },
 };
 
 const MAX_DECORATOR_SCAN_BYTES: usize = 4_096;
@@ -116,17 +119,43 @@ fn scan_class_methods(
         for decorator in &decorators {
             if let Some(method_name) = http_method(decorator.name) {
                 if context.controller {
-                    add_http_route(builder, &context, decorator, &method, method_name)?;
+                    add_http_route(
+                        builder,
+                        HttpRouteInput {
+                            context: &context,
+                            decorator,
+                            method: &method,
+                            http_method: method_name,
+                        },
+                    )?;
                 }
             } else if let Some(label) = graphql_label(decorator.name) {
                 if context.resolver {
-                    add_named_route(builder, &context, decorator, &method, label, method.name)?;
+                    add_named_route(
+                        builder,
+                        NamedRouteInput {
+                            context: &context,
+                            decorator,
+                            method: &method,
+                            label,
+                            value: method.name,
+                        },
+                    )?;
                 }
             } else if let Some(label) = rpc_label(decorator.name)
                 && (context.controller || context.gateway)
                 && let StaticArgument::Literal { value, .. } = decorator_static_argument(decorator)
             {
-                add_named_route(builder, &context, decorator, &method, label, value)?;
+                add_named_route(
+                    builder,
+                    NamedRouteInput {
+                        context: &context,
+                        decorator,
+                        method: &method,
+                        label,
+                        value,
+                    },
+                )?;
             }
         }
         cursor = method
@@ -137,13 +166,23 @@ fn scan_class_methods(
     Ok(())
 }
 
+struct HttpRouteInput<'input, 'source> {
+    context: &'input ClassRouteContext<'source>,
+    decorator: &'input Decorator<'source>,
+    method: &'input Method<'source>,
+    http_method: &'static str,
+}
+
 fn add_http_route(
     builder: &mut FrameworkBuilder<'_, '_>,
-    context: &ClassRouteContext<'_>,
-    decorator: &Decorator<'_>,
-    method: &Method<'_>,
-    http_method: &str,
+    input: HttpRouteInput<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let HttpRouteInput {
+        context,
+        decorator,
+        method,
+        http_method,
+    } = input;
     let method_path = decorator_static_argument(decorator);
     let (StaticArgument::Empty | StaticArgument::Literal { .. }) = context.controller_path else {
         return Ok(());
@@ -153,7 +192,7 @@ fn add_http_route(
     };
     let base = context.controller_path.value_or_empty();
     let subpath = method_path.value_or_empty();
-    let Some(path) = join_route_path(base, subpath) else {
+    let Some(path) = join_route_paths(base, subpath) else {
         return Ok(());
     };
     let (start, end) = method_path
@@ -178,14 +217,25 @@ fn add_http_route(
     })
 }
 
+struct NamedRouteInput<'input, 'source> {
+    context: &'input ClassRouteContext<'source>,
+    decorator: &'input Decorator<'source>,
+    method: &'input Method<'source>,
+    label: &'input str,
+    value: &'input str,
+}
+
 fn add_named_route(
     builder: &mut FrameworkBuilder<'_, '_>,
-    context: &ClassRouteContext<'_>,
-    decorator: &Decorator<'_>,
-    method: &Method<'_>,
-    label: &str,
-    value: &str,
+    input: NamedRouteInput<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let NamedRouteInput {
+        context,
+        decorator,
+        method,
+        label,
+        value,
+    } = input;
     if value.len() > MAX_ROUTE_BYTES {
         return Ok(());
     }
@@ -371,7 +421,7 @@ fn parse_decorator<'source>(
             end: source_offset + name_end,
         });
     }
-    let close = matching_delimiter(source, open, b'(', b')')?;
+    let close = matching_delimiter(DelimiterInput::parentheses(source, open))?;
     let argument = &source[open + 1..close];
     let literal = quoted_at_argument(argument, source_offset + open + 1);
     Some(Decorator {
@@ -433,12 +483,12 @@ fn method_after_decorators<'source>(
                 "if" | "for" | "while" | "switch" | "catch" | "constructor"
             )
         {
-            let params_close = matching_delimiter(source, after, b'(', b')')?;
+            let params_close = matching_delimiter(DelimiterInput::parentheses(source, after))?;
             let body_open = source[params_close + 1..limit]
                 .find('{')
                 .map(|offset| params_close + 1 + offset);
             let body_end = body_open
-                .and_then(|open| matching_delimiter(source, open, b'{', b'}'))
+                .and_then(|open| matching_delimiter(DelimiterInput::braces(source, open)))
                 .map(|close| close + 1);
             return Some(Method {
                 name,
@@ -450,27 +500,6 @@ fn method_after_decorators<'source>(
         cursor = name_end;
     }
     None
-}
-
-fn join_route_path(base: &str, subpath: &str) -> Option<String> {
-    if base.len().saturating_add(subpath.len()) > MAX_ROUTE_BYTES {
-        return None;
-    }
-    let mut path = String::new();
-    path.try_reserve(base.len().saturating_add(subpath.len()).saturating_add(1))
-        .ok()?;
-    for segment in base.split('/').chain(subpath.split('/')) {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        path.push('/');
-        path.push_str(segment);
-    }
-    if path.is_empty() {
-        path.push('/');
-    }
-    Some(path)
 }
 
 fn declaration_prefix_start(source: &str, declaration: usize) -> usize {
@@ -496,22 +525,6 @@ fn identifier_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
 }
 
-fn identifier_at(value: &str, start: usize) -> Option<(usize, &str)> {
-    let first = *value.as_bytes().get(start)?;
-    if !(first == b'_' || first == b'$' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut end = start + 1;
-    while value
-        .as_bytes()
-        .get(end)
-        .is_some_and(|byte| identifier_byte(*byte))
-    {
-        end += 1;
-    }
-    Some((end, &value[start..end]))
-}
-
 fn skip_to_identifier(value: &str, mut cursor: usize, limit: usize) -> Option<usize> {
     while cursor < limit {
         let byte = value.as_bytes()[cursor];
@@ -526,46 +539,6 @@ fn skip_to_identifier(value: &str, mut cursor: usize, limit: usize) -> Option<us
     None
 }
 
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
 fn matching_brace(value: &str, open: usize) -> Option<usize> {
-    matching_delimiter(value, open, b'{', b'}')
-}
-
-fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Option<usize> {
-    let mut depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in value.as_bytes().iter().copied().enumerate().skip(open) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`') {
-            quote = Some(byte);
-        } else if byte == opening {
-            depth = depth.saturating_add(1);
-        } else if byte == closing {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
+    matching_delimiter(DelimiterInput::braces(value, open))
 }

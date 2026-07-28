@@ -2,7 +2,13 @@ use std::collections::BTreeSet;
 
 use cartograph_domain::SourceLanguage;
 
-use crate::{ExtractError, framework::FrameworkBuilder};
+use crate::{
+    ExtractError,
+    framework::{
+        DelimiterInput, FrameworkBuilder, FrameworkRouteInput,
+        javascript_identifier_at as identifier_at, matching_delimiter, skip_ascii_whitespace,
+    },
+};
 
 const MAX_RECEIVERS: usize = 256;
 const MAX_ROUTES: usize = 4_096;
@@ -35,17 +41,25 @@ pub(crate) fn scan(
         .try_reserve_exact(MAX_RECEIVERS)
         .map_err(|_| ExtractError::OutputLimit)?;
     for receiver in &receivers {
-        scan_receiver_calls(builder, source, receiver, &mut routes, &mut mounts)?;
+        scan_receiver_calls(
+            builder,
+            ReceiverScan {
+                source,
+                receiver,
+                routes: &mut routes,
+                mounts: &mut mounts,
+            },
+        )?;
     }
     for route in &routes {
-        builder.add_route(
-            &route.method,
-            route.path,
-            route.path_start,
-            route.path_end,
-            false,
-            route.handler,
-        )?;
+        builder.add_route(FrameworkRouteInput {
+            method: &route.method,
+            path: route.path,
+            start: route.path_start,
+            end: route.path_end,
+            command: false,
+            handler: route.handler,
+        })?;
     }
     for mount in mounts {
         for route in &routes {
@@ -55,14 +69,14 @@ pub(crate) fn scan(
             let Some(path) = join_paths(mount.prefix, route.path) else {
                 continue;
             };
-            builder.add_route(
-                &route.method,
-                &path,
-                mount.prefix_start,
-                mount.prefix_end,
-                false,
-                route.handler,
-            )?;
+            builder.add_route(FrameworkRouteInput {
+                method: &route.method,
+                path: &path,
+                start: mount.prefix_start,
+                end: mount.prefix_end,
+                command: false,
+                handler: route.handler,
+            })?;
         }
     }
     Ok(())
@@ -108,11 +122,14 @@ fn collect_receivers<'source>(
 
 fn scan_receiver_calls<'source>(
     builder: &mut FrameworkBuilder<'_, '_>,
-    source: &'source str,
-    receiver: &'source str,
-    routes: &mut Vec<HonoRoute<'source>>,
-    mounts: &mut Vec<HonoMount<'source>>,
+    input: ReceiverScan<'_, 'source>,
 ) -> Result<(), ExtractError> {
+    let ReceiverScan {
+        source,
+        receiver,
+        routes,
+        mounts,
+    } = input;
     let marker = format!("{receiver}.");
     let mut cursor = 0_usize;
     while let Some(relative) = source[cursor..].find(&marker) {
@@ -132,7 +149,7 @@ fn scan_receiver_calls<'source>(
             cursor = method_end;
             continue;
         }
-        let Some(close) = matching_delimiter(source, open, b'(', b')') else {
+        let Some(close) = matching_delimiter(DelimiterInput::parentheses(source, open)) else {
             cursor = open + 1;
             continue;
         };
@@ -189,6 +206,13 @@ fn scan_receiver_calls<'source>(
     Ok(())
 }
 
+struct ReceiverScan<'a, 'source> {
+    source: &'source str,
+    receiver: &'source str,
+    routes: &'a mut Vec<HonoRoute<'source>>,
+    mounts: &'a mut Vec<HonoMount<'source>>,
+}
+
 fn push_route<'source>(
     routes: &mut Vec<HonoRoute<'source>>,
     route: HonoRoute<'source>,
@@ -233,9 +257,7 @@ fn handler_after_argument(source: &str, from: usize, close: usize) -> Option<(&s
 fn next_top_level_comma(source: &str, start: usize, end: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut cursor = start;
-    let mut paren = 0_usize;
-    let mut brace = 0_usize;
-    let mut bracket = 0_usize;
+    let mut depth = DelimiterDepth::default();
     let mut quote = None;
     let mut escaped = false;
     while cursor < end {
@@ -251,20 +273,37 @@ fn next_top_level_comma(source: &str, start: usize, end: usize) -> Option<usize>
             cursor += 1;
             continue;
         }
-        match byte {
-            b'\'' | b'"' | b'`' => quote = Some(byte),
-            b'(' => paren = paren.saturating_add(1),
-            b')' => paren = paren.saturating_sub(1),
-            b'{' => brace = brace.saturating_add(1),
-            b'}' => brace = brace.saturating_sub(1),
-            b'[' => bracket = bracket.saturating_add(1),
-            b']' => bracket = bracket.saturating_sub(1),
-            b',' if paren == 0 && brace == 0 && bracket == 0 => return Some(cursor),
-            _ => {}
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+        } else if depth.advance(byte) {
+            return Some(cursor);
         }
         cursor += 1;
     }
     None
+}
+
+#[derive(Default)]
+struct DelimiterDepth {
+    paren: usize,
+    brace: usize,
+    bracket: usize,
+}
+
+impl DelimiterDepth {
+    fn advance(&mut self, byte: u8) -> bool {
+        match byte {
+            b'(' => self.paren = self.paren.saturating_add(1),
+            b')' => self.paren = self.paren.saturating_sub(1),
+            b'{' => self.brace = self.brace.saturating_add(1),
+            b'}' => self.brace = self.brace.saturating_sub(1),
+            b'[' => self.bracket = self.bracket.saturating_add(1),
+            b']' => self.bracket = self.bracket.saturating_sub(1),
+            b',' => return self.paren == 0 && self.brace == 0 && self.bracket == 0,
+            _ => {}
+        }
+        false
+    }
 }
 
 struct Quoted<'source> {
@@ -343,60 +382,4 @@ fn identifiers(value: &str) -> impl Iterator<Item = (usize, &str)> {
 
 fn identifier_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
-}
-
-fn identifier_at(value: &str, start: usize) -> Option<(usize, &str)> {
-    let first = *value.as_bytes().get(start)?;
-    if !(first == b'_' || first == b'$' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut end = start + 1;
-    while value
-        .as_bytes()
-        .get(end)
-        .is_some_and(|byte| identifier_byte(*byte))
-    {
-        end += 1;
-    }
-    Some((end, &value[start..end]))
-}
-
-fn skip_ascii_whitespace(value: &str, mut cursor: usize) -> usize {
-    while value
-        .as_bytes()
-        .get(cursor)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn matching_delimiter(value: &str, open: usize, opening: u8, closing: u8) -> Option<usize> {
-    let mut depth = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in value.as_bytes().iter().copied().enumerate().skip(open) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`') {
-            quote = Some(byte);
-        } else if byte == opening {
-            depth = depth.saturating_add(1);
-        } else if byte == closing {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
 }

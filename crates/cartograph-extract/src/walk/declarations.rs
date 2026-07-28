@@ -78,7 +78,10 @@ pub(super) fn visit_export(
             named_children(node).find(|child| child.kind() == "namespace_export")
             && let Some(public_node) = namespace.named_child(0)
         {
-            module_system::emit_namespace_reexport(builder, namespace, public_node, module_name)?;
+            module_system::emit_namespace_reexport(
+                builder,
+                module_system::NamespaceReexportInput::new(namespace, public_node, module_name),
+            )?;
         } else {
             builder.emit_import_binding(ExtractedImportBinding {
                 kind: ImportBindingKind::ReExportAll,

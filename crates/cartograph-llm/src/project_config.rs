@@ -19,7 +19,6 @@ use url::Url;
 const CONFIG_DIRECTORY: &str = ".cartograph";
 const CONFIG_FILE: &str = "config.json";
 const MAXIMUM_CONFIG_BYTES: u64 = 1024 * 1024;
-const MAXIMUM_ENDPOINT_BYTES: usize = 4_096;
 const MAXIMUM_MODEL_BYTES: usize = 256;
 const MAXIMUM_API_KEY_BYTES: usize = 8_192;
 const MAXIMUM_TIMEOUT_MS: u64 = 600_000;
@@ -149,6 +148,33 @@ pub struct ProjectSourceSettings {
     enable_string_imports: bool,
     duplicate_code_partial_clones: bool,
     duplicate_code_allowlist: Vec<String>,
+}
+
+impl Default for ProjectSourceSettings {
+    fn default() -> Self {
+        Self {
+            maximum_file_bytes: None,
+            languages: Vec::new(),
+            includes: None,
+            excludes: Vec::new(),
+            extract_docstrings: true,
+            track_call_sites: true,
+            index_submodules: true,
+            index_embedded_repositories: true,
+            enable_centrality: true,
+            enable_betweenness: true,
+            enable_churn: true,
+            enable_co_change: true,
+            enable_biomarkers: true,
+            enable_issue_history: true,
+            enable_config_refs: true,
+            enable_sql_refs: true,
+            enable_build_context_refs: true,
+            enable_string_imports: true,
+            duplicate_code_partial_clones: false,
+            duplicate_code_allowlist: Vec::new(),
+        }
+    }
 }
 
 impl std::fmt::Debug for ProjectSourceSettings {
@@ -302,7 +328,7 @@ impl ProjectSourceSettings {
 }
 
 impl ProjectLlmTier {
-    pub(crate) const fn config_key(self) -> &'static str {
+    const fn config_key(self) -> &'static str {
         match self {
             Self::Embedding => "embeddingLlm",
             Self::Summarize => "summarizeLlm",
@@ -758,32 +784,17 @@ pub fn load_project_source_settings(
     project_root: &Path,
 ) -> Result<ProjectSourceSettings, ProjectLlmConfigError> {
     let Some(value) = read_config_value(project_root)? else {
-        return Ok(ProjectSourceSettings {
-            maximum_file_bytes: None,
-            languages: Vec::new(),
-            includes: None,
-            excludes: Vec::new(),
-            extract_docstrings: true,
-            track_call_sites: true,
-            index_submodules: true,
-            index_embedded_repositories: true,
-            enable_centrality: true,
-            enable_betweenness: true,
-            enable_churn: true,
-            enable_co_change: true,
-            enable_biomarkers: true,
-            enable_issue_history: true,
-            enable_config_refs: true,
-            enable_sql_refs: true,
-            enable_build_context_refs: true,
-            enable_string_imports: true,
-            duplicate_code_partial_clones: false,
-            duplicate_code_allowlist: Vec::new(),
-        });
+        return Ok(ProjectSourceSettings::default());
     };
     let root = value
         .as_object()
         .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+    parse_project_source_settings(root)
+}
+
+fn parse_project_source_settings(
+    root: &Map<String, Value>,
+) -> Result<ProjectSourceSettings, ProjectLlmConfigError> {
     let maximum_file_bytes = root
         .get("maxFileSize")
         .map(|value| {
@@ -974,7 +985,14 @@ fn load_project_llm_tier_with_fallback(
     });
     selected
         .map(|(value, configured_tier, fallback)| {
-            parse_tier(value, configured_tier, tier, fallback)
+            parse_tier(
+                value,
+                TierResolution {
+                    configured: configured_tier,
+                    requested: tier,
+                    fallback,
+                },
+            )
         })
         .transpose()
 }
@@ -1162,11 +1180,16 @@ const fn reachable_incompatible_probe() -> LlmEndpointProbe {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TierResolution {
+    configured: ProjectLlmTier,
+    requested: ProjectLlmTier,
+    fallback: bool,
+}
+
 fn parse_tier(
     value: &Value,
-    configured_tier: ProjectLlmTier,
-    requested_tier: ProjectLlmTier,
-    fallback: bool,
+    resolution: TierResolution,
 ) -> Result<ProjectLlmTierConfig, ProjectLlmConfigError> {
     let value = value
         .as_object()
@@ -1177,26 +1200,56 @@ fn parse_tier(
         .and_then(ProjectLlmProvider::parse)
         .ok_or(ProjectLlmConfigError::InvalidTier)?;
     let chat_tier = !matches!(
-        configured_tier,
+        resolution.configured,
         ProjectLlmTier::Embedding | ProjectLlmTier::Reranker
     );
     if !chat_tier && provider != ProjectLlmProvider::OpenAiCompat {
         return Err(ProjectLlmConfigError::InvalidTier);
     }
     let endpoint = project_tier_endpoint(value, provider)?;
-    let model = project_tier_model(value, provider, configured_tier, requested_tier, fallback)?;
+    let model = project_tier_model(value, provider, resolution)?;
     let ask_model = optional_model(value, "askModel")?;
     validate_model(&model)?;
-    let explicit_api_key_env = match value.get("apiKeyEnv") {
-        Some(Value::String(value)) => Some(value.as_str()),
-        Some(_) => return Err(ProjectLlmConfigError::InvalidTier),
-        None => None,
-    };
-    let inline = match value.get("apiKey") {
-        Some(Value::String(value)) => Some(value.as_str()),
-        Some(_) => return Err(ProjectLlmConfigError::InvalidTier),
-        None => None,
-    };
+    let credentials = parse_tier_credentials(value, provider)?;
+    let limits = parse_tier_runtime_limits(value)?;
+    let claude_bin = parse_claude_bin(value, provider)?;
+    let llama_server_args = parse_llama_server_args(value)?;
+    let externally_managed = optional_bool(value, "externallyManaged")?.unwrap_or(false);
+    Ok(ProjectLlmTierConfig {
+        provider,
+        endpoint,
+        model,
+        ask_model,
+        api_key: credentials.api_key,
+        credential_source: credentials.source,
+        timeout_ms: limits.timeout_ms,
+        concurrency: limits.concurrency,
+        summary_batch_size: limits.summary_batch_size,
+        claude_bin,
+        llama_server_args,
+        externally_managed,
+    })
+}
+
+struct TierCredentials {
+    api_key: Option<SecretString>,
+    source: ProjectLlmCredentialSource,
+}
+
+struct CredentialResolution<'input> {
+    value: &'input Map<String, Value>,
+    explicit_api_key_env: Option<&'input str>,
+    inline: Option<&'input str>,
+    api_key_env: Option<&'input str>,
+    missing_default_env_permitted: bool,
+}
+
+fn parse_tier_credentials(
+    value: &Map<String, Value>,
+    provider: ProjectLlmProvider,
+) -> Result<TierCredentials, ProjectLlmConfigError> {
+    let explicit_api_key_env = optional_string_value(value, "apiKeyEnv")?;
+    let inline = optional_string_value(value, "apiKey")?;
     let api_key_env = explicit_api_key_env
         .or_else(|| (provider == ProjectLlmProvider::AnthropicApi).then_some("ANTHROPIC_API_KEY"))
         .or_else(|| {
@@ -1206,18 +1259,45 @@ fn parse_tier(
     if explicit_api_key_env.is_some() && inline.is_some() {
         return Err(ProjectLlmConfigError::InvalidTier);
     }
-    let (api_key, credential_source) = if provider == ProjectLlmProvider::ClaudeBridge {
+    if provider == ProjectLlmProvider::ClaudeBridge {
         if inline.is_some() || explicit_api_key_env.is_some() {
             return Err(ProjectLlmConfigError::InvalidTier);
         }
-        (None, ProjectLlmCredentialSource::None)
-    } else if let Some(key) = inline {
+        return Ok(TierCredentials {
+            api_key: None,
+            source: ProjectLlmCredentialSource::None,
+        });
+    }
+    resolve_tier_credentials(CredentialResolution {
+        value,
+        explicit_api_key_env,
+        inline,
+        api_key_env,
+        missing_default_env_permitted: provider == ProjectLlmProvider::OpenAiCompat,
+    })
+}
+
+fn optional_string_value<'input>(
+    value: &'input Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'input str>, ProjectLlmConfigError> {
+    match value.get(key) {
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(ProjectLlmConfigError::InvalidTier),
+        None => Ok(None),
+    }
+}
+
+fn resolve_tier_credentials(
+    resolution: CredentialResolution<'_>,
+) -> Result<TierCredentials, ProjectLlmConfigError> {
+    let (api_key, source) = if let Some(key) = resolution.inline {
         validate_api_key(key)?;
         (
             Some(SecretString::from(key.to_owned())),
             ProjectLlmCredentialSource::InlineLegacy,
         )
-    } else if let Some(name) = api_key_env {
+    } else if let Some(name) = resolution.api_key_env {
         validate_env_name(name)?;
         match env::var(name) {
             Ok(key) => {
@@ -1228,9 +1308,9 @@ fn parse_tier(
                 )
             }
             Err(env::VarError::NotPresent)
-                if explicit_api_key_env.is_none()
-                    && value.get("endpoint").is_some()
-                    && provider == ProjectLlmProvider::OpenAiCompat =>
+                if resolution.explicit_api_key_env.is_none()
+                    && resolution.value.get("endpoint").is_some()
+                    && resolution.missing_default_env_permitted =>
             {
                 (None, ProjectLlmCredentialSource::None)
             }
@@ -1239,6 +1319,18 @@ fn parse_tier(
     } else {
         (None, ProjectLlmCredentialSource::None)
     };
+    Ok(TierCredentials { api_key, source })
+}
+
+struct TierRuntimeLimits {
+    timeout_ms: Option<u64>,
+    concurrency: Option<u16>,
+    summary_batch_size: Option<u16>,
+}
+
+fn parse_tier_runtime_limits(
+    value: &Map<String, Value>,
+) -> Result<TierRuntimeLimits, ProjectLlmConfigError> {
     let timeout_ms = optional_bounded_u64(value, "timeoutMs", MAXIMUM_TIMEOUT_MS)?;
     let concurrency = optional_bounded_u64(value, "concurrency", u64::from(MAXIMUM_CONCURRENCY))?
         .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
@@ -1250,22 +1342,10 @@ fn parse_tier(
     )?
     .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
     .transpose()?;
-    let claude_bin = parse_claude_bin(value, provider)?;
-    let llama_server_args = parse_llama_server_args(value)?;
-    let externally_managed = optional_bool(value, "externallyManaged")?.unwrap_or(false);
-    Ok(ProjectLlmTierConfig {
-        provider,
-        endpoint,
-        model,
-        ask_model,
-        api_key,
-        credential_source,
+    Ok(TierRuntimeLimits {
         timeout_ms,
         concurrency,
         summary_batch_size,
-        claude_bin,
-        llama_server_args,
-        externally_managed,
     })
 }
 
@@ -1295,11 +1375,9 @@ fn project_tier_endpoint(
 fn project_tier_model(
     object: &Map<String, Value>,
     provider: ProjectLlmProvider,
-    configured_tier: ProjectLlmTier,
-    requested_tier: ProjectLlmTier,
-    fallback: bool,
+    resolution: TierResolution,
 ) -> Result<String, ProjectLlmConfigError> {
-    if fallback && requested_tier == ProjectLlmTier::Ask {
+    if resolution.fallback && resolution.requested == ProjectLlmTier::Ask {
         if let Some(model) = optional_model(object, "askModel")? {
             return Ok(model);
         }
@@ -1316,7 +1394,7 @@ fn project_tier_model(
     match provider {
         ProjectLlmProvider::OpenAiCompat => Err(ProjectLlmConfigError::InvalidTier),
         ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::AnthropicApi => {
-            let model = if configured_tier == ProjectLlmTier::Summarize {
+            let model = if resolution.configured == ProjectLlmTier::Summarize {
                 DEFAULT_CLAUDE_SUMMARIZE_MODEL
             } else {
                 DEFAULT_CLAUDE_ASK_MODEL
@@ -1422,34 +1500,7 @@ fn optional_bounded_u64(
 }
 
 fn validate_endpoint(raw: &str) -> Result<(), ProjectLlmConfigError> {
-    if raw.is_empty() || raw.len() > MAXIMUM_ENDPOINT_BYTES || raw.chars().any(char::is_control) {
-        return Err(ProjectLlmConfigError::InvalidTier);
-    }
-    let endpoint = Url::parse(raw).map_err(|_| ProjectLlmConfigError::InvalidTier)?;
-    if endpoint.username() != ""
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-        || endpoint.host_str().is_none()
-    {
-        return Err(ProjectLlmConfigError::InvalidTier);
-    }
-    match endpoint.scheme() {
-        "https" => Ok(()),
-        "http" if endpoint.host_str().is_some_and(loopback_host) => Ok(()),
-        _ => Err(ProjectLlmConfigError::InvalidTier),
-    }
-}
-
-fn loopback_host(host: &str) -> bool {
-    let host = host
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host);
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
+    crate::endpoint::validate_endpoint(raw).map_err(|()| ProjectLlmConfigError::InvalidTier)
 }
 
 fn validate_model(value: &str) -> Result<(), ProjectLlmConfigError> {
@@ -1596,6 +1647,15 @@ fn canonical_project_root(project_root: &Path) -> Result<PathBuf, ProjectLlmConf
 mod tests {
     use super::*;
 
+    const LOCAL_SUMMARY_ENDPOINT: &str = "http://localhost:8081";
+    const LEGACY_INLINE_CONFIG: &str = r#"{"llm":{"summarizeLlm":{"provider":"openai-compat","endpoint":"https://example.test","model":"fixture","apiKey":"do-not-print"}}}"#;
+    const REJECTED_ENDPOINTS: [&str; 3] = [
+        "http://example.test",
+        "https://user:secret@example.test",
+        "file:///tmp/model",
+    ];
+    const VALID_REMOTE_ENDPOINT: &str = "https://example.test";
+
     #[test]
     fn project_config_round_trips_without_replacing_unrelated_fields() {
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
@@ -1608,7 +1668,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("config fixture failed: {error}"));
         let input = ProjectLlmTierInput::new(
             ProjectLlmTier::Summarize,
-            "http://localhost:8081",
+            LOCAL_SUMMARY_ENDPOINT,
             "fixture-chat",
         )
         .and_then(|input| input.with_concurrency(3))
@@ -1718,7 +1778,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("config directory failed: {error}"));
         fs::write(
             root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
-            r#"{"llm":{"summarizeLlm":{"provider":"openai-compat","endpoint":"https://example.test","model":"fixture","apiKey":"do-not-print"}}}"#,
+            LEGACY_INLINE_CONFIG,
         )
         .unwrap_or_else(|error| panic!("legacy fixture failed: {error}"));
         let loaded = load_project_llm_tier(root.path(), ProjectLlmTier::Summarize)
@@ -1829,15 +1889,11 @@ mod tests {
 
     #[test]
     fn endpoint_and_environment_name_policy_rejects_unsafe_values() {
-        for endpoint in [
-            "http://example.test",
-            "https://user:secret@example.test",
-            "file:///tmp/model",
-        ] {
+        for endpoint in REJECTED_ENDPOINTS {
             assert!(ProjectLlmTierInput::new(ProjectLlmTier::Ask, endpoint, "model").is_err());
         }
         assert!(
-            ProjectLlmTierInput::new(ProjectLlmTier::Ask, "https://example.test", "model")
+            ProjectLlmTierInput::new(ProjectLlmTier::Ask, VALID_REMOTE_ENDPOINT, "model")
                 .and_then(|input| input.with_api_key_env("bad-name"))
                 .is_err()
         );

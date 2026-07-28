@@ -938,7 +938,7 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
     let projected_ids = file
         .symbols
         .iter()
-        .filter(|symbol| !symbol.declaration_only)
+        .filter(|symbol| !symbol.declaration_only && symbol.kind != SymbolKind::Parameter)
         .map(|symbol| symbol.id.as_str())
         .collect::<BTreeSet<_>>();
     let names = file
@@ -951,6 +951,18 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
         .iter()
         .map(|symbol| (symbol.id.as_str(), symbol.kind))
         .collect::<BTreeMap<_, _>>();
+    let parameter_uses = file
+        .containments
+        .iter()
+        .filter_map(|edge| {
+            if kinds.get(edge.child.as_str()) != Some(&SymbolKind::Parameter) {
+                return None;
+            }
+            names
+                .get(edge.child.as_str())
+                .map(|name| (edge.parent.as_str(), *name))
+        })
+        .collect::<BTreeSet<_>>();
     OracleCase {
         path: file.path.as_str().to_owned(),
         language: file.language.as_str().to_owned(),
@@ -1003,11 +1015,16 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
                     .as_ref()
                     .and_then(|owner| kinds.get(owner.as_str()))
                     .copied();
-                owner_kind != Some(SymbolKind::Component)
-                    || !matches!(
-                        reference.kind,
-                        ReferenceKind::TypeOf | ReferenceKind::Returns
-                    )
+                let additive_parameter_use = reference.kind == ReferenceKind::References
+                    && reference.owner.as_ref().is_some_and(|owner| {
+                        parameter_uses.contains(&(owner.as_str(), reference.name.as_str()))
+                    });
+                !additive_parameter_use
+                    && (owner_kind != Some(SymbolKind::Component)
+                        || !matches!(
+                            reference.kind,
+                            ReferenceKind::TypeOf | ReferenceKind::Returns
+                        ))
             })
             .map(|reference| OracleReference {
                 owner: reference

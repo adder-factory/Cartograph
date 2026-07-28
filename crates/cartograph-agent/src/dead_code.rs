@@ -4,7 +4,7 @@ use std::{
 };
 
 use cartograph_db::DeadCodeCandidate;
-use cartograph_llm::{ChatError, OpenAiChatClient};
+use cartograph_llm::{ChatError, ChatMessageRequest, OpenAiChatClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -121,13 +121,24 @@ pub enum DeadCodeJudgeError {
     Cancelled,
 }
 
+/// Client, candidates, bounds, and cancellation scope for one dead-code judgement.
+pub struct DeadCodeJudgeRequest<'a> {
+    pub client: &'a OpenAiChatClient,
+    pub candidates: Vec<DeadCodeCandidate>,
+    pub options: DeadCodeJudgeOptions,
+    pub cancellation: ProjectCancellation,
+}
+
 /// Judge already-filtered graph candidates in deterministic, bounded batches.
 pub async fn judge_dead_code_candidates(
-    client: &OpenAiChatClient,
-    mut candidates: Vec<DeadCodeCandidate>,
-    options: DeadCodeJudgeOptions,
-    cancellation: ProjectCancellation,
+    input: DeadCodeJudgeRequest<'_>,
 ) -> Result<DeadCodeJudgeReport, DeadCodeJudgeError> {
+    let DeadCodeJudgeRequest {
+        client,
+        mut candidates,
+        options,
+        cancellation,
+    } = input;
     if options.maximum_candidates == 0
         || options.maximum_candidates > MAXIMUM_CANDIDATES
         || options.batch_size == 0
@@ -152,7 +163,11 @@ pub async fn judge_dead_code_candidates(
                 .saturating_mul(OUTPUT_TOKENS_PER_CANDIDATE),
         );
         let parsed = match client
-            .complete_message(DEAD_CODE_JUDGE_SYSTEM, &prompt, Some(tokens))
+            .complete_message(ChatMessageRequest::new(
+                DEAD_CODE_JUDGE_SYSTEM,
+                &prompt,
+                Some(tokens),
+            ))
             .await
         {
             Ok(completion) => {
@@ -279,14 +294,7 @@ fn parse_batch_reply(value: &str, expected: usize) -> Option<BTreeMap<usize, Par
         let Ok(row) = serde_json::from_value::<JudgeRow>(value.clone()) else {
             continue;
         };
-        if row.i >= expected
-            || !row.confidence.is_finite()
-            || !(0.0..=1.0).contains(&row.confidence)
-            || row.reason.trim().is_empty()
-            || row.reason.len() > MAXIMUM_REASON_BYTES
-            || row.reason.chars().any(char::is_control)
-            || duplicate_indices.contains(&row.i)
-        {
+        if !valid_judge_row(&row, expected, &duplicate_indices) {
             continue;
         }
         if output.remove(&row.i).is_some() {
@@ -303,6 +311,18 @@ fn parse_batch_reply(value: &str, expected: usize) -> Option<BTreeMap<usize, Par
         );
     }
     Some(output)
+}
+
+fn valid_judge_row(row: &JudgeRow, expected: usize, duplicate_indices: &BTreeSet<usize>) -> bool {
+    if row.i >= expected || duplicate_indices.contains(&row.i) {
+        return false;
+    }
+    if !row.confidence.is_finite() || !(0.0..=1.0).contains(&row.confidence) {
+        return false;
+    }
+    !row.reason.trim().is_empty()
+        && row.reason.len() <= MAXIMUM_REASON_BYTES
+        && !row.reason.chars().any(char::is_control)
 }
 
 fn apply_structural_hedges(

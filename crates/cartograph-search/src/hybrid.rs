@@ -108,6 +108,15 @@ pub struct RetrievalDocument {
     details: RetrievalDocumentDetails,
 }
 
+/// Stable document identity shared by lexical and semantic retrieval channels.
+pub struct RetrievalDocumentInput {
+    pub document_id: DocumentId,
+    pub generation_id: GenerationId,
+    pub path: NormalizedPath,
+    pub language: SourceLanguage,
+    pub document_kind: DocumentKind,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct RetrievalDocumentDetails {
     document_id: DocumentId,
@@ -123,13 +132,14 @@ struct RetrievalDocumentDetails {
 impl RetrievalDocument {
     /// Create the minimum stable identity required for cross-channel fusion.
     #[must_use]
-    pub const fn new(
-        document_id: DocumentId,
-        generation_id: GenerationId,
-        path: NormalizedPath,
-        language: SourceLanguage,
-        document_kind: DocumentKind,
-    ) -> Self {
+    pub fn new(input: RetrievalDocumentInput) -> Self {
+        let RetrievalDocumentInput {
+            document_id,
+            generation_id,
+            path,
+            language,
+            document_kind,
+        } = input;
         Self {
             details: RetrievalDocumentDetails {
                 document_id,

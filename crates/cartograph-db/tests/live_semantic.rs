@@ -13,7 +13,8 @@ use cartograph_db::{
     NewGeneration, NewProject, PendingEmbeddingPageInput, PendingEmbeddingPageRequest,
     RetireEmbeddingModelRequest, SearchDocumentInput, SemanticReadinessRequest,
     SemanticReadinessState, SemanticStorageError, SimilarSymbolsInput, SimilarSymbolsRequest,
-    SymbolInput, VectorSearchInput, VectorSearchRequest, validate_generation_facts,
+    SimilarityMaterializationPolicy, SymbolInput, VectorSearchInput, VectorSearchRequest,
+    validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, FileId, FileParseStatus, GenerationId, ModelId,
@@ -218,7 +219,11 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     );
     let materialized = fixture
         .database
-        .rebuild_current_similarity_edges(&project, 2, 0.0, STATEMENT_TIMEOUT)
+        .rebuild_current_similarity_edges(
+            &project,
+            SimilarityMaterializationPolicy::new(2, 0.0, STATEMENT_TIMEOUT)
+                .unwrap_or_else(|error| panic!("similarity policy failed: {error}")),
+        )
         .await
         .unwrap_or_else(|error| panic!("similarity materialization failed: {error}"));
     assert_eq!(materialized.models, 1);
@@ -741,10 +746,10 @@ async fn migrate(fixture: &Fixture) {
     assert_eq!(
         report.applied_versions,
         [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
         ]
     );
-    assert_eq!(report.current_version, 21);
+    assert_eq!(report.current_version, 22);
 }
 
 fn model_registration(fixture: ModelFixture) -> EmbeddingModelRegistration {

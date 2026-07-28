@@ -45,13 +45,13 @@ impl ProjectAutoSync {
         state.active.store(true, Ordering::Release);
         let watcher = start_watcher(&root, events, state.clone())?;
         let task_state = state.clone();
-        let task = tokio::spawn(run_auto_sync(
+        let task = tokio::spawn(run_auto_sync(AutoSyncTask {
             runtime,
-            receiver,
-            cancellation_receiver,
-            debounce_from_env(),
-            task_state,
-        ));
+            events: receiver,
+            cancellation: cancellation_receiver,
+            debounce: debounce_from_env(),
+            state: task_state,
+        }));
         Ok(Self {
             watcher,
             cancellation,
@@ -183,13 +183,22 @@ fn watcher_handler(
     }
 }
 
-async fn run_auto_sync(
+struct AutoSyncTask {
     runtime: Arc<ProjectRuntime>,
-    mut events: mpsc::Receiver<()>,
-    mut cancellation: watch::Receiver<bool>,
+    events: mpsc::Receiver<()>,
+    cancellation: watch::Receiver<bool>,
     debounce: Duration,
     state: Arc<AutoSyncState>,
-) {
+}
+
+async fn run_auto_sync(input: AutoSyncTask) {
+    let AutoSyncTask {
+        runtime,
+        mut events,
+        mut cancellation,
+        debounce,
+        state,
+    } = input;
     let mut reconciliation = tokio::time::interval(RECONCILIATION_INTERVAL);
     reconciliation.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reconciliation.tick().await;
@@ -418,11 +427,24 @@ mod tests {
             refreshed.is_ok(),
             "watcher did not refresh within its bound"
         );
-        let watcher_status = watcher.status();
+        let watcher_status = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let status = watcher.status();
+                if status.publications > 0 || status.noops > 0 || status.errors > 0 {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("watcher did not record its terminal outcome within its bound"));
         assert!(watcher_status.active);
         assert!(watcher_status.events >= 1 || watcher_status.reconciliations >= 1);
         assert!(watcher_status.sync_attempts >= 1);
-        assert!(watcher_status.publications >= 1);
+        assert!(
+            watcher_status.publications >= 1,
+            "watcher did not record its publication: {watcher_status:?}"
+        );
         assert_eq!(watcher_status.errors, 0);
         drop(watcher);
         drop(runtime);

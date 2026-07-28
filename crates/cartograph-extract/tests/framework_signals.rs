@@ -176,6 +176,27 @@ fn framework_signals_add_cli_and_configuration_edges_without_copying_values() {
         !format!("{typescript:?}{spring:?}").contains(SECRET),
         "framework signal output leaked: typescript={typescript:?} spring={spring:?}"
     );
+
+    let rust = extract(
+        "src/install.rs",
+        r#"
+fn load() {
+    config("APP_MODE");
+    static_config(".codex/config.toml");
+}
+"#,
+        SourceLanguage::Rust,
+    );
+    assert!(rust.references.iter().any(|reference| {
+        reference.kind == ReferenceKind::References && reference.name == "APP_MODE"
+    }));
+    assert!(
+        rust.references.iter().all(|reference| {
+            reference.kind != ReferenceKind::References || reference.name != ".codex/config.toml"
+        }),
+        "static_config argument leaked into configuration references: {:?}",
+        rust.references
+    );
 }
 
 #[test]

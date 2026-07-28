@@ -4,8 +4,8 @@ use tree_sitter::Node;
 use crate::{
     ExtractError, ExtractedReference,
     walk::{
-        ExtractionBuilder, PendingSymbol,
-        syntax::{named_children, span_for},
+        ExtractionBuilder, JoinedSignature, PendingSymbol, joined_signature,
+        syntax::{DescendantQuery, descendant_of_kind, named_children, span_for},
     },
 };
 
@@ -38,13 +38,6 @@ pub(super) fn visit_declaration(
     }
 }
 
-pub(super) fn capture_usage(
-    _builder: &mut ExtractionBuilder<'_, '_>,
-    _node: Node<'_>,
-) -> Result<(), ExtractError> {
-    Ok(())
-}
-
 fn emit_record(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
@@ -54,7 +47,7 @@ fn emit_record(
         return Ok(());
     };
     let name = builder.context.owned_text(name_node)?;
-    let signature = declaration_signature(builder, keyword, &name)?;
+    let signature = joined_signature(builder, JoinedSignature::words(keyword, &name))?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::Struct,
         name: name.clone(),
@@ -133,7 +126,7 @@ fn emit_enum(builder: &mut ExtractionBuilder<'_, '_>, node: Node<'_>) -> Result<
         return Ok(());
     };
     let name = builder.context.owned_text(name_node)?;
-    let signature = declaration_signature(builder, "enum", &name)?;
+    let signature = joined_signature(builder, JoinedSignature::words("enum", &name))?;
     let owner = builder.emit_symbol(PendingSymbol {
         kind: SymbolKind::Enum,
         name: name.clone(),
@@ -212,8 +205,20 @@ fn safe_column_signature(
     type_node: Node<'_>,
     base_name: &str,
 ) -> Result<String, ExtractError> {
-    let array = descendant_of_kind(type_node, "array", 0).is_some();
-    let optional = descendant_of_kind(type_node, "maybe", 0).is_some();
+    let array = descendant_of_kind(DescendantQuery {
+        node: type_node,
+        kind: "array",
+        depth: 0,
+        maximum_depth: MAX_TYPE_DEPTH,
+    })
+    .is_some();
+    let optional = descendant_of_kind(DescendantQuery {
+        node: type_node,
+        kind: "maybe",
+        depth: 0,
+        maximum_depth: MAX_TYPE_DEPTH,
+    })
+    .is_some();
     let extra = usize::from(array).saturating_mul(2) + usize::from(optional);
     let length = base_name
         .len()
@@ -233,51 +238,21 @@ fn safe_column_signature(
     builder.context.copy_text(&signature)
 }
 
-fn declaration_signature(
-    builder: &ExtractionBuilder<'_, '_>,
-    keyword: &str,
-    name: &str,
-) -> Result<String, ExtractError> {
-    let length = keyword
-        .len()
-        .checked_add(name.len())
-        .and_then(|length| length.checked_add(1))
-        .ok_or(ExtractError::OutputLimit)?;
-    let mut signature = String::new();
-    signature
-        .try_reserve(length)
-        .map_err(|_| ExtractError::OutputLimit)?;
-    signature.push_str(keyword);
-    signature.push(' ');
-    signature.push_str(name);
-    builder.context.copy_text(&signature)
-}
+const PRISMA_SCALAR_NAMES: &[&str] = &[
+    "String",
+    "Boolean",
+    "Int",
+    "BigInt",
+    "Float",
+    "Decimal",
+    "DateTime",
+    "Json",
+    "Bytes",
+    "Unsupported",
+];
 
 fn is_scalar(name: &str) -> bool {
-    matches!(
-        name,
-        "String"
-            | "Boolean"
-            | "Int"
-            | "BigInt"
-            | "Float"
-            | "Decimal"
-            | "DateTime"
-            | "Json"
-            | "Bytes"
-            | "Unsupported"
-    )
-}
-
-fn descendant_of_kind<'tree>(node: Node<'tree>, kind: &str, depth: usize) -> Option<Node<'tree>> {
-    if depth > MAX_TYPE_DEPTH {
-        return None;
-    }
-    if node.kind() == kind {
-        return Some(node);
-    }
-    direct_named_children(node)
-        .find_map(|child| descendant_of_kind(child, kind, depth.saturating_add(1)))
+    PRISMA_SCALAR_NAMES.contains(&name)
 }
 
 fn direct_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {

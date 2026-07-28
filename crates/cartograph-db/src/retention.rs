@@ -95,10 +95,11 @@ impl GenerationRetentionPolicy {
         maximum_search_relation_bytes: u64,
         maximum_ddl_relations: u32,
     ) -> Result<Self, GenerationRetentionError> {
-        if maximum_cascade_rows == 0
-            || maximum_cascade_rows > MAXIMUM_CASCADE_ROW_BUDGET
-            || maximum_search_relation_bytes == 0
-            || maximum_search_relation_bytes > MAXIMUM_SEARCH_RELATION_BYTE_BUDGET
+        if !valid_positive_limit(maximum_cascade_rows, MAXIMUM_CASCADE_ROW_BUDGET)
+            || !valid_positive_limit(
+                maximum_search_relation_bytes,
+                MAXIMUM_SEARCH_RELATION_BYTE_BUDGET,
+            )
             || maximum_ddl_relations == 0
             || maximum_ddl_relations > MAXIMUM_DDL_RELATIONS
         {
@@ -145,6 +146,10 @@ impl GenerationRetentionPolicy {
     pub const fn maximum_ddl_relations(self) -> u32 {
         self.maximum_ddl_relations
     }
+}
+
+const fn valid_positive_limit(value: u64, maximum: u64) -> bool {
+    value > 0 && value <= maximum
 }
 
 /// Exact bounded cleanup result after cascades committed.

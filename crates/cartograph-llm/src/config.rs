@@ -30,7 +30,6 @@ const MAXIMUM_INPUT_BYTES: usize = 16 * 1_024 * 1_024;
 const DEFAULT_MAXIMUM_RESPONSE_BYTES: usize = 16 * 1_024 * 1_024;
 const MAXIMUM_RESPONSE_BYTES: usize = 64 * 1_024 * 1_024;
 const MAXIMUM_MODEL_BYTES: usize = 256;
-const MAXIMUM_ENDPOINT_BYTES: usize = 4_096;
 const MAXIMUM_API_KEY_BYTES: usize = 8_192;
 const PROJECT_CONFIG_FIELD: &str = ".cartograph/config.json embeddingLlm";
 
@@ -206,56 +205,11 @@ impl EmbeddingSettings {
 }
 
 fn normalize_endpoint(raw: &str) -> Result<Url, EmbeddingError> {
-    if raw.is_empty() || raw.len() > MAXIMUM_ENDPOINT_BYTES || raw.chars().any(char::is_control) {
-        return Err(EmbeddingError::InvalidConfiguration {
+    crate::endpoint::normalize_endpoint(raw, crate::endpoint::EndpointPath::Embeddings).map_err(
+        |()| EmbeddingError::InvalidConfiguration {
             field: EMBEDDING_ENDPOINT_ENV,
-        });
-    }
-    let mut endpoint = Url::parse(raw).map_err(|_| EmbeddingError::InvalidConfiguration {
-        field: EMBEDDING_ENDPOINT_ENV,
-    })?;
-    if endpoint.username() != ""
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-        || endpoint.host_str().is_none()
-    {
-        return Err(EmbeddingError::InvalidConfiguration {
-            field: EMBEDDING_ENDPOINT_ENV,
-        });
-    }
-    match endpoint.scheme() {
-        "https" => {}
-        "http" if endpoint.host_str().is_some_and(is_loopback_host) => {}
-        _ => {
-            return Err(EmbeddingError::InvalidConfiguration {
-                field: EMBEDDING_ENDPOINT_ENV,
-            });
-        }
-    }
-    let path = endpoint.path().trim_end_matches('/');
-    let path = if path.ends_with("/v1/embeddings") {
-        path.to_owned()
-    } else if path.ends_with("/v1") {
-        format!("{path}/embeddings")
-    } else if path.is_empty() {
-        "/v1/embeddings".to_owned()
-    } else {
-        format!("{path}/v1/embeddings")
-    };
-    endpoint.set_path(&path);
-    Ok(endpoint)
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    let host = host
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host);
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
+        },
+    )
 }
 
 fn optional_env(key: &'static str) -> Result<Option<String>, EmbeddingError> {

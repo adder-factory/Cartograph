@@ -1,5 +1,3 @@
-use std::mem;
-
 use cartograph_domain::{
     ReferenceKind, SourceLanguage, SymbolId, SymbolKind, Visibility,
     callable_signature_is_literal_free,
@@ -9,14 +7,102 @@ use tree_sitter::Node;
 use crate::{ExtractError, ExtractedImportBinding, ImportBindingKind};
 
 use super::{
-    ExtractionBuilder, PendingReference, PendingSymbol, references,
+    ExtractionBuilder, PendingReference, PendingSymbol, current_owner_kind_in, references,
     syntax::{children, descendants_including_root, named_children, span_for},
+    with_root_scope,
 };
 
 const MAX_SIGNATURE_BYTES: usize = 512;
 const MAX_REFERENCE_TARGET_BYTES: usize = 512;
 const MAX_TYPE_DEPTH: usize = 64;
 const MAX_DOC_BYTES: usize = 16 * 1024;
+const JVM_TYPE_OWNER_KINDS: &[SymbolKind] = &[
+    SymbolKind::Class,
+    SymbolKind::Struct,
+    SymbolKind::Interface,
+    SymbolKind::Trait,
+    SymbolKind::Enum,
+];
+
+struct ImportBindingEmission<'tree, 'text> {
+    node: Node<'tree>,
+    kind: ImportBindingKind,
+    module: &'text str,
+    imported: &'text str,
+    local: &'text str,
+}
+
+struct ContainerEmission<'tree> {
+    node: Node<'tree>,
+    kind: SymbolKind,
+    name: String,
+    visibility: Option<Visibility>,
+}
+
+struct ConstructorEmission<'tree, 'text> {
+    node: Node<'tree>,
+    name: &'text str,
+    signature: Option<String>,
+    visibility: Option<Visibility>,
+}
+
+struct PrimaryConstructor<'tree, 'text> {
+    parameters: Node<'tree>,
+    name: &'text str,
+    visibility: Option<Visibility>,
+}
+
+struct ScalaPrimaryConstructor<'tree, 'text> {
+    parameters: Node<'tree>,
+    name: &'text str,
+    visibility: Option<Visibility>,
+    container: Node<'tree>,
+}
+
+struct OwnedBody<'tree> {
+    id: SymbolId,
+    kind: SymbolKind,
+    name: String,
+    body: Option<Node<'tree>>,
+    depth: usize,
+}
+
+struct TypeAliasEmission<'tree> {
+    node: Node<'tree>,
+    name_node: Node<'tree>,
+    target: Option<Node<'tree>>,
+}
+
+struct EnumMemberVisit<'tree> {
+    node: Node<'tree>,
+    depth: usize,
+    name_node: Option<Node<'tree>>,
+}
+
+struct InheritanceCapture<'tree, 'owner> {
+    node: Node<'tree>,
+    owner: &'owner SymbolId,
+    owner_kind: SymbolKind,
+}
+
+struct TypeReferenceCapture<'tree, 'owner> {
+    node: Node<'tree>,
+    owner: &'owner SymbolId,
+    kind: ReferenceKind,
+    depth: usize,
+}
+
+struct ParameterSignatureInput<'tree, Parameters> {
+    parameters: Parameters,
+    style: ParameterStyle,
+    return_type: Option<Node<'tree>>,
+}
+
+struct TypedSignatureInput<'tree, 'text> {
+    keyword: &'text str,
+    name: &'text str,
+    type_node: Option<Node<'tree>>,
+}
 
 pub(super) fn visit_declaration(
     builder: &mut ExtractionBuilder<'_, '_>,
@@ -58,7 +144,14 @@ fn visit_kotlin_declaration(
         "secondary_constructor" => visit_kotlin_secondary_constructor(builder, node, depth)?,
         "property_declaration" => visit_kotlin_property(builder, node, depth)?,
         "type_alias" => visit_kotlin_type_alias(builder, node)?,
-        "enum_entry" => visit_enum_member(builder, node, depth, kotlin_direct_name(node))?,
+        "enum_entry" => visit_enum_member(
+            builder,
+            EnumMemberVisit {
+                node,
+                depth,
+                name_node: kotlin_direct_name(node),
+            },
+        )?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -80,7 +173,14 @@ fn visit_scala_declaration(
         }
         "val_definition" | "var_definition" => visit_scala_binding(builder, node, depth)?,
         "simple_enum_case" | "full_enum_case" => {
-            visit_enum_member(builder, node, depth, node.child_by_field_name("name"))?;
+            visit_enum_member(
+                builder,
+                EnumMemberVisit {
+                    node,
+                    depth,
+                    name_node: node.child_by_field_name("name"),
+                },
+            )?;
         }
         "type_definition" => visit_scala_type_alias(builder, node)?,
         "extension_definition" => visit_scala_extension(builder, node, depth)?,
@@ -171,9 +271,11 @@ fn visit_groovy_recovered_enum(
             builder.context.ensure_active()?;
             visit_enum_member(
                 builder,
-                parameter,
-                depth.saturating_add(1),
-                parameter.child_by_field_name("name"),
+                EnumMemberVisit {
+                    node: parameter,
+                    depth: depth.saturating_add(1),
+                    name_node: parameter.child_by_field_name("name"),
+                },
             )?;
         }
     }
@@ -244,24 +346,7 @@ fn emit_namespace(
     node: Node<'_>,
     name: String,
 ) -> Result<SymbolId, ExtractError> {
-    emit_jvm_symbol(
-        builder,
-        PendingSymbol {
-            kind: SymbolKind::Namespace,
-            name,
-            span_node: node,
-            structural_node: node,
-            doc_anchor: node,
-            body_node: None,
-            declaration_only: false,
-            signature: None,
-            exported: true,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
-            visibility: None,
-        },
-    )
+    emit_jvm_symbol(builder, PendingSymbol::namespace(node, name))
 }
 
 fn visit_kotlin_import(
@@ -285,20 +370,24 @@ fn visit_kotlin_import(
     if wildcard {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Namespace,
-            &target,
-            "*",
-            alias.as_deref().unwrap_or("*"),
+            ImportBindingEmission {
+                node,
+                kind: ImportBindingKind::Namespace,
+                module: &target,
+                imported: "*",
+                local: alias.as_deref().unwrap_or("*"),
+            },
         )?;
     } else if let Some((module, imported)) = target.rsplit_once('.') {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Named,
-            module,
-            imported,
-            alias.as_deref().unwrap_or(imported),
+            ImportBindingEmission {
+                node,
+                kind: ImportBindingKind::Named,
+                module,
+                imported,
+                local: alias.as_deref().unwrap_or(imported),
+            },
         )?;
     }
     Ok(())
@@ -327,20 +416,24 @@ fn visit_scala_import(
     if named_children(node).any(|child| child.kind() == "namespace_wildcard") {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Namespace,
-            &target,
-            "*",
-            "*",
+            ImportBindingEmission {
+                node,
+                kind: ImportBindingKind::Namespace,
+                module: &target,
+                imported: "*",
+                local: "*",
+            },
         )?;
     } else if let Some((module, imported)) = target.rsplit_once('.') {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Named,
-            module,
-            imported,
-            imported,
+            ImportBindingEmission {
+                node,
+                kind: ImportBindingKind::Named,
+                module,
+                imported,
+                local: imported,
+            },
         )?;
     }
     Ok(())
@@ -366,20 +459,24 @@ fn visit_groovy_import(
     if wildcard {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Namespace,
-            &target,
-            "*",
-            alias.as_deref().unwrap_or("*"),
+            ImportBindingEmission {
+                node,
+                kind: ImportBindingKind::Namespace,
+                module: &target,
+                imported: "*",
+                local: alias.as_deref().unwrap_or("*"),
+            },
         )?;
     } else if let Some((module, imported)) = target.rsplit_once('.') {
         emit_binding(
             builder,
-            node,
-            ImportBindingKind::Named,
-            module,
-            imported,
-            alias.as_deref().unwrap_or(imported),
+            ImportBindingEmission {
+                node,
+                kind: ImportBindingKind::Named,
+                module,
+                imported,
+                local: alias.as_deref().unwrap_or(imported),
+            },
         )?;
     }
     Ok(())
@@ -436,16 +533,7 @@ fn emit_root_symbol(
     builder: &mut ExtractionBuilder<'_, '_>,
     pending: PendingSymbol<'_>,
 ) -> Result<SymbolId, ExtractError> {
-    let owners = mem::take(&mut builder.owners);
-    let owner_kinds = mem::take(&mut builder.native_owner_kinds);
-    let visibilities = mem::take(&mut builder.native_visibilities);
-    let qualifiers = mem::take(&mut builder.qualifiers);
-    let result = emit_jvm_symbol(builder, pending);
-    builder.owners = owners;
-    builder.native_owner_kinds = owner_kinds;
-    builder.native_visibilities = visibilities;
-    builder.qualifiers = qualifiers;
-    result
+    with_root_scope(builder, |builder| emit_jvm_symbol(builder, pending))
 }
 
 fn emit_jvm_symbol(
@@ -573,12 +661,15 @@ fn normalize_doc(
 
 fn emit_binding(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    kind: ImportBindingKind,
-    module: &str,
-    imported: &str,
-    local: &str,
+    input: ImportBindingEmission<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let ImportBindingEmission {
+        node,
+        kind,
+        module,
+        imported,
+        local,
+    } = input;
     builder.emit_import_binding(ExtractedImportBinding {
         kind,
         module_specifier: builder.context.copy_text(module)?,
@@ -610,15 +701,37 @@ fn visit_kotlin_container(
         named_children(node).find(|child| matches!(child.kind(), "class_body" | "enum_class_body"));
     let name = builder.context.owned_text(name_node)?;
     let visibility = jvm_visibility(builder, node)?;
-    let id = emit_container(builder, node, kind, name.clone(), visibility)?;
-    capture_kotlin_inheritance(builder, node, &id, kind)?;
+    let id = emit_container(
+        builder,
+        ContainerEmission {
+            node,
+            kind,
+            name: name.clone(),
+            visibility,
+        },
+    )?;
+    capture_kotlin_inheritance(
+        builder,
+        InheritanceCapture {
+            node,
+            owner: &id,
+            owner_kind: kind,
+        },
+    )?;
 
     builder.owners.push(id);
     builder.native_owner_kinds.push(kind);
     builder.qualifiers.push(name.clone());
     if let Some(primary) = named_children(node).find(|child| child.kind() == "primary_constructor")
     {
-        emit_kotlin_primary_constructor(builder, primary, &name, visibility)?;
+        emit_kotlin_primary_constructor(
+            builder,
+            PrimaryConstructor {
+                parameters: primary,
+                name: &name,
+                visibility,
+            },
+        )?;
     }
     let result = match body {
         Some(body) => builder.visit(body, depth.saturating_add(1)),
@@ -646,15 +759,38 @@ fn visit_scala_container(
     };
     let name = builder.context.owned_text(name_node)?;
     let visibility = jvm_visibility(builder, node)?;
-    let id = emit_container(builder, node, kind, name.clone(), visibility)?;
-    capture_scala_inheritance(builder, node, &id, kind)?;
+    let id = emit_container(
+        builder,
+        ContainerEmission {
+            node,
+            kind,
+            name: name.clone(),
+            visibility,
+        },
+    )?;
+    capture_scala_inheritance(
+        builder,
+        InheritanceCapture {
+            node,
+            owner: &id,
+            owner_kind: kind,
+        },
+    )?;
 
     builder.owners.push(id);
     builder.native_owner_kinds.push(kind);
     builder.qualifiers.push(name.clone());
     if matches!(node.kind(), "class_definition" | "enum_definition") {
         for parameters in named_children(node).filter(|child| child.kind() == "class_parameters") {
-            emit_scala_primary_constructor(builder, parameters, &name, visibility, node)?;
+            emit_scala_primary_constructor(
+                builder,
+                ScalaPrimaryConstructor {
+                    parameters,
+                    name: &name,
+                    visibility,
+                    container: node,
+                },
+            )?;
         }
     }
     let result = if let Some(body) = node.child_by_field_name("body") {
@@ -685,9 +821,25 @@ fn visit_groovy_container(
     };
     let name = builder.context.owned_text(name_node)?;
     let visibility = jvm_visibility(builder, node)?;
-    let id = emit_container(builder, node, kind, name.clone(), visibility)?;
+    let id = emit_container(
+        builder,
+        ContainerEmission {
+            node,
+            kind,
+            name: name.clone(),
+            visibility,
+        },
+    )?;
     if let Some(superclass) = node.child_by_field_name("superclass") {
-        capture_outer_type_reference(builder, superclass, &id, ReferenceKind::Extends)?;
+        capture_outer_type_reference(
+            builder,
+            TypeReferenceCapture {
+                node: superclass,
+                owner: &id,
+                kind: ReferenceKind::Extends,
+                depth: 0,
+            },
+        )?;
     }
     capture_groovy_implements(builder, node, &id)?;
 
@@ -706,11 +858,14 @@ fn visit_groovy_container(
 
 fn emit_container(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    kind: SymbolKind,
-    name: String,
-    visibility: Option<Visibility>,
+    input: ContainerEmission<'_>,
 ) -> Result<SymbolId, ExtractError> {
+    let ContainerEmission {
+        node,
+        kind,
+        name,
+        visibility,
+    } = input;
     emit_jvm_symbol(
         builder,
         PendingSymbol {
@@ -733,23 +888,35 @@ fn emit_container(
 
 fn emit_kotlin_primary_constructor(
     builder: &mut ExtractionBuilder<'_, '_>,
-    parameters: Node<'_>,
-    name: &str,
-    visibility: Option<Visibility>,
+    input: PrimaryConstructor<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let PrimaryConstructor {
+        parameters,
+        name,
+        visibility,
+    } = input;
     let signature = kotlin_parameters_signature(builder, parameters)?;
     let constructor_visibility = jvm_visibility(builder, parameters)?.or(visibility);
-    let constructor_id =
-        emit_constructor(builder, parameters, name, signature, constructor_visibility)?;
+    let constructor_id = emit_constructor(
+        builder,
+        ConstructorEmission {
+            node: parameters,
+            name,
+            signature,
+            visibility: constructor_visibility,
+        },
+    )?;
     for parameter in named_children(parameters).filter(|child| child.kind() == "class_parameter") {
         builder.context.ensure_active()?;
         if let Some(type_node) = kotlin_type_node(parameter) {
             capture_type_references(
                 builder,
-                type_node,
-                &constructor_id,
-                ReferenceKind::TypeOf,
-                0,
+                TypeReferenceCapture {
+                    node: type_node,
+                    owner: &constructor_id,
+                    kind: ReferenceKind::TypeOf,
+                    depth: 0,
+                },
             )?;
         }
         if !named_children(parameter).any(|child| child.kind() == "binding_pattern_kind") {
@@ -762,23 +929,36 @@ fn emit_kotlin_primary_constructor(
 
 fn emit_scala_primary_constructor(
     builder: &mut ExtractionBuilder<'_, '_>,
-    parameters: Node<'_>,
-    name: &str,
-    visibility: Option<Visibility>,
-    container: Node<'_>,
+    input: ScalaPrimaryConstructor<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let ScalaPrimaryConstructor {
+        parameters,
+        name,
+        visibility,
+        container,
+    } = input;
     let signature = scala_parameters_signature(builder, std::iter::once(parameters))?;
-    let constructor_id = emit_constructor(builder, parameters, name, signature, visibility)?;
+    let constructor_id = emit_constructor(
+        builder,
+        ConstructorEmission {
+            node: parameters,
+            name,
+            signature,
+            visibility,
+        },
+    )?;
     let case_class = direct_keyword(builder, container, "case")?;
     for parameter in named_children(parameters).filter(|child| child.kind() == "class_parameter") {
         builder.context.ensure_active()?;
         if let Some(type_node) = parameter.child_by_field_name("type") {
             capture_type_references(
                 builder,
-                type_node,
-                &constructor_id,
-                ReferenceKind::TypeOf,
-                0,
+                TypeReferenceCapture {
+                    node: type_node,
+                    owner: &constructor_id,
+                    kind: ReferenceKind::TypeOf,
+                    depth: 0,
+                },
             )?;
         }
         if case_class
@@ -793,11 +973,14 @@ fn emit_scala_primary_constructor(
 
 fn emit_constructor(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    name: &str,
-    signature: Option<String>,
-    visibility: Option<Visibility>,
+    input: ConstructorEmission<'_, '_>,
 ) -> Result<SymbolId, ExtractError> {
+    let ConstructorEmission {
+        node,
+        name,
+        signature,
+        visibility,
+    } = input;
     emit_jvm_symbol(
         builder,
         PendingSymbol {
@@ -853,7 +1036,16 @@ fn visit_kotlin_secondary_constructor(
         },
     )?;
     capture_kotlin_parameter_types(builder, parameters, &id)?;
-    visit_owned_body(builder, id, SymbolKind::Method, name, body, depth)
+    visit_owned_body(
+        builder,
+        OwnedBody {
+            id,
+            kind: SymbolKind::Method,
+            name,
+            body,
+            depth,
+        },
+    )
 }
 
 fn visit_kotlin_callable(
@@ -870,7 +1062,7 @@ fn visit_kotlin_callable(
         return builder.visit_named_children(node, depth);
     };
     let name = builder.context.owned_text(name_node)?;
-    let kind = if current_type_scope(builder) {
+    let kind = if current_owner_kind_in(builder, JVM_TYPE_OWNER_KINDS) {
         SymbolKind::Method
     } else {
         SymbolKind::Function
@@ -900,12 +1092,37 @@ fn visit_kotlin_callable(
     )?;
     capture_kotlin_parameter_types(builder, parameters, &id)?;
     if let Some(return_type) = return_type {
-        capture_type_references(builder, return_type, &id, ReferenceKind::Returns, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: return_type,
+                owner: &id,
+                kind: ReferenceKind::Returns,
+                depth: 0,
+            },
+        )?;
     }
     if let Some(receiver) = node.child_by_field_name("receiver") {
-        capture_type_references(builder, receiver, &id, ReferenceKind::TypeOf, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: receiver,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+                depth: 0,
+            },
+        )?;
     }
-    visit_owned_body(builder, id, kind, name, body, depth)
+    visit_owned_body(
+        builder,
+        OwnedBody {
+            id,
+            kind,
+            name,
+            body,
+            depth,
+        },
+    )
 }
 
 fn visit_scala_callable(
@@ -917,7 +1134,7 @@ fn visit_scala_callable(
         return builder.visit_named_children(node, depth);
     };
     let name = builder.context.owned_text(name_node)?;
-    let kind = if current_type_scope(builder) {
+    let kind = if current_owner_kind_in(builder, JVM_TYPE_OWNER_KINDS) {
         SymbolKind::Method
     } else {
         SymbolKind::Function
@@ -949,12 +1166,29 @@ fn visit_scala_callable(
         },
     )?;
     for parameter_list in &parameters {
-        capture_scala_parameter_types(builder, *parameter_list, &id)?;
+        capture_dynamic_parameter_types(builder, *parameter_list, &id)?;
     }
     if let Some(return_type) = return_type {
-        capture_type_references(builder, return_type, &id, ReferenceKind::Returns, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: return_type,
+                owner: &id,
+                kind: ReferenceKind::Returns,
+                depth: 0,
+            },
+        )?;
     }
-    visit_owned_body(builder, id, kind, name, body, depth)
+    visit_owned_body(
+        builder,
+        OwnedBody {
+            id,
+            kind,
+            name,
+            body,
+            depth,
+        },
+    )
 }
 
 fn visit_groovy_callable(
@@ -969,7 +1203,7 @@ fn visit_groovy_callable(
         return builder.visit_named_children(node, depth);
     };
     let name = builder.context.owned_text(name_node)?;
-    let kind = if current_type_scope(builder) {
+    let kind = if current_owner_kind_in(builder, JVM_TYPE_OWNER_KINDS) {
         SymbolKind::Method
     } else {
         SymbolKind::Function
@@ -997,15 +1231,32 @@ fn visit_groovy_callable(
             visibility,
         },
     )?;
-    capture_groovy_parameter_types(builder, parameters, &id)?;
+    capture_dynamic_parameter_types(builder, parameters, &id)?;
     if let Some(return_type) = return_type {
-        capture_type_references(builder, return_type, &id, ReferenceKind::Returns, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: return_type,
+                owner: &id,
+                kind: ReferenceKind::Returns,
+                depth: 0,
+            },
+        )?;
     }
-    visit_owned_body(builder, id, kind, name, body, depth)
+    visit_owned_body(
+        builder,
+        OwnedBody {
+            id,
+            kind,
+            name,
+            body,
+            depth,
+        },
+    )
 }
 
 fn is_groovy_constructor_node(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> bool {
-    if !current_type_scope(builder) {
+    if !current_owner_kind_in(builder, JVM_TYPE_OWNER_KINDS) {
         return false;
     }
     let Some(function) = node.child_by_field_name("function") else {
@@ -1054,7 +1305,16 @@ fn visit_groovy_constructor(
         },
     )?;
     capture_recovered_groovy_parameter_types(builder, arguments, &id)?;
-    visit_owned_body(builder, id, SymbolKind::Method, name, body, depth)
+    visit_owned_body(
+        builder,
+        OwnedBody {
+            id,
+            kind: SymbolKind::Method,
+            name,
+            body,
+            depth,
+        },
+    )
 }
 
 fn groovy_recovered_constructor_signature(
@@ -1106,10 +1366,12 @@ fn capture_recovered_groovy_parameter_types(
         let type_name = builder.context.copy_text(type_name)?;
         push_named_reference(
             builder,
-            Some(owner.clone()),
-            type_name,
-            ReferenceKind::TypeOf,
-            arguments,
+            PendingReference {
+                owner: Some(owner.clone()),
+                name: type_name,
+                kind: ReferenceKind::TypeOf,
+                node: arguments,
+            },
         )?;
     }
     Ok(())
@@ -1127,12 +1389,15 @@ fn bounded_groovy_parameters(raw: &str) -> Option<&str> {
 
 fn visit_owned_body(
     builder: &mut ExtractionBuilder<'_, '_>,
-    id: SymbolId,
-    kind: SymbolKind,
-    name: String,
-    body: Option<Node<'_>>,
-    depth: usize,
+    input: OwnedBody<'_>,
 ) -> Result<(), ExtractError> {
+    let OwnedBody {
+        id,
+        kind,
+        name,
+        body,
+        depth,
+    } = input;
     let Some(body) = body else {
         return Ok(());
     };
@@ -1151,7 +1416,12 @@ fn visit_kotlin_property(
     node: Node<'_>,
     depth: usize,
 ) -> Result<(), ExtractError> {
-    let Some(id) = emit_kotlin_property_symbol(builder, node, current_type_scope(builder))? else {
+    let Some(id) = emit_kotlin_property_symbol(
+        builder,
+        node,
+        current_owner_kind_in(builder, JVM_TYPE_OWNER_KINDS),
+    )?
+    else {
         return builder.visit_named_children(node, depth);
     };
     let Some(variable) = named_children(node).find(|child| child.kind() == "variable_declaration")
@@ -1222,7 +1492,14 @@ fn emit_kotlin_property_symbol(
             doc_anchor: node,
             body_node: None,
             declaration_only: false,
-            signature: kotlin_property_signature(builder, keyword, &name, type_node)?,
+            signature: kotlin_property_signature(
+                builder,
+                TypedSignatureInput {
+                    keyword,
+                    name: &name,
+                    type_node,
+                },
+            )?,
             exported: visibility == Some(Visibility::Public),
             default_export: false,
             async_symbol: false,
@@ -1231,7 +1508,15 @@ fn emit_kotlin_property_symbol(
         },
     )?;
     if let Some(type_node) = type_node {
-        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: type_node,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+                depth: 0,
+            },
+        )?;
     }
     Ok(Some(id))
 }
@@ -1261,7 +1546,14 @@ fn emit_scala_class_parameter(
             doc_anchor: node,
             body_node: None,
             declaration_only: false,
-            signature: keyword_typed_signature(builder, keyword, &name, type_node)?,
+            signature: keyword_typed_signature(
+                builder,
+                TypedSignatureInput {
+                    keyword,
+                    name: &name,
+                    type_node,
+                },
+            )?,
             exported: visibility == Some(Visibility::Public),
             default_export: false,
             async_symbol: false,
@@ -1270,7 +1562,15 @@ fn emit_scala_class_parameter(
         },
     )?;
     if let Some(type_node) = type_node {
-        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: type_node,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+                depth: 0,
+            },
+        )?;
     }
     Ok(())
 }
@@ -1287,7 +1587,7 @@ fn visit_scala_binding(
         return builder.visit_named_children(node, depth);
     };
     let name = builder.context.owned_text(name_node)?;
-    let class_scope = current_type_scope(builder);
+    let class_scope = current_owner_kind_in(builder, JVM_TYPE_OWNER_KINDS);
     let immutable = node.kind() == "val_definition";
     let kind = if class_scope {
         SymbolKind::Field
@@ -1316,9 +1616,11 @@ fn visit_scala_binding(
             declaration_only: false,
             signature: keyword_typed_signature(
                 builder,
-                if immutable { "val" } else { "var" },
-                &name,
-                type_node,
+                TypedSignatureInput {
+                    keyword: if immutable { "val" } else { "var" },
+                    name: &name,
+                    type_node,
+                },
             )?,
             exported: visibility == Some(Visibility::Public),
             default_export: false,
@@ -1328,7 +1630,15 @@ fn visit_scala_binding(
         },
     )?;
     if let Some(type_node) = type_node {
-        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: type_node,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+                depth: 0,
+            },
+        )?;
     }
     if let Some(value) = value {
         builder.owners.push(id);
@@ -1348,7 +1658,7 @@ fn visit_groovy_binding(
         return builder.visit_named_children(node, depth);
     };
     let name = builder.context.owned_text(name_node)?;
-    let class_scope = current_type_scope(builder);
+    let class_scope = current_owner_kind_in(builder, JVM_TYPE_OWNER_KINDS);
     let kind = if class_scope {
         SymbolKind::Field
     } else if has_modifier(builder, node, "final")? {
@@ -1383,7 +1693,15 @@ fn visit_groovy_binding(
         },
     )?;
     if let Some(type_node) = type_node {
-        capture_type_references(builder, type_node, &id, ReferenceKind::TypeOf, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: type_node,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+                depth: 0,
+            },
+        )?;
     }
     if let Some(value) = value {
         builder.owners.push(id);
@@ -1412,7 +1730,14 @@ fn visit_kotlin_type_alias(
         return Ok(());
     };
     let target = types.next();
-    emit_type_alias(builder, node, name_node, target)
+    emit_type_alias(
+        builder,
+        TypeAliasEmission {
+            node,
+            name_node,
+            target,
+        },
+    )
 }
 
 fn visit_scala_type_alias(
@@ -1422,15 +1747,25 @@ fn visit_scala_type_alias(
     let Some(name_node) = node.child_by_field_name("name") else {
         return Ok(());
     };
-    emit_type_alias(builder, node, name_node, node.child_by_field_name("type"))
+    emit_type_alias(
+        builder,
+        TypeAliasEmission {
+            node,
+            name_node,
+            target: node.child_by_field_name("type"),
+        },
+    )
 }
 
 fn emit_type_alias(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    name_node: Node<'_>,
-    target: Option<Node<'_>>,
+    input: TypeAliasEmission<'_>,
 ) -> Result<(), ExtractError> {
+    let TypeAliasEmission {
+        node,
+        name_node,
+        target,
+    } = input;
     let name = builder.context.owned_text(name_node)?;
     let visibility = jvm_visibility(builder, node)?;
     let id = emit_jvm_symbol(
@@ -1452,17 +1787,28 @@ fn emit_type_alias(
         },
     )?;
     if let Some(target) = target {
-        capture_type_references(builder, target, &id, ReferenceKind::TypeOf, 0)?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: target,
+                owner: &id,
+                kind: ReferenceKind::TypeOf,
+                depth: 0,
+            },
+        )?;
     }
     Ok(())
 }
 
 fn visit_enum_member(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    depth: usize,
-    name_node: Option<Node<'_>>,
+    input: EnumMemberVisit<'_>,
 ) -> Result<(), ExtractError> {
+    let EnumMemberVisit {
+        node,
+        depth,
+        name_node,
+    } = input;
     let Some(name_node) = name_node else {
         return builder.visit_named_children(node, depth);
     };
@@ -1487,7 +1833,16 @@ fn visit_enum_member(
     )?;
     let body =
         named_children(node).find(|child| matches!(child.kind(), "class_body" | "template_body"));
-    visit_owned_body(builder, id, SymbolKind::EnumMember, name, body, depth)
+    visit_owned_body(
+        builder,
+        OwnedBody {
+            id,
+            kind: SymbolKind::EnumMember,
+            name,
+            body,
+            depth,
+        },
+    )
 }
 
 fn visit_scala_extension(
@@ -1506,10 +1861,13 @@ fn visit_scala_extension(
 
 fn capture_kotlin_inheritance(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    owner_kind: SymbolKind,
+    input: InheritanceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let InheritanceCapture {
+        node,
+        owner,
+        owner_kind,
+    } = input;
     let mut index = 0_usize;
     for specifier in named_children(node).filter(|child| child.kind() == "delegation_specifier") {
         builder.context.ensure_active()?;
@@ -1520,7 +1878,15 @@ fn capture_kotlin_inheritance(
         } else {
             ReferenceKind::Implements
         };
-        capture_outer_type_reference(builder, specifier, owner, kind)?;
+        capture_outer_type_reference(
+            builder,
+            TypeReferenceCapture {
+                node: specifier,
+                owner,
+                kind,
+                depth: 0,
+            },
+        )?;
         index = index.saturating_add(1);
     }
     Ok(())
@@ -1528,10 +1894,13 @@ fn capture_kotlin_inheritance(
 
 fn capture_scala_inheritance(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    owner_kind: SymbolKind,
+    input: InheritanceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let InheritanceCapture {
+        node,
+        owner,
+        owner_kind,
+    } = input;
     let Some(clause) = node.child_by_field_name("extend") else {
         return Ok(());
     };
@@ -1543,7 +1912,15 @@ fn capture_scala_inheritance(
         } else {
             ReferenceKind::Implements
         };
-        capture_outer_type_reference(builder, target, owner, kind)?;
+        capture_outer_type_reference(
+            builder,
+            TypeReferenceCapture {
+                node: target,
+                owner,
+                kind,
+                depth: 0,
+            },
+        )?;
         index = index.saturating_add(1);
     }
     Ok(())
@@ -1567,10 +1944,12 @@ fn capture_groovy_implements(
             };
             push_named_reference(
                 builder,
-                Some(owner.clone()),
-                name,
-                ReferenceKind::Implements,
-                error,
+                PendingReference {
+                    owner: Some(owner.clone()),
+                    name,
+                    kind: ReferenceKind::Implements,
+                    node: error,
+                },
             )?;
         }
     }
@@ -1579,10 +1958,11 @@ fn capture_groovy_implements(
 
 fn capture_outer_type_reference(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    kind: ReferenceKind,
+    input: TypeReferenceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let TypeReferenceCapture {
+        node, owner, kind, ..
+    } = input;
     let target = descendants_including_root(node).find(|candidate| {
         matches!(
             candidate.kind(),
@@ -1600,16 +1980,27 @@ fn capture_outer_type_reference(
     let Some(name) = safe_type_text(builder, target)? else {
         return Ok(());
     };
-    push_named_reference(builder, Some(owner.clone()), name, kind, target)
+    push_named_reference(
+        builder,
+        PendingReference {
+            owner: Some(owner.clone()),
+            name,
+            kind,
+            node: target,
+        },
+    )
 }
 
 fn capture_type_references(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    owner: &SymbolId,
-    kind: ReferenceKind,
-    depth: usize,
+    input: TypeReferenceCapture<'_, '_>,
 ) -> Result<(), ExtractError> {
+    let TypeReferenceCapture {
+        node,
+        owner,
+        kind,
+        depth,
+    } = input;
     if depth > MAX_TYPE_DEPTH {
         return Err(ExtractError::NestingLimit);
     }
@@ -1624,12 +2015,28 @@ fn capture_type_references(
         if let Some(name) = safe_type_text(builder, node)?
             && !is_jvm_builtin(&name)
         {
-            push_named_reference(builder, Some(owner.clone()), name, kind, node)?;
+            push_named_reference(
+                builder,
+                PendingReference {
+                    owner: Some(owner.clone()),
+                    name,
+                    kind,
+                    node,
+                },
+            )?;
         }
         return Ok(());
     }
     for child in named_children(node) {
-        capture_type_references(builder, child, owner, kind, depth.saturating_add(1))?;
+        capture_type_references(
+            builder,
+            TypeReferenceCapture {
+                node: child,
+                owner,
+                kind,
+                depth: depth.saturating_add(1),
+            },
+        )?;
     }
     Ok(())
 }
@@ -1656,7 +2063,15 @@ fn capture_kotlin_usage(
             } else {
                 ReferenceKind::Calls
             };
-            push_named_reference(builder, builder.owners.last().cloned(), name, kind, target)
+            push_named_reference(
+                builder,
+                PendingReference {
+                    owner: builder.owners.last().cloned(),
+                    name,
+                    kind,
+                    node: target,
+                },
+            )
         }
         "navigation_expression" if !is_kotlin_call_target(node) => {
             capture_terminal_member(builder, node)
@@ -1679,10 +2094,12 @@ fn capture_scala_usage(
             };
             push_named_reference(
                 builder,
-                builder.owners.last().cloned(),
-                name,
-                ReferenceKind::Calls,
-                target,
+                PendingReference {
+                    owner: builder.owners.last().cloned(),
+                    name,
+                    kind: ReferenceKind::Calls,
+                    node: target,
+                },
             )
         }
         "instance_expression" => {
@@ -1695,10 +2112,12 @@ fn capture_scala_usage(
             };
             push_named_reference(
                 builder,
-                builder.owners.last().cloned(),
-                name,
-                ReferenceKind::Instantiates,
-                target,
+                PendingReference {
+                    owner: builder.owners.last().cloned(),
+                    name,
+                    kind: ReferenceKind::Instantiates,
+                    node: target,
+                },
             )
         }
         "field_expression" if !is_scala_call_target(node) => capture_terminal_member(builder, node),
@@ -1720,10 +2139,12 @@ fn capture_groovy_usage(
             };
             push_named_reference(
                 builder,
-                builder.owners.last().cloned(),
-                name,
-                ReferenceKind::Calls,
-                target,
+                PendingReference {
+                    owner: builder.owners.last().cloned(),
+                    name,
+                    kind: ReferenceKind::Calls,
+                    node: target,
+                },
             )
         }
         "unary_op" if builder.context.text(node).trim_start().starts_with("new ") => {
@@ -1738,10 +2159,12 @@ fn capture_groovy_usage(
             };
             push_named_reference(
                 builder,
-                builder.owners.last().cloned(),
-                name,
-                ReferenceKind::Instantiates,
-                target,
+                PendingReference {
+                    owner: builder.owners.last().cloned(),
+                    name,
+                    kind: ReferenceKind::Instantiates,
+                    node: target,
+                },
             )
         }
         "dotted_identifier" if !is_groovy_call_target(node) => {
@@ -1771,10 +2194,12 @@ fn capture_terminal_member(
     };
     push_named_reference(
         builder,
-        builder.owners.last().cloned(),
-        name,
-        ReferenceKind::FieldAccess,
-        target,
+        PendingReference {
+            owner: builder.owners.last().cloned(),
+            name,
+            kind: ReferenceKind::FieldAccess,
+            node: target,
+        },
     )
 }
 
@@ -1817,20 +2242,9 @@ fn same_node(left: Node<'_>, right: Node<'_>) -> bool {
 
 fn push_named_reference(
     builder: &mut ExtractionBuilder<'_, '_>,
-    owner: Option<SymbolId>,
-    name: String,
-    kind: ReferenceKind,
-    node: Node<'_>,
+    pending: PendingReference<'_>,
 ) -> Result<(), ExtractError> {
-    references::push_reference(
-        builder,
-        PendingReference {
-            owner,
-            name,
-            kind,
-            node,
-        },
-    )
+    references::push_reference(builder, pending)
 }
 
 fn safe_reference_text(
@@ -1867,37 +2281,59 @@ fn normalize_reference(
     normalized
         .try_reserve(raw.len())
         .map_err(|_| ExtractError::OutputLimit)?;
-    let mut generic_depth = 0_usize;
+    let mut state = ReferenceNormalization {
+        text: normalized,
+        generic_depth: 0,
+    };
     let mut characters = raw.chars().peekable();
     while let Some(character) = characters.next() {
-        match character {
-            '<' | '[' => generic_depth = generic_depth.saturating_add(1),
-            '>' | ']' if generic_depth > 0 => generic_depth = generic_depth.saturating_sub(1),
-            _ if generic_depth > 0 => {}
-            '?' if characters.peek() == Some(&'.') => {}
-            character if character.is_whitespace() => {}
-            character
-                if character.is_ascii_alphanumeric()
-                    || matches!(character, '_' | '.' | ':' | '$') =>
-            {
-                normalized.push(character);
-            }
-            _ => return Ok(None),
+        if !state.accept(character, characters.peek().copied()) {
+            return Ok(None);
         }
     }
-    if generic_depth != 0
-        || normalized.is_empty()
-        || normalized.len() > MAX_REFERENCE_TARGET_BYTES
-        || normalized.starts_with('.')
-        || normalized.ends_with('.')
-    {
+    if !state.is_valid() {
         return Ok(None);
     }
     builder
         .context
         .budget
-        .ensure_string_length(normalized.len())?;
-    Ok(Some(normalized))
+        .ensure_string_length(state.text.len())?;
+    Ok(Some(state.text))
+}
+
+struct ReferenceNormalization {
+    text: String,
+    generic_depth: usize,
+}
+
+impl ReferenceNormalization {
+    fn accept(&mut self, character: char, next: Option<char>) -> bool {
+        match character {
+            '<' | '[' => self.generic_depth = self.generic_depth.saturating_add(1),
+            '>' | ']' if self.generic_depth > 0 => {
+                self.generic_depth = self.generic_depth.saturating_sub(1);
+            }
+            _ if self.generic_depth > 0 => {}
+            '?' if next == Some('.') => {}
+            character if character.is_whitespace() => {}
+            character
+                if character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '.' | ':' | '$') =>
+            {
+                self.text.push(character);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn is_valid(&self) -> bool {
+        self.generic_depth == 0
+            && !self.text.is_empty()
+            && self.text.len() <= MAX_REFERENCE_TARGET_BYTES
+            && !self.text.starts_with('.')
+            && !self.text.ends_with('.')
+    }
 }
 
 fn is_literal_kind(kind: &str) -> bool {
@@ -1918,7 +2354,14 @@ fn kotlin_parameters_signature(
 ) -> Result<Option<String>, ExtractError> {
     let values = named_children(parameters)
         .filter(|child| matches!(child.kind(), "parameter" | "class_parameter"));
-    parameter_signature(builder, values, ParameterStyle::NameColonType, None)
+    parameter_signature(
+        builder,
+        ParameterSignatureInput {
+            parameters: values,
+            style: ParameterStyle::NameColonType,
+            return_type: None,
+        },
+    )
 }
 
 fn kotlin_callable_signature(
@@ -1927,7 +2370,14 @@ fn kotlin_callable_signature(
     return_type: Option<Node<'_>>,
 ) -> Result<Option<String>, ExtractError> {
     let values = named_children(parameters).filter(|child| child.kind() == "parameter");
-    parameter_signature(builder, values, ParameterStyle::NameColonType, return_type)
+    parameter_signature(
+        builder,
+        ParameterSignatureInput {
+            parameters: values,
+            style: ParameterStyle::NameColonType,
+            return_type,
+        },
+    )
 }
 
 fn scala_parameters_signature<'tree>(
@@ -1938,10 +2388,12 @@ fn scala_parameters_signature<'tree>(
     for parameter_list in parameters {
         let Some(group) = parameter_signature(
             builder,
-            named_children(parameter_list)
-                .filter(|child| matches!(child.kind(), "parameter" | "class_parameter")),
-            ParameterStyle::NameColonType,
-            None,
+            ParameterSignatureInput {
+                parameters: named_children(parameter_list)
+                    .filter(|child| matches!(child.kind(), "parameter" | "class_parameter")),
+                style: ParameterStyle::NameColonType,
+                return_type: None,
+            },
         )?
         else {
             return Ok(None);
@@ -1978,8 +2430,14 @@ fn groovy_callable_signature(
     return_type: Option<Node<'_>>,
 ) -> Result<Option<String>, ExtractError> {
     let values = named_children(parameters).filter(|child| child.kind() == "parameter");
-    let Some(parameters) =
-        parameter_signature(builder, values, ParameterStyle::TypeSpaceName, None)?
+    let Some(parameters) = parameter_signature(
+        builder,
+        ParameterSignatureInput {
+            parameters: values,
+            style: ParameterStyle::TypeSpaceName,
+            return_type: None,
+        },
+    )?
     else {
         return Ok(None);
     };
@@ -2011,12 +2469,18 @@ enum ParameterStyle {
     TypeSpaceName,
 }
 
-fn parameter_signature<'tree>(
+fn parameter_signature<'tree, Parameters>(
     builder: &mut ExtractionBuilder<'_, '_>,
-    parameters: impl IntoIterator<Item = Node<'tree>>,
-    style: ParameterStyle,
-    return_type: Option<Node<'tree>>,
-) -> Result<Option<String>, ExtractError> {
+    input: ParameterSignatureInput<'tree, Parameters>,
+) -> Result<Option<String>, ExtractError>
+where
+    Parameters: IntoIterator<Item = Node<'tree>>,
+{
+    let ParameterSignatureInput {
+        parameters,
+        style,
+        return_type,
+    } = input;
     let mut signature = String::from("(");
     let mut first = true;
     for parameter in parameters {
@@ -2106,19 +2570,20 @@ fn safe_signature(
 
 fn kotlin_property_signature(
     builder: &ExtractionBuilder<'_, '_>,
-    keyword: &str,
-    name: &str,
-    type_node: Option<Node<'_>>,
+    input: TypedSignatureInput<'_, '_>,
 ) -> Result<Option<String>, ExtractError> {
-    keyword_typed_signature(builder, keyword, name, type_node)
+    keyword_typed_signature(builder, input)
 }
 
 fn keyword_typed_signature(
     builder: &ExtractionBuilder<'_, '_>,
-    keyword: &str,
-    name: &str,
-    type_node: Option<Node<'_>>,
+    input: TypedSignatureInput<'_, '_>,
 ) -> Result<Option<String>, ExtractError> {
+    let TypedSignatureInput {
+        keyword,
+        name,
+        type_node,
+    } = input;
     let type_text = type_node.map(|node| builder.context.text(node).trim());
     let length = keyword
         .len()
@@ -2182,13 +2647,21 @@ fn capture_kotlin_parameter_types(
     {
         builder.context.ensure_active()?;
         if let Some(type_node) = kotlin_type_node(parameter) {
-            capture_type_references(builder, type_node, owner, ReferenceKind::TypeOf, 0)?;
+            capture_type_references(
+                builder,
+                TypeReferenceCapture {
+                    node: type_node,
+                    owner,
+                    kind: ReferenceKind::TypeOf,
+                    depth: 0,
+                },
+            )?;
         }
     }
     Ok(())
 }
 
-fn capture_scala_parameter_types(
+fn capture_dynamic_parameter_types(
     builder: &mut ExtractionBuilder<'_, '_>,
     parameters: Node<'_>,
     owner: &SymbolId,
@@ -2196,21 +2669,15 @@ fn capture_scala_parameter_types(
     for parameter in named_children(parameters).filter(|child| child.kind() == "parameter") {
         builder.context.ensure_active()?;
         if let Some(type_node) = parameter.child_by_field_name("type") {
-            capture_type_references(builder, type_node, owner, ReferenceKind::TypeOf, 0)?;
-        }
-    }
-    Ok(())
-}
-
-fn capture_groovy_parameter_types(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    parameters: Node<'_>,
-    owner: &SymbolId,
-) -> Result<(), ExtractError> {
-    for parameter in named_children(parameters).filter(|child| child.kind() == "parameter") {
-        builder.context.ensure_active()?;
-        if let Some(type_node) = parameter.child_by_field_name("type") {
-            capture_type_references(builder, type_node, owner, ReferenceKind::TypeOf, 0)?;
+            capture_type_references(
+                builder,
+                TypeReferenceCapture {
+                    node: type_node,
+                    owner,
+                    kind: ReferenceKind::TypeOf,
+                    depth: 0,
+                },
+            )?;
         }
     }
     Ok(())
@@ -2254,19 +2721,6 @@ fn scala_pattern_name(pattern: Node<'_>) -> Option<Node<'_>> {
         descendants_including_root(pattern)
             .find(|child| matches!(child.kind(), "identifier" | "operator_identifier"))
     }
-}
-
-fn current_type_scope(builder: &ExtractionBuilder<'_, '_>) -> bool {
-    matches!(
-        builder.native_owner_kinds.last(),
-        Some(
-            SymbolKind::Class
-                | SymbolKind::Struct
-                | SymbolKind::Interface
-                | SymbolKind::Trait
-                | SymbolKind::Enum
-        )
-    )
 }
 
 fn jvm_visibility(
@@ -2349,32 +2803,13 @@ fn direct_keyword(
     Ok(false)
 }
 
+const JVM_BUILTIN_TYPES: &[&str] = &[
+    "Any", "Boolean", "Byte", "Char", "Double", "Float", "Int", "Long", "Nothing", "Short", "Unit",
+    "Void", "boolean", "byte", "char", "def", "double", "float", "int", "long", "short", "void",
+];
+
 fn is_jvm_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "Any"
-            | "Boolean"
-            | "Byte"
-            | "Char"
-            | "Double"
-            | "Float"
-            | "Int"
-            | "Long"
-            | "Nothing"
-            | "Short"
-            | "Unit"
-            | "Void"
-            | "boolean"
-            | "byte"
-            | "char"
-            | "def"
-            | "double"
-            | "float"
-            | "int"
-            | "long"
-            | "short"
-            | "void"
-    )
+    JVM_BUILTIN_TYPES.contains(&name)
 }
 
 fn terminal_name(name: &str) -> &str {

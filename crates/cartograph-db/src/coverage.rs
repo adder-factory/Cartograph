@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use cartograph_domain::{ContentDigest, GenerationId, NormalizedPath, ProjectId, SymbolId};
 use serde::Serialize;
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{column::ColumnIndex, query::query, row::Row, sql_str::AssertSqlSafe};
 
 use crate::{
     CartographDatabase, StorageError,
-    database::{quoted_schema, set_local_statement_timeout},
+    database::{ProjectReadRequest, quoted_schema, read_project_rows, set_local_statement_timeout},
 };
 
 const COVERAGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -56,6 +56,27 @@ impl CoverageTarget {
     }
 }
 
+/// Validated found/hit counts for one coverage dimension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoverageCount {
+    found: u64,
+    hit: u64,
+}
+
+impl CoverageCount {
+    pub const ZERO: Self = Self { found: 0, hit: 0 };
+
+    pub fn new(found: u64, hit: u64) -> Result<Self, StorageError> {
+        if hit > found {
+            Err(StorageError::InvalidInput {
+                field: "coverage_counts",
+            })
+        } else {
+            Ok(Self { found, hit })
+        }
+    }
+}
+
 /// One exact symbol-level coverage observation ready for bulk insertion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolCoverageFact {
@@ -67,26 +88,23 @@ pub struct SymbolCoverageFact {
 }
 
 impl SymbolCoverageFact {
-    pub fn new(
-        symbol_id: SymbolId,
-        lines_found: u64,
-        lines_hit: u64,
-        functions_found: u64,
-        functions_hit: u64,
-    ) -> Result<Self, StorageError> {
-        if lines_hit > lines_found || functions_hit > functions_found {
-            return Err(StorageError::InvalidInput {
-                field: "coverage_counts",
-            });
-        }
-        Ok(Self {
+    pub fn new(symbol_id: SymbolId, lines: CoverageCount, functions: CoverageCount) -> Self {
+        Self {
             symbol_id,
-            lines_found,
-            lines_hit,
-            functions_found,
-            functions_hit,
-        })
+            lines_found: lines.found,
+            lines_hit: lines.hit,
+            functions_found: functions.found,
+            functions_hit: functions.hit,
+        }
     }
+}
+
+/// Identity and provenance for one current-generation coverage replacement.
+pub struct CoverageLoadInput {
+    pub project_id: ProjectId,
+    pub generation_id: GenerationId,
+    pub source_label: String,
+    pub report_digest: ContentDigest,
 }
 
 /// Validated replacement of one source/current-generation coverage snapshot.
@@ -101,13 +119,15 @@ pub struct CoverageLoadRequest {
 
 impl CoverageLoadRequest {
     pub fn new(
-        project_id: ProjectId,
-        generation_id: GenerationId,
-        source_label: impl Into<String>,
-        report_digest: ContentDigest,
+        input: CoverageLoadInput,
         facts: Vec<SymbolCoverageFact>,
     ) -> Result<Self, StorageError> {
-        let source_label = source_label.into();
+        let CoverageLoadInput {
+            project_id,
+            generation_id,
+            source_label,
+            report_digest,
+        } = input;
         if source_label.is_empty()
             || source_label.len() > 256
             || source_label.contains('\0')
@@ -310,14 +330,17 @@ impl CartographDatabase {
                 ORDER BY files.normalized_path, symbols.start_line, symbols.symbol_id
                 LIMIT {COVERAGE_TARGET_OVERFLOW_PROBE}"#,
         );
-        let rows = self
-            .coverage_read(
+        let rows = read_project_rows(
+            self,
+            ProjectReadRequest {
                 statement,
-                |statement| statement,
                 project_id,
-                "current-coverage-targets",
-            )
-            .await?;
+                operation: "current-coverage-targets",
+                statement_timeout: COVERAGE_TIMEOUT,
+            },
+            |statement| statement,
+        )
+        .await?;
         if i64::try_from(rows.len()).unwrap_or(i64::MAX) > MAX_COVERAGE_TARGETS {
             return Err(StorageError::InvalidInput {
                 field: "coverage_target_limit",
@@ -562,24 +585,27 @@ impl CartographDatabase {
                 LIMIT $9"#,
         );
         let symbol_kinds = (!request.symbol_kinds.is_empty()).then(|| request.symbol_kinds.clone());
-        let rows = self
-            .coverage_read(
+        let rows = read_project_rows(
+            self,
+            ProjectReadRequest {
                 statement,
-                |statement| {
-                    statement
-                        .bind(request.source.as_deref())
-                        .bind(request.symbol_id.as_ref().map(SymbolId::as_str))
-                        .bind(request.include_tests)
-                        .bind(request.maximum_fraction)
-                        .bind(request.minimum_centrality)
-                        .bind(symbol_kinds)
-                        .bind(request.path_prefix.as_deref())
-                        .bind(i64::from(request.limit))
-                },
                 project_id,
-                "current-symbol-coverage",
-            )
-            .await?;
+                operation: "current-symbol-coverage",
+                statement_timeout: COVERAGE_TIMEOUT,
+            },
+            |statement| {
+                statement
+                    .bind(request.source.as_deref())
+                    .bind(request.symbol_id.as_ref().map(SymbolId::as_str))
+                    .bind(request.include_tests)
+                    .bind(request.maximum_fraction)
+                    .bind(request.minimum_centrality)
+                    .bind(symbol_kinds)
+                    .bind(request.path_prefix.as_deref())
+                    .bind(i64::from(request.limit))
+            },
+        )
+        .await?;
         rows.iter().map(decode_coverage_record).collect()
     }
 
@@ -619,14 +645,17 @@ impl CartographDatabase {
                        COUNT(DISTINCT source_id)::bigint
                 FROM selected"#,
         );
-        let mut rows = self
-            .coverage_read(
+        let mut rows = read_project_rows(
+            self,
+            ProjectReadRequest {
                 statement,
-                |statement| statement.bind(source),
                 project_id,
-                "current-coverage-stats",
-            )
-            .await?;
+                operation: "current-coverage-stats",
+                statement_timeout: COVERAGE_TIMEOUT,
+            },
+            |statement| statement.bind(source),
+        )
+        .await?;
         let row = rows
             .pop()
             .ok_or(StorageError::CorruptStoredValue { field: "coverage" })?;
@@ -664,14 +693,17 @@ impl CartographDatabase {
                          sources.loaded_at
                 ORDER BY sources.label"#,
         );
-        let rows = self
-            .coverage_read(
+        let rows = read_project_rows(
+            self,
+            ProjectReadRequest {
                 statement,
-                |statement| statement,
                 project_id,
-                "coverage-sources",
-            )
-            .await?;
+                operation: "coverage-sources",
+                statement_timeout: COVERAGE_TIMEOUT,
+            },
+            |statement| statement,
+        )
+        .await?;
         rows.iter().map(decode_source).collect()
     }
 
@@ -693,45 +725,6 @@ impl CartographDatabase {
             .await
             .map_err(|_| database_error("drop-coverage-source"))?;
         Ok(result.rows_affected() == 1)
-    }
-
-    async fn coverage_read<'query, Bind>(
-        &self,
-        statement: String,
-        bind: Bind,
-        project_id: &ProjectId,
-        operation: &'static str,
-    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError>
-    where
-        Bind: FnOnce(
-            sqlx_core::query::Query<'query, sqlx_postgres::Postgres, sqlx_postgres::PgArguments>,
-        ) -> sqlx_core::query::Query<
-            'query,
-            sqlx_postgres::Postgres,
-            sqlx_postgres::PgArguments,
-        >,
-    {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| database_error(operation))?;
-        query("SET TRANSACTION READ ONLY")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        set_local_statement_timeout(&mut transaction, COVERAGE_TIMEOUT)
-            .await
-            .map_err(|_| database_error(operation))?;
-        let rows = bind(query(AssertSqlSafe(statement)).bind(project_id.as_str()))
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(|_| database_error(operation))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| database_error(operation))?;
-        Ok(rows)
     }
 }
 
@@ -776,15 +769,20 @@ fn validate_fraction(value: Option<f64>, field: &'static str) -> Result<(), Stor
     }
 }
 
+const COVERAGE_SYMBOL_KIND_COLUMN: usize = 3;
+const COVERAGE_QUALIFIED_NAME_COLUMN: usize = 4;
+const COVERAGE_START_LINE_COLUMN: usize = 5;
+const COVERAGE_END_LINE_COLUMN: usize = 6;
+
 fn decode_target(row: &sqlx_postgres::PgRow) -> Result<CoverageTarget, StorageError> {
     Ok(CoverageTarget {
         generation_id: GenerationId::parse(&text(row, 0)?).map_err(|_| corrupt())?,
         symbol_id: SymbolId::parse(&text(row, 1)?).map_err(|_| corrupt())?,
         path: NormalizedPath::parse(&text(row, 2)?).map_err(|_| corrupt())?,
-        symbol_kind: text(row, 3)?,
-        qualified_name: text(row, 4)?,
-        start_line: positive_u32(row, 5)?,
-        end_line: positive_u32(row, 6)?,
+        symbol_kind: text(row, COVERAGE_SYMBOL_KIND_COLUMN)?,
+        qualified_name: text(row, COVERAGE_QUALIFIED_NAME_COLUMN)?,
+        start_line: positive_u32(row, COVERAGE_START_LINE_COLUMN)?,
+        end_line: positive_u32(row, COVERAGE_END_LINE_COLUMN)?,
     })
 }
 
@@ -792,18 +790,18 @@ fn decode_coverage_record(
     row: &sqlx_postgres::PgRow,
 ) -> Result<SymbolCoverageRecord, StorageError> {
     Ok(SymbolCoverageRecord {
-        symbol_id: text(row, 0)?,
-        path: text(row, 1)?,
-        language: text(row, 2)?,
-        symbol_kind: text(row, 3)?,
-        qualified_name: text(row, 4)?,
-        source: text(row, 5)?,
-        lines_found: nonnegative_u64(row, 6)?,
-        lines_hit: nonnegative_u64(row, 7)?,
-        coverage_fraction: row.try_get(8).map_err(|_| corrupt())?,
-        incoming_edges: nonnegative_u64(row, 9)?,
-        direct_test_files: nonnegative_u64(row, 10)?,
-        degree_centrality: row.try_get(11).map_err(|_| corrupt())?,
+        symbol_id: text(row, "symbol_id")?,
+        path: text(row, "normalized_path")?,
+        language: text(row, "language")?,
+        symbol_kind: text(row, "symbol_kind")?,
+        qualified_name: text(row, "qualified_name")?,
+        source: text(row, "label")?,
+        lines_found: nonnegative_u64(row, "lines_found")?,
+        lines_hit: nonnegative_u64(row, "lines_hit")?,
+        coverage_fraction: row.try_get("coverage_fraction").map_err(|_| corrupt())?,
+        incoming_edges: nonnegative_u64(row, "incoming_edges")?,
+        direct_test_files: nonnegative_u64(row, "direct_test_files")?,
+        degree_centrality: row.try_get("degree_centrality").map_err(|_| corrupt())?,
     })
 }
 
@@ -817,11 +815,17 @@ fn decode_source(row: &sqlx_postgres::PgRow) -> Result<CoverageSourceRecord, Sto
     })
 }
 
-fn text(row: &sqlx_postgres::PgRow, index: usize) -> Result<String, StorageError> {
+fn text<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<String, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get(index).map_err(|_| corrupt())
 }
 
-fn positive_u32(row: &sqlx_postgres::PgRow, index: usize) -> Result<u32, StorageError> {
+fn positive_u32<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<u32, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get::<i32, _>(index)
         .ok()
         .and_then(|value| u32::try_from(value).ok())
@@ -829,7 +833,10 @@ fn positive_u32(row: &sqlx_postgres::PgRow, index: usize) -> Result<u32, Storage
         .ok_or_else(corrupt)
 }
 
-fn nonnegative_u64(row: &sqlx_postgres::PgRow, index: usize) -> Result<u64, StorageError> {
+fn nonnegative_u64<Index>(row: &sqlx_postgres::PgRow, index: Index) -> Result<u64, StorageError>
+where
+    Index: ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get::<i64, _>(index)
         .ok()
         .and_then(|value| u64::try_from(value).ok())
@@ -852,7 +859,12 @@ mod tests {
     fn coverage_facts_reject_impossible_hit_counts() {
         let symbol = SymbolId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
             .unwrap_or_else(|error| panic!("fixture symbol failed: {error}"));
-        assert!(SymbolCoverageFact::new(symbol.clone(), 10, 8, 2, 1).is_ok());
-        assert!(SymbolCoverageFact::new(symbol, 10, 11, 2, 1).is_err());
+        let lines =
+            CoverageCount::new(10, 8).unwrap_or_else(|error| panic!("line counts failed: {error}"));
+        let functions = CoverageCount::new(2, 1)
+            .unwrap_or_else(|error| panic!("function counts failed: {error}"));
+        let fact = SymbolCoverageFact::new(symbol, lines, functions);
+        assert_eq!(fact.lines_hit, 8);
+        assert!(CoverageCount::new(10, 11).is_err());
     }
 }

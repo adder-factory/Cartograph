@@ -36,13 +36,16 @@ pub use adhoc::{
     read_only_sql_schema,
 };
 pub use artifacts::{
-    AgentArtifactKind, AgentArtifactQuery, AgentArtifactRecord, AgentArtifactScope,
-    AgentArtifactState, AgentRoleCount, CurrentModuleSummary, CurrentModuleSummaryPage,
-    FileSummarySaveRequest, ModuleSummaryRollupItem, ModuleSummarySaveRequest,
-    NeighborSummarySaveRequest, NeighborSummarySource, NewAgentArtifact, PendingFileSummary,
-    PendingModuleSummary, PendingNeighborSummary, PendingRoleSymbol, PendingStructuralSummary,
-    PendingSummarySymbol, StructuralSummaryEdge, SummaryCandidatePolicy, SummaryCoverageStats,
-    SummaryRollupItem,
+    AgentArtifactContent, AgentArtifactKind, AgentArtifactQuery, AgentArtifactRecord,
+    AgentArtifactScope, AgentArtifactState, AgentRoleCount, CurrentModuleSummary,
+    CurrentModuleSummaryPage, FileSummarySaveRequest, ModuleSummaryRollupItem,
+    ModuleSummarySaveRequest, NeighborSummarySaveInput, NeighborSummarySaveRequest,
+    NeighborSummarySource, NewAgentArtifact, PendingFileSummary, PendingModelSummaryQuery,
+    PendingModuleSummary, PendingNeighborSummary, PendingNeighborSummaryQuery, PendingRoleSymbol,
+    PendingStructuralSummary, PendingStructuralSummaryQuery, PendingSummaryRollupQuery,
+    PendingSummarySymbol, StructuralSummaryEdge, StructuralSymbolSummarySaveInput,
+    SummaryCandidatePolicy, SummaryCoverageStats, SummaryRollupItem, SummarySaveInput,
+    SymbolRoleSaveInput, SymbolSummarySaveInput,
 };
 pub use capabilities::{
     CapabilityCheck, CapabilityReport, CheckStatus, probe_capabilities, probe_capabilities_bounded,
@@ -53,8 +56,9 @@ pub use centrality::{
     SymbolPageRankScore, apply_page_rank, apply_sampled_betweenness,
 };
 pub use coverage::{
-    CoverageLoadReport, CoverageLoadRequest, CoverageSourceRecord, CoverageStats, CoverageTarget,
-    SymbolCoverageFact, SymbolCoverageQuery, SymbolCoverageRecord,
+    CoverageCount, CoverageLoadInput, CoverageLoadReport, CoverageLoadRequest,
+    CoverageSourceRecord, CoverageStats, CoverageTarget, SymbolCoverageFact, SymbolCoverageQuery,
+    SymbolCoverageRecord,
 };
 pub use database::{CartographDatabase, StorageError};
 pub use derived_prune::{
@@ -74,7 +78,8 @@ pub use generation::{
     ReadyGeneration, RecoverableGeneration, StagedGeneration, TerminalGenerationMutation,
 };
 pub use history::{
-    FileCochangeFact, FileCochangeRecord, FileHistoryFact, FileHistoryRecord,
+    FileCochangeFact, FileCochangeMetrics, FileCochangeQuery, FileCochangeRecord, FileHistoryFact,
+    FileHistoryMetrics, FileHistoryQuery, FileHistoryRecord, HistoryRefreshInput,
     HistoryRefreshMetadata, HistoryRefreshReport, HistoryRefreshRequest,
 };
 pub use ingest::{
@@ -85,20 +90,23 @@ pub use ingest::{
 };
 pub use insights::{
     DeadCodeCandidate, DeadCodeQuery, DependencyCoverageRow, ExternalImportRecord, FileTestImpact,
-    FileTestImpactResult, GroupedPathInput, GroupedSymbolPeer, GroupedSymbolPeers,
-    GroupedSymbolQuery, ImportInsight, IndexedFileFingerprint, RenameReferenceSite,
-    StructuralCoverageRow, StructuralFinding, StructuralFindingGroup, StructuralFindingGroupQuery,
-    StructuralFindingQuery, StructuralFindingSeverity, StructuralFindingStats, StructuralHotspot,
-    StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort,
+    FileTestImpactQuery, FileTestImpactResult, GroupedPathInput, GroupedSymbolPeer,
+    GroupedSymbolPeers, GroupedSymbolQuery, ImportInsight, IndexedFileFingerprint,
+    RenameReferenceSite, StructuralCoverageRow, StructuralFinding, StructuralFindingGroup,
+    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
+    StructuralFindingStats, StructuralHotspot, StructuralHotspotCategory, StructuralHotspotQuery,
+    StructuralHotspotSort,
 };
 pub use interchange::{
     InterchangeEdge, InterchangeFile, InterchangeReference, InterchangeSnapshot,
-    InterchangeSnapshotError, InterchangeSymbol,
+    InterchangeSnapshotError, InterchangeSnapshotRequest, InterchangeSymbol,
 };
 pub use issue_history::{
-    IssueAttributionKind, IssueHistoryError, IssueHistoryRefreshMetadata,
-    IssueHistoryRefreshReport, IssueHistoryRefreshRequest, SymbolIssueAttribution,
-    SymbolIssueCommitPeer, SymbolIssueCommitPeers, SymbolIssuePeer, SymbolIssueRecord,
+    IssueAttributionKind, IssueCommitSymbolPeerQuery, IssueHistoryError, IssueHistoryRefreshInput,
+    IssueHistoryRefreshMetadata, IssueHistoryRefreshMetadataInput, IssueHistoryRefreshReport,
+    IssueHistoryRefreshRequest, SymbolIssueAttribution, SymbolIssueAttributionInput,
+    SymbolIssueCommitPeer, SymbolIssueCommitPeers, SymbolIssuePeer, SymbolIssuePeerQuery,
+    SymbolIssueQuery, SymbolIssueRecord,
 };
 pub use leases::{
     LeaseAcquisitionAttempt, LeaseAcquisitionProbe, LeaseError, LeaseFence, LeaseOwner,
@@ -114,11 +122,11 @@ pub use managed::{
 pub use migrations::{MigrationError, MigrationReport};
 pub use parse_cache::{
     MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheError, NativeParseCacheKey,
-    NativeParseCacheRecord, NativeParseCacheWrite,
+    NativeParseCacheKeyInput, NativeParseCacheRecord, NativeParseCacheWrite,
 };
 pub use project::{
     GenerationCounts, GenerationStorageSummary, ProjectCurrentGeneration, ProjectPurgeError,
-    ProjectPurgeReport, ProjectSnapshot,
+    ProjectPurgeReport, ProjectPurgeRequest, ProjectSnapshot,
 };
 pub use qualified::{
     QualifiedCentralityComparator, QualifiedSymbolHit, QualifiedSymbolPage, QualifiedSymbolQuery,
@@ -130,9 +138,10 @@ pub use retention::{
 };
 pub use retrieval::{
     CurrentEntryPointPage, CurrentEntryPointsLookup, CurrentFileLookup, CurrentFileRecord,
-    CurrentFileSymbolsLookup, CurrentFilesLookup, CurrentGenerationRecord, CurrentGraphEdge,
-    CurrentGraphLookup, CurrentReferenceRecord, CurrentSourceRangeLookup, CurrentSymbolRecord,
-    CurrentSymbolSetLookup, EntryPointBucket, ExactTextLookup, GraphDirection,
+    CurrentFileSymbolsLookup, CurrentFilesLookup, CurrentGenerationLookup, CurrentGenerationRecord,
+    CurrentGraphEdge, CurrentGraphLookup, CurrentReferenceRecord, CurrentSourceRangeLookup,
+    CurrentSymbolRecord, CurrentSymbolSetLookup, EntryPointBucket, ExactTextLookup, GraphDirection,
+    SourceLineRange,
 };
 pub use search::{SearchComponent, SearchHit, SearchQuery};
 pub use search_relation::SearchRelationMaintenanceReport;
@@ -146,11 +155,13 @@ pub use semantic::{
     RetireEmbeddingModelRequest, RetiredEmbeddingCleanupReport, SemanticReadinessReport,
     SemanticReadinessRequest, SemanticReadinessState, SemanticStorageError, SimilarSymbolHit,
     SimilarSymbolsInput, SimilarSymbolsRequest, SimilarSymbolsResult,
-    SimilarityMaterializationReport, VectorSearchHit, VectorSearchInput, VectorSearchRequest,
+    SimilarityMaterializationPolicy, SimilarityMaterializationReport, VectorSearchHit,
+    VectorSearchInput, VectorSearchRequest,
 };
 pub use sessions::{
-    McpMacroRecord, McpMacroStep, McpSessionKind, McpSessionRecord, McpToolCallInput,
-    McpToolCallRecord, McpToolUsage, McpTraceUsage, NewMcpMacro, NewMcpSession,
+    McpMacroRecord, McpMacroStep, McpSessionCallsQuery, McpSessionKind, McpSessionLookup,
+    McpSessionRecord, McpToolCallData, McpToolCallInput, McpToolCallRecord, McpToolCallWrite,
+    McpToolUsage, McpTraceUsage, NewMcpMacro, NewMcpSession,
 };
 use sqlx_core::{pool::PoolOptions, query::query};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgSslMode, Postgres};

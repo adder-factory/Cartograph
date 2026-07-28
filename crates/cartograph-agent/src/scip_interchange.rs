@@ -8,11 +8,12 @@ use std::{
 #[cfg(unix)]
 use std::fs::File;
 
-use cartograph_db::{InterchangeSnapshot, InterchangeSnapshotError};
-use cartograph_domain::{GenerationId, NormalizedPath};
+use cartograph_db::{InterchangeSnapshot, InterchangeSnapshotError, InterchangeSnapshotRequest};
+use cartograph_domain::{ContentDigest, GenerationId, NormalizedPath};
 use cartograph_extract::{SourceReadOptions, SourceRoot};
 use cartograph_scip::{
-    ScipExportOptions, ScipExportStats, ScipIndex, decode_scip_index, export_snapshot,
+    ScipExportOptions, ScipExportOptionsInput, ScipExportStats, ScipIndex, decode_scip_index,
+    export_snapshot,
 };
 use serde::Serialize;
 
@@ -59,6 +60,37 @@ impl ScipExportRequest {
     }
 }
 
+/// Validated byte, row, and worker bounds for a persistent SCIP overlay import.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScipImportLimits {
+    maximum_bytes: usize,
+    maximum_rows: usize,
+    workers: u16,
+}
+
+impl ScipImportLimits {
+    /// Validate the complete bounded import envelope before any artifact is opened.
+    pub fn new(
+        maximum_bytes: usize,
+        maximum_rows: usize,
+        workers: u16,
+    ) -> Result<Self, ProjectError> {
+        if maximum_bytes == 0
+            || maximum_bytes > MAXIMUM_SCIP_OVERLAY_BYTES
+            || maximum_rows == 0
+            || maximum_rows > MAXIMUM_SCIP_OVERLAY_ROWS
+        {
+            return Err(ProjectError::InvalidOptions);
+        }
+        IndexOptions::default().with_max_workers(workers)?;
+        Ok(Self {
+            maximum_bytes,
+            maximum_rows,
+            workers,
+        })
+    }
+}
+
 /// Validated request to install and publish a persistent SCIP overlay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScipImportRequest {
@@ -70,26 +102,13 @@ pub struct ScipImportRequest {
 
 impl ScipImportRequest {
     /// Bound the project-relative input, protobuf bytes/rows, and index workers.
-    pub fn new(
-        input: &str,
-        maximum_bytes: usize,
-        maximum_rows: usize,
-        workers: u16,
-    ) -> Result<Self, ProjectError> {
+    pub fn new(input: &str, limits: ScipImportLimits) -> Result<Self, ProjectError> {
         let input = artifact_path(input)?;
-        if maximum_bytes == 0
-            || maximum_bytes > MAXIMUM_SCIP_OVERLAY_BYTES
-            || maximum_rows == 0
-            || maximum_rows > MAXIMUM_SCIP_OVERLAY_ROWS
-        {
-            return Err(ProjectError::InvalidOptions);
-        }
-        IndexOptions::default().with_max_workers(workers)?;
         Ok(Self {
             input,
-            maximum_bytes,
-            maximum_rows,
-            workers,
+            maximum_bytes: limits.maximum_bytes,
+            maximum_rows: limits.maximum_rows,
+            workers: limits.workers,
         })
     }
 }
@@ -142,6 +161,28 @@ struct DecodedImport {
     exact_typed_edges: u64,
 }
 
+struct ScipExportWork<'input> {
+    root: &'input Path,
+    repository_fingerprint: &'input ContentDigest,
+    snapshot: InterchangeSnapshot,
+    output: &'input NormalizedPath,
+    cancellation: ProjectCancellation,
+}
+
+struct ScipImportRead<'input> {
+    root: &'input Path,
+    input: &'input NormalizedPath,
+    maximum_bytes: usize,
+    maximum_rows: usize,
+    cancellation: ProjectCancellation,
+}
+
+struct RelativeReadRequest<'input> {
+    root: &'input Path,
+    relative: &'input NormalizedPath,
+    maximum_bytes: usize,
+}
+
 impl ProjectRuntime {
     /// Export the exact fresh PostgreSQL graph to a project-local SCIP artifact.
     pub async fn export_scip_with_cancellation(
@@ -164,7 +205,11 @@ impl ProjectRuntime {
             .ok_or(ProjectError::StatusFailed)?;
         let snapshot = self
             .database
-            .current_interchange_snapshot(&project_id, request.maximum_rows, request.timeout)
+            .current_interchange_snapshot(InterchangeSnapshotRequest {
+                project_id: &project_id,
+                maximum_rows: request.maximum_rows,
+                statement_timeout: request.timeout,
+            })
             .await
             .map_err(interchange_error)?;
         if cancellation.is_cancelled() {
@@ -175,13 +220,13 @@ impl ProjectRuntime {
         let output = request.output.clone();
         let worker_cancellation = cancellation.clone();
         let report = tokio::task::spawn_blocking(move || {
-            export_scip_blocking(
-                &root,
-                &repository_fingerprint,
+            export_scip_blocking(ScipExportWork {
+                root: &root,
+                repository_fingerprint: &repository_fingerprint,
                 snapshot,
-                &output,
-                worker_cancellation,
-            )
+                output: &output,
+                cancellation: worker_cancellation,
+            })
         })
         .await
         .map_err(|_| ProjectError::IndexFailed)??;
@@ -203,13 +248,13 @@ impl ProjectRuntime {
         let maximum_bytes = request.maximum_bytes;
         let maximum_rows = request.maximum_rows;
         let decoded = tokio::task::spawn_blocking(move || {
-            read_and_decode_import(
-                &root,
-                &input,
+            read_and_decode_import(ScipImportRead {
+                root: &root,
+                input: &input,
                 maximum_bytes,
                 maximum_rows,
-                read_cancellation,
-            )
+                cancellation: read_cancellation,
+            })
         })
         .await
         .map_err(|_| ProjectError::ScipOverlayInvalid)??;
@@ -267,23 +312,24 @@ impl ProjectRuntime {
     }
 }
 
-fn export_scip_blocking(
-    root: &Path,
-    repository_fingerprint: &cartograph_domain::ContentDigest,
-    snapshot: InterchangeSnapshot,
-    output: &NormalizedPath,
-    cancellation: ProjectCancellation,
-) -> Result<ScipExportReport, ProjectError> {
+fn export_scip_blocking(input: ScipExportWork<'_>) -> Result<ScipExportReport, ProjectError> {
+    let ScipExportWork {
+        root,
+        repository_fingerprint,
+        snapshot,
+        output,
+        cancellation,
+    } = input;
     let source_root = SourceRoot::open(root).map_err(|_| ProjectError::ProjectRootUnavailable)?;
     let limits = source_limits()?;
     let project_name = package_name(root);
     let project_root_uri = format!("cartograph://{}", repository_fingerprint.as_str());
-    let options = ScipExportOptions::new(
-        &project_name,
-        DEFAULT_PACKAGE_VERSION,
-        env!("CARGO_PKG_VERSION"),
-        &project_root_uri,
-    )
+    let options = ScipExportOptions::new(ScipExportOptionsInput {
+        project_name: &project_name,
+        project_version: DEFAULT_PACKAGE_VERSION,
+        tool_version: env!("CARGO_PKG_VERSION"),
+        project_root_uri: &project_root_uri,
+    })
     .map_err(|_| ProjectError::IndexFailed)?;
     let read_cancellation = cancellation.clone();
     let export = export_snapshot(&snapshot, &options, |raw_path| {
@@ -317,14 +363,22 @@ fn export_scip_blocking(
     })
 }
 
-fn read_and_decode_import(
-    root: &Path,
-    input: &NormalizedPath,
-    maximum_bytes: usize,
-    maximum_rows: usize,
-    cancellation: ProjectCancellation,
-) -> Result<DecodedImport, ProjectError> {
-    let bytes = read_bounded_relative(root, input, maximum_bytes, || cancellation.is_cancelled())?;
+fn read_and_decode_import(input: ScipImportRead<'_>) -> Result<DecodedImport, ProjectError> {
+    let ScipImportRead {
+        root,
+        input,
+        maximum_bytes,
+        maximum_rows,
+        cancellation,
+    } = input;
+    let bytes = read_bounded_relative(
+        RelativeReadRequest {
+            root,
+            relative: input,
+            maximum_bytes,
+        },
+        || cancellation.is_cancelled(),
+    )?;
     if cancellation.is_cancelled() {
         return Err(ProjectError::RequestCancelled);
     }
@@ -426,11 +480,14 @@ fn read_path_digest(path: &Path) -> Result<Option<blake3::Hash>, ProjectError> {
 }
 
 fn read_bounded_relative(
-    root: &Path,
-    relative: &NormalizedPath,
-    maximum_bytes: usize,
+    request: RelativeReadRequest<'_>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<Vec<u8>, ProjectError> {
+    let RelativeReadRequest {
+        root,
+        relative,
+        maximum_bytes,
+    } = request;
     let canonical_root =
         std::fs::canonicalize(root).map_err(|_| ProjectError::ProjectRootUnavailable)?;
     let path = canonical_root.join(relative.as_str());
@@ -639,23 +696,23 @@ mod tests {
         let input = NormalizedPath::parse("index.scip")
             .unwrap_or_else(|error| panic!("path failed: {error}"));
         assert!(
-            read_and_decode_import(
-                directory.path(),
-                &input,
-                1024 * 1024,
-                1,
-                ProjectCancellation::new(),
-            )
+            read_and_decode_import(ScipImportRead {
+                root: directory.path(),
+                input: &input,
+                maximum_bytes: 1024 * 1024,
+                maximum_rows: 1,
+                cancellation: ProjectCancellation::new(),
+            })
             .is_ok()
         );
         assert_eq!(
-            read_and_decode_import(
-                directory.path(),
-                &input,
-                1024 * 1024,
-                0,
-                ProjectCancellation::new(),
-            )
+            read_and_decode_import(ScipImportRead {
+                root: directory.path(),
+                input: &input,
+                maximum_bytes: 1024 * 1024,
+                maximum_rows: 0,
+                cancellation: ProjectCancellation::new(),
+            })
             .map(|decoded| decoded.documents),
             Err(ProjectError::ScipOverlayInvalid)
         );

@@ -69,6 +69,20 @@ pub struct InterchangeSnapshot {
     pub references: Vec<InterchangeReference>,
 }
 
+/// Bounded, deadline-scoped export of one project's current generation.
+pub struct InterchangeSnapshotRequest<'request> {
+    pub project_id: &'request ProjectId,
+    pub maximum_rows: u64,
+    pub statement_timeout: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct InterchangeGeneration<'generation> {
+    schema: &'generation str,
+    project_id: &'generation ProjectId,
+    generation_id: &'generation GenerationId,
+}
+
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum InterchangeSnapshotError {
     #[error("invalid Cartograph interchange snapshot bounds")]
@@ -87,13 +101,11 @@ impl CartographDatabase {
     /// Load one immutable, exactly bounded graph snapshot for interchange.
     pub async fn current_interchange_snapshot(
         &self,
-        project_id: &ProjectId,
-        maximum_rows: u64,
-        statement_timeout: Duration,
+        request: InterchangeSnapshotRequest<'_>,
     ) -> Result<InterchangeSnapshot, InterchangeSnapshotError> {
-        if maximum_rows == 0
-            || maximum_rows > MAXIMUM_INTERCHANGE_ROWS
-            || statement_timeout.is_zero()
+        if request.maximum_rows == 0
+            || request.maximum_rows > MAXIMUM_INTERCHANGE_ROWS
+            || request.statement_timeout.is_zero()
         {
             return Err(InterchangeSnapshotError::InvalidBounds);
         }
@@ -106,7 +118,7 @@ impl CartographDatabase {
             .execute(&mut *transaction)
             .await
             .map_err(|_| InterchangeSnapshotError::DatabaseOperation)?;
-        crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+        crate::database::set_local_statement_timeout(&mut transaction, request.statement_timeout)
             .await
             .map_err(|()| InterchangeSnapshotError::InvalidBounds)?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -117,7 +129,7 @@ impl CartographDatabase {
                   AND current_generation_id IS NOT NULL"#
         );
         let generation = query(AssertSqlSafe(generation_sql))
-            .bind(project_id.as_str())
+            .bind(request.project_id.as_str())
             .fetch_optional(&mut *transaction)
             .await
             .map_err(|_| InterchangeSnapshotError::DatabaseOperation)?
@@ -139,7 +151,7 @@ impl CartographDatabase {
                 AS rows"#
         );
         let rows = query(AssertSqlSafe(count_sql))
-            .bind(project_id.as_str())
+            .bind(request.project_id.as_str())
             .bind(generation.as_str())
             .fetch_one(&mut *transaction)
             .await
@@ -148,14 +160,18 @@ impl CartographDatabase {
             .ok()
             .and_then(|value| u64::try_from(value).ok())
             .ok_or(InterchangeSnapshotError::CorruptStoredValue)?;
-        if rows > maximum_rows {
+        if rows > request.maximum_rows {
             return Err(InterchangeSnapshotError::RowBoundExceeded);
         }
-        let files = load_files(&mut transaction, &schema, project_id, &generation).await?;
-        let symbols = load_symbols(&mut transaction, &schema, project_id, &generation).await?;
-        let edges = load_edges(&mut transaction, &schema, project_id, &generation).await?;
-        let references =
-            load_references(&mut transaction, &schema, project_id, &generation).await?;
+        let generation_scope = InterchangeGeneration {
+            schema: &schema,
+            project_id: request.project_id,
+            generation_id: &generation,
+        };
+        let files = load_files(&mut transaction, generation_scope).await?;
+        let symbols = load_symbols(&mut transaction, generation_scope).await?;
+        let edges = load_edges(&mut transaction, generation_scope).await?;
+        let references = load_references(&mut transaction, generation_scope).await?;
         transaction
             .commit()
             .await
@@ -172,19 +188,18 @@ impl CartographDatabase {
 
 async fn load_files(
     connection: &mut sqlx_postgres::PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    generation: InterchangeGeneration<'_>,
 ) -> Result<Vec<InterchangeFile>, InterchangeSnapshotError> {
     let sql = format!(
         r#"SELECT file_id::text, normalized_path, language, content_hash, byte_size
-            FROM {schema}."files"
+            FROM {}."files"
             WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
-            ORDER BY normalized_path, file_id"#
+            ORDER BY normalized_path, file_id"#,
+        generation.schema
     );
     query(AssertSqlSafe(sql))
-        .bind(project_id.as_str())
-        .bind(generation_id.as_str())
+        .bind(generation.project_id.as_str())
+        .bind(generation.generation_id.as_str())
         .fetch_all(connection)
         .await
         .map_err(|_| InterchangeSnapshotError::DatabaseOperation)?
@@ -203,28 +218,27 @@ async fn load_files(
 
 async fn load_symbols(
     connection: &mut sqlx_postgres::PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    generation: InterchangeGeneration<'_>,
 ) -> Result<Vec<InterchangeSymbol>, InterchangeSnapshotError> {
     let sql = format!(
         r#"SELECT symbols.symbol_id::text, symbols.file_id::text, symbols.symbol_kind,
                    symbols.qualified_name, symbols.signature,
                    COALESCE(documents.code, ''), COALESCE(documents.natural_text, ''),
                    symbols.start_byte, symbols.end_byte, symbols.start_line, symbols.end_line
-            FROM {schema}."symbols" AS symbols
-            LEFT JOIN {schema}."search_documents" AS documents
+            FROM {}."symbols" AS symbols
+            LEFT JOIN {}."search_documents" AS documents
               ON documents.project_id = symbols.project_id
              AND documents.generation_id = symbols.generation_id
              AND documents.symbol_id = symbols.symbol_id
              AND documents.document_kind = 'symbol'
             WHERE symbols.project_id = CAST($1 AS uuid)
               AND symbols.generation_id = CAST($2 AS uuid)
-            ORDER BY symbols.file_id, symbols.start_line, symbols.start_byte, symbols.symbol_id"#
+            ORDER BY symbols.file_id, symbols.start_line, symbols.start_byte, symbols.symbol_id"#,
+        generation.schema, generation.schema
     );
     query(AssertSqlSafe(sql))
-        .bind(project_id.as_str())
-        .bind(generation_id.as_str())
+        .bind(generation.project_id.as_str())
+        .bind(generation.generation_id.as_str())
         .fetch_all(connection)
         .await
         .map_err(|_| InterchangeSnapshotError::DatabaseOperation)?
@@ -249,20 +263,19 @@ async fn load_symbols(
 
 async fn load_edges(
     connection: &mut sqlx_postgres::PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    generation: InterchangeGeneration<'_>,
 ) -> Result<Vec<InterchangeEdge>, InterchangeSnapshotError> {
     let sql = format!(
         r#"SELECT source_symbol_id::text, target_symbol_id::text, edge_kind,
                    confidence, provenance, site_count
-            FROM {schema}."edges"
+            FROM {}."edges"
             WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
-            ORDER BY source_symbol_id, target_symbol_id, edge_kind"#
+            ORDER BY source_symbol_id, target_symbol_id, edge_kind"#,
+        generation.schema
     );
     query(AssertSqlSafe(sql))
-        .bind(project_id.as_str())
-        .bind(generation_id.as_str())
+        .bind(generation.project_id.as_str())
+        .bind(generation.generation_id.as_str())
         .fetch_all(connection)
         .await
         .map_err(|_| InterchangeSnapshotError::DatabaseOperation)?
@@ -282,20 +295,19 @@ async fn load_edges(
 
 async fn load_references(
     connection: &mut sqlx_postgres::PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    generation: InterchangeGeneration<'_>,
 ) -> Result<Vec<InterchangeReference>, InterchangeSnapshotError> {
     let sql = format!(
         r#"SELECT file_id::text, owner_symbol_id::text, target_symbol_id::text,
                    reference_name, reference_kind, start_byte, end_byte, site_count
-            FROM {schema}."references"
+            FROM {}."references"
             WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
-            ORDER BY file_id, start_byte, reference_id"#
+            ORDER BY file_id, start_byte, reference_id"#,
+        generation.schema
     );
     query(AssertSqlSafe(sql))
-        .bind(project_id.as_str())
-        .bind(generation_id.as_str())
+        .bind(generation.project_id.as_str())
+        .bind(generation.generation_id.as_str())
         .fetch_all(connection)
         .await
         .map_err(|_| InterchangeSnapshotError::DatabaseOperation)?

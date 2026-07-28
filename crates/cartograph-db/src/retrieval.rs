@@ -9,7 +9,10 @@ use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 use crate::{
     CartographDatabase, ReferenceSpanPrecision, StorageError,
-    database::{parse_stored_generation_id, read_stored_string, stored_value_error},
+    database::{
+        parse_stored_generation_id, read_stored_bool as read_bool, read_stored_string,
+        stored_value_error,
+    },
 };
 
 const MAX_EXACT_TEXT_BYTES: usize = 4_096;
@@ -66,6 +69,39 @@ impl CurrentGenerationRecord {
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
+    }
+}
+
+/// Immutable project/generation fence shared by current-generation lookups.
+#[derive(Clone, Copy, Debug)]
+pub struct CurrentGenerationLookup<'lookup> {
+    project_id: &'lookup ProjectId,
+    expected_generation_id: &'lookup GenerationId,
+}
+
+impl<'lookup> CurrentGenerationLookup<'lookup> {
+    /// Bind one project to the exact generation callers already observed.
+    #[must_use]
+    pub const fn new(
+        project_id: &'lookup ProjectId,
+        expected_generation_id: &'lookup GenerationId,
+    ) -> Self {
+        Self {
+            project_id,
+            expected_generation_id,
+        }
+    }
+
+    /// Project constrained by this immutable-generation fence.
+    #[must_use]
+    pub const fn project_id(&self) -> &'lookup ProjectId {
+        self.project_id
+    }
+
+    /// Published generation callers already observed for the project.
+    #[must_use]
+    pub const fn expected_generation_id(&self) -> &'lookup GenerationId {
+        self.expected_generation_id
     }
 }
 
@@ -444,14 +480,13 @@ impl<'a> CurrentEntryPointsLookup<'a> {
     /// Bind one entry-point category to one immutable current generation.
     #[must_use]
     pub const fn new(
-        project_id: &'a ProjectId,
-        expected_generation_id: &'a GenerationId,
+        generation: CurrentGenerationLookup<'a>,
         bucket: EntryPointBucket,
         limit: u16,
     ) -> Self {
         Self {
-            project_id,
-            expected_generation_id,
+            project_id: generation.project_id,
+            expected_generation_id: generation.expected_generation_id,
             bucket,
             limit,
         }
@@ -536,15 +571,10 @@ pub struct ExactTextLookup<'a> {
 impl<'a> ExactTextLookup<'a> {
     /// Bind exact text and its result limit to a project.
     #[must_use]
-    pub const fn new(
-        project_id: &'a ProjectId,
-        expected_generation_id: &'a GenerationId,
-        text: &'a str,
-        limit: u16,
-    ) -> Self {
+    pub const fn new(generation: CurrentGenerationLookup<'a>, text: &'a str, limit: u16) -> Self {
         Self {
-            project_id,
-            expected_generation_id,
+            project_id: generation.project_id,
+            expected_generation_id: generation.expected_generation_id,
             text,
             limit,
         }
@@ -571,23 +601,40 @@ pub struct CurrentSourceRangeLookup<'a> {
     limit: u16,
 }
 
+/// Inclusive one-based line range within one canonical path.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceLineRange<'range> {
+    path: &'range NormalizedPath,
+    start_line: u32,
+    end_line: u32,
+}
+
+impl<'range> SourceLineRange<'range> {
+    /// Bind one canonical path to an inclusive source-line range.
+    #[must_use]
+    pub const fn new(path: &'range NormalizedPath, start_line: u32, end_line: u32) -> Self {
+        Self {
+            path,
+            start_line,
+            end_line,
+        }
+    }
+}
+
 impl<'a> CurrentSourceRangeLookup<'a> {
     /// Bind an inclusive source range and result limit to one immutable generation.
     #[must_use]
     pub const fn new(
-        project_id: &'a ProjectId,
-        expected_generation_id: &'a GenerationId,
-        path: &'a NormalizedPath,
-        start_line: u32,
-        end_line: u32,
+        generation: CurrentGenerationLookup<'a>,
+        range: SourceLineRange<'a>,
         limit: u16,
     ) -> Self {
         Self {
-            project_id,
-            expected_generation_id,
-            path,
-            start_line,
-            end_line,
+            project_id: generation.project_id,
+            expected_generation_id: generation.expected_generation_id,
+            path: range.path,
+            start_line: range.start_line,
+            end_line: range.end_line,
             limit,
         }
     }
@@ -597,14 +644,13 @@ impl<'a> CurrentFileSymbolsLookup<'a> {
     /// Bind one file and its result limit to a project.
     #[must_use]
     pub const fn new(
-        project_id: &'a ProjectId,
-        expected_generation_id: &'a GenerationId,
+        generation: CurrentGenerationLookup<'a>,
         file_id: &'a FileId,
         limit: u16,
     ) -> Self {
         Self {
-            project_id,
-            expected_generation_id,
+            project_id: generation.project_id,
+            expected_generation_id: generation.expected_generation_id,
             file_id,
             limit,
         }
@@ -650,14 +696,13 @@ impl<'a> CurrentGraphLookup<'a> {
     /// Bind a graph frontier and direction to a project.
     #[must_use]
     pub const fn new(
-        project_id: &'a ProjectId,
-        expected_generation_id: &'a GenerationId,
+        generation: CurrentGenerationLookup<'a>,
         frontier: &'a [SymbolId],
         direction: GraphDirection,
     ) -> Self {
         Self {
-            project_id,
-            expected_generation_id,
+            project_id: generation.project_id,
+            expected_generation_id: generation.expected_generation_id,
             frontier,
             direction,
             limit: MAX_EDGE_LIMIT,
@@ -800,8 +845,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            request.project_id,
-            request.expected_generation_id,
+            CurrentGenerationLookup::new(request.project_id, request.expected_generation_id),
         )
         .await?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -846,8 +890,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            request.project_id,
-            request.expected_generation_id,
+            CurrentGenerationLookup::new(request.project_id, request.expected_generation_id),
         )
         .await?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -934,8 +977,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            request.project_id,
-            request.expected_generation_id,
+            CurrentGenerationLookup::new(request.project_id, request.expected_generation_id),
         )
         .await?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -973,8 +1015,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            request.project_id,
-            request.expected_generation_id,
+            CurrentGenerationLookup::new(request.project_id, request.expected_generation_id),
         )
         .await?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -1036,8 +1077,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            request.project_id,
-            request.expected_generation_id,
+            CurrentGenerationLookup::new(request.project_id, request.expected_generation_id),
         )
         .await?;
         if request.symbol_ids.is_empty() {
@@ -1083,8 +1123,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            request.project_id,
-            request.expected_generation_id,
+            CurrentGenerationLookup::new(request.project_id, request.expected_generation_id),
         )
         .await?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -1171,8 +1210,7 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            request.project_id,
-            request.expected_generation_id,
+            CurrentGenerationLookup::new(request.project_id, request.expected_generation_id),
         )
         .await?;
         if request.frontier.is_empty() {
@@ -1262,8 +1300,10 @@ impl CartographDatabase {
         require_expected_current_generation(
             &mut transaction,
             &self.schema,
-            input.request.project_id,
-            input.request.expected_generation_id,
+            CurrentGenerationLookup::new(
+                input.request.project_id,
+                input.request.expected_generation_id,
+            ),
         )
         .await?;
         let rows = query(AssertSqlSafe(input.sql))
@@ -1312,8 +1352,7 @@ pub(crate) async fn begin_bounded_read(
 pub(crate) async fn require_expected_current_generation(
     connection: &mut sqlx_postgres::PgConnection,
     schema: &cartograph_config::DatabaseSchema,
-    project_id: &ProjectId,
-    expected_generation_id: &GenerationId,
+    generation: CurrentGenerationLookup<'_>,
 ) -> Result<(), StorageError> {
     let sql = format!(
         r#"SELECT current_generation_id = CAST($2 AS uuid) AS matches
@@ -1322,8 +1361,8 @@ pub(crate) async fn require_expected_current_generation(
         crate::database::quoted_schema(schema)
     );
     let matches = query(AssertSqlSafe(sql))
-        .bind(project_id.as_str())
-        .bind(expected_generation_id.as_str())
+        .bind(generation.project_id.as_str())
+        .bind(generation.expected_generation_id.as_str())
         .fetch_optional(connection)
         .await
         .map_err(|_| database_error("expected-generation-read"))?
@@ -1660,14 +1699,6 @@ fn read_u32(
 ) -> Result<u32, StorageError> {
     let value = row.try_get::<i32, _>(index).map_err(|_| corrupt(field))?;
     u32::try_from(value).map_err(|_| corrupt(field))
-}
-
-fn read_bool(
-    row: &sqlx_postgres::PgRow,
-    index: usize,
-    field: &'static str,
-) -> Result<bool, StorageError> {
-    row.try_get::<bool, _>(index).map_err(|_| corrupt(field))
 }
 
 fn read_confidence(row: &sqlx_postgres::PgRow, index: usize) -> Result<f32, StorageError> {

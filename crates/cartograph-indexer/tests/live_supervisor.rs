@@ -12,10 +12,11 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, GenerationContents, GenerationFacts,
-    GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget,
-    NewGeneration, NewProject, PrepareGenerationMetrics, ReadyGeneration, SearchDocumentInput,
-    SearchQuery, StructuralFindingQuery, StructuralFindingSeverity, validate_generation_facts,
+    CanonicalGenerationFacts, CartographDatabase, CurrentGenerationLookup, GenerationContents,
+    GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
+    LeaseRequest, LeaseTarget, NewGeneration, NewProject, PrepareGenerationMetrics,
+    ReadyGeneration, SearchDocumentInput, SearchQuery, StructuralFindingQuery,
+    StructuralFindingSeverity, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, GenerationId, GenerationState, ProjectId,
@@ -695,8 +696,7 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
     let hits = match fixture
         .database
         .search_current_code(SearchQuery::new(
-            fixture.project.clone(),
-            generation_id.clone(),
+            CurrentGenerationLookup::new(&fixture.project, &generation_id),
             "Service",
             NATIVE_SEARCH_LIMIT,
         ))
@@ -922,8 +922,7 @@ async fn assert_parser_only_bm25_hits(fixture: &DatabaseFixture, generation_id: 
         let hits = fixture
             .database
             .search_current_code(SearchQuery::new(
-                fixture.project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(&fixture.project, generation_id),
                 query,
                 NATIVE_SEARCH_LIMIT,
             ))
@@ -951,8 +950,7 @@ async fn assert_admitted_family_bm25_hits(fixture: &DatabaseFixture, generation_
         let hits = fixture
             .database
             .search_current_code(SearchQuery::new(
-                fixture.project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(&fixture.project, generation_id),
                 query,
                 NATIVE_SEARCH_LIMIT,
             ))
@@ -978,8 +976,7 @@ async fn assert_generic_family_bm25_hits(fixture: &DatabaseFixture, generation_i
         let hits = fixture
             .database
             .search_current_code(SearchQuery::new(
-                fixture.project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(&fixture.project, generation_id),
                 query,
                 NATIVE_SEARCH_LIMIT,
             ))
@@ -1013,8 +1010,7 @@ async fn assert_custom_family_bm25_hits(fixture: &DatabaseFixture, generation_id
         let hits = fixture
             .database
             .search_current_code(SearchQuery::new(
-                fixture.project.clone(),
-                generation_id.clone(),
+                CurrentGenerationLookup::new(&fixture.project, generation_id),
                 query,
                 NATIVE_SEARCH_LIMIT,
             ))

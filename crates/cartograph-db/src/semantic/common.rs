@@ -80,7 +80,7 @@ impl TransactionCompletion {
     }
 }
 
-pub(crate) async fn finish_bounded<T>(
+async fn finish_bounded<T>(
     transaction: Transaction<'_, Postgres>,
     result: Result<T, SemanticStorageError>,
     completion: TransactionCompletion,
@@ -361,10 +361,7 @@ pub(crate) fn decode_document_source(
     })
 }
 
-pub(crate) fn read_u64(
-    row: &sqlx_postgres::PgRow,
-    column: &'static str,
-) -> Result<u64, SemanticStorageError> {
+fn read_u64(row: &sqlx_postgres::PgRow, column: &'static str) -> Result<u64, SemanticStorageError> {
     let value = row.try_get::<i64, _>(column).map_err(|_| corrupt(column))?;
     u64::try_from(value).map_err(|_| corrupt(column))
 }

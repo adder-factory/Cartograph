@@ -27,27 +27,32 @@ pub struct FileHistoryFact {
     last_touched_at: Option<u64>,
 }
 
+/// Validated churn counters for one file-history fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileHistoryMetrics {
+    pub commit_count: u64,
+    pub author_count: u64,
+    pub insertions: u64,
+    pub deletions: u64,
+    pub last_touched_at: Option<u64>,
+}
+
 impl FileHistoryFact {
-    pub fn new(
-        path: NormalizedPath,
-        commit_count: u64,
-        author_count: u64,
-        insertions: u64,
-        deletions: u64,
-        last_touched_at: Option<u64>,
-    ) -> Result<Self, StorageError> {
-        if author_count > commit_count || (commit_count == 0) != last_touched_at.is_none() {
+    pub fn new(path: NormalizedPath, metrics: FileHistoryMetrics) -> Result<Self, StorageError> {
+        if metrics.author_count > metrics.commit_count
+            || (metrics.commit_count == 0) != metrics.last_touched_at.is_none()
+        {
             return Err(StorageError::InvalidInput {
                 field: "file_history",
             });
         }
         Ok(Self {
             path,
-            commit_count,
-            author_count,
-            insertions,
-            deletions,
-            last_touched_at,
+            commit_count: metrics.commit_count,
+            author_count: metrics.author_count,
+            insertions: metrics.insertions,
+            deletions: metrics.deletions,
+            last_touched_at: metrics.last_touched_at,
         })
     }
 }
@@ -61,17 +66,23 @@ pub struct FileCochangeFact {
     confidence: f32,
 }
 
+/// Validated shared-commit metrics for one co-change pair.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FileCochangeMetrics {
+    pub commit_count: u64,
+    pub confidence: f32,
+}
+
 impl FileCochangeFact {
     pub fn new(
         path_a: NormalizedPath,
         path_b: NormalizedPath,
-        commit_count: u64,
-        confidence: f32,
+        metrics: FileCochangeMetrics,
     ) -> Result<Self, StorageError> {
         if path_a >= path_b
-            || commit_count == 0
-            || !confidence.is_finite()
-            || !(0.0..=1.0).contains(&confidence)
+            || metrics.commit_count == 0
+            || !metrics.confidence.is_finite()
+            || !(0.0..=1.0).contains(&metrics.confidence)
         {
             return Err(StorageError::InvalidInput {
                 field: "file_cochange",
@@ -80,8 +91,8 @@ impl FileCochangeFact {
         Ok(Self {
             path_a,
             path_b,
-            commit_count,
-            confidence,
+            commit_count: metrics.commit_count,
+            confidence: metrics.confidence,
         })
     }
 }
@@ -107,18 +118,23 @@ pub struct HistoryRefreshMetadata {
     pub oversized_commits_skipped: u64,
 }
 
+/// Bounded history and co-change rows supplied by one Git scan.
+pub struct HistoryRefreshInput {
+    pub metadata: HistoryRefreshMetadata,
+    pub files: Vec<FileHistoryFact>,
+    pub cochanges: Vec<FileCochangeFact>,
+}
+
 impl HistoryRefreshRequest {
     pub fn new(
         project_id: ProjectId,
         head_commit: impl Into<String>,
-        metadata: HistoryRefreshMetadata,
-        files: Vec<FileHistoryFact>,
-        cochanges: Vec<FileCochangeFact>,
+        input: HistoryRefreshInput,
     ) -> Result<Self, StorageError> {
         let head_commit = head_commit.into();
         if !valid_commit(&head_commit)
-            || files.len() > MAX_HISTORY_FILES
-            || cochanges.len() > MAX_HISTORY_PAIRS
+            || input.files.len() > MAX_HISTORY_FILES
+            || input.cochanges.len() > MAX_HISTORY_PAIRS
         {
             return Err(StorageError::InvalidInput {
                 field: "history_refresh",
@@ -127,13 +143,75 @@ impl HistoryRefreshRequest {
         Ok(Self {
             project_id,
             head_commit,
-            shallow_history: metadata.shallow_history,
-            commits_scanned: metadata.commits_scanned,
-            truncated: metadata.truncated,
-            oversized_commits_skipped: metadata.oversized_commits_skipped,
-            files,
-            cochanges,
+            shallow_history: input.metadata.shallow_history,
+            commits_scanned: input.metadata.commits_scanned,
+            truncated: input.metadata.truncated,
+            oversized_commits_skipped: input.metadata.oversized_commits_skipped,
+            files: input.files,
+            cochanges: input.cochanges,
         })
+    }
+}
+
+/// Bounded current-file history query.
+pub struct FileHistoryQuery<'query> {
+    project_id: &'query ProjectId,
+    path: Option<&'query NormalizedPath>,
+    minimum_commits: u32,
+    limit: u16,
+}
+
+impl<'query> FileHistoryQuery<'query> {
+    #[must_use]
+    pub const fn new(project_id: &'query ProjectId, limit: u16) -> Self {
+        Self {
+            project_id,
+            path: None,
+            minimum_commits: 0,
+            limit,
+        }
+    }
+
+    #[must_use]
+    pub const fn for_path(mut self, path: &'query NormalizedPath) -> Self {
+        self.path = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_minimum_commits(mut self, minimum_commits: u32) -> Self {
+        self.minimum_commits = minimum_commits;
+        self
+    }
+}
+
+/// Bounded current-file co-change query.
+pub struct FileCochangeQuery<'query> {
+    project_id: &'query ProjectId,
+    path: &'query NormalizedPath,
+    minimum_commits: u32,
+    limit: u16,
+}
+
+impl<'query> FileCochangeQuery<'query> {
+    #[must_use]
+    pub const fn new(
+        project_id: &'query ProjectId,
+        path: &'query NormalizedPath,
+        limit: u16,
+    ) -> Self {
+        Self {
+            project_id,
+            path,
+            minimum_commits: 0,
+            limit,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_minimum_commits(mut self, minimum_commits: u32) -> Self {
+        self.minimum_commits = minimum_commits;
+        self
     }
 }
 
@@ -203,6 +281,26 @@ impl FileCochangeRecord {
     }
 }
 
+struct HistoryReadInput<'query> {
+    statement: String,
+    project_id: &'query ProjectId,
+    operation: &'static str,
+}
+
+struct HistoryChunkInput<'chunk> {
+    schema: &'chunk str,
+    project_id: &'chunk ProjectId,
+    head_commit: &'chunk str,
+    shallow_history: bool,
+    chunk: &'chunk [FileHistoryFact],
+}
+
+struct CochangeChunkInput<'chunk> {
+    schema: &'chunk str,
+    project_id: &'chunk ProjectId,
+    chunk: &'chunk [FileCochangeFact],
+}
+
 impl CartographDatabase {
     /// Atomically replace file churn and co-change evidence under one project lock.
     pub async fn replace_file_history(
@@ -242,16 +340,26 @@ impl CartographDatabase {
         for chunk in request.files.chunks(HISTORY_INSERT_CHUNK) {
             insert_history_chunk(
                 &mut transaction,
-                &schema,
-                &request.project_id,
-                &request.head_commit,
-                request.shallow_history,
-                chunk,
+                HistoryChunkInput {
+                    schema: &schema,
+                    project_id: &request.project_id,
+                    head_commit: &request.head_commit,
+                    shallow_history: request.shallow_history,
+                    chunk,
+                },
             )
             .await?;
         }
         for chunk in request.cochanges.chunks(HISTORY_INSERT_CHUNK) {
-            insert_cochange_chunk(&mut transaction, &schema, &request.project_id, chunk).await?;
+            insert_cochange_chunk(
+                &mut transaction,
+                CochangeChunkInput {
+                    schema: &schema,
+                    project_id: &request.project_id,
+                    chunk,
+                },
+            )
+            .await?;
         }
         transaction
             .commit()
@@ -308,12 +416,9 @@ impl CartographDatabase {
     /// Read persisted churn for current indexed files, hottest first.
     pub async fn current_file_history(
         &self,
-        project_id: &ProjectId,
-        path: Option<&NormalizedPath>,
-        minimum_commits: u32,
-        limit: u16,
+        request: FileHistoryQuery<'_>,
     ) -> Result<Vec<FileHistoryRecord>, StorageError> {
-        validate_query_limit(limit)?;
+        validate_query_limit(request.limit)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r#"WITH current AS (
@@ -343,15 +448,17 @@ impl CartographDatabase {
         );
         let rows = self
             .history_read(
-                statement,
+                HistoryReadInput {
+                    statement,
+                    project_id: request.project_id,
+                    operation: "current-file-history",
+                },
                 |statement| {
                     statement
-                        .bind(path.map(NormalizedPath::as_str))
-                        .bind(i64::from(minimum_commits))
-                        .bind(i64::from(limit))
+                        .bind(request.path.map(NormalizedPath::as_str))
+                        .bind(i64::from(request.minimum_commits))
+                        .bind(i64::from(request.limit))
                 },
-                project_id,
-                "current-file-history",
             )
             .await?;
         rows.iter().map(decode_history).collect()
@@ -360,12 +467,9 @@ impl CartographDatabase {
     /// Read current-file co-change partners for one exact anchor path.
     pub async fn current_file_cochanges(
         &self,
-        project_id: &ProjectId,
-        path: &NormalizedPath,
-        minimum_commits: u32,
-        limit: u16,
+        request: FileCochangeQuery<'_>,
     ) -> Result<Vec<FileCochangeRecord>, StorageError> {
-        validate_query_limit(limit)?;
+        validate_query_limit(request.limit)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r#"WITH current AS (
@@ -403,15 +507,17 @@ impl CartographDatabase {
         );
         let rows = self
             .history_read(
-                statement,
+                HistoryReadInput {
+                    statement,
+                    project_id: request.project_id,
+                    operation: "current-file-cochanges",
+                },
                 |statement| {
                     statement
-                        .bind(path.as_str())
-                        .bind(i64::from(minimum_commits))
-                        .bind(i64::from(limit))
+                        .bind(request.path.as_str())
+                        .bind(i64::from(request.minimum_commits))
+                        .bind(i64::from(request.limit))
                 },
-                project_id,
-                "current-file-cochanges",
             )
             .await?;
         rows.iter().map(decode_cochange).collect()
@@ -419,10 +525,8 @@ impl CartographDatabase {
 
     async fn history_read<'query, Bind>(
         &self,
-        statement: String,
+        input: HistoryReadInput<'_>,
         bind: Bind,
-        project_id: &ProjectId,
-        operation: &'static str,
     ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError>
     where
         Bind: FnOnce(
@@ -437,43 +541,41 @@ impl CartographDatabase {
             .pool
             .begin()
             .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
         query("SET TRANSACTION READ ONLY")
             .execute(&mut *transaction)
             .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
         set_local_statement_timeout(&mut transaction, HISTORY_READ_TIMEOUT)
             .await
-            .map_err(|_| database_error(operation))?;
-        let rows = bind(query(AssertSqlSafe(statement)).bind(project_id.as_str()))
+            .map_err(|_| database_error(input.operation))?;
+        let rows = bind(query(AssertSqlSafe(input.statement)).bind(input.project_id.as_str()))
             .fetch_all(&mut *transaction)
             .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
         transaction
             .commit()
             .await
-            .map_err(|_| database_error(operation))?;
+            .map_err(|_| database_error(input.operation))?;
         Ok(rows)
     }
 }
 
 async fn insert_history_chunk(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    head_commit: &str,
-    shallow_history: bool,
-    chunk: &[FileHistoryFact],
+    input: HistoryChunkInput<'_>,
 ) -> Result<(), StorageError> {
-    let paths = chunk
+    let paths = input
+        .chunk
         .iter()
         .map(|fact| fact.path.as_str())
         .collect::<Vec<_>>();
-    let commits = counts(chunk, |fact| fact.commit_count)?;
-    let authors = counts(chunk, |fact| fact.author_count)?;
-    let insertions = counts(chunk, |fact| fact.insertions)?;
-    let deletions = counts(chunk, |fact| fact.deletions)?;
-    let touched = chunk
+    let commits = counts(input.chunk, |fact| fact.commit_count)?;
+    let authors = counts(input.chunk, |fact| fact.author_count)?;
+    let insertions = counts(input.chunk, |fact| fact.insertions)?;
+    let deletions = counts(input.chunk, |fact| fact.deletions)?;
+    let touched = input
+        .chunk
         .iter()
         .map(|fact| {
             fact.last_touched_at
@@ -481,6 +583,7 @@ async fn insert_history_chunk(
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let schema = input.schema;
     let statement = format!(
         r#"INSERT INTO {schema}."file_history" (
                 project_id, normalized_path, head_commit, commit_count,
@@ -497,9 +600,9 @@ async fn insert_history_chunk(
             ) AS rows(path, commits, authors, insertions, deletions, touched)"#,
     );
     query(AssertSqlSafe(statement))
-        .bind(project_id.as_str())
-        .bind(head_commit)
-        .bind(shallow_history)
+        .bind(input.project_id.as_str())
+        .bind(input.head_commit)
+        .bind(input.shallow_history)
         .bind(paths)
         .bind(commits)
         .bind(authors)
@@ -514,20 +617,25 @@ async fn insert_history_chunk(
 
 async fn insert_cochange_chunk(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    chunk: &[FileCochangeFact],
+    input: CochangeChunkInput<'_>,
 ) -> Result<(), StorageError> {
-    let path_a = chunk
+    let path_a = input
+        .chunk
         .iter()
         .map(|fact| fact.path_a.as_str())
         .collect::<Vec<_>>();
-    let path_b = chunk
+    let path_b = input
+        .chunk
         .iter()
         .map(|fact| fact.path_b.as_str())
         .collect::<Vec<_>>();
-    let commits = counts(chunk, |fact| fact.commit_count)?;
-    let confidence = chunk.iter().map(|fact| fact.confidence).collect::<Vec<_>>();
+    let commits = counts(input.chunk, |fact| fact.commit_count)?;
+    let confidence = input
+        .chunk
+        .iter()
+        .map(|fact| fact.confidence)
+        .collect::<Vec<_>>();
+    let schema = input.schema;
     let statement = format!(
         r#"INSERT INTO {schema}."file_cochanges" (
                 project_id, path_a, path_b, commit_count, confidence
@@ -539,7 +647,7 @@ async fn insert_cochange_chunk(
             ) AS rows(path_a, path_b, commits, confidence)"#,
     );
     query(AssertSqlSafe(statement))
-        .bind(project_id.as_str())
+        .bind(input.project_id.as_str())
         .bind(path_a)
         .bind(path_b)
         .bind(commits)
@@ -569,16 +677,28 @@ fn validate_query_limit(limit: u16) -> Result<(), StorageError> {
     }
 }
 
+const HISTORY_AUTHOR_COUNT_COLUMN: usize = 3;
+const HISTORY_INSERTIONS_COLUMN: usize = 4;
+const HISTORY_DELETIONS_COLUMN: usize = 5;
+const HISTORY_LAST_TOUCHED_COLUMN: usize = 6;
+const HISTORY_SHALLOW_COLUMN: usize = 7;
+const COCHANGE_ANCHOR_RATIO_COLUMN: usize = 3;
+const COCHANGE_PARTNER_RATIO_COLUMN: usize = 4;
+const COCHANGE_ANCHOR_COMMITS_COLUMN: usize = 5;
+const COCHANGE_PARTNER_COMMITS_COLUMN: usize = 6;
+
 fn decode_history(row: &sqlx_postgres::PgRow) -> Result<FileHistoryRecord, StorageError> {
     Ok(FileHistoryRecord {
         path: text(row, 0)?,
         head_commit: text(row, 1)?,
         commit_count: nonnegative(row, 2)?,
-        author_count: nonnegative(row, 3)?,
-        insertions: nonnegative(row, 4)?,
-        deletions: nonnegative(row, 5)?,
-        last_touched_at: row.try_get(6).map_err(|_| corrupt())?,
-        shallow_history: row.try_get(7).map_err(|_| corrupt())?,
+        author_count: nonnegative(row, HISTORY_AUTHOR_COUNT_COLUMN)?,
+        insertions: nonnegative(row, HISTORY_INSERTIONS_COLUMN)?,
+        deletions: nonnegative(row, HISTORY_DELETIONS_COLUMN)?,
+        last_touched_at: row
+            .try_get(HISTORY_LAST_TOUCHED_COLUMN)
+            .map_err(|_| corrupt())?,
+        shallow_history: row.try_get(HISTORY_SHALLOW_COLUMN).map_err(|_| corrupt())?,
     })
 }
 
@@ -587,10 +707,14 @@ fn decode_cochange(row: &sqlx_postgres::PgRow) -> Result<FileCochangeRecord, Sto
         path: text(row, 0)?,
         shared_commits: nonnegative(row, 1)?,
         jaccard: row.try_get(2).map_err(|_| corrupt())?,
-        anchor_ratio: row.try_get(3).map_err(|_| corrupt())?,
-        partner_ratio: row.try_get(4).map_err(|_| corrupt())?,
-        anchor_commits: nonnegative(row, 5)?,
-        partner_commits: nonnegative(row, 6)?,
+        anchor_ratio: row
+            .try_get(COCHANGE_ANCHOR_RATIO_COLUMN)
+            .map_err(|_| corrupt())?,
+        partner_ratio: row
+            .try_get(COCHANGE_PARTNER_RATIO_COLUMN)
+            .map_err(|_| corrupt())?,
+        anchor_commits: nonnegative(row, COCHANGE_ANCHOR_COMMITS_COLUMN)?,
+        partner_commits: nonnegative(row, COCHANGE_PARTNER_COMMITS_COLUMN)?,
     })
 }
 
@@ -625,20 +749,26 @@ mod tests {
 
     #[test]
     fn cochanges_require_canonical_order_nonzero_count_and_probability() {
+        let metrics = |commit_count, confidence| FileCochangeMetrics {
+            commit_count,
+            confidence,
+        };
         let a = NormalizedPath::parse("src/a.rs")
             .unwrap_or_else(|error| panic!("path a failed: {error}"));
         let b = NormalizedPath::parse("src/b.rs")
             .unwrap_or_else(|error| panic!("path b failed: {error}"));
-        assert!(FileCochangeFact::new(a.clone(), b.clone(), 2, 0.5).is_ok());
-        assert!(FileCochangeFact::new(b, a.clone(), 2, 0.5).is_err());
-        assert!(FileCochangeFact::new(a.clone(), a.clone(), 2, 0.5).is_err());
-        assert!(FileCochangeFact::new(a.clone(), a, 0, 1.5).is_err());
+        assert!(FileCochangeFact::new(a.clone(), b.clone(), metrics(2, 0.5)).is_ok());
+        assert!(FileCochangeFact::new(b, a.clone(), metrics(2, 0.5)).is_err());
+        assert!(FileCochangeFact::new(a.clone(), a.clone(), metrics(2, 0.5)).is_err());
+        assert!(FileCochangeFact::new(a.clone(), a, metrics(0, 1.5)).is_err());
 
         let punctuation = NormalizedPath::parse(".github/workflows/check.ts")
             .unwrap_or_else(|error| panic!("punctuation path failed: {error}"));
         let uppercase = NormalizedPath::parse("ACKNOWLEDGEMENTS.ts")
             .unwrap_or_else(|error| panic!("uppercase path failed: {error}"));
-        assert!(FileCochangeFact::new(punctuation.clone(), uppercase.clone(), 1, 1.0).is_ok());
-        assert!(FileCochangeFact::new(uppercase, punctuation, 1, 1.0).is_err());
+        assert!(
+            FileCochangeFact::new(punctuation.clone(), uppercase.clone(), metrics(1, 1.0)).is_ok()
+        );
+        assert!(FileCochangeFact::new(uppercase, punctuation, metrics(1, 1.0)).is_err());
     }
 }

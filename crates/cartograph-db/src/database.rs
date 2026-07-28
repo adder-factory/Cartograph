@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use cartograph_config::DatabaseSchema;
-use cartograph_domain::GenerationId;
-use sqlx_core::{query::query, row::Row};
-use sqlx_postgres::{PgConnection, PgPool, PgRow};
+use cartograph_domain::{GenerationId, ProjectId};
+use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_postgres::{PgArguments, PgConnection, PgPool, PgRow, Postgres};
 use thiserror::Error;
 
 /// PostgreSQL-backed v2 data plane bound to one validated Cartograph schema.
@@ -115,6 +115,125 @@ pub(crate) async fn set_local_statement_timeout(
         .await
         .map(|_| ())
         .map_err(|_| ())
+}
+
+pub(crate) struct ProjectReadRequest<'project> {
+    pub(crate) statement: String,
+    pub(crate) project_id: &'project ProjectId,
+    pub(crate) operation: &'static str,
+    pub(crate) statement_timeout: Duration,
+}
+
+pub(crate) struct RowReadRequest {
+    pub(crate) statement: String,
+    pub(crate) operation: &'static str,
+    pub(crate) statement_timeout: Duration,
+}
+
+impl RowReadRequest {
+    pub(crate) const fn new(
+        statement: String,
+        operation: &'static str,
+        statement_timeout: Duration,
+    ) -> Self {
+        Self {
+            statement,
+            operation,
+            statement_timeout,
+        }
+    }
+}
+
+pub(crate) type PgQuery<'query> = sqlx_core::query::Query<'query, Postgres, PgArguments>;
+
+pub(crate) fn audited_query(
+    sql: String,
+) -> sqlx_core::query::Query<'static, Postgres, PgArguments> {
+    // Dynamic content is limited to a conservatively validated DatabaseSchema
+    // and is always double-quoted before insertion into the audited SQL.
+    query(AssertSqlSafe(sql))
+}
+
+pub(crate) const fn validate_bounded_limit(limit: u16, maximum: u16) -> Result<(), StorageError> {
+    if limit == 0 || limit > maximum {
+        Err(StorageError::InvalidInput { field: "limit" })
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn read_stored_bool(
+    row: &PgRow,
+    index: usize,
+    field: &'static str,
+) -> Result<bool, StorageError> {
+    row.try_get::<bool, _>(index)
+        .map_err(|_| stored_value_error(field))
+}
+
+pub(crate) fn validate_json_object(
+    value: &serde_json::Value,
+    maximum_bytes: usize,
+    field: &'static str,
+) -> Result<(), StorageError> {
+    let encoded = serde_json::to_vec(value).map_err(|_| StorageError::InvalidInput { field })?;
+    if value.is_object() && encoded.len() <= maximum_bytes {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidInput { field })
+    }
+}
+
+pub(crate) async fn read_project_rows<'query, Bind>(
+    database: &CartographDatabase,
+    request: ProjectReadRequest<'_>,
+    bind: Bind,
+) -> Result<Vec<PgRow>, StorageError>
+where
+    Bind: FnOnce(PgQuery<'query>) -> PgQuery<'query>,
+{
+    let ProjectReadRequest {
+        statement,
+        project_id,
+        operation,
+        statement_timeout,
+    } = request;
+    read_rows(
+        database,
+        RowReadRequest::new(statement, operation, statement_timeout),
+        |statement| bind(statement.bind(project_id.as_str())),
+    )
+    .await
+}
+
+pub(crate) async fn read_rows<'query, Bind>(
+    database: &CartographDatabase,
+    request: RowReadRequest,
+    bind: Bind,
+) -> Result<Vec<PgRow>, StorageError>
+where
+    Bind: FnOnce(PgQuery<'query>) -> PgQuery<'query>,
+{
+    let RowReadRequest {
+        statement,
+        operation,
+        statement_timeout,
+    } = request;
+    let database_error = || StorageError::DatabaseOperation { operation };
+    let mut transaction = database.pool.begin().await.map_err(|_| database_error())?;
+    query("SET TRANSACTION READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| database_error())?;
+    set_local_statement_timeout(&mut transaction, statement_timeout)
+        .await
+        .map_err(|_| database_error())?;
+    let rows = bind(query(AssertSqlSafe(statement)))
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| database_error())?;
+    transaction.commit().await.map_err(|_| database_error())?;
+    Ok(rows)
 }
 
 pub(crate) fn read_stored_string(

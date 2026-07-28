@@ -9,12 +9,13 @@ use std::{
 use cartograph_domain::{
     ContentDigest, GenerationDigestVersion, GenerationId, GenerationState, ProjectId,
 };
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{query::query, row::Row};
 use sqlx_postgres::{PgConnection, PgRow};
 use thiserror::Error;
 
 use crate::{
-    CartographDatabase, LeaseFence, StorageError,
+    CartographDatabase, CurrentGenerationLookup, LeaseFence, StorageError,
+    database::audited_query,
     ingest::{
         CanonicalGenerationFacts, CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations,
         copy_generation_facts,
@@ -631,13 +632,54 @@ impl<'a> LeaseMutationOptions<'a> {
 #[derive(Clone, Copy)]
 enum FenceCheck {
     Observe,
+    HeartbeatCompatibleLock,
     Lock,
+}
+
+impl FenceCheck {
+    const fn row_lock(self) -> &'static str {
+        match self {
+            Self::Observe => "",
+            Self::HeartbeatCompatibleLock => " FOR KEY SHARE",
+            Self::Lock => " FOR UPDATE",
+        }
+    }
+
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::Observe => "check-generation-fence",
+            Self::HeartbeatCompatibleLock => "protect-generation-fence",
+            Self::Lock => "lock-generation-fence",
+        }
+    }
 }
 
 struct FenceValidation<'a> {
     schema: &'a cartograph_config::DatabaseSchema,
     fence: &'a LeaseFence,
     check: FenceCheck,
+}
+
+impl<'a> FenceValidation<'a> {
+    const fn new(
+        schema: &'a cartograph_config::DatabaseSchema,
+        fence: &'a LeaseFence,
+        check: FenceCheck,
+    ) -> Self {
+        Self {
+            schema,
+            fence,
+            check,
+        }
+    }
+}
+
+struct ReadyTransition<'a> {
+    schema: &'a cartograph_config::DatabaseSchema,
+    generation: &'a StagedGeneration,
+    fence: &'a LeaseFence,
+    content_digest: &'a ContentDigest,
+    digest_version: GenerationDigestVersion,
 }
 
 impl GenerationContents {
@@ -1359,7 +1401,11 @@ async fn cleanup_transaction(
         .ok_or(StorageError::InvalidInput {
             field: "generation_id",
         })?;
-    lock_generation_fence(connection, schema, fence).await?;
+    lock_generation_fence(
+        connection,
+        FenceValidation::new(schema, fence, FenceCheck::Lock),
+    )
+    .await?;
     let quoted_schema = crate::database::quoted_schema(schema);
     let state_sql = format!(
         r#"SELECT state FROM {quoted_schema}."index_generations"
@@ -1412,7 +1458,11 @@ async fn fail_transaction(
     connection: &mut PgConnection,
     input: FailTransactionInput<'_>,
 ) -> Result<(), StorageError> {
-    lock_generation_fence(connection, input.schema, input.fence).await?;
+    lock_generation_fence(
+        connection,
+        FenceValidation::new(input.schema, input.fence, FenceCheck::Lock),
+    )
+    .await?;
     let quoted_schema = crate::database::quoted_schema(input.schema);
     let sql = format!(
         r#"UPDATE {quoted_schema}."index_generations"
@@ -1502,14 +1552,42 @@ async fn prepare_transaction(
     .await?;
     carry_forward_unchanged_generation_evidence(
         connection,
-        &quoted_schema,
-        input.generation,
-        &content_digest,
-        digest_version,
+        GenerationEvidenceCarry {
+            quoted_schema: &quoted_schema,
+            generation: input.generation,
+            content_digest: &content_digest,
+            digest_version,
+        },
     )
     .await?;
     analyze_copied_relations(connection, input.schema).await?;
-    lock_generation_fence(connection, input.schema, input.fence).await?;
+    mark_generation_ready(
+        connection,
+        ReadyTransition {
+            schema: input.schema,
+            generation: input.generation,
+            fence: input.fence,
+            content_digest: &content_digest,
+            digest_version,
+        },
+    )
+    .await
+}
+
+async fn mark_generation_ready(
+    connection: &mut PgConnection,
+    input: ReadyTransition<'_>,
+) -> Result<(), StorageError> {
+    lock_generation_fence(
+        connection,
+        FenceValidation::new(
+            input.schema,
+            input.fence,
+            FenceCheck::HeartbeatCompatibleLock,
+        ),
+    )
+    .await?;
+    let quoted_schema = crate::database::quoted_schema(input.schema);
     validate_generation_state(
         connection,
         GenerationStateRequirement {
@@ -1533,18 +1611,19 @@ async fn prepare_transaction(
     let result = audited_query(ready_sql)
         .bind(input.generation.project_id().as_str())
         .bind(input.generation.generation_id().as_str())
-        .bind(content_digest.as_str())
-        .bind(digest_version.database_value())
+        .bind(input.content_digest.as_str())
+        .bind(input.digest_version.database_value())
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("mark-generation-ready"))?;
-    if result.rows_affected() != 1 {
-        return Err(StorageError::InvalidGenerationTransition {
+    if result.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidGenerationTransition {
             actual: "changed concurrently".to_owned(),
             requested: GenerationState::Ready.as_str(),
-        });
+        })
     }
-    Ok(())
 }
 
 async fn analyze_copied_relations(
@@ -1709,7 +1788,11 @@ async fn publish_transaction(
         .await
         .map_err(|_| database_error("publish-lock"))?;
     let quoted_schema = crate::database::quoted_schema(input.schema);
-    lock_generation_fence(connection, input.schema, fence).await?;
+    lock_generation_fence(
+        connection,
+        FenceValidation::new(input.schema, fence, FenceCheck::Lock),
+    )
+    .await?;
     validate_generation_state(
         connection,
         GenerationStateRequirement {
@@ -1725,8 +1808,7 @@ async fn publish_transaction(
     require_generation_search_relation(
         connection,
         input.schema,
-        generation.project_id(),
-        generation.generation_id(),
+        CurrentGenerationLookup::new(generation.project_id(), generation.generation_id()),
     )
     .await?;
 
@@ -1802,11 +1884,14 @@ async fn publish_transaction(
 /// without derived evidence so callers cannot mistake it for fresh data.
 async fn carry_forward_unchanged_generation_evidence(
     connection: &mut PgConnection,
-    quoted_schema: &str,
-    generation: &StagedGeneration,
-    content_digest: &ContentDigest,
-    digest_version: GenerationDigestVersion,
+    input: GenerationEvidenceCarry<'_>,
 ) -> Result<(), StorageError> {
+    let GenerationEvidenceCarry {
+        quoted_schema,
+        generation,
+        content_digest,
+        digest_version,
+    } = input;
     let project_id = generation.project_id().as_str();
     let generation_id = generation.generation_id().as_str();
 
@@ -1950,21 +2035,19 @@ async fn carry_forward_unchanged_generation_evidence(
     Ok(())
 }
 
+struct GenerationEvidenceCarry<'a> {
+    quoted_schema: &'a str,
+    generation: &'a StagedGeneration,
+    content_digest: &'a ContentDigest,
+    digest_version: GenerationDigestVersion,
+}
+
 async fn lock_generation_fence(
     connection: &mut PgConnection,
-    schema: &cartograph_config::DatabaseSchema,
-    fence: &LeaseFence,
+    input: FenceValidation<'_>,
 ) -> Result<(), StorageError> {
-    lock_generation_mutation(connection, schema, fence).await?;
-    require_generation_fence(
-        connection,
-        FenceValidation {
-            schema,
-            fence,
-            check: FenceCheck::Lock,
-        },
-    )
-    .await
+    lock_generation_mutation(connection, input.schema, input.fence).await?;
+    require_generation_fence(connection, input).await
 }
 
 async fn check_generation_fence(
@@ -1974,11 +2057,7 @@ async fn check_generation_fence(
 ) -> Result<(), StorageError> {
     require_generation_fence(
         connection,
-        FenceValidation {
-            schema,
-            fence,
-            check: FenceCheck::Observe,
-        },
+        FenceValidation::new(schema, fence, FenceCheck::Observe),
     )
     .await
 }
@@ -1993,10 +2072,7 @@ async fn require_generation_fence(
         .generation_id()
         .ok_or(StorageError::LeaseFenceLost)?;
     let quoted_schema = crate::database::quoted_schema(input.schema);
-    let row_lock = match input.check {
-        FenceCheck::Observe => "",
-        FenceCheck::Lock => " FOR UPDATE",
-    };
+    let row_lock = input.check.row_lock();
     let sql = format!(
         r#"SELECT 1 FROM {quoted_schema}."project_operation_leases"
             WHERE project_id = CAST($1 AS uuid)
@@ -2012,12 +2088,7 @@ async fn require_generation_fence(
         .bind(generation_id.as_str())
         .fetch_optional(connection)
         .await
-        .map_err(|_| {
-            database_error(match input.check {
-                FenceCheck::Observe => "check-generation-fence",
-                FenceCheck::Lock => "lock-generation-fence",
-            })
-        })?;
+        .map_err(|_| database_error(input.check.operation()))?;
     if row.is_some() {
         Ok(())
     } else {
@@ -2253,6 +2324,7 @@ async fn validate_generation_state(
 ) -> Result<(), StorageError> {
     let (lock_clause, operation) = match check {
         FenceCheck::Observe => ("", "check-generation"),
+        FenceCheck::HeartbeatCompatibleLock => (" FOR KEY SHARE", "protect-generation"),
         FenceCheck::Lock => (" FOR UPDATE", "lock-generation"),
     };
     let sql = format!(
@@ -2398,14 +2470,6 @@ fn parse_generation_state(
         "failed" => Ok(GenerationState::Failed),
         _ => Err(StorageError::CorruptStoredValue { field: "state" }),
     }
-}
-
-fn audited_query(
-    sql: String,
-) -> sqlx_core::query::Query<'static, sqlx_postgres::Postgres, sqlx_postgres::PgArguments> {
-    // Dynamic content is limited to a DatabaseSchema that has passed the
-    // conservative identifier validator and is always double-quoted.
-    query(AssertSqlSafe(sql))
 }
 
 const fn database_error(operation: &'static str) -> StorageError {

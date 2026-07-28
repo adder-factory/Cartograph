@@ -36,7 +36,7 @@ use legacy_json::{
     has_valid_extraction_errors, parse_legacy_edge_metadata, parse_legacy_string_array,
     parse_legacy_u32_array,
 };
-use mapping::{line_starts, map_source_facts, require_source_count, validate_v1_body_hash};
+use mapping::{map_source_facts, require_source_count, validate_v1_body_hash};
 
 const V1_SCHEMA_VERSION: i64 = 75;
 const MAXIMUM_IMPORT_ROWS: u64 = 100_000_000;
@@ -103,27 +103,33 @@ const IMPORT_WORKER_COUNT: i16 = 1;
 const EXPECTED_MUTATED_ROWS: u64 = 1;
 const V1_SIGNATURE_SEPARATOR: [u8; 1] = [0];
 const V1_BODY_HASH_HEX_LENGTH: usize = 32;
+
+fn line_starts(source: &str) -> Result<Vec<u32>, V1PostgresImportError> {
+    let line_count = source
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        .checked_add(1)
+        .ok_or(V1PostgresImportError::SourceLimit)?;
+    let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(line_count)
+        .map_err(|_| V1PostgresImportError::SourceLimit)?;
+    starts.push(0);
+    for (index, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(
+                u32::try_from(index.saturating_add(1))
+                    .map_err(|_| V1PostgresImportError::SourceLimit)?,
+            );
+        }
+    }
+    Ok(starts)
+}
 const HEX_NIBBLE_BITS: u8 = 4;
 const HEX_NIBBLE_MASK: u8 = 0x0f;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const HEX_CHARACTERS_PER_BYTE: usize = 2;
-const IMPORTED_EDGE_KINDS: &[(&str, EdgeKind)] = &[
-    ("calls", EdgeKind::Calls),
-    ("imports", EdgeKind::Imports),
-    ("references", EdgeKind::References),
-    ("implements", EdgeKind::Implements),
-    ("extends", EdgeKind::Extends),
-    ("tests", EdgeKind::Tests),
-    ("type_of", EdgeKind::TypeOf),
-    ("returns", EdgeKind::Returns),
-    ("instantiates", EdgeKind::Instantiates),
-    ("overrides", EdgeKind::Overrides),
-    ("decorates", EdgeKind::Decorates),
-    ("field_access", EdgeKind::FieldAccess),
-    ("def_use", EdgeKind::DefUse),
-    ("exports", EdgeKind::Exports),
-    ("contains", EdgeKind::Contains),
-];
 const SOURCE_PREFLIGHT_SQL_TEMPLATE: &str = r#"SELECT
     (SELECT COALESCE(max(version), 0)::bigint FROM {source}."schema_versions") AS schema_version,
     (SELECT count(*)::bigint FROM {source}."files") AS file_count,
@@ -2172,9 +2178,10 @@ async fn decode_source_file(
         .map_err(|_| invalid_source("source_file"))?;
     let scip_placeholder = is_scip_placeholder(&stored_hash, stored_size, &key);
     let actual_size = metadata.len();
-    if !metadata.is_file()
-        || (!scip_placeholder && actual_size != stored_size)
-        || actual_size > plan.maximum_source_bytes
+    if !metadata.is_file() || (!scip_placeholder && actual_size != stored_size) {
+        return Err(invalid_source("file_size"));
+    }
+    if actual_size > plan.maximum_source_bytes
         || actual_size > remaining_source_bytes
         || actual_size > MAXIMUM_IMPORT_FILE_BYTES
     {

@@ -9,11 +9,11 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, EdgeInput, FileInput,
-    GenerationContents, GenerationFacts, GenerationValidationLimits, LeaseOwner, LeaseTarget,
-    MANAGED_DATABASE_IMAGE, NewGeneration, NewProject, PrepareGenerationMetrics, ReadyGeneration,
-    ReferenceInput, SearchDocumentInput, SearchQuery, StagedGeneration, SymbolInput,
-    probe_capabilities, validate_generation_facts,
+    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, CurrentGenerationLookup,
+    EdgeInput, FileInput, GenerationContents, GenerationFacts, GenerationValidationLimits,
+    LeaseOwner, LeaseTarget, MANAGED_DATABASE_IMAGE, NewGeneration, NewProject,
+    PrepareGenerationMetrics, ReadyGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
+    StagedGeneration, SymbolInput, probe_capabilities, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
@@ -81,6 +81,8 @@ enum BenchmarkError {
     MissingDatabase,
     #[error("index scaling benchmark failed during {operation}")]
     Operation { operation: &'static str },
+    #[error("index scaling benchmark supervisor failed: {failure}")]
+    Supervisor { failure: String },
     #[error("index scaling benchmark invariant failed: {name}")]
     Invariant { name: &'static str },
     #[error("index scaling benchmark logical digest changed to {actual}")]
@@ -596,7 +598,9 @@ async fn run_supervised_pipeline(
     let current = supervisor
         .run(request, move |context| run_pipeline_work(context, work))
         .await
-        .map_err(|_| operation("supervised-index-publication"))?;
+        .map_err(|failure| BenchmarkError::Supervisor {
+            failure: failure.to_string(),
+        })?;
     Ok(CompletedSample {
         current,
         generation_id,
@@ -841,8 +845,7 @@ async fn bm25_fingerprint(
     let hits = database
         .database
         .search_current_code(SearchQuery::new(
-            database.project.clone(),
-            current.generation_id().clone(),
+            CurrentGenerationLookup::new(&database.project, current.generation_id()),
             NEEDLE_QUERY,
             5,
         ))
@@ -1351,6 +1354,7 @@ impl BenchmarkError {
         match self {
             Self::MissingDatabase => "database-url",
             Self::Operation { operation } => operation,
+            Self::Supervisor { .. } => "supervised-index-publication",
             Self::Invariant { name } => name,
             Self::LogicalDigestChanged { .. } => "logical-digest-changed",
             Self::FixtureFingerprintChanged { .. } => "fixture-fingerprint-changed",

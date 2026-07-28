@@ -175,7 +175,13 @@ impl ProjectRuntime {
             .await
             .map_err(|_| LayerAnalysisError::StorageUnavailable)?;
         tokio::task::spawn_blocking(move || {
-            evaluate_imports(&layers, &exceptions, imports, warnings, &cancellation)
+            evaluate_imports(LayerEvaluation {
+                layers: &layers,
+                exceptions: &exceptions,
+                imports,
+                configuration_warnings: warnings,
+                cancellation: &cancellation,
+            })
         })
         .await
         .map_err(|_| LayerAnalysisError::SourceUnavailable)?
@@ -293,13 +299,22 @@ fn compile_policy(
         .collect()
 }
 
-fn evaluate_imports(
-    layers: &[CompiledLayer],
-    exceptions: &[CompiledException],
+struct LayerEvaluation<'a> {
+    layers: &'a [CompiledLayer],
+    exceptions: &'a [CompiledException],
     imports: Vec<crate::ImportHit>,
     configuration_warnings: Vec<String>,
-    cancellation: &ProjectCancellation,
-) -> Result<LayerAnalysisReport, LayerAnalysisError> {
+    cancellation: &'a ProjectCancellation,
+}
+
+fn evaluate_imports(input: LayerEvaluation<'_>) -> Result<LayerAnalysisReport, LayerAnalysisError> {
+    let LayerEvaluation {
+        layers,
+        exceptions,
+        imports,
+        configuration_warnings,
+        cancellation,
+    } = input;
     let import_count = imports.len();
     let mut unresolved_imports_skipped = 0_usize;
     let mut violations = Vec::new();
@@ -319,7 +334,14 @@ fn evaluate_imports(
         };
         if from_layer.name == to_layer.name
             || !violates(from_layer, &to_layer.name, target_path)
-            || is_excepted(exceptions, import.file(), &to_layer.name, target_path)
+            || is_excepted(
+                exceptions,
+                ImportRoute {
+                    importer: import.file(),
+                    to_layer: &to_layer.name,
+                    target_path,
+                },
+            )
         {
             continue;
         }
@@ -388,16 +410,22 @@ fn violates(from: &CompiledLayer, to_layer: &str, target_path: &str) -> bool {
     !from.can_import.is_empty() && !policy_matches(&from.can_import, to_layer, target_path)
 }
 
-fn is_excepted(
-    exceptions: &[CompiledException],
-    importer: &str,
-    to_layer: &str,
-    target_path: &str,
-) -> bool {
+fn is_excepted(exceptions: &[CompiledException], route: ImportRoute<'_>) -> bool {
+    let ImportRoute {
+        importer,
+        to_layer,
+        target_path,
+    } = route;
     exceptions.iter().any(|exception| {
         exception.file.as_str() == importer
             && policy_matches(&exception.can_import, to_layer, target_path)
     })
+}
+
+struct ImportRoute<'a> {
+    importer: &'a str,
+    to_layer: &'a str,
+    target_path: &'a str,
 }
 
 #[cfg(test)]

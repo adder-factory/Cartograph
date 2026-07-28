@@ -12,6 +12,15 @@ const WIRE_I64: u8 = 1;
 const WIRE_LEN: u8 = 2;
 const WIRE_I32: u8 = 5;
 const MAXIMUM_VARINT_BYTES: usize = 10;
+const PROTOBUF_TAG_SHIFT: u32 = 3;
+const PROTOBUF_WIRE_TYPE_MASK: u64 = 7;
+const FIXED_64_BYTES: usize = 8;
+const FIXED_32_BYTES: usize = 4;
+const VARINT_VALUE_BITS: usize = 64;
+const VARINT_PAYLOAD_BITS: usize = 7;
+const VARINT_FINAL_SHIFT: usize = 63;
+const VARINT_PAYLOAD_MASK: u8 = 0x7f;
+const VARINT_CONTINUATION_BIT: u8 = 0x80;
 
 const INDEX_METADATA: u32 = 1;
 const INDEX_DOCUMENTS: u32 = 2;
@@ -64,9 +73,14 @@ impl Writer {
 
     fn varint(&mut self, mut value: u64) -> Result<(), ScipError> {
         loop {
-            let payload = u8::try_from(value & 0x7f).map_err(|_| ScipError::LimitExceeded)?;
-            value >>= 7;
-            self.push(if value == 0 { payload } else { payload | 0x80 })?;
+            let payload = u8::try_from(value & u64::from(VARINT_PAYLOAD_MASK))
+                .map_err(|_| ScipError::LimitExceeded)?;
+            value >>= VARINT_PAYLOAD_BITS;
+            self.push(if value == 0 {
+                payload
+            } else {
+                payload | VARINT_CONTINUATION_BIT
+            })?;
             if value == 0 {
                 return Ok(());
             }
@@ -400,8 +414,10 @@ fn decode_message(bytes: &[u8]) -> Result<Message<'_>, ScipError> {
     while position < bytes.len() {
         let (tag, next) = read_varint(bytes, position)?;
         position = next;
-        let field = u32::try_from(tag >> 3).map_err(|_| ScipError::InvalidWireData)?;
-        let wire = u8::try_from(tag & 7).map_err(|_| ScipError::InvalidWireData)?;
+        let field =
+            u32::try_from(tag >> PROTOBUF_TAG_SHIFT).map_err(|_| ScipError::InvalidWireData)?;
+        let wire =
+            u8::try_from(tag & PROTOBUF_WIRE_TYPE_MASK).map_err(|_| ScipError::InvalidWireData)?;
         if field == 0 {
             return Err(ScipError::InvalidWireData);
         }
@@ -425,14 +441,14 @@ fn decode_message(bytes: &[u8]) -> Result<Message<'_>, ScipError> {
             }
             WIRE_I64 => {
                 position = position
-                    .checked_add(8)
+                    .checked_add(FIXED_64_BYTES)
                     .filter(|end| *end <= bytes.len())
                     .ok_or(ScipError::InvalidWireData)?;
                 None
             }
             WIRE_I32 => {
                 position = position
-                    .checked_add(4)
+                    .checked_add(FIXED_32_BYTES)
                     .filter(|end| *end <= bytes.len())
                     .ok_or(ScipError::InvalidWireData)?;
                 None
@@ -449,15 +465,18 @@ fn decode_message(bytes: &[u8]) -> Result<Message<'_>, ScipError> {
 fn read_varint(bytes: &[u8], start: usize) -> Result<(u64, usize), ScipError> {
     let mut value = 0_u64;
     let mut position = start;
-    for shift in (0..64).step_by(7).take(MAXIMUM_VARINT_BYTES) {
+    for shift in (0..VARINT_VALUE_BITS)
+        .step_by(VARINT_PAYLOAD_BITS)
+        .take(MAXIMUM_VARINT_BYTES)
+    {
         let byte = *bytes.get(position).ok_or(ScipError::InvalidWireData)?;
         position = position.checked_add(1).ok_or(ScipError::InvalidWireData)?;
-        let payload = u64::from(byte & 0x7f);
-        if shift == 63 && payload > 1 {
+        let payload = u64::from(byte & VARINT_PAYLOAD_MASK);
+        if shift == VARINT_FINAL_SHIFT && payload > 1 {
             return Err(ScipError::InvalidWireData);
         }
         value |= payload << shift;
-        if byte & 0x80 == 0 {
+        if byte & VARINT_CONTINUATION_BIT == 0 {
             return Ok((value, position));
         }
     }

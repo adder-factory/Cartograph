@@ -28,6 +28,11 @@ const MAX_SCRIPT_TOTAL_BYTES: u64 = 32 * 1_024 * 1_024;
 const MAX_EVIDENCE_PATHS: usize = 20;
 const MAX_CONFIG_BYTES: u64 = 1_024 * 1_024;
 const MAX_PNPM_WORKSPACE_BYTES: u64 = 256 * 1_024;
+const MAX_PACKAGE_SPECIFIER_BYTES: usize = 512;
+const MAX_PACKAGE_NAME_BYTES: usize = 214;
+const UNSUPPORTED_PACKAGE_PREFIXES: [&str; 9] = [
+    ".", "/", "#", "node:", "bun:", "deno:", "jsr:", "http:", "https:",
+];
 
 /// Evidence explaining why one declared package is retained.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -221,7 +226,12 @@ fn collect_disk_evidence(
     }
     let declared = declared_dependencies(&records);
     let scripts = manifest_scripts(&records);
-    let bin_to_package = collect_bin_names(&root, &records, &declared, cancellation)?;
+    let bin_to_package = collect_bin_names(BinNameScan {
+        root: &root,
+        records: &records,
+        declared: &declared,
+        cancellation,
+    })?;
     let configured_providers = configured_provider_packages(&records);
     let runtime_shims = runtime_shims(&root, &scripts, &declared);
     let mut scripts = scripts;
@@ -580,12 +590,22 @@ fn manifest_scripts(records: &[ManifestRecord]) -> Vec<String> {
         .collect()
 }
 
+struct BinNameScan<'a> {
+    root: &'a Path,
+    records: &'a [ManifestRecord],
+    declared: &'a DeclaredDependencies,
+    cancellation: &'a ProjectCancellation,
+}
+
 fn collect_bin_names(
-    root: &Path,
-    records: &[ManifestRecord],
-    declared: &DeclaredDependencies,
-    cancellation: &ProjectCancellation,
+    input: BinNameScan<'_>,
 ) -> Result<BTreeMap<String, String>, DependencyAuditError> {
+    let BinNameScan {
+        root,
+        records,
+        declared,
+        cancellation,
+    } = input;
     let mut output = BTreeMap::new();
     for package in declared.all() {
         if cancellation.is_cancelled() {
@@ -779,7 +799,7 @@ fn read_dependencies_allowlist(root: &Path) -> BTreeSet<String> {
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= 214)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_PACKAGE_NAME_BYTES)
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -795,25 +815,24 @@ fn script_tokens(source: &str) -> impl Iterator<Item = &str> {
 }
 
 fn package_name(specifier: &str) -> Option<String> {
+    let specifier = normalized_package_specifier(specifier)?;
+    let package = package_from_specifier(specifier)?;
+    (!is_node_builtin(&package) && plausible_package_name(&package)).then_some(package)
+}
+
+fn normalized_package_specifier(specifier: &str) -> Option<&str> {
     let specifier = specifier.trim();
-    if specifier.is_empty()
-        || specifier.len() > 512
-        || specifier.starts_with('.')
-        || specifier.starts_with('/')
-        || specifier.starts_with('#')
-        || specifier.starts_with("node:")
-        || specifier.starts_with("bun:")
-        || specifier.starts_with("deno:")
-        || specifier.starts_with("jsr:")
-        || specifier.contains('\0')
-    {
+    if invalid_package_specifier(specifier) {
         return None;
     }
-    let specifier = specifier
+    specifier
         .strip_prefix("npm:")
         .unwrap_or(specifier)
         .split(['?', '#'])
-        .next()?;
+        .next()
+}
+
+fn package_from_specifier(specifier: &str) -> Option<String> {
     let mut parts = specifier.split('/');
     let first = parts.next()?;
     let package = if first.starts_with('@') {
@@ -821,15 +840,23 @@ fn package_name(specifier: &str) -> Option<String> {
     } else {
         first.to_owned()
     };
-    if package.is_empty() || is_node_builtin(&package) || !plausible_package_name(&package) {
-        None
-    } else {
-        Some(package)
+    Some(package)
+}
+
+fn invalid_package_specifier(specifier: &str) -> bool {
+    if specifier.is_empty()
+        || specifier.len() > MAX_PACKAGE_SPECIFIER_BYTES
+        || specifier.contains('\0')
+    {
+        return true;
     }
+    UNSUPPORTED_PACKAGE_PREFIXES
+        .iter()
+        .any(|prefix| specifier.starts_with(prefix))
 }
 
 fn plausible_package_name(package: &str) -> bool {
-    package.len() <= 214
+    package.len() <= MAX_PACKAGE_NAME_BYTES
         && package
             .chars()
             .any(|character| character.is_ascii_alphanumeric())

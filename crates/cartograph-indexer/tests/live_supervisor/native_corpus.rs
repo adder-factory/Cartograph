@@ -15,8 +15,8 @@ use std::{
 use std::process::Command as ProcessCommand;
 
 use cartograph_db::{
-    CurrentGeneration, ExactTextLookup, GenerationContents, PrepareGenerationMetrics, SearchQuery,
-    StagedGeneration,
+    CurrentGeneration, CurrentGenerationLookup, ExactTextLookup, GenerationContents,
+    PrepareGenerationMetrics, SearchQuery, StagedGeneration,
 };
 use cartograph_domain::{GenerationDigestVersion, GenerationId};
 use cartograph_indexer::NativePipelineReport;
@@ -35,13 +35,13 @@ const CORPUS_FINGERPRINT_DOMAIN: &[u8] = b"cartograph-v2-native-real-corpus-v1";
 const EXPECTED_CORPUS_FINGERPRINT: &str =
     "ab91088c482ed36d31759382283342654ce6958be4e601429b8181da531c5fc1";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "f6ed3809bb65794558a02ad0eb78a4b300894b955ec944397567447e98c9d964";
+    "940c0e0e3b65696d5f2389da81148b8090c60f7df1d529514f770a3d898cda65";
 const EXPECTED_BM25_DOCUMENT_IDS: [&str; 5] = [
     "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+    "78f1eb97-24b2-8a80-ad44-6dd679456592",
     "a5008cb5-184d-819e-a6bf-54c4f6207da0",
     "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
     "fc1a31af-afc0-827c-b3bc-acb5e56736d1",
-    "aaf947c6-c26f-8a97-9de2-c0e8df4e6470",
 ];
 const EXPECTED_TAGS_BM25_DOCUMENT_IDS: [&str; 6] = [
     "07ce3e1c-8912-83cb-8464-999aeef53935",
@@ -52,10 +52,10 @@ const EXPECTED_TAGS_BM25_DOCUMENT_IDS: [&str; 6] = [
     "72da0535-5a0c-830b-a9ec-ab9948bceb6e",
 ];
 const EXPECTED_FILES: i64 = 34;
-const EXPECTED_SYMBOLS: i64 = 4_207;
-const EXPECTED_EDGES: i64 = 6_818;
-const EXPECTED_REFERENCES: i64 = 14_314;
-const EXPECTED_DOCUMENTS: i64 = 4_207;
+const EXPECTED_SYMBOLS: i64 = 6_337;
+const EXPECTED_EDGES: i64 = 8_930;
+const EXPECTED_REFERENCES: i64 = 13_861;
+const EXPECTED_DOCUMENTS: i64 = 6_337;
 const EXPECTED_EDGE_KINDS: [&str; 10] = [
     "calls",
     "contains",
@@ -69,11 +69,11 @@ const EXPECTED_EDGE_KINDS: [&str; 10] = [
     "type_of",
 ];
 const EXPECTED_SOURCE_BYTES: u64 = 1_052_564;
-const EXPECTED_RESOLVED_REFERENCES: u64 = 2_852;
-const EXPECTED_UNRESOLVED_REFERENCES: u64 = 11_474;
-const EXPECTED_MODELED_GENERATION_BYTES: u64 = 13_070_698;
-const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 74_588_689;
-const EXPECTED_VALIDATION_HIGH_WATER_BYTES: u64 = 85_370_330;
+const EXPECTED_RESOLVED_REFERENCES: u64 = 2_809;
+const EXPECTED_UNRESOLVED_REFERENCES: u64 = 11_064;
+const EXPECTED_MODELED_GENERATION_BYTES: u64 = 17_117_054;
+const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 103_110_354;
+const EXPECTED_VALIDATION_HIGH_WATER_BYTES: u64 = 123_162_013;
 const CORPUS_QUERY: &str = "detectSecretsHandling";
 const TAGS_CORPUS_QUERY: &str = "tagscanary";
 const LIVE_SECRET_SENTINEL: &str = "sk_live_secret";
@@ -892,7 +892,8 @@ async fn execute_native_pipeline(
         )
         .await;
     let supervised_pipeline_nanos = duration_nanos(supervised_pipeline_started.elapsed());
-    let current = current.map_err(|_| error("supervised-native-pipeline"))?;
+    let current = current
+        .map_err(|failure| format!("native corpus supervised pipeline failed: {failure}"))?;
     let (native, native_nanos) = report_receiver
         .await
         .map_err(|_| error("native-report-missing"))?;
@@ -984,8 +985,7 @@ async fn assert_tags_exact_lookup(
     let simple = fixture
         .database
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            &fixture.project,
-            current,
+            CurrentGenerationLookup::new(&fixture.project, current),
             TAGS_CORPUS_QUERY,
             16,
         ))
@@ -1001,8 +1001,7 @@ async fn assert_tags_exact_lookup(
     let full = fixture
         .database
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            &fixture.project,
-            current,
+            CurrentGenerationLookup::new(&fixture.project, current),
             "T2Elixir.tagscanary",
             16,
         ))
@@ -1014,8 +1013,7 @@ async fn assert_tags_exact_lookup(
     let substring = fixture
         .database
         .exact_current_symbols_by_name(ExactTextLookup::new(
-            &fixture.project,
-            current,
+            CurrentGenerationLookup::new(&fixture.project, current),
             "scanary",
             16,
         ))
@@ -1033,8 +1031,7 @@ async fn read_bm25_document_ids(request: Bm25Inspection<'_>) -> CorpusResult<Vec
         .fixture
         .database
         .search_current_code(SearchQuery::new(
-            request.fixture.project.clone(),
-            request.current.clone(),
+            CurrentGenerationLookup::new(&request.fixture.project, request.current),
             request.query_text,
             request.limit,
         ))

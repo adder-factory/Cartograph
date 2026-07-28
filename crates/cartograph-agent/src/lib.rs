@@ -6,7 +6,7 @@
 
 use std::{
     collections::BTreeSet,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
     process,
@@ -22,18 +22,19 @@ use cartograph_db::{
     ProjectSnapshot, StagedGeneration,
 };
 use cartograph_domain::{
-    ContentDigest, NormalizedPath, ProjectId, ProjectOperation, SourceManifestDigestBuilder,
-    project_root_identity,
+    ContentDigest, GenerationDigestVersion, NormalizedPath, ProjectId, ProjectOperation,
+    SourceManifestDigestBuilder, project_root_identity,
 };
 use cartograph_extract::{
-    DiscoveryLimits, DiscoveryPolicy, SourceDiscoveryOptions, SourceLimits, SourceReadError,
-    SourceReadOptions, SourceRoot,
+    DiscoveryLimits, DiscoveryPolicy, NestedRepositoryPolicy, SourceDiscoveryOptions, SourceLimits,
+    SourceReadError, SourceReadOptions, SourceRoot,
 };
 use cartograph_indexer::{
-    IndexerSupervisor, NativeParseCache, NativePipelineConfig, NativePipelineDeadlines,
-    NativePipelineLimits, NativePipelineParallelism, NativePipelineReport, NativeRetainedLimits,
-    PipelineFailure, PipelineStage, PipelineStageTiming, ScipOverlayInput, StageCapacity,
-    SupervisorConfig, SupervisorRequest, build_native_generation_with_scip_and_cache,
+    IndexerSupervisor, NativeGenerationBuild, NativeParseCache, NativePipelineConfig,
+    NativePipelineDeadlines, NativePipelineLimits, NativePipelineParallelism, NativePipelineReport,
+    NativeRetainedLimits, PipelineFailure, PipelineStage, PipelineStageTiming, ScipOverlayInput,
+    StageCapacity, SupervisorConfig, SupervisorContext, SupervisorRequest,
+    build_native_generation_with_scip_and_cache,
 };
 use cartograph_llm::{ProjectSourceSettings, load_project_source_settings};
 use serde::Serialize;
@@ -70,16 +71,16 @@ pub use compare::{
 };
 pub use coverage::{CoverageError, LcovLoadOptions, LcovLoadReport};
 pub use dead_code::{
-    DeadCodeJudgeError, DeadCodeJudgeOptions, DeadCodeJudgeReport, DeadCodeJudgement,
-    DeadCodeVerdict, judge_dead_code_candidates,
+    DeadCodeJudgeError, DeadCodeJudgeOptions, DeadCodeJudgeReport, DeadCodeJudgeRequest,
+    DeadCodeJudgement, DeadCodeVerdict, judge_dead_code_candidates,
 };
 pub use dependencies::{
     DependencyAuditError, DependencyAuditReport, DependencyUseEvidence, UndeclaredDependency,
 };
 pub use diff_review::{
-    DiffCochangeWarning, DiffFileKind, DiffHunkContext, DiffReviewError, DiffReviewOptions,
-    DiffReviewReport, DiffSymbolContext, UnifiedDiffComparison, UnifiedDiffFile, UnifiedDiffHunk,
-    parse_unified_diff,
+    DiffCochangeWarning, DiffFileKind, DiffHunkContext, DiffReviewError, DiffReviewInput,
+    DiffReviewOptions, DiffReviewReport, DiffSymbolContext, UnifiedDiffComparison, UnifiedDiffFile,
+    UnifiedDiffHunk, parse_unified_diff,
 };
 pub use drift::{
     FileDriftBasis, FileDriftError, FileDriftOptions, FileDriftReport, MAXIMUM_UNIX_MILLISECONDS,
@@ -88,20 +89,23 @@ pub use embeddings::{
     EmbeddingClientRequest, EmbeddingOptions, EmbeddingStatusReport, EmbeddingSweepReport,
 };
 pub use git_intelligence::{
-    GitBlameLine, GitCommitPathSet, GitHistoryCommit, GitLineHistory, GitPathHistory,
-    GitRenameEvidence, TraceCulprit, TraceCulpritReport, discover_git_blame,
-    discover_git_commit_paths, discover_git_history, discover_git_line_history,
+    GitBlameLine, GitCommitPathSet, GitHistoryCommit, GitLineHistory, GitLineHistoryRequest,
+    GitLineRange, GitPathHistory, GitRenameEvidence, TraceCulprit, TraceCulpritReport,
+    discover_git_blame, discover_git_commit_paths, discover_git_history, discover_git_line_history,
     discover_git_rename_evidence, trace_git_culprits,
 };
 pub use history::{HistoryIndexError, HistoryIndexOptions};
 pub use imports::{
-    ImportAuditError, ImportAuditOptions, ImportAuditReport, ImportAuditSource, ImportAuditTarget,
-    ImportHit, ImportOrigin,
+    ImportAuditError, ImportAuditOptions, ImportAuditReport, ImportAuditRequest, ImportAuditSource,
+    ImportAuditTarget, ImportHit, ImportOrigin,
 };
-pub use issue_history::{IssueHistoryIndexError, IssueHistoryIndexOptions};
+pub use issue_history::{
+    IssueHistoryIndexError, IssueHistoryIndexOptions, IssueHistoryIndexRequest,
+};
 pub use layering::{LayerAnalysisError, LayerAnalysisReport, LayerViolation};
 pub use rename::{
-    RenamePlan, RenamePlanError, RenamePlanOptions, RenameReferenceEvidence, RenameTextualMention,
+    RenamePlan, RenamePlanError, RenamePlanOptions, RenamePlanRequest, RenameReferenceEvidence,
+    RenameTextualMention,
 };
 pub use retrieval::{
     PreparedRetrieval, RetrievalClientRequest, RetrievalOptions, RetrievalRequest,
@@ -111,7 +115,7 @@ pub use review::{
     discover_git_comparison,
 };
 pub use scip_interchange::{
-    ScipExportReport, ScipExportRequest, ScipImportReport, ScipImportRequest,
+    ScipExportReport, ScipExportRequest, ScipImportLimits, ScipImportReport, ScipImportRequest,
 };
 pub use source_context::{
     FileSourceContext, FileSourceExcerpt, FileSourceOptions, FileSourceRequest,
@@ -173,6 +177,18 @@ const AUTOMATIC_RETENTION_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATIC_RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTOMATIC_RETENTION_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 const OVERSIZED_SOURCE_DIGEST_DOMAIN: &[u8] = b"cartograph-v2-oversized-source-v1";
+
+pub(crate) fn trim_ascii_bytes(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    &value[start..end]
+}
 
 /// User-controlled bounds for one full source index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,7 +365,7 @@ pub struct IndexReport {
     pub content_digest: ContentDigest,
     /// Number of workers selected from the bounded corpus policy.
     pub workers: u16,
-    /// False when an identical current source revision made the request a no-op.
+    /// False when an identical source revision under the current digest contract made this a no-op.
     pub published: bool,
     /// Native pipeline metrics, absent for a no-op publication.
     pub native: Option<NativeIndexMetrics>,
@@ -423,7 +439,7 @@ pub struct ProjectStatus {
     pub snapshot: Option<ProjectSnapshot>,
     /// Current supported-source manifest digest.
     pub live_source_revision: ContentDigest,
-    /// True only when the durable generation recorded this exact manifest.
+    /// True only when the durable generation recorded this exact manifest and digest contract.
     pub fresh: bool,
 }
 
@@ -515,6 +531,324 @@ impl Drop for AbortTaskOnDrop {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IndexEnrichmentPolicy {
+    refresh_history: bool,
+    history_enabled: bool,
+    churn_enabled: bool,
+    co_change_enabled: bool,
+    issue_history_enabled: bool,
+}
+
+struct TimedHistoryPreparation {
+    result: Result<history::PreparedHistoryIndex, HistoryIndexError>,
+    elapsed_millis: u64,
+}
+
+struct TimedIssueHistoryPreparation {
+    result: Result<issue_history::PreparedIssueHistory, IssueHistoryIndexError>,
+    elapsed_millis: u64,
+}
+
+struct IndexCompletion {
+    report: IndexReport,
+    history: Option<TimedHistoryPreparation>,
+    issue_history: Option<TimedIssueHistoryPreparation>,
+    policy: IndexEnrichmentPolicy,
+    operation_started: Instant,
+}
+
+fn index_enrichment_policy(
+    options: IndexOptions,
+    source_settings: &ProjectSourceSettings,
+) -> IndexEnrichmentPolicy {
+    let churn_enabled = source_settings.enable_churn();
+    let co_change_enabled = source_settings.enable_co_change();
+    IndexEnrichmentPolicy {
+        refresh_history: options.refresh_history,
+        history_enabled: options.refresh_history && (churn_enabled || co_change_enabled),
+        churn_enabled,
+        co_change_enabled,
+        issue_history_enabled: options.refresh_history && source_settings.enable_issue_history(),
+    }
+}
+
+async fn run_core_index(
+    runtime: &ProjectRuntime,
+    options: IndexOptions,
+    cancellation: ProjectCancellation,
+) -> Result<IndexReport, ProjectError> {
+    let preparation_started = Instant::now();
+    let preparation = runtime.prepare_index(options, cancellation.clone()).await?;
+    let preparation_millis = monotonic_millis(preparation_started.elapsed());
+    let mut report = match preparation {
+        IndexPreparation::Unchanged(report) => *report,
+        IndexPreparation::Pending(pending) => {
+            runtime
+                .publish_index(*pending, cancellation, options.profile)
+                .await?
+        }
+    };
+    if let Some(profile) = report.profile.as_mut() {
+        profile.preparation_millis = preparation_millis;
+    }
+    report.retention = runtime
+        .maintain_generation_retention(&report.project_id)
+        .await;
+    Ok(report)
+}
+
+async fn prepare_optional_history(
+    runtime: &ProjectRuntime,
+    policy: IndexEnrichmentPolicy,
+    cancellation: ProjectCancellation,
+) -> Option<TimedHistoryPreparation> {
+    if !policy.history_enabled {
+        return None;
+    }
+    let started = Instant::now();
+    let result = runtime
+        .prepare_git_history(HistoryIndexOptions::default(), cancellation)
+        .await
+        .map(|history| history.with_channels(policy.churn_enabled, policy.co_change_enabled));
+    Some(TimedHistoryPreparation {
+        result,
+        elapsed_millis: monotonic_millis(started.elapsed()),
+    })
+}
+
+async fn prepare_optional_issue_history(
+    runtime: &ProjectRuntime,
+    policy: IndexEnrichmentPolicy,
+    cancellation: ProjectCancellation,
+) -> Option<TimedIssueHistoryPreparation> {
+    if !policy.issue_history_enabled {
+        return None;
+    }
+    let started = Instant::now();
+    let result = runtime
+        .prepare_issue_history(IssueHistoryIndexOptions::default(), cancellation)
+        .await;
+    Some(TimedIssueHistoryPreparation {
+        result,
+        elapsed_millis: monotonic_millis(started.elapsed()),
+    })
+}
+
+async fn finalize_index_completion(
+    runtime: &ProjectRuntime,
+    completion: IndexCompletion,
+) -> IndexReport {
+    let mut report = completion.report;
+    if let Some(history) = completion.history {
+        report = runtime.attach_history(report, history.result).await;
+        if let Some(profile) = report.profile.as_mut() {
+            profile.history_millis = history.elapsed_millis;
+        }
+    } else if completion.policy.refresh_history && !completion.policy.history_enabled {
+        report.history = match runtime
+            .database
+            .clear_file_history(&report.project_id)
+            .await
+        {
+            Ok(()) => HistoryIndexStatus::Unavailable {
+                reason: "disabled_by_project_config",
+            },
+            Err(_) => HistoryIndexStatus::Unavailable {
+                reason: "storage_unavailable",
+            },
+        };
+    }
+    if let Some(issue_history) = completion.issue_history {
+        report = runtime
+            .attach_issue_history(report, issue_history.result)
+            .await;
+        if let Some(profile) = report.profile.as_mut() {
+            profile.issue_history_millis = issue_history.elapsed_millis;
+        }
+    } else if completion.policy.refresh_history {
+        report.issue_history = match runtime
+            .database
+            .clear_issue_history(&report.project_id, &report.generation_id)
+            .await
+        {
+            Ok(()) => IssueHistoryIndexStatus::Unavailable {
+                reason: "disabled_by_project_config",
+            },
+            Err(_) => IssueHistoryIndexStatus::Unavailable {
+                reason: "storage_unavailable",
+            },
+        };
+    }
+    if let Some(profile) = report.profile.as_mut() {
+        profile.total_millis = monotonic_millis(completion.operation_started.elapsed());
+    }
+    report
+}
+
+async fn project_status_with_cancellation(
+    runtime: &ProjectRuntime,
+    cancellation: ProjectCancellation,
+) -> Result<ProjectStatus, ProjectError> {
+    let source = runtime.scan_source(None, cancellation.clone()).await?;
+    if cancellation.is_cancelled() {
+        return Err(ProjectError::RequestCancelled);
+    }
+    let snapshot = runtime
+        .database
+        .project_snapshot_by_root(&runtime.root_identity)
+        .await
+        .map_err(|_| ProjectError::StatusFailed)?;
+    let fresh = snapshot
+        .as_ref()
+        .and_then(|project| project.current.as_ref())
+        .is_some_and(|current| {
+            current.source_revision == source.digest.as_str()
+                && current.digest_version == GenerationDigestVersion::CURRENT
+        });
+    Ok(ProjectStatus {
+        snapshot,
+        live_source_revision: source.digest,
+        fresh,
+    })
+}
+
+async fn index_project_with_cancellation(
+    runtime: &ProjectRuntime,
+    options: IndexOptions,
+    cancellation: ProjectCancellation,
+) -> Result<IndexReport, ProjectError> {
+    let operation_started = Instant::now();
+    let source_settings =
+        load_project_source_settings(&runtime.root).map_err(|_| ProjectError::InvalidOptions)?;
+    let policy = index_enrichment_policy(options, &source_settings);
+    let index = run_core_index(runtime, options, cancellation.clone());
+    let history = prepare_optional_history(runtime, policy, cancellation.clone());
+    let issue_history = prepare_optional_issue_history(runtime, policy, cancellation);
+    let (report, history, issue_history) = tokio::join!(index, history, issue_history);
+    Ok(finalize_index_completion(
+        runtime,
+        IndexCompletion {
+            report: report?,
+            history,
+            issue_history,
+            policy,
+            operation_started,
+        },
+    )
+    .await)
+}
+
+async fn attach_history_result(
+    runtime: &ProjectRuntime,
+    mut report: IndexReport,
+    history: Result<history::PreparedHistoryIndex, HistoryIndexError>,
+) -> IndexReport {
+    report.history = match history {
+        Ok(history) => match runtime
+            .persist_git_history(report.project_id.clone(), history)
+            .await
+        {
+            Ok(history) => HistoryIndexStatus::Indexed { report: history },
+            Err(error) => HistoryIndexStatus::Unavailable {
+                reason: history_unavailable_reason(error),
+            },
+        },
+        Err(error) => HistoryIndexStatus::Unavailable {
+            reason: history_unavailable_reason(error),
+        },
+    };
+    report
+}
+
+async fn attach_issue_history_result(
+    runtime: &ProjectRuntime,
+    mut report: IndexReport,
+    issue_history: Result<issue_history::PreparedIssueHistory, IssueHistoryIndexError>,
+) -> IndexReport {
+    report.issue_history = match issue_history {
+        Ok(issue_history) => match runtime
+            .persist_issue_history(
+                report.project_id.clone(),
+                report.generation_id.clone(),
+                issue_history,
+            )
+            .await
+        {
+            Ok(issue_history) => IssueHistoryIndexStatus::Indexed {
+                report: issue_history,
+            },
+            Err(error) => IssueHistoryIndexStatus::Unavailable {
+                reason: issue_history_unavailable_reason(error),
+            },
+        },
+        Err(error) => IssueHistoryIndexStatus::Unavailable {
+            reason: issue_history_unavailable_reason(error),
+        },
+    };
+    report
+}
+
+async fn maintain_generation_retention(
+    runtime: &ProjectRuntime,
+    project_id: &ProjectId,
+) -> GenerationRetentionStatus {
+    let policy = match GenerationRetentionPolicy::new(
+        AUTOMATIC_RETENTION_KEEP_SUPERSEDED,
+        AUTOMATIC_RETENTION_MAXIMUM_DELETIONS,
+    ) {
+        Ok(policy) => policy,
+        Err(_) => {
+            return GenerationRetentionStatus::Deferred {
+                reason: "invalid_policy",
+            };
+        }
+    };
+    let target = LeaseTarget::new(project_id.clone(), ProjectOperation::Migration, None);
+    let lease = match runtime
+        .database
+        .acquire_lease_bounded(
+            LeaseRequest::new(target, process_owner(), AUTOMATIC_RETENTION_LEASE_DURATION),
+            AUTOMATIC_RETENTION_ACQUIRE_TIMEOUT,
+        )
+        .await
+    {
+        Ok(lease) => lease,
+        Err(LeaseError::Busy) => {
+            return GenerationRetentionStatus::Deferred {
+                reason: "project_busy",
+            };
+        }
+        Err(_) => {
+            return GenerationRetentionStatus::Deferred {
+                reason: "lease_unavailable",
+            };
+        }
+    };
+    let report = runtime
+        .database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            policy,
+            &lease.fence(),
+            AUTOMATIC_RETENTION_STATEMENT_TIMEOUT,
+        ))
+        .await;
+    let released = runtime
+        .database
+        .release_lease_bounded(&lease, AUTOMATIC_RETENTION_RELEASE_TIMEOUT)
+        .await;
+    match (report, released) {
+        (Ok(report), Ok(())) => GenerationRetentionStatus::Completed { report },
+        (Ok(report), Err(_)) => GenerationRetentionStatus::CompletedWithWarning {
+            report,
+            warning: "lease_release_unavailable",
+        },
+        (Err(_), _) => GenerationRetentionStatus::Deferred {
+            reason: "cleanup_unavailable",
+        },
     }
 }
 
@@ -682,24 +1016,7 @@ impl ProjectRuntime {
         &self,
         cancellation: ProjectCancellation,
     ) -> Result<ProjectStatus, ProjectError> {
-        let source = self.scan_source(None, cancellation.clone()).await?;
-        if cancellation.is_cancelled() {
-            return Err(ProjectError::RequestCancelled);
-        }
-        let snapshot = self
-            .database
-            .project_snapshot_by_root(&self.root_identity)
-            .await
-            .map_err(|_| ProjectError::StatusFailed)?;
-        let fresh = snapshot
-            .as_ref()
-            .and_then(|project| project.current.as_ref())
-            .is_some_and(|current| current.source_revision == source.digest.as_str());
-        Ok(ProjectStatus {
-            snapshot,
-            live_source_revision: source.digest,
-            fresh,
-        })
+        project_status_with_cancellation(self, cancellation).await
     }
 
     /// Build and atomically publish one complete generation, or return an exact no-op.
@@ -714,142 +1031,23 @@ impl ProjectRuntime {
         options: IndexOptions,
         cancellation: ProjectCancellation,
     ) -> Result<IndexReport, ProjectError> {
-        let operation_started = Instant::now();
-        let source_settings =
-            load_project_source_settings(&self.root).map_err(|_| ProjectError::InvalidOptions)?;
-        let churn_enabled = source_settings.enable_churn();
-        let co_change_enabled = source_settings.enable_co_change();
-        let history_enabled = options.refresh_history && (churn_enabled || co_change_enabled);
-        let issue_history_enabled =
-            options.refresh_history && source_settings.enable_issue_history();
-        let index = async {
-            let preparation_started = Instant::now();
-            let preparation = self.prepare_index(options, cancellation.clone()).await?;
-            let preparation_millis = monotonic_millis(preparation_started.elapsed());
-            let mut report = match preparation {
-                IndexPreparation::Unchanged(report) => *report,
-                IndexPreparation::Pending(pending) => {
-                    self.publish_index(*pending, cancellation.clone(), options.profile)
-                        .await?
-                }
-            };
-            if let Some(profile) = report.profile.as_mut() {
-                profile.preparation_millis = preparation_millis;
-            }
-            report.retention = self.maintain_generation_retention(&report.project_id).await;
-            Ok::<_, ProjectError>(report)
-        };
-        let history = async {
-            if !history_enabled {
-                return None;
-            }
-            let started = Instant::now();
-            let result = self
-                .prepare_git_history(HistoryIndexOptions::default(), cancellation.clone())
-                .await
-                .map(|history| history.with_channels(churn_enabled, co_change_enabled));
-            Some((result, monotonic_millis(started.elapsed())))
-        };
-        let issue_history = async {
-            if !issue_history_enabled {
-                return None;
-            }
-            let started = Instant::now();
-            let result = self
-                .prepare_issue_history(IssueHistoryIndexOptions::default(), cancellation.clone())
-                .await;
-            Some((result, monotonic_millis(started.elapsed())))
-        };
-        let (report, history, issue_history) = tokio::join!(index, history, issue_history);
-        let mut report = report?;
-        if let Some((history, history_millis)) = history {
-            report = self.attach_history(report, history).await;
-            if let Some(profile) = report.profile.as_mut() {
-                profile.history_millis = history_millis;
-            }
-        } else if options.refresh_history && !history_enabled {
-            report.history = match self.database.clear_file_history(&report.project_id).await {
-                Ok(()) => HistoryIndexStatus::Unavailable {
-                    reason: "disabled_by_project_config",
-                },
-                Err(_) => HistoryIndexStatus::Unavailable {
-                    reason: "storage_unavailable",
-                },
-            };
-        }
-        if let Some((issue_history, issue_history_millis)) = issue_history {
-            report = self.attach_issue_history(report, issue_history).await;
-            if let Some(profile) = report.profile.as_mut() {
-                profile.issue_history_millis = issue_history_millis;
-            }
-        } else if options.refresh_history {
-            report.issue_history = match self
-                .database
-                .clear_issue_history(&report.project_id, &report.generation_id)
-                .await
-            {
-                Ok(()) => IssueHistoryIndexStatus::Unavailable {
-                    reason: "disabled_by_project_config",
-                },
-                Err(_) => IssueHistoryIndexStatus::Unavailable {
-                    reason: "storage_unavailable",
-                },
-            };
-        }
-        if let Some(profile) = report.profile.as_mut() {
-            profile.total_millis = monotonic_millis(operation_started.elapsed());
-        }
-        Ok(report)
+        index_project_with_cancellation(self, options, cancellation).await
     }
 
     async fn attach_history(
         &self,
-        mut report: IndexReport,
+        report: IndexReport,
         history: Result<history::PreparedHistoryIndex, HistoryIndexError>,
     ) -> IndexReport {
-        report.history = match history {
-            Ok(history) => match self
-                .persist_git_history(report.project_id.clone(), history)
-                .await
-            {
-                Ok(history) => HistoryIndexStatus::Indexed { report: history },
-                Err(error) => HistoryIndexStatus::Unavailable {
-                    reason: history_unavailable_reason(error),
-                },
-            },
-            Err(error) => HistoryIndexStatus::Unavailable {
-                reason: history_unavailable_reason(error),
-            },
-        };
-        report
+        attach_history_result(self, report, history).await
     }
 
     async fn attach_issue_history(
         &self,
-        mut report: IndexReport,
+        report: IndexReport,
         issue_history: Result<issue_history::PreparedIssueHistory, IssueHistoryIndexError>,
     ) -> IndexReport {
-        report.issue_history = match issue_history {
-            Ok(issue_history) => match self
-                .persist_issue_history(
-                    report.project_id.clone(),
-                    report.generation_id.clone(),
-                    issue_history,
-                )
-                .await
-            {
-                Ok(issue_history) => IssueHistoryIndexStatus::Indexed {
-                    report: issue_history,
-                },
-                Err(error) => IssueHistoryIndexStatus::Unavailable {
-                    reason: issue_history_unavailable_reason(error),
-                },
-            },
-            Err(error) => IssueHistoryIndexStatus::Unavailable {
-                reason: issue_history_unavailable_reason(error),
-            },
-        };
-        report
+        attach_issue_history_result(self, report, issue_history).await
     }
 
     async fn prepare_index(
@@ -863,12 +1061,12 @@ impl ProjectRuntime {
             .or(source_policy.maximum_file_bytes)
             .unwrap_or(DEFAULT_MAX_SOURCE_BYTES);
         let source = self
-            .scan_source_for_index(
-                cancellation.clone(),
+            .scan_source_for_index(IndexSourceScan {
+                cancellation: cancellation.clone(),
                 max_source_bytes,
-                source_policy.discovery.clone(),
-                source_policy.index,
-            )
+                discovery_policy: source_policy.discovery.clone(),
+                index_policy: source_policy.index,
+            })
             .await?;
         if cancellation.is_cancelled() {
             return Err(ProjectError::RequestCancelled);
@@ -881,6 +1079,7 @@ impl ProjectRuntime {
         if !options.force
             && let Some(current) = prior.as_ref().and_then(|project| project.current.as_ref())
             && current.source_revision == source.digest.as_str()
+            && current.digest_version == GenerationDigestVersion::CURRENT
         {
             return Ok(IndexPreparation::Unchanged(Box::new(IndexReport {
                 project_id: prior
@@ -1006,32 +1205,18 @@ impl ProjectRuntime {
         let parse_cache = NativeParseCache::new(self.database.clone(), project_id.clone())
             .with_reads(parse_cache_reads);
         let (report_sender, report_receiver) = oneshot::channel();
+        let mut build =
+            NativeGenerationBuild::new(source_root, pipeline).with_parse_cache(parse_cache);
+        if let Some(overlay) = scip_overlay {
+            build = build.with_scip_overlay(overlay);
+        }
+        let work = GenerationBuildWork {
+            build,
+            staged,
+            report_sender,
+        };
         let current_result = supervisor
-            .run(request, move |context| async move {
-                let native = build_native_generation_with_scip_and_cache(
-                    &context.stages(),
-                    source_root,
-                    pipeline,
-                    scip_overlay,
-                    Some(parse_cache),
-                )
-                .await
-                .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
-                let report = native.report();
-                let (facts, _) = native.into_parts();
-                report_sender
-                    .send(report)
-                    .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
-                context
-                    .progress()
-                    .begin_stage(PipelineStage::Copy)
-                    .await
-                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
-                context
-                    .prepare_generation(GenerationContents::new(staged, facts))
-                    .await
-                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
-            })
+            .run(request, move |context| prepare_generation(context, work))
             .await;
         cancellation_task.abort_and_reap().await;
         let supervisor_status = supervisor.status().await;
@@ -1072,60 +1257,7 @@ impl ProjectRuntime {
         &self,
         project_id: &ProjectId,
     ) -> GenerationRetentionStatus {
-        let policy = match GenerationRetentionPolicy::new(
-            AUTOMATIC_RETENTION_KEEP_SUPERSEDED,
-            AUTOMATIC_RETENTION_MAXIMUM_DELETIONS,
-        ) {
-            Ok(policy) => policy,
-            Err(_) => {
-                return GenerationRetentionStatus::Deferred {
-                    reason: "invalid_policy",
-                };
-            }
-        };
-        let target = LeaseTarget::new(project_id.clone(), ProjectOperation::Migration, None);
-        let lease = match self
-            .database
-            .acquire_lease_bounded(
-                LeaseRequest::new(target, process_owner(), AUTOMATIC_RETENTION_LEASE_DURATION),
-                AUTOMATIC_RETENTION_ACQUIRE_TIMEOUT,
-            )
-            .await
-        {
-            Ok(lease) => lease,
-            Err(LeaseError::Busy) => {
-                return GenerationRetentionStatus::Deferred {
-                    reason: "project_busy",
-                };
-            }
-            Err(_) => {
-                return GenerationRetentionStatus::Deferred {
-                    reason: "lease_unavailable",
-                };
-            }
-        };
-        let report = self
-            .database
-            .cleanup_generations(GenerationRetentionRequest::new(
-                policy,
-                &lease.fence(),
-                AUTOMATIC_RETENTION_STATEMENT_TIMEOUT,
-            ))
-            .await;
-        let released = self
-            .database
-            .release_lease_bounded(&lease, AUTOMATIC_RETENTION_RELEASE_TIMEOUT)
-            .await;
-        match (report, released) {
-            (Ok(report), Ok(())) => GenerationRetentionStatus::Completed { report },
-            (Ok(report), Err(_)) => GenerationRetentionStatus::CompletedWithWarning {
-                report,
-                warning: "lease_release_unavailable",
-            },
-            (Err(_), _) => GenerationRetentionStatus::Deferred {
-                reason: "cleanup_unavailable",
-            },
-        }
+        maintain_generation_retention(self, project_id).await
     }
 
     /// Close all PostgreSQL connections owned by this project runtime.
@@ -1157,11 +1289,14 @@ impl ProjectRuntime {
 
     async fn scan_source_for_index(
         &self,
-        cancellation: ProjectCancellation,
-        max_source_bytes: usize,
-        discovery_policy: DiscoveryPolicy,
-        index_policy: SourceIndexPolicy,
+        input: IndexSourceScan,
     ) -> Result<SourceRevision, ProjectError> {
+        let IndexSourceScan {
+            cancellation,
+            max_source_bytes,
+            discovery_policy,
+            index_policy,
+        } = input;
         scan_source_path(SourceScanRequest {
             root: self.root.clone(),
             permits: self.source_scan_permits.clone(),
@@ -1194,6 +1329,35 @@ struct PendingIndex {
     staged: StagedGeneration,
 }
 
+struct GenerationBuildWork {
+    build: NativeGenerationBuild,
+    staged: StagedGeneration,
+    report_sender: oneshot::Sender<NativePipelineReport>,
+}
+
+async fn prepare_generation(
+    context: SupervisorContext,
+    work: GenerationBuildWork,
+) -> Result<cartograph_db::ReadyGeneration, PipelineFailure> {
+    let native = build_native_generation_with_scip_and_cache(&context.stages(), work.build)
+        .await
+        .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+    let report = native.report();
+    let (facts, _) = native.into_parts();
+    work.report_sender
+        .send(report)
+        .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+    context
+        .progress()
+        .begin_stage(PipelineStage::Copy)
+        .await
+        .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+    context
+        .prepare_generation(GenerationContents::new(work.staged, facts))
+        .await
+        .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+}
+
 struct SourceScanRequest {
     root: PathBuf,
     permits: Arc<Semaphore>,
@@ -1203,6 +1367,13 @@ struct SourceScanRequest {
     discovery_policy: DiscoveryPolicy,
     index_policy: SourceIndexPolicy,
     cancellation: ProjectCancellation,
+}
+
+struct IndexSourceScan {
+    cancellation: ProjectCancellation,
+    max_source_bytes: usize,
+    discovery_policy: DiscoveryPolicy,
+    index_policy: SourceIndexPolicy,
 }
 
 async fn scan_source_path(input: SourceScanRequest) -> Result<SourceRevision, ProjectError> {
@@ -1232,12 +1403,14 @@ async fn scan_source_path(input: SourceScanRequest) -> Result<SourceRevision, Pr
         // second scan while the first worker was still unwinding.
         let _permit = permit;
         source_revision_with_options(
-            &root,
-            capture_path.as_ref(),
-            retain_scip_overlay,
-            max_source_bytes,
-            discovery_policy,
-            index_policy,
+            SourceRevisionRequest {
+                root: &root,
+                capture_path: capture_path.as_ref(),
+                retain_scip_overlay,
+                max_source_bytes,
+                discovery_policy,
+                index_policy,
+            },
             || worker_cancellation.is_cancelled(),
         )
     })
@@ -1279,8 +1452,10 @@ impl ProjectSourcePolicy {
     fn from_settings(settings: &ProjectSourceSettings) -> Result<Self, ProjectError> {
         let discovery = DiscoveryPolicy::new_with_languages(
             settings.excludes(),
-            settings.index_submodules(),
-            settings.index_embedded_repositories(),
+            NestedRepositoryPolicy::new(
+                settings.index_submodules(),
+                settings.index_embedded_repositories(),
+            ),
             settings.languages(),
         )
         .and_then(|policy| policy.with_includes(settings.includes()))
@@ -1324,30 +1499,44 @@ where
 {
     let source_policy = project_source_policy(root)?;
     source_revision_with_options(
-        root,
-        capture_path,
-        false,
-        source_policy
-            .maximum_file_bytes
-            .unwrap_or(DEFAULT_MAX_SOURCE_BYTES),
-        source_policy.discovery,
-        source_policy.index,
+        SourceRevisionRequest {
+            root,
+            capture_path,
+            retain_scip_overlay: false,
+            max_source_bytes: source_policy
+                .maximum_file_bytes
+                .unwrap_or(DEFAULT_MAX_SOURCE_BYTES),
+            discovery_policy: source_policy.discovery,
+            index_policy: source_policy.index,
+        },
         cancelled,
     )
 }
 
-fn source_revision_with_options<Cancel>(
-    root: &Path,
-    capture_path: Option<&NormalizedPath>,
+struct SourceRevisionRequest<'path> {
+    root: &'path Path,
+    capture_path: Option<&'path NormalizedPath>,
     retain_scip_overlay: bool,
     max_source_bytes: usize,
     discovery_policy: DiscoveryPolicy,
     index_policy: SourceIndexPolicy,
+}
+
+fn source_revision_with_options<Cancel>(
+    request: SourceRevisionRequest<'_>,
     mut cancelled: Cancel,
 ) -> Result<SourceRevision, ProjectError>
 where
     Cancel: FnMut() -> bool,
 {
+    let SourceRevisionRequest {
+        root,
+        capture_path,
+        retain_scip_overlay,
+        max_source_bytes,
+        discovery_policy,
+        index_policy,
+    } = request;
     let source_root = SourceRoot::open_with_policy(root, discovery_policy)
         .map_err(|_| ProjectError::ProjectRootUnavailable)?;
     let discovery = discovery_limits()?;
@@ -1426,20 +1615,16 @@ struct ScipOverlayRead {
     input: Option<ScipOverlayInput>,
 }
 
-fn read_scip_overlay(
-    root: &Path,
-    retain_bytes: bool,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<ScipOverlayRead, ProjectError> {
+struct OpenScipOverlay {
+    file: File,
+    expected_bytes: usize,
+}
+
+fn open_scip_overlay(root: &Path) -> Result<Option<OpenScipOverlay>, ProjectError> {
     let path = root.join(SCIP_OVERLAY_RELATIVE_PATH);
     let initial = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(ScipOverlayRead {
-                digest: None,
-                input: None,
-            });
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(ProjectError::ScipOverlayInvalid),
     };
     if initial.file_type().is_symlink() || !initial.is_file() {
@@ -1452,23 +1637,34 @@ fn read_scip_overlay(
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    let mut file = options
+    let file = options
         .open(path)
         .map_err(|_| ProjectError::ScipOverlayInvalid)?;
     let metadata = file
         .metadata()
         .map_err(|_| ProjectError::ScipOverlayInvalid)?;
-    let expected = usize::try_from(metadata.len())
+    let expected_bytes = usize::try_from(metadata.len())
         .ok()
         .filter(|length| (1..=MAXIMUM_SCIP_OVERLAY_BYTES).contains(length))
         .ok_or(ProjectError::ScipOverlayInvalid)?;
     if !metadata.is_file() {
         return Err(ProjectError::ScipOverlayInvalid);
     }
+    Ok(Some(OpenScipOverlay {
+        file,
+        expected_bytes,
+    }))
+}
+
+fn read_open_scip_overlay(
+    mut opened: OpenScipOverlay,
+    retain_bytes: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ScipOverlayRead, ProjectError> {
     let mut retained = if retain_bytes {
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(expected)
+            .try_reserve_exact(opened.expected_bytes)
             .map_err(|_| ProjectError::ScipOverlayInvalid)?;
         Some(bytes)
     } else {
@@ -1481,7 +1677,7 @@ fn read_scip_overlay(
         if cancelled() {
             return Err(ProjectError::RequestCancelled);
         }
-        let count = match file.read(&mut buffer) {
+        let count = match opened.file.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -1496,7 +1692,7 @@ fn read_scip_overlay(
             bytes.extend_from_slice(&buffer[..count]);
         }
     }
-    if total != expected {
+    if total != opened.expected_bytes {
         return Err(ProjectError::ScipOverlayInvalid);
     }
     let digest = ContentDigest::from_bytes(*hasher.finalize().as_bytes());
@@ -1508,6 +1704,20 @@ fn read_scip_overlay(
         digest: Some(digest),
         input,
     })
+}
+
+fn read_scip_overlay(
+    root: &Path,
+    retain_bytes: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ScipOverlayRead, ProjectError> {
+    let Some(opened) = open_scip_overlay(root)? else {
+        return Ok(ScipOverlayRead {
+            digest: None,
+            input: None,
+        });
+    };
+    read_open_scip_overlay(opened, retain_bytes, cancelled)
 }
 
 fn source_overlay_digest(source: &ContentDigest, overlay: &ContentDigest) -> ContentDigest {
@@ -1900,19 +2110,21 @@ mod tests {
         assert_ne!(changed.digest, overlaid.digest);
         assert_eq!(changed.files, overlaid.files);
         let retained = source_revision_with_options(
-            directory.path(),
-            None,
-            true,
-            DEFAULT_MAX_SOURCE_BYTES,
-            DiscoveryPolicy::v1_defaults()
-                .unwrap_or_else(|error| panic!("default discovery policy failed: {error}")),
-            SourceIndexPolicy {
-                enable_centrality: true,
-                enable_betweenness: true,
-                extract_docstrings: true,
-                track_call_sites: true,
-                duplicate_code_partial_clones: false,
-                duplicate_code_allowlist_digest: duplicate_code_allowlist_digest(&[]),
+            SourceRevisionRequest {
+                root: directory.path(),
+                capture_path: None,
+                retain_scip_overlay: true,
+                max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+                discovery_policy: DiscoveryPolicy::v1_defaults()
+                    .unwrap_or_else(|error| panic!("default discovery policy failed: {error}")),
+                index_policy: SourceIndexPolicy {
+                    enable_centrality: true,
+                    enable_betweenness: true,
+                    extract_docstrings: true,
+                    track_call_sites: true,
+                    duplicate_code_partial_clones: false,
+                    duplicate_code_allowlist_digest: duplicate_code_allowlist_digest(&[]),
+                },
             },
             || false,
         )

@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_db::{
-    CurrentSourceRangeLookup, CurrentSymbolRecord, RenameReferenceSite, StorageError,
+    CurrentGenerationLookup, CurrentSourceRangeLookup, CurrentSymbolRecord, RenameReferenceSite,
+    SourceLineRange, StorageError,
 };
 use cartograph_domain::{ContentDigest, NormalizedPath, ProjectId, SourceManifestDigestBuilder};
-use cartograph_extract::{SourceDiscoveryOptions, SourceReadOptions, SourceRoot};
+use cartograph_extract::{
+    DiscoveredSource, SourceDiscoveryOptions, SourceReadOptions, SourceRoot, SourceSnapshot,
+};
 use futures_util::{StreamExt, stream};
 use serde::Serialize;
 use thiserror::Error;
@@ -40,6 +43,14 @@ impl RenamePlanOptions {
             maximum_mention_file_bytes: DEFAULT_MAXIMUM_MENTION_FILE_BYTES,
         })
     }
+}
+
+/// Exact symbol, project, bounds, and cancellation scope for one rename plan.
+pub struct RenamePlanRequest {
+    pub project_id: ProjectId,
+    pub definition: CurrentSymbolRecord,
+    pub options: RenamePlanOptions,
+    pub cancellation: ProjectCancellation,
 }
 
 /// Exact graph reference enriched with a fresh one-based source line.
@@ -105,11 +116,14 @@ impl ProjectRuntime {
     /// Build a fresh exact-reference plus textual-mention plan without editing files.
     pub async fn plan_rename(
         &self,
-        project_id: ProjectId,
-        definition: CurrentSymbolRecord,
-        options: RenamePlanOptions,
-        cancellation: ProjectCancellation,
+        input: RenamePlanRequest,
     ) -> Result<RenamePlan, RenamePlanError> {
+        let RenamePlanRequest {
+            project_id,
+            definition,
+            options,
+            cancellation,
+        } = input;
         let before = self
             .database()
             .project_snapshot_by_root(self.root_identity())
@@ -146,12 +160,14 @@ impl ProjectRuntime {
         let mut scan = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             scan_rename_source(
-                &root,
-                &symbol_name,
-                &definition_path,
-                definition_line,
-                references,
-                options,
+                RenameSourceRequest {
+                    root: &root,
+                    symbol_name: &symbol_name,
+                    definition_path: &definition_path,
+                    definition_line,
+                    references,
+                    options,
+                },
                 || worker_cancellation.is_cancelled(),
             )
         })
@@ -168,13 +184,13 @@ impl ProjectRuntime {
             return Err(RenamePlanError::SourceChanged);
         }
         scan.source_revision = observed.digest;
-        let mentions = attach_enclosing_symbols(
-            self,
-            &project_id,
-            &generation_id,
-            scan.mentions,
-            cancellation.clone(),
-        )
+        let mentions = attach_enclosing_symbols(EnclosingSymbolRequest {
+            runtime: self,
+            project_id: &project_id,
+            generation_id: &generation_id,
+            mentions: scan.mentions,
+            cancellation: cancellation.clone(),
+        })
         .await?;
         let after = self
             .database()
@@ -216,6 +232,15 @@ struct RenameSourceScan {
     skipped_large_files: u64,
 }
 
+struct RenameSourceRequest<'value> {
+    root: &'value std::path::Path,
+    symbol_name: &'value str,
+    definition_path: &'value str,
+    definition_line: u32,
+    references: Vec<RenameReferenceSite>,
+    options: RenamePlanOptions,
+}
+
 #[derive(Clone)]
 struct RawMention {
     path: String,
@@ -224,17 +249,20 @@ struct RawMention {
 }
 
 fn scan_rename_source<Cancel>(
-    root: &std::path::Path,
-    symbol_name: &str,
-    definition_path: &str,
-    definition_line: u32,
-    references: Vec<RenameReferenceSite>,
-    options: RenamePlanOptions,
+    request: RenameSourceRequest<'_>,
     mut cancelled: Cancel,
 ) -> Result<RenameSourceScan, RenamePlanError>
 where
     Cancel: FnMut() -> bool,
 {
+    let RenameSourceRequest {
+        root,
+        symbol_name,
+        definition_path,
+        definition_line,
+        references,
+        options,
+    } = request;
     let source_policy =
         crate::project_source_policy(root).map_err(|_| RenamePlanError::SourceUnavailable)?;
     let maximum_source_bytes = source_policy
@@ -248,19 +276,7 @@ where
     let files = source_root
         .discover_with_cancellation(SourceDiscoveryOptions::new(discovery, &mut cancelled))
         .map_err(map_source_error)?;
-    let mut references_by_path = BTreeMap::<String, Vec<RenameReferenceSite>>::new();
-    for reference in references {
-        references_by_path
-            .entry(reference.path().to_owned())
-            .or_default()
-            .push(reference);
-    }
-    let mut digest = SourceManifestDigestBuilder::new(files.len())
-        .map_err(|_| RenamePlanError::SourceUnavailable)?;
-    let mut exact = Vec::new();
-    let mut mentions = Vec::new();
-    let mut mention_count = 0_u64;
-    let mut skipped_large_files = 0_u64;
+    let mut state = RenameScanAccumulator::new(references, files.len())?;
     for file in &files {
         if cancelled() {
             return Err(RenamePlanError::Cancelled);
@@ -271,85 +287,178 @@ where
                 SourceReadOptions::new(read_limits, &mut cancelled),
             )
             .map_err(map_source_error)?;
-        digest
+        state
+            .digest
             .push(file.path(), snapshot.content_hash())
             .map_err(|_| RenamePlanError::SourceUnavailable)?;
-        let mut exact_lines = BTreeSet::new();
-        if let Some(file_references) = references_by_path.remove(file.path().as_str()) {
-            for reference in file_references {
-                let start = usize::try_from(reference.start_byte())
-                    .map_err(|_| RenamePlanError::SourceChanged)?;
-                let end = usize::try_from(reference.end_byte())
-                    .map_err(|_| RenamePlanError::SourceChanged)?;
-                let represented_site = snapshot
-                    .source()
-                    .get(start..end)
-                    .ok_or(RenamePlanError::SourceChanged)?;
-                let line = one_based_line(snapshot.source(), start)?;
-                exact_lines.insert(line);
-                exact.push(RenameReferenceEvidence {
-                    path: file.path().as_str().to_owned(),
-                    line,
-                    owner_symbol_id: reference.owner_symbol_id().map(str::to_owned),
-                    start_byte: reference.start_byte(),
-                    end_byte: reference.end_byte(),
-                    reference_kind: reference.reference_kind().to_owned(),
-                    confidence: reference.confidence(),
-                    provenance: reference.provenance().to_owned(),
-                    represented_site: bounded_text(represented_site.trim(), MENTION_SNIPPET_BYTES),
-                });
-            }
-        }
-        if options.mention_limit == 0 || file.byte_size() > options.maximum_mention_file_bytes {
-            if file.byte_size() > options.maximum_mention_file_bytes {
-                skipped_large_files = skipped_large_files.saturating_add(1);
-            }
-            continue;
-        }
-        for (index, line) in snapshot.source().lines().enumerate() {
-            if !line_has_identifier(line, symbol_name) {
-                continue;
-            }
-            let line_number = u32::try_from(index)
-                .ok()
-                .and_then(|line| line.checked_add(1))
-                .ok_or(RenamePlanError::SourceUnavailable)?;
-            if (file.path().as_str() == definition_path && line_number == definition_line)
-                || exact_lines.contains(&line_number)
-            {
-                continue;
-            }
-            mention_count = mention_count.saturating_add(1);
-            if mentions.len() < usize::from(options.mention_limit) {
-                mentions.push(RawMention {
-                    path: file.path().as_str().to_owned(),
-                    line: line_number,
-                    text: bounded_text(line.trim(), MENTION_SNIPPET_BYTES),
-                });
-            }
-        }
+        scan_rename_file(
+            &mut state,
+            RenameFileScan {
+                file,
+                snapshot: &snapshot,
+                symbol_name,
+                definition_path,
+                definition_line,
+                options,
+            },
+        )?;
     }
-    if !references_by_path.is_empty() {
+    if !state.references_by_path.is_empty() {
         return Err(RenamePlanError::SourceChanged);
     }
     Ok(RenameSourceScan {
-        source_revision: digest
+        source_revision: state
+            .digest
             .finish()
             .map_err(|_| RenamePlanError::SourceUnavailable)?,
-        references: exact,
-        mentions,
-        mention_count,
-        skipped_large_files,
+        references: state.exact,
+        mentions: state.mentions,
+        mention_count: state.mention_count,
+        skipped_large_files: state.skipped_large_files,
     })
 }
 
-async fn attach_enclosing_symbols(
-    runtime: &ProjectRuntime,
-    project_id: &ProjectId,
-    generation_id: &cartograph_domain::GenerationId,
+struct RenameScanAccumulator {
+    references_by_path: BTreeMap<String, Vec<RenameReferenceSite>>,
+    digest: SourceManifestDigestBuilder,
+    exact: Vec<RenameReferenceEvidence>,
+    mentions: Vec<RawMention>,
+    mention_count: u64,
+    skipped_large_files: u64,
+}
+
+impl RenameScanAccumulator {
+    fn new(
+        references: Vec<RenameReferenceSite>,
+        file_count: usize,
+    ) -> Result<Self, RenamePlanError> {
+        let mut references_by_path = BTreeMap::<String, Vec<RenameReferenceSite>>::new();
+        for reference in references {
+            references_by_path
+                .entry(reference.path().to_owned())
+                .or_default()
+                .push(reference);
+        }
+        Ok(Self {
+            references_by_path,
+            digest: SourceManifestDigestBuilder::new(file_count)
+                .map_err(|_| RenamePlanError::SourceUnavailable)?,
+            exact: Vec::new(),
+            mentions: Vec::new(),
+            mention_count: 0,
+            skipped_large_files: 0,
+        })
+    }
+}
+
+struct RenameFileScan<'source> {
+    file: &'source DiscoveredSource,
+    snapshot: &'source SourceSnapshot,
+    symbol_name: &'source str,
+    definition_path: &'source str,
+    definition_line: u32,
+    options: RenamePlanOptions,
+}
+
+fn scan_rename_file(
+    state: &mut RenameScanAccumulator,
+    input: RenameFileScan<'_>,
+) -> Result<(), RenamePlanError> {
+    let exact_lines = collect_exact_rename_references(state, &input)?;
+    if input.options.mention_limit == 0
+        || input.file.byte_size() > input.options.maximum_mention_file_bytes
+    {
+        if input.file.byte_size() > input.options.maximum_mention_file_bytes {
+            state.skipped_large_files = state.skipped_large_files.saturating_add(1);
+        }
+        return Ok(());
+    }
+    collect_textual_rename_mentions(state, &input, &exact_lines)
+}
+
+fn collect_exact_rename_references(
+    state: &mut RenameScanAccumulator,
+    input: &RenameFileScan<'_>,
+) -> Result<BTreeSet<u32>, RenamePlanError> {
+    let mut exact_lines = BTreeSet::new();
+    let Some(file_references) = state.references_by_path.remove(input.file.path().as_str()) else {
+        return Ok(exact_lines);
+    };
+    for reference in file_references {
+        let start =
+            usize::try_from(reference.start_byte()).map_err(|_| RenamePlanError::SourceChanged)?;
+        let end =
+            usize::try_from(reference.end_byte()).map_err(|_| RenamePlanError::SourceChanged)?;
+        let represented_site = input
+            .snapshot
+            .source()
+            .get(start..end)
+            .ok_or(RenamePlanError::SourceChanged)?;
+        let line = one_based_line(input.snapshot.source(), start)?;
+        exact_lines.insert(line);
+        state.exact.push(RenameReferenceEvidence {
+            path: input.file.path().as_str().to_owned(),
+            line,
+            owner_symbol_id: reference.owner_symbol_id().map(str::to_owned),
+            start_byte: reference.start_byte(),
+            end_byte: reference.end_byte(),
+            reference_kind: reference.reference_kind().to_owned(),
+            confidence: reference.confidence(),
+            provenance: reference.provenance().to_owned(),
+            represented_site: bounded_text(represented_site.trim(), MENTION_SNIPPET_BYTES),
+        });
+    }
+    Ok(exact_lines)
+}
+
+fn collect_textual_rename_mentions(
+    state: &mut RenameScanAccumulator,
+    input: &RenameFileScan<'_>,
+    exact_lines: &BTreeSet<u32>,
+) -> Result<(), RenamePlanError> {
+    for (index, line) in input.snapshot.source().lines().enumerate() {
+        if !line_has_identifier(line, input.symbol_name) {
+            continue;
+        }
+        let line_number = u32::try_from(index)
+            .ok()
+            .and_then(|line| line.checked_add(1))
+            .ok_or(RenamePlanError::SourceUnavailable)?;
+        let is_definition = input.file.path().as_str() == input.definition_path
+            && line_number == input.definition_line;
+        if is_definition || exact_lines.contains(&line_number) {
+            continue;
+        }
+        state.mention_count = state.mention_count.saturating_add(1);
+        if state.mentions.len() < usize::from(input.options.mention_limit) {
+            state.mentions.push(RawMention {
+                path: input.file.path().as_str().to_owned(),
+                line: line_number,
+                text: bounded_text(line.trim(), MENTION_SNIPPET_BYTES),
+            });
+        }
+    }
+    Ok(())
+}
+
+struct EnclosingSymbolRequest<'a> {
+    runtime: &'a ProjectRuntime,
+    project_id: &'a ProjectId,
+    generation_id: &'a cartograph_domain::GenerationId,
     mentions: Vec<RawMention>,
     cancellation: ProjectCancellation,
+}
+
+async fn attach_enclosing_symbols(
+    input: EnclosingSymbolRequest<'_>,
 ) -> Result<Vec<RenameTextualMention>, RenamePlanError> {
+    let EnclosingSymbolRequest {
+        runtime,
+        project_id,
+        generation_id,
+        mentions,
+        cancellation,
+    } = input;
     let database = runtime.database().clone();
     let project_id = project_id.clone();
     let generation_id = generation_id.clone();
@@ -367,11 +476,8 @@ async fn attach_enclosing_symbols(
                     .map_err(|_| RenamePlanError::SourceChanged)?;
                 let symbols = database
                     .current_symbols_at_range(CurrentSourceRangeLookup::new(
-                        &project_id,
-                        &generation_id,
-                        &path,
-                        mention.line,
-                        mention.line,
+                        CurrentGenerationLookup::new(&project_id, &generation_id),
+                        SourceLineRange::new(&path, mention.line, mention.line),
                         ENCLOSING_LOOKUP_LIMIT,
                     ))
                     .await

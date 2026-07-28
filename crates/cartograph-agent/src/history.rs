@@ -5,8 +5,8 @@ use std::{
 };
 
 use cartograph_db::{
-    FileCochangeFact, FileHistoryFact, HistoryRefreshMetadata, HistoryRefreshReport,
-    HistoryRefreshRequest,
+    FileCochangeFact, FileCochangeMetrics, FileHistoryFact, FileHistoryMetrics,
+    HistoryRefreshInput, HistoryRefreshMetadata, HistoryRefreshReport, HistoryRefreshRequest,
 };
 use cartograph_domain::{NormalizedPath, ProjectId};
 use cartograph_llm::load_project_source_settings;
@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     ProjectCancellation, ProjectRuntime, ReviewError,
-    review::{run_git, run_git_bounded},
+    review::{GitCommandBounds, run_git, run_git_bounded},
 };
 
 const DEFAULT_MAX_COMMITS: u32 = 20_000;
@@ -24,6 +24,10 @@ const GIT_HISTORY_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const MAX_FILES_PER_COCHANGE_COMMIT: usize = 512;
 const MAX_COCHANGE_PAIRS: usize = 2_000_000;
 const COMMIT_MARKER: &[u8] = b"CARTOGRAPH_COMMIT";
+const CANCELLATION_POLL_FIELDS: usize = 4_096;
+const COMMIT_FIELD_COUNT: usize = 4;
+const COMMIT_AUTHOR_FIELD_OFFSET: usize = 3;
+const RENAMED_NUMSTAT_FIELD_COUNT: usize = 3;
 
 /// Bounded full-repository Git mining options.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,8 +128,7 @@ impl ProjectRuntime {
                 "HEAD",
                 "--",
             ],
-            MAX_GIT_HISTORY_BYTES,
-            GIT_HISTORY_TIMEOUT,
+            GitCommandBounds::new(MAX_GIT_HISTORY_BYTES, GIT_HISTORY_TIMEOUT),
         )
         .await
         .map_err(map_git_error)?;
@@ -142,11 +145,13 @@ impl ProjectRuntime {
             .map(|(path, facts)| {
                 FileHistoryFact::new(
                     path,
-                    facts.commit_count,
-                    u64::try_from(facts.authors.len()).unwrap_or(u64::MAX),
-                    facts.insertions,
-                    facts.deletions,
-                    Some(facts.last_touched_at),
+                    FileHistoryMetrics {
+                        commit_count: facts.commit_count,
+                        author_count: u64::try_from(facts.authors.len()).unwrap_or(u64::MAX),
+                        insertions: facts.insertions,
+                        deletions: facts.deletions,
+                        last_touched_at: Some(facts.last_touched_at),
+                    },
                 )
                 .map_err(|_| HistoryIndexError::RelationLimit)
             })
@@ -171,8 +176,15 @@ impl ProjectRuntime {
                     .filter(|value| *value > 0)
                     .ok_or(HistoryIndexError::RelationLimit)?;
                 let confidence = (shared as f64 / union as f64) as f32;
-                FileCochangeFact::new(path_a, path_b, shared, confidence)
-                    .map_err(|_| HistoryIndexError::RelationLimit)
+                FileCochangeFact::new(
+                    path_a,
+                    path_b,
+                    FileCochangeMetrics {
+                        commit_count: shared,
+                        confidence,
+                    },
+                )
+                .map_err(|_| HistoryIndexError::RelationLimit)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(PreparedHistoryIndex {
@@ -196,9 +208,11 @@ impl ProjectRuntime {
         let request = HistoryRefreshRequest::new(
             project_id,
             prepared.head,
-            prepared.metadata,
-            prepared.files,
-            prepared.cochanges,
+            HistoryRefreshInput {
+                metadata: prepared.metadata,
+                files: prepared.files,
+                cochanges: prepared.cochanges,
+            },
         )
         .map_err(|_| HistoryIndexError::RelationLimit)?;
         self.database()
@@ -256,6 +270,32 @@ struct FileDelta {
     deletions: u64,
 }
 
+#[derive(Default)]
+struct CommitHistory {
+    files: BTreeMap<NormalizedPath, FileAggregate>,
+    cochanges: BTreeMap<(NormalizedPath, NormalizedPath), u64>,
+    commits_scanned: u64,
+    oversized_commits_skipped: u64,
+}
+
+impl CommitHistory {
+    fn finish(self, truncated: bool) -> HistoryScan {
+        let file_commit_counts = self
+            .files
+            .iter()
+            .map(|(path, facts)| (path.clone(), facts.commit_count))
+            .collect();
+        HistoryScan {
+            files: self.files,
+            file_commit_counts,
+            cochanges: self.cochanges,
+            commits_scanned: self.commits_scanned,
+            truncated,
+            oversized_commits_skipped: self.oversized_commits_skipped,
+        }
+    }
+}
+
 fn parse_git_log(
     output: &[u8],
     max_commits: u32,
@@ -268,29 +308,19 @@ fn parse_git_log(
     let mut index = 0_usize;
     let mut current = None;
     let mut changes = BTreeMap::new();
-    let mut files = BTreeMap::<NormalizedPath, FileAggregate>::new();
-    let mut cochanges = BTreeMap::<(NormalizedPath, NormalizedPath), u64>::new();
-    let mut commits_scanned = 0_u64;
+    let mut history = CommitHistory::default();
     let mut truncated = false;
-    let mut oversized_commits_skipped = 0_u64;
     while index < fields.len() {
-        if index.is_multiple_of(4_096) && cancellation.is_cancelled() {
+        if index.is_multiple_of(CANCELLATION_POLL_FIELDS) && cancellation.is_cancelled() {
             return Err(HistoryIndexError::Cancelled);
         }
         let raw_field = fields[index];
-        if trim_ascii(raw_field) == COMMIT_MARKER {
+        if crate::trim_ascii_bytes(raw_field) == COMMIT_MARKER {
             if let Some(metadata) = current.take() {
-                apply_commit(
-                    metadata,
-                    &changes,
-                    &mut files,
-                    &mut cochanges,
-                    &mut oversized_commits_skipped,
-                )?;
-                commits_scanned = commits_scanned.saturating_add(1);
+                history.apply_commit(metadata, &changes)?;
                 changes.clear();
             }
-            if commits_scanned >= u64::from(max_commits) {
+            if history.commits_scanned >= u64::from(max_commits) {
                 truncated = true;
                 break;
             }
@@ -302,14 +332,14 @@ fn parse_git_log(
                 .parse::<u64>()
                 .map_err(|_| HistoryIndexError::GitOutputInvalid)?;
             let author = fields
-                .get(index + 3)
+                .get(index + COMMIT_AUTHOR_FIELD_OFFSET)
                 .copied()
                 .ok_or(HistoryIndexError::GitOutputInvalid)?;
             current = Some(CommitMetadata {
                 unix_seconds,
                 author_key: author_key(author),
             });
-            index += 4;
+            index += COMMIT_FIELD_COUNT;
             continue;
         }
         let field = trim_numstat_prefix(raw_field);
@@ -324,7 +354,7 @@ fn parse_git_log(
                     .copied()
                     .ok_or(HistoryIndexError::GitOutputInvalid)?;
                 add_delta(&mut changes, new_path, delta)?;
-                index += 3;
+                index += RENAMED_NUMSTAT_FIELD_COUNT;
                 continue;
             }
             add_delta(&mut changes, delta.path.as_bytes(), delta)?;
@@ -332,27 +362,9 @@ fn parse_git_log(
         index += 1;
     }
     if !truncated && let Some(metadata) = current {
-        apply_commit(
-            metadata,
-            &changes,
-            &mut files,
-            &mut cochanges,
-            &mut oversized_commits_skipped,
-        )?;
-        commits_scanned = commits_scanned.saturating_add(1);
+        history.apply_commit(metadata, &changes)?;
     }
-    let file_commit_counts = files
-        .iter()
-        .map(|(path, facts)| (path.clone(), facts.commit_count))
-        .collect();
-    Ok(HistoryScan {
-        files,
-        file_commit_counts,
-        cochanges,
-        commits_scanned,
-        truncated,
-        oversized_commits_skipped,
-    })
+    Ok(history.finish(truncated))
 }
 
 struct ParsedNumstat<'a> {
@@ -407,46 +419,50 @@ fn add_delta(
     Ok(())
 }
 
-fn apply_commit(
-    metadata: CommitMetadata,
-    changes: &BTreeMap<NormalizedPath, FileDelta>,
-    files: &mut BTreeMap<NormalizedPath, FileAggregate>,
-    cochanges: &mut BTreeMap<(NormalizedPath, NormalizedPath), u64>,
-    oversized_commits_skipped: &mut u64,
-) -> Result<(), HistoryIndexError> {
-    for (path, delta) in changes {
-        let aggregate = files.entry(path.clone()).or_default();
-        aggregate.commit_count = aggregate.commit_count.saturating_add(1);
-        aggregate.authors.insert(metadata.author_key);
-        aggregate.insertions = aggregate
-            .insertions
-            .checked_add(delta.insertions)
-            .ok_or(HistoryIndexError::RelationLimit)?;
-        aggregate.deletions = aggregate
-            .deletions
-            .checked_add(delta.deletions)
-            .ok_or(HistoryIndexError::RelationLimit)?;
-        aggregate.last_touched_at = aggregate.last_touched_at.max(metadata.unix_seconds);
-    }
-    if changes.len() > MAX_FILES_PER_COCHANGE_COMMIT {
-        *oversized_commits_skipped = oversized_commits_skipped.saturating_add(1);
-        return Ok(());
-    }
-    let paths = changes.keys().collect::<Vec<_>>();
-    for (left_index, path_a) in paths.iter().enumerate() {
-        for path_b in &paths[left_index.saturating_add(1)..] {
-            if cochanges.len() >= MAX_COCHANGE_PAIRS
-                && !cochanges.contains_key(&((*path_a).clone(), (*path_b).clone()))
-            {
-                return Err(HistoryIndexError::RelationLimit);
-            }
-            let count = cochanges
-                .entry(((*path_a).clone(), (*path_b).clone()))
-                .or_default();
-            *count = count.saturating_add(1);
+impl CommitHistory {
+    fn apply_commit(
+        &mut self,
+        metadata: CommitMetadata,
+        changes: &BTreeMap<NormalizedPath, FileDelta>,
+    ) -> Result<(), HistoryIndexError> {
+        for (path, delta) in changes {
+            let aggregate = self.files.entry(path.clone()).or_default();
+            aggregate.commit_count = aggregate.commit_count.saturating_add(1);
+            aggregate.authors.insert(metadata.author_key);
+            aggregate.insertions = aggregate
+                .insertions
+                .checked_add(delta.insertions)
+                .ok_or(HistoryIndexError::RelationLimit)?;
+            aggregate.deletions = aggregate
+                .deletions
+                .checked_add(delta.deletions)
+                .ok_or(HistoryIndexError::RelationLimit)?;
+            aggregate.last_touched_at = aggregate.last_touched_at.max(metadata.unix_seconds);
         }
+        self.commits_scanned = self.commits_scanned.saturating_add(1);
+        if changes.len() > MAX_FILES_PER_COCHANGE_COMMIT {
+            self.oversized_commits_skipped = self.oversized_commits_skipped.saturating_add(1);
+            return Ok(());
+        }
+        let paths = changes.keys().collect::<Vec<_>>();
+        for (left_index, path_a) in paths.iter().enumerate() {
+            for path_b in &paths[left_index.saturating_add(1)..] {
+                if self.cochanges.len() >= MAX_COCHANGE_PAIRS
+                    && !self
+                        .cochanges
+                        .contains_key(&((*path_a).clone(), (*path_b).clone()))
+                {
+                    return Err(HistoryIndexError::RelationLimit);
+                }
+                let count = self
+                    .cochanges
+                    .entry(((*path_a).clone(), (*path_b).clone()))
+                    .or_default();
+                *count = count.saturating_add(1);
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 async fn git_head(root: &Path) -> Result<String, HistoryIndexError> {
@@ -456,7 +472,7 @@ async fn git_head(root: &Path) -> Result<String, HistoryIndexError> {
     if !output.success {
         return Err(HistoryIndexError::NotGitRepository);
     }
-    let head = text_field(Some(trim_ascii(&output.stdout)))?.to_ascii_lowercase();
+    let head = text_field(Some(crate::trim_ascii_bytes(&output.stdout)))?.to_ascii_lowercase();
     valid_commit(&head)
         .then_some(head)
         .ok_or(HistoryIndexError::GitOutputInvalid)
@@ -469,7 +485,7 @@ async fn git_is_shallow(root: &Path) -> Result<bool, HistoryIndexError> {
     if !output.success {
         return Err(HistoryIndexError::NotGitRepository);
     }
-    match trim_ascii(&output.stdout) {
+    match crate::trim_ascii_bytes(&output.stdout) {
         b"true" => Ok(true),
         b"false" => Ok(false),
         _ => Err(HistoryIndexError::GitOutputInvalid),
@@ -508,18 +524,6 @@ fn text_field(value: Option<&[u8]>) -> Result<&str, HistoryIndexError> {
 
 fn valid_commit(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn trim_ascii(value: &[u8]) -> &[u8] {
-    let start = value
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(value.len());
-    let end = value
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map_or(start, |index| index + 1);
-    &value[start..end]
 }
 
 fn trim_numstat_prefix(mut value: &[u8]) -> &[u8] {

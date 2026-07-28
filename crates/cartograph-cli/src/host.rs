@@ -64,12 +64,98 @@ pub(crate) struct DiscoveryReport {
     stats_scope: &'static str,
 }
 
-pub(crate) async fn discover_projects(
-    active_root: &Path,
-    requested_root: Option<&str>,
+pub(crate) struct ProjectDiscoveryRequest<'root> {
+    active_root: &'root Path,
+    requested_root: Option<&'root str>,
     max_depth: u8,
     cancellation: ProjectCancellation,
+}
+
+impl<'root> ProjectDiscoveryRequest<'root> {
+    pub(crate) const fn new(
+        active_root: &'root Path,
+        max_depth: u8,
+        cancellation: ProjectCancellation,
+    ) -> Self {
+        Self {
+            active_root,
+            requested_root: None,
+            max_depth,
+            cancellation,
+        }
+    }
+
+    pub(crate) const fn with_requested_root(mut self, requested_root: Option<&'root str>) -> Self {
+        self.requested_root = requested_root;
+        self
+    }
+}
+
+struct ProjectDiscoveryWork {
+    root: PathBuf,
+    active_root: PathBuf,
+    max_depth: u8,
+    cancellation: ProjectCancellation,
+}
+
+struct DiscoveryDirectoryInput<'input> {
+    directory: &'input Path,
+    depth: u8,
+    max_depth: u8,
+    active_root: &'input Path,
+    projects: &'input mut Vec<DiscoveredProject>,
+}
+
+fn discovery_children(
+    input: DiscoveryDirectoryInput<'_>,
+) -> Result<Vec<PathBuf>, HostInspectionError> {
+    let entries = match fs::read_dir(input.directory) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut children = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        if name == ".cartograph" {
+            let config = bounded_config(&path.join("config.json"));
+            input.projects.push(DiscoveredProject {
+                path: path_text(input.directory)?,
+                active: input.directory == input.active_root,
+                config_present: config.is_some(),
+                postgres_configured: config.as_ref().is_some_and(postgres_configured),
+            });
+            continue;
+        }
+        if input.depth >= input.max_depth
+            || name.starts_with('.')
+            || SKIPPED_DIRECTORY_NAMES.contains(&name.as_ref())
+        {
+            continue;
+        }
+        children.push(path);
+    }
+    children.sort();
+    children.reverse();
+    Ok(children)
+}
+
+pub(crate) async fn discover_projects(
+    request: ProjectDiscoveryRequest<'_>,
 ) -> Result<DiscoveryReport, HostInspectionError> {
+    let ProjectDiscoveryRequest {
+        active_root,
+        requested_root,
+        max_depth,
+        cancellation,
+    } = request;
     if max_depth == 0 || max_depth > MAX_DISCOVERY_DEPTH {
         return Err(HostInspectionError::InvalidOptions);
     }
@@ -79,19 +165,26 @@ pub(crate) async fn discover_projects(
         return Err(HostInspectionError::RootUnavailable);
     }
     let active_root = active_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        discover_projects_blocking(root, active_root, max_depth, cancellation)
-    })
-    .await
-    .map_err(|_| HostInspectionError::WorkerFailed)?
+    let work = ProjectDiscoveryWork {
+        root,
+        active_root,
+        max_depth,
+        cancellation,
+    };
+    tokio::task::spawn_blocking(move || discover_projects_blocking(work))
+        .await
+        .map_err(|_| HostInspectionError::WorkerFailed)?
 }
 
 fn discover_projects_blocking(
-    root: PathBuf,
-    active_root: PathBuf,
-    max_depth: u8,
-    cancellation: ProjectCancellation,
+    work: ProjectDiscoveryWork,
 ) -> Result<DiscoveryReport, HostInspectionError> {
+    let ProjectDiscoveryWork {
+        root,
+        active_root,
+        max_depth,
+        cancellation,
+    } = work;
     let mut stack = vec![(root.clone(), 0_u8)];
     let mut projects = Vec::new();
     let mut visited = 0_usize;
@@ -105,41 +198,13 @@ fn discover_projects_blocking(
             break;
         }
         visited = visited.saturating_add(1);
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        let mut children = Vec::new();
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() || file_type.is_symlink() {
-                continue;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let path = entry.path();
-            if name == ".cartograph" {
-                let config = bounded_config(&path.join("config.json"));
-                projects.push(DiscoveredProject {
-                    path: path_text(&directory)?,
-                    active: directory == active_root,
-                    config_present: config.is_some(),
-                    postgres_configured: config.as_ref().is_some_and(postgres_configured),
-                });
-                continue;
-            }
-            if depth >= max_depth
-                || name.starts_with('.')
-                || SKIPPED_DIRECTORY_NAMES.contains(&name.as_ref())
-            {
-                continue;
-            }
-            children.push(path);
-        }
-        children.sort();
-        children.reverse();
+        let children = discovery_children(DiscoveryDirectoryInput {
+            directory: &directory,
+            depth,
+            max_depth,
+            active_root: &active_root,
+            projects: &mut projects,
+        })?;
         for child in children {
             stack.push((child, depth.saturating_add(1)));
         }
@@ -195,6 +260,33 @@ pub(crate) struct InstallTargetDetection {
     config_path: &'static str,
 }
 
+struct HostConfigTarget<'path> {
+    target: &'static str,
+    location: &'static str,
+    path: &'path Path,
+    config_path: &'static str,
+}
+
+impl<'path> HostConfigTarget<'path> {
+    const fn local(target: &'static str, path: &'path Path, config_path: &'static str) -> Self {
+        Self {
+            target,
+            location: "local",
+            path,
+            config_path,
+        }
+    }
+
+    const fn global(target: &'static str, path: &'path Path, config_path: &'static str) -> Self {
+        Self {
+            target,
+            location: "global",
+            path,
+            config_path,
+        }
+    }
+}
+
 pub(crate) fn detect_install_targets(
     project_root: &Path,
     location: DiagnosticLocation,
@@ -205,29 +297,30 @@ pub(crate) fn detect_install_targets(
         location,
         DiagnosticLocation::Local | DiagnosticLocation::Both
     ) {
-        detections.push(detect_toml(
+        detections.push(detect_toml(HostConfigTarget::local(
             "codex",
-            "local",
             &project_root.join(".codex/config.toml"),
             ".codex/config.toml",
-        ));
-        detections.push(detect_json(
-            "cursor",
-            "local",
-            &project_root.join(".cursor/mcp.json"),
-            ".cursor/mcp.json",
-            JsonDetection::TopLevel,
+        )));
+        detections.push(detect_json(JsonHostConfigTarget {
+            config: HostConfigTarget::local(
+                "cursor",
+                &project_root.join(".cursor/mcp.json"),
+                ".cursor/mcp.json",
+            ),
+            mode: JsonDetection::TopLevel,
             project_root,
-        ));
+        }));
         if let Some(home) = home.as_ref() {
-            detections.push(detect_json(
-                "claude",
-                "local",
-                &home.join(".claude.json"),
-                "~/.claude.json (project entry)",
-                JsonDetection::ClaudeProject,
+            detections.push(detect_json(JsonHostConfigTarget {
+                config: HostConfigTarget::local(
+                    "claude",
+                    &home.join(".claude.json"),
+                    "~/.claude.json (project entry)",
+                ),
+                mode: JsonDetection::ClaudeProject,
                 project_root,
-            ));
+            }));
         }
     }
     if matches!(
@@ -235,28 +328,29 @@ pub(crate) fn detect_install_targets(
         DiagnosticLocation::Global | DiagnosticLocation::Both
     ) && let Some(home) = home.as_ref()
     {
-        detections.push(detect_toml(
+        detections.push(detect_toml(HostConfigTarget::global(
             "codex",
-            "global",
             &home.join(".codex/config.toml"),
             "~/.codex/config.toml",
-        ));
-        detections.push(detect_json(
-            "cursor",
-            "global",
-            &home.join(".cursor/mcp.json"),
-            "~/.cursor/mcp.json",
-            JsonDetection::TopLevel,
+        )));
+        detections.push(detect_json(JsonHostConfigTarget {
+            config: HostConfigTarget::global(
+                "cursor",
+                &home.join(".cursor/mcp.json"),
+                "~/.cursor/mcp.json",
+            ),
+            mode: JsonDetection::TopLevel,
             project_root,
-        ));
-        detections.push(detect_json(
-            "claude",
-            "global",
-            &home.join(".claude.json"),
-            "~/.claude.json",
-            JsonDetection::TopLevel,
+        }));
+        detections.push(detect_json(JsonHostConfigTarget {
+            config: HostConfigTarget::global(
+                "claude",
+                &home.join(".claude.json"),
+                "~/.claude.json",
+            ),
+            mode: JsonDetection::TopLevel,
             project_root,
-        ));
+        }));
     }
     detections
 }
@@ -277,12 +371,13 @@ fn bounded_text(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
-fn detect_toml(
-    target: &'static str,
-    location: &'static str,
-    path: &Path,
-    config_path: &'static str,
-) -> InstallTargetDetection {
+fn detect_toml(config: HostConfigTarget<'_>) -> InstallTargetDetection {
+    let HostConfigTarget {
+        target,
+        location,
+        path,
+        config_path,
+    } = config;
     let text = bounded_text(path);
     let parsed = text
         .as_deref()
@@ -308,14 +403,24 @@ enum JsonDetection {
     ClaudeProject,
 }
 
-fn detect_json(
-    target: &'static str,
-    location: &'static str,
-    path: &Path,
-    config_path: &'static str,
+struct JsonHostConfigTarget<'path> {
+    config: HostConfigTarget<'path>,
     mode: JsonDetection,
-    project_root: &Path,
-) -> InstallTargetDetection {
+    project_root: &'path Path,
+}
+
+fn detect_json(config: JsonHostConfigTarget<'_>) -> InstallTargetDetection {
+    let JsonHostConfigTarget {
+        config:
+            HostConfigTarget {
+                target,
+                location,
+                path,
+                config_path,
+            },
+        mode,
+        project_root,
+    } = config;
     let text = bounded_text(path);
     let parsed = text
         .as_deref()
@@ -363,12 +468,12 @@ mod tests {
             .unwrap_or_else(|error| panic!("project marker failed: {error}"));
         fs::create_dir_all(fixture.join(".cartograph"))
             .unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
-        let report = discover_projects_blocking(
-            root.path().to_path_buf(),
-            project.clone(),
-            4,
-            ProjectCancellation::new(),
-        )
+        let report = discover_projects_blocking(ProjectDiscoveryWork {
+            root: root.path().to_path_buf(),
+            active_root: project.clone(),
+            max_depth: 4,
+            cancellation: ProjectCancellation::new(),
+        })
         .unwrap_or_else(|error| panic!("discovery failed: {error}"));
         assert_eq!(report.projects.len(), 1);
         assert_eq!(report.projects[0].path, project.to_string_lossy());
@@ -380,15 +485,18 @@ mod tests {
     async fn async_discovery_rejects_invalid_roots_depths_and_cancellation() {
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         assert_eq!(
-            discover_projects(root.path(), None, 0, ProjectCancellation::new(),).await,
+            discover_projects(ProjectDiscoveryRequest::new(
+                root.path(),
+                0,
+                ProjectCancellation::new(),
+            ))
+            .await,
             Err(HostInspectionError::InvalidOptions)
         );
         assert_eq!(
             discover_projects(
-                root.path(),
-                Some("missing-host-root"),
-                1,
-                ProjectCancellation::new(),
+                ProjectDiscoveryRequest::new(root.path(), 1, ProjectCancellation::new())
+                    .with_requested_root(Some("missing-host-root")),
             )
             .await,
             Err(HostInspectionError::RootUnavailable)
@@ -396,7 +504,7 @@ mod tests {
         let cancellation = ProjectCancellation::new();
         cancellation.cancel();
         assert_eq!(
-            discover_projects(root.path(), None, 1, cancellation).await,
+            discover_projects(ProjectDiscoveryRequest::new(root.path(), 1, cancellation)).await,
             Err(HostInspectionError::Cancelled)
         );
 
@@ -407,12 +515,11 @@ mod tests {
             br#"{"database":{"provider":"postgresql"}}"#,
         )
         .unwrap_or_else(|error| panic!("project config failed: {error}"));
-        let report = discover_projects(
+        let report = discover_projects(ProjectDiscoveryRequest::new(
             root.path(),
-            None,
             MAX_DISCOVERY_DEPTH,
             ProjectCancellation::new(),
-        )
+        ))
         .await
         .unwrap_or_else(|error| panic!("async discovery failed: {error}"));
         assert_eq!(report.projects.len(), 1);
@@ -428,14 +535,22 @@ mod tests {
     fn host_config_detection_distinguishes_missing_invalid_and_configured_targets() {
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let codex = root.path().join("config.toml");
-        let missing = detect_toml("codex", "local", &codex, ".codex/config.toml");
+        let missing = detect_toml(HostConfigTarget::local(
+            "codex",
+            &codex,
+            ".codex/config.toml",
+        ));
         assert!(!missing.config_present);
         assert!(!missing.config_valid);
         assert!(!missing.cartograph_configured);
 
         fs::write(&codex, "not = [valid")
             .unwrap_or_else(|error| panic!("invalid TOML fixture failed: {error}"));
-        let invalid = detect_toml("codex", "local", &codex, ".codex/config.toml");
+        let invalid = detect_toml(HostConfigTarget::local(
+            "codex",
+            &codex,
+            ".codex/config.toml",
+        ));
         assert!(invalid.config_present);
         assert!(!invalid.config_valid);
         assert!(!invalid.cartograph_configured);
@@ -445,7 +560,11 @@ mod tests {
             "[mcp_servers.cartograph]\ncommand = '/usr/local/bin/cartograph'\n",
         )
         .unwrap_or_else(|error| panic!("valid TOML fixture failed: {error}"));
-        let configured = detect_toml("codex", "local", &codex, ".codex/config.toml");
+        let configured = detect_toml(HostConfigTarget::local(
+            "codex",
+            &codex,
+            ".codex/config.toml",
+        ));
         assert!(configured.config_valid);
         assert!(configured.cartograph_configured);
         assert!(bounded_text(&codex).is_some());
@@ -456,14 +575,11 @@ mod tests {
             br#"{"mcpServers":{"cartograph":{"command":"cartograph"}}}"#,
         )
         .unwrap_or_else(|error| panic!("cursor fixture failed: {error}"));
-        let cursor_detection = detect_json(
-            "cursor",
-            "local",
-            &cursor,
-            ".cursor/mcp.json",
-            JsonDetection::TopLevel,
-            root.path(),
-        );
+        let cursor_detection = detect_json(JsonHostConfigTarget {
+            config: HostConfigTarget::local("cursor", &cursor, ".cursor/mcp.json"),
+            mode: JsonDetection::TopLevel,
+            project_root: root.path(),
+        });
         assert!(cursor_detection.config_present);
         assert!(cursor_detection.config_valid);
         assert!(cursor_detection.cartograph_configured);
@@ -482,14 +598,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("Claude fixture encode failed: {error}")),
         )
         .unwrap_or_else(|error| panic!("Claude fixture failed: {error}"));
-        let claude_detection = detect_json(
-            "claude",
-            "local",
-            &claude,
-            "~/.claude.json (project entry)",
-            JsonDetection::ClaudeProject,
-            root.path(),
-        );
+        let claude_detection = detect_json(JsonHostConfigTarget {
+            config: HostConfigTarget::local("claude", &claude, "~/.claude.json (project entry)"),
+            mode: JsonDetection::ClaudeProject,
+            project_root: root.path(),
+        });
         assert!(claude_detection.config_valid);
         assert!(claude_detection.cartograph_configured);
 

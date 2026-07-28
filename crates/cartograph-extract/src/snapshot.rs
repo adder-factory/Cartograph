@@ -57,6 +57,22 @@ struct ValidatedSourcePath {
     byte_size: u64,
 }
 
+struct SnapshotBytes<'a> {
+    raw_path: &'a str,
+    bytes: &'a [u8],
+    limits: SourceLimits,
+}
+
+impl<'a> SnapshotBytes<'a> {
+    const fn new(raw_path: &'a str, bytes: &'a [u8], limits: SourceLimits) -> Self {
+        Self {
+            raw_path,
+            bytes,
+            limits,
+        }
+    }
+}
+
 pub(crate) struct StreamedSource {
     source: String,
     content_hash: ContentDigest,
@@ -78,7 +94,10 @@ impl SourceSnapshot {
         bytes: &[u8],
         limits: SourceLimits,
     ) -> Result<Self, SnapshotError> {
-        Self::from_bytes_with_classifier(raw_path, bytes, limits, classify_source)
+        Self::from_bytes_with_classifier(
+            SnapshotBytes::new(raw_path, bytes, limits),
+            classify_source,
+        )
     }
 
     /// Build a bounded snapshot for an implemented language before production admission.
@@ -91,15 +110,21 @@ impl SourceSnapshot {
         bytes: &[u8],
         limits: SourceLimits,
     ) -> Result<Self, SnapshotError> {
-        Self::from_bytes_with_classifier(raw_path, bytes, limits, classify_known_source)
+        Self::from_bytes_with_classifier(
+            SnapshotBytes::new(raw_path, bytes, limits),
+            classify_known_source,
+        )
     }
 
     fn from_bytes_with_classifier(
-        raw_path: &str,
-        bytes: &[u8],
-        limits: SourceLimits,
+        input: SnapshotBytes<'_>,
         classifier: fn(ValidatedSourcePath, &str) -> Result<ValidatedSource, SnapshotError>,
     ) -> Result<Self, SnapshotError> {
+        let SnapshotBytes {
+            raw_path,
+            bytes,
+            limits,
+        } = input;
         let validated_path = validate_source_path(raw_path, bytes.len(), limits)?;
         let validated_utf8 = str::from_utf8(bytes).map_err(|_| SnapshotError::InvalidUtf8)?;
         let validated = classifier(validated_path, validated_utf8)?;
@@ -280,7 +305,19 @@ pub fn is_test_source_path(path: &str) -> bool {
         if components.peek().is_some()
             && matches_ignore_ascii_case(
                 component,
-                &["test", "tests", "__tests__", "spec", "specs", "__specs__"],
+                &[
+                    "test",
+                    "tests",
+                    "__tests__",
+                    "spec",
+                    "specs",
+                    "__specs__",
+                    "fixture",
+                    "fixtures",
+                    "test-bed",
+                    "test-beds",
+                    "testdata",
+                ],
             )
         {
             return true;
@@ -357,6 +394,9 @@ mod tests {
             "python/worker_test.py",
             "python/test_types.pyi",
             "SRC/TESTS/Mixed.SPEC.TS",
+            "docs/test-beds/typescript/fixture.ts",
+            "src/fixtures/example.rs",
+            "pkg/testdata/input.go",
         ] {
             assert!(is_test_source_path(value), "{value}");
         }
