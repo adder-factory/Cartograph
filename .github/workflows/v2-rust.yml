@@ -207,7 +207,6 @@ jobs:
 
   linux-release-portability:
     name: Linux x64 Debian 12 release baseline
-    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -224,7 +223,6 @@ jobs:
 
   paradedb:
     name: PostgreSQL 18 + ParadeDB + pgvector (${{ matrix.shard }})
-    needs: quality
     strategy:
       fail-fast: false
       matrix:
