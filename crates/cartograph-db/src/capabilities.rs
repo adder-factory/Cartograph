@@ -8,9 +8,9 @@ use crate::DatabaseError;
 
 const MINIMUM_POSTGRES_VERSION_NUM: i32 = 180_004;
 const NEXT_POSTGRES_MAJOR_VERSION_NUM: i32 = 190_000;
-pub(crate) const SUPPORTED_PG_SEARCH_VERSION: &str = "0.24.3";
-pub(crate) const MANAGED_PGVECTOR_VERSION: &str = "0.8.2";
-const MINIMUM_PGVECTOR_VERSION: [u32; 3] = [0, 8, 2];
+pub(crate) const SUPPORTED_PG_SEARCH_VERSION: &str = "0.25.0";
+pub(crate) const MANAGED_PGVECTOR_VERSION: &str = "0.8.4";
+const MINIMUM_PGVECTOR_VERSION: [u32; 3] = [0, 8, 4];
 const DEFAULT_CAPABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPECTED_SOURCE_CODE_TOKENS: [&str; 5] = ["cartograph", "search", "snake", "case", "42"];
 
@@ -61,7 +61,7 @@ struct ProbeFacts {
     postgres_version: String,
     extensions: HashMap<String, String>,
     preload_libraries: String,
-    has_bm25_access_method: bool,
+    has_paradedb_access_method: bool,
     source_code_tokens: Result<Vec<String>, ()>,
 }
 
@@ -166,8 +166,8 @@ pub(crate) async fn probe_capabilities_connection(
             .map_err(|_| DatabaseError::CapabilityProbe {
                 check: "pg-search-preload",
             })?;
-    let has_bm25_access_method =
-        query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pg_am WHERE amname = 'bm25')")
+    let has_paradedb_access_method =
+        query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pg_am WHERE amname = 'paradedb')")
             .fetch_one(&mut *connection)
             .await
             .map_err(|_| DatabaseError::CapabilityProbe {
@@ -195,7 +195,7 @@ pub(crate) async fn probe_capabilities_connection(
         postgres_version,
         extensions,
         preload_libraries,
-        has_bm25_access_method,
+        has_paradedb_access_method,
         source_code_tokens,
     }))
 }
@@ -235,13 +235,13 @@ fn build_report(facts: ProbeFacts) -> CapabilityReport {
             id: "pg-search-extension",
             passed: pg_search_version_supported,
             message: extension_message("pg_search", pg_search_version.as_deref()),
-            remediation: "Install the Cartograph-supported pg_search 0.24.3 build, add it to shared_preload_libraries, restart PostgreSQL, and create or update the extension to 0.24.3.",
+            remediation: "Install the Cartograph-supported pg_search 0.25.0 build, add it to shared_preload_libraries, restart PostgreSQL, and create or update the extension to 0.25.0.",
         }),
         check(CheckInput {
             id: "pgvector-extension",
             passed: pgvector_version_supported,
             message: extension_message("vector", pgvector_version.as_deref()),
-            remediation: "Install pgvector 0.8.2 or newer and create or update the vector extension in the Cartograph database.",
+            remediation: "Install pgvector 0.8.4 or newer and create or update the vector extension in the Cartograph database; 0.8.5 is recommended for external PostgreSQL.",
         }),
         check(CheckInput {
             id: "pg-search-preload",
@@ -255,13 +255,13 @@ fn build_report(facts: ProbeFacts) -> CapabilityReport {
         }),
         check(CheckInput {
             id: "bm25-access-method",
-            passed: facts.has_bm25_access_method,
-            message: if facts.has_bm25_access_method {
-                "BM25 index access method is registered".to_owned()
+            passed: facts.has_paradedb_access_method,
+            message: if facts.has_paradedb_access_method {
+                "ParadeDB index access method is registered".to_owned()
             } else {
-                "BM25 index access method is unavailable".to_owned()
+                "ParadeDB index access method is unavailable".to_owned()
             },
-            remediation: "Verify the pg_search extension installation and server restart.",
+            remediation: "Verify that pg_search 0.25.0 is installed, preloaded, and exposes the paradedb access method.",
         }),
         check(CheckInput {
             id: "source-code-tokenizer",
@@ -333,10 +333,10 @@ mod tests {
                     "pg_search".to_owned(),
                     SUPPORTED_PG_SEARCH_VERSION.to_owned(),
                 ),
-                ("vector".to_owned(), "0.8.2".to_owned()),
+                ("vector".to_owned(), MANAGED_PGVECTOR_VERSION.to_owned()),
             ]),
             preload_libraries: "pg_search,pg_cron".to_owned(),
-            has_bm25_access_method: true,
+            has_paradedb_access_method: true,
             source_code_tokens: Ok(EXPECTED_SOURCE_CODE_TOKENS
                 .iter()
                 .map(ToString::to_string)
@@ -359,11 +359,24 @@ mod tests {
     }
 
     #[test]
+    fn paradedb_0_25_managed_capabilities_are_supported() {
+        let mut facts = ready_facts();
+        facts
+            .extensions
+            .insert("pg_search".to_owned(), "0.25.0".to_owned());
+        facts
+            .extensions
+            .insert("vector".to_owned(), "0.8.4".to_owned());
+
+        assert!(build_report(facts).ready);
+    }
+
+    #[test]
     fn missing_pg_search_does_not_hide_other_diagnostics() {
         let mut facts = ready_facts();
         facts.extensions.remove("pg_search");
         facts.preload_libraries = "pg_cron".to_owned();
-        facts.has_bm25_access_method = false;
+        facts.has_paradedb_access_method = false;
         facts.source_code_tokens = Err(());
 
         let report = build_report(facts);
@@ -438,7 +451,7 @@ mod tests {
         let mut facts = ready_facts();
         facts
             .extensions
-            .insert("pg_search".to_owned(), "0.23.5".to_owned());
+            .insert("pg_search".to_owned(), "0.24.3".to_owned());
 
         let report = build_report(facts);
         let extension_check = report
@@ -450,11 +463,11 @@ mod tests {
     }
 
     #[test]
-    fn pgvector_before_0_8_2_is_rejected() {
+    fn pgvector_before_0_8_4_is_rejected() {
         let mut facts = ready_facts();
         facts
             .extensions
-            .insert("vector".to_owned(), "0.8.1".to_owned());
+            .insert("vector".to_owned(), "0.8.3".to_owned());
 
         let report = build_report(facts);
         let extension_check = report
@@ -463,10 +476,11 @@ mod tests {
             .find(|check| check.id == "pgvector-extension");
 
         assert!(matches!(extension_check, Some(check) if check.status == CheckStatus::Fail));
-        assert!(pgvector_version_is_supported("0.8.2"));
+        assert!(pgvector_version_is_supported("0.8.4"));
+        assert!(pgvector_version_is_supported("0.8.5"));
         assert!(pgvector_version_is_supported("0.9.0"));
-        assert!(!pgvector_version_is_supported("0.8.1"));
-        assert!(!pgvector_version_is_supported("0.8.2.1"));
+        assert!(!pgvector_version_is_supported("0.8.3"));
+        assert!(!pgvector_version_is_supported("0.8.4.1"));
     }
 
     #[test]

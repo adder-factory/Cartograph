@@ -923,7 +923,7 @@ async fn read_bm25_health(
                  AND indexes.indisready
                 INNER JOIN pg_catalog.pg_am AS methods
                   ON methods.oid = index_relations.relam
-                 AND methods.amname = 'bm25'
+                 AND methods.amname IN ('paradedb', 'bm25')
             ), counts AS (
                 SELECT (SELECT count(*) FROM required) AS required_count,
                        (SELECT count(*) FROM healthy) AS healthy_count
@@ -931,7 +931,7 @@ async fn read_bm25_health(
             SELECT to_regclass($2) IS NOT NULL AS present,
                    required_count = healthy_count AS valid,
                    required_count = healthy_count AS ready,
-                   EXISTS (SELECT 1 FROM pg_catalog.pg_am WHERE amname = 'bm25')
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_am WHERE amname = 'paradedb')
                        AS bm25_access_method
             FROM counts"#
     );
@@ -997,8 +997,8 @@ mod tests {
     const LIVE_SCHEMA: &str = "cartograph_managed_maintenance_test";
     const LIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
     const PREVIOUS_MANAGED_DATABASE_IMAGE: &str = concat!(
-        "paradedb/paradedb:0.23.5@sha256:",
-        "c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d"
+        "paradedb/paradedb:0.24.3@sha256:",
+        "8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb"
     );
 
     struct LiveDockerCleanup {

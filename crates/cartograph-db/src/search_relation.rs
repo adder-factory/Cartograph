@@ -66,7 +66,7 @@ pub(crate) async fn rebuild_generation_search_relation(
     drop_relation(connection, input.schema, &relation).await?;
     delete_catalog_record(connection, input).await?;
     create_relation(connection, input, &relation).await?;
-    create_bm25_index(connection, input.schema, &relation).await?;
+    create_paradedb_index(connection, input.schema, &relation).await?;
     let document_count = verify_relation(connection, input, &relation).await?;
     record_verified_relation(connection, input, document_count).await?;
     Ok(relation)
@@ -86,7 +86,7 @@ pub(crate) async fn require_generation_search_relation(
                   relations.relation_format_version,
                   tables.relkind = 'r' AND tables.relpersistence = 'p' AS table_ready,
                   indexes.indisvalid AND indexes.indisready
-                      AND methods.amname = 'bm25'
+                      AND methods.amname IN ('paradedb', 'bm25')
                       AND indexes.indrelid = tables.oid AS index_ready
             FROM {}."generation_search_relations" AS relations
             INNER JOIN {}."index_generations" AS generations
@@ -239,7 +239,7 @@ async fn create_relation(
     Ok(())
 }
 
-async fn create_bm25_index(
+async fn create_paradedb_index(
     connection: &mut PgConnection,
     schema: &DatabaseSchema,
     relation: &GenerationSearchRelation,
@@ -247,7 +247,7 @@ async fn create_bm25_index(
     let sql = format!(
         r#"CREATE INDEX "{}"
             ON {}
-            USING bm25 (
+            USING paradedb (
                 id,
                 project_id,
                 generation_id,
@@ -331,7 +331,9 @@ async fn verify_relation(
     let healthy = catalog.is_some_and(|row| {
         row.try_get::<bool, _>("indisvalid").unwrap_or(false)
             && row.try_get::<bool, _>("indisready").unwrap_or(false)
-            && row.try_get::<String, _>("amname").unwrap_or_default() == "bm25"
+            && row
+                .try_get::<String, _>("amname")
+                .is_ok_and(|method| matches!(method.as_str(), "paradedb" | "bm25"))
             && row.try_get::<bool, _>("correct_table").unwrap_or(false)
     });
     if !healthy {
@@ -452,7 +454,7 @@ impl CartographDatabase {
                           AND indexes.indisvalid
                           AND indexes.indisready
                           AND indexes.indrelid = tables.oid
-                          AND methods.amname = 'bm25',
+                          AND methods.amname IN ('paradedb', 'bm25'),
                           FALSE
                       ) AS healthy
                 FROM {}."index_generations" AS generations

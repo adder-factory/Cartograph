@@ -29,7 +29,8 @@ abstention instead of presenting stale or incomplete data as certainty.
 
 > [!IMPORTANT]
 > Cartograph v2 is PostgreSQL-only. It requires PostgreSQL 18.4 or newer within
-> major version 18, ParadeDB `pg_search` 0.24.3, and pgvector 0.8.2 or newer.
+> major version 18, ParadeDB `pg_search` 0.25.0, and pgvector 0.8.4 or newer
+> (0.8.5 recommended for external PostgreSQL).
 > There is no SQLite runtime, compatibility mode, importer, optional feature,
 > or fallback.
 
@@ -139,7 +140,7 @@ Linux archive is built in a pinned Rust/Bookworm container and executed in a
 separate pinned Debian 12 runtime container before publication.
 
 For an external deployment, the database administrator installs PostgreSQL 18.4
-or newer within major version 18, `pg_search` 0.24.3, and pgvector 0.8.2 or
+or newer within major version 18, `pg_search` 0.25.0, and pgvector 0.8.4 or
 newer, and creates both extensions. Load the connection URL from the shell or a
 secret manager rather than a committed file:
 
