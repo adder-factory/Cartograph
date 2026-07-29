@@ -19,6 +19,7 @@ use tempfile::NamedTempFile;
 use url::Url;
 
 const STATE_DIRECTORY: &str = "backends";
+const PUBLIC_STATE_DIRECTORY: &str = ".cartograph/backends";
 const PID_SCHEMA_VERSION: u8 = 2;
 const MAXIMUM_STATE_FILE_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_STATE_ENTRIES: usize = 256;
@@ -209,6 +210,12 @@ struct BackendPidRecord {
     log_path: PathBuf,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendPidVersion {
+    schema_version: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BackendRow {
@@ -276,24 +283,57 @@ enum BackendCleanupKind {
     InvalidPidState,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BackendCleanupReason {
+    BoundedRotatedLog,
+    StaleInvalidPidState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct BackendCleanupSkipReason(&'static str);
+
+impl BackendCleanupSkipReason {
+    const ENTRY_UNREADABLE: Self = Self("entry_unreadable");
+    const NON_UNICODE_ENTRY: Self = Self("non_unicode_entry");
+    const INVALID_ENTRY_NAME: Self = Self("invalid_entry_name");
+    const UNSAFE_ENTRY_TYPE: Self = Self("unsafe_entry_type");
+    const MODIFICATION_TIME_UNAVAILABLE: Self = Self("modification_time_unavailable");
+    const UNSUPPORTED_STATE_VERSION: Self = Self("unsupported_state_version");
+    const CANDIDATE_CHANGED: Self = Self("candidate_changed");
+    const REMOVAL_FAILED: Self = Self("removal_failed");
+
+    const fn label(self) -> &'static str {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendCleanupSkip {
+    name: Option<String>,
+    reason: BackendCleanupSkipReason,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BackendCleanupEntry {
-    path: PathBuf,
+    name: String,
     kind: BackendCleanupKind,
     bytes: u64,
-    reason: String,
+    reason: BackendCleanupReason,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BackendCleanupReport {
-    state_directory: PathBuf,
+    state_directory: &'static str,
     dry_run: bool,
     examined: usize,
     eligible: Vec<BackendCleanupEntry>,
     removed: Vec<BackendCleanupEntry>,
-    skipped: Vec<String>,
+    skipped: Vec<BackendCleanupSkip>,
     reclaimed_bytes: u64,
     truncated: bool,
 }
@@ -301,6 +341,7 @@ struct BackendCleanupReport {
 enum PidState {
     Missing,
     Valid(BackendPidRecord),
+    UnsupportedVersion,
     Invalid(String),
 }
 
@@ -577,6 +618,21 @@ fn short_hash(value: &str) -> String {
     output
 }
 
+fn valid_backend_id(value: &str) -> bool {
+    value.strip_prefix("llama-").is_some_and(|digest| {
+        digest.len() == 12
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn valid_cleanup_entry_name(name: &str) -> bool {
+    name.strip_suffix(".log.1")
+        .or_else(|| name.strip_suffix(".json"))
+        .is_some_and(valid_backend_id)
+}
+
 async fn backend_status(project: &Path, binary: &str) -> Result<BackendStatusReport, String> {
     let paths = state_paths(project)?;
     let config_specs = build_specs(&paths.project, binary)?;
@@ -632,6 +688,9 @@ async fn build_status_row(
     let (pid_record, state_error) = match pid_state {
         PidState::Missing => (None, None),
         PidState::Valid(record) => (Some(record), None),
+        PidState::UnsupportedVersion => {
+            (None, Some("state file version is unsupported".to_owned()))
+        }
         PidState::Invalid(message) => (None, Some(message)),
     };
     let pid_alive = pid_record
@@ -705,6 +764,10 @@ fn discover_orphans(
         let Some(id) = name.strip_suffix(".json") else {
             continue;
         };
+        if !valid_backend_id(id) {
+            warnings.push("ignored backend state with an invalid entry name".to_owned());
+            continue;
+        }
         if known.contains(id) {
             continue;
         }
@@ -715,6 +778,9 @@ fn discover_orphans(
             },
             PidState::Invalid(message) => {
                 warnings.push(format!("invalid backend state {name}: {message}"));
+            }
+            PidState::UnsupportedVersion => {
+                warnings.push(format!("preserved unsupported backend state {name}"));
             }
             PidState::Missing => {}
         }
@@ -760,6 +826,12 @@ fn read_pid_record(path: &Path) -> PidState {
     if result.is_err() || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAXIMUM_STATE_FILE_BYTES
     {
         return PidState::Invalid("state file cannot be read safely".to_owned());
+    }
+    let Ok(version) = serde_json::from_slice::<BackendPidVersion>(&bytes) else {
+        return PidState::Invalid("state file is malformed".to_owned());
+    };
+    if version.schema_version != u64::from(PID_SCHEMA_VERSION) {
+        return PidState::UnsupportedVersion;
     }
     let Ok(record) = serde_json::from_slice::<BackendPidRecord>(&bytes) else {
         return PidState::Invalid("state file is malformed".to_owned());
@@ -1334,6 +1406,7 @@ async fn run_logs(arguments: LogsArguments) -> Result<ExitCode, String> {
 
 #[derive(Clone)]
 struct PlannedBackendCleanup {
+    path: PathBuf,
     entry: BackendCleanupEntry,
     modified: SystemTime,
 }
@@ -1341,7 +1414,7 @@ struct PlannedBackendCleanup {
 #[derive(Default)]
 struct BackendCleanupScan {
     planned: Vec<PlannedBackendCleanup>,
-    skipped: Vec<String>,
+    skipped: Vec<BackendCleanupSkip>,
     examined: usize,
     truncated: bool,
 }
@@ -1352,14 +1425,18 @@ struct BackendCleanupExecution {
     reclaimed_bytes: u64,
 }
 
-enum CleanupInspection {
-    Candidate(PlannedBackendCleanup),
-    Preserved(String),
-    Ignored,
+fn run_cleanup(arguments: CleanupArguments) -> Result<ExitCode, String> {
+    let report = backend_cleanup_report(&arguments)?;
+    if arguments.json {
+        print_json(&report)?;
+    } else {
+        render_cleanup(&report);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
-fn run_cleanup(arguments: CleanupArguments) -> Result<ExitCode, String> {
-    validate_cleanup_confirmation(&arguments)?;
+fn backend_cleanup_report(arguments: &CleanupArguments) -> Result<BackendCleanupReport, String> {
+    validate_cleanup_confirmation(arguments)?;
     let paths = state_paths(&arguments.path)?;
     let minimum_age = Duration::from_secs(u64::from(arguments.minimum_age_hours) * 60 * 60);
     let mut scan = scan_backend_cleanup(&paths.directory, minimum_age)?;
@@ -1374,8 +1451,8 @@ fn run_cleanup(arguments: CleanupArguments) -> Result<ExitCode, String> {
     } else {
         BackendCleanupExecution::default()
     };
-    let report = BackendCleanupReport {
-        state_directory: paths.directory,
+    Ok(BackendCleanupReport {
+        state_directory: PUBLIC_STATE_DIRECTORY,
         dry_run: !arguments.apply,
         examined: scan.examined,
         eligible,
@@ -1383,13 +1460,7 @@ fn run_cleanup(arguments: CleanupArguments) -> Result<ExitCode, String> {
         skipped: scan.skipped,
         reclaimed_bytes: execution.reclaimed_bytes,
         truncated: scan.truncated,
-    };
-    if arguments.json {
-        print_json(&report)?;
-    } else {
-        render_cleanup(&report);
-    }
-    Ok(ExitCode::SUCCESS)
+    })
 }
 
 fn validate_cleanup_confirmation(arguments: &CleanupArguments) -> Result<(), String> {
@@ -1420,15 +1491,15 @@ fn scan_backend_cleanup(
         }
         scan.examined = scan.examined.saturating_add(1);
         match inspect_cleanup_entry(result, minimum_age) {
-            CleanupInspection::Candidate(candidate) => scan.planned.push(candidate),
-            CleanupInspection::Preserved(reason) => scan.skipped.push(reason),
-            CleanupInspection::Ignored => {}
+            Ok(Some(candidate)) => scan.planned.push(candidate),
+            Err(reason) => scan.skipped.push(reason),
+            Ok(None) => {}
         }
     }
     scan.planned.sort_by(|left, right| {
         left.modified
             .cmp(&right.modified)
-            .then_with(|| left.entry.path.cmp(&right.entry.path))
+            .then_with(|| left.entry.name.cmp(&right.entry.name))
     });
     Ok(scan)
 }
@@ -1436,62 +1507,109 @@ fn scan_backend_cleanup(
 fn inspect_cleanup_entry(
     result: std::io::Result<fs::DirEntry>,
     minimum_age: Duration,
-) -> CleanupInspection {
-    let entry = match result {
-        Ok(entry) => entry,
-        Err(_) => {
-            return CleanupInspection::Preserved(
-                "an unreadable backend state entry was preserved".to_owned(),
-            );
-        }
-    };
+) -> Result<Option<PlannedBackendCleanup>, BackendCleanupSkip> {
+    let entry = result.map_err(|_| BackendCleanupSkip {
+        name: None,
+        reason: BackendCleanupSkipReason::ENTRY_UNREADABLE,
+    })?;
     let path = entry.path();
-    let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-        return CleanupInspection::Preserved(
-            "a non-Unicode backend state entry was preserved".to_owned(),
-        );
+    let name = entry
+        .file_name()
+        .into_string()
+        .map_err(|_| BackendCleanupSkip {
+            name: None,
+            reason: BackendCleanupSkipReason::NON_UNICODE_ENTRY,
+        })?;
+    if !is_cleanup_file_name(&name) {
+        return Ok(None);
+    }
+    if !valid_cleanup_entry_name(&name) {
+        return Err(BackendCleanupSkip {
+            name: None,
+            reason: BackendCleanupSkipReason::INVALID_ENTRY_NAME,
+        });
+    }
+    let Some(metadata) = cleanup_entry_metadata(&path, &name)? else {
+        return Ok(None);
     };
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
-        Ok(_) => {
-            return CleanupInspection::Preserved(format!("preserved unsafe state entry {name}"));
-        }
-        Err(_) => return CleanupInspection::Ignored,
+    let Some(modified) = cleanup_entry_modified(&metadata, &name, minimum_age)? else {
+        return Ok(None);
     };
-    let modified = match metadata.modified() {
-        Ok(modified) if old_enough(modified, minimum_age) => modified,
-        Ok(_) => return CleanupInspection::Ignored,
-        Err(_) => {
-            return CleanupInspection::Preserved(format!(
-                "preserved state entry with unknown age {name}"
-            ));
-        }
-    };
+    preserve_unsupported_pid_state(&path, &name)?;
     let Some((kind, reason)) = classify_cleanup_entry(&name, &path) else {
-        return CleanupInspection::Ignored;
+        return Ok(None);
     };
-    CleanupInspection::Candidate(PlannedBackendCleanup {
+    Ok(Some(PlannedBackendCleanup {
+        path,
         entry: BackendCleanupEntry {
-            path,
+            name,
             kind,
             bytes: metadata.len(),
             reason,
         },
         modified,
-    })
+    }))
 }
 
-fn classify_cleanup_entry(name: &str, path: &Path) -> Option<(BackendCleanupKind, String)> {
+fn is_cleanup_file_name(name: &str) -> bool {
+    name.ends_with(".log.1") || name.ends_with(".json")
+}
+
+fn cleanup_entry_metadata(
+    path: &Path,
+    name: &str,
+) -> Result<Option<fs::Metadata>, BackendCleanupSkip> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            Ok(Some(metadata))
+        }
+        Ok(_) => Err(BackendCleanupSkip {
+            name: Some(name.to_owned()),
+            reason: BackendCleanupSkipReason::UNSAFE_ENTRY_TYPE,
+        }),
+        Err(_) => Ok(None),
+    }
+}
+
+fn cleanup_entry_modified(
+    metadata: &fs::Metadata,
+    name: &str,
+    minimum_age: Duration,
+) -> Result<Option<SystemTime>, BackendCleanupSkip> {
+    match metadata.modified() {
+        Ok(modified) if old_enough(modified, minimum_age) => Ok(Some(modified)),
+        Ok(_) => Ok(None),
+        Err(_) => Err(BackendCleanupSkip {
+            name: Some(name.to_owned()),
+            reason: BackendCleanupSkipReason::MODIFICATION_TIME_UNAVAILABLE,
+        }),
+    }
+}
+
+fn preserve_unsupported_pid_state(path: &Path, name: &str) -> Result<(), BackendCleanupSkip> {
+    if name.ends_with(".json") && matches!(read_pid_record(path), PidState::UnsupportedVersion) {
+        return Err(BackendCleanupSkip {
+            name: Some(name.to_owned()),
+            reason: BackendCleanupSkipReason::UNSUPPORTED_STATE_VERSION,
+        });
+    }
+    Ok(())
+}
+
+fn classify_cleanup_entry(
+    name: &str,
+    path: &Path,
+) -> Option<(BackendCleanupKind, BackendCleanupReason)> {
     if name.ends_with(".log.1") {
         return Some((
             BackendCleanupKind::RotatedLog,
-            "bounded rotated backend log".to_owned(),
+            BackendCleanupReason::BoundedRotatedLog,
         ));
     }
     if name.ends_with(".json") && matches!(read_pid_record(path), PidState::Invalid(_)) {
         return Some((
             BackendCleanupKind::InvalidPidState,
-            "stale invalid pid state that cannot own a verified process".to_owned(),
+            BackendCleanupReason::StaleInvalidPidState,
         ));
     }
     None
@@ -1508,28 +1626,28 @@ fn limit_cleanup_candidates(scan: &mut BackendCleanupScan, maximum_deletions: u1
 fn remove_cleanup_candidates(
     candidates: Vec<PlannedBackendCleanup>,
     minimum_age: Duration,
-    skipped: &mut Vec<String>,
+    skipped: &mut Vec<BackendCleanupSkip>,
 ) -> BackendCleanupExecution {
     let mut execution = BackendCleanupExecution::default();
     for candidate in candidates {
         if !cleanup_candidate_still_safe(&candidate, minimum_age) {
-            skipped.push(format!(
-                "preserved changed cleanup candidate {}",
-                candidate.entry.path.display()
-            ));
+            skipped.push(BackendCleanupSkip {
+                name: Some(candidate.entry.name.clone()),
+                reason: BackendCleanupSkipReason::CANDIDATE_CHANGED,
+            });
             continue;
         }
-        match fs::remove_file(&candidate.entry.path) {
+        match fs::remove_file(&candidate.path) {
             Ok(()) => {
                 execution.reclaimed_bytes = execution
                     .reclaimed_bytes
                     .saturating_add(candidate.entry.bytes);
                 execution.removed.push(candidate.entry);
             }
-            Err(_) => skipped.push(format!(
-                "could not remove cleanup candidate {}",
-                candidate.entry.path.display()
-            )),
+            Err(_) => skipped.push(BackendCleanupSkip {
+                name: Some(candidate.entry.name),
+                reason: BackendCleanupSkipReason::REMOVAL_FAILED,
+            }),
         }
     }
     execution
@@ -1542,7 +1660,7 @@ fn old_enough(modified: SystemTime, minimum_age: Duration) -> bool {
 }
 
 fn cleanup_candidate_still_safe(candidate: &PlannedBackendCleanup, minimum_age: Duration) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(&candidate.entry.path) else {
+    let Ok(metadata) = fs::symlink_metadata(&candidate.path) else {
         return false;
     };
     if !metadata.is_file()
@@ -1554,7 +1672,7 @@ fn cleanup_candidate_still_safe(candidate: &PlannedBackendCleanup, minimum_age: 
         return false;
     }
     candidate.entry.kind != BackendCleanupKind::InvalidPidState
-        || matches!(read_pid_record(&candidate.entry.path), PidState::Invalid(_))
+        || matches!(read_pid_record(&candidate.path), PidState::Invalid(_))
 }
 
 fn tail_log(path: &Path, lines: u16) -> Result<Option<String>, String> {
@@ -1726,17 +1844,30 @@ fn render_cleanup(report: &BackendCleanupReport) {
         };
         println!(
             "- {action} {} ({} bytes, {:?}): {}",
-            entry.path.display(),
+            entry.name,
             entry.bytes,
             entry.kind,
-            entry.reason
+            cleanup_reason_label(entry.reason)
         );
     }
     for warning in &report.skipped {
-        println!("- preserved: {warning}");
+        println!(
+            "- preserved {} ({})",
+            warning.name.as_deref().unwrap_or("unidentified entry"),
+            warning.reason.label()
+        );
     }
     if report.truncated {
         println!("- more eligible entries remain beyond this bounded batch");
+    }
+}
+
+const fn cleanup_reason_label(reason: BackendCleanupReason) -> &'static str {
+    match reason {
+        BackendCleanupReason::BoundedRotatedLog => "bounded rotated backend log",
+        BackendCleanupReason::StaleInvalidPidState => {
+            "stale invalid pid state that cannot own a verified process"
+        }
     }
 }
 
@@ -1947,7 +2078,7 @@ mod tests {
             state_paths(root.path()).unwrap_or_else(|error| panic!("state paths failed: {error}"));
         ensure_state_directory(&paths)
             .unwrap_or_else(|error| panic!("state directory failed: {error}"));
-        let log = paths.directory.join("fixture.log");
+        let log = paths.directory.join("llama-0123456789ab.log");
         let oversized =
             File::create(&log).unwrap_or_else(|error| panic!("log fixture create failed: {error}"));
         oversized
@@ -1961,28 +2092,68 @@ mod tests {
                 .len(),
             0
         );
-        let rotated = paths.directory.join("fixture.log.1");
+        let rotated = paths.directory.join("llama-0123456789ab.log.1");
         assert_eq!(
             fs::metadata(&rotated)
                 .unwrap_or_else(|error| panic!("rotated log metadata failed: {error}"))
                 .len(),
             MAXIMUM_BACKEND_LOG_BYTES
         );
-        let invalid = paths.directory.join("invalid.json");
+        let invalid = paths.directory.join("llama-fedcba987654.json");
         fs::write(&invalid, b"not-json")
             .unwrap_or_else(|error| panic!("invalid state fixture failed: {error}"));
+        let unsafe_entry = paths.directory.join("llama-aaaaaaaaaaaa.log.1");
+        fs::create_dir(&unsafe_entry)
+            .unwrap_or_else(|error| panic!("unsafe cleanup fixture failed: {error}"));
+        let malicious = paths.directory.join("llama-bbbbbbbbbbbb\n\u{1b}[31m.log.1");
+        fs::write(&malicious, b"terminal injection fixture")
+            .unwrap_or_else(|error| panic!("malicious-name fixture failed: {error}"));
+        let future = paths.directory.join("llama-cccccccccccc.json");
+        fs::write(&future, br#"{"schemaVersion":3,"futureField":true}"#)
+            .unwrap_or_else(|error| panic!("future state fixture failed: {error}"));
+        assert!(matches!(
+            read_pid_record(&future),
+            PidState::UnsupportedVersion
+        ));
 
-        let dry_run = run_cleanup(CleanupArguments {
+        let dry_run_arguments = CleanupArguments {
             path: root.path().to_path_buf(),
             apply: false,
             confirm: None,
             minimum_age_hours: 0,
             maximum_deletions: 8,
             json: true,
-        });
+        };
+        let report = backend_cleanup_report(&dry_run_arguments)
+            .unwrap_or_else(|error| panic!("cleanup report failed: {error}"));
+        assert_eq!(report.state_directory, PUBLIC_STATE_DIRECTORY);
+        assert!(
+            report
+                .eligible
+                .iter()
+                .all(|entry| valid_cleanup_entry_name(&entry.name))
+        );
+        assert!(report.skipped.iter().any(|skipped| {
+            skipped.name.as_deref() == Some("llama-aaaaaaaaaaaa.log.1")
+                && skipped.reason == BackendCleanupSkipReason::UNSAFE_ENTRY_TYPE
+        }));
+        assert!(report.skipped.iter().any(|skipped| {
+            skipped.name.is_none() && skipped.reason == BackendCleanupSkipReason::INVALID_ENTRY_NAME
+        }));
+        assert!(report.skipped.iter().any(|skipped| {
+            skipped.name.as_deref() == Some("llama-cccccccccccc.json")
+                && skipped.reason == BackendCleanupSkipReason::UNSUPPORTED_STATE_VERSION
+        }));
+        let encoded = serde_json::to_string(&report)
+            .unwrap_or_else(|error| panic!("cleanup report serialization failed: {error}"));
+        assert!(!encoded.contains(&root.path().to_string_lossy().into_owned()));
+        assert!(!encoded.contains("[31m"));
+
+        let dry_run = run_cleanup(dry_run_arguments);
         assert_eq!(dry_run, Ok(ExitCode::SUCCESS));
         assert!(rotated.exists());
         assert!(invalid.exists());
+        assert!(future.exists());
         assert!(
             run_cleanup(CleanupArguments {
                 path: root.path().to_path_buf(),
@@ -2008,6 +2179,9 @@ mod tests {
         assert!(!rotated.exists());
         assert!(!invalid.exists());
         assert!(log.exists());
+        assert!(future.exists());
+        assert!(malicious.exists());
+        assert!(unsafe_entry.is_dir());
     }
 
     #[test]
@@ -2068,6 +2242,11 @@ mod tests {
         assert!(!is_loopback("192.0.2.1"));
         assert_eq!(short_hash("stable"), short_hash("stable"));
         assert_ne!(short_hash("stable"), short_hash("different"));
+        assert!(valid_backend_id("llama-0123456789ab"));
+        assert!(!valid_backend_id("llama-0123456789AG"));
+        assert!(!valid_cleanup_entry_name(
+            "llama-0123456789ab\n\u{1b}[31m.log.1"
+        ));
         assert_eq!(BackendTier::Summarize.label(), "summarize");
         assert_eq!(BackendTier::Local.label(), "local");
         assert_eq!(BackendTier::Ask.label(), "ask");
@@ -2100,8 +2279,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("unsafe log fixture failed: {error}"));
         assert!(tail_log(&unsafe_log, 2).is_err());
 
+        let fixture_id = "llama-0123456789ab";
         let spec = BackendSpec {
-            id: "fixture".to_owned(),
+            id: fixture_id.to_owned(),
             labels: vec!["embed".to_owned()],
             endpoint: UNREACHABLE_ENDPOINT.to_owned(),
             model_path: model.clone(),
@@ -2115,7 +2295,7 @@ mod tests {
         let mut row = BackendRow {
             spec: spec.clone(),
             origin: BackendOrigin::Config,
-            pid_file_path: paths.directory.join("fixture.json"),
+            pid_file_path: paths.directory.join(format!("{fixture_id}.json")),
             log_path: log.clone(),
             pid_record: None,
             pid_alive: false,
@@ -2133,7 +2313,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("pid record write failed: {error}"));
         let record = match read_pid_record(&row.pid_file_path) {
             PidState::Valid(record) => record,
-            PidState::Missing | PidState::Invalid(_) => panic!("valid pid state was rejected"),
+            PidState::Missing | PidState::UnsupportedVersion | PidState::Invalid(_) => {
+                panic!("valid pid state was rejected")
+            }
         };
         assert!(valid_pid_record(&record));
         assert!(safe_regular_file(&row.pid_file_path));
@@ -2142,9 +2324,9 @@ mod tests {
             PidState::Missing
         ));
 
-        let orphan = orphan_spec("orphan", &record)
+        let orphan = orphan_spec(fixture_id, &record)
             .unwrap_or_else(|error| panic!("orphan state failed: {error}"));
-        assert_eq!(orphan.id, "orphan");
+        assert_eq!(orphan.id, fixture_id);
         let (orphans, warnings) = discover_orphans(&paths.directory, &BTreeSet::new())
             .unwrap_or_else(|error| panic!("orphan discovery failed: {error}"));
         assert_eq!(orphans.len(), 1);

@@ -1136,7 +1136,7 @@ struct DatabaseCompactArguments {
     timeout_seconds: u64,
     /// Operator-observed free bytes for external PostgreSQL. Managed mode reads
     /// the validated container filesystem automatically.
-    #[arg(long)]
+    #[arg(long, requires = "apply")]
     available_headroom_bytes: Option<u64>,
     /// Output format for humans or automation.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -3508,7 +3508,7 @@ async fn run_generation_prune(arguments: PruneArguments) -> Result<ExitCode, Str
 }
 
 async fn run_database_usage(arguments: DatabaseUsageArguments) -> Result<ExitCode, String> {
-    let runtime = open_runtime(&arguments.project_path).await?;
+    let runtime = open_current_read_only_runtime(&arguments.project_path).await?;
     let status = runtime.status().await.map_err(|error| error.to_string())?;
     let project_id = status
         .snapshot
@@ -3538,15 +3538,25 @@ async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<Exi
         statement_timeout: Duration::from_secs(arguments.timeout_seconds),
     })
     .map_err(|error| error.to_string())?;
+    let external_database = env::var_os(DATABASE_URL_ENV).is_some();
+    let headroom_authority = arguments
+        .apply
+        .then(|| {
+            compaction_headroom_authority(external_database, arguments.available_headroom_bytes)
+        })
+        .transpose()?;
     let settings = resolve_database_settings(&arguments.project_path)?;
     let pool = cartograph_db::connect(&settings)
         .await
         .map_err(|error| error.to_string())?;
     let database = CartographDatabase::new(pool, settings.schema().clone());
+    if let Err(error) = database.verify_current_schema().await {
+        database.close().await;
+        return Err(current_schema_guidance(error));
+    }
     let result = if arguments.apply {
-        let headroom = match arguments.available_headroom_bytes {
-            Some(bytes) => bytes,
-            None if env::var_os(DATABASE_URL_ENV).is_none() => {
+        let headroom = match headroom_authority {
+            Some(CompactionHeadroomAuthority::Managed) => {
                 let port = resolve_managed_database_port(None)?;
                 ManagedDatabase::new(&arguments.project_path, port)
                     .map_err(|error| error.to_string())?
@@ -3555,12 +3565,8 @@ async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<Exi
                     .await
                     .map_err(|error| error.to_string())?
             }
-            None => {
-                database.close().await;
-                return Err(
-                    "external PostgreSQL compaction requires --available-headroom-bytes".to_owned(),
-                );
-            }
+            Some(CompactionHeadroomAuthority::External(bytes)) => bytes,
+            None => return Err("online compaction headroom authority is unavailable".to_owned()),
         };
         database
             .compact_storage_online(policy, headroom)
@@ -3577,6 +3583,47 @@ async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<Exi
     database.close().await;
     result?;
     Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactionHeadroomAuthority {
+    Managed,
+    External(u64),
+}
+
+fn compaction_headroom_authority(
+    external_database: bool,
+    supplied_bytes: Option<u64>,
+) -> Result<CompactionHeadroomAuthority, String> {
+    match (external_database, supplied_bytes) {
+        (false, None) => Ok(CompactionHeadroomAuthority::Managed),
+        (false, Some(_)) => Err(
+            "managed PostgreSQL compaction rejects --available-headroom-bytes; Cartograph measures the validated data volume"
+                .to_owned(),
+        ),
+        (true, Some(bytes)) => Ok(CompactionHeadroomAuthority::External(bytes)),
+        (true, None) => {
+            Err("external PostgreSQL compaction requires --available-headroom-bytes".to_owned())
+        }
+    }
+}
+
+async fn open_current_read_only_runtime(project_path: &PathBuf) -> Result<ProjectRuntime, String> {
+    let settings = resolve_database_settings(project_path)?;
+    let runtime = ProjectRuntime::connect_read_only(project_path, &settings)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = runtime.database().verify_current_schema().await {
+        runtime.close().await;
+        return Err(current_schema_guidance(error));
+    }
+    Ok(runtime)
+}
+
+fn current_schema_guidance(error: cartograph_db::MigrationError) -> String {
+    format!(
+        "{error}; run `cartograph db start --project-path .` or the approved external migration workflow before retrying"
+    )
 }
 
 fn maintenance_owner() -> LeaseOwner {
@@ -4951,6 +4998,16 @@ mod tests {
                 })
             }
         ));
+        assert!(
+            Cli::try_parse_from([
+                "cartograph",
+                "db",
+                "compact",
+                "--available-headroom-bytes",
+                "1073741824",
+            ])
+            .is_err()
+        );
 
         let credential_migration = Cli::try_parse_from([
             "cartograph",
@@ -4983,5 +5040,19 @@ mod tests {
                 command: backend::BackendCommand::Cleanup(_)
             }
         ));
+    }
+
+    #[test]
+    fn compaction_headroom_authority_cannot_be_overridden_in_managed_mode() {
+        assert_eq!(
+            compaction_headroom_authority(false, None),
+            Ok(CompactionHeadroomAuthority::Managed)
+        );
+        assert!(compaction_headroom_authority(false, Some(u64::MAX)).is_err());
+        assert_eq!(
+            compaction_headroom_authority(true, Some(1_073_741_824)),
+            Ok(CompactionHeadroomAuthority::External(1_073_741_824))
+        );
+        assert!(compaction_headroom_authority(true, None).is_err());
     }
 }

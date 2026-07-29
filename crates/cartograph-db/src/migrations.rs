@@ -1114,9 +1114,32 @@ pub enum MigrationError {
         /// Newer recorded migration version.
         version: i64,
     },
+    /// A read-only caller found an older, otherwise valid append-only ledger.
+    #[error("database schema version {version} is older than required version {required_version}")]
+    SchemaVersionBehind {
+        /// Highest migration version recorded by the database.
+        version: i64,
+        /// Exact migration version required by this binary.
+        required_version: i64,
+    },
 }
 
 impl CartographDatabase {
+    /// Verify the immutable migration ledger without creating a schema, applying
+    /// migrations, or performing derived-index maintenance.
+    pub async fn verify_current_schema(&self) -> Result<MigrationReport, MigrationError> {
+        let quoted_schema = crate::database::quoted_schema(&self.schema);
+        let mut connection =
+            self.pool
+                .acquire()
+                .await
+                .map_err(|_| MigrationError::DatabaseOperation {
+                    operation: "acquire-read-only-ledger",
+                })?;
+        let ledger = load_ledger(&mut connection, &quoted_schema).await?;
+        validate_current_ledger(&ledger)
+    }
+
     /// Verify hard capabilities, then apply append-only migrations under a
     /// transaction-scoped advisory lock.
     pub async fn migrate(&self) -> Result<MigrationReport, MigrationError> {
@@ -1202,7 +1225,7 @@ async fn migrate_transaction(
     schema: &DatabaseSchema,
 ) -> Result<MigrationReport, MigrationError> {
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("{MIGRATION_LOCK_NAMESPACE}:{}", schema.as_str()))
+        .bind(migration_lock_key(schema))
         .execute(&mut *connection)
         .await
         .map_err(|_| MigrationError::DatabaseOperation {
@@ -1277,6 +1300,10 @@ async fn migrate_transaction(
     })
 }
 
+pub(crate) fn migration_lock_key(schema: &DatabaseSchema) -> String {
+    format!("{MIGRATION_LOCK_NAMESPACE}:{}", schema.as_str())
+}
+
 async fn load_ledger(
     connection: &mut PgConnection,
     quoted_schema: &str,
@@ -1310,6 +1337,48 @@ async fn load_ledger(
         ledger.insert(version, LedgerRecord { name, checksum });
     }
     Ok(ledger)
+}
+
+fn validate_current_ledger(
+    ledger: &BTreeMap<i64, LedgerRecord>,
+) -> Result<MigrationReport, MigrationError> {
+    if let Some(version) = ledger
+        .keys()
+        .copied()
+        .find(|version| *version > LATEST_SCHEMA_VERSION)
+    {
+        return Err(MigrationError::SchemaVersionAhead { version });
+    }
+
+    let recorded_version = ledger.keys().next_back().copied().unwrap_or_default();
+    for migration in MIGRATIONS {
+        let checksum = migration_checksum(migration);
+        match ledger.get(&migration.version) {
+            Some(record) if record.name != migration.name || record.checksum != checksum => {
+                return Err(MigrationError::LedgerConflict {
+                    version: migration.version,
+                });
+            }
+            Some(_) => {}
+            None if migration.version <= recorded_version => {
+                return Err(MigrationError::LedgerGap {
+                    missing_version: migration.version,
+                    recorded_version,
+                });
+            }
+            None => {
+                return Err(MigrationError::SchemaVersionBehind {
+                    version: recorded_version,
+                    required_version: LATEST_SCHEMA_VERSION,
+                });
+            }
+        }
+    }
+
+    Ok(MigrationReport {
+        applied_versions: Vec::new(),
+        current_version: LATEST_SCHEMA_VERSION,
+    })
 }
 
 async fn apply_migration(
@@ -1553,5 +1622,38 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn read_only_ledger_verification_requires_the_exact_current_schema() {
+        let mut ledger = MIGRATIONS
+            .iter()
+            .map(|migration| {
+                (
+                    migration.version,
+                    LedgerRecord {
+                        name: migration.name.to_owned(),
+                        checksum: migration_checksum(migration),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            validate_current_ledger(&ledger),
+            Ok(MigrationReport {
+                applied_versions: Vec::new(),
+                current_version: LATEST_SCHEMA_VERSION,
+            })
+        );
+
+        ledger.remove(&LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            validate_current_ledger(&ledger),
+            Err(MigrationError::SchemaVersionBehind {
+                version: LATEST_SCHEMA_VERSION - 1,
+                required_version: LATEST_SCHEMA_VERSION,
+            })
+        );
     }
 }

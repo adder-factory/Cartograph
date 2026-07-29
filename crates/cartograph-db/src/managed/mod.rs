@@ -550,6 +550,7 @@ impl ManagedDatabaseLifecycle<'_> {
             .await?
             .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
         validate_owned_container(&self.database.identity, &inspection, false)?;
+        verify_volume(&self.database.docker.volumes(), &self.database.identity).await?;
         if container_state(&inspection) != ManagedContainerState::Healthy {
             return Err(ManagedDatabaseError::DatabaseNotHealthyForMaintenance);
         }
@@ -1384,6 +1385,7 @@ mod tests {
                 "container",
                 "rm",
                 "--force",
+                "--volumes",
                 &database.identity.container_name,
             ])
             .output();
@@ -1445,6 +1447,7 @@ mod tests {
                 "container",
                 "rm",
                 "--force",
+                "--volumes",
                 &database.identity.container_name,
             ])
             .output();
@@ -1517,6 +1520,7 @@ mod tests {
                 "container",
                 "rm",
                 "--force",
+                "--volumes",
                 &database.identity.container_name,
             ])
             .output();
@@ -1554,6 +1558,12 @@ mod tests {
         assert_eq!(status.port, database.port);
         assert!(status.image_matches);
         assert_container_metadata_uses_password_file(database);
+
+        let available_storage = match database.lifecycle().available_storage_bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => panic!("managed storage headroom inspection failed: {error}"),
+        };
+        assert!(available_storage > 0);
 
         let second = match database.lifecycle().start().await {
             Ok(report) => report,
@@ -1653,10 +1663,12 @@ mod tests {
                 "container",
                 "rm",
                 "--force",
+                "--volumes",
                 &database.identity.container_name,
             ])
             .output();
         assert!(matches!(removed_container, Ok(output) if output.status.success()));
+        wait_for_loopback_port_release(database.port).await;
         if let Err(error) = std::fs::remove_file(database.credentials.path()) {
             panic!("could not remove password fixture: {error}");
         }
@@ -1675,6 +1687,16 @@ mod tests {
         };
         assert_eq!(status.state, ManagedContainerState::Missing);
         assert!(!database.credentials.path().exists());
+    }
+
+    async fn wait_for_loopback_port_release(port: u16) {
+        for _ in 0..RESTART_POLL_ATTEMPTS * 4 {
+            if ensure_loopback_port_available(port).is_ok() {
+                return;
+            }
+            sleep(RESTART_POLL_INTERVAL).await;
+        }
+        panic!("managed test port {port} remained occupied after container removal");
     }
 
     fn assert_container_metadata_uses_password_file(database: &ManagedDatabase) {

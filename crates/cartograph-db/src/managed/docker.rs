@@ -580,10 +580,7 @@ impl DockerContainerCli<'_> {
 
     pub(super) async fn remove_container(&self, name: &str) -> Result<(), ManagedDatabaseError> {
         self.runner
-            .checked(
-                "remove managed container",
-                ["container", "rm", "--force", name],
-            )
+            .checked_os("remove managed container", remove_container_arguments(name))
             .await
             .map(|_| ())
     }
@@ -619,6 +616,13 @@ async fn stop_container_with_grace(
 
 fn stop_container_arguments(name: &str, policy: StopPolicy) -> Vec<OsString> {
     ["container", "stop", "--time", policy.grace_seconds, name]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+}
+
+fn remove_container_arguments(name: &str) -> Vec<OsString> {
+    ["container", "rm", "--force", "--volumes", name]
         .into_iter()
         .map(OsString::from)
         .collect()
@@ -1244,6 +1248,26 @@ mod tests {
             ["container", "stop", "--time", "30", "cartograph-v2-test"]
         );
         assert!(NORMAL_STOP_POLICY.command_timeout > Duration::from_secs(30));
+    }
+
+    #[test]
+    fn container_removal_collects_only_attached_anonymous_volumes() {
+        let arguments = remove_container_arguments("cartograph-v2-test");
+        let rendered: Vec<_> = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect();
+
+        assert_eq!(
+            rendered,
+            [
+                "container",
+                "rm",
+                "--force",
+                "--volumes",
+                "cartograph-v2-test"
+            ]
+        );
     }
 
     #[test]

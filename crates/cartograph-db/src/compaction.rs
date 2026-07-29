@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -12,6 +12,7 @@ const MINIMUM_INDEX_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_STATEMENT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const HEADROOM_MULTIPLIER: u64 = 2;
 const HEADROOM_ALLOWANCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAXIMUM_INVALID_ARTIFACTS: usize = 64;
 const COMPACTION_LOCK_NAMESPACE: &str = "cartograph-v2-online-compaction";
 const AUTOMATIC_MAXIMUM_INDEXES: u16 = 32;
 const AUTOMATIC_MAXIMUM_CANDIDATE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -108,6 +109,8 @@ impl Default for StorageCompactionPolicy {
 pub struct StorageCompactionPlan {
     pub candidates: Vec<StorageCompactionCandidate>,
     pub invalid_artifacts: Vec<InvalidIndexArtifact>,
+    pub invalid_artifact_total: u64,
+    pub invalid_artifacts_truncated: bool,
     pub candidate_bytes: u64,
     pub required_headroom_bytes: u64,
     pub truncated: bool,
@@ -170,6 +173,24 @@ impl CartographDatabase {
         policy: StorageCompactionPolicy,
         available_headroom_bytes: u64,
     ) -> Result<StorageCompactionReport, StorageCompactionError> {
+        self.compact_storage_online_with_observer(policy, available_headroom_bytes, || async {})
+            .await
+    }
+
+    /// Execute online compaction with a bounded observer point after session
+    /// state is installed. Live fault tests use this to prove cancellation
+    /// cleanup without relying on PostgreSQL lock timing.
+    #[doc(hidden)]
+    pub async fn compact_storage_online_with_observer<Observe, Observed>(
+        &self,
+        policy: StorageCompactionPolicy,
+        available_headroom_bytes: u64,
+        observe_session: Observe,
+    ) -> Result<StorageCompactionReport, StorageCompactionError>
+    where
+        Observe: FnOnce() -> Observed,
+        Observed: Future<Output = ()>,
+    {
         validate_policy(policy)?;
         let plan = load_plan(self, policy).await?;
         require_headroom(available_headroom_bytes, plan.required_headroom_bytes)?;
@@ -178,13 +199,16 @@ impl CartographDatabase {
             .acquire()
             .await
             .map_err(|_| database_error("acquire"))?;
+        connection.close_on_drop();
         let session =
             begin_compaction_session(&mut connection, self.schema.as_str(), policy).await?;
+        observe_session().await;
         let schema = quoted_schema(&self.schema);
         let mut execution = execute_reindex_plan(&mut connection, &schema, &plan.candidates).await;
         let session_clean =
             finish_compaction_session(&mut connection, session, &mut execution).await;
-        if !session_clean && connection.close().await.is_err() && execution.stop_reason.is_none() {
+        let connection_closed = connection.close().await.is_ok();
+        if !session_clean && !connection_closed && execution.stop_reason.is_none() {
             execution.stop_reason = Some(StorageCompactionStopReason::AdvisoryUnlockFailed);
         }
         let bytes_before = sum_candidate_bytes(&execution.reindexed)?;
@@ -210,6 +234,12 @@ struct OnlineCompactionExecution {
     reindexed: Vec<StorageCompactionCandidate>,
     stopped_at: Option<String>,
     stop_reason: Option<StorageCompactionStopReason>,
+}
+
+struct InvalidIndexArtifactInventory {
+    artifacts: Vec<InvalidIndexArtifact>,
+    total: u64,
+    truncated: bool,
 }
 
 fn require_headroom(available: u64, required: u64) -> Result<(), StorageCompactionError> {
@@ -428,7 +458,9 @@ async fn load_plan(
     let invalid_artifacts = load_invalid_artifacts(database).await?;
     Ok(StorageCompactionPlan {
         candidates,
-        invalid_artifacts,
+        invalid_artifacts: invalid_artifacts.artifacts,
+        invalid_artifact_total: invalid_artifacts.total,
+        invalid_artifacts_truncated: invalid_artifacts.truncated,
         candidate_bytes,
         required_headroom_bytes,
         truncated,
@@ -437,12 +469,13 @@ async fn load_plan(
 
 async fn load_invalid_artifacts(
     database: &CartographDatabase,
-) -> Result<Vec<InvalidIndexArtifact>, StorageCompactionError> {
+) -> Result<InvalidIndexArtifactInventory, StorageCompactionError> {
     let statement = r#"SELECT indexes.relname AS index_name,
                tables.relname AS table_name,
                pg_relation_size(indexes.oid)::bigint AS bytes,
                catalog.indisvalid,
-               catalog.indisready
+               catalog.indisready,
+               count(*) OVER ()::bigint AS total_artifacts
         FROM pg_catalog.pg_index AS catalog
         INNER JOIN pg_catalog.pg_class AS indexes
             ON indexes.oid = catalog.indexrelid
@@ -454,13 +487,24 @@ async fn load_invalid_artifacts(
           AND (NOT catalog.indisvalid OR NOT catalog.indisready
                OR indexes.relname ~ '_cc(new|old)[0-9]*$')
         ORDER BY bytes DESC, indexes.relname
-        LIMIT 64"#;
-    query(statement)
+        LIMIT $2"#;
+    let rows = query(statement)
         .bind(database.schema.as_str())
+        .bind(
+            i64::try_from(MAXIMUM_INVALID_ARTIFACTS + 1)
+                .map_err(|_| corrupt("invalid_artifact_limit"))?,
+        )
         .fetch_all(&database.pool)
         .await
-        .map_err(|_| database_error("plan-invalid-artifacts"))?
+        .map_err(|_| database_error("plan-invalid-artifacts"))?;
+    let total = rows
+        .first()
+        .map(|row| read_nonnegative(row, "total_artifacts"))
+        .transpose()?
+        .unwrap_or(0);
+    let artifacts = rows
         .iter()
+        .take(MAXIMUM_INVALID_ARTIFACTS)
         .map(|row| {
             Ok(InvalidIndexArtifact {
                 index: read_identifier(row, "index_name")?,
@@ -474,7 +518,14 @@ async fn load_invalid_artifacts(
                     .map_err(|_| corrupt("index_ready"))?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    let returned =
+        u64::try_from(artifacts.len()).map_err(|_| corrupt("invalid_artifact_returned"))?;
+    Ok(InvalidIndexArtifactInventory {
+        artifacts,
+        total,
+        truncated: total > returned,
+    })
 }
 
 async fn load_candidate_bytes(

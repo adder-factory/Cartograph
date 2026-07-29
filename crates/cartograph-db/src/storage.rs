@@ -497,6 +497,7 @@ async fn load_deduplication(
                 INNER JOIN duplicate_groups
                     USING (content_digest_version, content_digest)
                 WHERE generations.project_id = $1::uuid
+                  AND generations.state IN ('ready', 'current', 'superseded')
             )
             SELECT (SELECT count(*) FROM duplicate_groups)::bigint AS duplicate_groups,
                    count(DISTINCT redundant.generation_id)

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use cartograph_domain::{GenerationId, ProjectOperation};
 use serde::Serialize;
@@ -18,17 +18,22 @@ const MAXIMUM_STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_STALE_READY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAXIMUM_STALE_READY_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const POST_RETENTION_VACUUM_ROW_THRESHOLD: u64 = 100_000;
-const POST_RETENTION_VACUUM_TABLES: [&str; 10] = [
+const RETENTION_ROW_TABLES: [&str; 15] = [
     "index_generations",
     "files",
     "symbols",
     "edges",
     "references",
     "search_documents",
+    "project_operation_leases",
     "document_embeddings",
+    "generation_search_relations",
+    "symbol_coverage",
     "symbol_similarity_edges",
     "symbol_similarity_builds",
-    "generation_search_relations",
+    "symbol_issues",
+    "issue_history_refreshes",
+    "summary_priority_queue",
 ];
 const RETENTION_LOCK_NAMESPACE: &str = "cartograph-v2-generation-retention";
 const PUBLICATION_LOCK_NAMESPACE: &str = "cartograph-v2-publish";
@@ -276,6 +281,23 @@ impl CartographDatabase {
         &self,
         request: GenerationRetentionRequest<'_>,
     ) -> Result<GenerationRetentionReport, GenerationRetentionError> {
+        self.cleanup_generations_with_observer(request, || async {})
+            .await
+    }
+
+    /// Execute generation cleanup with one observer point after every cascade
+    /// relation is locked and the catalog is verified. Live concurrency tests
+    /// use this to prove that FK-changing DDL cannot cross the accounting fence.
+    #[doc(hidden)]
+    pub async fn cleanup_generations_with_observer<Observe, Observed>(
+        &self,
+        request: GenerationRetentionRequest<'_>,
+        observe_catalog: Observe,
+    ) -> Result<GenerationRetentionReport, GenerationRetentionError>
+    where
+        Observe: FnOnce() -> Observed,
+        Observed: Future<Output = ()>,
+    {
         validate_fence_shape(request.fence)?;
         if request.statement_timeout.is_zero() {
             return Err(GenerationRetentionError::InvalidPolicy);
@@ -298,7 +320,7 @@ impl CartographDatabase {
             fence: request.fence,
             quoted_schema: crate::database::quoted_schema(&self.schema),
         };
-        let result = cleanup_transaction(&mut transaction, &context).await;
+        let result = cleanup_transaction(&mut transaction, &context, observe_catalog).await;
         match result {
             Ok(report) => {
                 transaction
@@ -337,6 +359,7 @@ impl CartographDatabase {
             return Err(());
         }
         let mut connection = self.pool.acquire().await.map_err(|_| ())?;
+        connection.close_on_drop();
         let prior_timeout = query("SELECT current_setting('statement_timeout')")
             .fetch_one(&mut *connection)
             .await
@@ -351,7 +374,7 @@ impl CartographDatabase {
         let schema = crate::database::quoted_schema(&self.schema);
         let mut attempted = 0_u64;
         let mut result = Ok(());
-        for table in POST_RETENTION_VACUUM_TABLES {
+        for table in RETENTION_ROW_TABLES {
             let statement = format!(
                 r#"VACUUM (
                         ANALYZE,
@@ -423,13 +446,21 @@ struct BoundedCandidateWork {
     search_relations: u64,
 }
 
-async fn cleanup_transaction(
+async fn cleanup_transaction<Observe, Observed>(
     connection: &mut sqlx_postgres::PgConnection,
     context: &RetentionContext<'_>,
-) -> Result<GenerationRetentionReport, GenerationRetentionError> {
+    observe_catalog: Observe,
+) -> Result<GenerationRetentionReport, GenerationRetentionError>
+where
+    Observe: FnOnce() -> Observed,
+    Observed: Future<Output = ()>,
+{
     acquire_retention_locks(connection, context).await?;
     require_live_fence(connection, context).await?;
     lock_project(connection, context).await?;
+    lock_retention_relations(connection, context).await?;
+    verify_retention_cascade_catalog(connection, context).await?;
+    observe_catalog().await;
     let candidates = load_terminal_candidates(connection, context).await?;
     let bounded = bound_candidate_work(connection, context, candidates).await?;
     for work in &bounded.candidates {
@@ -441,6 +472,10 @@ async fn cleanup_transaction(
         .await
         .map_err(|_| database_error("drop-generation-search-relation"))?;
     }
+    // The relation locks make FK-changing DDL wait. Re-reading the complete
+    // catalog immediately before DELETE also fails closed if pre-existing
+    // catalog drift was exposed by a concurrent transaction snapshot.
+    verify_retention_cascade_catalog(connection, context).await?;
     let removed = delete_terminal_generations(connection, context, &bounded.candidates).await?;
     let preserved = load_preserved_counts(connection, context).await?;
     // Row locks prevent takeover, but they do not freeze database-clock expiry.
@@ -615,53 +650,24 @@ async fn load_candidate_work(
         context.database.schema.as_str(),
         candidate.generation_id.as_str().replace('-', "")
     );
+    let cascade_count = RETENTION_ROW_TABLES
+        .iter()
+        .map(|table| {
+            format!(
+                r#"(SELECT count(*) FROM {}."{table}"
+                    WHERE project_id = CAST($1 AS uuid)
+                      AND generation_id = CAST($2 AS uuid))"#,
+                context.quoted_schema,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
     let sql = format!(
         r#"SELECT
-                1
-                + (SELECT count(*) FROM {}."files"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."symbols"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."edges"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."references"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."search_documents"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."document_embeddings"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."symbol_similarity_edges"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."symbol_similarity_builds"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."generation_search_relations"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                + (SELECT count(*) FROM {}."project_operation_leases"
-                   WHERE project_id = CAST($1 AS uuid)
-                     AND generation_id = CAST($2 AS uuid))
-                    AS cascade_rows,
+                {cascade_count} AS cascade_rows,
                 COALESCE(pg_total_relation_size(to_regclass($3)), 0)::bigint
                     AS search_relation_bytes,
                 to_regclass($3) IS NOT NULL AS search_relation_present"#,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
-        context.quoted_schema,
     );
     let row = query(AssertSqlSafe(sql))
         .bind(context.fence.target().project_id().as_str())
@@ -683,10 +689,81 @@ async fn load_candidate_work(
     })
 }
 
+async fn verify_retention_cascade_catalog(
+    connection: &mut sqlx_postgres::PgConnection,
+    context: &RetentionContext<'_>,
+) -> Result<(), GenerationRetentionError> {
+    let rows = query(
+        r#"WITH RECURSIVE cascade_relations(oid, nspname, relname) AS (
+                SELECT relations.oid, namespaces.nspname, relations.relname
+                FROM pg_catalog.pg_class AS relations
+                INNER JOIN pg_catalog.pg_namespace AS namespaces
+                    ON namespaces.oid = relations.relnamespace
+                WHERE namespaces.nspname = $1
+                  AND relations.relname = 'index_generations'
+                UNION
+                SELECT children.oid, child_namespaces.nspname, children.relname
+                FROM cascade_relations AS parents
+                INNER JOIN pg_catalog.pg_constraint AS constraints
+                    ON constraints.confrelid = parents.oid
+                   AND constraints.contype = 'f'
+                   AND constraints.confdeltype = 'c'
+                INNER JOIN pg_catalog.pg_class AS children
+                    ON children.oid = constraints.conrelid
+                INNER JOIN pg_catalog.pg_namespace AS child_namespaces
+                    ON child_namespaces.oid = children.relnamespace
+            )
+            SELECT nspname, relname
+            FROM cascade_relations
+            WHERE nspname <> $1 OR relname <> 'index_generations'
+            ORDER BY nspname, relname"#,
+    )
+    .bind(context.database.schema.as_str())
+    .fetch_all(connection)
+    .await
+    .map_err(|_| database_error("verify-cascade-catalog"))?;
+    let actual = rows
+        .iter()
+        .map(|row| {
+            let namespace = row
+                .try_get::<String, _>(0)
+                .map_err(|_| database_error("decode-cascade-catalog"))?;
+            let relation = row
+                .try_get::<String, _>(1)
+                .map_err(|_| database_error("decode-cascade-catalog"))?;
+            Ok((namespace, relation))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut expected = RETENTION_ROW_TABLES[1..]
+        .iter()
+        .map(|table| {
+            (
+                context.database.schema.as_str().to_owned(),
+                (*table).to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(database_error("cascade-catalog-mismatch"))
+    }
+}
+
 async fn acquire_retention_locks(
     connection: &mut sqlx_postgres::PgConnection,
     context: &RetentionContext<'_>,
 ) -> Result<(), GenerationRetentionError> {
+    // Match the first lock taken by append-only migrations so a rolling binary
+    // cannot validate one schema shape while another binary changes it.
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(crate::migrations::migration_lock_key(
+            &context.database.schema,
+        ))
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("schema-migration-lock"))?;
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(project_lock_key(
             &context.database.schema,
@@ -714,6 +791,28 @@ async fn acquire_retention_locks(
         .await
         .map_err(|_| database_error("retention-lock"))?;
     Ok(())
+}
+
+async fn lock_retention_relations(
+    connection: &mut sqlx_postgres::PgConnection,
+    context: &RetentionContext<'_>,
+) -> Result<(), GenerationRetentionError> {
+    // PostgreSQL takes SHARE ROW EXCLUSIVE on a referenced relation while
+    // adding a foreign key. ROW EXCLUSIVE conflicts with that mode while still
+    // permitting ordinary concurrent DML, so the complete known cascade graph
+    // cannot change between verification, accounting, and DELETE.
+    let relations = RETENTION_ROW_TABLES
+        .iter()
+        .map(|table| format!(r#"{}."{table}""#, context.quoted_schema))
+        .collect::<Vec<_>>()
+        .join(", ");
+    query(AssertSqlSafe(format!(
+        "LOCK TABLE {relations} IN ROW EXCLUSIVE MODE"
+    )))
+    .execute(connection)
+    .await
+    .map(|_| ())
+    .map_err(|_| database_error("cascade-relation-lock"))
 }
 
 async fn lock_project(

@@ -238,8 +238,16 @@ million cascade rows, 8 GiB of generation search relations, and 64 relation
 drops; hard bounds are 100 million rows, 64 GiB, and 64 drops. For every
 selected terminal generation it accounts work first, drops the physical search
 table (including its BM25 index), deletes canonical rows by cascade, and reports
-the exact admitted rows, relations, and bytes. It acquires publication/retention
-locks and rechecks the exact live migration lease after deletion before commit.
+the exact admitted rows, relations, and bytes. Before selection it walks the
+PostgreSQL cascade catalog across every schema and verifies the namespace plus
+relation identity of every known direct and indirect generation-owned table;
+same-schema or cross-schema drift fails closed instead of weakening the row cap.
+The transaction shares the schema-migration advisory lock, holds relation locks
+that conflict with foreign-key DDL through accounting and deletion, and rechecks
+the catalog immediately before `DELETE`. Child evidence tables such as coverage,
+issue history, similarity, and summary-priority state are included in both
+accounting and maintenance. It also acquires publication/retention locks and
+rechecks the exact live migration lease after deletion before commit.
 At 100,000 or more admitted cascade rows, a post-commit maintenance pass vacuums
 and analyzes only the named high-churn tables with `SKIP_LOCKED`, forced index
 cleanup, truncation disabled, and the same bounded deadline. A maintenance
@@ -259,11 +267,17 @@ Use the read-only report before deciding that the database is bloated:
 cartograph db usage --project-path . --limit 64 --format json
 ```
 
+Both `db usage` and the default `db compact` plan verify the exact current
+migration ledger without creating or upgrading the selected schema.
+
 It separates whole-database bytes from this schema's heap, B-tree/all-index,
 TOAST, generation-search, and parse-cache allocations. It also reports bounded
 largest-table/index rows, estimated live/dead tuples, autovacuum evidence,
-stale ready generations, invalid concurrent-index artifacts, and duplicate
-generation-content potential. Duplicate content is assessment-only: mutation
+stale ready generations, invalid concurrent-index artifacts with exact total
+and truncation evidence, and duplicate generation-content potential. Duplicate
+ranking consistently considers only ready, current, and superseded generations;
+failed/staging work cannot distort the estimate. Duplicate content is
+assessment-only: mutation
 stays disabled until a normalized content-addressed fact schema can preserve
 immutable generation identity, project isolation, cascades, and freshness.
 
@@ -290,10 +304,12 @@ outside a transaction, under a schema advisory lock and per-index deadline. It
 is bounded by index count and candidate bytes, is resumable after a partial
 failure, and never auto-drops `_ccnew`, `_ccold`, invalid, BM25, or exclusion-
 constraint artifacts. Managed mode measures free bytes from the validated
-database filesystem. External PostgreSQL requires an operator-supplied
-`--available-headroom-bytes`. The required minimum is twice the largest
+project-owned data volume and rejects `--available-headroom-bytes`; external
+PostgreSQL requires that operator-supplied value. The required minimum is twice the largest
 candidate plus 64 MiB because concurrent rebuilds temporarily need both index
-copies and working space.
+copies and working space. The advisory lock and session timeout live on a
+dedicated close-on-drop connection so cancellation cannot contaminate the pool
+or strand a session lock.
 
 `VACUUM FULL` is intentionally not automated: it takes an exclusive table lock
 and needs extra disk for a rewritten copy. If heap/TOAST—not B-tree indexes—is

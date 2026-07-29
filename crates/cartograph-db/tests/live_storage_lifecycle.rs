@@ -18,6 +18,9 @@ use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
 const LEASE_DURATION: Duration = Duration::from_secs(60);
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(60);
+const CASCADE_CHILD_ROWS: u64 = 1_024;
+const CASCADE_FIXTURE_ROWS: u64 = CASCADE_CHILD_ROWS + 6;
+const COMPACTION_LOCK_NAMESPACE: &str = "cartograph-v2-online-compaction";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
@@ -48,8 +51,51 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         ))
         .await
         .unwrap_or_else(|error| panic!("storage project registration failed: {error}"));
+    let cascade_generation =
+        create_generation_cascade_fixture(&database, &pool, &schema, &project).await;
     let first_ready = prepare_empty_generation(&database, &project, "storage-ready-one").await;
     let second_ready = prepare_empty_generation(&database, &project, "storage-ready-two").await;
+
+    let retention_lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "storage-lifecycle-maintenance"),
+            LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("storage migration lease failed: {error}"));
+    let migration_fence = retention_lease.fence();
+    assert_cascade_row_limit_is_exact(
+        &database,
+        &pool,
+        &schema,
+        &migration_fence,
+        &cascade_generation,
+    )
+    .await;
+    assert_cross_schema_cascade_is_detected_and_ddl_is_fenced(
+        &database,
+        &pool,
+        &schema,
+        &project,
+        &migration_fence,
+    )
+    .await;
+    database
+        .release_lease(&retention_lease)
+        .await
+        .unwrap_or_else(|error| panic!("initial storage migration lease release failed: {error}"));
+    let failed_duplicate =
+        prepare_empty_generation(&database, &project, "storage-failed-duplicate").await;
+    mark_generation_failed(&pool, &schema, &project, &failed_duplicate).await;
+    let migration_lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "storage-lifecycle-maintenance-resumed"),
+            LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("resumed storage migration lease failed: {error}"));
     age_ready_generations(&pool, &schema, &project).await;
 
     let protected_contract = digest(b"current-extractor-contract");
@@ -83,14 +129,6 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
     assert!(before.schema_bytes > 0);
     assert!(before.index_bytes > 0);
 
-    let migration_lease = database
-        .acquire_lease(LeaseRequest::new(
-            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
-            LeaseOwner::new(process::id(), "storage-lifecycle-maintenance"),
-            LEASE_DURATION,
-        ))
-        .await
-        .unwrap_or_else(|error| panic!("storage migration lease failed: {error}"));
     let cache_report = database
         .cleanup_native_parse_cache(NativeParseCacheRetentionRequest {
             project_id: &project,
@@ -140,6 +178,7 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
     assert_ne!(first_ready, second_ready);
 
     create_compaction_fixture(&pool, &schema).await;
+    create_invalid_artifact_fixture(&pool, &schema).await;
     let compaction_policy = StorageCompactionPolicy::new(StorageCompactionPolicyInput {
         maximum_indexes: 4,
         maximum_candidate_bytes: 128 * 1024 * 1024,
@@ -157,6 +196,9 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
             .any(|candidate| candidate.index == "storage_compaction_fixture_idx")
     );
     assert!(plan.required_headroom_bytes > plan.candidate_bytes);
+    assert_eq!(plan.invalid_artifact_total, 65);
+    assert_eq!(plan.invalid_artifacts.len(), 64);
+    assert!(plan.invalid_artifacts_truncated);
     let compacted = database
         .compact_storage_online(compaction_policy, u64::MAX)
         .await
@@ -168,6 +210,7 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
             .any(|candidate| candidate.index == "storage_compaction_fixture_idx")
     );
     assert!(compacted.stop_reason.is_none());
+    assert_compaction_cancellation_closes_session(&database_url, &pool, &schema).await;
 
     drop(database);
     drop_schema(&pool, &schema).await;
@@ -209,6 +252,474 @@ async fn prepare_empty_generation(
         .await
         .unwrap_or_else(|error| panic!("storage generation lease release failed: {error}"));
     ready.generation_id().clone()
+}
+
+async fn create_generation_cascade_fixture(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+) -> GenerationId {
+    let staged = database
+        .begin_generation(NewGeneration::new(
+            project.clone(),
+            "storage-cascade-fixture",
+            1,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("cascade generation start failed: {error}"));
+    let generation = staged.generation_id().clone();
+    let file_id = "11111111-1111-8111-8111-111111111111";
+    let symbol_id = "22222222-2222-8222-8222-222222222222";
+
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."files" (
+                project_id, generation_id, file_id, normalized_path, language,
+                content_hash, byte_size, parse_status
+            ) VALUES (
+                $1::uuid, $2::uuid, $3::uuid, 'src/cascade.rs', 'rust',
+                repeat('a', 64), 1, 'parsed'
+            )"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(file_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade file fixture failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."symbols" (
+                project_id, generation_id, symbol_id, file_id, symbol_kind,
+                qualified_name, signature, start_byte, end_byte, start_line,
+                end_line, structural_digest
+            ) VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'function',
+                'cascade_fixture', '()', 0, 1, 1, 1, repeat('b', 64)
+            )"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(symbol_id)
+    .bind(file_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade symbol fixture failed: {error}"));
+    let coverage_source = query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."coverage_sources" (
+                project_id, label, report_format, report_digest
+            ) VALUES ($1::uuid, 'cascade-fixture', 'lcov', repeat('c', 64))
+            RETURNING source_id::text"#
+    )))
+    .bind(project.as_str())
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<String, _>(0))
+    .unwrap_or_else(|error| panic!("cascade coverage source failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."symbol_coverage" (
+                project_id, generation_id, source_id, symbol_id,
+                lines_found, lines_hit
+            ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, 1)"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(coverage_source)
+    .bind(symbol_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade coverage fixture failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."symbol_issues" (
+                project_id, generation_id, symbol_id, issue_number,
+                commit_sha, attribution_kind
+            )
+            SELECT $1::uuid, $2::uuid, $3::uuid, value,
+                   repeat('d', 40), 'modified'
+            FROM generate_series(1, $4::bigint) AS value"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(symbol_id)
+    .bind(i64::try_from(CASCADE_CHILD_ROWS).unwrap_or(i64::MAX))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade issue fixture failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."summary_priority_queue" (
+                project_id, generation_id, symbol_id
+            ) VALUES ($1::uuid, $2::uuid, $3::uuid)"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(symbol_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade summary queue fixture failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."issue_history_refreshes" (
+                project_id, generation_id, head_commit, commits_scanned,
+                tagged_commits, oversized_commits_skipped,
+                comparison_failures_skipped, attributions_written, truncated
+            ) VALUES (
+                $1::uuid, $2::uuid, repeat('e', 40), 0, 0, 0, 0, 0, false
+            )"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade history refresh fixture failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"UPDATE "{schema}"."index_generations"
+            SET state = 'failed'
+            WHERE project_id = $1::uuid AND generation_id = $2::uuid"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade generation terminalization failed: {error}"));
+    generation
+}
+
+async fn assert_cascade_row_limit_is_exact(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    fence: &cartograph_db::LeaseFence,
+    generation: &GenerationId,
+) {
+    let below_exact = GenerationRetentionPolicy::new(0, 1)
+        .and_then(|policy| policy.with_work_limits(CASCADE_FIXTURE_ROWS - 1, 1024 * 1024 * 1024, 1))
+        .unwrap_or_else(|error| panic!("bounded cascade policy failed: {error}"));
+    let preserved = database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            below_exact,
+            fence,
+            STATEMENT_TIMEOUT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("bounded cascade preflight failed: {error}"));
+    assert_eq!(preserved.removed(), 0);
+    assert_eq!(preserved.cascade_rows_removed, 0);
+    assert_eq!(preserved.failed_remaining, 1);
+
+    let exact = GenerationRetentionPolicy::new(0, 1)
+        .and_then(|policy| policy.with_work_limits(CASCADE_FIXTURE_ROWS, 1024 * 1024 * 1024, 1))
+        .unwrap_or_else(|error| panic!("exact cascade policy failed: {error}"));
+    let removed = database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            exact,
+            fence,
+            STATEMENT_TIMEOUT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("exact cascade cleanup failed: {error}"));
+    assert_eq!(removed.failed_removed, 1);
+    assert_eq!(removed.cascade_rows_removed, CASCADE_FIXTURE_ROWS);
+    assert_eq!(removed.maintenance, PostRetentionMaintenance::NotNeeded);
+    assert_eq!(removed.failed_remaining, 0);
+    let remaining = query(AssertSqlSafe(format!(
+        r#"SELECT count(*)::bigint FROM "{schema}"."index_generations"
+            WHERE generation_id = $1::uuid"#
+    )))
+    .bind(generation.as_str())
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<i64, _>(0))
+    .unwrap_or_else(|error| panic!("cascade cleanup verification failed: {error}"));
+    assert_eq!(remaining, 0);
+
+    query(AssertSqlSafe(format!(
+        r#"CREATE TABLE "{schema}"."storage_unknown_generation_child" (
+                project_id uuid NOT NULL,
+                generation_id uuid NOT NULL,
+                FOREIGN KEY (project_id, generation_id)
+                    REFERENCES "{schema}"."index_generations"(project_id, generation_id)
+                    ON DELETE CASCADE
+            )"#
+    )))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("unknown cascade fixture failed: {error}"));
+    let drift = database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            exact,
+            fence,
+            STATEMENT_TIMEOUT,
+        ))
+        .await;
+    assert!(matches!(
+        drift,
+        Err(cartograph_db::GenerationRetentionError::DatabaseOperation {
+            operation: "cascade-catalog-mismatch"
+        })
+    ));
+    query(AssertSqlSafe(format!(
+        r#"DROP TABLE "{schema}"."storage_unknown_generation_child""#
+    )))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("unknown cascade fixture cleanup failed: {error}"));
+}
+
+async fn assert_cross_schema_cascade_is_detected_and_ddl_is_fenced(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    fence: &cartograph_db::LeaseFence,
+) {
+    let external_schema = format!("{schema}_external");
+    query(AssertSqlSafe(format!(
+        r#"CREATE SCHEMA "{external_schema}""#
+    )))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("external cascade schema failed: {error}"));
+
+    let policy = GenerationRetentionPolicy::new(0, 1)
+        .and_then(|policy| policy.with_work_limits(10_000, 1024 * 1024 * 1024, 1))
+        .unwrap_or_else(|error| panic!("cascade concurrency policy failed: {error}"));
+    let (catalog_entered_sender, catalog_entered_receiver) = tokio::sync::oneshot::channel();
+    let (catalog_hold_sender, catalog_hold_receiver) = tokio::sync::oneshot::channel::<()>();
+    let cleanup_database = database.clone();
+    let cleanup_fence = fence.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_database
+            .cleanup_generations_with_observer(
+                GenerationRetentionRequest::new(policy, &cleanup_fence, STATEMENT_TIMEOUT),
+                || async move {
+                    let _ = catalog_entered_sender.send(());
+                    let _ = catalog_hold_receiver.await;
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), catalog_entered_receiver)
+        .await
+        .unwrap_or_else(|_| panic!("retention catalog observer was not reached"))
+        .unwrap_or_else(|_| panic!("retention catalog observer closed unexpectedly"));
+
+    let mut ddl_connection = pool
+        .acquire()
+        .await
+        .unwrap_or_else(|error| panic!("cascade DDL connection failed: {error}"));
+    let ddl_pid = query("SELECT pg_backend_pid()")
+        .fetch_one(&mut *ddl_connection)
+        .await
+        .and_then(|row| row.try_get::<i32, _>(0))
+        .unwrap_or_else(|error| panic!("cascade DDL pid failed: {error}"));
+    let ddl_external_schema = external_schema.clone();
+    let ddl_schema = schema.to_owned();
+    let ddl = tokio::spawn(async move {
+        query(AssertSqlSafe(format!(
+            r#"CREATE TABLE "{ddl_external_schema}"."storage_cross_schema_symbol_child" (
+                    project_id uuid NOT NULL,
+                    generation_id uuid NOT NULL,
+                    symbol_id uuid NOT NULL,
+                    FOREIGN KEY (project_id, generation_id, symbol_id)
+                        REFERENCES "{ddl_schema}"."symbols"(project_id, generation_id, symbol_id)
+                        ON DELETE CASCADE
+                )"#
+        )))
+        .execute(&mut *ddl_connection)
+        .await
+    });
+    wait_for_blocked_fk_lock(pool, schema, "symbols", ddl_pid).await;
+    let _ = catalog_hold_sender.send(());
+    let cleanup_report = tokio::time::timeout(Duration::from_secs(10), cleanup)
+        .await
+        .unwrap_or_else(|_| panic!("retention cleanup did not finish after DDL fence release"))
+        .unwrap_or_else(|error| panic!("retention cleanup task failed: {error}"))
+        .unwrap_or_else(|error| panic!("retention cleanup failed: {error}"));
+    assert_eq!(cleanup_report.removed(), 0);
+    tokio::time::timeout(Duration::from_secs(10), ddl)
+        .await
+        .unwrap_or_else(|_| panic!("cross-schema cascade DDL remained blocked"))
+        .unwrap_or_else(|error| panic!("cross-schema cascade DDL task failed: {error}"))
+        .unwrap_or_else(|error| panic!("cross-schema cascade DDL failed: {error}"));
+
+    let (generation, file_id, symbol_id) =
+        create_minimal_failed_symbol_generation(database, pool, schema, project).await;
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{external_schema}"."storage_cross_schema_symbol_child" (
+                project_id, generation_id, symbol_id
+            ) VALUES ($1::uuid, $2::uuid, $3::uuid)"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(&symbol_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cross-schema cascade row failed: {error}"));
+
+    let rejected = database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            policy,
+            fence,
+            STATEMENT_TIMEOUT,
+        ))
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(cartograph_db::GenerationRetentionError::DatabaseOperation {
+            operation: "cascade-catalog-mismatch"
+        })
+    ));
+    let preserved = query(AssertSqlSafe(format!(
+        r#"SELECT
+                EXISTS (
+                    SELECT 1 FROM "{schema}"."index_generations"
+                    WHERE project_id = $1::uuid AND generation_id = $2::uuid
+                ) AS generation_present,
+                EXISTS (
+                    SELECT 1 FROM "{schema}"."files"
+                    WHERE project_id = $1::uuid AND generation_id = $2::uuid
+                      AND file_id = $3::uuid
+                ) AS file_present,
+                EXISTS (
+                    SELECT 1 FROM "{external_schema}"."storage_cross_schema_symbol_child"
+                    WHERE project_id = $1::uuid AND generation_id = $2::uuid
+                      AND symbol_id = $4::uuid
+                ) AS child_present"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(&file_id)
+    .bind(&symbol_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cross-schema preservation query failed: {error}"));
+    assert!(
+        preserved
+            .try_get::<bool, _>("generation_present")
+            .unwrap_or(false)
+    );
+    assert!(
+        preserved
+            .try_get::<bool, _>("file_present")
+            .unwrap_or(false)
+    );
+    assert!(
+        preserved
+            .try_get::<bool, _>("child_present")
+            .unwrap_or(false)
+    );
+
+    query(AssertSqlSafe(format!(
+        r#"DROP SCHEMA "{external_schema}" CASCADE"#
+    )))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("external cascade schema cleanup failed: {error}"));
+}
+
+async fn create_minimal_failed_symbol_generation(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+) -> (GenerationId, String, String) {
+    let staged = database
+        .begin_generation(NewGeneration::new(
+            project.clone(),
+            "storage-cross-schema-cascade",
+            1,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("cross-schema generation start failed: {error}"));
+    let generation = staged.generation_id().clone();
+    let file_id = "33333333-3333-8333-8333-333333333333".to_owned();
+    let symbol_id = "44444444-4444-8444-8444-444444444444".to_owned();
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."files" (
+                project_id, generation_id, file_id, normalized_path, language,
+                content_hash, byte_size, parse_status
+            ) VALUES (
+                $1::uuid, $2::uuid, $3::uuid, 'src/cross_schema.rs', 'rust',
+                repeat('f', 64), 1, 'parsed'
+            )"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(&file_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cross-schema file fixture failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."symbols" (
+                project_id, generation_id, symbol_id, file_id, symbol_kind,
+                qualified_name, signature, start_byte, end_byte, start_line,
+                end_line, structural_digest
+            ) VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'function',
+                'cross_schema_fixture', '()', 0, 1, 1, 1, repeat('a', 64)
+            )"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .bind(&symbol_id)
+    .bind(&file_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cross-schema symbol fixture failed: {error}"));
+    mark_generation_failed(pool, schema, project, &generation).await;
+    (generation, file_id, symbol_id)
+}
+
+async fn mark_generation_failed(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+) {
+    query(AssertSqlSafe(format!(
+        r#"UPDATE "{schema}"."index_generations"
+            SET state = 'failed'
+            WHERE project_id = $1::uuid AND generation_id = $2::uuid"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("generation failure fixture failed: {error}"));
+}
+
+async fn wait_for_blocked_fk_lock(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    relation: &str,
+    pid: i32,
+) {
+    for _ in 0..200 {
+        let row = query(
+            r#"SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_locks AS locks
+                    INNER JOIN pg_catalog.pg_class AS relations
+                        ON relations.oid = locks.relation
+                    INNER JOIN pg_catalog.pg_namespace AS namespaces
+                        ON namespaces.oid = relations.relnamespace
+                    WHERE locks.pid = $1
+                      AND locks.mode = 'ShareRowExclusiveLock'
+                      AND NOT locks.granted
+                      AND namespaces.nspname = $2
+                      AND relations.relname = $3
+                )"#,
+        )
+        .bind(pid)
+        .bind(schema)
+        .bind(relation)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("blocked FK lock probe failed: {error}"));
+        if row.try_get::<bool, _>(0).unwrap_or(false) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("foreign-key DDL did not wait on the retention relation lock");
 }
 
 async fn age_ready_generations(pool: &sqlx_postgres::PgPool, schema: &str, project: &ProjectId) {
@@ -292,6 +803,133 @@ async fn create_compaction_fixture(pool: &sqlx_postgres::PgPool, schema: &str) {
             .await
             .unwrap_or_else(|error| panic!("compaction fixture failed: {error}"));
     }
+}
+
+async fn create_invalid_artifact_fixture(pool: &sqlx_postgres::PgPool, schema: &str) {
+    query(AssertSqlSafe(format!(
+        r#"CREATE TABLE "{schema}"."storage_invalid_artifact_fixture" (
+            id bigint NOT NULL
+        )"#
+    )))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("invalid artifact table fixture failed: {error}"));
+    for index in 0..65 {
+        query(AssertSqlSafe(format!(
+            r#"CREATE INDEX storage_artifact_ccnew{index}
+                ON "{schema}"."storage_invalid_artifact_fixture" (id)"#
+        )))
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("invalid artifact index fixture failed: {error}"));
+    }
+}
+
+async fn assert_compaction_cancellation_closes_session(
+    database_url: &str,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+) {
+    let settings = DatabaseSettings::parse(database_url, Some("1"), Some("60000"))
+        .and_then(|settings| settings.with_schema(schema))
+        .unwrap_or_else(|error| panic!("isolated compaction settings failed: {error}"));
+    let isolated_pool = cartograph_db::connect(&settings)
+        .await
+        .unwrap_or_else(|error| panic!("isolated compaction connection failed: {error}"));
+    let isolated = CartographDatabase::new(isolated_pool.clone(), settings.schema().clone());
+    let policy = StorageCompactionPolicy::new(StorageCompactionPolicyInput {
+        maximum_indexes: 1,
+        maximum_candidate_bytes: 128 * 1024 * 1024,
+        minimum_index_bytes: 1024 * 1024,
+        statement_timeout: Duration::from_secs(30),
+    })
+    .unwrap_or_else(|error| panic!("cancellation compaction policy failed: {error}"));
+    let plan = isolated
+        .storage_compaction_plan(policy)
+        .await
+        .unwrap_or_else(|error| panic!("cancellation compaction plan failed: {error}"));
+    assert_eq!(
+        plan.candidates
+            .first()
+            .map(|candidate| candidate.index.as_str()),
+        Some("storage_compaction_fixture_idx")
+    );
+    let default_timeout = statement_timeout(pool).await;
+
+    let (session_entered_sender, session_entered_receiver) = tokio::sync::oneshot::channel();
+    let (session_hold_sender, session_hold_receiver) = tokio::sync::oneshot::channel::<()>();
+    let cancelled_database = isolated.clone();
+    let cancelled = tokio::spawn(async move {
+        cancelled_database
+            .compact_storage_online_with_observer(policy, u64::MAX, || async move {
+                let _ = session_entered_sender.send(());
+                let _ = session_hold_receiver.await;
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), session_entered_receiver)
+        .await
+        .unwrap_or_else(|_| panic!("compaction session observer was not reached"))
+        .unwrap_or_else(|_| panic!("compaction session observer closed unexpectedly"));
+    wait_for_compaction_lock_state(pool, schema, true).await;
+    cancelled.abort();
+    assert!(
+        cancelled.await.is_err_and(|error| error.is_cancelled()),
+        "compaction cancellation task was not cancelled"
+    );
+    drop(session_hold_sender);
+    wait_for_compaction_lock_state(pool, schema, false).await;
+
+    let resumed = tokio::time::timeout(
+        STATEMENT_TIMEOUT,
+        isolated.compact_storage_online(policy, u64::MAX),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("compaction did not resume after cancellation"))
+    .unwrap_or_else(|error| panic!("compaction resume failed: {error}"));
+    assert!(resumed.stop_reason.is_none());
+    assert_eq!(statement_timeout(&isolated_pool).await, default_timeout);
+    isolated.close().await;
+}
+
+async fn wait_for_compaction_lock_state(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    expected_held: bool,
+) {
+    let lock_name = format!("{COMPACTION_LOCK_NAMESPACE}:{schema}");
+    for _ in 0..200 {
+        let mut connection = pool
+            .acquire()
+            .await
+            .unwrap_or_else(|error| panic!("compaction lock probe failed: {error}"));
+        let acquired = query("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+            .bind(&lock_name)
+            .fetch_one(&mut *connection)
+            .await
+            .and_then(|row| row.try_get::<bool, _>(0))
+            .unwrap_or_else(|error| panic!("compaction lock probe query failed: {error}"));
+        if acquired {
+            query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                .bind(&lock_name)
+                .execute(&mut *connection)
+                .await
+                .unwrap_or_else(|error| panic!("compaction lock probe release failed: {error}"));
+        }
+        if acquired != expected_held {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("compaction advisory lock did not reach expected held={expected_held} state");
+}
+
+async fn statement_timeout(pool: &sqlx_postgres::PgPool) -> String {
+    query("SELECT current_setting('statement_timeout')")
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>(0))
+        .unwrap_or_else(|error| panic!("statement timeout probe failed: {error}"))
 }
 
 fn cache_key(project: &ProjectId, contract: &ContentDigest, path: &str) -> NativeParseCacheKey {

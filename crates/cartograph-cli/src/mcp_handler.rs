@@ -3454,6 +3454,10 @@ fn project_llm_error(error: ProjectLlmConfigError) -> ToolError {
             ToolErrorCode::InvalidArguments,
             "Cartograph project configuration exceeds the one-megabyte limit",
         ),
+        ProjectLlmConfigError::ConcurrentModification => safe_error(
+            ToolErrorCode::NotReady,
+            "Cartograph project configuration changed concurrently; retry the operation",
+        ),
         ProjectLlmConfigError::WriteFailed => ToolError::internal(),
     }
 }

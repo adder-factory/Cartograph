@@ -829,6 +829,7 @@ dependencies = [
  "blake3",
  "cartograph-domain",
  "futures-util",
+ "libc",
  "reqwest",
  "rustls",
  "secrecy",

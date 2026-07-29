@@ -1012,7 +1012,7 @@ mod tests {
         fn drop(&mut self) {
             for name in [&self.container_name, &self.rollback_name] {
                 let _ = std::process::Command::new("docker")
-                    .args(["container", "rm", "--force", name])
+                    .args(["container", "rm", "--force", "--volumes", name])
                     .output();
             }
             let _ = std::process::Command::new("docker")
