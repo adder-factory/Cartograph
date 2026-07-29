@@ -10,9 +10,10 @@ use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{CartographDatabase, DEFAULT_MANAGED_DATABASE_PORT, ManagedDatabase};
 use cartograph_llm::{
     ChatMessageRequest, ChatSettings, EmbeddingSettings, InstallModelsOptions, OpenAiChatClient,
-    OpenAiEmbeddingClient, OpenAiRerankClient, ProjectLlmTier, ProjectLlmTierInput, RerankSettings,
-    install_recommended_models, load_exact_project_llm_tier, probe_openai_compatible_endpoint,
-    write_project_llm_configuration,
+    OpenAiEmbeddingClient, OpenAiRerankClient, ProjectCredentialMigrationReport,
+    ProjectCredentialMigrationStatus, ProjectLlmTier, ProjectLlmTierInput, RerankSettings,
+    install_recommended_models, load_exact_project_llm_tier, migrate_project_inline_credentials,
+    probe_openai_compatible_endpoint, write_project_llm_configuration,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -30,6 +31,7 @@ const LM_STUDIO_ENDPOINT: &str = "http://127.0.0.1:1234";
 #[cfg(test)]
 const UNREACHABLE_LOOPBACK_ENDPOINT: &str = "http://127.0.0.1:1";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com";
+const CREDENTIAL_MIGRATION_CONFIRMATION: &str = "migrate-inline-credentials";
 #[cfg(test)]
 const OPENAI_V1_ENDPOINT: &str = "https://api.openai.com/v1";
 
@@ -41,6 +43,8 @@ pub(super) enum LlmCommand {
     Smoke(SmokeArguments),
     /// Download checksum-pinned recommended GGUFs and write the local stack config.
     Install(InstallArguments),
+    /// Safely replace legacy inline API keys with environment references.
+    MigrateCredentials(MigrateCredentialsArguments),
 }
 
 #[derive(Debug, Args)]
@@ -131,6 +135,30 @@ pub(super) struct InstallArguments {
     /// Print structured JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct MigrateCredentialsArguments {
+    /// Existing project root.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+    /// Override a tier's target variable, for example summarize=MY_API_KEY.
+    #[arg(long = "tier-env", value_parser = parse_tier_environment_override)]
+    tier_environments: Vec<TierEnvironmentOverride>,
+    /// Atomically rewrite credentials whose environment values match exactly.
+    #[arg(long)]
+    apply: bool,
+    /// Exact phrase required with --apply: migrate-inline-credentials.
+    #[arg(long, requires = "apply")]
+    confirm: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Debug)]
+struct TierEnvironmentOverride {
+    tier: ProjectLlmTier,
+    environment: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
@@ -355,7 +383,89 @@ pub(super) async fn run(command: LlmCommand) -> Result<ExitCode, String> {
         LlmCommand::Setup(arguments) => run_setup(arguments).await,
         LlmCommand::Smoke(arguments) => run_smoke(arguments).await,
         LlmCommand::Install(arguments) => run_install(arguments).await,
+        LlmCommand::MigrateCredentials(arguments) => run_migrate_credentials(arguments),
     }
+}
+
+fn parse_tier_environment_override(raw: &str) -> Result<TierEnvironmentOverride, String> {
+    let (tier, environment) = raw
+        .split_once('=')
+        .ok_or_else(|| "tier environment must use tier=ENVIRONMENT".to_owned())?;
+    let tier = match tier {
+        "embed" | "embedding" => ProjectLlmTier::Embedding,
+        "chat" | "summarize" => ProjectLlmTier::Summarize,
+        "local" => ProjectLlmTier::Local,
+        "ask" => ProjectLlmTier::Ask,
+        "classify" => ProjectLlmTier::Classify,
+        "rerank" | "reranker" => ProjectLlmTier::Reranker,
+        _ => return Err("unknown LLM tier in --tier-env".to_owned()),
+    };
+    if environment.is_empty() {
+        return Err("tier environment name cannot be empty".to_owned());
+    }
+    Ok(TierEnvironmentOverride {
+        tier,
+        environment: environment.to_owned(),
+    })
+}
+
+fn run_migrate_credentials(arguments: MigrateCredentialsArguments) -> Result<ExitCode, String> {
+    if arguments.apply && arguments.confirm.as_deref() != Some(CREDENTIAL_MIGRATION_CONFIRMATION) {
+        return Err(format!(
+            "llm migrate-credentials --apply requires --confirm {CREDENTIAL_MIGRATION_CONFIRMATION}"
+        ));
+    }
+    let overrides = arguments
+        .tier_environments
+        .into_iter()
+        .map(|override_| (override_.tier, override_.environment))
+        .collect::<Vec<_>>();
+    let report = migrate_project_inline_credentials(&arguments.path, &overrides, arguments.apply)
+        .map_err(|error| error.to_string())?;
+    let blocked = report.candidates.iter().any(|entry| {
+        matches!(
+            entry.status,
+            ProjectCredentialMigrationStatus::EnvironmentMissing
+                | ProjectCredentialMigrationStatus::EnvironmentMismatch
+                | ProjectCredentialMigrationStatus::UnsupportedProvider
+        )
+    });
+    if arguments.json {
+        print_json(&report)?;
+    } else {
+        render_credential_migration(&report);
+    }
+    Ok(if blocked {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+fn render_credential_migration(report: &ProjectCredentialMigrationReport) {
+    println!("## cartograph LLM credential migration\n");
+    if report.dry_run {
+        println!("_Dry run: config.json was not changed._\n");
+    }
+    if report.candidates.is_empty() {
+        println!("No legacy inline tier credentials were found.");
+        return;
+    }
+    for entry in &report.candidates {
+        println!(
+            "- {:?}: {:?} via {}",
+            entry.tier,
+            entry.status,
+            entry
+                .environment
+                .as_deref()
+                .unwrap_or("no supported variable")
+        );
+    }
+    println!(
+        "\nMigrated {}; {} inline credential(s) remain.",
+        report.migrated, report.remaining_inline
+    );
 }
 
 /// Apply only missing required LLM tiers for `doctor --fix`.
@@ -1378,6 +1488,17 @@ mod tests {
             database_ssl: false,
             json: false,
         }
+    }
+
+    #[test]
+    fn credential_environment_overrides_are_tier_scoped_and_bounded_by_the_library() {
+        let parsed = parse_tier_environment_override("summarize=CARTOGRAPH_CHAT_KEY")
+            .unwrap_or_else(|error| panic!("tier environment parse failed: {error}"));
+        assert_eq!(parsed.tier, ProjectLlmTier::Summarize);
+        assert_eq!(parsed.environment, "CARTOGRAPH_CHAT_KEY");
+        assert!(parse_tier_environment_override("unknown=KEY").is_err());
+        assert!(parse_tier_environment_override("summarize").is_err());
+        assert!(parse_tier_environment_override("summarize=").is_err());
     }
 
     #[test]

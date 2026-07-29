@@ -53,13 +53,15 @@ about PostgreSQL or transport.
 
 Before migration or normal work, Cartograph proves:
 
-- PostgreSQL major version 18 or newer;
-- `pg_search` 0.23.5, expected preload state, BM25 access method, and exact
+- PostgreSQL 18.4 or newer within major version 18;
+- `pg_search` 0.24.3, expected preload state, BM25 access method, and exact
   `pdb.source_code` token behavior;
-- pgvector availability;
+- pgvector 0.8.2 or newer;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns twenty-two versions. Core relations:
+The append-only migration ledger currently owns twenty-three versions. Migration
+23 adds virtual parse-cache payload accounting and table-local autovacuum policy
+for high-churn generation, fact, and cache relations. Core relations:
 
 | Relation | Purpose |
 | --- | --- |
@@ -345,18 +347,31 @@ Legacy multiplicity is retained. A span is exact only when the stored/current
 source proves the full token; otherwise it is explicitly coarse. SCIP
 placeholder hashes cannot prove historical bytes v1 never stored.
 
-Every successful index or no-op reconciliation attempts a bounded retention
-batch after publication/no-op detection. Pre-supervisor failures terminalize
+Every successful index or no-op reconciliation attempts bounded generation and
+parse-cache retention after publication/no-op detection. The current extractor
+contract is always cache-protected; one recent older contract plus independent
+row/logical-byte/deletion caps prevent unbounded parser-version accumulation.
+Pre-supervisor failures terminalize
 their exact staging generation under the same project advisory lock used by
 lease acquisition. A later batch can collect staging only when it is old,
-unleased, and not referenced by an incomplete import. `db prune` uses the same
-bounded engine for larger explicit batches of stale staging, failed, and old
-superseded generations, always preserving current, ready, recent/leased
-staging, import recovery state, and configured recent histories. Retention locks
+unleased, and not referenced by an incomplete import. Ready work becomes
+eligible only after a longer age floor when it is unleased, non-current, and
+outside import recovery. `db prune` uses the same bounded engine for larger
+explicit batches of stale staging/ready, failed, and old superseded generations,
+always preserving current, recent/leased work, import recovery state, and
+configured recent histories. Retention locks
 publication, rechecks its exact migration lease before commit, drops selected
 derived BM25 relations transactionally, and reports admitted cascade rows,
 relation count, and physical relation bytes. Status and doctor expose all
 generation-state counts and a conservative retained-byte estimate.
+
+`db usage` reads a repeatable, bounded storage snapshot with schema heap/index/
+TOAST, cache, generation, dead-row, autovacuum, invalid-index, and deduplication
+evidence. Content-addressed fact sharing is deliberately assessment-only until
+a schema migration can preserve immutable generation identity and cascades.
+`db compact` dry-runs by default and can rebuild eligible B-trees one at a time
+with PostgreSQL's concurrent reindex path after explicit confirmation and
+headroom proof. Heap-rewriting `VACUUM FULL` remains outside automation.
 
 ## Security, durability, and licensing
 

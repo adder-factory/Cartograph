@@ -21,8 +21,9 @@ use cartograph_db::{
     GenerationRetentionPolicy, GenerationRetentionRequest, GenerationStorageSummary,
     GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, ManagedContainerState,
     ManagedDatabase, ManagedDatabaseStatus, ManagedDestructiveConfirmation,
-    ManagedDestructiveOperation, ManagedStartReport, V1PostgresImportExecution,
-    V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
+    ManagedDestructiveOperation, ManagedStartReport, StorageCompactionPolicy,
+    StorageCompactionPolicyInput, V1PostgresImportExecution, V1PostgresImportLimits,
+    V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
 };
 use cartograph_domain::{
     EdgeKind, ModelId, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage, SymbolId,
@@ -68,6 +69,7 @@ use graph_export::{DEFAULT_NODE_LIMIT, GraphExportFormat, GraphExportRequest};
 const MANAGED_DATABASE_PORT_ENV: &str = "CARTOGRAPH_MANAGED_DATABASE_PORT";
 const V1_IMPORT_CONFIRMATION: &str = "import-v1-postgres";
 const RETENTION_CONFIRMATION: &str = "prune-old-generations";
+const ONLINE_COMPACTION_CONFIRMATION: &str = "compact-online-indexes";
 const DEFAULT_IMPORT_MAXIMUM_ROWS: u64 = 10_000_000;
 const MAXIMUM_IMPORT_ROWS: u64 = 100_000_000;
 const DEFAULT_IMPORT_MAXIMUM_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -650,8 +652,12 @@ enum DatabaseCommand {
     DerivedIndex(DatabaseDerivedIndexArguments),
     /// Validate or resume a PostgreSQL-only v1.1.33 schema import.
     ImportV1(V1ImportArguments),
-    /// Delete a bounded batch of stale staging, failed, and old superseded generations.
+    /// Delete a bounded batch of stale staging/ready, failed, and old superseded generations.
     Prune(PruneArguments),
+    /// Report database/schema heap, index, TOAST, cache, and generation storage.
+    Usage(DatabaseUsageArguments),
+    /// Plan or explicitly apply bounded one-at-a-time concurrent B-tree rebuilds.
+    Compact(DatabaseCompactArguments),
 }
 
 #[derive(Debug, Args)]
@@ -1087,6 +1093,51 @@ struct PruneArguments {
     /// Exact acknowledgement: prune-old-generations.
     #[arg(long)]
     confirm: String,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseUsageArguments {
+    /// Existing indexed project whose configured schema should be inspected.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Maximum largest table and index rows returned per list.
+    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(1..=128))]
+    limit: u16,
+    /// Output format for humans or automation.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct DatabaseCompactArguments {
+    /// Existing project whose configured PostgreSQL schema should be compacted.
+    #[arg(long, default_value = ".")]
+    project_path: PathBuf,
+    /// Apply the plan. Omit for the default read-only dry run.
+    #[arg(long)]
+    apply: bool,
+    /// Exact acknowledgement required with --apply: compact-online-indexes.
+    #[arg(long, requires = "apply")]
+    confirm: Option<String>,
+    /// Maximum B-tree indexes rebuilt one at a time.
+    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=64))]
+    maximum_indexes: u16,
+    /// Maximum aggregate bytes admitted into one resumable plan.
+    #[arg(long, default_value_t = 16 * GIBIBYTE_U64, value_parser = clap::value_parser!(u64).range(1..=64 * GIBIBYTE_U64))]
+    maximum_candidate_bytes: u64,
+    /// Ignore B-tree indexes smaller than this allocation.
+    #[arg(long, default_value_t = 8 * MEBIBYTE_U64, value_parser = clap::value_parser!(u64).range(1..=64 * GIBIBYTE_U64))]
+    minimum_index_bytes: u64,
+    /// Hard PostgreSQL deadline for each concurrent index rebuild.
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    timeout_seconds: u64,
+    /// Operator-observed free bytes for external PostgreSQL. Managed mode reads
+    /// the validated container filesystem automatically.
+    #[arg(long)]
+    available_headroom_bytes: Option<u64>,
     /// Output format for humans or automation.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
@@ -3138,17 +3189,50 @@ fn print_index_report(report: &IndexReport, format: OutputFormat) -> Result<(), 
 
 async fn run_database_command(command: DatabaseCommand) -> Result<ExitCode, String> {
     match command {
+        command @ (DatabaseCommand::Start(_)
+        | DatabaseCommand::Status(_)
+        | DatabaseCommand::Stop(_)
+        | DatabaseCommand::Logs(_)) => run_database_lifecycle_command(command).await,
+        command @ (DatabaseCommand::Backup(_)
+        | DatabaseCommand::Restore(_)
+        | DatabaseCommand::Remove(_)
+        | DatabaseCommand::Upgrade(_)) => run_database_protection_command(command).await,
+        command @ (DatabaseCommand::DerivedIndex(_)
+        | DatabaseCommand::ImportV1(_)
+        | DatabaseCommand::Prune(_)
+        | DatabaseCommand::Usage(_)
+        | DatabaseCommand::Compact(_)) => run_database_maintenance_command(command).await,
+    }
+}
+
+async fn run_database_lifecycle_command(command: DatabaseCommand) -> Result<ExitCode, String> {
+    match command {
         DatabaseCommand::Start(arguments) => run_database_start(arguments).await,
         DatabaseCommand::Status(arguments) => run_database_status(arguments).await,
         DatabaseCommand::Stop(arguments) => run_database_stop(arguments).await,
         DatabaseCommand::Logs(arguments) => run_database_logs(arguments).await,
+        _ => Err("database lifecycle command was routed incorrectly".to_owned()),
+    }
+}
+
+async fn run_database_protection_command(command: DatabaseCommand) -> Result<ExitCode, String> {
+    match command {
         DatabaseCommand::Backup(arguments) => run_database_backup(arguments).await,
         DatabaseCommand::Restore(arguments) => run_database_restore(arguments).await,
         DatabaseCommand::Remove(arguments) => run_database_remove(arguments).await,
         DatabaseCommand::Upgrade(arguments) => run_database_upgrade(arguments).await,
+        _ => Err("database protection command was routed incorrectly".to_owned()),
+    }
+}
+
+async fn run_database_maintenance_command(command: DatabaseCommand) -> Result<ExitCode, String> {
+    match command {
         DatabaseCommand::DerivedIndex(arguments) => run_derived_index(arguments).await,
         DatabaseCommand::ImportV1(arguments) => run_v1_postgres_import(arguments).await,
         DatabaseCommand::Prune(arguments) => run_generation_prune(arguments).await,
+        DatabaseCommand::Usage(arguments) => run_database_usage(arguments).await,
+        DatabaseCommand::Compact(arguments) => run_database_compact(arguments).await,
+        _ => Err("database maintenance command was routed incorrectly".to_owned()),
     }
 }
 
@@ -3420,6 +3504,78 @@ async fn run_generation_prune(arguments: PruneArguments) -> Result<ExitCode, Str
     let result = cleanup.and_then(|report| release.map(|()| report));
     runtime.close().await;
     print_serialized(&result?, format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_usage(arguments: DatabaseUsageArguments) -> Result<ExitCode, String> {
+    let runtime = open_runtime(&arguments.project_path).await?;
+    let status = runtime.status().await.map_err(|error| error.to_string())?;
+    let project_id = status
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.project_id.clone())
+        .ok_or_else(|| "project has no index; storage usage is unavailable".to_owned())?;
+    let report = runtime
+        .database()
+        .storage_usage(&project_id, arguments.limit, MAINTENANCE_STATEMENT_TIMEOUT)
+        .await
+        .map_err(|error| error.to_string());
+    runtime.close().await;
+    print_serialized(&report?, arguments.format)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<ExitCode, String> {
+    if arguments.apply && arguments.confirm.as_deref() != Some(ONLINE_COMPACTION_CONFIRMATION) {
+        return Err(format!(
+            "online compaction requires --confirm {ONLINE_COMPACTION_CONFIRMATION}"
+        ));
+    }
+    let policy = StorageCompactionPolicy::new(StorageCompactionPolicyInput {
+        maximum_indexes: arguments.maximum_indexes,
+        maximum_candidate_bytes: arguments.maximum_candidate_bytes,
+        minimum_index_bytes: arguments.minimum_index_bytes,
+        statement_timeout: Duration::from_secs(arguments.timeout_seconds),
+    })
+    .map_err(|error| error.to_string())?;
+    let settings = resolve_database_settings(&arguments.project_path)?;
+    let pool = cartograph_db::connect(&settings)
+        .await
+        .map_err(|error| error.to_string())?;
+    let database = CartographDatabase::new(pool, settings.schema().clone());
+    let result = if arguments.apply {
+        let headroom = match arguments.available_headroom_bytes {
+            Some(bytes) => bytes,
+            None if env::var_os(DATABASE_URL_ENV).is_none() => {
+                let port = resolve_managed_database_port(None)?;
+                ManagedDatabase::new(&arguments.project_path, port)
+                    .map_err(|error| error.to_string())?
+                    .lifecycle()
+                    .available_storage_bytes()
+                    .await
+                    .map_err(|error| error.to_string())?
+            }
+            None => {
+                database.close().await;
+                return Err(
+                    "external PostgreSQL compaction requires --available-headroom-bytes".to_owned(),
+                );
+            }
+        };
+        database
+            .compact_storage_online(policy, headroom)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|report| print_serialized(&report, arguments.format))
+    } else {
+        database
+            .storage_compaction_plan(policy)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|plan| print_serialized(&plan, arguments.format))
+    };
+    database.close().await;
+    result?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -4754,5 +4910,78 @@ mod tests {
             ])
             .is_err()
         );
+
+        let usage = Cli::try_parse_from([
+            "cartograph",
+            "db",
+            "usage",
+            "--project-path",
+            "workspace",
+            "--limit",
+            "32",
+            "--format",
+            "json",
+        ])
+        .unwrap_or_else(|error| panic!("database usage CLI did not parse: {error}"));
+        assert!(matches!(
+            usage.command,
+            Command::Db {
+                command: DatabaseCommand::Usage(DatabaseUsageArguments { limit: 32, .. })
+            }
+        ));
+
+        let compact = Cli::try_parse_from([
+            "cartograph",
+            "db",
+            "compact",
+            "--apply",
+            "--confirm",
+            ONLINE_COMPACTION_CONFIRMATION,
+            "--available-headroom-bytes",
+            "1073741824",
+        ])
+        .unwrap_or_else(|error| panic!("database compact CLI did not parse: {error}"));
+        assert!(matches!(
+            compact.command,
+            Command::Db {
+                command: DatabaseCommand::Compact(DatabaseCompactArguments {
+                    apply: true,
+                    available_headroom_bytes: Some(1_073_741_824),
+                    ..
+                })
+            }
+        ));
+
+        let credential_migration = Cli::try_parse_from([
+            "cartograph",
+            "llm",
+            "migrate-credentials",
+            "workspace",
+            "--tier-env",
+            "summarize=CARTOGRAPH_CHAT_KEY",
+        ])
+        .unwrap_or_else(|error| panic!("credential migration CLI did not parse: {error}"));
+        assert!(matches!(
+            credential_migration.command,
+            Command::Llm {
+                command: llm_commands::LlmCommand::MigrateCredentials(_)
+            }
+        ));
+
+        let backend_cleanup = Cli::try_parse_from([
+            "cartograph",
+            "backend",
+            "cleanup",
+            "workspace",
+            "--minimum-age-hours",
+            "48",
+        ])
+        .unwrap_or_else(|error| panic!("backend cleanup CLI did not parse: {error}"));
+        assert!(matches!(
+            backend_cleanup.command,
+            Command::Backend {
+                command: backend::BackendCommand::Cleanup(_)
+            }
+        ));
     }
 }

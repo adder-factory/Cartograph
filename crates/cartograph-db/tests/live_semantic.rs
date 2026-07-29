@@ -20,6 +20,7 @@ use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, FileId, FileParseStatus, GenerationId, ModelId,
     ProjectId, ProjectOperation, SymbolId,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -714,6 +715,7 @@ struct Fixture {
     database: CartographDatabase,
     pool: sqlx_postgres::PgPool,
     schema: String,
+    _schema_guard: TestSchemaGuard,
 }
 
 async fn open_fixture() -> Fixture {
@@ -734,6 +736,8 @@ async fn open_fixture() -> Fixture {
         database: CartographDatabase::new(pool.clone(), settings.schema().clone()),
         pool,
         schema,
+        _schema_guard: TestSchemaGuard::new(database_url, settings.schema().as_str())
+            .unwrap_or_else(|error| panic!("semantic schema guard failed: {error}")),
     }
 }
 
@@ -746,10 +750,10 @@ async fn migrate(fixture: &Fixture) {
     assert_eq!(
         report.applied_versions,
         [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
         ]
     );
-    assert_eq!(report.current_version, 22);
+    assert_eq!(report.current_version, 23);
 }
 
 fn model_registration(fixture: ModelFixture) -> EmbeddingModelRegistration {

@@ -29,6 +29,7 @@ unicode-ident.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+cartograph-test-support = { path = "../cartograph-test-support" }
 
 [lints]
 workspace = true

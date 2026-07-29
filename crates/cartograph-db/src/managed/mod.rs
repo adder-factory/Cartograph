@@ -19,8 +19,8 @@ use crate::{CapabilityReport, CartographDatabase, MigrationReport, connect, prob
 
 /// Exact upstream multi-architecture image accepted by the v2 preview.
 pub const MANAGED_DATABASE_IMAGE: &str = concat!(
-    "paradedb/paradedb:0.23.5@sha256:",
-    "c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d"
+    "paradedb/paradedb:0.24.3@sha256:",
+    "8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb"
 );
 /// Default loopback port for the first managed Cartograph database.
 pub const DEFAULT_MANAGED_DATABASE_PORT: u16 = 55_432;
@@ -535,6 +535,29 @@ impl ManagedDatabaseLifecycle<'_> {
             port,
             image_matches: inspection.image == MANAGED_DATABASE_IMAGE,
         })
+    }
+
+    /// Return exact filesystem bytes available to the validated project-owned
+    /// database mount. External PostgreSQL deployments must supply equivalent
+    /// operator-observed headroom themselves.
+    pub async fn available_storage_bytes(&self) -> Result<u64, ManagedDatabaseError> {
+        self.database.docker.ensure_available().await?;
+        let inspection = self
+            .database
+            .docker
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
+            .await?
+            .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
+        validate_owned_container(&self.database.identity, &inspection, false)?;
+        if container_state(&inspection) != ManagedContainerState::Healthy {
+            return Err(ManagedDatabaseError::DatabaseNotHealthyForMaintenance);
+        }
+        self.database
+            .docker
+            .containers()
+            .available_data_bytes(&self.database.identity.container_name)
+            .await
     }
 
     /// Stop only the project-owned container. Missing/stopped is an idempotent
@@ -1300,11 +1323,11 @@ mod tests {
             Ok(schema) => schema,
             Err(error) => panic!("managed test schema is invalid: {error}"),
         };
-        let database =
-            match managed_database_with_schema(directory.path(), TEST_DATABASE_PORT, schema) {
-                Ok(database) => database.with_startup_timeout(TEST_STARTUP_TIMEOUT),
-                Err(error) => panic!("could not build manager: {error}"),
-            };
+        let live_port = available_loopback_port();
+        let database = match managed_database_with_schema(directory.path(), live_port, schema) {
+            Ok(database) => database.with_startup_timeout(TEST_STARTUP_TIMEOUT),
+            Err(error) => panic!("could not build manager: {error}"),
+        };
         let _cleanup = DockerCleanup {
             container_name: database.identity.container_name.clone(),
             volume_name: database.identity.volume_name.clone(),
@@ -1316,7 +1339,7 @@ mod tests {
         assert_foreign_volume_refusal(&database).await;
         assert_restarting_container_can_be_stopped(&database).await;
         assert_normal_lifecycle(&database).await;
-        assert_readiness_timeout_rolls_back(directory.path()).await;
+        assert_readiness_timeout_rolls_back(directory.path(), live_port).await;
         assert_existing_volume_without_password_is_refused(&database).await;
     }
 
@@ -1528,7 +1551,7 @@ mod tests {
             Err(error) => panic!("managed status failed: {error}"),
         };
         assert_eq!(status.state, ManagedContainerState::Healthy);
-        assert_eq!(status.port, TEST_DATABASE_PORT);
+        assert_eq!(status.port, database.port);
         assert!(status.image_matches);
         assert_container_metadata_uses_password_file(database);
 
@@ -1599,8 +1622,8 @@ mod tests {
         });
     }
 
-    async fn assert_readiness_timeout_rolls_back(project_root: &Path) {
-        let zero_timeout = match ManagedDatabase::new(project_root, TEST_DATABASE_PORT) {
+    async fn assert_readiness_timeout_rolls_back(project_root: &Path, port: u16) {
+        let zero_timeout = match ManagedDatabase::new(project_root, port) {
             Ok(database) => database.with_startup_timeout(Duration::ZERO),
             Err(error) => panic!("could not build timeout manager: {error}"),
         };
@@ -1613,6 +1636,15 @@ mod tests {
             Err(error) => panic!("rollback status failed: {error}"),
         };
         assert_eq!(rolled_back.state, ManagedContainerState::Stopped);
+    }
+
+    fn available_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("could not reserve managed test port: {error}"));
+        listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("could not inspect managed test port: {error}"))
+            .port()
     }
 
     async fn assert_existing_volume_without_password_is_refused(database: &ManagedDatabase) {

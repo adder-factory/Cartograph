@@ -7,6 +7,7 @@ use cartograph_db::{
     ProjectPurgeRequest, SearchDocumentInput, validate_generation_facts,
 };
 use cartograph_domain::{ContentDigest, DocumentId, DocumentKind, ProjectOperation};
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -22,6 +23,8 @@ async fn project_purge_blocks_live_work_and_drops_physical_search_relations() {
     let database_url = env::var(TEST_DATABASE_URL_ENV)
         .unwrap_or_else(|_| panic!("{TEST_DATABASE_URL_ENV} must be set"));
     let schema = format!("cartograph_purge_{}", process::id());
+    let _schema_guard = TestSchemaGuard::new(&database_url, schema.clone())
+        .unwrap_or_else(|error| panic!("purge schema guard failed: {error}"));
     let settings = DatabaseSettings::parse(&database_url, Some("4"), Some("10000"))
         .and_then(|settings| settings.with_schema(&schema))
         .unwrap_or_else(|error| panic!("purge settings failed: {error}"));

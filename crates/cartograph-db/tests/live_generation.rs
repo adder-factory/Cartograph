@@ -26,6 +26,7 @@ use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
     GenerationState, NormalizedPath, ProjectId, ProjectOperation, SymbolId, Visibility,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -65,8 +66,9 @@ const SYMBOL_PAGERANK_MIGRATION_VERSION: i64 = 19;
 const SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION: i64 = 22;
-const LATEST_MIGRATION_VERSION: i64 = NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 22] = [
+const STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION: i64 = 23;
+const LATEST_MIGRATION_VERSION: i64 = STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 23] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -89,6 +91,7 @@ const EXPECTED_MIGRATIONS: [i64; 22] = [
     SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
     DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION,
     NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION,
+    STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -404,7 +407,7 @@ async fn copied_relations_receive_planner_statistics_before_ready() {
              AND relname IN ('files', 'symbols', 'edges', 'references', 'search_documents')
            ORDER BY relname"#,
     )
-    .bind(&schema)
+    .bind(schema.as_ref())
     .fetch_all(&pool)
     .await
     .unwrap_or_else(|error| panic!("could not read copied-relation statistics: {error}"));
@@ -3164,7 +3167,32 @@ async fn assert_ledger_tampering_is_refused(
     ));
 }
 
-async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool, String) {
+struct GuardedSchema {
+    name: String,
+    _cleanup: TestSchemaGuard,
+}
+
+impl std::ops::Deref for GuardedSchema {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.name
+    }
+}
+
+impl AsRef<str> for GuardedSchema {
+    fn as_ref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for GuardedSchema {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.name)
+    }
+}
+
+async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool, GuardedSchema) {
     let database_url = match env::var(TEST_DATABASE_URL_ENV) {
         Ok(database_url) => database_url,
         Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
@@ -3185,7 +3213,16 @@ async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool,
         Err(error) => panic!("test database connection failed: {error}"),
     };
     let database = CartographDatabase::new(pool.clone(), settings.schema().clone());
-    (database, pool, schema)
+    let cleanup = TestSchemaGuard::new(database_url, schema.clone())
+        .unwrap_or_else(|error| panic!("generation schema guard failed: {error}"));
+    (
+        database,
+        pool,
+        GuardedSchema {
+            name: schema,
+            _cleanup: cleanup,
+        },
+    )
 }
 
 async fn assert_exact_lookup_migration(pool: &sqlx_postgres::PgPool, schema: &str) {

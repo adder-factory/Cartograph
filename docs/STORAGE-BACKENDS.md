@@ -1,17 +1,17 @@
 # PostgreSQL storage and operations
 
-Cartograph v2 has one storage engine: PostgreSQL 18 with ParadeDB `pg_search`
-0.23.5 and pgvector. SQLite is not a backend, fallback, migration target,
-importer, feature, or test utility.
+Cartograph v2 has one storage engine: PostgreSQL 18.4 or newer within major
+version 18 with ParadeDB `pg_search` 0.24.3 and pgvector 0.8.2 or newer. SQLite
+is not a backend, fallback, migration target, importer, feature, or test utility.
 
 ## Capability contract
 
 `cartograph doctor` fails closed unless the selected database proves:
 
-- PostgreSQL major version 18 or newer;
+- PostgreSQL 18.4 or newer within major version 18;
 - the expected `pg_search` version and preload state;
 - the BM25 access method and `pdb.source_code` tokenizer behavior;
-- pgvector availability;
+- pgvector 0.8.2 or newer;
 - the complete append-only Cartograph migration ledger;
 - bounded read/write/DDL capability in the selected schema.
 
@@ -48,6 +48,19 @@ Backup:
 cartograph db backup ./cartograph.backup --project-path .
 ```
 
+Before replacing an older managed image, create and retain a verified backup,
+then use the explicit upgrade capability:
+
+```sh
+cartograph db upgrade --project-path . \
+  --confirm upgrade-managed-database
+```
+
+The upgrade starts the exact digest against the retained volume, updates
+`pg_search` and pgvector transactionally before calling extension-defined
+functions, and requires capability plus Cartograph migration proof before it
+discards the old container.
+
 Restore, upgrade, derived-index rebuild, and removal replace or delete state and
 require the exact confirmation phrase shown by `cartograph db <command> --help`.
 The lifecycle validates archive/resource identity before mutation and tests
@@ -58,15 +71,24 @@ disabled there until private credential ACL behavior can be proved equivalent.
 
 ## External database
 
-The database administrator installs PostgreSQL 18, `pg_search` 0.23.5, and
-pgvector and creates the extensions. Supply secrets only through the process
-environment:
+The database administrator installs PostgreSQL 18.4 or newer within major
+version 18, `pg_search` 0.24.3, and pgvector 0.8.2 or newer, and creates the
+extensions. Supply secrets only through the process environment:
 
 ```sh
 export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
 export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
 cartograph doctor /absolute/path/to/project
 cartograph index /absolute/path/to/project
+```
+
+For an existing external database, quiesce Cartograph writers, retain a verified
+database backup, install the new extension binaries, restart PostgreSQL, and
+update both catalogs before running `cartograph doctor`:
+
+```sql
+ALTER EXTENSION pg_search UPDATE TO '0.24.3';
+ALTER EXTENSION vector UPDATE TO '0.8.2';
 ```
 
 Optional bounded pool controls:
@@ -184,9 +206,15 @@ cartograph db derived-index --project-path /absolute/path/to/checkout
 
 Successful index and no-op reconciliation requests perform an automatic cleanup
 with a 32-generation transaction cap while preserving the two newest
-superseded generations. This keeps routine watcher churn bounded. Explicit
-pruning remains separate from import, backup, `VACUUM`, and derived-index
-recovery and is available for larger audited batches after a verified backup:
+superseded generations. The same exact migration lease also runs parse-cache
+retention: the running extractor contract is always protected, at most one
+recent older contract is retained, and independent defaults cap the project at
+20,000 rows, 2 GiB of logical payload, and 10,000 deletions per pass. Cache hits
+touch `last_used_at` at most hourly rather than writing on every hit.
+
+This keeps routine watcher churn bounded. Explicit pruning remains separate
+from import, backup, physical compaction, and derived-index recovery and is
+available for larger audited batches after a verified backup:
 
 ```sh
 cartograph db prune \
@@ -198,11 +226,12 @@ cartograph db prune \
 ```
 
 One invocation deletes at most the requested batch of stale unleased staging,
-failed, and old superseded generations. Staging must be at least ten minutes old
-by default. It always preserves the current generation, recent or leased
-staging, all ready work, staging/failed generations referenced by non-complete
-v1 import runs, and the newest configured superseded histories. The import-run
-exception preserves the exact state needed for concurrent-publication recovery.
+stale unleased ready, failed, and old superseded generations. Staging must be at
+least ten minutes old and ready work at least 24 hours old by default. It always
+preserves the current generation, recent or leased staging/ready work,
+staging/ready/failed generations referenced by non-complete v1 import runs, and
+the newest configured superseded histories. The import-run exception preserves
+the exact state needed for concurrent-publication recovery.
 The transaction also enforces independent canonical/cascade-row,
 generation-relation-byte, and DDL-relation caps. Defaults admit at most five
 million cascade rows, 8 GiB of generation search relations, and 64 relation
@@ -211,10 +240,65 @@ selected terminal generation it accounts work first, drops the physical search
 table (including its BM25 index), deletes canonical rows by cascade, and reports
 the exact admitted rows, relations, and bytes. It acquires publication/retention
 locks and rechecks the exact live migration lease after deletion before commit.
+At 100,000 or more admitted cascade rows, a post-commit maintenance pass vacuums
+and analyzes only the named high-churn tables with `SKIP_LOCKED`, forced index
+cleanup, truncation disabled, and the same bounded deadline. A maintenance
+failure is reported as deferred and cannot roll back already committed
+retention.
+
 Status and doctor expose generation-state counts plus a conservative retained
 byte estimate (source bytes plus physical generation search tables/indexes).
 Inspect the report and request another explicit batch if automatic cleanup does
 not drain an existing backlog.
+
+## Storage measurement and online compaction
+
+Use the read-only report before deciding that the database is bloated:
+
+```sh
+cartograph db usage --project-path . --limit 64 --format json
+```
+
+It separates whole-database bytes from this schema's heap, B-tree/all-index,
+TOAST, generation-search, and parse-cache allocations. It also reports bounded
+largest-table/index rows, estimated live/dead tuples, autovacuum evidence,
+stale ready generations, invalid concurrent-index artifacts, and duplicate
+generation-content potential. Duplicate content is assessment-only: mutation
+stays disabled until a normalized content-addressed fact schema can preserve
+immutable generation identity, project isolation, cascades, and freshness.
+
+Migration 23 applies table-specific autovacuum/analyze thresholds to the
+highest-churn generation and cache relations. It adds `payload_bytes` as a
+PostgreSQL 18 virtual generated column, so byte accounting occupies no per-row
+storage.
+
+Ordinary `VACUUM` makes deleted space reusable inside PostgreSQL but usually
+does not return it to the filesystem. Cartograph therefore offers a dry-run
+online B-tree plan for recoverable index bloat:
+
+```sh
+cartograph db compact --project-path . --format json
+
+cartograph db compact --project-path . \
+  --apply \
+  --confirm compact-online-indexes \
+  --format json
+```
+
+Apply rebuilds one eligible B-tree at a time with `REINDEX INDEX CONCURRENTLY`
+outside a transaction, under a schema advisory lock and per-index deadline. It
+is bounded by index count and candidate bytes, is resumable after a partial
+failure, and never auto-drops `_ccnew`, `_ccold`, invalid, BM25, or exclusion-
+constraint artifacts. Managed mode measures free bytes from the validated
+database filesystem. External PostgreSQL requires an operator-supplied
+`--available-headroom-bytes`. The required minimum is twice the largest
+candidate plus 64 MiB because concurrent rebuilds temporarily need both index
+copies and working space.
+
+`VACUUM FULL` is intentionally not automated: it takes an exclusive table lock
+and needs extra disk for a rewritten copy. If heap/TOAST—not B-tree indexes—is
+the remaining problem, schedule that separately only after a verified backup,
+free-space check, and maintenance window.
 
 ## Distribution boundary
 

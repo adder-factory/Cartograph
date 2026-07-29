@@ -18,8 +18,9 @@ use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CartographDatabase, GenerationContents, GenerationRecoveryRequest, GenerationRetentionPolicy,
     GenerationRetentionReport, GenerationRetentionRequest, HistoryRefreshReport,
-    IssueHistoryRefreshReport, LeaseError, LeaseRequest, LeaseTarget, NewGeneration, NewProject,
-    ProjectSnapshot, StagedGeneration,
+    IssueHistoryRefreshReport, LeaseError, LeaseRequest, LeaseTarget,
+    NativeParseCacheRetentionPolicy, NativeParseCacheRetentionReport,
+    NativeParseCacheRetentionRequest, NewGeneration, NewProject, ProjectSnapshot, StagedGeneration,
 };
 use cartograph_domain::{
     ContentDigest, GenerationDigestVersion, NormalizedPath, ProjectId, ProjectOperation,
@@ -27,7 +28,7 @@ use cartograph_domain::{
 };
 use cartograph_extract::{
     DiscoveryLimits, DiscoveryPolicy, NestedRepositoryPolicy, SourceDiscoveryOptions, SourceLimits,
-    SourceReadError, SourceReadOptions, SourceRoot,
+    SourceReadError, SourceReadOptions, SourceRoot, native_extractor_contract_digest,
 };
 use cartograph_indexer::{
     IndexerSupervisor, NativeGenerationBuild, NativeParseCache, NativePipelineConfig,
@@ -384,10 +385,14 @@ pub struct IndexReport {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum GenerationRetentionStatus {
     /// A bounded cleanup transaction committed under an exact migration lease.
-    Completed { report: GenerationRetentionReport },
+    Completed {
+        report: GenerationRetentionReport,
+        parse_cache: NativeParseCacheRetentionReport,
+    },
     /// Cleanup committed, but releasing its bounded lease could not be confirmed.
     CompletedWithWarning {
         report: GenerationRetentionReport,
+        parse_cache: Option<NativeParseCacheRetentionReport>,
         warning: &'static str,
     },
     /// Cleanup was safely deferred because another writer won or storage was unavailable.
@@ -828,25 +833,51 @@ async fn maintain_generation_retention(
             };
         }
     };
+    let fence = lease.fence();
     let report = runtime
         .database
         .cleanup_generations(GenerationRetentionRequest::new(
             policy,
-            &lease.fence(),
+            &fence,
             AUTOMATIC_RETENTION_STATEMENT_TIMEOUT,
         ))
         .await;
+    let contract = native_extractor_contract_digest();
+    let parse_cache = if report.is_ok() {
+        runtime
+            .database
+            .cleanup_native_parse_cache(NativeParseCacheRetentionRequest {
+                project_id,
+                protected_contract_digest: &contract,
+                policy: NativeParseCacheRetentionPolicy::automatic(),
+                fence: &fence,
+                statement_timeout: AUTOMATIC_RETENTION_STATEMENT_TIMEOUT,
+            })
+            .await
+            .ok()
+    } else {
+        None
+    };
     let released = runtime
         .database
         .release_lease_bounded(&lease, AUTOMATIC_RETENTION_RELEASE_TIMEOUT)
         .await;
-    match (report, released) {
-        (Ok(report), Ok(())) => GenerationRetentionStatus::Completed { report },
-        (Ok(report), Err(_)) => GenerationRetentionStatus::CompletedWithWarning {
+    match (report, parse_cache, released) {
+        (Ok(report), Some(parse_cache), Ok(())) => GenerationRetentionStatus::Completed {
             report,
+            parse_cache,
+        },
+        (Ok(report), None, Ok(())) => GenerationRetentionStatus::CompletedWithWarning {
+            report,
+            parse_cache: None,
+            warning: "parse_cache_cleanup_unavailable",
+        },
+        (Ok(report), parse_cache, Err(_)) => GenerationRetentionStatus::CompletedWithWarning {
+            report,
+            parse_cache,
             warning: "lease_release_unavailable",
         },
-        (Err(_), _) => GenerationRetentionStatus::Deferred {
+        (Err(_), _, _) => GenerationRetentionStatus::Deferred {
             reason: "cleanup_unavailable",
         },
     }
@@ -1438,6 +1469,44 @@ struct ProjectSourcePolicy {
     index: SourceIndexPolicy,
 }
 
+/// Cheap, immutable source-policy snapshot used by filesystem watchers before
+/// they enqueue a full status reconciliation.
+#[derive(Clone, Debug)]
+pub struct ProjectWatchFilter {
+    discovery: DiscoveryPolicy,
+}
+
+impl ProjectWatchFilter {
+    /// Load the same project include, exclude, and language policy used by a
+    /// source scan. Callers should replace this snapshot after config changes.
+    pub fn load(project_root: &Path) -> Result<Self, ProjectError> {
+        let source_policy = project_source_policy(project_root)?;
+        Ok(Self {
+            discovery: source_policy.discovery,
+        })
+    }
+
+    /// Decide whether a relative filesystem path could change the indexed
+    /// source manifest. Invalid or non-Unicode paths fail open so periodic
+    /// reconciliation remains the final correctness boundary.
+    #[must_use]
+    pub fn relevant_relative_path(&self, path: &Path) -> bool {
+        if path.as_os_str().is_empty() {
+            return true;
+        }
+        let Some(raw) = path.to_str() else {
+            return true;
+        };
+        let Ok(normalized) = NormalizedPath::parse(raw) else {
+            return true;
+        };
+        if self.discovery.excludes_path_or_descendants(&normalized) {
+            return false;
+        }
+        self.discovery.supports_normalized_path(&normalized) || path.extension().is_none()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SourceIndexPolicy {
     enable_centrality: bool,
@@ -1982,6 +2051,7 @@ mod tests {
         let status = GenerationRetentionStatus::CompletedWithWarning {
             report: GenerationRetentionReport {
                 staging_removed: 1,
+                ready_removed: 0,
                 superseded_removed: 2,
                 failed_removed: 3,
                 embeddings_removed: 4,
@@ -1989,10 +2059,13 @@ mod tests {
                 superseded_preserved: 2,
                 failed_remaining: 0,
                 staging_remaining: 0,
+                ready_remaining: 0,
                 cascade_rows_removed: 20,
                 search_relations_removed: 2,
                 search_relation_bytes_removed: 1_024,
+                maintenance: cartograph_db::PostRetentionMaintenance::NotNeeded,
             },
+            parse_cache: Some(NativeParseCacheRetentionReport::default()),
             warning: "lease_release_unavailable",
         };
         let value = serde_json::to_value(status)

@@ -5,6 +5,8 @@ use std::{
 use serde::Deserialize;
 use tokio::{process::Command, time::timeout};
 
+use crate::capabilities::{MANAGED_PGVECTOR_VERSION, SUPPORTED_PG_SEARCH_VERSION};
+
 use super::{ManagedDatabaseError, ManagedResourceIdentity};
 
 const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -250,6 +252,36 @@ impl DockerContainerCli<'_> {
             });
         }
         parse_container_inspection(trim_line_end(&output.stdout)).map(Some)
+    }
+
+    pub(super) async fn available_data_bytes(
+        &self,
+        name: &str,
+    ) -> Result<u64, ManagedDatabaseError> {
+        let output = self
+            .runner
+            .checked(
+                "inspect managed database free space",
+                ["container", "exec", name, "df", "-Pk", DATABASE_DATA_PATH],
+            )
+            .await?;
+        let line = output.lines().rfind(|line| !line.trim().is_empty()).ok_or(
+            ManagedDatabaseError::DockerOperation {
+                operation: "decode managed database free space",
+            },
+        )?;
+        let available_kib = line
+            .split_whitespace()
+            .nth(3)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(ManagedDatabaseError::DockerOperation {
+                operation: "decode managed database free space",
+            })?;
+        available_kib
+            .checked_mul(1024)
+            .ok_or(ManagedDatabaseError::DockerOperation {
+                operation: "decode managed database free space",
+            })
     }
 }
 
@@ -711,24 +743,33 @@ pub(super) async fn initialize_extensions(
     docker: &DockerCli,
     name: &str,
 ) -> Result<(), ManagedDatabaseError> {
+    let pg_search_upgrade =
+        format!("ALTER EXTENSION pg_search UPDATE TO '{SUPPORTED_PG_SEARCH_VERSION}';");
+    let pgvector_upgrade =
+        format!("ALTER EXTENSION vector UPDATE TO '{MANAGED_PGVECTOR_VERSION}';");
     docker
         .runner
-        .checked(
+        .checked_os(
             "initialize PostgreSQL extensions",
-            [
-                "exec",
-                name,
-                "psql",
-                "--username",
-                DATABASE_USER,
-                "--dbname",
-                DATABASE_NAME,
-                "--set",
-                "ON_ERROR_STOP=1",
-                "--command",
-                "CREATE EXTENSION IF NOT EXISTS pg_search;",
-                "--command",
-                "CREATE EXTENSION IF NOT EXISTS vector;",
+            vec![
+                OsString::from("exec"),
+                OsString::from(name),
+                OsString::from("psql"),
+                OsString::from("--username"),
+                OsString::from(DATABASE_USER),
+                OsString::from("--dbname"),
+                OsString::from(DATABASE_NAME),
+                OsString::from("--set"),
+                OsString::from("ON_ERROR_STOP=1"),
+                OsString::from("--single-transaction"),
+                OsString::from("--command"),
+                OsString::from("CREATE EXTENSION IF NOT EXISTS pg_search;"),
+                OsString::from("--command"),
+                OsString::from(pg_search_upgrade),
+                OsString::from("--command"),
+                OsString::from("CREATE EXTENSION IF NOT EXISTS vector;"),
+                OsString::from("--command"),
+                OsString::from(pgvector_upgrade),
             ],
         )
         .await

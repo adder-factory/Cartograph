@@ -1,13 +1,13 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cartograph_agent::{IndexOptions, ProjectRuntime};
+use cartograph_agent::{IndexOptions, ProjectRuntime, ProjectWatchFilter};
 use notify::{Config, Event, EventKind, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use thiserror::Error;
@@ -42,8 +42,16 @@ impl ProjectAutoSync {
         let (events, receiver) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
         let (cancellation, cancellation_receiver) = watch::channel(false);
         let state = Arc::new(AutoSyncState::default());
+        let filter = Arc::new(RwLock::new(
+            ProjectWatchFilter::load(&root).map_err(|_| AutoSyncError::InvalidProjectPolicy)?,
+        ));
         state.active.store(true, Ordering::Release);
-        let watcher = start_watcher(&root, events, state.clone())?;
+        let watcher = start_watcher(WatcherContext {
+            root,
+            events,
+            state: state.clone(),
+            filter,
+        })?;
         let task_state = state.clone();
         let task = tokio::spawn(run_auto_sync(AutoSyncTask {
             runtime,
@@ -116,11 +124,21 @@ pub(crate) struct AutoSyncStatus {
 pub(crate) enum AutoSyncError {
     #[error("Cartograph native auto-sync watcher is unavailable")]
     WatcherUnavailable,
+    #[error("Cartograph project source policy is invalid")]
+    InvalidProjectPolicy,
 }
 
 enum AutoSyncWatcher {
     Native(RecommendedWatcher),
     Poll(PollWatcher),
+}
+
+#[derive(Clone)]
+struct WatcherContext {
+    root: PathBuf,
+    events: mpsc::Sender<()>,
+    state: Arc<AutoSyncState>,
+    filter: Arc<RwLock<ProjectWatchFilter>>,
 }
 
 impl AutoSyncWatcher {
@@ -138,40 +156,49 @@ impl AutoSyncWatcher {
     }
 }
 
-fn start_watcher(
-    root: &Path,
-    events: mpsc::Sender<()>,
-    state: Arc<AutoSyncState>,
-) -> Result<AutoSyncWatcher, AutoSyncError> {
+fn start_watcher(context: WatcherContext) -> Result<AutoSyncWatcher, AutoSyncError> {
     let native_config = Config::default().with_follow_symlinks(false);
-    if let Ok(mut watcher) = RecommendedWatcher::new(
-        watcher_handler(root.to_path_buf(), events.clone(), state.clone()),
-        native_config,
-    ) && watcher.watch(root, RecursiveMode::Recursive).is_ok()
+    if let Ok(mut watcher) =
+        RecommendedWatcher::new(watcher_handler(context.clone()), native_config)
+        && watcher
+            .watch(&context.root, RecursiveMode::Recursive)
+            .is_ok()
     {
         return Ok(AutoSyncWatcher::Native(watcher));
     }
     let poll_config = Config::default()
         .with_follow_symlinks(false)
         .with_poll_interval(FALLBACK_POLL_INTERVAL);
-    let mut watcher = PollWatcher::new(
-        watcher_handler(root.to_path_buf(), events, state),
-        poll_config,
-    )
-    .map_err(|_| AutoSyncError::WatcherUnavailable)?;
+    let mut watcher = PollWatcher::new(watcher_handler(context.clone()), poll_config)
+        .map_err(|_| AutoSyncError::WatcherUnavailable)?;
     watcher
-        .watch(root, RecursiveMode::Recursive)
+        .watch(&context.root, RecursiveMode::Recursive)
         .map_err(|_| AutoSyncError::WatcherUnavailable)?;
     Ok(AutoSyncWatcher::Poll(watcher))
 }
 
-fn watcher_handler(
-    root: PathBuf,
-    events: mpsc::Sender<()>,
-    state: Arc<AutoSyncState>,
-) -> impl FnMut(notify::Result<Event>) + Send + 'static {
+fn watcher_handler(context: WatcherContext) -> impl FnMut(notify::Result<Event>) + Send + 'static {
+    let WatcherContext {
+        root,
+        events,
+        state,
+        filter,
+    } = context;
     move |result| match result {
-        Ok(event) if event_relevant(&root, &event) => {
+        Ok(event) if event_relevant(&root, &event, &filter) => {
+            if event_changes_config(&root, &event) {
+                match ProjectWatchFilter::load(&root) {
+                    Ok(reloaded) => match filter.write() {
+                        Ok(mut current) => *current = reloaded,
+                        Err(_) => {
+                            state.errors.fetch_add(1, Ordering::AcqRel);
+                        }
+                    },
+                    Err(_) => {
+                        state.errors.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
+            }
             state.events.fetch_add(1, Ordering::AcqRel);
             let _ = events.try_send(());
         }
@@ -287,7 +314,7 @@ async fn synchronize(runtime: &ProjectRuntime, state: &AutoSyncState) {
     }
 }
 
-fn event_relevant(root: &Path, event: &Event) -> bool {
+fn event_relevant(root: &Path, event: &Event, filter: &RwLock<ProjectWatchFilter>) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
@@ -295,10 +322,10 @@ fn event_relevant(root: &Path, event: &Event) -> bool {
         .paths
         .iter()
         .filter_map(|path| path.strip_prefix(root).ok())
-        .any(relevant_relative_path)
+        .any(|path| relevant_relative_path(path, filter))
 }
 
-fn relevant_relative_path(path: &Path) -> bool {
+fn relevant_relative_path(path: &Path, filter: &RwLock<ProjectWatchFilter>) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
     if normalized.is_empty() {
         return true;
@@ -306,7 +333,20 @@ fn relevant_relative_path(path: &Path) -> bool {
     if normalized == CONFIG_RELATIVE_PATH || normalized == SCIP_OVERLAY_RELATIVE_PATH {
         return true;
     }
-    !normalized.starts_with(".cartograph/")
+    if normalized.starts_with(".cartograph/") {
+        return false;
+    }
+    filter
+        .read()
+        .map_or(true, |current| current.relevant_relative_path(path))
+}
+
+fn event_changes_config(root: &Path, event: &Event) -> bool {
+    event.paths.iter().any(|path| {
+        path.strip_prefix(root)
+            .ok()
+            .is_some_and(|relative| relative == Path::new(CONFIG_RELATIVE_PATH))
+    })
 }
 
 fn debounce_from_env() -> Duration {
@@ -332,7 +372,7 @@ const fn nonzero(value: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, path::PathBuf, process, time::SystemTime};
+    use std::{env, process, time::SystemTime};
 
     use cartograph_config::DatabaseSettings;
     use notify::event::AccessKind;
@@ -341,8 +381,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_filter_ignores_reads_and_internal_database_churn_but_keeps_config_and_source() {
-        let root = PathBuf::from("/tmp/cartograph-watch-fixture");
+    fn event_filter_ignores_reads_internal_churn_and_default_excludes() {
+        let fixture = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("watch filter tempdir failed: {error}"));
+        let root = fixture.path().to_path_buf();
+        let filter = RwLock::new(
+            ProjectWatchFilter::load(&root)
+                .unwrap_or_else(|error| panic!("watch filter load failed: {error}")),
+        );
         let event = |kind, relative: &str| Event {
             kind,
             paths: vec![root.join(relative)],
@@ -350,17 +396,43 @@ mod tests {
         };
         assert!(!event_relevant(
             &root,
-            &event(EventKind::Access(AccessKind::Any), "src/lib.rs")
+            &event(EventKind::Access(AccessKind::Any), "src/lib.rs"),
+            &filter,
         ));
         assert!(!event_relevant(
             &root,
-            &event(EventKind::Any, ".cartograph/private-state")
+            &event(EventKind::Any, ".cartograph/private-state"),
+            &filter,
+        ));
+        assert!(!event_relevant(
+            &root,
+            &event(EventKind::Any, "target/debug/cartograph"),
+            &filter,
+        ));
+        assert!(!event_relevant(
+            &root,
+            &event(EventKind::Any, "node_modules/package/index.js"),
+            &filter,
         ));
         assert!(event_relevant(
             &root,
+            &event(EventKind::Any, CONFIG_RELATIVE_PATH),
+            &filter,
+        ));
+        assert!(event_changes_config(
+            &root,
             &event(EventKind::Any, CONFIG_RELATIVE_PATH)
         ));
-        assert!(event_relevant(&root, &event(EventKind::Any, "src/lib.rs")));
+        assert!(event_relevant(
+            &root,
+            &event(EventKind::Any, "src/lib.rs"),
+            &filter,
+        ));
+        assert!(event_relevant(
+            &root,
+            &event(EventKind::Any, "src"),
+            &filter,
+        ));
     }
 
     #[test]
@@ -383,6 +455,8 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_watcher_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("watcher schema guard failed: {error}"));
         let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("watcher settings failed: {error}"));

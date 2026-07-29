@@ -23,7 +23,13 @@ const PID_SCHEMA_VERSION: u8 = 2;
 const MAXIMUM_STATE_FILE_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_STATE_ENTRIES: usize = 256;
 const MAXIMUM_LOG_TAIL_BYTES: u64 = 512 * 1024;
+const MAXIMUM_BACKEND_LOG_BYTES: u64 = 32 * 1024 * 1024;
+const ROTATED_LOG_SUFFIX: &str = ".1";
 const DEFAULT_LOG_LINES: u16 = 80;
+const DEFAULT_CLEANUP_MINIMUM_AGE_HOURS: u16 = 24;
+const DEFAULT_CLEANUP_MAXIMUM_DELETIONS: u16 = 64;
+const MAXIMUM_CLEANUP_DELETIONS: u16 = 256;
+const CLEANUP_CONFIRMATION: &str = "cleanup-backend-junk";
 const STOP_GRACE: Duration = Duration::from_secs(3);
 const STOP_POLL: Duration = Duration::from_millis(100);
 const START_CONFIRMATION: Duration = Duration::from_millis(250);
@@ -47,6 +53,8 @@ pub(super) enum BackendCommand {
     Stop(StopArguments),
     /// Tail bounded local logs for configured or orphaned managed processes.
     Logs(LogsArguments),
+    /// Inspect or remove bounded stale backend state and rotated logs.
+    Cleanup(CleanupArguments),
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +117,24 @@ pub(super) struct LogsArguments {
     tier: Option<BackendTier>,
     #[arg(long, default_value_t = DEFAULT_LOG_LINES, value_parser = clap::value_parser!(u16).range(1..=10_000))]
     lines: u16,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct CleanupArguments {
+    #[arg(default_value = ".")]
+    path: PathBuf,
+    /// Remove eligible junk. Without this flag the command is a dry run.
+    #[arg(long)]
+    apply: bool,
+    /// Exact phrase required with --apply: cleanup-backend-junk.
+    #[arg(long, requires = "apply")]
+    confirm: Option<String>,
+    #[arg(long, default_value_t = DEFAULT_CLEANUP_MINIMUM_AGE_HOURS)]
+    minimum_age_hours: u16,
+    #[arg(long, default_value_t = DEFAULT_CLEANUP_MAXIMUM_DELETIONS, value_parser = clap::value_parser!(u16).range(1..=MAXIMUM_CLEANUP_DELETIONS as i64))]
+    maximum_deletions: u16,
     #[arg(long)]
     json: bool,
 }
@@ -243,6 +269,35 @@ struct BackendLogsReport {
     logs: Vec<BackendLogEntry>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BackendCleanupKind {
+    RotatedLog,
+    InvalidPidState,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendCleanupEntry {
+    path: PathBuf,
+    kind: BackendCleanupKind,
+    bytes: u64,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendCleanupReport {
+    state_directory: PathBuf,
+    dry_run: bool,
+    examined: usize,
+    eligible: Vec<BackendCleanupEntry>,
+    removed: Vec<BackendCleanupEntry>,
+    skipped: Vec<String>,
+    reclaimed_bytes: u64,
+    truncated: bool,
+}
+
 enum PidState {
     Missing,
     Valid(BackendPidRecord),
@@ -265,6 +320,7 @@ pub(super) async fn run(command: BackendCommand) -> Result<ExitCode, String> {
         BackendCommand::Restart(arguments) => run_restart(arguments).await,
         BackendCommand::Stop(arguments) => run_stop(arguments).await,
         BackendCommand::Logs(arguments) => run_logs(arguments).await,
+        BackendCommand::Cleanup(arguments) => run_cleanup(arguments),
     }
 }
 
@@ -895,13 +951,16 @@ async fn spawn_row(row: &BackendRow) -> Result<u32, String> {
 }
 
 fn open_log_file(path: &Path) -> Result<File, String> {
-    match fs::symlink_metadata(path) {
+    let existing = match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
             return Err("backend log target is not a safe regular file".to_owned());
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return Err("backend log target is unavailable".to_owned()),
+    };
+    if existing.is_some_and(|metadata| metadata.len() >= MAXIMUM_BACKEND_LOG_BYTES) {
+        rotate_backend_log(path)?;
     }
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -913,6 +972,24 @@ fn open_log_file(path: &Path) -> Result<File, String> {
     options
         .open(path)
         .map_err(|_| "backend log cannot be opened".to_owned())
+}
+
+fn rotate_backend_log(path: &Path) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "backend log path is invalid".to_owned())?;
+    let rotated = path.with_file_name(format!("{file_name}{ROTATED_LOG_SUFFIX}"));
+    match fs::symlink_metadata(&rotated) {
+        Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+            return Err("rotated backend log target is unsafe".to_owned());
+        }
+        Ok(_) => fs::remove_file(&rotated)
+            .map_err(|_| "prior rotated backend log cannot be removed".to_owned())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("rotated backend log target is unavailable".to_owned()),
+    }
+    fs::rename(path, rotated).map_err(|_| "backend log cannot be rotated".to_owned())
 }
 
 fn write_pid_record(row: &BackendRow, pid: u32) -> Result<(), String> {
@@ -1255,6 +1332,231 @@ async fn run_logs(arguments: LogsArguments) -> Result<ExitCode, String> {
     })
 }
 
+#[derive(Clone)]
+struct PlannedBackendCleanup {
+    entry: BackendCleanupEntry,
+    modified: SystemTime,
+}
+
+#[derive(Default)]
+struct BackendCleanupScan {
+    planned: Vec<PlannedBackendCleanup>,
+    skipped: Vec<String>,
+    examined: usize,
+    truncated: bool,
+}
+
+#[derive(Default)]
+struct BackendCleanupExecution {
+    removed: Vec<BackendCleanupEntry>,
+    reclaimed_bytes: u64,
+}
+
+enum CleanupInspection {
+    Candidate(PlannedBackendCleanup),
+    Preserved(String),
+    Ignored,
+}
+
+fn run_cleanup(arguments: CleanupArguments) -> Result<ExitCode, String> {
+    validate_cleanup_confirmation(&arguments)?;
+    let paths = state_paths(&arguments.path)?;
+    let minimum_age = Duration::from_secs(u64::from(arguments.minimum_age_hours) * 60 * 60);
+    let mut scan = scan_backend_cleanup(&paths.directory, minimum_age)?;
+    limit_cleanup_candidates(&mut scan, arguments.maximum_deletions);
+    let eligible = scan
+        .planned
+        .iter()
+        .map(|candidate| candidate.entry.clone())
+        .collect();
+    let execution = if arguments.apply {
+        remove_cleanup_candidates(scan.planned, minimum_age, &mut scan.skipped)
+    } else {
+        BackendCleanupExecution::default()
+    };
+    let report = BackendCleanupReport {
+        state_directory: paths.directory,
+        dry_run: !arguments.apply,
+        examined: scan.examined,
+        eligible,
+        removed: execution.removed,
+        skipped: scan.skipped,
+        reclaimed_bytes: execution.reclaimed_bytes,
+        truncated: scan.truncated,
+    };
+    if arguments.json {
+        print_json(&report)?;
+    } else {
+        render_cleanup(&report);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn validate_cleanup_confirmation(arguments: &CleanupArguments) -> Result<(), String> {
+    if arguments.apply && arguments.confirm.as_deref() != Some(CLEANUP_CONFIRMATION) {
+        return Err(format!(
+            "backend cleanup --apply requires --confirm {CLEANUP_CONFIRMATION}"
+        ));
+    }
+    Ok(())
+}
+
+fn scan_backend_cleanup(
+    directory: &Path,
+    minimum_age: Duration,
+) -> Result<BackendCleanupScan, String> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BackendCleanupScan::default());
+        }
+        Err(_) => return Err("backend state directory cannot be read".to_owned()),
+    };
+    let mut scan = BackendCleanupScan::default();
+    for result in entries.take(MAXIMUM_STATE_ENTRIES + 1) {
+        if scan.examined >= MAXIMUM_STATE_ENTRIES {
+            scan.truncated = true;
+            break;
+        }
+        scan.examined = scan.examined.saturating_add(1);
+        match inspect_cleanup_entry(result, minimum_age) {
+            CleanupInspection::Candidate(candidate) => scan.planned.push(candidate),
+            CleanupInspection::Preserved(reason) => scan.skipped.push(reason),
+            CleanupInspection::Ignored => {}
+        }
+    }
+    scan.planned.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.entry.path.cmp(&right.entry.path))
+    });
+    Ok(scan)
+}
+
+fn inspect_cleanup_entry(
+    result: std::io::Result<fs::DirEntry>,
+    minimum_age: Duration,
+) -> CleanupInspection {
+    let entry = match result {
+        Ok(entry) => entry,
+        Err(_) => {
+            return CleanupInspection::Preserved(
+                "an unreadable backend state entry was preserved".to_owned(),
+            );
+        }
+    };
+    let path = entry.path();
+    let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+        return CleanupInspection::Preserved(
+            "a non-Unicode backend state entry was preserved".to_owned(),
+        );
+    };
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        Ok(_) => {
+            return CleanupInspection::Preserved(format!("preserved unsafe state entry {name}"));
+        }
+        Err(_) => return CleanupInspection::Ignored,
+    };
+    let modified = match metadata.modified() {
+        Ok(modified) if old_enough(modified, minimum_age) => modified,
+        Ok(_) => return CleanupInspection::Ignored,
+        Err(_) => {
+            return CleanupInspection::Preserved(format!(
+                "preserved state entry with unknown age {name}"
+            ));
+        }
+    };
+    let Some((kind, reason)) = classify_cleanup_entry(&name, &path) else {
+        return CleanupInspection::Ignored;
+    };
+    CleanupInspection::Candidate(PlannedBackendCleanup {
+        entry: BackendCleanupEntry {
+            path,
+            kind,
+            bytes: metadata.len(),
+            reason,
+        },
+        modified,
+    })
+}
+
+fn classify_cleanup_entry(name: &str, path: &Path) -> Option<(BackendCleanupKind, String)> {
+    if name.ends_with(".log.1") {
+        return Some((
+            BackendCleanupKind::RotatedLog,
+            "bounded rotated backend log".to_owned(),
+        ));
+    }
+    if name.ends_with(".json") && matches!(read_pid_record(path), PidState::Invalid(_)) {
+        return Some((
+            BackendCleanupKind::InvalidPidState,
+            "stale invalid pid state that cannot own a verified process".to_owned(),
+        ));
+    }
+    None
+}
+
+fn limit_cleanup_candidates(scan: &mut BackendCleanupScan, maximum_deletions: u16) {
+    let maximum = usize::from(maximum_deletions);
+    if scan.planned.len() > maximum {
+        scan.planned.truncate(maximum);
+        scan.truncated = true;
+    }
+}
+
+fn remove_cleanup_candidates(
+    candidates: Vec<PlannedBackendCleanup>,
+    minimum_age: Duration,
+    skipped: &mut Vec<String>,
+) -> BackendCleanupExecution {
+    let mut execution = BackendCleanupExecution::default();
+    for candidate in candidates {
+        if !cleanup_candidate_still_safe(&candidate, minimum_age) {
+            skipped.push(format!(
+                "preserved changed cleanup candidate {}",
+                candidate.entry.path.display()
+            ));
+            continue;
+        }
+        match fs::remove_file(&candidate.entry.path) {
+            Ok(()) => {
+                execution.reclaimed_bytes = execution
+                    .reclaimed_bytes
+                    .saturating_add(candidate.entry.bytes);
+                execution.removed.push(candidate.entry);
+            }
+            Err(_) => skipped.push(format!(
+                "could not remove cleanup candidate {}",
+                candidate.entry.path.display()
+            )),
+        }
+    }
+    execution
+}
+
+fn old_enough(modified: SystemTime, minimum_age: Duration) -> bool {
+    SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|age| age >= minimum_age)
+}
+
+fn cleanup_candidate_still_safe(candidate: &PlannedBackendCleanup, minimum_age: Duration) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(&candidate.entry.path) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != candidate.entry.bytes
+        || metadata.modified().ok() != Some(candidate.modified)
+        || !old_enough(candidate.modified, minimum_age)
+    {
+        return false;
+    }
+    candidate.entry.kind != BackendCleanupKind::InvalidPidState
+        || matches!(read_pid_record(&candidate.entry.path), PidState::Invalid(_))
+}
+
 fn tail_log(path: &Path, lines: u16) -> Result<Option<String>, String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1397,6 +1699,44 @@ fn render_logs(report: &BackendLogsReport) {
         } else {
             println!("```text\n{}\n```\n", entry.content);
         }
+    }
+}
+
+fn render_cleanup(report: &BackendCleanupReport) {
+    println!("## cartograph backend cleanup\n");
+    if report.dry_run {
+        println!("_Dry run: no files changed._\n");
+    }
+    println!(
+        "Inspected {} bounded state entries; {} eligible, {} removed, {} bytes reclaimed.",
+        report.examined,
+        report.eligible.len(),
+        report.removed.len(),
+        report.reclaimed_bytes
+    );
+    for entry in if report.dry_run {
+        &report.eligible
+    } else {
+        &report.removed
+    } {
+        let action = if report.dry_run {
+            "would remove"
+        } else {
+            "removed"
+        };
+        println!(
+            "- {action} {} ({} bytes, {:?}): {}",
+            entry.path.display(),
+            entry.bytes,
+            entry.kind,
+            entry.reason
+        );
+    }
+    for warning in &report.skipped {
+        println!("- preserved: {warning}");
+    }
+    if report.truncated {
+        println!("- more eligible entries remain beyond this bounded batch");
     }
 }
 
@@ -1583,7 +1923,91 @@ mod tests {
             .await,
             Ok(ExitCode::FAILURE)
         );
+        assert_eq!(
+            run(BackendCommand::Cleanup(CleanupArguments {
+                path: root.path().to_path_buf(),
+                apply: false,
+                confirm: None,
+                minimum_age_hours: 0,
+                maximum_deletions: 8,
+                json: true,
+            }))
+            .await,
+            Ok(ExitCode::SUCCESS)
+        );
         assert!(!root.path().join(".cartograph/backends").exists());
+    }
+
+    #[test]
+    fn logs_rotate_at_the_bound_and_cleanup_is_dry_run_first() {
+        let root = tempdir().unwrap_or_else(|error| panic!("fixture root failed: {error}"));
+        fs::create_dir(root.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
+        let paths =
+            state_paths(root.path()).unwrap_or_else(|error| panic!("state paths failed: {error}"));
+        ensure_state_directory(&paths)
+            .unwrap_or_else(|error| panic!("state directory failed: {error}"));
+        let log = paths.directory.join("fixture.log");
+        let oversized =
+            File::create(&log).unwrap_or_else(|error| panic!("log fixture create failed: {error}"));
+        oversized
+            .set_len(MAXIMUM_BACKEND_LOG_BYTES)
+            .unwrap_or_else(|error| panic!("log fixture resize failed: {error}"));
+        drop(oversized);
+        drop(open_log_file(&log).unwrap_or_else(|error| panic!("log rotate failed: {error}")));
+        assert_eq!(
+            fs::metadata(&log)
+                .unwrap_or_else(|error| panic!("current log metadata failed: {error}"))
+                .len(),
+            0
+        );
+        let rotated = paths.directory.join("fixture.log.1");
+        assert_eq!(
+            fs::metadata(&rotated)
+                .unwrap_or_else(|error| panic!("rotated log metadata failed: {error}"))
+                .len(),
+            MAXIMUM_BACKEND_LOG_BYTES
+        );
+        let invalid = paths.directory.join("invalid.json");
+        fs::write(&invalid, b"not-json")
+            .unwrap_or_else(|error| panic!("invalid state fixture failed: {error}"));
+
+        let dry_run = run_cleanup(CleanupArguments {
+            path: root.path().to_path_buf(),
+            apply: false,
+            confirm: None,
+            minimum_age_hours: 0,
+            maximum_deletions: 8,
+            json: true,
+        });
+        assert_eq!(dry_run, Ok(ExitCode::SUCCESS));
+        assert!(rotated.exists());
+        assert!(invalid.exists());
+        assert!(
+            run_cleanup(CleanupArguments {
+                path: root.path().to_path_buf(),
+                apply: true,
+                confirm: Some("wrong".to_owned()),
+                minimum_age_hours: 0,
+                maximum_deletions: 8,
+                json: true,
+            })
+            .is_err()
+        );
+        assert_eq!(
+            run_cleanup(CleanupArguments {
+                path: root.path().to_path_buf(),
+                apply: true,
+                confirm: Some(CLEANUP_CONFIRMATION.to_owned()),
+                minimum_age_hours: 0,
+                maximum_deletions: 8,
+                json: true,
+            }),
+            Ok(ExitCode::SUCCESS)
+        );
+        assert!(!rotated.exists());
+        assert!(!invalid.exists());
+        assert!(log.exists());
     }
 
     #[test]

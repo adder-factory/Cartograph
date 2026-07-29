@@ -2,7 +2,7 @@ services:
   postgres:
     # Cartograph does not redistribute ParadeDB. Development pulls the pinned
     # upstream multi-architecture image so extension upgrades are explicit.
-    image: paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d
+    image: paradedb/paradedb:0.24.3@sha256:8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${CARTOGRAPH_POSTGRES_USER:-cartograph}

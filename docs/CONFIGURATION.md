@@ -148,6 +148,23 @@ fields include bounded `timeoutMs`, `concurrency`, `summaryBatchSize`,
 applicable. Inline legacy keys are read for compatibility but environment
 lookup is the safe configuration.
 
+Audit and migrate legacy inline tier keys without printing them:
+
+```sh
+cartograph llm migrate-credentials . --json
+cartograph llm migrate-credentials . \
+  --tier-env summarize=MY_CHAT_API_KEY \
+  --apply \
+  --confirm migrate-inline-credentials \
+  --json
+```
+
+The dry run defaults OpenAI-compatible tiers to `OPENAI_API_KEY` and Anthropic
+tiers to `ANTHROPIC_API_KEY`; `--tier-env tier=NAME` overrides one tier. Apply
+removes an inline value only when the current process proves the named variable
+contains the exact same value. The atomic report contains tier, variable name,
+and status, never credential material.
+
 Use the native planner/wizard instead of hand-writing provider details:
 
 ```sh

@@ -23778,6 +23778,8 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_summary_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("live summary settings failed: {error}"));
@@ -24289,6 +24291,8 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_structural_summaries_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("structural summary settings failed: {error}"));
@@ -24586,6 +24590,8 @@ app.get('/orders', forward);
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_graph_parity_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("graph parity settings failed: {error}"));
@@ -24724,6 +24730,8 @@ pub fn root() -> u32 {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_post_index_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("post-index settings failed: {error}"));
@@ -24864,6 +24872,8 @@ pub fn root() -> u32 {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_neighbor_summaries_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("neighbor summary settings failed: {error}"));
@@ -25138,6 +25148,8 @@ pub fn target(value: u32) -> u32 {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_roles_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("live role settings failed: {error}"));
@@ -25282,6 +25294,8 @@ pub fn target(value: u32) -> u32 {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_live_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("live session settings failed: {error}"));
@@ -25803,6 +25817,8 @@ pub fn target(value: u32) -> u32 {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_issue_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("issue surface settings failed: {error}"));
@@ -25951,6 +25967,8 @@ pub fn target(value: u32) -> u32 {
             .unwrap_or_default()
             .as_nanos();
         let schema = format!("cg_cli_agent_surface_{}_{}", process::id(), nanos);
+        let _schema_guard = cartograph_test_support::TestSchemaGuard::new(&url, schema.clone())
+            .unwrap_or_else(|error| panic!("live CLI schema guard failed: {error}"));
         let settings = cartograph_config::DatabaseSettings::parse(&url, Some("8"), Some("10000"))
             .and_then(|settings| settings.with_schema(&schema))
             .unwrap_or_else(|error| panic!("agent-surface settings failed: {error}"));

@@ -30,7 +30,8 @@ const SYMBOL_PAGERANK_SCHEMA_VERSION: i64 = 19;
 const SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION: i64 = 22;
-const LATEST_SCHEMA_VERSION: i64 = NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION;
+const STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION: i64 = 23;
+const LATEST_SCHEMA_VERSION: i64 = STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
@@ -977,7 +978,63 @@ const NATIVE_INDEX_DIGEST_V5_SCHEMA: Migration = Migration {
                 CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5))"#],
 };
 
-const MIGRATIONS: [&Migration; 22] = [
+const STORAGE_LIFECYCLE_HARDENING_SCHEMA: Migration = Migration {
+    version: STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION,
+    name: "bounded_cache_and_high_churn_autovacuum",
+    statements: &[
+        r#"ALTER TABLE {schema}."native_parse_cache"
+            ADD COLUMN payload_bytes bigint
+                GENERATED ALWAYS AS (octet_length(payload)::bigint) VIRTUAL"#,
+        r#"CREATE INDEX native_parse_cache_contract_recency_idx
+            ON {schema}."native_parse_cache" (
+                project_id, extractor_contract_digest, last_used_at DESC, path_digest
+            )"#,
+        r#"ALTER TABLE {schema}."index_generations" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 100,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 100
+            )"#,
+        r#"ALTER TABLE {schema}."files" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."symbols" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."edges" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."references" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."search_documents" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."native_parse_cache" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 100,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 100
+            )"#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 23] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1000,6 +1057,7 @@ const MIGRATIONS: [&Migration; 22] = [
     &SUMMARY_PRIORITY_QUEUE_SCHEMA,
     &DETERMINISTIC_COCHANGE_ORDER_SCHEMA,
     &NATIVE_INDEX_DIGEST_V5_SCHEMA,
+    &STORAGE_LIFECYCLE_HARDENING_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1315,7 +1373,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 22] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 23] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1338,9 +1396,10 @@ mod tests {
         SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION,
         DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION,
         NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION,
+        STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 22] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 23] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1429,6 +1488,10 @@ mod tests {
             22,
             "ac9255910ba9dcd7babba294440758ee3bdee9ed3f142b9cd8291cc3e1128edb",
         ),
+        (
+            23,
+            "273e9a9d09aa4d15926c0d5f8d935d99857e0976e1dd3ee7a9638604f0fa36da",
+        ),
     ];
 
     #[test]
@@ -1472,7 +1535,10 @@ mod tests {
                 .windows(CHECKSUM_COMPARISON_WINDOW)
                 .all(|pair| pair[0] != pair[1])
         );
-        assert_eq!(LATEST_SCHEMA_VERSION, NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION);
+        assert_eq!(
+            LATEST_SCHEMA_VERSION,
+            STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION
+        );
     }
 
     #[test]

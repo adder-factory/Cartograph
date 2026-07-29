@@ -42,6 +42,7 @@ use cartograph_search::{
     ReviewAbstention, SearchMode, SemanticReadiness, SimilarRequest, TraversalBudget,
     WorkingTreeOverlayStatus,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -52,7 +53,7 @@ async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention()
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("12"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("multi-runtime settings failed: {error}"));
@@ -132,7 +133,7 @@ async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention()
         assert!(published.published);
         assert!(matches!(
             published.retention,
-            GenerationRetentionStatus::Completed { report }
+            GenerationRetentionStatus::Completed { report, .. }
                 if report.failed_removed == 4 && report.staging_remaining == 0
         ));
         let status = coordinator
@@ -167,7 +168,7 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("incremental settings failed: {error}"));
@@ -441,7 +442,7 @@ async fn fuzzy_name_and_parallel_source_search_use_live_paradedb_generation() {
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live find settings failed: {error}"));
@@ -523,7 +524,7 @@ async fn scip_export_and_persistent_partial_import_preserve_exact_graph_and_unco
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live SCIP settings failed: {error}"));
@@ -635,7 +636,7 @@ async fn fresh_checkout_indexes_searches_noops_and_atomically_refreshes() {
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live project settings failed: {error}"));
@@ -1196,7 +1197,7 @@ async fn graph_analysis_and_evidence_flags_reindex_without_weakening_traversal()
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("graph policy settings failed: {error}"));
@@ -1376,7 +1377,7 @@ async fn workspace_dependency_audit_combines_manifests_graph_scripts_and_dynamic
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live dependency settings failed: {error}"));
@@ -1880,7 +1881,7 @@ async fn git_history_refresh_persists_churn_and_symmetric_cochange_confidence() 
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live history settings failed: {error}"));
@@ -2111,7 +2112,7 @@ async fn issue_history_is_structural_generation_fenced_coupled_and_disableable()
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live issue-history settings failed: {error}"));
@@ -2352,7 +2353,7 @@ async fn import_audit_classifies_and_filters_complete_fresh_evidence() {
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live import settings failed: {error}"));
@@ -2493,7 +2494,7 @@ async fn rename_plan_combines_exact_references_and_attributed_textual_mentions()
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live rename settings failed: {error}"));
@@ -2617,7 +2618,7 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live test-impact settings failed: {error}"));
@@ -2747,7 +2748,7 @@ async fn file_drift_distinguishes_content_hash_from_mtime_threshold_semantics() 
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live file-drift settings failed: {error}"));
@@ -2819,7 +2820,7 @@ async fn profiled_index_skips_oversized_sources_without_weakening_the_published_
     let Some(url) = env::var(TEST_DATABASE_URL_ENV).ok() else {
         panic!("live project test database is not configured");
     };
-    let schema = unique_schema();
+    let schema = unique_schema(&url);
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("live profile settings failed: {error}"));
@@ -3103,12 +3104,37 @@ fn git(repository: &Path, arguments: &[&str]) {
     assert!(status.success(), "git fixture command returned {status}");
 }
 
-fn unique_schema() -> String {
+struct GuardedSchema {
+    name: String,
+    _cleanup: TestSchemaGuard,
+}
+
+impl std::ops::Deref for GuardedSchema {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for GuardedSchema {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.name)
+    }
+}
+
+fn unique_schema(database_url: &str) -> GuardedSchema {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("cg_agent_live_{}_{}", process::id(), nanos)
+    let name = format!("cg_agent_live_{}_{}", process::id(), nanos);
+    let cleanup = TestSchemaGuard::new(database_url, name.clone())
+        .unwrap_or_else(|error| panic!("schema cleanup guard failed: {error}"));
+    GuardedSchema {
+        name,
+        _cleanup: cleanup,
+    }
 }
 
 async fn drop_schema(settings: &DatabaseSettings, schema: &str) {

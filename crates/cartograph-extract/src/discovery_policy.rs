@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use cartograph_domain::SourceLanguage;
+use cartograph_domain::{NormalizedPath, SourceLanguage};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use thiserror::Error;
 
@@ -342,6 +342,28 @@ impl DiscoveryPolicy {
         self.duplicate_code_allowlist
             .as_ref()
             .is_some_and(|allowlist| allowlist.is_match(path))
+    }
+
+    /// Whether a normalized project-relative path, or any child beneath it,
+    /// is excluded from source discovery.
+    ///
+    /// The descendant probe lets filesystem watchers reject an excluded
+    /// directory event even when the event names the directory itself while
+    /// the configured glob ends in `/**`.
+    #[must_use]
+    pub fn excludes_path_or_descendants(&self, path: &NormalizedPath) -> bool {
+        if self.excludes(path.as_str()) {
+            return true;
+        }
+        let descendant = format!("{}/__cartograph_watch_probe__", path.as_str());
+        self.excludes(&descendant)
+    }
+
+    /// Whether a normalized path can contribute native source facts under
+    /// the configured include and language policy.
+    #[must_use]
+    pub fn supports_normalized_path(&self, path: &NormalizedPath) -> bool {
+        self.supports_path(path.as_str())
     }
 
     pub(crate) fn excludes(&self, path: &str) -> bool {
