@@ -12,6 +12,7 @@ use cartograph_db::{
 use cartograph_domain::{
     ContentDigest, GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -49,9 +50,10 @@ const SYMBOL_PAGERANK_MIGRATION_VERSION: i64 = 19;
 const SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION: i64 = 22;
-const LATEST_MIGRATION_VERSION: i64 = NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION;
-const LATER_MIGRATION_COUNT: u64 = 21;
-const EXPECTED_MIGRATIONS: [i64; 22] = [
+const STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION: i64 = 23;
+const LATEST_MIGRATION_VERSION: i64 = STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION;
+const LATER_MIGRATION_COUNT: u64 = 22;
+const EXPECTED_MIGRATIONS: [i64; 23] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -74,8 +76,9 @@ const EXPECTED_MIGRATIONS: [i64; 22] = [
     SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
     DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION,
     NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION,
+    STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION,
 ];
-const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 21] = [
+const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 22] = [
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
     REFERENCE_EVIDENCE_MIGRATION_VERSION,
@@ -97,6 +100,7 @@ const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 21] = [
     SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION,
     DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION,
     NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION,
+    STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION,
 ];
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -640,7 +644,26 @@ async fn assert_concurrent_exclusion(database: &CartographDatabase, project: &Pr
     }
 }
 
-async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool, String) {
+struct GuardedSchema {
+    name: String,
+    _cleanup: TestSchemaGuard,
+}
+
+impl std::ops::Deref for GuardedSchema {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for GuardedSchema {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.name)
+    }
+}
+
+async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool, GuardedSchema) {
     let database_url = match env::var(TEST_DATABASE_URL_ENV) {
         Ok(database_url) => database_url,
         Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
@@ -661,7 +684,16 @@ async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool,
         Err(error) => panic!("lease test database connection failed: {error}"),
     };
     let database = CartographDatabase::new(pool.clone(), settings.schema().clone());
-    (database, pool, schema)
+    let cleanup = TestSchemaGuard::new(database_url, schema.clone())
+        .unwrap_or_else(|error| panic!("lease schema guard failed: {error}"));
+    (
+        database,
+        pool,
+        GuardedSchema {
+            name: schema,
+            _cleanup: cleanup,
+        },
+    )
 }
 
 async fn register_project(database: &CartographDatabase) -> ProjectId {

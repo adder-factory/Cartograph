@@ -4,6 +4,7 @@ mod adhoc;
 mod artifacts;
 mod capabilities;
 mod centrality;
+mod compaction;
 mod coverage;
 mod database;
 mod derived_prune;
@@ -26,6 +27,7 @@ mod search;
 mod search_relation;
 mod semantic;
 mod sessions;
+mod storage;
 mod summary_priority;
 mod v1_import;
 
@@ -54,6 +56,11 @@ use cartograph_config::DatabaseSettings;
 pub use centrality::{
     BetweennessError, BetweennessReport, PageRankError, PageRankReport, SymbolBetweennessScore,
     SymbolPageRankScore, apply_page_rank, apply_sampled_betweenness,
+};
+pub use compaction::{
+    InvalidIndexArtifact, StorageCompactionCandidate, StorageCompactionError,
+    StorageCompactionPlan, StorageCompactionPolicy, StorageCompactionPolicyInput,
+    StorageCompactionReport, StorageCompactionStopReason,
 };
 pub use coverage::{
     CoverageCount, CoverageLoadInput, CoverageLoadReport, CoverageLoadRequest,
@@ -122,7 +129,9 @@ pub use managed::{
 pub use migrations::{MigrationError, MigrationReport};
 pub use parse_cache::{
     MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheError, NativeParseCacheKey,
-    NativeParseCacheKeyInput, NativeParseCacheRecord, NativeParseCacheWrite,
+    NativeParseCacheKeyInput, NativeParseCacheRecord, NativeParseCacheRetentionPolicy,
+    NativeParseCacheRetentionPolicyInput, NativeParseCacheRetentionReport,
+    NativeParseCacheRetentionRequest, NativeParseCacheStats, NativeParseCacheWrite,
 };
 pub use project::{
     GenerationCounts, GenerationStorageSummary, ProjectCurrentGeneration, ProjectPurgeError,
@@ -134,7 +143,7 @@ pub use qualified::{
 };
 pub use retention::{
     GenerationRetentionError, GenerationRetentionPolicy, GenerationRetentionReport,
-    GenerationRetentionRequest,
+    GenerationRetentionRequest, PostRetentionMaintenance,
 };
 pub use retrieval::{
     CurrentEntryPointPage, CurrentEntryPointsLookup, CurrentFileLookup, CurrentFileRecord,
@@ -165,6 +174,10 @@ pub use sessions::{
 };
 use sqlx_core::{pool::PoolOptions, query::query};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgSslMode, Postgres};
+pub use storage::{
+    GenerationDeduplicationAssessment, IndexStorageUsage, ParseCacheStorageUsage,
+    StorageUsageReport, StorageWarning, TableStorageUsage,
+};
 pub use summary_priority::{
     SummaryPriorityEnqueueReport, SummaryPriorityFailure, SummaryPriorityQueueStats,
 };

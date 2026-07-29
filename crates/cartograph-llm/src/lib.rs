@@ -24,11 +24,13 @@ pub use models::{
     install_recommended_models,
 };
 pub use project_config::{
-    LlmEndpointProbe, ProjectLlmConfigError, ProjectLlmCredentialSource, ProjectLlmProvider,
-    ProjectLlmTier, ProjectLlmTierConfig, ProjectLlmTierInput, ProjectSourceSettings,
-    ProjectSummaryEagerLimit, ProjectSummarySettings, load_exact_project_llm_tier,
-    load_project_llm_tier, load_project_max_file_size, load_project_source_settings,
-    load_project_summary_settings, probe_openai_compatible_endpoint, tune_project_llm_tier,
+    LlmEndpointProbe, ProjectCredentialMigrationEntry, ProjectCredentialMigrationReport,
+    ProjectCredentialMigrationStatus, ProjectLlmConfigError, ProjectLlmCredentialSource,
+    ProjectLlmProvider, ProjectLlmTier, ProjectLlmTierConfig, ProjectLlmTierInput,
+    ProjectSourceSettings, ProjectSummaryEagerLimit, ProjectSummarySettings,
+    load_exact_project_llm_tier, load_project_llm_tier, load_project_max_file_size,
+    load_project_source_settings, load_project_summary_settings,
+    migrate_project_inline_credentials, probe_openai_compatible_endpoint, tune_project_llm_tier,
     write_project_llm_configuration, write_project_llm_tiers, write_project_max_file_size,
 };
 pub use rerank::{OpenAiRerankClient, RerankBatch, RerankError, RerankSettings};

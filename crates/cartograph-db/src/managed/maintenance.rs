@@ -51,7 +51,7 @@ impl ManagedDatabaseArchives<'_> {
         let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
         self.database
             .maintenance()
-            .require_healthy_owned_container(true)
+            .require_healthy_owned_container(false)
             .await?;
         let _credentials = self.database.credentials.load()?;
 
@@ -996,6 +996,10 @@ mod tests {
 
     const LIVE_SCHEMA: &str = "cartograph_managed_maintenance_test";
     const LIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    const PREVIOUS_MANAGED_DATABASE_IMAGE: &str = concat!(
+        "paradedb/paradedb:0.23.5@sha256:",
+        "c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d"
+    );
 
     struct LiveDockerCleanup {
         container_name: String,
@@ -1008,7 +1012,7 @@ mod tests {
         fn drop(&mut self) {
             for name in [&self.container_name, &self.rollback_name] {
                 let _ = std::process::Command::new("docker")
-                    .args(["container", "rm", "--force", name])
+                    .args(["container", "rm", "--force", "--volumes", name])
                     .output();
             }
             let _ = std::process::Command::new("docker")
@@ -1393,39 +1397,42 @@ mod tests {
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("could not create upgrade project: {error}"));
         let database = live_database(directory.path());
-        database
-            .lifecycle()
-            .start()
-            .await
-            .unwrap_or_else(|error| panic!("could not start upgrade fixture: {error}"));
         let old_image = format!(
             "cartograph-maintenance-upgrade-old:{}",
             database.identity.project_hash
         );
         let _cleanup = live_cleanup(&database, Some(old_image.clone()));
-        assert_docker_success(&[
-            "image",
-            "tag",
-            super::super::MANAGED_DATABASE_IMAGE,
-            &old_image,
-        ]);
+        assert_docker_success(&["image", "pull", PREVIOUS_MANAGED_DATABASE_IMAGE]);
+        assert_docker_success(&["image", "tag", PREVIOUS_MANAGED_DATABASE_IMAGE, &old_image]);
         install_old_image_container(&database, &old_image).await;
+        let pre_upgrade_backup = directory.path().join("pre-upgrade.dump");
+        let backup = database
+            .archives()
+            .backup(&pre_upgrade_backup)
+            .await
+            .unwrap_or_else(|error| panic!("could not back up previous image: {error}"));
+        assert!(backup.bytes > 0);
         assert_upgrade_failure_restores_old(&database, directory.path(), &old_image).await;
         assert_pinned_upgrade_succeeds(&database).await;
     }
 
     async fn install_old_image_container(database: &ManagedDatabase, old_image: &str) {
         database
-            .lifecycle()
-            .stop()
-            .await
-            .unwrap_or_else(|error| panic!("could not stop upgrade fixture: {error}"));
-        database
             .docker
-            .containers()
-            .remove_container(&database.identity.container_name)
+            .ensure_available()
             .await
-            .unwrap_or_else(|error| panic!("could not replace upgrade fixture: {error}"));
+            .unwrap_or_else(|error| panic!("Docker is unavailable for upgrade fixture: {error}"));
+        let volume_created = database
+            .docker
+            .volumes()
+            .ensure_volume(&database.identity)
+            .await
+            .unwrap_or_else(|error| panic!("could not create old-image volume: {error}"));
+        assert!(volume_created);
+        database
+            .credentials
+            .load_or_create()
+            .unwrap_or_else(|error| panic!("could not create upgrade credentials: {error}"));
         database
             .docker
             .containers()
@@ -1502,6 +1509,14 @@ mod tests {
             .unwrap_or_else(|error| panic!("pinned-image upgrade failed: {error}"));
         assert!(upgraded.upgraded);
         assert!(upgraded.capabilities.ready);
+        assert_eq!(
+            upgraded.capabilities.pg_search_version.as_deref(),
+            Some(crate::capabilities::SUPPORTED_PG_SEARCH_VERSION)
+        );
+        assert_eq!(
+            upgraded.capabilities.pgvector_version.as_deref(),
+            Some(crate::capabilities::MANAGED_PGVECTOR_VERSION)
+        );
         let inspection = database
             .docker
             .containers()

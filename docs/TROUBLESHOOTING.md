@@ -14,10 +14,11 @@ MCP call is the control evidence.
 
 ## PostgreSQL capability failure
 
-Cartograph requires PostgreSQL 18, `pg_search` 0.23.5 with the expected preload
-state/BM25/tokenizer behavior, and pgvector. Upgrade or correct the external
-service, or use the pinned managed database on macOS/Linux. There is no SQLite
-or plain-FTS fallback.
+Cartograph requires PostgreSQL 18.4 or newer within major version 18,
+`pg_search` 0.24.3 with the expected preload state/BM25/tokenizer behavior, and
+pgvector 0.8.2 or newer. Upgrade or correct the external service, or use the
+pinned managed database on macOS/Linux. There is no SQLite or plain-FTS
+fallback.
 
 ## Managed database cannot start
 

@@ -16,6 +16,7 @@ use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
     GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation, SymbolId,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
@@ -248,6 +249,7 @@ struct DatabaseFixture {
     pool: sqlx_postgres::PgPool,
     schema: String,
     project: ProjectId,
+    _schema_guard: TestSchemaGuard,
 }
 
 async fn open_fixture() -> DatabaseFixture {
@@ -280,6 +282,8 @@ async fn open_fixture() -> DatabaseFixture {
         pool,
         schema,
         project,
+        _schema_guard: TestSchemaGuard::new(database_url, settings.schema().as_str())
+            .unwrap_or_else(|error| panic!("ingest schema guard failed: {error}")),
     }
 }
 

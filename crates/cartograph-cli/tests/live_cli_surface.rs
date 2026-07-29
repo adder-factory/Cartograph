@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde_json::Value;
-use sqlx_core::{query::query, sql_str::AssertSqlSafe};
+use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 #[test]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
@@ -18,6 +18,7 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
         .unwrap_or_default()
         .as_nanos();
     let schema = format!("cg_cli_public_surface_{}_{}", std::process::id(), nanos);
+    let read_only_schema = format!("{schema}_read_only");
     let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let project_path = project.path().to_string_lossy().into_owned();
     let missing_model = project
@@ -43,6 +44,37 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
             &["commit", "-m", "CG-99 establish public CLI surface"],
         );
 
+        failure(
+            project.path(),
+            &database_url,
+            &read_only_schema,
+            &[
+                "db",
+                "usage",
+                "--project-path",
+                &project_path,
+                "--format",
+                "json",
+            ],
+        );
+        failure(
+            project.path(),
+            &database_url,
+            &read_only_schema,
+            &[
+                "db",
+                "compact",
+                "--project-path",
+                &project_path,
+                "--format",
+                "json",
+            ],
+        );
+        assert!(
+            !schema_exists(&database_url, &read_only_schema),
+            "read-only database usage created its missing schema"
+        );
+
         success(
             project.path(),
             &database_url,
@@ -54,6 +86,64 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
             &database_url,
             &schema,
             &["status", &project_path, "--json", "--verbose"],
+        );
+        success(
+            project.path(),
+            &database_url,
+            &schema,
+            &[
+                "db",
+                "usage",
+                "--project-path",
+                &project_path,
+                "--limit",
+                "16",
+                "--format",
+                "json",
+            ],
+        );
+        success(
+            project.path(),
+            &database_url,
+            &schema,
+            &[
+                "db",
+                "compact",
+                "--project-path",
+                &project_path,
+                "--maximum-indexes",
+                "2",
+                "--minimum-index-bytes",
+                "1048576",
+                "--timeout-seconds",
+                "60",
+                "--format",
+                "json",
+            ],
+        );
+        success(
+            project.path(),
+            &database_url,
+            &schema,
+            &[
+                "db",
+                "compact",
+                "--project-path",
+                &project_path,
+                "--apply",
+                "--confirm",
+                "compact-online-indexes",
+                "--maximum-indexes",
+                "2",
+                "--minimum-index-bytes",
+                "1048576",
+                "--timeout-seconds",
+                "60",
+                "--available-headroom-bytes",
+                "1073741824",
+                "--format",
+                "json",
+            ],
         );
 
         let root = json_success(
@@ -667,6 +757,15 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
                     "--project-path",
                     &project_path,
                 ],
+                vec![
+                    "db",
+                    "compact",
+                    "--project-path",
+                    &project_path,
+                    "--apply",
+                    "--confirm",
+                    "wrong-confirmation",
+                ],
             ],
         );
 
@@ -690,6 +789,43 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
                 "--json",
             ],
         );
+        success(
+            project.path(),
+            &database_url,
+            &schema,
+            &["llm", "migrate-credentials", &project_path, "--json"],
+        );
+        seed_inline_llm_credential(project.path());
+        all_fail(
+            project.path(),
+            &database_url,
+            &schema,
+            &[
+                vec![
+                    "llm",
+                    "migrate-credentials",
+                    &project_path,
+                    "--tier-env",
+                    "summarize=CARTOGRAPH_LIVE_CLI_MISSING_KEY",
+                ],
+                vec![
+                    "llm",
+                    "migrate-credentials",
+                    &project_path,
+                    "--tier-env",
+                    "summarize=CARTOGRAPH_LIVE_CLI_MISSING_KEY",
+                    "--json",
+                ],
+                vec![
+                    "llm",
+                    "migrate-credentials",
+                    &project_path,
+                    "--apply",
+                    "--confirm",
+                    "wrong-confirmation",
+                ],
+            ],
+        );
         all_succeed(
             project.path(),
             &database_url,
@@ -698,6 +834,38 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
                 vec!["backend", "status", &project_path, "--json"],
                 vec!["backend", "stop", &project_path, "--json"],
                 vec!["backend", "logs", &project_path, "--lines", "20", "--json"],
+                vec![
+                    "backend",
+                    "cleanup",
+                    &project_path,
+                    "--minimum-age-hours",
+                    "0",
+                    "--maximum-deletions",
+                    "2",
+                ],
+                vec![
+                    "backend",
+                    "cleanup",
+                    &project_path,
+                    "--minimum-age-hours",
+                    "0",
+                    "--maximum-deletions",
+                    "2",
+                    "--json",
+                ],
+                vec![
+                    "backend",
+                    "cleanup",
+                    &project_path,
+                    "--apply",
+                    "--confirm",
+                    "cleanup-backend-junk",
+                    "--minimum-age-hours",
+                    "0",
+                    "--maximum-deletions",
+                    "2",
+                    "--json",
+                ],
             ],
         );
         all_fail(
@@ -707,6 +875,14 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
             &[
                 vec!["backend", "start", &project_path, "--dry-run", "--json"],
                 vec!["backend", "restart", &project_path, "--dry-run", "--json"],
+                vec![
+                    "backend",
+                    "cleanup",
+                    &project_path,
+                    "--apply",
+                    "--confirm",
+                    "wrong-confirmation",
+                ],
             ],
         );
         success(
@@ -788,6 +964,28 @@ app.get("/orders/:id", (request, response) => response.send(handleOrder(request.
     .unwrap_or_else(|error| panic!("manifest fixture write failed: {error}"));
 }
 
+fn seed_inline_llm_credential(root: &Path) {
+    let path = root.join(".cartograph/config.json");
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("LLM fixture config read failed: {error}"));
+    let mut config: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| panic!("LLM fixture config parse failed: {error}"));
+    let summarize = config
+        .get_mut("llm")
+        .and_then(Value::as_object_mut)
+        .and_then(|llm| llm.get_mut("summarizeLlm"))
+        .and_then(Value::as_object_mut)
+        .unwrap_or_else(|| panic!("LLM fixture summarize tier is missing"));
+    summarize.insert(
+        "apiKey".to_owned(),
+        Value::String("cartograph-live-cli-test-key".to_owned()),
+    );
+    let encoded = serde_json::to_vec_pretty(&config)
+        .unwrap_or_else(|error| panic!("LLM fixture config encode failed: {error}"));
+    std::fs::write(path, encoded)
+        .unwrap_or_else(|error| panic!("LLM fixture config write failed: {error}"));
+}
+
 fn all_succeed(root: &Path, database_url: &str, schema: &str, commands: &[Vec<&str>]) {
     for arguments in commands {
         success(root, database_url, schema, arguments);
@@ -843,6 +1041,7 @@ fn invoke(root: &Path, database_url: &str, schema: &str, arguments: &[&str]) -> 
         .env("CARTOGRAPH_DATABASE_SCHEMA", schema)
         .env("CARTOGRAPH_DATABASE_MAX_CONNECTIONS", "8")
         .env("CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS", "10000")
+        .env_remove("CARTOGRAPH_LIVE_CLI_MISSING_KEY")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
@@ -913,4 +1112,29 @@ fn cleanup_schema(database_url: &str, schema: &str) {
         .unwrap_or_else(|error| panic!("cleanup failed: {error}"));
         pool.close().await;
     });
+}
+
+fn schema_exists(database_url: &str, schema: &str) -> bool {
+    let settings =
+        cartograph_config::DatabaseSettings::parse(database_url, Some("2"), Some("10000"))
+            .and_then(|settings| settings.with_schema(schema))
+            .unwrap_or_else(|error| panic!("schema inspection settings failed: {error}"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("schema inspection runtime failed: {error}"));
+    runtime.block_on(async {
+        let pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("schema inspection connection failed: {error}"));
+        let exists =
+            query("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)")
+                .bind(schema)
+                .fetch_one(&pool)
+                .await
+                .and_then(|row| row.try_get::<bool, _>(0))
+                .unwrap_or_else(|error| panic!("schema inspection failed: {error}"));
+        pool.close().await;
+        exists
+    })
 }

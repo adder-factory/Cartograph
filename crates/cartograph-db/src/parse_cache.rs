@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use cartograph_domain::{ContentDigest, NormalizedPath, ProjectId, SourceLanguage};
+use cartograph_domain::{
+    ContentDigest, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage,
+};
+use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use thiserror::Error;
 
@@ -10,7 +13,16 @@ use crate::{
 };
 
 const CACHE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const CACHE_USAGE_TOUCH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const PATH_DIGEST_DOMAIN: &[u8] = b"cartograph-v2-native-parse-cache-path-v1";
+const MAXIMUM_RETAINED_CONTRACTS: u16 = 8;
+const MAXIMUM_RETAINED_ROWS: u64 = 1_000_000;
+const MAXIMUM_RETAINED_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAXIMUM_RETENTION_DELETIONS: u32 = 100_000;
+const DEFAULT_RETAINED_CONTRACTS: u16 = 2;
+const DEFAULT_RETAINED_ROWS: u64 = 20_000;
+const DEFAULT_RETAINED_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_RETENTION_DELETIONS: u32 = 10_000;
 /// Maximum serialized facts retained for one immutable source file.
 pub const MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
@@ -119,6 +131,124 @@ pub enum NativeParseCacheWrite {
     AlreadyPresent,
 }
 
+/// Cross-contract row and byte ceilings for one project's native parse cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeParseCacheRetentionPolicy {
+    maximum_contracts: u16,
+    maximum_rows: u64,
+    maximum_payload_bytes: u64,
+    maximum_deletions: u32,
+}
+
+/// Caller-selected parse-cache ceilings validated as one typed input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeParseCacheRetentionPolicyInput {
+    pub maximum_contracts: u16,
+    pub maximum_rows: u64,
+    pub maximum_payload_bytes: u64,
+    pub maximum_deletions: u32,
+}
+
+impl NativeParseCacheRetentionPolicy {
+    /// Validate one bounded cache-retention policy.
+    pub const fn new(
+        input: NativeParseCacheRetentionPolicyInput,
+    ) -> Result<Self, NativeParseCacheError> {
+        if input.maximum_contracts == 0 || input.maximum_contracts > MAXIMUM_RETAINED_CONTRACTS {
+            return Err(NativeParseCacheError::InvalidRetentionPolicy);
+        }
+        if input.maximum_rows == 0 || input.maximum_rows > MAXIMUM_RETAINED_ROWS {
+            return Err(NativeParseCacheError::InvalidRetentionPolicy);
+        }
+        if input.maximum_payload_bytes == 0
+            || input.maximum_payload_bytes > MAXIMUM_RETAINED_PAYLOAD_BYTES
+        {
+            return Err(NativeParseCacheError::InvalidRetentionPolicy);
+        }
+        if input.maximum_deletions == 0 || input.maximum_deletions > MAXIMUM_RETENTION_DELETIONS {
+            return Err(NativeParseCacheError::InvalidRetentionPolicy);
+        }
+        Ok(Self {
+            maximum_contracts: input.maximum_contracts,
+            maximum_rows: input.maximum_rows,
+            maximum_payload_bytes: input.maximum_payload_bytes,
+            maximum_deletions: input.maximum_deletions,
+        })
+    }
+
+    /// Conservative automatic policy: current plus one recent contract, with
+    /// independent row, logical-payload-byte, and per-call deletion caps.
+    #[must_use]
+    pub const fn automatic() -> Self {
+        Self {
+            maximum_contracts: DEFAULT_RETAINED_CONTRACTS,
+            maximum_rows: DEFAULT_RETAINED_ROWS,
+            maximum_payload_bytes: DEFAULT_RETAINED_PAYLOAD_BYTES,
+            maximum_deletions: DEFAULT_RETENTION_DELETIONS,
+        }
+    }
+
+    #[must_use]
+    pub const fn maximum_contracts(self) -> u16 {
+        self.maximum_contracts
+    }
+
+    #[must_use]
+    pub const fn maximum_rows(self) -> u64 {
+        self.maximum_rows
+    }
+
+    #[must_use]
+    pub const fn maximum_payload_bytes(self) -> u64 {
+        self.maximum_payload_bytes
+    }
+
+    #[must_use]
+    pub const fn maximum_deletions(self) -> u32 {
+        self.maximum_deletions
+    }
+}
+
+impl Default for NativeParseCacheRetentionPolicy {
+    fn default() -> Self {
+        Self::automatic()
+    }
+}
+
+/// Exact project, current extractor contract, lease fence, and deadline for
+/// one bounded cache-retention transaction.
+pub struct NativeParseCacheRetentionRequest<'a> {
+    pub project_id: &'a ProjectId,
+    pub protected_contract_digest: &'a ContentDigest,
+    pub policy: NativeParseCacheRetentionPolicy,
+    pub fence: &'a crate::LeaseFence,
+    pub statement_timeout: Duration,
+}
+
+/// Exact logical cache pressure before or after bounded cleanup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeParseCacheStats {
+    pub rows: u64,
+    pub contracts: u64,
+    pub payload_bytes: u64,
+}
+
+/// Bounded cache cleanup result. Physical heap/TOAST reclamation remains a
+/// separate explicit database-maintenance concern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeParseCacheRetentionReport {
+    pub before: NativeParseCacheStats,
+    pub after: NativeParseCacheStats,
+    pub rows_removed: u64,
+    pub payload_bytes_removed: u64,
+    pub deletion_limit_reached: bool,
+    pub over_row_budget: bool,
+    pub over_payload_byte_budget: bool,
+    pub over_contract_budget: bool,
+}
+
 /// Credential- and source-safe parse-cache failure.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum NativeParseCacheError {
@@ -128,12 +258,17 @@ pub enum NativeParseCacheError {
     CorruptStoredValue,
     #[error("native parse-cache identity produced conflicting immutable facts")]
     PayloadConflict,
+    #[error("invalid native parse-cache retention policy")]
+    InvalidRetentionPolicy,
+    #[error("native parse-cache cleanup lost its exact migration lease fence")]
+    LeaseFenceLost,
     #[error("Cartograph PostgreSQL parse-cache operation failed during {operation}")]
     DatabaseOperation { operation: &'static str },
 }
 
 impl CartographDatabase {
-    /// Load one exact path/content/extractor result and refresh only its usage timestamp.
+    /// Load one exact path/content/extractor result and refresh its usage
+    /// timestamp at most once per bounded touch interval.
     pub async fn load_native_parse_cache(
         &self,
         key: &NativeParseCacheKey,
@@ -141,16 +276,19 @@ impl CartographDatabase {
         validate_key(key)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
-            r#"UPDATE {schema}."native_parse_cache"
-               SET last_used_at = clock_timestamp()
+            r#"SELECT payload, payload_digest, source_bytes,
+                      last_used_at <= clock_timestamp() - $7 * interval '1 millisecond'
+                          AS touch_required
+               FROM {schema}."native_parse_cache"
                WHERE project_id = $1::uuid
                  AND extractor_contract_digest = $2
                  AND path_digest = $3
                  AND language = $4
                  AND content_hash = $5
-                 AND normalized_path = $6
-               RETURNING payload, payload_digest, source_bytes"#
+                 AND normalized_path = $6"#
         );
+        let touch_interval_millis = i64::try_from(CACHE_USAGE_TOUCH_INTERVAL.as_millis())
+            .map_err(|_| database_error("load"))?;
         let row = query(AssertSqlSafe(statement))
             .bind(key.project_id.as_str())
             .bind(key.extractor_contract_digest.as_str())
@@ -158,10 +296,42 @@ impl CartographDatabase {
             .bind(key.language.as_str())
             .bind(key.content_hash.as_str())
             .bind(key.path.as_str())
+            .bind(touch_interval_millis)
             .fetch_optional(&self.pool)
             .await
             .map_err(|_| database_error("load"))?;
-        row.map(decode_record).transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let touch_required = row
+            .try_get::<bool, _>(3)
+            .map_err(|_| NativeParseCacheError::CorruptStoredValue)?;
+        let record = decode_record(row)?;
+        if touch_required {
+            let touch = format!(
+                r#"UPDATE {schema}."native_parse_cache"
+                   SET last_used_at = clock_timestamp()
+                   WHERE project_id = $1::uuid
+                     AND extractor_contract_digest = $2
+                     AND path_digest = $3
+                     AND language = $4
+                     AND content_hash = $5
+                     AND normalized_path = $6
+                     AND last_used_at <= clock_timestamp() - $7 * interval '1 millisecond'"#
+            );
+            query(AssertSqlSafe(touch))
+                .bind(key.project_id.as_str())
+                .bind(key.extractor_contract_digest.as_str())
+                .bind(path_digest(&key.path))
+                .bind(key.language.as_str())
+                .bind(key.content_hash.as_str())
+                .bind(key.path.as_str())
+                .bind(touch_interval_millis)
+                .execute(&self.pool)
+                .await
+                .map_err(|_| database_error("touch"))?;
+        }
+        Ok(Some(record))
     }
 
     /// Persist one immutable extraction result and discard older content for the same path.
@@ -285,6 +455,246 @@ impl CartographDatabase {
             .map(|result| result.rows_affected() == 1)
             .map_err(|_| database_error("evict"))
     }
+
+    /// Delete a bounded oldest-first batch outside the current extractor
+    /// contract and configured cross-contract row/byte ceilings.
+    pub async fn cleanup_native_parse_cache(
+        &self,
+        request: NativeParseCacheRetentionRequest<'_>,
+    ) -> Result<NativeParseCacheRetentionReport, NativeParseCacheError> {
+        validate_retention_request(&request)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("retention-begin"))?;
+        set_local_statement_timeout(&mut transaction, request.statement_timeout)
+            .await
+            .map_err(|()| NativeParseCacheError::InvalidRetentionPolicy)?;
+        let result = cleanup_native_parse_cache_transaction(&mut transaction, self, &request).await;
+        match result {
+            Ok(report) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| database_error("retention-commit"))?;
+                Ok(report)
+            }
+            Err(error) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| database_error("retention-rollback"))?;
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn cleanup_native_parse_cache_transaction(
+    connection: &mut sqlx_postgres::PgConnection,
+    database: &CartographDatabase,
+    request: &NativeParseCacheRetentionRequest<'_>,
+) -> Result<NativeParseCacheRetentionReport, NativeParseCacheError> {
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(crate::leases::project_lock_key(
+            &database.schema,
+            request.project_id,
+        ))
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("retention-lock"))?;
+    require_live_retention_fence(connection, database, request).await?;
+    let before = load_cache_stats(connection, database, request.project_id).await?;
+    let schema = quoted_schema(&database.schema);
+    let recent_contracts = i64::from(request.policy.maximum_contracts.saturating_sub(1));
+    let maximum_rows = i64::try_from(request.policy.maximum_rows)
+        .map_err(|_| NativeParseCacheError::InvalidRetentionPolicy)?;
+    let maximum_payload_bytes = i64::try_from(request.policy.maximum_payload_bytes)
+        .map_err(|_| NativeParseCacheError::InvalidRetentionPolicy)?;
+    let maximum_deletions = i64::from(request.policy.maximum_deletions);
+    let statement = format!(
+        r#"WITH recent_contracts AS MATERIALIZED (
+                SELECT extractor_contract_digest
+                FROM {schema}."native_parse_cache"
+                WHERE project_id = $1::uuid
+                  AND extractor_contract_digest <> $2
+                GROUP BY extractor_contract_digest
+                ORDER BY max(last_used_at) DESC, extractor_contract_digest
+                LIMIT $3
+            ), protected_totals AS MATERIALIZED (
+                SELECT count(*)::bigint AS rows,
+                       COALESCE(sum(payload_bytes), 0)::bigint AS payload_bytes
+                FROM {schema}."native_parse_cache"
+                WHERE project_id = $1::uuid
+                  AND extractor_contract_digest = $2
+            ), optional_ranked AS MATERIALIZED (
+                SELECT cache.project_id, cache.extractor_contract_digest,
+                       cache.path_digest, cache.language, cache.content_hash,
+                       cache.last_used_at, cache.payload_bytes,
+                       row_number() OVER (
+                           ORDER BY cache.last_used_at DESC, cache.created_at DESC,
+                                    cache.extractor_contract_digest, cache.path_digest,
+                                    cache.language, cache.content_hash
+                       )::bigint AS retained_rank,
+                       sum(cache.payload_bytes) OVER (
+                           ORDER BY cache.last_used_at DESC, cache.created_at DESC,
+                                    cache.extractor_contract_digest, cache.path_digest,
+                                    cache.language, cache.content_hash
+                       )::bigint AS retained_payload_bytes
+                FROM {schema}."native_parse_cache" AS cache
+                INNER JOIN recent_contracts
+                    USING (extractor_contract_digest)
+                WHERE cache.project_id = $1::uuid
+            ), candidates AS MATERIALIZED (
+                SELECT cache.project_id, cache.extractor_contract_digest,
+                       cache.path_digest, cache.language, cache.content_hash,
+                       cache.last_used_at, cache.payload_bytes, 0 AS priority
+                FROM {schema}."native_parse_cache" AS cache
+                WHERE cache.project_id = $1::uuid
+                  AND cache.extractor_contract_digest <> $2
+                  AND NOT EXISTS (
+                      SELECT 1 FROM recent_contracts
+                      WHERE recent_contracts.extractor_contract_digest =
+                            cache.extractor_contract_digest
+                  )
+                UNION ALL
+                SELECT optional.project_id, optional.extractor_contract_digest,
+                       optional.path_digest, optional.language, optional.content_hash,
+                       optional.last_used_at, optional.payload_bytes, 1 AS priority
+                FROM optional_ranked AS optional
+                CROSS JOIN protected_totals AS protected
+                WHERE protected.rows + optional.retained_rank > $4
+                   OR protected.payload_bytes + optional.retained_payload_bytes > $5
+            ), bounded AS MATERIALIZED (
+                SELECT project_id, extractor_contract_digest, path_digest,
+                       language, content_hash, payload_bytes
+                FROM candidates
+                ORDER BY priority, last_used_at, extractor_contract_digest,
+                         path_digest, language, content_hash
+                LIMIT $6
+            ), deleted AS (
+                DELETE FROM {schema}."native_parse_cache" AS cache
+                USING bounded
+                WHERE cache.project_id = bounded.project_id
+                  AND cache.extractor_contract_digest = bounded.extractor_contract_digest
+                  AND cache.path_digest = bounded.path_digest
+                  AND cache.language = bounded.language
+                  AND cache.content_hash = bounded.content_hash
+                RETURNING cache.payload_bytes
+            )
+            SELECT count(*)::bigint AS rows_removed,
+                   COALESCE(sum(payload_bytes), 0)::bigint AS payload_bytes_removed
+            FROM deleted"#
+    );
+    let deleted = query(AssertSqlSafe(statement))
+        .bind(request.project_id.as_str())
+        .bind(request.protected_contract_digest.as_str())
+        .bind(recent_contracts)
+        .bind(maximum_rows)
+        .bind(maximum_payload_bytes)
+        .bind(maximum_deletions)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| database_error("retention-delete"))?;
+    let rows_removed = read_nonnegative(&deleted, "rows_removed")?;
+    let payload_bytes_removed = read_nonnegative(&deleted, "payload_bytes_removed")?;
+    let after = load_cache_stats(connection, database, request.project_id).await?;
+    require_live_retention_fence(connection, database, request).await?;
+    Ok(NativeParseCacheRetentionReport {
+        before,
+        after,
+        rows_removed,
+        payload_bytes_removed,
+        deletion_limit_reached: rows_removed == u64::from(request.policy.maximum_deletions),
+        over_row_budget: after.rows > request.policy.maximum_rows,
+        over_payload_byte_budget: after.payload_bytes > request.policy.maximum_payload_bytes,
+        over_contract_budget: after.contracts > u64::from(request.policy.maximum_contracts),
+    })
+}
+
+async fn load_cache_stats(
+    connection: &mut sqlx_postgres::PgConnection,
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+) -> Result<NativeParseCacheStats, NativeParseCacheError> {
+    let schema = quoted_schema(&database.schema);
+    let statement = format!(
+        r#"SELECT count(*)::bigint AS rows,
+                  count(DISTINCT extractor_contract_digest)::bigint AS contracts,
+                  COALESCE(sum(payload_bytes), 0)::bigint AS payload_bytes
+           FROM {schema}."native_parse_cache"
+           WHERE project_id = $1::uuid"#
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(project_id.as_str())
+        .fetch_one(connection)
+        .await
+        .map_err(|_| database_error("retention-stats"))?;
+    Ok(NativeParseCacheStats {
+        rows: read_nonnegative(&row, "rows")?,
+        contracts: read_nonnegative(&row, "contracts")?,
+        payload_bytes: read_nonnegative(&row, "payload_bytes")?,
+    })
+}
+
+async fn require_live_retention_fence(
+    connection: &mut sqlx_postgres::PgConnection,
+    database: &CartographDatabase,
+    request: &NativeParseCacheRetentionRequest<'_>,
+) -> Result<(), NativeParseCacheError> {
+    let schema = quoted_schema(&database.schema);
+    let statement = format!(
+        r#"SELECT 1 FROM {schema}."project_operation_leases"
+           WHERE project_id = $1::uuid
+             AND operation = 'migration'
+             AND lease_id = $2::uuid
+             AND generation_id IS NULL
+             AND expires_at > clock_timestamp()
+           FOR UPDATE"#
+    );
+    if query(AssertSqlSafe(statement))
+        .bind(request.project_id.as_str())
+        .bind(request.fence.lease_id().as_str())
+        .fetch_optional(connection)
+        .await
+        .map_err(|_| database_error("retention-fence"))?
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(NativeParseCacheError::LeaseFenceLost)
+    }
+}
+
+fn validate_retention_request(
+    request: &NativeParseCacheRetentionRequest<'_>,
+) -> Result<(), NativeParseCacheError> {
+    if request.statement_timeout.is_zero()
+        || request.fence.target().project_id() != request.project_id
+        || request.fence.target().operation() != ProjectOperation::Migration
+        || request.fence.target().generation_id().is_some()
+    {
+        Err(NativeParseCacheError::LeaseFenceLost)
+    } else {
+        NativeParseCacheRetentionPolicy::new(NativeParseCacheRetentionPolicyInput {
+            maximum_contracts: request.policy.maximum_contracts,
+            maximum_rows: request.policy.maximum_rows,
+            maximum_payload_bytes: request.policy.maximum_payload_bytes,
+            maximum_deletions: request.policy.maximum_deletions,
+        })
+        .map(|_| ())
+    }
+}
+
+fn read_nonnegative(
+    row: &sqlx_postgres::PgRow,
+    column: &'static str,
+) -> Result<u64, NativeParseCacheError> {
+    row.try_get::<i64, _>(column)
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(NativeParseCacheError::CorruptStoredValue)
 }
 
 fn validate_key(key: &NativeParseCacheKey) -> Result<(), NativeParseCacheError> {

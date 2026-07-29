@@ -14,6 +14,7 @@ use cartograph_search::{
     EvidenceItem, EvidenceReason, IndexFreshness, RetrievalConfidence, ReviewAbstention,
     ReviewPacket, TraversalBudget,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, sql_str::AssertSqlSafe};
 use tokio::process::{Child, Command};
 
@@ -103,6 +104,8 @@ async fn native_patch_task_gate_meets_v1_1_33_and_repeats_exactly() {
         return;
     };
     let schema = unique_schema();
+    let _schema_guard = TestSchemaGuard::new(&url, schema.clone())
+        .unwrap_or_else(|error| panic!("patch-task schema guard failed: {error}"));
     let settings = DatabaseSettings::parse(&url, Some("8"), Some("10000"))
         .and_then(|value| value.with_schema(&schema))
         .unwrap_or_else(|error| panic!("patch-task database settings failed: {error}"));

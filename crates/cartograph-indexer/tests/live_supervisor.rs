@@ -31,6 +31,7 @@ use cartograph_indexer::{
     StageWorkItem, StageWorkload, SupervisorConfig, SupervisorError, SupervisorRequest,
     SupervisorState, build_native_generation,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use tokio::sync::oneshot;
 
@@ -2559,6 +2560,7 @@ struct DatabaseFixture {
     pool: sqlx_postgres::PgPool,
     schema: String,
     project: ProjectId,
+    _schema_guard: TestSchemaGuard,
 }
 
 struct DropFlag(Arc<AtomicBool>);
@@ -2620,6 +2622,8 @@ async fn open_fixture_with_schema(schema: &str) -> DatabaseFixture {
         pool,
         schema: schema.to_owned(),
         project,
+        _schema_guard: TestSchemaGuard::new(database_url, schema)
+            .unwrap_or_else(|error| panic!("supervisor schema guard failed: {error}")),
     }
 }
 

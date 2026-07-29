@@ -16,6 +16,7 @@ use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, GenerationId, NormalizedPath, ProjectId,
     ProjectOperation, SourceManifestDigestBuilder, project_root_identity,
 };
+use cartograph_test_support::TestSchemaGuard;
 use sha2::{Digest, Sha256};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -379,6 +380,7 @@ struct Fixture {
     database: CartographDatabase,
     pool: sqlx_postgres::PgPool,
     destination_schema: String,
+    _schema_guard: TestSchemaGuard,
 }
 
 async fn open_fixture() -> Fixture {
@@ -405,6 +407,8 @@ async fn open_fixture() -> Fixture {
         database: CartographDatabase::new(pool.clone(), settings.schema().clone()),
         pool,
         destination_schema,
+        _schema_guard: TestSchemaGuard::new(database_url, settings.schema().as_str())
+            .unwrap_or_else(|error| panic!("import schema guard failed: {error}")),
     }
 }
 

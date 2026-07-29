@@ -35,9 +35,9 @@ If the project has no Cartograph setup, ask:
 Cartograph v2 is:
 
 - a native Rust executable;
-- PostgreSQL 18 only;
-- code-aware BM25 through ParadeDB `pg_search` 0.23.5;
-- pgvector-required;
+- PostgreSQL 18.4 or newer within major version 18;
+- code-aware BM25 through ParadeDB `pg_search` 0.24.3;
+- pgvector 0.8.2 or newer;
 - useful without an LLM through exact, lexical, graph, review, and test-impact
   retrieval.
 
@@ -93,8 +93,9 @@ refuses foreign resources with colliding names. Do not weaken those checks.
 
 ### External PostgreSQL (all supported platforms)
 
-The database administrator must install PostgreSQL 18, `pg_search` 0.23.5, and
-pgvector, then create both extensions. Supply the URL through the environment:
+The database administrator must install PostgreSQL 18.4 or newer within major
+version 18, `pg_search` 0.24.3, and pgvector 0.8.2 or newer, then create both
+extensions. Supply the URL through the environment:
 
 ```sh
 export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
@@ -257,9 +258,11 @@ Do not install SQLite tooling into v2 to shorten this workflow.
 Every successful index/no-op reconciliation attempts a small automatic bounded
 cleanup: it keeps the two newest superseded generations, terminalizes failed
 pre-lease work, and can collect staging rows only after they have been unleased
-for at least ten minutes. Import-referenced staging/failed generations and all
-ready/current work remain protected. After backup and import verification, an
-explicit larger bounded batch is:
+for at least ten minutes. It can also reconcile ready work only after 24 hours
+when it is unleased, non-current, and not part of incomplete import recovery.
+The same lease bounds the parse cache by current-plus-one extractor contracts,
+20,000 rows, 2 GiB logical payload, and a 10,000-row deletion batch. After
+backup and import verification, an explicit larger bounded batch is:
 
 ```sh
 cartograph db prune \
@@ -270,9 +273,15 @@ cartograph db prune \
   --format json
 ```
 
-This preserves the current generation, recent or leased staging work, all ready
-work, incomplete import recovery state, and the two newest superseded
-generations. Inspect each report before requesting another batch.
+This preserves the current generation, recent or leased staging/ready work,
+incomplete import recovery state, and the two newest superseded generations.
+Inspect each report before requesting another batch.
+
+Use `cartograph db usage --project-path . --format json` before diagnosing
+bloat. `cartograph db compact` is a read-only online B-tree plan by default;
+apply requires `--confirm compact-online-indexes`, verified free-space headroom,
+and rebuilds one index at a time. It never automates `VACUUM FULL` or drops
+invalid concurrent-reindex artifacts.
 
 ## Common failures
 

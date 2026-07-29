@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     env,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -18,6 +18,7 @@ use url::Url;
 
 const CONFIG_DIRECTORY: &str = ".cartograph";
 const CONFIG_FILE: &str = "config.json";
+const CONFIG_LOCK_FILE: &str = "config.lock";
 const MAXIMUM_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_MODEL_BYTES: usize = 256;
 const MAXIMUM_API_KEY_BYTES: usize = 8_192;
@@ -356,6 +357,37 @@ pub enum ProjectLlmCredentialSource {
     InlineLegacy,
 }
 
+/// Secret-safe outcome for one legacy inline credential migration candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectCredentialMigrationStatus {
+    Ready,
+    Migrated,
+    EnvironmentMissing,
+    EnvironmentMismatch,
+    UnsupportedProvider,
+}
+
+/// One credential migration decision. The credential value is never retained
+/// in or exposed by this report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCredentialMigrationEntry {
+    pub tier: ProjectLlmTier,
+    pub environment: Option<String>,
+    pub status: ProjectCredentialMigrationStatus,
+}
+
+/// Atomic project credential migration report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCredentialMigrationReport {
+    pub dry_run: bool,
+    pub candidates: Vec<ProjectCredentialMigrationEntry>,
+    pub migrated: usize,
+    pub remaining_inline: usize,
+}
+
 /// Bounded `/v1/models` probe used by the agent-driven setup planner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -661,6 +693,8 @@ pub enum ProjectLlmConfigError {
     CredentialUnavailable,
     #[error("Cartograph project configuration cannot be written safely")]
     WriteFailed,
+    #[error("Cartograph project configuration changed concurrently")]
+    ConcurrentModification,
 }
 
 /// Load one tier, retaining v1's ask/classify-to-summarize fallback.
@@ -1003,6 +1037,186 @@ pub fn write_project_llm_tiers(
     inputs: &[ProjectLlmTierInput],
 ) -> Result<(), ProjectLlmConfigError> {
     write_project_llm_configuration(project_root, inputs, &[])
+}
+
+/// Replace legacy inline credentials with named environment references only
+/// when the current process proves that the selected environment variable
+/// contains the exact same secret. The update is one atomic config write and
+/// reports no secret material.
+pub fn migrate_project_inline_credentials(
+    project_root: &Path,
+    environment_overrides: &[(ProjectLlmTier, String)],
+    apply: bool,
+) -> Result<ProjectCredentialMigrationReport, ProjectLlmConfigError> {
+    migrate_project_inline_credentials_with(CredentialMigrationRequest {
+        project_root,
+        environment_overrides,
+        apply,
+        resolve: |name: &str| env::var(name).ok(),
+    })
+}
+
+struct CredentialMigrationRequest<'a, Resolve> {
+    project_root: &'a Path,
+    environment_overrides: &'a [(ProjectLlmTier, String)],
+    apply: bool,
+    resolve: Resolve,
+}
+
+struct CredentialMigrationState<Resolve> {
+    overrides: BTreeMap<ProjectLlmTier, String>,
+    apply: bool,
+    resolve: Resolve,
+    candidates: Vec<ProjectCredentialMigrationEntry>,
+    migrated: usize,
+}
+
+impl<Resolve> CredentialMigrationState<Resolve>
+where
+    Resolve: FnMut(&str) -> Option<String>,
+{
+    fn new(
+        environment_overrides: &[(ProjectLlmTier, String)],
+        apply: bool,
+        resolve: Resolve,
+    ) -> Result<Self, ProjectLlmConfigError> {
+        let mut overrides = BTreeMap::new();
+        for (tier, name) in environment_overrides {
+            validate_env_name(name)?;
+            if overrides.insert(*tier, name.clone()).is_some() {
+                return Err(ProjectLlmConfigError::InvalidTier);
+            }
+        }
+        Ok(Self {
+            overrides,
+            apply,
+            resolve,
+            candidates: Vec::new(),
+            migrated: 0,
+        })
+    }
+
+    fn migrate_tier(
+        &mut self,
+        llm: &mut Map<String, Value>,
+        tier: ProjectLlmTier,
+    ) -> Result<(), ProjectLlmConfigError> {
+        let Some(value) = llm.get_mut(tier.config_key()) else {
+            return Ok(());
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        let object = value
+            .as_object_mut()
+            .ok_or(ProjectLlmConfigError::InvalidTier)?;
+        let Some(inline) = optional_string_value(object, "apiKey")? else {
+            return Ok(());
+        };
+        validate_api_key(inline)?;
+        if object.contains_key("apiKeyEnv") {
+            return Err(ProjectLlmConfigError::InvalidTier);
+        }
+        let provider = object
+            .get("provider")
+            .and_then(Value::as_str)
+            .and_then(ProjectLlmProvider::parse)
+            .ok_or(ProjectLlmConfigError::InvalidTier)?;
+        let environment = self
+            .overrides
+            .get(&tier)
+            .cloned()
+            .or_else(|| match provider {
+                ProjectLlmProvider::OpenAiCompat => Some("OPENAI_API_KEY".to_owned()),
+                ProjectLlmProvider::AnthropicApi => Some("ANTHROPIC_API_KEY".to_owned()),
+                ProjectLlmProvider::ClaudeBridge => None,
+            });
+        let status = match environment.as_deref() {
+            None => ProjectCredentialMigrationStatus::UnsupportedProvider,
+            Some(name) => match (self.resolve)(name) {
+                None => ProjectCredentialMigrationStatus::EnvironmentMissing,
+                Some(value) if value != inline => {
+                    ProjectCredentialMigrationStatus::EnvironmentMismatch
+                }
+                Some(_) if self.apply => {
+                    object.remove("apiKey");
+                    object.insert("apiKeyEnv".to_owned(), Value::String(name.to_owned()));
+                    self.migrated = self.migrated.saturating_add(1);
+                    ProjectCredentialMigrationStatus::Migrated
+                }
+                Some(_) => ProjectCredentialMigrationStatus::Ready,
+            },
+        };
+        self.candidates.push(ProjectCredentialMigrationEntry {
+            tier,
+            environment,
+            status,
+        });
+        Ok(())
+    }
+
+    fn report(self) -> ProjectCredentialMigrationReport {
+        let remaining_inline = self.candidates.len().saturating_sub(self.migrated);
+        ProjectCredentialMigrationReport {
+            dry_run: !self.apply,
+            candidates: self.candidates,
+            migrated: self.migrated,
+            remaining_inline,
+        }
+    }
+}
+
+fn migrate_project_inline_credentials_with<Resolve>(
+    request: CredentialMigrationRequest<'_, Resolve>,
+) -> Result<ProjectCredentialMigrationReport, ProjectLlmConfigError>
+where
+    Resolve: FnMut(&str) -> Option<String>,
+{
+    migrate_project_inline_credentials_with_observer(request, || {})
+}
+
+fn migrate_project_inline_credentials_with_observer<Resolve, Observe>(
+    request: CredentialMigrationRequest<'_, Resolve>,
+    observe_before_write: Observe,
+) -> Result<ProjectCredentialMigrationReport, ProjectLlmConfigError>
+where
+    Resolve: FnMut(&str) -> Option<String>,
+    Observe: FnOnce(),
+{
+    let mut state = CredentialMigrationState::new(
+        request.environment_overrides,
+        request.apply,
+        request.resolve,
+    )?;
+    let Some(snapshot) = read_config_snapshot(request.project_root)? else {
+        return Ok(state.report());
+    };
+    let mut config = snapshot.value;
+    let root = config
+        .as_object_mut()
+        .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+    let Some(llm) = root.get_mut("llm").and_then(Value::as_object_mut) else {
+        return Ok(state.report());
+    };
+    for tier in credential_migration_tiers() {
+        state.migrate_tier(llm, tier)?;
+    }
+    if state.apply && state.migrated > 0 {
+        observe_before_write();
+        write_config_value_if_unchanged(request.project_root, &config, &snapshot.bytes)?;
+    }
+    Ok(state.report())
+}
+
+const fn credential_migration_tiers() -> [ProjectLlmTier; 6] {
+    [
+        ProjectLlmTier::Embedding,
+        ProjectLlmTier::Summarize,
+        ProjectLlmTier::Local,
+        ProjectLlmTier::Ask,
+        ProjectLlmTier::Classify,
+        ProjectLlmTier::Reranker,
+    ]
 }
 
 /// Atomically update configured tiers and explicitly disable incompatible ones.
@@ -1553,9 +1767,32 @@ fn object_field<'a>(
         .ok_or(ProjectLlmConfigError::InvalidConfig)
 }
 
+struct ConfigSnapshot {
+    value: Value,
+    bytes: Vec<u8>,
+}
+
+struct ConfigWriteLock {
+    _file: File,
+}
+
 fn read_config_value(project_root: &Path) -> Result<Option<Value>, ProjectLlmConfigError> {
+    read_config_snapshot(project_root).map(|snapshot| snapshot.map(|snapshot| snapshot.value))
+}
+
+fn read_config_snapshot(
+    project_root: &Path,
+) -> Result<Option<ConfigSnapshot>, ProjectLlmConfigError> {
     let path = config_path(project_root)?;
-    let metadata = match fs::symlink_metadata(&path) {
+    let Some(bytes) = read_config_bytes(&path)? else {
+        return Ok(None);
+    };
+    let value = serde_json::from_slice(&bytes).map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
+    Ok(Some(ConfigSnapshot { value, bytes }))
+}
+
+fn read_config_bytes(path: &Path) -> Result<Option<Vec<u8>>, ProjectLlmConfigError> {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
@@ -1574,12 +1811,26 @@ fn read_config_value(project_root: &Path) -> Result<Option<Value>, ProjectLlmCon
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAXIMUM_CONFIG_BYTES {
         return Err(ProjectLlmConfigError::ConfigTooLarge);
     }
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| ProjectLlmConfigError::InvalidConfig)
+    Ok(Some(bytes))
 }
 
 fn write_config_value(project_root: &Path, value: &Value) -> Result<(), ProjectLlmConfigError> {
+    write_config_value_guarded(project_root, value, None)
+}
+
+fn write_config_value_if_unchanged(
+    project_root: &Path,
+    value: &Value,
+    expected: &[u8],
+) -> Result<(), ProjectLlmConfigError> {
+    write_config_value_guarded(project_root, value, Some(expected))
+}
+
+fn write_config_value_guarded(
+    project_root: &Path,
+    value: &Value,
+    expected: Option<&[u8]>,
+) -> Result<(), ProjectLlmConfigError> {
     let root = canonical_project_root(project_root)?;
     let directory = root.join(CONFIG_DIRECTORY);
     match fs::symlink_metadata(&directory) {
@@ -1590,9 +1841,17 @@ fn write_config_value(project_root: &Path, value: &Value) -> Result<(), ProjectL
         }
         Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
     }
+    let _lock = acquire_config_write_lock(&directory)?;
     let path = directory.join(CONFIG_FILE);
     if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(ProjectLlmConfigError::ProjectUnavailable);
+    }
+    if let Some(expected) = expected {
+        let current =
+            read_config_bytes(&path)?.ok_or(ProjectLlmConfigError::ConcurrentModification)?;
+        if current != expected {
+            return Err(ProjectLlmConfigError::ConcurrentModification);
+        }
     }
     let mut bytes =
         serde_json::to_vec_pretty(value).map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
@@ -1613,6 +1872,40 @@ fn write_config_value(project_root: &Path, value: &Value) -> Result<(), ProjectL
     File::open(directory)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| ProjectLlmConfigError::WriteFailed)
+}
+
+fn acquire_config_write_lock(directory: &Path) -> Result<ConfigWriteLock, ProjectLlmConfigError> {
+    let path = directory.join(CONFIG_LOCK_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| ProjectLlmConfigError::WriteFailed)?;
+    if !file
+        .metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return Err(ProjectLlmConfigError::ProjectUnavailable);
+    }
+    set_private_permissions(&file)?;
+    match file.try_lock() {
+        Ok(()) => Ok(ConfigWriteLock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err(ProjectLlmConfigError::ConcurrentModification)
+        }
+        Err(_) => Err(ProjectLlmConfigError::WriteFailed),
+    }
 }
 
 #[cfg(unix)]
@@ -1789,6 +2082,109 @@ mod tests {
             ProjectLlmCredentialSource::InlineLegacy
         );
         assert!(!format!("{loaded:?}").contains("do-not-print"));
+    }
+
+    #[test]
+    fn inline_credential_migration_requires_an_exact_environment_match() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        fs::create_dir(root.path().join(CONFIG_DIRECTORY))
+            .unwrap_or_else(|error| panic!("config directory failed: {error}"));
+        let path = root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE);
+        fs::write(&path, LEGACY_INLINE_CONFIG)
+            .unwrap_or_else(|error| panic!("legacy fixture failed: {error}"));
+
+        let blocked = migrate_project_inline_credentials_with(CredentialMigrationRequest {
+            project_root: root.path(),
+            environment_overrides: &[],
+            apply: true,
+            resolve: |_: &str| Some("different-secret".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("blocked migration failed: {error}"));
+        assert_eq!(blocked.migrated, 0);
+        assert_eq!(blocked.remaining_inline, 1);
+        assert_eq!(
+            blocked.candidates[0].status,
+            ProjectCredentialMigrationStatus::EnvironmentMismatch
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("blocked config read failed: {error}"))
+                .contains("do-not-print")
+        );
+
+        let dry_run = migrate_project_inline_credentials_with(CredentialMigrationRequest {
+            project_root: root.path(),
+            environment_overrides: &[(ProjectLlmTier::Summarize, "CARTOGRAPH_TEST_KEY".to_owned())],
+            apply: false,
+            resolve: |_: &str| Some("do-not-print".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("dry migration failed: {error}"));
+        assert_eq!(
+            dry_run.candidates[0].status,
+            ProjectCredentialMigrationStatus::Ready
+        );
+        assert!(
+            !serde_json::to_string(&dry_run)
+                .unwrap_or_else(|error| panic!("report serialization failed: {error}"))
+                .contains("do-not-print")
+        );
+
+        let applied = migrate_project_inline_credentials_with(CredentialMigrationRequest {
+            project_root: root.path(),
+            environment_overrides: &[(ProjectLlmTier::Summarize, "CARTOGRAPH_TEST_KEY".to_owned())],
+            apply: true,
+            resolve: |_: &str| Some("do-not-print".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("credential migration failed: {error}"));
+        assert_eq!(applied.migrated, 1);
+        assert_eq!(applied.remaining_inline, 0);
+        let updated = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("updated config read failed: {error}"));
+        assert!(!updated.contains("do-not-print"));
+        assert!(updated.contains("\"apiKeyEnv\": \"CARTOGRAPH_TEST_KEY\""));
+    }
+
+    #[test]
+    fn inline_credential_migration_rejects_a_concurrent_config_change() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        fs::create_dir(root.path().join(CONFIG_DIRECTORY))
+            .unwrap_or_else(|error| panic!("config directory failed: {error}"));
+        let path = root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE);
+        fs::write(&path, LEGACY_INLINE_CONFIG)
+            .unwrap_or_else(|error| panic!("legacy fixture failed: {error}"));
+        let mut concurrent = serde_json::from_str::<Value>(LEGACY_INLINE_CONFIG)
+            .unwrap_or_else(|error| panic!("concurrent fixture parse failed: {error}"));
+        concurrent
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("concurrent fixture root is not an object"))
+            .insert("concurrentEdit".to_owned(), Value::Bool(true));
+        let mut concurrent_bytes = serde_json::to_vec_pretty(&concurrent)
+            .unwrap_or_else(|error| panic!("concurrent fixture encode failed: {error}"));
+        concurrent_bytes.push(b'\n');
+        let observed_path = path.clone();
+        let observed_bytes = concurrent_bytes.clone();
+
+        let result = migrate_project_inline_credentials_with_observer(
+            CredentialMigrationRequest {
+                project_root: root.path(),
+                environment_overrides: &[(
+                    ProjectLlmTier::Summarize,
+                    "CARTOGRAPH_TEST_KEY".to_owned(),
+                )],
+                apply: true,
+                resolve: |_: &str| Some("do-not-print".to_owned()),
+            },
+            move || {
+                fs::write(observed_path, observed_bytes)
+                    .unwrap_or_else(|error| panic!("concurrent config write failed: {error}"));
+            },
+        );
+
+        assert_eq!(result, Err(ProjectLlmConfigError::ConcurrentModification));
+        assert_eq!(
+            fs::read(path).unwrap_or_else(|error| panic!("concurrent config read failed: {error}")),
+            concurrent_bytes
+        );
     }
 
     #[test]

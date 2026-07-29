@@ -67,8 +67,9 @@ cartograph context 'explain the primary request flow' --project-path .
 ```
 
 The managed lifecycle creates project-owned, loopback-only Docker resources
-using the pinned upstream ParadeDB image. PostgreSQL 18, `pg_search` 0.23.5,
-pgvector, preload, BM25, and source-code tokenization are hard checks.
+using the pinned upstream ParadeDB image. PostgreSQL 18.4 or newer within major
+version 18, `pg_search` 0.24.3, pgvector 0.8.2 or newer, preload, BM25, and
+source-code tokenization are hard checks.
 
 For external PostgreSQL, create both extensions and pass secrets through the
 process environment:

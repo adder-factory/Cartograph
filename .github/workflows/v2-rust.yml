@@ -77,7 +77,7 @@ jobs:
       - name: Dependency advisories, licenses, bans, and sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          rust-version: '1.96.1'
+          rust-version: '1.97.1'
           command: check
           arguments: --all-features
 
@@ -218,7 +218,7 @@ jobs:
           scripts/build-linux-rust-release.sh
           x86_64-unknown-linux-gnu
           linux-x64
-          rust:1.96.1-bookworm@sha256:d99f7b31f49909348dc59b51f3c95d1efded1701ffb222f095aaab7de3c4abd8
+          rust:1.97.1-bookworm@sha256:389c1ae98c20fbcadca68a685482749267cec3c90893ae4671c5a37cc894c416
           debian:12-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 
   paradedb:
@@ -236,7 +236,7 @@ jobs:
       CARTOGRAPH_POSTGRES_PASSWORD: cartograph-v2-ci-only
       CARTOGRAPH_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
       CARTOGRAPH_TEST_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
-      CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d
+      CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.24.3@sha256:8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
@@ -304,6 +304,18 @@ jobs:
           --command 'CREATE EXTENSION IF NOT EXISTS pg_search;'
           --command 'CREATE EXTENSION IF NOT EXISTS vector;'
 
+      - name: Capture clean schema baseline
+        id: schema_baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec cartograph-v2-ci-postgres \
+            psql --username cartograph --dbname cartograph \
+              --set ON_ERROR_STOP=1 --tuples-only --no-align \
+              --command "SELECT nspname FROM pg_catalog.pg_namespace ORDER BY nspname" \
+            > /tmp/cartograph-schema-baseline.txt
+          test -s /tmp/cartograph-schema-baseline.txt
+
       - name: Verify loopback-only publication
         shell: bash
         run: |
@@ -331,6 +343,12 @@ jobs:
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_generation -- --ignored --nocapture
+
+      - name: Storage observability, retention, and online compaction integration test
+        if: matrix.shard == 'database'
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_storage_lifecycle -- --ignored --nocapture
 
       - name: COPY ingestion and deterministic digest integration test
         if: matrix.shard == 'database'
@@ -422,6 +440,28 @@ jobs:
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib
           managed::maintenance::tests:: -- --ignored --nocapture --test-threads=1
+
+      - name: Remove named self-index fixture schema
+        if: always() && matrix.shard == 'operations' && steps.start_paradedb.outcome == 'success'
+        run: >-
+          docker exec cartograph-v2-ci-postgres
+          psql --username cartograph --dbname cartograph --set ON_ERROR_STOP=1
+          --command 'DROP SCHEMA IF EXISTS cartograph_ci_self_index CASCADE;'
+
+      - name: Assert live tests left zero PostgreSQL schemas
+        if: always() && steps.schema_baseline.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec cartograph-v2-ci-postgres \
+            psql --username cartograph --dbname cartograph \
+              --set ON_ERROR_STOP=1 --tuples-only --no-align \
+              --command "SELECT nspname FROM pg_catalog.pg_namespace ORDER BY nspname" \
+            > /tmp/cartograph-schema-final.txt
+          if ! diff -u /tmp/cartograph-schema-baseline.txt /tmp/cartograph-schema-final.txt; then
+            echo 'Live tests leaked PostgreSQL schemas; panic-safe cleanup is a release gate.' >&2
+            exit 1
+          fi
 
       - name: ParadeDB logs on failure
         if: failure()

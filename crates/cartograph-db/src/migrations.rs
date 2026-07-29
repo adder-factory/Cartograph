@@ -30,7 +30,8 @@ const SYMBOL_PAGERANK_SCHEMA_VERSION: i64 = 19;
 const SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION: i64 = 22;
-const LATEST_SCHEMA_VERSION: i64 = NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION;
+const STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION: i64 = 23;
+const LATEST_SCHEMA_VERSION: i64 = STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
@@ -977,7 +978,63 @@ const NATIVE_INDEX_DIGEST_V5_SCHEMA: Migration = Migration {
                 CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5))"#],
 };
 
-const MIGRATIONS: [&Migration; 22] = [
+const STORAGE_LIFECYCLE_HARDENING_SCHEMA: Migration = Migration {
+    version: STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION,
+    name: "bounded_cache_and_high_churn_autovacuum",
+    statements: &[
+        r#"ALTER TABLE {schema}."native_parse_cache"
+            ADD COLUMN payload_bytes bigint
+                GENERATED ALWAYS AS (octet_length(payload)::bigint) VIRTUAL"#,
+        r#"CREATE INDEX native_parse_cache_contract_recency_idx
+            ON {schema}."native_parse_cache" (
+                project_id, extractor_contract_digest, last_used_at DESC, path_digest
+            )"#,
+        r#"ALTER TABLE {schema}."index_generations" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 100,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 100
+            )"#,
+        r#"ALTER TABLE {schema}."files" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."symbols" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."edges" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."references" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."search_documents" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."native_parse_cache" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 100,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 100
+            )"#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 23] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1000,6 +1057,7 @@ const MIGRATIONS: [&Migration; 22] = [
     &SUMMARY_PRIORITY_QUEUE_SCHEMA,
     &DETERMINISTIC_COCHANGE_ORDER_SCHEMA,
     &NATIVE_INDEX_DIGEST_V5_SCHEMA,
+    &STORAGE_LIFECYCLE_HARDENING_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1056,9 +1114,32 @@ pub enum MigrationError {
         /// Newer recorded migration version.
         version: i64,
     },
+    /// A read-only caller found an older, otherwise valid append-only ledger.
+    #[error("database schema version {version} is older than required version {required_version}")]
+    SchemaVersionBehind {
+        /// Highest migration version recorded by the database.
+        version: i64,
+        /// Exact migration version required by this binary.
+        required_version: i64,
+    },
 }
 
 impl CartographDatabase {
+    /// Verify the immutable migration ledger without creating a schema, applying
+    /// migrations, or performing derived-index maintenance.
+    pub async fn verify_current_schema(&self) -> Result<MigrationReport, MigrationError> {
+        let quoted_schema = crate::database::quoted_schema(&self.schema);
+        let mut connection =
+            self.pool
+                .acquire()
+                .await
+                .map_err(|_| MigrationError::DatabaseOperation {
+                    operation: "acquire-read-only-ledger",
+                })?;
+        let ledger = load_ledger(&mut connection, &quoted_schema).await?;
+        validate_current_ledger(&ledger)
+    }
+
     /// Verify hard capabilities, then apply append-only migrations under a
     /// transaction-scoped advisory lock.
     pub async fn migrate(&self) -> Result<MigrationReport, MigrationError> {
@@ -1144,7 +1225,7 @@ async fn migrate_transaction(
     schema: &DatabaseSchema,
 ) -> Result<MigrationReport, MigrationError> {
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("{MIGRATION_LOCK_NAMESPACE}:{}", schema.as_str()))
+        .bind(migration_lock_key(schema))
         .execute(&mut *connection)
         .await
         .map_err(|_| MigrationError::DatabaseOperation {
@@ -1219,6 +1300,10 @@ async fn migrate_transaction(
     })
 }
 
+pub(crate) fn migration_lock_key(schema: &DatabaseSchema) -> String {
+    format!("{MIGRATION_LOCK_NAMESPACE}:{}", schema.as_str())
+}
+
 async fn load_ledger(
     connection: &mut PgConnection,
     quoted_schema: &str,
@@ -1252,6 +1337,48 @@ async fn load_ledger(
         ledger.insert(version, LedgerRecord { name, checksum });
     }
     Ok(ledger)
+}
+
+fn validate_current_ledger(
+    ledger: &BTreeMap<i64, LedgerRecord>,
+) -> Result<MigrationReport, MigrationError> {
+    if let Some(version) = ledger
+        .keys()
+        .copied()
+        .find(|version| *version > LATEST_SCHEMA_VERSION)
+    {
+        return Err(MigrationError::SchemaVersionAhead { version });
+    }
+
+    let recorded_version = ledger.keys().next_back().copied().unwrap_or_default();
+    for migration in MIGRATIONS {
+        let checksum = migration_checksum(migration);
+        match ledger.get(&migration.version) {
+            Some(record) if record.name != migration.name || record.checksum != checksum => {
+                return Err(MigrationError::LedgerConflict {
+                    version: migration.version,
+                });
+            }
+            Some(_) => {}
+            None if migration.version <= recorded_version => {
+                return Err(MigrationError::LedgerGap {
+                    missing_version: migration.version,
+                    recorded_version,
+                });
+            }
+            None => {
+                return Err(MigrationError::SchemaVersionBehind {
+                    version: recorded_version,
+                    required_version: LATEST_SCHEMA_VERSION,
+                });
+            }
+        }
+    }
+
+    Ok(MigrationReport {
+        applied_versions: Vec::new(),
+        current_version: LATEST_SCHEMA_VERSION,
+    })
 }
 
 async fn apply_migration(
@@ -1315,7 +1442,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 22] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 23] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1338,9 +1465,10 @@ mod tests {
         SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION,
         DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION,
         NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION,
+        STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 22] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 23] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1429,6 +1557,10 @@ mod tests {
             22,
             "ac9255910ba9dcd7babba294440758ee3bdee9ed3f142b9cd8291cc3e1128edb",
         ),
+        (
+            23,
+            "273e9a9d09aa4d15926c0d5f8d935d99857e0976e1dd3ee7a9638604f0fa36da",
+        ),
     ];
 
     #[test]
@@ -1472,7 +1604,10 @@ mod tests {
                 .windows(CHECKSUM_COMPARISON_WINDOW)
                 .all(|pair| pair[0] != pair[1])
         );
-        assert_eq!(LATEST_SCHEMA_VERSION, NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION);
+        assert_eq!(
+            LATEST_SCHEMA_VERSION,
+            STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -1487,5 +1622,38 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn read_only_ledger_verification_requires_the_exact_current_schema() {
+        let mut ledger = MIGRATIONS
+            .iter()
+            .map(|migration| {
+                (
+                    migration.version,
+                    LedgerRecord {
+                        name: migration.name.to_owned(),
+                        checksum: migration_checksum(migration),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            validate_current_ledger(&ledger),
+            Ok(MigrationReport {
+                applied_versions: Vec::new(),
+                current_version: LATEST_SCHEMA_VERSION,
+            })
+        );
+
+        ledger.remove(&LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            validate_current_ledger(&ledger),
+            Err(MigrationError::SchemaVersionBehind {
+                version: LATEST_SCHEMA_VERSION - 1,
+                required_version: LATEST_SCHEMA_VERSION,
+            })
+        );
     }
 }

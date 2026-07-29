@@ -78,12 +78,37 @@ cartograph db derived-index
 cartograph db remove
 cartograph db import-v1
 cartograph db prune
+cartograph db usage
+cartograph db compact
 ```
 
 Managed lifecycle is supported on macOS/Linux with local Docker. Windows uses
 external PostgreSQL. Restore, upgrade, derived-index rebuild, remove, v1 import,
-and prune require explicit operation-specific confirmation. See
+and prune require explicit operation-specific confirmation. `db usage` is
+read-only: it verifies the exact current append-only migration ledger and fails
+with migration guidance instead of creating or upgrading a schema. `db compact`
+is a dry run unless `--apply --confirm compact-online-indexes` is supplied;
+managed mode always verifies filesystem headroom and rejects an operator
+override, while external PostgreSQL requires `--available-headroom-bytes`. See
 [PostgreSQL operations](STORAGE-BACKENDS.md).
+
+## LLM credentials and local backend state
+
+```text
+cartograph llm migrate-credentials [PROJECT] [--tier-env TIER=ENV]
+  [--apply --confirm migrate-inline-credentials]
+cartograph backend cleanup [PROJECT] [--minimum-age-hours 24]
+  [--apply --confirm cleanup-backend-junk]
+```
+
+Both commands are dry-run-first, bounded, and emit secret-free JSON. Credential
+migration requires an exact environment-value match, serializes Cartograph
+writers with a private lock, and aborts if the config bytes changed after the
+proof was made. Backend cleanup considers only generated-name rotated logs and
+invalid current-version PID state; it preserves current logs, valid or active
+processes, and state written by an unsupported newer/older format. Cleanup JSON
+exposes only validated project-relative entry names and stable path-free reason
+codes; unsafe/control-character names are never echoed.
 
 ## Database selection
 

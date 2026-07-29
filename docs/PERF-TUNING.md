@@ -36,6 +36,21 @@ Native MCP auto-sync uses a recursive OS watcher where available, debounces
 bursts, and periodically reconciles missed events. If native watching cannot be
 established it uses the bounded polling watcher. Status exposes watcher events,
 reconciliations, attempts, publications, and errors without project paths.
+Watcher admission uses the same default/project include, exclude, and language
+policy as indexing, reloads after `config.json` changes, and ignores access-only,
+build-output, dependency-cache, and private `.cartograph` churn. Configuration
+and SCIP-overlay events remain explicit reconciliation triggers.
+
+Managed local LLM logs rotate at 32 MiB and retain one `.1` file. Inspect stale
+rotated logs and invalid PID state without mutation, then apply only a bounded
+age-qualified batch with the exact confirmation:
+
+```sh
+cartograph backend cleanup . --json
+cartograph backend cleanup . --apply --confirm cleanup-backend-junk --json
+```
+
+Cleanup never removes current logs, valid process state, or any active backend.
 
 ## Measurement gates
 

@@ -28,9 +28,10 @@ generation provenance, freshness, confidence, truncation, and explicit
 abstention instead of presenting stale or incomplete data as certainty.
 
 > [!IMPORTANT]
-> Cartograph v2 is PostgreSQL-only. It requires PostgreSQL 18, ParadeDB
-> `pg_search` 0.23.5, and pgvector. There is no SQLite runtime, compatibility
-> mode, importer, optional feature, or fallback.
+> Cartograph v2 is PostgreSQL-only. It requires PostgreSQL 18.4 or newer within
+> major version 18, ParadeDB `pg_search` 0.24.3, and pgvector 0.8.2 or newer.
+> There is no SQLite runtime, compatibility mode, importer, optional feature,
+> or fallback.
 
 ## What Cartograph gives an agent
 
@@ -137,9 +138,10 @@ Linux release binaries target Debian 12's glibc 2.36 baseline or newer. Every
 Linux archive is built in a pinned Rust/Bookworm container and executed in a
 separate pinned Debian 12 runtime container before publication.
 
-For an external deployment, the database administrator installs PostgreSQL 18,
-`pg_search` 0.23.5, and pgvector and creates both extensions. Load the connection
-URL from the shell or a secret manager rather than a committed file:
+For an external deployment, the database administrator installs PostgreSQL 18.4
+or newer within major version 18, `pg_search` 0.24.3, and pgvector 0.8.2 or
+newer, and creates both extensions. Load the connection URL from the shell or a
+secret manager rather than a committed file:
 
 ```sh
 export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
@@ -269,6 +271,8 @@ Common read-only or idempotent lifecycle commands:
 ```sh
 cartograph db status --project-path .
 cartograph db logs --project-path . --tail 200
+cartograph db usage --project-path . --format json
+cartograph db compact --project-path . --format json  # dry-run plan
 cartograph db derived-index --project-path .
 cartograph db backup ./cartograph.backup --project-path .
 cartograph db stop --project-path .
@@ -277,6 +281,15 @@ cartograph db stop --project-path .
 Restore, upgrade, derived-index rebuild, removal, import, and prune can replace
 or delete state. They require the exact confirmation phrase shown by command
 help and are never implied by a diagnostic request.
+
+`db usage` separates schema heap/index/TOAST, generation, and parse-cache
+allocations. `db compact` plans bounded one-at-a-time concurrent B-tree rebuilds
+and remains read-only until `--apply --confirm compact-online-indexes`; apply
+also requires verified filesystem headroom. Legacy inline LLM keys can be
+audited with `cartograph llm migrate-credentials .` and atomically moved only
+after an exact environment-value match. Local backend logs rotate at 32 MiB;
+`cartograph backend cleanup .` is a bounded dry run for old rotated logs and
+invalid PID state.
 
 Community ParadeDB BM25 is treated as rebuildable local derived data. Shared,
 hosted, replicated, customer-facing, or paying production use requires a

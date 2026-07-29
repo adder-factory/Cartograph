@@ -6,7 +6,11 @@ use sqlx_postgres::{PgConnection, PgPool};
 
 use crate::DatabaseError;
 
-const MINIMUM_POSTGRES_VERSION_NUM: i32 = 180_000;
+const MINIMUM_POSTGRES_VERSION_NUM: i32 = 180_004;
+const NEXT_POSTGRES_MAJOR_VERSION_NUM: i32 = 190_000;
+pub(crate) const SUPPORTED_PG_SEARCH_VERSION: &str = "0.24.3";
+pub(crate) const MANAGED_PGVECTOR_VERSION: &str = "0.8.2";
+const MINIMUM_PGVECTOR_VERSION: [u32; 3] = [0, 8, 2];
 const DEFAULT_CAPABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPECTED_SOURCE_CODE_TOKENS: [&str; 5] = ["cartograph", "search", "snake", "case", "42"];
 
@@ -170,12 +174,21 @@ pub(crate) async fn probe_capabilities_connection(
                 check: "bm25-access-method",
             })?;
 
-    let source_code_tokens = query_scalar::<_, Vec<String>>(
-        "SELECT 'cartographSearch snake_case 42'::pdb.source_code::text[]",
-    )
-    .fetch_one(connection)
-    .await
-    .map_err(|_| ());
+    let source_code_tokens =
+        if extensions.get("pg_search").map(String::as_str) == Some(SUPPORTED_PG_SEARCH_VERSION) {
+            query_scalar::<_, Vec<String>>(
+                "SELECT 'cartographSearch snake_case 42'::pdb.source_code::text[]",
+            )
+            .fetch_one(connection)
+            .await
+            .map_err(|_| ())
+        } else {
+            // Loading extension-defined types while the catalog and shared library
+            // versions differ can terminate the PostgreSQL backend. Report the
+            // version mismatch first and leave runtime probing to the supported
+            // catalog version.
+            Err(())
+        };
 
     Ok(build_report(ProbeFacts {
         postgres_version_num,
@@ -190,6 +203,11 @@ pub(crate) async fn probe_capabilities_connection(
 fn build_report(facts: ProbeFacts) -> CapabilityReport {
     let pg_search_version = facts.extensions.get("pg_search").cloned();
     let pgvector_version = facts.extensions.get("vector").cloned();
+    let pg_search_version_supported =
+        pg_search_version.as_deref() == Some(SUPPORTED_PG_SEARCH_VERSION);
+    let pgvector_version_supported = pgvector_version
+        .as_deref()
+        .is_some_and(pgvector_version_is_supported);
     let source_code_tokenizer_ready = facts.source_code_tokens.as_ref().is_ok_and(|tokens| {
         tokens
             .iter()
@@ -205,24 +223,25 @@ fn build_report(facts: ProbeFacts) -> CapabilityReport {
     let checks = vec![
         check(CheckInput {
             id: "postgres-18",
-            passed: facts.postgres_version_num >= MINIMUM_POSTGRES_VERSION_NUM,
+            passed: (MINIMUM_POSTGRES_VERSION_NUM..NEXT_POSTGRES_MAJOR_VERSION_NUM)
+                .contains(&facts.postgres_version_num),
             message: format!(
                 "PostgreSQL server reports version number {}",
                 facts.postgres_version_num
             ),
-            remediation: "Run Cartograph's pinned PostgreSQL 18 + ParadeDB image or upgrade the configured server.",
+            remediation: "Run Cartograph's pinned PostgreSQL 18.4 + ParadeDB image or upgrade the configured server to PostgreSQL 18.4 or newer.",
         }),
         check(CheckInput {
             id: "pg-search-extension",
-            passed: pg_search_version.is_some(),
+            passed: pg_search_version_supported,
             message: extension_message("pg_search", pg_search_version.as_deref()),
-            remediation: "Install pg_search, add it to shared_preload_libraries, restart PostgreSQL, and run CREATE EXTENSION pg_search.",
+            remediation: "Install the Cartograph-supported pg_search 0.24.3 build, add it to shared_preload_libraries, restart PostgreSQL, and create or update the extension to 0.24.3.",
         }),
         check(CheckInput {
             id: "pgvector-extension",
-            passed: pgvector_version.is_some(),
+            passed: pgvector_version_supported,
             message: extension_message("vector", pgvector_version.as_deref()),
-            remediation: "Install pgvector and run CREATE EXTENSION vector in the Cartograph database.",
+            remediation: "Install pgvector 0.8.2 or newer and create or update the vector extension in the Cartograph database.",
         }),
         check(CheckInput {
             id: "pg-search-preload",
@@ -287,17 +306,34 @@ fn extension_message(name: &str, version: Option<&str>) -> String {
     }
 }
 
+fn pgvector_version_is_supported(version: &str) -> bool {
+    parse_three_part_version(version).is_some_and(|parsed| parsed >= MINIMUM_PGVECTOR_VERSION)
+}
+
+fn parse_three_part_version(version: &str) -> Option<[u32; 3]> {
+    let mut parts = version.split('.');
+    let parsed = [
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ];
+    parts.next().is_none().then_some(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ready_facts() -> ProbeFacts {
         ProbeFacts {
-            postgres_version_num: 180_002,
-            postgres_version: "PostgreSQL 18.2".to_owned(),
+            postgres_version_num: 180_004,
+            postgres_version: "PostgreSQL 18.4".to_owned(),
             extensions: HashMap::from([
-                ("pg_search".to_owned(), "0.23.5".to_owned()),
-                ("vector".to_owned(), "0.8.1".to_owned()),
+                (
+                    "pg_search".to_owned(),
+                    SUPPORTED_PG_SEARCH_VERSION.to_owned(),
+                ),
+                ("vector".to_owned(), "0.8.2".to_owned()),
             ]),
             preload_libraries: "pg_search,pg_cron".to_owned(),
             has_bm25_access_method: true,
@@ -369,6 +405,68 @@ mod tests {
         assert!(!report.ready);
         assert_eq!(report.checks[0].id, "postgres-18");
         assert_eq!(report.checks[0].status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn vulnerable_postgres_18_minor_is_rejected() {
+        let mut facts = ready_facts();
+        facts.postgres_version_num = 180_003;
+        facts.postgres_version = "PostgreSQL 18.3".to_owned();
+
+        let report = build_report(facts);
+
+        assert!(!report.ready);
+        assert_eq!(report.checks[0].id, "postgres-18");
+        assert_eq!(report.checks[0].status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn unvalidated_postgres_19_is_rejected() {
+        let mut facts = ready_facts();
+        facts.postgres_version_num = 190_000;
+        facts.postgres_version = "PostgreSQL 19".to_owned();
+
+        let report = build_report(facts);
+
+        assert!(!report.ready);
+        assert_eq!(report.checks[0].id, "postgres-18");
+        assert_eq!(report.checks[0].status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn unsupported_pg_search_version_is_rejected() {
+        let mut facts = ready_facts();
+        facts
+            .extensions
+            .insert("pg_search".to_owned(), "0.23.5".to_owned());
+
+        let report = build_report(facts);
+        let extension_check = report
+            .checks
+            .iter()
+            .find(|check| check.id == "pg-search-extension");
+
+        assert!(matches!(extension_check, Some(check) if check.status == CheckStatus::Fail));
+    }
+
+    #[test]
+    fn pgvector_before_0_8_2_is_rejected() {
+        let mut facts = ready_facts();
+        facts
+            .extensions
+            .insert("vector".to_owned(), "0.8.1".to_owned());
+
+        let report = build_report(facts);
+        let extension_check = report
+            .checks
+            .iter()
+            .find(|check| check.id == "pgvector-extension");
+
+        assert!(matches!(extension_check, Some(check) if check.status == CheckStatus::Fail));
+        assert!(pgvector_version_is_supported("0.8.2"));
+        assert!(pgvector_version_is_supported("0.9.0"));
+        assert!(!pgvector_version_is_supported("0.8.1"));
+        assert!(!pgvector_version_is_supported("0.8.2.1"));
     }
 
     #[test]
