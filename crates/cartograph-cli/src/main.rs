@@ -1,5 +1,8 @@
 #![recursion_limit = "256"]
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("Cartograph v2 supports only 64-bit operating systems.");
+
 use std::{
     collections::BTreeMap,
     env, fs,

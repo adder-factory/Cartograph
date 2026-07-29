@@ -355,5 +355,5 @@ migrations, deterministic COPY/publication, leases, fault handling,
 and cleanup. Its exact-SHA green `main` run emits a GitHub-attested gate
 manifest; the tag workflow verifies that evidence rather than rerunning the
 live suite. Stable releases still require independent review, Sonar/static
-analysis, five native archive smokes, checksums, provenance, a signed tag, and
+analysis, four native 64-bit archive smokes, checksums, provenance, a signed tag, and
 a tag SHA equal to the published `main` head.

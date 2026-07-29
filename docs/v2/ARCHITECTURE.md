@@ -394,7 +394,7 @@ Stable release requires format, strict Clippy, workspace tests, cargo-deny,
 SQLite-free dependency/source proofs, live PostgreSQL/ParadeDB capability and
 fault suites, semantic/import/retention/agent evaluations, deterministic worker
 matrices, Rust LCOV plus Sonar quality gate, structural floor, independent
-review, native archive privacy/smoke audits, five-platform CI builds, checksums,
+review, native archive privacy/smoke audits, four-platform 64-bit CI builds, checksums,
 provenance, signed tag, and exact tag/main/release SHA identity.
 
 The complete remote gate runs once for the exact published `main` SHA. Its
@@ -402,7 +402,7 @@ quality, Windows, Linux-baseline, and sharded live PostgreSQL jobs produce a
 GitHub-attested SHA-bound manifest. A tag-triggered release must verify that
 manifest's repository, workflow, source digest, `refs/heads/main` source ref,
 GitHub-hosted runner provenance, and required-job set before any platform build.
-The tag workflow then performs only release-specific five-platform build,
+The tag workflow then performs only release-specific four-platform build,
 archive, checksum, provenance, and publication work; it never substitutes the
 attestation for the local Sonar or independent-review requirements.
 

@@ -6,6 +6,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VALIDATION="$ROOT/.github/workflows/v2-rust.yml"
 RELEASE="$ROOT/.github/workflows/release.yml"
 PULL_HELPER="$ROOT/scripts/pull-pinned-image.sh"
+SMOKE_HELPER="$ROOT/scripts/smoke-rust-release.sh"
+UNIX_BUILD_HELPER="$ROOT/scripts/build-rust-release.sh"
+LINUX_BUILD_HELPER="$ROOT/scripts/build-linux-rust-release.sh"
+UNIX_INSTALLER="$ROOT/install.sh"
+WINDOWS_INSTALLER="$ROOT/install.ps1"
+UPGRADE_SOURCE="$ROOT/crates/cartograph-cli/src/upgrade.rs"
+CLI_SOURCE="$ROOT/crates/cartograph-cli/src/main.rs"
+DENY_CONFIG="$ROOT/deny.toml"
 
 fail() {
   echo "release workflow contract failed: $1" >&2
@@ -20,6 +28,12 @@ job_block() {
     capture && /^  [[:alnum:]_-]+:$/ { exit }
     capture { print }
   ' "$workflow"
+}
+
+literal_count() {
+  local needle="$1"
+  awk -v needle="$needle" 'index($0, needle) { count += 1 } END { print count + 0 }' \
+    "$VALIDATION" "$RELEASE"
 }
 
 grep -Fq 'attest-main-gate:' "$VALIDATION" || fail 'main-gate attestation job is missing'
@@ -62,13 +76,72 @@ grep -Fq 'cache_key: release-windows-x64' "$RELEASE" || \
 if grep -Fq 'cache_key: v2-windows' "$RELEASE"; then
   fail 'Windows release build still shares the dev and Clippy cache'
 fi
-grep -Fq "save-if: 'true'" "$RELEASE" || fail 'release-profile cache is not persisted'
+grep -Fq 'os: macos-26' "$RELEASE" || fail 'Apple Silicon release does not target macOS 26'
+grep -Fq 'rust_target: aarch64-apple-darwin' "$RELEASE" || \
+  fail 'Apple Silicon release target is missing'
+if grep -Fq 'darwin-x64' "$RELEASE" "$UNIX_BUILD_HELPER" "$UPGRADE_SOURCE"; then
+  fail 'Intel macOS remains in the native release contract'
+fi
+if grep -Fq 'x86_64-apple-darwin' "$RELEASE" "$UNIX_BUILD_HELPER" "$UPGRADE_SOURCE" "$DENY_CONFIG"; then
+  fail 'Intel macOS remains in a compiled or audited target set'
+fi
+if grep -Eq '(i[3-6]86|armv7|thumbv7|windows-x86|linux-x86)' \
+  "$RELEASE" "$UNIX_BUILD_HELPER" "$LINUX_BUILD_HELPER" "$DENY_CONFIG"; then
+  fail 'a 32-bit native release target is configured'
+fi
+grep -Fq '#[cfg(not(target_pointer_width = "64"))]' "$CLI_SOURCE" || \
+  fail 'the native CLI does not fail closed on 32-bit targets'
+grep -Fq 'Cartograph v2 supports only 64-bit operating systems.' "$CLI_SOURCE" || \
+  fail 'the 32-bit compile failure is not actionable'
+grep -Fq 'rust:1.97.1-trixie@sha256:' "$VALIDATION" || \
+  fail 'Linux validation does not build on current stable Debian'
+grep -Fq 'debian:13-slim@sha256:' "$VALIDATION" || \
+  fail 'Linux validation does not smoke on current stable Debian'
+grep -Fq 'rust:1.97.1-trixie@sha256:' "$RELEASE" || \
+  fail 'Linux releases do not build on current stable Debian'
+grep -Fq 'debian:13-slim@sha256:' "$RELEASE" || \
+  fail 'Linux releases do not smoke on current stable Debian'
+if grep -Eq '(bookworm|debian:12|Debian 12|glibc 2\.36)' \
+  "$VALIDATION" "$RELEASE" "$LINUX_BUILD_HELPER"; then
+  fail 'the old Debian 12 compatibility floor remains configured'
+fi
+grep -Fq 'MACOSX_DEPLOYMENT_TARGET=26.0' "$UNIX_BUILD_HELPER" || \
+  fail 'macOS release binaries do not require the current major version'
+grep -Fq 'minos 26.0' "$UNIX_BUILD_HELPER" || \
+  fail 'macOS release binaries do not verify their minimum OS contract'
+grep -Fq 'requires glibc 2.41 or newer' "$UNIX_INSTALLER" || \
+  fail 'the Unix installer does not reject old Linux before download'
+grep -Fq 'requires macOS 26 or newer' "$UNIX_INSTALLER" || \
+  fail 'the Unix installer does not reject old macOS before download'
+grep -Fq "{ 26100 } else { 26200 }" "$WINDOWS_INSTALLER" || \
+  fail 'the Windows installer does not reject old Windows before download'
+if grep -Fq 'Swatinem/rust-cache@' "$VALIDATION" "$RELEASE"; then
+  fail 'Rust cache still bundles the deprecated core-punycode dependency path'
+fi
+CACHE_ACTION_SHA='55cc8345863c7cc4c66a329aec7e433d2d1c52a9'
+restore_count="$(literal_count "actions/cache/restore@$CACHE_ACTION_SHA")"
+[[ "$restore_count" == 4 ]] || fail 'every Rust cache restore must use pinned actions/cache v6.1.0'
+save_count="$(literal_count "actions/cache/save@$CACHE_ACTION_SHA")"
+[[ "$save_count" == 3 ]] || fail 'bounded main, Windows, and release cache saves are missing'
+for cache_path in \
+  '.cargo/registry/index/' \
+  '.cargo/registry/cache/' \
+  '.cargo/git/db/' \
+  'target/'; do
+  path_count="$(literal_count "$cache_path")"
+  [[ "$path_count" == 7 ]] || fail "Rust cache path coverage changed for $cache_path"
+done
+grep -Fq 'steps.rust-cache.outputs.cache-primary-key' "$VALIDATION" || \
+  fail 'main cache saves are not bound to their exact restored primary key'
+grep -Fq 'steps.rust-cache.outputs.cache-primary-key' "$RELEASE" || \
+  fail 'release cache saves are not bound to their exact restored primary key'
 grep -Fq 'scripts/pull-pinned-image.sh' "$VALIDATION" || fail 'ParadeDB pulls do not use bounded retries'
 grep -Fq 'PostgreSQL init process complete; ready for start up.' "$VALIDATION" || \
   fail 'ParadeDB readiness can accept the temporary bootstrap server'
 grep -Fq -- "--command 'SELECT 1;'" "$VALIDATION" || \
   fail 'ParadeDB readiness does not prove a live SQL connection'
-grep -Fq "cache-workspace-crates: 'true'" "$VALIDATION" || fail 'live shards do not reuse the compiled workspace'
+grep -Fq -- '-v2-ubuntu-' "$VALIDATION" || \
+  fail 'live shards do not reuse the compiled Ubuntu workspace cache'
 
 unpinned_actions="$({
   grep -hE '^[[:space:]]*(- )?uses:' "$VALIDATION" "$RELEASE"
@@ -85,6 +158,65 @@ CARTOGRAPH_DOCKER_BIN=/usr/bin/false "$PULL_HELPER" example.invalid/cartograph:l
 
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/cartograph-pull-test.XXXXXX")"
 trap 'rm -rf "$fixture"' EXIT
+
+unsupported_release_status=0
+"$UNIX_BUILD_HELPER" x86_64-apple-darwin darwin-x64 \
+  >"$fixture/unsupported-release.out" 2>"$fixture/unsupported-release.err" || \
+  unsupported_release_status=$?
+[[ "$unsupported_release_status" -eq 2 ]] || fail 'Intel macOS release pairing was not rejected'
+
+fake_uname_dir="$fixture/fake-uname"
+mkdir -p "$fake_uname_dir"
+cat >"$fake_uname_dir/uname" <<'EOF'
+#!/usr/bin/env sh
+case "${1:-}" in
+  -s) printf '%s\n' "${CARTOGRAPH_FAKE_UNAME_S:?}" ;;
+  -m) printf '%s\n' "${CARTOGRAPH_FAKE_UNAME_M:?}" ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod 0755 "$fake_uname_dir/uname"
+intel_install_status=0
+PATH="$fake_uname_dir:$PATH" HOME="$fixture/home" \
+  CARTOGRAPH_FAKE_UNAME_S=Darwin CARTOGRAPH_FAKE_UNAME_M=x86_64 "$UNIX_INSTALLER" \
+  >"$fixture/intel-install.out" 2>"$fixture/intel-install.err" || intel_install_status=$?
+[[ "$intel_install_status" -eq 1 ]] || fail 'Intel macOS installer request was not rejected'
+grep -Fq 'Intel macOS is not supported' "$fixture/intel-install.err" || \
+  fail 'Intel macOS installer failure is not actionable'
+
+cat >"$fake_uname_dir/ldd" <<'EOF'
+#!/usr/bin/env sh
+printf '%s\n' 'ldd (Debian GLIBC 2.36-9+deb12u13) 2.36'
+EOF
+cat >"$fake_uname_dir/sw_vers" <<'EOF'
+#!/usr/bin/env sh
+[ "${1:-}" = -productVersion ]
+printf '%s\n' '15.7.6'
+EOF
+cat >"$fake_uname_dir/curl" <<'EOF'
+#!/usr/bin/env sh
+echo 'installer reached the network unexpectedly' >&2
+exit 99
+EOF
+chmod 0755 "$fake_uname_dir/ldd" "$fake_uname_dir/sw_vers" "$fake_uname_dir/curl"
+old_macos_install_status=0
+PATH="$fake_uname_dir:$PATH" HOME="$fixture/home" \
+  CARTOGRAPH_FAKE_UNAME_S=Darwin CARTOGRAPH_FAKE_UNAME_M=arm64 "$UNIX_INSTALLER" \
+  >"$fixture/old-macos-install.out" 2>"$fixture/old-macos-install.err" || \
+  old_macos_install_status=$?
+[[ "$old_macos_install_status" -eq 1 ]] || fail 'old macOS installer request was not rejected'
+grep -Fq 'requires macOS 26 or newer' "$fixture/old-macos-install.err" || \
+  fail 'old macOS installer failure is not actionable or happened after network access'
+
+old_linux_install_status=0
+PATH="$fake_uname_dir:$PATH" HOME="$fixture/home" \
+  CARTOGRAPH_FAKE_UNAME_S=Linux CARTOGRAPH_FAKE_UNAME_M=x86_64 "$UNIX_INSTALLER" \
+  >"$fixture/old-linux-install.out" 2>"$fixture/old-linux-install.err" || \
+  old_linux_install_status=$?
+[[ "$old_linux_install_status" -eq 1 ]] || fail 'old Linux installer request was not rejected'
+grep -Fq 'requires glibc 2.41 or newer' "$fixture/old-linux-install.err" || \
+  fail 'old Linux installer failure is not actionable or happened after network access'
+
 fake_docker="$fixture/docker"
 cat >"$fake_docker" <<'EOF'
 #!/usr/bin/env bash
@@ -119,5 +251,44 @@ CARTOGRAPH_DOCKER_BIN="$fake_docker" \
   CARTOGRAPH_IMAGE_PULL_RETRY_DELAY_SECONDS=0 \
   "$PULL_HELPER" "$IMAGE" 4 >/dev/null
 [[ "$(<"$fixture/state/count")" == 3 ]] || fail 'bounded pull retry count changed'
+
+space_binary_directory="$fixture/release path with spaces"
+space_binary="$space_binary_directory/cartograph"
+mkdir -p "$space_binary_directory"
+cat >"$space_binary" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  --version)
+    printf 'cartograph %s\n' "${CARTOGRAPH_SMOKE_FIXTURE_VERSION:?}"
+    ;;
+  --help)
+    cat <<'HELP'
+  index
+  status
+  find
+  context
+  graph
+  affected
+  review
+  install
+  uninstall
+  serve
+  doctor
+  db
+HELP
+    ;;
+  serve)
+    echo 'serve requires --mcp' >&2
+    exit 1
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+EOF
+chmod 0755 "$space_binary"
+fixture_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "cartograph-cli") | .version')"
+CARTOGRAPH_SMOKE_FIXTURE_VERSION="$fixture_version" "$SMOKE_HELPER" "$space_binary" >/dev/null
 
 echo 'Release workflow attestation, sharding, and pinned-image retry contracts passed.'

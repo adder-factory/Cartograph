@@ -1,7 +1,7 @@
 # Cartograph v2 tag-only release pipeline. The complete live suite runs once on
 # the exact published main SHA in v2-rust.yml and emits a GitHub-attested gate
 # manifest. This workflow verifies that immutable evidence, then performs only
-# the five release-specific native builds, archive audits, provenance, and
+# the four release-specific native builds, archive audits, provenance, and
 # publication.
 # PostgreSQL, ParadeDB, and pgvector are external runtime services and are never
 # bundled in these archives.
@@ -154,25 +154,20 @@ jobs:
             asset_target: linux-x64
             shell: bash
             cache_key: unused-linux-x64
-            build_image: rust:1.97.1-bookworm@sha256:389c1ae98c20fbcadca68a685482749267cec3c90893ae4671c5a37cc894c416
-            runtime_image: debian:12-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+            build_image: rust:1.97.1-trixie@sha256:9146b0f62e1939989aa96fc8d89699a43c5635bf212819235a773e1a9e71a98f
+            runtime_image: debian:13-slim@sha256:9bb8a3626890e084ab54e888fdd7c4b6d2f119071cd4c5dc5fecb4d73062aa5f
           - os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             asset_target: linux-arm64
             shell: bash
             cache_key: unused-linux-arm64
-            build_image: rust:1.97.1-bookworm@sha256:3f06c76f95a67e66d431f1420bd128251b5d660055ffdf7c4d08add39dd32640
-            runtime_image: debian:12-slim@sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0
-          - os: macos-latest
+            build_image: rust:1.97.1-trixie@sha256:6b52e2a871abbb9c26cbdd5425b0aba10f3dbd9485bee18e55b91efafeb4bf17
+            runtime_image: debian:13-slim@sha256:8b5033c95ca60cdffb0e0f4c446e5f714e82d8960a9ef4153c0eaf13e988b0ea
+          - os: macos-26
             rust_target: aarch64-apple-darwin
             asset_target: darwin-arm64
             shell: bash
             cache_key: release-darwin-arm64
-          - os: macos-latest
-            rust_target: x86_64-apple-darwin
-            asset_target: darwin-x64
-            shell: bash
-            cache_key: release-darwin-x64
           - os: windows-latest
             rust_target: x86_64-pc-windows-msvc
             asset_target: windows-x64
@@ -193,20 +188,24 @@ jobs:
 
       - name: Restore Rust dependency cache
         if: ${{ !startsWith(matrix.asset_target, 'linux-') }}
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          shared-key: ${{ matrix.cache_key }}
-          add-job-id-key: 'false'
-          cache-bin: 'false'
-          cache-workspace-crates: 'true'
-          save-if: 'true'
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cartograph-rust-${{ runner.os }}-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: |
+            cartograph-rust-${{ runner.os }}-${{ matrix.cache_key }}-
 
       - name: Build, audit, and smoke Unix archive
         if: matrix.shell == 'bash' && !startsWith(matrix.asset_target, 'linux-')
         shell: bash
         run: scripts/build-rust-release.sh '${{ matrix.rust_target }}' '${{ matrix.asset_target }}'
 
-      - name: Build and smoke Linux archive on the glibc 2.36 baseline
+      - name: Build and smoke Linux archive on current stable glibc 2.41
         if: startsWith(matrix.asset_target, 'linux-')
         shell: bash
         run: >-
@@ -220,6 +219,17 @@ jobs:
         if: matrix.shell == 'pwsh'
         shell: pwsh
         run: scripts/build-rust-release.ps1 -Target '${{ matrix.rust_target }}' -AssetTarget '${{ matrix.asset_target }}'
+
+      - name: Save Rust dependency cache
+        if: ${{ !startsWith(matrix.asset_target, 'linux-') && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -252,7 +262,7 @@ jobs:
           set -euo pipefail
           mkdir -p release
           find release-artifacts -type f -name 'cartograph-*' -exec cp {} release/ \;
-          expected=$'cartograph-darwin-arm64\ncartograph-darwin-arm64.tar.gz\ncartograph-darwin-x64\ncartograph-darwin-x64.tar.gz\ncartograph-linux-arm64\ncartograph-linux-arm64.tar.gz\ncartograph-linux-x64\ncartograph-linux-x64.tar.gz\ncartograph-windows-x64.exe\ncartograph-windows-x64.zip'
+          expected=$'cartograph-darwin-arm64\ncartograph-darwin-arm64.tar.gz\ncartograph-linux-arm64\ncartograph-linux-arm64.tar.gz\ncartograph-linux-x64\ncartograph-linux-x64.tar.gz\ncartograph-windows-x64.exe\ncartograph-windows-x64.zip'
           actual="$(find release -maxdepth 1 -type f -name 'cartograph-*' -exec basename {} \; | LC_ALL=C sort)"
           if [[ "$actual" != "$expected" ]]; then
             echo 'release asset set mismatch' >&2

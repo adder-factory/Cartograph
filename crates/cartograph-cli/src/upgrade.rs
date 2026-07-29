@@ -648,8 +648,8 @@ const fn asset_name() -> Result<&'static str, String> {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const fn asset_name() -> Result<&'static str, String> {
-    Ok("cartograph-darwin-x64")
+fn asset_name() -> Result<&'static str, String> {
+    Err("Intel macOS is not supported; use Apple Silicon with macOS 26 or newer".to_owned())
 }
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
