@@ -41,8 +41,12 @@ irm https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 
 cartograph --version
 ```
 
-The installers select one of the five release platforms and verify the archive
-against the release `SHA256SUMS`. Building from source requires only the pinned
+The installers select one of the four 64-bit release platforms and verify the
+archive against the release `SHA256SUMS`. Supported native releases are macOS
+26 on Apple Silicon, current Linux with glibc 2.41 or newer on arm64/x64,
+Windows 11 25H2 or newer, and Windows Server 2025 or newer. Intel macOS and
+every 32-bit target are unsupported.
+Building from source requires only the pinned
 Rust toolchain:
 
 ```sh

@@ -51,13 +51,17 @@ jobs:
         run: rustup show active-toolchain
 
       - name: Restore Rust dependency cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          shared-key: v2-ubuntu
-          add-job-id-key: 'false'
-          cache-bin: 'false'
-          cache-workspace-crates: 'true'
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cartograph-rust-${{ runner.os }}-v2-ubuntu-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: |
+            cartograph-rust-${{ runner.os }}-v2-ubuntu-
 
       - name: Fetch locked dependencies
         run: cargo fetch --locked
@@ -179,6 +183,20 @@ jobs:
           fi
           echo 'No executable TypeScript/Bun/Node/browser-viewer runtime found.'
 
+      - name: Save Rust dependency cache
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
   windows-portability:
     name: Windows strict compile portability
     runs-on: windows-latest
@@ -190,13 +208,17 @@ jobs:
         run: rustup show active-toolchain
 
       - name: Restore Rust dependency cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          shared-key: v2-windows
-          add-job-id-key: 'false'
-          cache-bin: 'false'
-          cache-workspace-crates: 'true'
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cartograph-rust-${{ runner.os }}-v2-windows-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: |
+            cartograph-rust-${{ runner.os }}-v2-windows-
 
       - name: Windows release path privacy regression
         shell: pwsh
@@ -205,21 +227,35 @@ jobs:
       - name: Windows all-target, all-feature Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      - name: Save Rust dependency cache
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
   linux-release-portability:
-    name: Linux x64 Debian 12 release baseline
+    name: Linux x64 Debian 13 current stable
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build, audit, and smoke on glibc 2.36
+      - name: Build, audit, and smoke on glibc 2.41
         shell: bash
         run: >-
           scripts/build-linux-rust-release.sh
           x86_64-unknown-linux-gnu
           linux-x64
-          rust:1.97.1-bookworm@sha256:389c1ae98c20fbcadca68a685482749267cec3c90893ae4671c5a37cc894c416
-          debian:12-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+          rust:1.97.1-trixie@sha256:9146b0f62e1939989aa96fc8d89699a43c5635bf212819235a773e1a9e71a98f
+          debian:13-slim@sha256:9bb8a3626890e084ab54e888fdd7c4b6d2f119071cd4c5dc5fecb4d73062aa5f
 
   paradedb:
     name: PostgreSQL 18 + ParadeDB + pgvector (${{ matrix.shard }})
@@ -244,13 +280,17 @@ jobs:
         run: rustup show active-toolchain
 
       - name: Restore Rust dependency cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          shared-key: v2-ubuntu
-          add-job-id-key: 'false'
-          cache-bin: 'false'
-          cache-workspace-crates: 'true'
-          save-if: 'false'
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cartograph-rust-${{ runner.os }}-v2-ubuntu-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: |
+            cartograph-rust-${{ runner.os }}-v2-ubuntu-
 
       - name: Pull pinned ParadeDB image with bounded retries
         run: scripts/pull-pinned-image.sh "$CARTOGRAPH_PARADEDB_IMAGE"

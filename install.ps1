@@ -3,6 +3,17 @@ $ErrorActionPreference = 'Stop'
 $repo = if ($env:CARTOGRAPH_REPO) { $env:CARTOGRAPH_REPO } else { 'adder-factory/cartograph' }
 $installDir = if ($env:CARTOGRAPH_INSTALL_DIR) { $env:CARTOGRAPH_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'cartograph-cli' }
 
+if (-not [Environment]::Is64BitOperatingSystem) {
+  throw 'cartograph: 32-bit Windows is not supported; use a current 64-bit Windows release.'
+}
+$windowsVersion = [Environment]::OSVersion.Version
+$windowsInstallationType = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').InstallationType
+$windowsMinimumBuild = if ($windowsInstallationType -like '*Server*') { 26100 } else { 26200 }
+$windowsMinimumRelease = if ($windowsInstallationType -like '*Server*') { 'Windows Server 2025' } else { 'Windows 11 25H2' }
+if ($windowsVersion.Major -lt 10 -or $windowsVersion.Build -lt $windowsMinimumBuild) {
+  throw "cartograph: $windowsMinimumRelease (build $windowsMinimumBuild) or newer is required; found $windowsVersion."
+}
+
 # Only 64-bit x64 builds are published; Windows-on-ARM runs them via the
 # built-in x64 emulation.
 $target = 'windows-x64'

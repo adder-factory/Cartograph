@@ -131,13 +131,15 @@ agent host, make one live MCP request as the separate transport-health check.
 
 | Host | Native release | Managed local database | External PostgreSQL |
 | --- | ---: | ---: | ---: |
-| macOS arm64 / x64 | Yes | Yes, with local Docker | Yes |
-| Linux arm64 / x64 | Yes | Yes, with local Docker | Yes |
-| Windows x64 | Yes | Not enabled | Yes |
+| macOS 26 on Apple Silicon | Yes | Yes, with local Docker | Yes |
+| Current 64-bit Linux, glibc 2.41+ (arm64 / x64) | Yes | Yes, with local Docker | Yes |
+| Windows 11 25H2+ / Server 2025 x64 | Yes | Not enabled | Yes |
 
-Linux release binaries target Debian 12's glibc 2.36 baseline or newer. Every
-Linux archive is built in a pinned Rust/Bookworm container and executed in a
-separate pinned Debian 12 runtime container before publication.
+Only current 64-bit operating-system generations are release targets. Intel
+macOS and every 32-bit architecture are unsupported. Linux release binaries
+target Debian 13's glibc 2.41 baseline or newer. Every Linux archive is built
+in a pinned Rust/Trixie container and executed in a separate pinned Debian 13
+runtime container before publication.
 
 For an external deployment, the database administrator installs PostgreSQL 18.4
 or newer within major version 18, `pg_search` 0.25.0, and pgvector 0.8.4 or
@@ -331,7 +333,7 @@ The full resumable workflow, validation rules, and retention constraints are in
 - Release archives contain only the native executable, README, license, and
   allowlisted third-party notices.
 - Every stable release requires strict Rust gates, live PostgreSQL fault tests,
-  deterministic worker benchmarks, Sonar, independent review, five native
+  deterministic worker benchmarks, Sonar, independent review, four native
   archive audits, checksums, provenance, and a signed tag at published `main`.
 
 Cartograph does not bundle PostgreSQL, ParadeDB, pgvector, an extension package,
@@ -369,8 +371,8 @@ cargo deny --all-features check
 The complete live PostgreSQL/ParadeDB gate is defined in
 [`v2-rust.yml`](.github/workflows/v2-rust.yml). A successful exact-SHA main run
 emits a GitHub-attested gate manifest. Release tags verify that immutable
-evidence instead of rerunning the live suite, then build and smoke macOS
-arm64/x64, Linux arm64/x64, and Windows x64 archives before checksums,
+evidence instead of rerunning the live suite, then build and smoke macOS 26
+arm64, current Linux arm64/x64, and current Windows x64 archives before checksums,
 provenance, and immutable publication.
 
 ## License

@@ -17,17 +17,51 @@ fi
 
 os="$(uname -s)"
 arch="$(uname -m)"
-case "$os" in
-  Darwin) os="darwin" ;;
-  Linux) os="linux" ;;
+case "$os:$arch" in
+  Darwin:arm64|Darwin:aarch64) target="darwin-arm64" ;;
+  Darwin:x86_64|Darwin:amd64)
+    echo "cartograph: Intel macOS is not supported; use Apple Silicon with macOS 26 or newer." >&2
+    exit 1
+    ;;
+  Linux:aarch64|Linux:arm64) target="linux-arm64" ;;
+  Linux:x86_64|Linux:amd64) target="linux-x64" ;;
+  Darwin:*|Linux:*) echo "cartograph: unsupported architecture '$arch'" >&2; exit 1 ;;
   *) echo "cartograph: unsupported OS '$os'" >&2; exit 1 ;;
 esac
-case "$arch" in
-  arm64|aarch64) arch="arm64" ;;
-  x86_64|amd64) arch="x64" ;;
-  *) echo "cartograph: unsupported architecture '$arch'" >&2; exit 1 ;;
+
+case "$target" in
+  darwin-arm64)
+    macos_version="$(sw_vers -productVersion 2>/dev/null || true)"
+    macos_major="${macos_version%%.*}"
+    case "$macos_major" in
+      ''|*[!0-9]*)
+        echo "cartograph: could not verify the macOS release; Cartograph requires macOS 26 or newer." >&2
+        exit 1
+        ;;
+    esac
+    if [ "$macos_major" -lt 26 ]; then
+      echo "cartograph: Cartograph requires macOS 26 or newer (found $macos_version)." >&2
+      exit 1
+    fi
+    ;;
+  linux-*)
+    glibc_line="$(ldd --version 2>&1 | sed -n '1p' || true)"
+    glibc_version="${glibc_line##* }"
+    glibc_major="${glibc_version%%.*}"
+    glibc_minor="${glibc_version#*.}"
+    glibc_minor="${glibc_minor%%.*}"
+    case "$glibc_major:$glibc_minor" in
+      *[!0-9:]*|:*)
+        echo "cartograph: could not verify glibc; Cartograph requires glibc 2.41 or newer." >&2
+        exit 1
+        ;;
+    esac
+    if [ "$glibc_major" -lt 2 ] || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -lt 41 ]; }; then
+      echo "cartograph: Cartograph requires glibc 2.41 or newer (found $glibc_version)." >&2
+      exit 1
+    fi
+    ;;
 esac
-target="${os}-${arch}"
 
 version="${CARTOGRAPH_VERSION:-}"
 if [ -z "$version" ]; then

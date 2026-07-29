@@ -11,10 +11,17 @@ if [[ -z "$TARGET" || -z "$ASSET_TARGET" ]]; then
   exit 2
 fi
 
-case "$ASSET_TARGET" in
-  darwin-arm64|darwin-x64|linux-arm64|linux-x64) ;;
+case "$TARGET:$ASSET_TARGET" in
+  aarch64-apple-darwin:darwin-arm64)
+    if [[ -n "${MACOSX_DEPLOYMENT_TARGET:-}" && "$MACOSX_DEPLOYMENT_TARGET" != 26.0 ]]; then
+      echo "macOS releases require MACOSX_DEPLOYMENT_TARGET=26.0" >&2
+      exit 2
+    fi
+    export MACOSX_DEPLOYMENT_TARGET=26.0
+    ;;
+  aarch64-unknown-linux-gnu:linux-arm64|x86_64-unknown-linux-gnu:linux-x64) ;;
   *)
-    echo "unsupported release asset target: $ASSET_TARGET" >&2
+    echo "unsupported release target pairing: $TARGET / $ASSET_TARGET" >&2
     exit 2
     ;;
 esac
@@ -64,6 +71,17 @@ done
 export CARGO_ENCODED_RUSTFLAGS CFLAGS CXXFLAGS
 
 cargo build --locked --release --package cartograph-cli --target "$TARGET"
+
+if [[ "$ASSET_TARGET" == darwin-arm64 ]]; then
+  if ! command -v otool >/dev/null 2>&1; then
+    echo "macOS release verification requires otool" >&2
+    exit 1
+  fi
+  if ! otool -l "$BINARY" | grep -Eq '^[[:space:]]*minos 26\.0([[:space:]]|$)'; then
+    echo "macOS release binary does not declare minos 26.0" >&2
+    exit 1
+  fi
+fi
 
 rm -rf "$STAGE" "$ARCHIVE" "$DIRECT"
 mkdir -p "$STAGE/bin" "$STAGE/share/cartograph"

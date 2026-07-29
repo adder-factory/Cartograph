@@ -22,12 +22,12 @@ case "$TARGET:$ASSET_TARGET" in
     ;;
 esac
 
-if [[ ! "$BUILD_IMAGE" =~ ^rust:1\.97\.1-bookworm@sha256:[0-9a-f]{64}$ ]]; then
-  echo "Linux release build image must pin rust:1.97.1-bookworm by digest" >&2
+if [[ ! "$BUILD_IMAGE" =~ ^rust:1\.97\.1-trixie@sha256:[0-9a-f]{64}$ ]]; then
+  echo "Linux release build image must pin rust:1.97.1-trixie by digest" >&2
   exit 2
 fi
-if [[ ! "$RUNTIME_IMAGE" =~ ^debian:12-slim@sha256:[0-9a-f]{64}$ ]]; then
-  echo "Linux release runtime image must pin debian:12-slim by digest" >&2
+if [[ ! "$RUNTIME_IMAGE" =~ ^debian:13-slim@sha256:[0-9a-f]{64}$ ]]; then
+  echo "Linux release runtime image must pin debian:13-slim by digest" >&2
   exit 2
 fi
 if ! docker info >/dev/null 2>&1; then
@@ -90,9 +90,9 @@ docker run --rm --pull never \
     fi
     glibc="$(ldd --version 2>&1 | head -n 1)"
     case "$glibc" in
-      *" 2.36") ;;
+      *" 2.41") ;;
       *)
-        echo "runtime smoke did not execute on the Debian 12 glibc 2.36 baseline: $glibc" >&2
+        echo "runtime smoke did not execute on the Debian 13 glibc 2.41 baseline: $glibc" >&2
         exit 1
         ;;
     esac
@@ -103,4 +103,4 @@ docker run --rm --pull never \
     fi
   '
 
-echo "[rust-release] Debian 12 / glibc 2.36 runtime smoke passed for $ASSET_TARGET"
+echo "[rust-release] Debian 13 / glibc 2.41 runtime smoke passed for $ASSET_TARGET"
