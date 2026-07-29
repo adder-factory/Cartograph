@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
@@ -184,7 +184,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
@@ -210,7 +210,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build, audit, and smoke on glibc 2.36
         shell: bash
@@ -236,9 +236,9 @@ jobs:
       CARTOGRAPH_POSTGRES_PASSWORD: cartograph-v2-ci-only
       CARTOGRAPH_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
       CARTOGRAPH_TEST_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
-      CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.24.3@sha256:8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb
+      CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.25.0@sha256:6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve pinned Rust toolchain
         run: rustup show active-toolchain
@@ -528,7 +528,7 @@ jobs:
             gate-attestation/v2-main-gate.json >/dev/null
 
       - name: Attest exact-SHA gate manifest
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: gate-attestation/v2-main-gate.json
 

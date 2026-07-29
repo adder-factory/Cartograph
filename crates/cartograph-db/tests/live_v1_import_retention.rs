@@ -790,7 +790,8 @@ async fn assert_import_state(fixture: &Fixture, state: &str, checkpoint: &str, f
 async fn bm25_index_state(fixture: &Fixture) -> (i64, bool) {
     let statement = format!(
         r#"SELECT index_relations.oid::bigint,
-                  indexes.indisvalid AND indexes.indisready AND methods.amname = 'bm25'
+                  indexes.indisvalid AND indexes.indisready
+                  AND methods.amname IN ('paradedb', 'bm25')
             FROM "{}"."v1_import_runs" AS runs
             JOIN pg_namespace AS namespaces ON namespaces.nspname = $1
             JOIN pg_class AS tables
@@ -922,7 +923,8 @@ async fn assert_published_import(fixture: &Fixture, generation_id: &GenerationId
         r#"SELECT generations.state, runs.checkpoint,
                   (SELECT count(*)::bigint FROM "{schema}".v1_import_checkpoints
                     WHERE import_id = runs.import_id),
-                  indexes.indisvalid AND indexes.indisready AND methods.amname = 'bm25'
+                  indexes.indisvalid AND indexes.indisready
+                  AND methods.amname IN ('paradedb', 'bm25')
             FROM "{schema}".v1_import_runs AS runs
             JOIN "{schema}".index_generations AS generations
               ON generations.generation_id = runs.generation_id

@@ -87,8 +87,8 @@ mkdir -p "$dest"
 tar -xzf "$tmp/cartograph.tar.gz" -C "$dest" --strip-components=1
 
 mkdir -p "$BIN_DIR"
-ln -sf "$dest/bin/cartograph" "$BIN_DIR/cartograph"
 ln -sfn "$dest" "$INSTALL_DIR/current"
+ln -sf "$INSTALL_DIR/current/bin/cartograph" "$BIN_DIR/cartograph"
 
 echo "Installed to $dest"
 echo "Linked     $BIN_DIR/cartograph"

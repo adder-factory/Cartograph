@@ -54,9 +54,9 @@ about PostgreSQL or transport.
 Before migration or normal work, Cartograph proves:
 
 - PostgreSQL 18.4 or newer within major version 18;
-- `pg_search` 0.24.3, expected preload state, BM25 access method, and exact
+- `pg_search` 0.25.0, expected preload state, the `paradedb` access method, and exact
   `pdb.source_code` token behavior;
-- pgvector 0.8.2 or newer;
+- pgvector 0.8.4 or newer, with 0.8.5 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
 The append-only migration ledger currently owns twenty-three versions. Migration

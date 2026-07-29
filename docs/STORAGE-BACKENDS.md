@@ -1,8 +1,10 @@
 # PostgreSQL storage and operations
 
 Cartograph v2 has one storage engine: PostgreSQL 18.4 or newer within major
-version 18 with ParadeDB `pg_search` 0.24.3 and pgvector 0.8.2 or newer. SQLite
-is not a backend, fallback, migration target, importer, feature, or test utility.
+version 18 with ParadeDB `pg_search` 0.25.0 and pgvector 0.8.4 or newer.
+Pgvector 0.8.5 is recommended for external PostgreSQL; the managed upstream
+ParadeDB 0.25.0 image bundles 0.8.4. SQLite is not a backend, fallback,
+migration target, importer, feature, or test utility.
 
 ## Capability contract
 
@@ -10,8 +12,8 @@ is not a backend, fallback, migration target, importer, feature, or test utility
 
 - PostgreSQL 18.4 or newer within major version 18;
 - the expected `pg_search` version and preload state;
-- the BM25 access method and `pdb.source_code` tokenizer behavior;
-- pgvector 0.8.2 or newer;
+- the `paradedb` access method and `pdb.source_code` tokenizer behavior;
+- pgvector 0.8.4 or newer;
 - the complete append-only Cartograph migration ledger;
 - bounded read/write/DDL capability in the selected schema.
 
@@ -59,7 +61,10 @@ cartograph db upgrade --project-path . \
 The upgrade starts the exact digest against the retained volume, updates
 `pg_search` and pgvector transactionally before calling extension-defined
 functions, and requires capability plus Cartograph migration proof before it
-discards the old container.
+discards the old container. ParadeDB 0.25.0 retains the legacy `bm25` access
+method, so existing derived indexes remain valid and queryable; Cartograph
+creates replacement/new generation indexes with the current `paradedb` access
+method and accepts both catalog names during this upgrade boundary.
 
 Restore, upgrade, derived-index rebuild, and removal replace or delete state and
 require the exact confirmation phrase shown by `cartograph db <command> --help`.
@@ -72,8 +77,9 @@ disabled there until private credential ACL behavior can be proved equivalent.
 ## External database
 
 The database administrator installs PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.24.3, and pgvector 0.8.2 or newer, and creates the
-extensions. Supply secrets only through the process environment:
+version 18, `pg_search` 0.25.0, and pgvector 0.8.4 or newer (0.8.5
+recommended), and creates the extensions. Supply secrets only through the
+process environment:
 
 ```sh
 export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
@@ -87,8 +93,8 @@ database backup, install the new extension binaries, restart PostgreSQL, and
 update both catalogs before running `cartograph doctor`:
 
 ```sql
-ALTER EXTENSION pg_search UPDATE TO '0.24.3';
-ALTER EXTENSION vector UPDATE TO '0.8.2';
+ALTER EXTENSION pg_search UPDATE TO '0.25.0';
+ALTER EXTENSION vector UPDATE TO '0.8.5';
 ```
 
 Optional bounded pool controls:

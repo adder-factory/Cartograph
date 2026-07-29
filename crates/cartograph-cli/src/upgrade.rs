@@ -132,6 +132,7 @@ pub(super) async fn run_upgrade(apply: bool) -> UpgradeReport {
                 path.display()
             ),
             next_steps: vec![
+                "Re-run `cartograph install` in registered projects to repin MCP hosts.".to_owned(),
                 "Restart MCP clients so every connection uses the new binary.".to_owned(),
                 "Run `cartograph --version` from a new process to verify the update.".to_owned(),
             ],
@@ -228,8 +229,7 @@ async fn apply_release(version: &str) -> Result<PathBuf, String> {
     if actual != expected {
         return Err("downloaded native binary failed SHA-256 verification".to_owned());
     }
-    install_binary(&executable, &binary, version)?;
-    Ok(executable)
+    install_binary(&executable, &binary, version)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -307,7 +307,50 @@ fn checksum_for_asset(checksums: &[u8], asset: &str) -> Result<String, String> {
     Ok(matches[0].to_ascii_lowercase())
 }
 
-fn install_binary(executable: &Path, bytes: &[u8], version: &str) -> Result<(), String> {
+fn install_binary(executable: &Path, bytes: &[u8], version: &str) -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    {
+        let launcher_path = env::var_os("PATH");
+        install_binary_unix(InstallBinaryInput {
+            executable,
+            bytes,
+            version,
+            launcher_path: launcher_path.as_deref(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    {
+        install_binary_in_place(executable, bytes, version)?;
+        Ok(executable.to_path_buf())
+    }
+}
+
+#[cfg(unix)]
+struct InstallBinaryInput<'input> {
+    executable: &'input Path,
+    bytes: &'input [u8],
+    version: &'input str,
+    launcher_path: Option<&'input std::ffi::OsStr>,
+}
+
+#[cfg(unix)]
+fn install_binary_unix(input: InstallBinaryInput<'_>) -> Result<PathBuf, String> {
+    if let Some(layout) = VersionedInstallLayout::detect(input.executable, input.version)? {
+        return layout.install(input);
+    }
+
+    let InstallBinaryInput {
+        executable,
+        bytes,
+        version,
+        ..
+    } = input;
+    install_binary_in_place(executable, bytes, version)?;
+    Ok(executable.to_path_buf())
+}
+
+fn install_binary_in_place(executable: &Path, bytes: &[u8], version: &str) -> Result<(), String> {
     let directory = executable
         .parent()
         .ok_or_else(|| "running executable has no parent directory".to_owned())?;
@@ -321,6 +364,166 @@ fn install_binary(executable: &Path, bytes: &[u8], version: &str) -> Result<(), 
     let staged = staged.into_temp_path();
     verify_staged_binary(staged.as_ref(), version)?;
     replace_executable(staged, executable)
+}
+
+#[cfg(unix)]
+struct VersionedInstallLayout {
+    install_root: PathBuf,
+    release_name: String,
+    release_root: PathBuf,
+    executable: PathBuf,
+}
+
+#[cfg(unix)]
+impl VersionedInstallLayout {
+    fn detect(executable: &Path, version: &str) -> Result<Option<Self>, String> {
+        let Some(bin_directory) = executable.parent() else {
+            return Ok(None);
+        };
+        let Some(previous_release) = bin_directory.parent() else {
+            return Ok(None);
+        };
+        let Some(versions_directory) = previous_release.parent() else {
+            return Ok(None);
+        };
+        let Some(install_root) = versions_directory.parent() else {
+            return Ok(None);
+        };
+        let is_versioned_layout = bin_directory.file_name().is_some_and(|name| name == "bin")
+            && versions_directory
+                .file_name()
+                .is_some_and(|name| name == "versions")
+            && previous_release
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.strip_prefix('v').and_then(parse_version).is_some());
+        if !is_versioned_layout {
+            return Ok(None);
+        }
+        let release_name = version_release_directory(version)?;
+        let release_root = versions_directory.join(&release_name);
+        let executable = release_root.join("bin").join(
+            executable
+                .file_name()
+                .ok_or_else(|| "running executable has no file name".to_owned())?,
+        );
+        Ok(Some(Self {
+            install_root: install_root.to_path_buf(),
+            release_name,
+            release_root,
+            executable,
+        }))
+    }
+
+    fn install(self, input: InstallBinaryInput<'_>) -> Result<PathBuf, String> {
+        let InstallBinaryInput {
+            executable: prior_executable,
+            bytes,
+            version,
+            launcher_path,
+        } = input;
+        ensure_real_directory(&self.release_root)?;
+        let bin_directory = self
+            .executable
+            .parent()
+            .ok_or_else(|| "versioned executable has no parent directory".to_owned())?;
+        ensure_real_directory(bin_directory)?;
+        install_binary_in_place(&self.executable, bytes, version)?;
+
+        let current_target = Path::new("versions").join(&self.release_name);
+        atomic_repoint_symlink(
+            &self.install_root.join("current"),
+            &current_target,
+            "current release",
+        )?;
+        let launcher_target = self.install_root.join("current/bin/cartograph");
+        if let Some(path) = launcher_path {
+            repoint_matching_path_launchers_in(path, prior_executable, &launcher_target)?;
+        }
+        Ok(self.executable)
+    }
+}
+
+#[cfg(unix)]
+fn version_release_directory(version: &str) -> Result<String, String> {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    if version.is_empty()
+        || version.len() > 128
+        || parse_version(version).is_none()
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return Err("published version is not a safe install directory name".to_owned());
+    }
+    Ok(format!("v{version}"))
+}
+
+#[cfg(unix)]
+fn ensure_real_directory(directory: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("versioned update destination is not a real directory".to_owned());
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err("could not inspect the versioned update destination".to_owned());
+        }
+        Err(_) => {}
+    }
+    fs::create_dir_all(directory)
+        .map_err(|_| "could not create the versioned update destination".to_owned())?;
+    let metadata = fs::symlink_metadata(directory)
+        .map_err(|_| "could not inspect the versioned update destination".to_owned())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("versioned update destination is not a real directory".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn repoint_matching_path_launchers_in(
+    path: &std::ffi::OsStr,
+    prior_executable: &Path,
+    launcher_target: &Path,
+) -> Result<(), String> {
+    const MAXIMUM_PATH_DIRECTORIES: usize = 128;
+    let prior_executable = fs::canonicalize(prior_executable)
+        .map_err(|_| "could not resolve the prior Cartograph executable".to_owned())?;
+    for directory in env::split_paths(&path).take(MAXIMUM_PATH_DIRECTORIES) {
+        let launcher = directory.join("cartograph");
+        let Ok(metadata) = fs::symlink_metadata(&launcher) else {
+            continue;
+        };
+        if !metadata.file_type().is_symlink()
+            || fs::canonicalize(&launcher).ok().as_deref() != Some(prior_executable.as_path())
+        {
+            continue;
+        }
+        atomic_repoint_symlink(&launcher, launcher_target, "Cartograph launcher")?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn atomic_repoint_symlink(link: &Path, target: &Path, label: &str) -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    if let Ok(metadata) = fs::symlink_metadata(link)
+        && !metadata.file_type().is_symlink()
+    {
+        return Err(format!("{label} path is not a symbolic link"));
+    }
+    let parent = link
+        .parent()
+        .ok_or_else(|| format!("{label} path has no parent directory"))?;
+    let staging = tempfile::Builder::new()
+        .prefix(".cartograph-link-")
+        .tempdir_in(parent)
+        .map_err(|_| format!("could not stage the {label} link"))?;
+    let staged_link = staging.path().join("link");
+    symlink(target, &staged_link).map_err(|_| format!("could not stage the {label} link"))?;
+    fs::rename(&staged_link, link).map_err(|_| format!("could not replace the {label} link"))
 }
 
 fn verify_staged_binary(path: &Path, version: &str) -> Result<(), String> {
@@ -578,6 +781,73 @@ mod tests {
             .permissions()
             .mode();
         assert_ne!(mode & 0o111, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn versioned_native_update_installs_a_new_release_and_preserves_the_prior_binary() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("upgrade fixture failed: {error}"));
+        let install_root = root.path().join(".cartograph-cli");
+        let old_release = install_root.join("versions/v2.0.7");
+        let old_executable = old_release.join("bin/cartograph");
+        fs::create_dir_all(
+            old_executable
+                .parent()
+                .unwrap_or_else(|| panic!("old executable fixture has no parent")),
+        )
+        .unwrap_or_else(|error| panic!("old release fixture failed: {error}"));
+        let old_bytes = b"#!/bin/sh\necho 'cartograph 2.0.7'\n";
+        fs::write(&old_executable, old_bytes)
+            .unwrap_or_else(|error| panic!("old executable fixture failed: {error}"));
+        fs::set_permissions(&old_executable, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("old executable chmod failed: {error}"));
+        symlink("versions/v2.0.7", install_root.join("current"))
+            .unwrap_or_else(|error| panic!("current release fixture failed: {error}"));
+        let launcher_directory = root.path().join("bin");
+        fs::create_dir(&launcher_directory)
+            .unwrap_or_else(|error| panic!("launcher directory fixture failed: {error}"));
+        let launcher = launcher_directory.join("cartograph");
+        symlink(&old_executable, &launcher)
+            .unwrap_or_else(|error| panic!("launcher fixture failed: {error}"));
+
+        let launcher_path = env::join_paths([&launcher_directory])
+            .unwrap_or_else(|error| panic!("launcher PATH fixture failed: {error}"));
+        let replacement = b"#!/bin/sh\necho 'cartograph 2.0.8'\n";
+        install_binary_unix(InstallBinaryInput {
+            executable: &old_executable,
+            bytes: replacement,
+            version: "2.0.8",
+            launcher_path: Some(&launcher_path),
+        })
+        .unwrap_or_else(|error| panic!("versioned install failed: {error}"));
+
+        let new_release = install_root.join("versions/v2.0.8");
+        let new_executable = new_release.join("bin/cartograph");
+        assert_eq!(
+            fs::read(&old_executable)
+                .unwrap_or_else(|error| panic!("prior executable read failed: {error}")),
+            old_bytes
+        );
+        assert_eq!(
+            fs::read(&new_executable)
+                .unwrap_or_else(|error| panic!("new executable read failed: {error}")),
+            replacement
+        );
+        assert_eq!(
+            fs::canonicalize(install_root.join("current"))
+                .unwrap_or_else(|error| panic!("current release resolve failed: {error}")),
+            fs::canonicalize(new_release)
+                .unwrap_or_else(|error| panic!("new release resolve failed: {error}"))
+        );
+        assert_eq!(
+            fs::canonicalize(launcher)
+                .unwrap_or_else(|error| panic!("launcher resolve failed: {error}")),
+            fs::canonicalize(new_executable)
+                .unwrap_or_else(|error| panic!("new executable resolve failed: {error}"))
+        );
     }
 
     fn spawn_http_fixture(response: String) -> (String, thread::JoinHandle<Vec<u8>>) {

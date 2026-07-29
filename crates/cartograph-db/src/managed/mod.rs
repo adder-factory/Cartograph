@@ -17,10 +17,10 @@ use tokio::time::{sleep, timeout};
 
 use crate::{CapabilityReport, CartographDatabase, MigrationReport, connect, probe_capabilities};
 
-/// Exact upstream multi-architecture image accepted by the v2 preview.
+/// Exact upstream multi-architecture image accepted by Cartograph v2.
 pub const MANAGED_DATABASE_IMAGE: &str = concat!(
-    "paradedb/paradedb:0.24.3@sha256:",
-    "8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb"
+    "paradedb/paradedb:0.25.0@sha256:",
+    "6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7"
 );
 /// Default loopback port for the first managed Cartograph database.
 pub const DEFAULT_MANAGED_DATABASE_PORT: u16 = 55_432;
@@ -230,7 +230,7 @@ pub struct ManagedDerivedIndexHealth {
     pub valid: bool,
     /// Whether every required generation relation has an index ready for use.
     pub ready: bool,
-    /// The catalog reports ParadeDB's `bm25` access method.
+    /// The catalog reports ParadeDB's BM25-capable access method.
     pub bm25_access_method: bool,
 }
 
