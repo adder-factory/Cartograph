@@ -219,18 +219,26 @@ import or inspect SQLite.
 The v1 source and v2 destination must be distinct schemas in the same database.
 Set `CARTOGRAPH_DATABASE_SCHEMA` to the v2 destination, preserve a database
 backup, quiesce index/sync/hook/rebuild writers for the project, and preflight
-the exact source checkout before authorizing mutation. The destination may
-already have a current generation; import publishes a new immutable one:
+the exact source checkout before authorizing mutation. Use `--source-checkout`
+when that byte-exact historical tree is separate from the initialized current
+project; this preserves dirty work without changing destination identity. The
+preflight requires the exact v1.1.33-compatible checkout path/content set and
+excludes only additive v2 `.pyi` and TOML modes. Missing, extra, or substituted
+v1 files fail before destination mutation. The
+destination may already have a current generation; import publishes a new
+immutable one:
 
 ```sh
 cartograph db import-v1 \
-  --project-path /absolute/path/to/checkout \
+  --project-path /absolute/path/to/current-project \
+  --source-checkout /absolute/path/to/exact-v1-checkout \
   --source-schema cartograph_v1 \
   --dry-run \
   --format json
 
 cartograph db import-v1 \
-  --project-path /absolute/path/to/checkout \
+  --project-path /absolute/path/to/current-project \
+  --source-checkout /absolute/path/to/exact-v1-checkout \
   --source-schema cartograph_v1 \
   --confirm import-v1-postgres \
   --format json
@@ -239,7 +247,9 @@ cartograph db import-v1 \
 An interrupted exact run resumes when the same command is repeated. Never
 change schemas or checkout bytes to force a checkpoint forward. Keep the v1
 schema and backup until `status`, one real `context` query, and derived-index
-health all pass. Imported reference site counts preserve v1 multiplicity; spans
+health all pass. Run a normal v2 index first when additive v2 file types make
+the imported v1 generation correctly report stale. Imported reference site
+counts preserve v1 multiplicity; spans
 remain explicitly coarse where v1 cannot prove an exact token. SCIP placeholder
 hashes cannot prove historical bytes that v1 did not retain.
 
@@ -279,7 +289,11 @@ incomplete import recovery state, and the two newest superseded generations.
 Inspect each report before requesting another batch.
 
 Use `cartograph db usage --project-path . --format json` before diagnosing
-bloat. `cartograph db compact` is a read-only online B-tree plan by default;
+bloat. Treat `generationStorage.estimatedRetainedBytes` only as its documented
+source-plus-generation-BM25 lower bound; shared fact heaps, B-trees, embeddings,
+and reusable space are accounted by the full storage report. Compare parse
+cache logical, stored, schema-stored, and physical-overhead bytes before
+attributing its allocated TOAST file to live payload. `cartograph db compact` is a read-only online B-tree plan by default;
 apply requires `--confirm compact-online-indexes`, verified free-space headroom,
 and rebuilds one index at a time. It never automates `VACUUM FULL` or drops
 invalid concurrent-reindex artifacts.

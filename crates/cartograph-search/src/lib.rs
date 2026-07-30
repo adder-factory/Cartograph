@@ -13,9 +13,9 @@ pub use cartograph_db::{EntryPointBucket, SimilarSymbolHit, SimilarSymbolsResult
 pub use engine::{DeterministicRetriever, FuzzyNameRequest, GenerationLexicalRequest};
 pub use hybrid::{
     ChannelCandidate, ChannelContribution, ChannelResults, FusedSearchItem, HybridSearchInput,
-    HybridSearchPacket, LexicalComponent, RetrievalAbstention, RetrievalChannel, RetrievalChannels,
-    RetrievalDocument, RetrievalDocumentInput, RetrievalExecution, RetrievalFallback, SearchMode,
-    SemanticReadiness, fuse_search,
+    HybridSearchPacket, LexicalComponent, RerankReport, RerankState, RetrievalAbstention,
+    RetrievalChannel, RetrievalChannels, RetrievalDocument, RetrievalDocumentInput,
+    RetrievalExecution, RetrievalFallback, SearchMode, SemanticReadiness, fuse_search,
 };
 pub use intent::{ContextGraphDirection, TaskIntent};
 pub use model::{

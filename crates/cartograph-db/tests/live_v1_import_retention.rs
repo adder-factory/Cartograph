@@ -254,6 +254,43 @@ async fn v1_dry_run_accepts_bom_hash_provenance_and_tree_sitter_byte_columns() {
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn v1_import_rejects_checkout_file_omission_before_destination_mutation() {
+    let fixture = open_fixture().await;
+    let root = create_checkout();
+    let source = source_schema(&fixture.destination_schema, "omitted_file");
+    create_v1_source(&fixture.pool, &source, root.path()).await;
+    fs::write(root.path().join("extra.rs"), "pub fn extra() {}\n")
+        .unwrap_or_else(|error| panic!("could not write omitted source fixture: {error}"));
+    let expected_manifest = checkout_manifest_for_paths(root.path(), &["extra.rs", "sample.rs"]);
+    let request = import_request_with_execution_and_manifest(
+        &source,
+        root.path(),
+        "omitted-file",
+        LEASE_DURATION,
+        STATEMENT_TIMEOUT,
+        expected_manifest,
+    );
+
+    assert_destination_absent(&fixture.pool, &fixture.destination_schema).await;
+    assert_eq!(
+        fixture.database.dry_run_v1_postgres_import(&request).await,
+        Err(V1PostgresImportError::SourceManifestMismatch)
+    );
+    assert_destination_absent(&fixture.pool, &fixture.destination_schema).await;
+    assert_eq!(
+        fixture.database.import_v1_postgres(request).await,
+        Err(V1PostgresImportError::SourceManifestMismatch)
+    );
+    assert_destination_absent(&fixture.pool, &fixture.destination_schema).await;
+
+    drop(fixture.database);
+    drop_schema(&fixture.pool, &source).await;
+    drop_schema(&fixture.pool, &fixture.destination_schema).await;
+    fixture.pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
 async fn expired_bm25_rebuild_fence_rolls_back_ddl_and_checkpoint() {
     let fixture = open_fixture().await;
     let root = create_checkout();
@@ -657,6 +694,24 @@ fn import_request_with_execution(
     lease_duration: Duration,
     statement_timeout: Duration,
 ) -> V1PostgresImportRequest {
+    import_request_with_execution_and_manifest(
+        source_schema,
+        project_root,
+        owner,
+        lease_duration,
+        statement_timeout,
+        checkout_manifest(project_root),
+    )
+}
+
+fn import_request_with_execution_and_manifest(
+    source_schema: &str,
+    project_root: &std::path::Path,
+    owner: &str,
+    lease_duration: Duration,
+    statement_timeout: Duration,
+    source_manifest: ContentDigest,
+) -> V1PostgresImportRequest {
     let source_schema = match DatabaseSchema::parse(source_schema) {
         Ok(schema) => schema,
         Err(error) => panic!("source schema fixture is invalid: {error}"),
@@ -674,10 +729,7 @@ fn import_request_with_execution(
         V1PostgresSource::new(
             source_schema,
             project_root,
-            V1PostgresSourceRevision::new(
-                digest(PROJECT_FINGERPRINT),
-                checkout_manifest(project_root),
-            ),
+            V1PostgresSourceRevision::new(digest(PROJECT_FINGERPRINT), source_manifest),
         ),
         V1PostgresImportExecution::new(
             LeaseOwner::new(process::id(), owner),
@@ -689,16 +741,22 @@ fn import_request_with_execution(
 }
 
 fn checkout_manifest(project_root: &std::path::Path) -> ContentDigest {
-    let path = NormalizedPath::parse("sample.rs")
-        .unwrap_or_else(|error| panic!("manifest path was invalid: {error}"));
-    let source = fs::read(project_root.join(path.as_str()))
-        .unwrap_or_else(|error| panic!("could not read manifest fixture: {error}"));
-    let content_hash = ContentDigest::from_bytes(*blake3::hash(&source).as_bytes());
-    let mut manifest = SourceManifestDigestBuilder::new(1)
+    checkout_manifest_for_paths(project_root, &["sample.rs"])
+}
+
+fn checkout_manifest_for_paths(project_root: &std::path::Path, paths: &[&str]) -> ContentDigest {
+    let mut manifest = SourceManifestDigestBuilder::new(paths.len())
         .unwrap_or_else(|error| panic!("could not begin manifest fixture: {error}"));
-    manifest
-        .push(&path, &content_hash)
-        .unwrap_or_else(|error| panic!("could not add manifest fixture: {error}"));
+    for raw_path in paths {
+        let path = NormalizedPath::parse(raw_path)
+            .unwrap_or_else(|error| panic!("manifest path was invalid: {error}"));
+        let source = fs::read(project_root.join(path.as_str()))
+            .unwrap_or_else(|error| panic!("could not read manifest fixture: {error}"));
+        let content_hash = ContentDigest::from_bytes(*blake3::hash(&source).as_bytes());
+        manifest
+            .push(&path, &content_hash)
+            .unwrap_or_else(|error| panic!("could not add manifest fixture: {error}"));
+    }
     manifest
         .finish()
         .unwrap_or_else(|error| panic!("could not finish manifest fixture: {error}"))

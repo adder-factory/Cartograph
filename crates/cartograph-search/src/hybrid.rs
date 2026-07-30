@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::{CONTEXT_ANCHOR_MAXIMUM_BYTES, RetrievalError};
 
 const MAXIMUM_FUSED_RESULTS: u16 = 100;
+const MAXIMUM_RERANK_MODEL_BYTES: usize = 256;
 const RECIPROCAL_RANK_OFFSET: f64 = 60.0;
 
 /// Retrieval policy requested by a caller before any channel work begins.
@@ -47,6 +48,131 @@ pub enum RetrievalChannel {
     Lexical,
     /// Vector similarity search.
     Semantic,
+}
+
+/// Observable outcome of the optional semantic cross-encoder stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankState {
+    /// Deterministic retrieval deliberately bypassed every model-backed stage.
+    NotRequested,
+    /// No reranker tier is configured for this project.
+    NotConfigured,
+    /// A configured reranker had no semantic candidates to score.
+    SkippedNoCandidates,
+    /// Candidate metadata contained no bounded text safe to score.
+    SkippedNoText,
+    /// The configured reranker produced one complete finite score set.
+    Applied,
+    /// Configuration, endpoint, timeout, or response validation failed closed.
+    Unavailable,
+}
+
+/// Query-free reranker provenance retained beside reciprocal-rank evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RerankReport {
+    state: RerankState,
+    model: Option<String>,
+    reranked_documents: u16,
+}
+
+impl Default for RerankReport {
+    fn default() -> Self {
+        Self::not_configured()
+    }
+}
+
+impl RerankReport {
+    /// Record a caller policy that excludes model-backed reranking.
+    #[must_use]
+    pub const fn not_requested() -> Self {
+        Self {
+            state: RerankState::NotRequested,
+            model: None,
+            reranked_documents: 0,
+        }
+    }
+
+    /// Record the absence of a project reranker tier.
+    #[must_use]
+    pub const fn not_configured() -> Self {
+        Self {
+            state: RerankState::NotConfigured,
+            model: None,
+            reranked_documents: 0,
+        }
+    }
+
+    /// Record a configured model that had no semantic candidates.
+    pub fn skipped_no_candidates(model: impl Into<String>) -> Result<Self, RetrievalError> {
+        Self::for_model(RerankState::SkippedNoCandidates, model, 0)
+    }
+
+    /// Record a configured model that received no non-empty bounded text.
+    pub fn skipped_no_text(model: impl Into<String>) -> Result<Self, RetrievalError> {
+        Self::for_model(RerankState::SkippedNoText, model, 0)
+    }
+
+    /// Record one successful complete rerank response.
+    pub fn applied(
+        model: impl Into<String>,
+        reranked_documents: u16,
+    ) -> Result<Self, RetrievalError> {
+        if reranked_documents == 0 || reranked_documents > MAXIMUM_FUSED_RESULTS {
+            return Err(invalid("reranked_documents"));
+        }
+        Self::for_model(RerankState::Applied, model, reranked_documents)
+    }
+
+    /// Record a configured or malformed tier that could not be used.
+    pub fn unavailable(model: Option<String>) -> Result<Self, RetrievalError> {
+        if model.as_deref().is_some_and(invalid_rerank_model) {
+            return Err(invalid("rerank_model"));
+        }
+        Ok(Self {
+            state: RerankState::Unavailable,
+            model,
+            reranked_documents: 0,
+        })
+    }
+
+    /// Outcome state for this retrieval.
+    #[must_use]
+    pub const fn state(&self) -> RerankState {
+        self.state
+    }
+
+    /// Configured model identity when one was validated.
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Number of semantic documents scored by a complete response.
+    #[must_use]
+    pub const fn reranked_documents(&self) -> u16 {
+        self.reranked_documents
+    }
+
+    fn for_model(
+        state: RerankState,
+        model: impl Into<String>,
+        reranked_documents: u16,
+    ) -> Result<Self, RetrievalError> {
+        let model = model.into();
+        if invalid_rerank_model(&model) {
+            return Err(invalid("rerank_model"));
+        }
+        Ok(Self {
+            state,
+            model: Some(model),
+            reranked_documents,
+        })
+    }
+}
+
+fn invalid_rerank_model(model: &str) -> bool {
+    model.is_empty() || model.len() > MAXIMUM_RERANK_MODEL_BYTES || model.contains('\0')
 }
 
 /// Lexical document fields that contributed to a BM25 candidate.
@@ -348,6 +474,7 @@ impl ChannelResults {
 pub struct RetrievalChannels {
     lexical: Option<ChannelResults>,
     semantic: Option<ChannelResults>,
+    rerank: RerankReport,
 }
 
 impl RetrievalChannels {
@@ -357,6 +484,7 @@ impl RetrievalChannels {
         Self {
             lexical: None,
             semantic: None,
+            rerank: RerankReport::not_configured(),
         }
     }
 
@@ -383,6 +511,19 @@ impl RetrievalChannels {
     #[must_use]
     pub const fn semantic(&self) -> Option<&ChannelResults> {
         self.semantic.as_ref()
+    }
+
+    /// Attach the exact optional reranker outcome observed for this query.
+    #[must_use]
+    pub fn with_rerank_report(mut self, report: RerankReport) -> Self {
+        self.rerank = report;
+        self
+    }
+
+    /// Optional semantic reranker outcome carried into fusion provenance.
+    #[must_use]
+    pub const fn rerank_report(&self) -> &RerankReport {
+        &self.rerank
     }
 }
 
@@ -517,6 +658,7 @@ struct HybridSearchDetails {
     requested_mode: SearchMode,
     execution: RetrievalExecution,
     semantic_readiness: SemanticReadiness,
+    rerank: RerankReport,
     fallback: Option<RetrievalFallback>,
     abstention: Option<RetrievalAbstention>,
     items: Vec<FusedSearchItem>,
@@ -546,6 +688,12 @@ impl HybridSearchPacket {
     #[must_use]
     pub const fn semantic_readiness(&self) -> SemanticReadiness {
         self.details.semantic_readiness
+    }
+
+    /// Optional semantic reranker outcome for this exact packet.
+    #[must_use]
+    pub const fn rerank_report(&self) -> &RerankReport {
+        &self.details.rerank
     }
 
     /// Explicit single-channel degradation reason.
@@ -595,12 +743,18 @@ pub fn fuse_search(input: HybridSearchInput) -> Result<HybridSearchPacket, Retri
     let packet_was_truncated = items.len() > usize::from(input.result_limit);
     items.truncate(usize::from(input.result_limit));
     let channel_was_truncated = selected.iter().any(|channel| channel.truncated());
+    let rerank = if input.mode == SearchMode::Deterministic {
+        RerankReport::not_requested()
+    } else {
+        input.channels.rerank.clone()
+    };
     Ok(HybridSearchPacket {
         details: HybridSearchDetails {
             generation_id,
             requested_mode: input.mode,
             execution,
             semantic_readiness: input.semantic_readiness,
+            rerank,
             fallback,
             abstention,
             items,

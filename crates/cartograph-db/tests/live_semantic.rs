@@ -218,6 +218,13 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         hits.windows(2)
             .all(|pair| pair[0].distance() <= pair[1].distance())
     );
+    let rerank_text = hits[0]
+        .rerank_text()
+        .unwrap_or_else(|| panic!("vector hit omitted bounded reranker text"));
+    assert!(rerank_text.contains("alpha_symbol"));
+    let serialized = serde_json::to_string(&hits[0])
+        .unwrap_or_else(|error| panic!("vector hit serialization failed: {error}"));
+    assert!(!serialized.contains("documentation for alpha_symbol"));
     let materialized = fixture
         .database
         .rebuild_current_similarity_edges(

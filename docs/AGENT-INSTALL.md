@@ -129,6 +129,10 @@ and the bounded local Claude CLI bridge. Embedding and reranker tiers use
 OpenAI-compatible HTTP. Credentials should be resolved from environment
 variables, not stored inline.
 
+It is valid to configure only embeddings and reranking. Intentionally absent
+summarize, ask, local-chat, and classification tiers are reported as skipped by
+`llm smoke` and do not make doctor unhealthy.
+
 The browser visual-graph viewer is the only v1 capability not present in v2.
 Typed graph data, paths, impact, similarity, JSON/DOT/Mermaid/Cytoscape export,
 and SCIP interchange remain available to agents and tools.

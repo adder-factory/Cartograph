@@ -1051,9 +1051,12 @@ struct McpServeArguments {
 
 #[derive(Debug, Args)]
 struct V1ImportArguments {
-    /// Existing checkout whose bytes must match the v1 source rows.
+    /// Existing initialized v2 project that owns the destination schema.
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
+    /// Byte-exact historical checkout for the v1 rows. Defaults to project-path.
+    #[arg(long)]
+    source_checkout: Option<PathBuf>,
     /// Existing v1.1.33 PostgreSQL schema in the same database.
     #[arg(long)]
     source_schema: String,
@@ -3077,7 +3080,8 @@ fn render_status_text(value: &Value) {
         };
         println!(
             "Retained generations: {staging} staging, {ready} ready, {current} current, \
-             {superseded} superseded, {failed} failed; estimated {}",
+             {superseded} superseded, {failed} failed; source plus generation-local BM25 \
+             lower bound {}",
             render_byte_count(retained_bytes)
         );
         if generation_storage_needs_attention(generation_storage) {
@@ -3405,6 +3409,7 @@ async fn rebuild_derived_index(
 async fn run_v1_postgres_import(arguments: V1ImportArguments) -> Result<ExitCode, String> {
     let V1ImportArguments {
         project_path,
+        source_checkout,
         source_schema,
         maximum_rows,
         maximum_source_bytes,
@@ -3419,7 +3424,10 @@ async fn run_v1_postgres_import(arguments: V1ImportArguments) -> Result<ExitCode
     }
     let source_schema = cartograph_config::DatabaseSchema::parse(&source_schema)
         .map_err(|error| error.to_string())?;
-    let identity = ProjectRuntime::inspect_source_identity(&project_path)
+    let destination_identity = ProjectRuntime::inspect_source_identity(&project_path)
+        .map_err(|error| error.to_string())?;
+    let source_checkout = source_checkout.unwrap_or_else(|| project_path.clone());
+    let source_identity = ProjectRuntime::inspect_source_identity(&source_checkout)
         .map_err(|error| error.to_string())?;
     let validation =
         GenerationValidationLimits::new(DEFAULT_IMPORT_OUTPUT_BYTES, DEFAULT_IMPORT_WORKING_BYTES)
@@ -3431,9 +3439,11 @@ async fn run_v1_postgres_import(arguments: V1ImportArguments) -> Result<ExitCode
         MAINTENANCE_LEASE_DURATION,
         MAINTENANCE_STATEMENT_TIMEOUT,
     );
-    let source_revision =
-        V1PostgresSourceRevision::new(identity.repository_fingerprint, identity.source_revision);
-    let source = V1PostgresSource::new(source_schema, &project_path, source_revision);
+    let source_revision = V1PostgresSourceRevision::new(
+        destination_identity.repository_fingerprint,
+        source_identity.v1_source_manifest,
+    );
+    let source = V1PostgresSource::new(source_schema, source_checkout, source_revision);
     let request = V1PostgresImportRequest::new(source, execution, limits);
     let settings = resolve_database_settings(&project_path)?;
     let pool = cartograph_db::connect(&settings)
@@ -4158,7 +4168,7 @@ async fn check_project_index(
 fn check_generation_storage(storage: GenerationStorageSummary, checks: &mut Vec<DoctorCheck>) {
     let message = format!(
         "Retained generations: {} staging, {} ready, {} current, {} superseded, {} failed; \
-         estimated {}.",
+         source plus generation-local BM25 lower bound {}.",
         storage.staging,
         storage.ready,
         storage.current,
@@ -4180,7 +4190,7 @@ fn check_generation_storage(storage: GenerationStorageSummary, checks: &mut Vec<
 async fn check_llm_configuration(project_path: &Path, checks: &mut Vec<DoctorCheck>) {
     let tiers = [
         (ProjectLlmTier::Embedding, "embedding", true),
-        (ProjectLlmTier::Summarize, "summarize", true),
+        (ProjectLlmTier::Summarize, "summarize", false),
         (ProjectLlmTier::Local, "local", false),
         (ProjectLlmTier::Ask, "ask", false),
         (ProjectLlmTier::Classify, "classify", false),

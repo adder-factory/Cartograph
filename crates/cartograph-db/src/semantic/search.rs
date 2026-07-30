@@ -17,6 +17,9 @@ use super::{
 
 const COSINE_DISTANCE_MAXIMUM: f64 = 2.0;
 const COSINE_DISTANCE_TOLERANCE: f64 = 1.0e-9;
+const MAXIMUM_RERANK_CODE_CHARACTERS: i32 = 4_096;
+const MAXIMUM_RERANK_NATURAL_TEXT_CHARACTERS: i32 = 2_048;
+const MAXIMUM_RERANK_TEXT_BYTES: usize = 32 * 1_024;
 
 impl CartographDatabase {
     /// Execute current-generation cosine Top-K only after every semantic readiness proof passes.
@@ -116,6 +119,8 @@ async fn execute_exact_vector_search(
                   documents.file_id::text, documents.symbol_id::text,
                   documents.path, documents.language, documents.document_kind,
                   documents.qualified_name,
+                  left(documents.code, $5) AS rerank_code,
+                  left(documents.natural_text, $6) AS rerank_natural_text,
                   (current_embeddings.embedding
                       <=> CAST($3 AS vector({dimension})))::float8 AS distance
             FROM current_embeddings
@@ -132,10 +137,12 @@ async fn execute_exact_vector_search(
         .bind(input.generation.as_str())
         .bind(vector_text(&input.request.vector)?)
         .bind(i64::from(input.request.limit))
+        .bind(MAXIMUM_RERANK_CODE_CHARACTERS)
+        .bind(MAXIMUM_RERANK_NATURAL_TEXT_CHARACTERS)
         .fetch_all(connection)
         .await
         .map_err(|_| database_error("vector-search-exact-fallback"))?;
-    rows.iter().map(decode_hit).collect()
+    rows.iter().map(decode_rerankable_hit).collect()
 }
 
 async fn execute_vector_search(
@@ -162,7 +169,10 @@ async fn execute_vector_search(
             SELECT documents.generation_id::text, documents.document_id::text,
                   documents.file_id::text, documents.symbol_id::text,
                   documents.path, documents.language, documents.document_kind,
-                  documents.qualified_name, nearest.distance
+                  documents.qualified_name,
+                  left(documents.code, $5) AS rerank_code,
+                  left(documents.natural_text, $6) AS rerank_natural_text,
+                  nearest.distance
             FROM nearest
             INNER JOIN {schema}."search_documents" AS documents
               ON documents.project_id = nearest.project_id
@@ -175,10 +185,22 @@ async fn execute_vector_search(
         .bind(input.generation.as_str())
         .bind(vector_text(&input.request.vector)?)
         .bind(i64::from(input.request.limit))
+        .bind(MAXIMUM_RERANK_CODE_CHARACTERS)
+        .bind(MAXIMUM_RERANK_NATURAL_TEXT_CHARACTERS)
         .fetch_all(connection)
         .await
         .map_err(|_| database_error("vector-search-query"))?;
-    rows.iter().map(decode_hit).collect()
+    rows.iter().map(decode_rerankable_hit).collect()
+}
+
+fn decode_rerankable_hit(
+    row: &sqlx_postgres::PgRow,
+) -> Result<VectorSearchHit, SemanticStorageError> {
+    let mut hit = decode_hit(row)?;
+    let code = read_string(row, "rerank_code")?;
+    let natural_text = read_string(row, "rerank_natural_text")?;
+    hit.rerank_text = Some(render_rerank_text(&hit, &code, &natural_text)?);
+    Ok(hit)
 }
 
 pub(crate) fn decode_hit(
@@ -220,7 +242,58 @@ pub(crate) fn decode_hit(
         document_kind: parse_document_kind(&read_string(row, "document_kind")?)?,
         qualified_name: read_string(row, "qualified_name")?,
         distance,
+        rerank_text: None,
     })
+}
+
+fn render_rerank_text(
+    hit: &VectorSearchHit,
+    code: &str,
+    natural_text: &str,
+) -> Result<String, SemanticStorageError> {
+    let mut text = String::new();
+    text.try_reserve(MAXIMUM_RERANK_TEXT_BYTES)
+        .map_err(|_| database_error("rerank-text-reserve"))?;
+    for (label, value) in [
+        ("path", hit.path.as_str()),
+        ("language", hit.language.as_str()),
+        ("kind", hit.document_kind.as_str()),
+        ("name", hit.qualified_name.as_str()),
+        ("code", code),
+        ("natural_text", natural_text),
+    ] {
+        append_rerank_field(&mut text, label, value);
+        if text.len() == MAXIMUM_RERANK_TEXT_BYTES {
+            break;
+        }
+    }
+    Ok(text)
+}
+
+fn append_rerank_field(text: &mut String, label: &str, value: &str) {
+    if value.is_empty() || text.len() == MAXIMUM_RERANK_TEXT_BYTES {
+        return;
+    }
+    let separator = if text.is_empty() { "" } else { "\n" };
+    let prefix = format!("{separator}{label}:\n");
+    let prefix = bounded_utf8(
+        &prefix,
+        MAXIMUM_RERANK_TEXT_BYTES.saturating_sub(text.len()),
+    );
+    text.push_str(prefix);
+    let remaining = MAXIMUM_RERANK_TEXT_BYTES.saturating_sub(text.len());
+    text.push_str(bounded_utf8(value, remaining));
+}
+
+fn bounded_utf8(value: &str, maximum_bytes: usize) -> &str {
+    if value.len() <= maximum_bytes {
+        return value;
+    }
+    let mut end = maximum_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &value[..end]
 }
 
 fn parse_optional_id<T>(
@@ -230,4 +303,16 @@ fn parse_optional_id<T>(
 ) -> Result<Option<T>, SemanticStorageError> {
     raw.map(|value| parse(&value).map_err(|_| corrupt(field)))
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_utf8_never_splits_a_scalar() {
+        assert_eq!(bounded_utf8("a😀b", 3), "a");
+        assert_eq!(bounded_utf8("a😀b", 5), "a😀");
+        assert_eq!(bounded_utf8("small", 8), "small");
+    }
 }

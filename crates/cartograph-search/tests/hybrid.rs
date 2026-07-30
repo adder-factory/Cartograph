@@ -1,8 +1,9 @@
 use cartograph_domain::{DocumentId, DocumentKind, GenerationId, NormalizedPath, SourceLanguage};
 use cartograph_search::{
-    ChannelCandidate, ChannelResults, HybridSearchInput, LexicalComponent, RetrievalAbstention,
-    RetrievalChannel, RetrievalDocument, RetrievalDocumentInput, RetrievalExecution,
-    RetrievalFallback, SearchMode, SemanticReadiness, fuse_search,
+    ChannelCandidate, ChannelResults, HybridSearchInput, LexicalComponent, RerankReport,
+    RerankState, RetrievalAbstention, RetrievalChannel, RetrievalChannels, RetrievalDocument,
+    RetrievalDocumentInput, RetrievalExecution, RetrievalFallback, SearchMode, SemanticReadiness,
+    fuse_search,
 };
 
 const RESULT_LIMIT: u16 = 20;
@@ -166,6 +167,7 @@ fn deterministic_mode_ignores_semantic_candidates_without_hiding_readiness() {
     assert_eq!(packet.semantic_readiness(), SemanticReadiness::Ready);
     assert_eq!(packet.execution(), RetrievalExecution::Lexical);
     assert_eq!(packet.fallback(), None);
+    assert_eq!(packet.rerank_report().state(), RerankState::NotRequested);
     assert_eq!(paths(&packet), vec!["src/a.rs"]);
 }
 
@@ -333,6 +335,30 @@ fn compact_packet_serialization_keeps_explanation_without_query_or_source() {
     assert!(serialized.contains("\"raw_score\""));
     assert!(!serialized.contains("query"));
     assert!(!serialized.contains("source"));
+}
+
+#[test]
+fn reranker_provenance_is_bounded_and_does_not_replace_rrf_evidence() {
+    let semantic = channel(
+        RetrievalChannel::Semantic,
+        vec![candidate("a", "src/a.rs", (1, SEMANTIC_PRIMARY_SCORE))],
+    );
+    let report = RerankReport::applied("gte-modernbert-int8", 1)
+        .unwrap_or_else(|error| panic!("rerank report failed: {error}"));
+    let channels = RetrievalChannels::new()
+        .with_channel(semantic)
+        .unwrap_or_else(|error| panic!("semantic channel failed: {error}"))
+        .with_rerank_report(report);
+    let packet =
+        fuse_search(input(SearchMode::Hybrid, SemanticReadiness::Ready).with_channels(channels))
+            .unwrap_or_else(|error| panic!("fusion failed: {error}"));
+
+    assert_eq!(packet.rerank_report().state(), RerankState::Applied);
+    assert_eq!(packet.rerank_report().model(), Some("gte-modernbert-int8"));
+    assert_eq!(packet.rerank_report().reranked_documents(), 1);
+    assert_eq!(packet.items()[0].contributions()[0].rank(), 1);
+    assert!(RerankReport::applied("", 1).is_err());
+    assert!(RerankReport::applied("model", 0).is_err());
 }
 
 fn packet(

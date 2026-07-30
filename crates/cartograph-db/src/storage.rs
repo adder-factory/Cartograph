@@ -13,6 +13,9 @@ const MAXIMUM_STORAGE_ROWS: u16 = 128;
 const DEFAULT_PARSE_CACHE_ROWS: u64 = 20_000;
 const DEFAULT_PARSE_CACHE_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_PARSE_CACHE_CONTRACTS: u64 = 2;
+const PARSE_CACHE_AMPLIFICATION_MINIMUM_BYTES: u64 = 64 * 1024 * 1024;
+const PARSE_CACHE_AMPLIFICATION_ALLOWANCE_BYTES: u64 = 64 * 1024 * 1024;
+const PARSE_CACHE_AMPLIFICATION_MULTIPLIER: u64 = 4;
 const STALE_READY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// One bounded relation-level storage and autovacuum signal.
@@ -49,7 +52,10 @@ pub struct ParseCacheStorageUsage {
     pub rows: u64,
     pub contracts: u64,
     pub logical_payload_bytes: u64,
+    pub stored_payload_bytes: u64,
+    pub schema_stored_payload_bytes: u64,
     pub physical_relation_bytes: u64,
+    pub physical_overhead_bytes: u64,
 }
 
 /// Exact duplicate-content evidence. Mutation remains disabled until facts can
@@ -71,6 +77,7 @@ pub enum StorageWarning {
     ParseCacheContractBudgetExceeded,
     ParseCacheRowBudgetExceeded,
     ParseCachePayloadBudgetExceeded,
+    ParseCachePhysicalAmplification,
     StaleReadyGeneration,
     InvalidConcurrentIndexArtifact,
     DeadTuplePressure,
@@ -291,24 +298,37 @@ async fn load_parse_cache_storage(
 ) -> Result<ParseCacheStorageUsage, StorageError> {
     let schema = quoted_schema(&database.schema);
     let statement = format!(
-        r#"SELECT count(*)::bigint AS rows,
-                  count(DISTINCT extractor_contract_digest)::bigint AS contracts,
-                  COALESCE(sum(payload_bytes), 0)::bigint AS logical_payload_bytes,
+        r#"SELECT count(*) FILTER (WHERE project_id = $1::uuid)::bigint AS rows,
+                  count(DISTINCT extractor_contract_digest)
+                      FILTER (WHERE project_id = $1::uuid)::bigint AS contracts,
+                  COALESCE(sum(payload_bytes)
+                      FILTER (WHERE project_id = $1::uuid), 0)::bigint
+                      AS logical_payload_bytes,
+                  COALESCE(sum(pg_column_size(payload))
+                      FILTER (WHERE project_id = $1::uuid), 0)::bigint
+                      AS stored_payload_bytes,
+                  COALESCE(sum(pg_column_size(payload)), 0)::bigint
+                      AS schema_stored_payload_bytes,
                   pg_total_relation_size('{schema}."native_parse_cache"'::regclass)::bigint
                       AS physical_relation_bytes
-           FROM {schema}."native_parse_cache"
-           WHERE project_id = $1::uuid"#
+           FROM {schema}."native_parse_cache""#
     );
     let row = query(AssertSqlSafe(statement))
         .bind(project_id.as_str())
         .fetch_one(connection)
         .await
         .map_err(|_| database_error("storage-parse-cache"))?;
+    let schema_stored_payload_bytes = nonnegative(&row, "schema_stored_payload_bytes")?;
+    let physical_relation_bytes = nonnegative(&row, "physical_relation_bytes")?;
     Ok(ParseCacheStorageUsage {
         rows: nonnegative(&row, "rows")?,
         contracts: nonnegative(&row, "contracts")?,
         logical_payload_bytes: nonnegative(&row, "logical_payload_bytes")?,
-        physical_relation_bytes: nonnegative(&row, "physical_relation_bytes")?,
+        stored_payload_bytes: nonnegative(&row, "stored_payload_bytes")?,
+        schema_stored_payload_bytes,
+        physical_relation_bytes,
+        physical_overhead_bytes: physical_relation_bytes
+            .saturating_sub(schema_stored_payload_bytes),
     })
 }
 
@@ -546,6 +566,9 @@ fn storage_warnings(input: StorageWarningInput<'_>) -> Vec<StorageWarning> {
     if input.parse_cache.logical_payload_bytes > DEFAULT_PARSE_CACHE_PAYLOAD_BYTES {
         warnings.push(StorageWarning::ParseCachePayloadBudgetExceeded);
     }
+    if parse_cache_physically_amplified(input.parse_cache) {
+        warnings.push(StorageWarning::ParseCachePhysicalAmplification);
+    }
     if input.stale_ready_generations > 0 {
         warnings.push(StorageWarning::StaleReadyGeneration);
     }
@@ -576,6 +599,15 @@ fn storage_warnings(input: StorageWarningInput<'_>) -> Vec<StorageWarning> {
         warnings.push(StorageWarning::IndexListTruncated);
     }
     warnings
+}
+
+fn parse_cache_physically_amplified(cache: ParseCacheStorageUsage) -> bool {
+    let healthy_upper_bound = cache
+        .schema_stored_payload_bytes
+        .saturating_mul(PARSE_CACHE_AMPLIFICATION_MULTIPLIER)
+        .saturating_add(PARSE_CACHE_AMPLIFICATION_ALLOWANCE_BYTES);
+    cache.physical_relation_bytes >= PARSE_CACHE_AMPLIFICATION_MINIMUM_BYTES
+        && cache.physical_relation_bytes > healthy_upper_bound
 }
 
 fn nonnegative(row: &sqlx_postgres::PgRow, field: &'static str) -> Result<u64, StorageError> {
@@ -630,7 +662,10 @@ mod tests {
                 rows: DEFAULT_PARSE_CACHE_ROWS + 1,
                 contracts: DEFAULT_PARSE_CACHE_CONTRACTS + 1,
                 logical_payload_bytes: DEFAULT_PARSE_CACHE_PAYLOAD_BYTES + 1,
-                physical_relation_bytes: 1,
+                stored_payload_bytes: 1,
+                schema_stored_payload_bytes: 1,
+                physical_relation_bytes: 128 * 1024 * 1024,
+                physical_overhead_bytes: 128 * 1024 * 1024 - 1,
             },
             stale_ready_generations: 1,
             tables: &tables,
@@ -642,6 +677,18 @@ mod tests {
                 ..GenerationDeduplicationAssessment::default()
             },
         });
-        assert_eq!(warnings.len(), 9);
+        assert_eq!(warnings.len(), 10);
+        assert!(warnings.contains(&StorageWarning::ParseCachePhysicalAmplification));
+    }
+
+    #[test]
+    fn small_parse_cache_relations_do_not_report_physical_amplification() {
+        assert!(!parse_cache_physically_amplified(ParseCacheStorageUsage {
+            stored_payload_bytes: 1,
+            schema_stored_payload_bytes: 1,
+            physical_relation_bytes: PARSE_CACHE_AMPLIFICATION_MINIMUM_BYTES - 1,
+            physical_overhead_bytes: PARSE_CACHE_AMPLIFICATION_MINIMUM_BYTES - 2,
+            ..ParseCacheStorageUsage::default()
+        }));
     }
 }

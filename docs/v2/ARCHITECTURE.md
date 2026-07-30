@@ -100,8 +100,10 @@ same domain helper, preventing invisible duplicate projects or path disclosure.
 
 The complete supported-source revision is built from an exact count plus
 ordered normalized path/content-digest pairs through one shared domain builder.
-Indexer, status, source context, and importer use the same encoding. An imported
-schema must contain exactly the checkout's supported path/content set; missing,
+Indexer, status, source context, and importer use the same encoding. The importer
+builds its caller-owned manifest from the exact checkout through the frozen
+v1.1.33 path boundary, excluding only additive v2 `.pyi` and TOML modes. An
+imported schema must contain exactly that checkout path/content set; missing,
 extra, or substituted paths fail before durable mutation.
 
 `fresh=true` means the current generation recorded exactly that complete live
@@ -255,6 +257,19 @@ under shared cancellation/deadlines. Reciprocal-rank fusion combines ranks—not
 raw BM25/cosine scales—and retains channel rank/score provenance. If semantic
 evidence is not ready or empty, the packet labels the exact lexical fallback.
 
+When `rerankerLlm` is configured, the agent sends only the bounded query and
+bounded source-bearing semantic Top-K candidates to its OpenAI-compatible
+`/v1/rerank` endpoint. A complete finite response replaces semantic rank and
+raw score before reciprocal-rank fusion; lexical rank and evidence remain
+unchanged. Candidate source is never serialized in vector-search or retrieval
+responses. Timeout, endpoint, configuration, missing-text, and malformed-result
+paths retain cosine order and emit an explicit rerank outcome instead of
+failing lexical retrieval.
+
+Embedding and reranking can be the only configured model tiers. Generated
+summaries, classification, `ask`, and local chat are independent optional
+features; their absence does not degrade model smoke status or doctor health.
+
 ## Intent, graph policy, and evidence packets
 
 Natural-language context is classified without an LLM into:
@@ -282,8 +297,8 @@ retained for impact and uncertainty instead of being discarded by that primary
 edit-site decision.
 
 Packets return generation, intent, freshness, confidence, abstention, channel
-provenance, primary edit candidates, affected tests, and truncation. No query or
-full source body is persisted as telemetry.
+and reranker provenance, primary edit candidates, affected tests, and
+truncation. No query or full source body is persisted as telemetry.
 
 ## Working-tree overlay and review
 

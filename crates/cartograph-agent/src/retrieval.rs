@@ -1,17 +1,19 @@
 use std::time::Duration;
 
 use cartograph_db::{
-    EmbeddingModelRegistration, EmbeddingModelRegistrationInput, EmbeddingNormalization,
-    SemanticReadinessRequest, SemanticReadinessState, SemanticStorageError, StorageError,
-    VectorSearchHit, VectorSearchInput, VectorSearchRequest,
+    EmbeddingModelRegistration, EmbeddingModelRegistrationInput, EmbeddingModelSelector,
+    EmbeddingNormalization, SemanticReadinessRequest, SemanticReadinessState, SemanticStorageError,
+    StorageError, VectorSearchHit, VectorSearchInput, VectorSearchRequest,
 };
 use cartograph_domain::{GenerationId, NormalizedPath, ProjectId, SourceLanguage};
-use cartograph_llm::{EmbeddingSettings, OpenAiEmbeddingClient};
+use cartograph_llm::{
+    EmbeddingSettings, OpenAiEmbeddingClient, OpenAiRerankClient, RerankSettings,
+};
 use cartograph_search::{
     ChannelCandidate, ChannelResults, DeterministicRetriever, GenerationLexicalRequest,
-    HybridSearchInput, HybridSearchPacket, LexicalQuery, RetrievalChannel, RetrievalChannels,
-    RetrievalDocument, RetrievalDocumentInput, RetrievalError, SearchMode, SemanticReadiness,
-    fuse_search,
+    HybridSearchInput, HybridSearchPacket, LexicalQuery, RerankReport, RetrievalChannel,
+    RetrievalChannels, RetrievalDocument, RetrievalDocumentInput, RetrievalError, SearchMode,
+    SemanticReadiness, fuse_search,
 };
 
 use crate::{ProjectCancellation, ProjectError, ProjectRuntime};
@@ -20,6 +22,7 @@ const DEFAULT_CANDIDATE_LIMIT: u16 = 20;
 const MAXIMUM_CANDIDATE_LIMIT: u16 = 100;
 const SEMANTIC_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(30);
 const SEMANTIC_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+const RERANK_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_PROVIDER: &str = "openai-compatible";
 const GENERATION_ATTEMPTS: usize = 2;
 
@@ -27,6 +30,13 @@ enum SemanticClientState {
     NotConfigured,
     Unavailable,
     Ready(Box<OpenAiEmbeddingClient>),
+}
+
+enum RerankClientState {
+    NotRequested,
+    NotConfigured,
+    Unavailable { model: Option<String> },
+    Ready(Box<OpenAiRerankClient>),
 }
 
 enum RetrievalStageError {
@@ -189,9 +199,14 @@ impl ProjectRuntime {
             request.options.mode,
             self.project_root_for_host_operations(),
         );
+        let rerank_client = rerank_client_from_project(
+            request.options.mode,
+            self.project_root_for_host_operations(),
+        );
         self.prepare_retrieval_inner(RetrievalExecutionRequest {
             request,
             semantic_client,
+            rerank_client,
             cancellation,
         })
         .await
@@ -202,9 +217,11 @@ impl ProjectRuntime {
         &self,
         input: RetrievalClientRequest,
     ) -> Result<PreparedRetrieval, ProjectError> {
+        let rerank_client = rerank_client_without_project(input.request.options.mode);
         self.prepare_retrieval_inner(RetrievalExecutionRequest {
             request: input.request,
             semantic_client: SemanticClientState::Ready(Box::new(input.client)),
+            rerank_client,
             cancellation: input.cancellation,
         })
         .await
@@ -222,6 +239,7 @@ impl ProjectRuntime {
                     options,
                 },
             semantic_client,
+            rerank_client,
             cancellation,
         } = input;
         for attempt in 0..GENERATION_ATTEMPTS {
@@ -231,6 +249,7 @@ impl ProjectRuntime {
                     query: &query,
                     options,
                     semantic_client: &semantic_client,
+                    rerank_client: &rerank_client,
                     cancellation: &cancellation,
                 })
                 .await
@@ -252,6 +271,7 @@ impl ProjectRuntime {
             query,
             options,
             semantic_client,
+            rerank_client,
             cancellation,
         } = input;
         let generation = self
@@ -260,85 +280,36 @@ impl ProjectRuntime {
             .await
             .map_err(storage_stage_error)?;
         let Some(generation) = generation else {
-            let lexical = ChannelResults::new(RetrievalChannel::Lexical, Vec::new())
-                .map_err(|_| RetrievalStageError::Failed)?;
-            let channels = RetrievalChannels::new()
-                .with_channel(lexical)
-                .map_err(|_| RetrievalStageError::Failed)?;
-            let semantic_readiness = if options.mode == SearchMode::Deterministic {
-                SemanticReadiness::NotConfigured
-            } else {
-                SemanticReadiness::NotIndexed
-            };
-            return Ok(PreparedRetrieval {
-                semantic_readiness,
-                channels,
-            });
+            return prepared_without_generation(options.mode, rerank_client);
         };
         let expected_generation_id = generation.generation_id().clone();
         let lexical_query = LexicalQuery::new(query, options.candidate_limit)
             .map_err(|_| RetrievalStageError::Failed)?;
         let retriever = DeterministicRetriever::new(self.database().clone());
         if options.mode == SearchMode::Deterministic {
-            let lexical = lexical_channel(LexicalChannelRequest {
+            return deterministic_retrieval(DeterministicRetrievalRequest {
+                runtime: self,
                 retriever,
-                project_id: project_id.clone(),
-                expected_generation_id: expected_generation_id.clone(),
-                query: lexical_query,
-                cancellation: cancellation.clone(),
+                project_id,
+                expected_generation_id,
+                lexical_query,
+                cancellation,
             })
-            .await?;
-            ensure_generation_current(self, project_id, &expected_generation_id).await?;
-            return Ok(PreparedRetrieval {
-                semantic_readiness: SemanticReadiness::NotConfigured,
-                channels: optional_channel(Some(lexical))
-                    .map_err(|_| RetrievalStageError::Failed)?,
-            });
+            .await;
         }
-
-        let lexical = lexical_channel(LexicalChannelRequest {
-            retriever,
-            project_id: project_id.clone(),
-            expected_generation_id: expected_generation_id.clone(),
-            query: lexical_query,
-            cancellation: cancellation.clone(),
-        });
-        let semantic = semantic_channel(SemanticChannelRequest {
+        hybrid_retrieval(HybridRetrievalRequest {
             runtime: self,
-            project_id: project_id.clone(),
-            expected_generation_id: expected_generation_id.clone(),
-            query: query.to_owned(),
-            limit: options.candidate_limit,
-            client: semantic_client,
-            cancellation: cancellation.clone(),
-        });
-        let (lexical, semantic) = tokio::join!(lexical, semantic);
-        let lexical = match lexical {
-            Ok(channel) => Some(channel),
-            Err(RetrievalStageError::RequestCancelled) => {
-                return Err(RetrievalStageError::RequestCancelled);
-            }
-            Err(RetrievalStageError::GenerationChanged) => {
-                return Err(RetrievalStageError::GenerationChanged);
-            }
-            Err(RetrievalStageError::Failed) => None,
-        };
-        let (semantic_readiness, semantic) = semantic?;
-        if lexical.is_none() && semantic.is_none() {
-            return Err(RetrievalStageError::Failed);
-        }
-        let channels = optional_channel(lexical).map_err(|_| RetrievalStageError::Failed)?;
-        let channels = match semantic {
-            Some(channel) => channels
-                .with_channel(channel)
-                .map_err(|_| RetrievalStageError::Failed)?,
-            None => channels,
-        };
-        ensure_generation_current(self, project_id, &expected_generation_id).await?;
-        Ok(PreparedRetrieval {
-            semantic_readiness,
-            channels,
+            retriever,
+            project_id,
+            expected_generation_id,
+            lexical_query,
+            query,
+            options,
+            semantic_client,
+            rerank_client,
+            cancellation,
         })
+        .await
     }
 
     /// Return one compact fused packet suitable for CLI and MCP `find` consumers.
@@ -377,6 +348,7 @@ impl ProjectRuntime {
 struct RetrievalExecutionRequest {
     request: RetrievalRequest,
     semantic_client: SemanticClientState,
+    rerank_client: RerankClientState,
     cancellation: ProjectCancellation,
 }
 
@@ -385,7 +357,30 @@ struct RetrievalAttemptRequest<'a> {
     query: &'a str,
     options: RetrievalOptions,
     semantic_client: &'a SemanticClientState,
+    rerank_client: &'a RerankClientState,
     cancellation: &'a ProjectCancellation,
+}
+
+struct DeterministicRetrievalRequest<'request> {
+    runtime: &'request ProjectRuntime,
+    retriever: DeterministicRetriever,
+    project_id: &'request ProjectId,
+    expected_generation_id: GenerationId,
+    lexical_query: LexicalQuery,
+    cancellation: &'request ProjectCancellation,
+}
+
+struct HybridRetrievalRequest<'request> {
+    runtime: &'request ProjectRuntime,
+    retriever: DeterministicRetriever,
+    project_id: &'request ProjectId,
+    expected_generation_id: GenerationId,
+    lexical_query: LexicalQuery,
+    query: &'request str,
+    options: RetrievalOptions,
+    semantic_client: &'request SemanticClientState,
+    rerank_client: &'request RerankClientState,
+    cancellation: &'request ProjectCancellation,
 }
 
 struct LexicalChannelRequest {
@@ -403,7 +398,132 @@ struct SemanticChannelRequest<'runtime> {
     query: String,
     limit: u16,
     client: &'runtime SemanticClientState,
+    reranker: &'runtime RerankClientState,
     cancellation: ProjectCancellation,
+}
+
+struct SemanticChannelResult {
+    readiness: SemanticReadiness,
+    channel: Option<ChannelResults>,
+    rerank: RerankReport,
+}
+
+struct SemanticEmbedding {
+    selector: EmbeddingModelSelector,
+    vector: Vec<f32>,
+}
+
+fn prepared_without_generation(
+    mode: SearchMode,
+    reranker: &RerankClientState,
+) -> Result<PreparedRetrieval, RetrievalStageError> {
+    let lexical = ChannelResults::new(RetrievalChannel::Lexical, Vec::new())
+        .map_err(|_| RetrievalStageError::Failed)?;
+    let channels = RetrievalChannels::new()
+        .with_channel(lexical)
+        .map_err(|_| RetrievalStageError::Failed)?
+        .with_rerank_report(rerank_report_without_candidates(reranker)?);
+    let semantic_readiness = if mode == SearchMode::Deterministic {
+        SemanticReadiness::NotConfigured
+    } else {
+        SemanticReadiness::NotIndexed
+    };
+    Ok(PreparedRetrieval {
+        semantic_readiness,
+        channels,
+    })
+}
+
+async fn deterministic_retrieval(
+    input: DeterministicRetrievalRequest<'_>,
+) -> Result<PreparedRetrieval, RetrievalStageError> {
+    let DeterministicRetrievalRequest {
+        runtime,
+        retriever,
+        project_id,
+        expected_generation_id,
+        lexical_query,
+        cancellation,
+    } = input;
+    let lexical = lexical_channel(LexicalChannelRequest {
+        retriever,
+        project_id: project_id.clone(),
+        expected_generation_id: expected_generation_id.clone(),
+        query: lexical_query,
+        cancellation: cancellation.clone(),
+    })
+    .await?;
+    ensure_generation_current(runtime, project_id, &expected_generation_id).await?;
+    let channels = optional_channel(Some(lexical))
+        .map_err(|_| RetrievalStageError::Failed)?
+        .with_rerank_report(RerankReport::not_requested());
+    Ok(PreparedRetrieval {
+        semantic_readiness: SemanticReadiness::NotConfigured,
+        channels,
+    })
+}
+
+async fn hybrid_retrieval(
+    input: HybridRetrievalRequest<'_>,
+) -> Result<PreparedRetrieval, RetrievalStageError> {
+    let HybridRetrievalRequest {
+        runtime,
+        retriever,
+        project_id,
+        expected_generation_id,
+        lexical_query,
+        query,
+        options,
+        semantic_client,
+        rerank_client,
+        cancellation,
+    } = input;
+    let lexical = lexical_channel(LexicalChannelRequest {
+        retriever,
+        project_id: project_id.clone(),
+        expected_generation_id: expected_generation_id.clone(),
+        query: lexical_query,
+        cancellation: cancellation.clone(),
+    });
+    let semantic = semantic_channel(SemanticChannelRequest {
+        runtime,
+        project_id: project_id.clone(),
+        expected_generation_id: expected_generation_id.clone(),
+        query: query.to_owned(),
+        limit: options.candidate_limit,
+        client: semantic_client,
+        reranker: rerank_client,
+        cancellation: cancellation.clone(),
+    });
+    let (lexical, semantic) = tokio::join!(lexical, semantic);
+    let lexical = optional_lexical_result(lexical)?;
+    let semantic = semantic?;
+    if lexical.is_none() && semantic.channel.is_none() {
+        return Err(RetrievalStageError::Failed);
+    }
+    let mut channels = optional_channel(lexical).map_err(|_| RetrievalStageError::Failed)?;
+    if let Some(channel) = semantic.channel {
+        channels = channels
+            .with_channel(channel)
+            .map_err(|_| RetrievalStageError::Failed)?;
+    }
+    channels = channels.with_rerank_report(semantic.rerank);
+    ensure_generation_current(runtime, project_id, &expected_generation_id).await?;
+    Ok(PreparedRetrieval {
+        semantic_readiness: semantic.readiness,
+        channels,
+    })
+}
+
+fn optional_lexical_result(
+    result: Result<ChannelResults, RetrievalStageError>,
+) -> Result<Option<ChannelResults>, RetrievalStageError> {
+    match result {
+        Ok(channel) => Ok(Some(channel)),
+        Err(RetrievalStageError::RequestCancelled) => Err(RetrievalStageError::RequestCancelled),
+        Err(RetrievalStageError::GenerationChanged) => Err(RetrievalStageError::GenerationChanged),
+        Err(RetrievalStageError::Failed) => Ok(None),
+    }
 }
 
 fn semantic_client_from_project(
@@ -420,6 +540,34 @@ fn semantic_client_from_project(
             }),
         Ok(None) => SemanticClientState::NotConfigured,
         Err(_) => SemanticClientState::Unavailable,
+    }
+}
+
+fn rerank_client_without_project(mode: SearchMode) -> RerankClientState {
+    if mode == SearchMode::Deterministic {
+        RerankClientState::NotRequested
+    } else {
+        RerankClientState::NotConfigured
+    }
+}
+
+fn rerank_client_from_project(
+    mode: SearchMode,
+    project_root: &std::path::Path,
+) -> RerankClientState {
+    if mode == SearchMode::Deterministic {
+        return RerankClientState::NotRequested;
+    }
+    match RerankSettings::try_from_project(project_root) {
+        Ok(Some(settings)) => {
+            let model = settings.model().to_owned();
+            OpenAiRerankClient::new(settings).map_or(
+                RerankClientState::Unavailable { model: Some(model) },
+                |client| RerankClientState::Ready(Box::new(client)),
+            )
+        }
+        Ok(None) => RerankClientState::NotConfigured,
+        Err(_) => RerankClientState::Unavailable { model: None },
     }
 }
 
@@ -446,9 +594,38 @@ async fn lexical_channel(
     }
 }
 
+async fn semantic_embedding(
+    client: &OpenAiEmbeddingClient,
+    query: &str,
+    cancellation: &ProjectCancellation,
+) -> Result<Option<SemanticEmbedding>, RetrievalStageError> {
+    let inputs = [query.to_owned()];
+    let batch = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(RetrievalStageError::RequestCancelled),
+        result = tokio::time::timeout(SEMANTIC_ENDPOINT_TIMEOUT, client.embed(&inputs)) => match result {
+            Ok(Ok(batch)) => batch,
+            Ok(Err(_)) | Err(_) => return Ok(None),
+        },
+    };
+    let Ok(dimension) = u16::try_from(batch.dimension()) else {
+        return Ok(None);
+    };
+    let Ok(registration) = model_registration(client, dimension) else {
+        return Ok(None);
+    };
+    let Some(vector) = batch.vectors().first() else {
+        return Ok(None);
+    };
+    Ok(Some(SemanticEmbedding {
+        selector: registration.selector(),
+        vector: vector.values().to_vec(),
+    }))
+}
+
 async fn semantic_channel(
     input: SemanticChannelRequest<'_>,
-) -> Result<(SemanticReadiness, Option<ChannelResults>), RetrievalStageError> {
+) -> Result<SemanticChannelResult, RetrievalStageError> {
     let SemanticChannelRequest {
         runtime,
         project_id,
@@ -456,39 +633,27 @@ async fn semantic_channel(
         query,
         limit,
         client,
+        reranker,
         cancellation,
     } = input;
     let client = match client {
         SemanticClientState::NotConfigured => {
-            return Ok((SemanticReadiness::NotConfigured, None));
+            return semantic_without_candidates(SemanticReadiness::NotConfigured, reranker);
         }
         SemanticClientState::Unavailable => {
-            return Ok((SemanticReadiness::Unavailable, None));
+            return semantic_without_candidates(SemanticReadiness::Unavailable, reranker);
         }
         SemanticClientState::Ready(client) => client,
     };
-    let inputs = [query];
-    let batch = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(RetrievalStageError::RequestCancelled),
-        result = tokio::time::timeout(SEMANTIC_ENDPOINT_TIMEOUT, client.embed(&inputs)) => match result {
-            Ok(Ok(batch)) => batch,
-            Err(_) => return Ok((SemanticReadiness::Unavailable, None)),
-            Ok(Err(_)) => return Ok((SemanticReadiness::Unavailable, None)),
-        },
+    let Some(embedding) = semantic_embedding(client, &query, &cancellation).await? else {
+        return semantic_without_candidates(SemanticReadiness::Unavailable, reranker);
     };
-    let dimension = match u16::try_from(batch.dimension()) {
-        Ok(dimension) => dimension,
-        Err(_) => return Ok((SemanticReadiness::Unavailable, None)),
-    };
-    let registration = match model_registration(client.as_ref(), dimension) {
-        Ok(registration) => registration,
-        Err(_) => return Ok((SemanticReadiness::Unavailable, None)),
-    };
-    let selector = registration.selector();
-    let readiness_request =
-        SemanticReadinessRequest::new(project_id.clone(), selector.clone(), SEMANTIC_QUERY_TIMEOUT)
-            .map_err(|_| RetrievalStageError::Failed)?;
+    let readiness_request = SemanticReadinessRequest::new(
+        project_id.clone(),
+        embedding.selector.clone(),
+        SEMANTIC_QUERY_TIMEOUT,
+    )
+    .map_err(|_| RetrievalStageError::Failed)?;
     let readiness_report = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(RetrievalStageError::RequestCancelled),
@@ -497,7 +662,7 @@ async fn semantic_channel(
             Err(SemanticStorageError::CurrentGenerationChanged) => {
                 return Err(RetrievalStageError::GenerationChanged);
             }
-            Err(_) => return Ok((SemanticReadiness::Unavailable, None)),
+            Err(_) => return semantic_without_candidates(SemanticReadiness::Unavailable, reranker),
         },
     };
     if readiness_report
@@ -510,16 +675,13 @@ async fn semantic_channel(
     }
     let readiness = semantic_readiness(readiness_report.state());
     if readiness != SemanticReadiness::Ready {
-        return Ok((readiness, None));
+        return semantic_without_candidates(readiness, reranker);
     }
-    let Some(vector) = batch.vectors().first() else {
-        return Ok((SemanticReadiness::Unavailable, None));
-    };
     let request = VectorSearchRequest::new(VectorSearchInput {
         project_id,
         expected_generation_id,
-        model: selector,
-        vector: vector.values().to_vec(),
+        model: embedding.selector,
+        vector: embedding.vector,
         limit,
         statement_timeout: SEMANTIC_QUERY_TIMEOUT,
     })
@@ -530,16 +692,188 @@ async fn semantic_channel(
         result = runtime.database().vector_top_k(request) => match result {
             Ok(hits) => hits,
             Err(SemanticStorageError::NotReady { state }) => {
-                return Ok((semantic_readiness(state), None));
+                return semantic_without_candidates(semantic_readiness(state), reranker);
             }
             Err(SemanticStorageError::CurrentGenerationChanged) => {
                 return Err(RetrievalStageError::GenerationChanged);
             }
-            Err(_) => return Ok((SemanticReadiness::Unavailable, None)),
+            Err(_) => return semantic_without_candidates(SemanticReadiness::Unavailable, reranker),
         },
     };
     let channel = semantic_results(&hits).map_err(|_| RetrievalStageError::Failed)?;
-    Ok((SemanticReadiness::Ready, Some(channel)))
+    let (channel, rerank) = rerank_semantic_channel(RerankSemanticRequest {
+        query: &query,
+        hits: &hits,
+        channel,
+        client: reranker,
+        cancellation: &cancellation,
+    })
+    .await?;
+    Ok(SemanticChannelResult {
+        readiness: SemanticReadiness::Ready,
+        channel: Some(channel),
+        rerank,
+    })
+}
+
+struct RerankSemanticRequest<'request> {
+    query: &'request str,
+    hits: &'request [VectorSearchHit],
+    channel: ChannelResults,
+    client: &'request RerankClientState,
+    cancellation: &'request ProjectCancellation,
+}
+
+async fn rerank_semantic_channel(
+    input: RerankSemanticRequest<'_>,
+) -> Result<(ChannelResults, RerankReport), RetrievalStageError> {
+    let RerankSemanticRequest {
+        query,
+        hits,
+        channel,
+        client,
+        cancellation,
+    } = input;
+    let client = match client {
+        RerankClientState::NotRequested => {
+            return Ok((channel, RerankReport::not_requested()));
+        }
+        RerankClientState::NotConfigured => {
+            return Ok((channel, RerankReport::not_configured()));
+        }
+        RerankClientState::Unavailable { model } => {
+            return Ok((
+                channel,
+                RerankReport::unavailable(model.clone())
+                    .map_err(|_| RetrievalStageError::Failed)?,
+            ));
+        }
+        RerankClientState::Ready(client) => client,
+    };
+    if hits.is_empty() {
+        return Ok((
+            channel,
+            RerankReport::skipped_no_candidates(client.model())
+                .map_err(|_| RetrievalStageError::Failed)?,
+        ));
+    }
+    let documents = hits
+        .iter()
+        .map(|hit| {
+            hit.rerank_text()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(documents) = documents else {
+        return Ok((
+            channel,
+            RerankReport::skipped_no_text(client.model())
+                .map_err(|_| RetrievalStageError::Failed)?,
+        ));
+    };
+    let batch = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(RetrievalStageError::RequestCancelled),
+        result = tokio::time::timeout(
+            RERANK_ENDPOINT_TIMEOUT,
+            client.rerank(query, &documents),
+        ) => match result {
+            Ok(Ok(batch)) => batch,
+            Ok(Err(_)) | Err(_) => {
+                return Ok((
+                    channel,
+                    RerankReport::unavailable(Some(client.model().to_owned()))
+                        .map_err(|_| RetrievalStageError::Failed)?,
+                ));
+            }
+        },
+    };
+    let reranked = match apply_rerank_scores(&channel, batch.scores()) {
+        Ok(reranked) => reranked,
+        Err(_) => {
+            return Ok((
+                channel,
+                RerankReport::unavailable(Some(client.model().to_owned()))
+                    .map_err(|_| RetrievalStageError::Failed)?,
+            ));
+        }
+    };
+    let reranked_documents =
+        u16::try_from(documents.len()).map_err(|_| RetrievalStageError::Failed)?;
+    let report = RerankReport::applied(batch.model(), reranked_documents)
+        .map_err(|_| RetrievalStageError::Failed)?;
+    Ok((reranked, report))
+}
+
+fn apply_rerank_scores(
+    channel: &ChannelResults,
+    scores: &[f32],
+) -> Result<ChannelResults, ProjectError> {
+    if channel.channel() != RetrievalChannel::Semantic
+        || channel.candidates().len() != scores.len()
+        || scores.iter().any(|score| !score.is_finite())
+    {
+        return Err(ProjectError::RetrievalOperationFailed);
+    }
+    let mut order = scores.iter().copied().enumerate().collect::<Vec<_>>();
+    order.sort_by(|(left_index, left_score), (right_index, right_score)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| {
+                channel.candidates()[*left_index]
+                    .rank()
+                    .cmp(&channel.candidates()[*right_index].rank())
+            })
+            .then_with(|| {
+                channel.candidates()[*left_index]
+                    .document()
+                    .document_id()
+                    .cmp(channel.candidates()[*right_index].document().document_id())
+            })
+    });
+    let candidates = order
+        .into_iter()
+        .enumerate()
+        .map(|(index, (candidate_index, score))| {
+            let rank = u16::try_from(index.saturating_add(1))
+                .map_err(|_| ProjectError::RetrievalOperationFailed)?;
+            ChannelCandidate::new(
+                channel.candidates()[candidate_index].document().clone(),
+                rank,
+                f64::from(score),
+            )
+            .map_err(|_| ProjectError::RetrievalOperationFailed)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ChannelResults::new(RetrievalChannel::Semantic, candidates)
+        .map(|results| results.with_truncated(channel.truncated()))
+        .map_err(|_| ProjectError::RetrievalOperationFailed)
+}
+
+fn semantic_without_candidates(
+    readiness: SemanticReadiness,
+    reranker: &RerankClientState,
+) -> Result<SemanticChannelResult, RetrievalStageError> {
+    Ok(SemanticChannelResult {
+        readiness,
+        channel: None,
+        rerank: rerank_report_without_candidates(reranker)?,
+    })
+}
+
+fn rerank_report_without_candidates(
+    reranker: &RerankClientState,
+) -> Result<RerankReport, RetrievalStageError> {
+    match reranker {
+        RerankClientState::NotRequested => Ok(RerankReport::not_requested()),
+        RerankClientState::NotConfigured => Ok(RerankReport::not_configured()),
+        RerankClientState::Unavailable { model } => {
+            RerankReport::unavailable(model.clone()).map_err(|_| RetrievalStageError::Failed)
+        }
+        RerankClientState::Ready(client) => RerankReport::skipped_no_candidates(client.model())
+            .map_err(|_| RetrievalStageError::Failed),
+    }
 }
 
 fn model_registration(
@@ -675,6 +1009,8 @@ const fn semantic_readiness(state: SemanticReadinessState) -> SemanticReadiness 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cartograph_domain::{DocumentId, DocumentKind};
+    use cartograph_search::RerankState;
 
     #[test]
     fn retrieval_options_default_to_auto_and_reject_unbounded_top_k() {
@@ -721,5 +1057,61 @@ mod tests {
             semantic_readiness(SemanticReadinessState::QueryProbeFailed),
             SemanticReadiness::Unavailable
         );
+    }
+
+    #[test]
+    fn rerank_scores_replace_only_semantic_order_with_stable_ties() {
+        let channel = ChannelResults::new(
+            RetrievalChannel::Semantic,
+            vec![
+                semantic_fixture_candidate("a", "src/a.rs", 1, 0.95),
+                semantic_fixture_candidate("b", "src/b.rs", 2, 0.90),
+                semantic_fixture_candidate("c", "src/c.rs", 3, 0.85),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("semantic fixture failed: {error}"));
+        let reranked = apply_rerank_scores(&channel, &[0.1, 0.9, 0.9])
+            .unwrap_or_else(|error| panic!("semantic rerank failed: {error}"));
+        let paths = reranked
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.document().path().as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["src/b.rs", "src/c.rs", "src/a.rs"]);
+        assert_eq!(reranked.candidates()[0].raw_score(), f64::from(0.9_f32));
+        assert_eq!(reranked.candidates()[0].rank(), 1);
+        assert!(apply_rerank_scores(&channel, &[0.1]).is_err());
+    }
+
+    #[test]
+    fn absent_reranker_has_an_explicit_non_model_outcome() {
+        let report = rerank_report_without_candidates(&RerankClientState::NotConfigured)
+            .unwrap_or_else(|_| panic!("not-configured rerank report failed"));
+        assert_eq!(report.state(), RerankState::NotConfigured);
+        assert_eq!(report.model(), None);
+    }
+
+    fn semantic_fixture_candidate(id: &str, path: &str, rank: u16, score: f64) -> ChannelCandidate {
+        let document_id = DocumentId::parse(match id {
+            "a" => "11111111-1111-4111-8111-111111111111",
+            "b" => "22222222-2222-4222-8222-222222222222",
+            "c" => "33333333-3333-4333-8333-333333333333",
+            _ => panic!("unknown semantic fixture"),
+        })
+        .unwrap_or_else(|error| panic!("document fixture failed: {error}"));
+        let generation_id = GenerationId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap_or_else(|error| panic!("generation fixture failed: {error}"));
+        let path = NormalizedPath::parse(path)
+            .unwrap_or_else(|error| panic!("path fixture failed: {error}"));
+        let document = RetrievalDocument::new(RetrievalDocumentInput {
+            document_id,
+            generation_id,
+            path,
+            language: SourceLanguage::Rust,
+            document_kind: DocumentKind::Symbol,
+        });
+        ChannelCandidate::new(document, rank, score)
+            .unwrap_or_else(|error| panic!("candidate fixture failed: {error}"))
     }
 }

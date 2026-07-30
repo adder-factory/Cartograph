@@ -286,7 +286,9 @@ or delete state. They require the exact confirmation phrase shown by command
 help and are never implied by a diagnostic request.
 
 `db usage` separates schema heap/index/TOAST, generation, and parse-cache
-allocations. `db compact` plans bounded one-at-a-time concurrent B-tree rebuilds
+allocations. Parse-cache evidence distinguishes uncompressed logical payload,
+live compressed storage, whole-schema allocation, and physical overhead so a
+high-water TOAST file cannot masquerade as live cache data. `db compact` plans bounded one-at-a-time concurrent B-tree rebuilds
 and remains read-only until `--apply --confirm compact-online-indexes`; apply
 also requires verified filesystem headroom. Legacy inline LLM keys can be
 audited with `cartograph llm migrate-credentials .` and atomically moved only
@@ -312,7 +314,8 @@ preflight before the confirmed import:
 
 ```sh
 cartograph db import-v1 \
-  --project-path /absolute/path/to/checkout \
+  --project-path /absolute/path/to/current-project \
+  --source-checkout /absolute/path/to/exact-v1-checkout \
   --source-schema cartograph_v1 \
   --dry-run \
   --format json

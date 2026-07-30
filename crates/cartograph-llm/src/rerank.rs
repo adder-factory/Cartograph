@@ -67,6 +67,12 @@ impl RerankSettings {
             timeout,
         }))
     }
+
+    /// Validated configured model identity without endpoint or credential material.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 /// Input-ordered, finite reranker scores normalized to `[0, 1]`.
@@ -107,6 +113,12 @@ impl OpenAiRerankClient {
             .build()
             .map_err(|_| RerankError::ClientUnavailable)?;
         Ok(Self { settings, client })
+    }
+
+    /// Validated configured model identity used for retrieval provenance.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        self.settings.model()
     }
 
     /// Score candidates and restore the response's rank-sorted rows to exact

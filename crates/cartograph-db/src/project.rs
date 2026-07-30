@@ -100,7 +100,9 @@ pub struct GenerationCounts {
     pub documents: i64,
 }
 
-/// Project-wide generation retention counts and a conservative physical-size estimate.
+/// Project-wide generation retention counts and a source/BM25 lower bound.
+/// Shared fact-table heaps, B-trees, embeddings, and reusable dead space are
+/// intentionally reported by the fuller storage-usage surface instead.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct GenerationStorageSummary {
     /// Generations staged but not yet prepared.

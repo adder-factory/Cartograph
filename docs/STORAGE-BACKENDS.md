@@ -161,11 +161,15 @@ The v1 source and v2 destination must be different schemas in the same database.
 The destination may already contain a current generation; import publishes a
 new immutable generation. Back up the database, quiesce project
 index/sync/hook/rebuild writers, and select the v2 destination through
-`CARTOGRAPH_DATABASE_SCHEMA`. Preflight the exact checkout first:
+`CARTOGRAPH_DATABASE_SCHEMA`. `--project-path` identifies the initialized v2
+destination; `--source-checkout` may point at a detached byte-exact historical
+tree so current dirty work never needs to be rewound. Preflight that exact
+checkout first:
 
 ```sh
 cartograph db import-v1 \
-  --project-path /absolute/path/to/checkout \
+  --project-path /absolute/path/to/current-project \
+  --source-checkout /absolute/path/to/exact-v1-checkout \
   --source-schema cartograph_v1 \
   --dry-run \
   --format json
@@ -174,7 +178,10 @@ cartograph db import-v1 \
 The preflight validates schema history, bounded rows/bytes/JSON, supported
 languages, repository/source identity, current checkout bytes, relations,
 coordinates, body/content hashes, and canonical output without writing the
-destination. The default aggregate source/metadata ceiling is 512 MiB; bounded
+destination. It independently discovers the exact v1.1.33-compatible checkout
+path/content set, excluding only additive v2 `.pyi` and TOML modes, and rejects
+any missing, extra, or substituted v1 file before mutation. It reports that raw
+verified manifest as the imported generation revision. The default aggregate source/metadata ceiling is 512 MiB; bounded
 advanced ceilings are available as `--maximum-rows` and
 `--maximum-source-bytes`.
 
@@ -182,7 +189,8 @@ After a clean report:
 
 ```sh
 cartograph db import-v1 \
-  --project-path /absolute/path/to/checkout \
+  --project-path /absolute/path/to/current-project \
+  --source-checkout /absolute/path/to/exact-v1-checkout \
   --source-schema cartograph_v1 \
   --confirm import-v1-postgres \
   --format json
@@ -195,6 +203,10 @@ closed. Reference/edge multiplicity is preserved. Exact spans remain exact only
 when v1 plus current source proves the token; otherwise the span is marked
 coarse. A SCIP placeholder hash proves its path-derived placeholder identity,
 not historical bytes v1 never stored.
+
+Additive v2 file types or source-policy inputs can make the imported v1
+generation correctly report stale. Run a normal v2 index before the final
+status/retrieval verification in that case.
 
 `ConcurrentPublication` is retryable only after writers are quiesced. The
 failed attempt atomically releases its stale generation; repeat the identical
@@ -261,7 +273,9 @@ failure is reported as deferred and cannot roll back already committed
 retention.
 
 Status and doctor expose generation-state counts plus a conservative retained
-byte estimate (source bytes plus physical generation search tables/indexes).
+byte lower bound (source bytes plus physical generation search tables/indexes).
+That lower bound deliberately excludes shared fact-table heaps and B-trees,
+embeddings, and reusable dead space; use `db usage` for physical totals.
 Inspect the report and request another explicit batch if automatic cleanup does
 not drain an existing backlog.
 
@@ -277,7 +291,12 @@ Both `db usage` and the default `db compact` plan verify the exact current
 migration ledger without creating or upgrading the selected schema.
 
 It separates whole-database bytes from this schema's heap, B-tree/all-index,
-TOAST, generation-search, and parse-cache allocations. It also reports bounded
+TOAST, generation-search, and parse-cache allocations. Parse-cache evidence
+separates uncompressed logical payload, live compressed payload for the selected
+project and whole schema, total relation allocation, and the remaining physical
+overhead. A bounded `parse_cache_physical_amplification` warning identifies a
+large high-water relation without claiming that every overhead byte is safely
+reclaimable. It also reports bounded
 largest-table/index rows, estimated live/dead tuples, autovacuum evidence,
 stale ready generations, invalid concurrent-index artifacts with exact total
 and truncation evidence, and duplicate generation-content potential. Duplicate
@@ -293,7 +312,9 @@ PostgreSQL 18 virtual generated column, so byte accounting occupies no per-row
 storage.
 
 Ordinary `VACUUM` makes deleted space reusable inside PostgreSQL but usually
-does not return it to the filesystem. Cartograph therefore offers a dry-run
+does not return it to the filesystem. This is especially visible for a
+high-churn parse-cache TOAST relation: zero dead tuples can coexist with a large
+reusable high-water file. Cartograph therefore offers a dry-run
 online B-tree plan for recoverable index bloat:
 
 ```sh

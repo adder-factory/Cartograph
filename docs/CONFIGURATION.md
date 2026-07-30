@@ -129,6 +129,11 @@ remain usable without it.
       "endpoint": "https://api.anthropic.com",
       "model": "claude-sonnet-4-6",
       "apiKeyEnv": "ANTHROPIC_API_KEY"
+    },
+    "rerankerLlm": {
+      "provider": "openai-compat",
+      "endpoint": "http://127.0.0.1:8083",
+      "model": "local-cross-encoder"
     }
   }
 }
@@ -147,6 +152,15 @@ fields include bounded `timeoutMs`, `concurrency`, `summaryBatchSize`,
 `apiKeyEnv`, `claudeBin`, `llamaServerArgs`, and `externallyManaged` where
 applicable. Inline legacy keys are read for compatibility but environment
 lookup is the safe configuration.
+
+A low-load deployment may configure only `embeddingLlm` and `rerankerLlm` and
+set `summarizeLlm`, `askLlm`, `localLlm`, and `classifyLlm` to `null`.
+`cartograph llm smoke` tests configured tiers and reports those absent
+generative tiers as explicit skips. Reranking applies only to bounded semantic
+Top-K candidates before reciprocal-rank fusion. The source-bearing candidate
+text sent to that operator-configured endpoint is capped and is never included
+in Cartograph's serialized search response; reranker failure retains cosine
+ordering and reports the exact outcome.
 
 Audit and migrate legacy inline tier keys without printing them:
 

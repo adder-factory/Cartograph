@@ -24,7 +24,7 @@ use cartograph_db::{
 };
 use cartograph_domain::{
     ContentDigest, GenerationDigestVersion, NormalizedPath, ProjectId, ProjectOperation,
-    SourceManifestDigestBuilder, project_root_identity,
+    SourceLanguage, SourceManifestDigestBuilder, project_root_identity,
 };
 use cartograph_extract::{
     DiscoveryLimits, DiscoveryPolicy, NestedRepositoryPolicy, SourceDiscoveryOptions, SourceLimits,
@@ -455,6 +455,9 @@ pub struct ProjectSourceIdentity {
     pub repository_fingerprint: ContentDigest,
     /// Complete digest of every supported source path and content hash.
     pub source_revision: ContentDigest,
+    /// Exact v1.1.33-compatible path/content manifest, excluding additive v2
+    /// modes while retaining the checkout's bounded source policy.
+    pub v1_source_manifest: ContentDigest,
     /// Supported source files included in the revision.
     pub files: usize,
     /// Exact indexed source bytes contributing to worker selection.
@@ -897,6 +900,7 @@ impl ProjectRuntime {
         Ok(ProjectSourceIdentity {
             repository_fingerprint: project_identity_digest(&root),
             source_revision: source.digest,
+            v1_source_manifest: source.v1_source_manifest,
             files: source.files,
             source_bytes: source.source_bytes,
         })
@@ -1456,6 +1460,7 @@ async fn scan_source_path(input: SourceScanRequest) -> Result<SourceRevision, Pr
 
 struct SourceRevision {
     digest: ContentDigest,
+    v1_source_manifest: ContentDigest,
     files: usize,
     source_bytes: u64,
     captured_source: Option<Box<str>>,
@@ -1617,12 +1622,19 @@ where
     manifest_entries
         .try_reserve_exact(files.len())
         .map_err(|_| ProjectError::SourceScanFailed)?;
+    let mut v1_manifest_entries = Vec::new();
+    v1_manifest_entries
+        .try_reserve_exact(files.len())
+        .map_err(|_| ProjectError::SourceScanFailed)?;
     let mut captured_source = None;
     let mut captured_content_hash = None;
     let mut source_bytes = 0_u64;
     for file in &files {
         if file.byte_size() > u64::try_from(max_source_bytes).unwrap_or(u64::MAX) {
             let marker = oversized_source_digest(file);
+            if SourceLanguage::is_v1_candidate_path(file.path().as_str()) {
+                v1_manifest_entries.push((file.path().clone(), marker.clone()));
+            }
             manifest_entries.push((file.path().clone(), marker));
             continue;
         }
@@ -1639,22 +1651,23 @@ where
         source_bytes = source_bytes
             .checked_add(snapshot_bytes)
             .ok_or(ProjectError::SourceScanFailed)?;
-        manifest_entries.push((file.path().clone(), snapshot.content_hash().clone()));
+        let content_hash = snapshot.content_hash().clone();
+        if SourceLanguage::for_v1_normalized_path_with_source(
+            file.path().as_str(),
+            snapshot.source(),
+        )
+        .is_some()
+        {
+            v1_manifest_entries.push((file.path().clone(), content_hash.clone()));
+        }
+        manifest_entries.push((file.path().clone(), content_hash));
         if capture_path == Some(file.path()) {
             captured_source = Some(snapshot.source().to_owned().into_boxed_str());
             captured_content_hash = Some(snapshot.content_hash().clone());
         }
     }
-    let mut digest = SourceManifestDigestBuilder::new(manifest_entries.len())
-        .map_err(|_| ProjectError::SourceScanFailed)?;
-    for (path, content_hash) in &manifest_entries {
-        digest
-            .push(path, content_hash)
-            .map_err(|_| ProjectError::SourceScanFailed)?;
-    }
-    let source_digest = digest
-        .finish()
-        .map_err(|_| ProjectError::SourceScanFailed)?;
+    let source_digest = finish_source_manifest(&manifest_entries)?;
+    let v1_source_manifest = finish_source_manifest(&v1_manifest_entries)?;
     let overlay = read_scip_overlay(root, retain_scip_overlay, &mut cancelled)?;
     let source_and_overlay_digest = overlay.digest.as_ref().map_or_else(
         || source_digest.clone(),
@@ -1663,12 +1676,26 @@ where
     let digest = source_index_policy_digest(&source_and_overlay_digest, index_policy);
     Ok(SourceRevision {
         digest,
+        v1_source_manifest,
         files: manifest_entries.len(),
         source_bytes,
         captured_source,
         captured_content_hash,
         scip_overlay: overlay.input,
     })
+}
+
+fn finish_source_manifest(
+    entries: &[(NormalizedPath, ContentDigest)],
+) -> Result<ContentDigest, ProjectError> {
+    let mut digest = SourceManifestDigestBuilder::new(entries.len())
+        .map_err(|_| ProjectError::SourceScanFailed)?;
+    for (path, content_hash) in entries {
+        digest
+            .push(path, content_hash)
+            .map_err(|_| ProjectError::SourceScanFailed)?;
+    }
+    digest.finish().map_err(|_| ProjectError::SourceScanFailed)
 }
 
 fn oversized_source_digest(file: &cartograph_extract::DiscoveredSource) -> ContentDigest {
@@ -2430,6 +2457,16 @@ mod tests {
             "export const ready = true;\n",
         )
         .unwrap_or_else(|error| panic!("source write failed: {error}"));
+        std::fs::write(
+            directory.path().join("service.pyi"),
+            "def ready() -> bool: ...\n",
+        )
+        .unwrap_or_else(|error| panic!("additive Python source write failed: {error}"));
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap_or_else(|error| panic!("additive TOML source write failed: {error}"));
         let canonical = std::fs::canonicalize(directory.path())
             .unwrap_or_else(|error| panic!("canonicalize failed: {error}"));
 
@@ -2439,11 +2476,21 @@ mod tests {
             .unwrap_or_else(|error| panic!("source revision failed: {error}"));
 
         assert_eq!(identity.source_revision, internal.digest);
+        assert_eq!(identity.v1_source_manifest, internal.v1_source_manifest);
+        let service_path = NormalizedPath::parse("service.ts")
+            .unwrap_or_else(|error| panic!("service path was invalid: {error}"));
+        let service_hash =
+            ContentDigest::from_bytes(*blake3::hash(b"export const ready = true;\n").as_bytes());
+        assert_eq!(
+            identity.v1_source_manifest,
+            finish_source_manifest(&[(service_path, service_hash)])
+                .unwrap_or_else(|error| panic!("v1 manifest failed: {error}"))
+        );
+        assert_eq!(identity.files, 3);
         assert_eq!(
             identity.repository_fingerprint,
             project_identity_digest(&canonical)
         );
-        assert_eq!(identity.files, 1);
         assert!(!format!("{identity:?}").contains(&canonical.to_string_lossy().to_string()));
     }
 

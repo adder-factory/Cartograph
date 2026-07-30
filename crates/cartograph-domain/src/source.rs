@@ -472,6 +472,18 @@ impl SourceLanguage {
         Self::detect(path, Some(source)).filter(|language| language.is_native_indexable())
     }
 
+    /// Classify a normalized path/content pair through the immutable v1.1.33
+    /// language and extension boundary. Additive v2 paths such as `.pyi` and
+    /// `.toml` remain excluded even when their language has a native extractor.
+    #[must_use]
+    pub fn for_v1_normalized_path_with_source(path: &str, source: &str) -> Option<Self> {
+        if !Self::is_v1_candidate_path(path) {
+            return None;
+        }
+        Self::detect(path, Some(source))
+            .filter(|language| language.is_native_indexable() && language.is_v1_language())
+    }
+
     /// Whether a path could become supported after bounded content inspection.
     #[must_use]
     pub fn is_known_candidate_path(path: &str) -> bool {
@@ -486,6 +498,24 @@ impl SourceLanguage {
     #[must_use]
     pub fn is_native_candidate_path(path: &str) -> bool {
         is_candidate_path_with(path, Self::is_native_indexable)
+    }
+
+    /// Whether bounded content inspection could select one of the exact
+    /// v1.1.33 source modes. Paths admitted only by v2 additions are excluded.
+    #[must_use]
+    pub fn is_v1_candidate_path(path: &str) -> bool {
+        let extension = path_extension(path);
+        if SourceLanguage::ALL.into_iter().any(|language| {
+            language
+                .additional_extensions()
+                .iter()
+                .any(|addition| extension.is_some_and(|value| value.eq_ignore_ascii_case(addition)))
+        }) {
+            return false;
+        }
+        is_candidate_path_with(path, |language| {
+            language.is_native_indexable() && language.is_v1_language()
+        })
     }
 
     /// Whether a path could resolve to a native language admitted by a
@@ -1495,6 +1525,23 @@ mod tests {
         assert_eq!(SourceLanguage::Python.additional_extensions(), &[".pyi"]);
         assert!(SourceLanguage::Toml.v1_extensions().is_empty());
         assert_eq!(SourceLanguage::Toml.additional_extensions(), &[".toml"]);
+        assert!(SourceLanguage::is_v1_candidate_path("src/service.py"));
+        assert!(!SourceLanguage::is_v1_candidate_path("src/service.pyi"));
+        assert!(!SourceLanguage::is_v1_candidate_path("Cargo.toml"));
+        assert_eq!(
+            SourceLanguage::for_v1_normalized_path_with_source(
+                "src/service.py",
+                "def ready():\n    return True\n",
+            ),
+            Some(SourceLanguage::Python)
+        );
+        assert_eq!(
+            SourceLanguage::for_v1_normalized_path_with_source(
+                "src/service.pyi",
+                "def ready() -> bool: ...\n",
+            ),
+            None
+        );
 
         for language in SourceLanguage::ALL {
             assert_eq!(

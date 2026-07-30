@@ -282,15 +282,16 @@ pub struct V1PostgresSource {
     revision: V1PostgresSourceRevision,
 }
 
-/// Repository identity and exact source revision represented by a v1 schema.
+/// Repository identity and caller-owned exact v1 source-manifest assertion.
 #[derive(Clone)]
 pub struct V1PostgresSourceRevision {
     repository_fingerprint: ContentDigest,
-    source_revision: ContentDigest,
+    expected_source_manifest: ContentDigest,
 }
 
 impl V1PostgresSourceRevision {
-    /// Pair a stable repository identity with the imported source revision.
+    /// Pair a stable repository identity with an independently known raw
+    /// source-manifest digest.
     #[must_use]
     pub const fn new(
         repository_fingerprint: ContentDigest,
@@ -298,7 +299,7 @@ impl V1PostgresSourceRevision {
     ) -> Self {
         Self {
             repository_fingerprint,
-            source_revision,
+            expected_source_manifest: source_revision,
         }
     }
 }
@@ -447,6 +448,8 @@ impl V1PostgresImportCheckpoint {
 /// Read-only proof that a v1.1.33 PostgreSQL source can become one canonical v2 generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct V1PostgresDryRunReport {
+    /// Raw path/content manifest of the exact verified v1 file set.
+    pub source_revision: ContentDigest,
     /// BLAKE3 fingerprint covering the explicit schema and every imported source field.
     pub source_fingerprint: ContentDigest,
     /// Canonical v2 logical generation digest.
@@ -545,6 +548,7 @@ struct SourceSnapshot {
     nodes: Vec<SourceNode>,
     edges: Vec<SourceEdge>,
     references: Vec<SourceReference>,
+    source_revision: ContentDigest,
     fingerprint: ContentDigest,
     source_bytes: u64,
 }
@@ -1427,6 +1431,7 @@ fn finalize_source_analysis(
     let counts = canonical_counts(&facts)?;
     Ok(V1Analysis {
         report: V1PostgresDryRunReport {
+            source_revision: source.source_revision,
             source_fingerprint: source.fingerprint,
             content_digest: facts.digest().clone(),
             counts,
@@ -2041,7 +2046,11 @@ async fn load_source(
         fingerprint: &mut fingerprint,
     };
     let (files, source_bytes) = load_source_files(connection, &mut state).await?;
-    require_source_manifest(&files, &input.request.source.revision.source_revision)?;
+    let source_revision = require_source_manifest(
+        &files,
+        &input.request.source.revision.expected_source_manifest,
+    )?;
+    hash_field(state.fingerprint, source_revision.as_str().as_bytes());
     let nodes = load_source_nodes(connection, &mut state, &files).await?;
     let edges = load_source_edges(connection, &mut state).await?;
     let references = load_source_references(connection, &mut state).await?;
@@ -2050,6 +2059,7 @@ async fn load_source(
         nodes,
         edges,
         references,
+        source_revision,
         fingerprint: ContentDigest::from_bytes(*fingerprint.finalize().as_bytes()),
         source_bytes,
     })
@@ -2058,7 +2068,7 @@ async fn load_source(
 fn require_source_manifest(
     files: &BTreeMap<String, SourceFile>,
     expected: &ContentDigest,
-) -> Result<(), V1PostgresImportError> {
+) -> Result<ContentDigest, V1PostgresImportError> {
     let mut manifest = SourceManifestDigestBuilder::new(files.len())
         .map_err(|_| V1PostgresImportError::SourceLimit)?;
     for (path, file) in files {
@@ -2071,10 +2081,10 @@ fn require_source_manifest(
     let actual = manifest
         .finish()
         .map_err(|_| invalid_source("source_manifest_count"))?;
-    if &actual == expected {
-        Ok(())
-    } else {
+    if expected != &actual {
         Err(V1PostgresImportError::SourceManifestMismatch)
+    } else {
+        Ok(actual)
     }
 }
 
@@ -2089,7 +2099,6 @@ fn source_fingerprint_hasher(request: &V1PostgresImportRequest) -> blake3::Hashe
             .repository_fingerprint
             .as_str()
             .as_bytes(),
-        request.source.revision.source_revision.as_str().as_bytes(),
     ] {
         hash_field(&mut fingerprint, value);
     }
@@ -2296,10 +2305,11 @@ async fn load_source_nodes(
 
 fn decode_source_node(row: &sqlx_postgres::PgRow) -> Result<SourceNode, V1PostgresImportError> {
     let file_path = read_named_string(row, "file_path", "node_file_path")?;
+    let kind = read_named_string(row, "kind", "node_kind")?;
     Ok(SourceNode {
         legacy_id: read_named_string(row, "id", "node_id")?,
         name: read_named_string(row, "name", "node_name")?,
-        kind: read_named_string(row, "kind", "node_kind")?,
+        kind: kind.clone(),
         qualified_name: read_named_string(row, "qualified_name", "qualified_name")?,
         file_path: NormalizedPath::parse(&file_path)
             .map_err(|_| invalid_source("node_file_path"))?
@@ -2307,7 +2317,11 @@ fn decode_source_node(row: &sqlx_postgres::PgRow) -> Result<SourceNode, V1Postgr
         language: read_supported_language(row, "language", "node_language")?,
         start_line: read_named_u32(row, "start_line", "start_line")?,
         end_line: read_named_u32(row, "end_line", "end_line")?,
-        start_column: read_named_u32(row, "start_column", "start_column")?,
+        start_column: normalize_legacy_start_column(
+            row.try_get::<i32, _>("start_column")
+                .map_err(|_| invalid_source("start_column"))?,
+            &kind,
+        )?,
         end_column: read_named_u32(row, "end_column", "end_column")?,
         docstring: read_named_optional_string(row, "docstring", "docstring")?,
         signature: read_named_optional_string(row, "signature", "signature")?,
@@ -2318,6 +2332,13 @@ fn decode_source_node(row: &sqlx_postgres::PgRow) -> Result<SourceNode, V1Postgr
         is_async: read_legacy_bool(row, "is_async", "is_async")?,
         is_static: read_legacy_bool(row, "is_static", "is_static")?,
     })
+}
+
+fn normalize_legacy_start_column(value: i32, kind: &str) -> Result<u32, V1PostgresImportError> {
+    match value {
+        -1 if kind == "module" => Ok(0),
+        value => u32::try_from(value).map_err(|_| invalid_source("start_column")),
+    }
 }
 
 async fn load_source_edges(
@@ -2632,14 +2653,7 @@ async fn create_import_run(
         .bind(initialization.project_id.as_str())
         .bind(generation_id.as_str())
         .bind(sequence)
-        .bind(
-            initialization
-                .request
-                .source
-                .revision
-                .source_revision
-                .as_str(),
-        )
+        .bind(initialization.report.source_revision.as_str())
         .bind(IMPORT_WORKER_COUNT)
         .execute(&mut *connection)
         .await
@@ -2700,13 +2714,7 @@ fn deterministic_generation_id(
     let sequence_bytes = sequence.to_be_bytes();
     for field in [
         initialization.project_id.as_str().as_bytes(),
-        initialization
-            .request
-            .source
-            .revision
-            .source_revision
-            .as_str()
-            .as_bytes(),
+        initialization.report.source_revision.as_str().as_bytes(),
         initialization.report.source_fingerprint.as_str().as_bytes(),
         sequence_bytes.as_slice(),
     ] {
@@ -3312,8 +3320,8 @@ mod tests {
         UUID_VARIANT_BYTE, UUID_VARIANT_CLEAR_MASK, UUID_VARIANT_RFC_4122, UUID_VERSION_BYTE,
         UUID_VERSION_CLEAR_MASK, UUID_VERSION_EIGHT, V1PostgresImportCheckpoint,
         V1PostgresImportCounts, V1PostgresImportError, deterministic_uuid_bytes,
-        lease_heartbeat_error, line_starts, native_import_languages, preflight_memory_admission,
-        require_source_manifest, retryable_stale_import, sha256_hex,
+        lease_heartbeat_error, line_starts, native_import_languages, normalize_legacy_start_column,
+        preflight_memory_admission, require_source_manifest, retryable_stale_import, sha256_hex,
         source_matches_native_language, storage_mutation_error, v1_content_hash_matches,
         validate_checkpoint_state,
     };
@@ -3547,6 +3555,23 @@ mod tests {
         assert_eq!(
             require_source_manifest(&missing, &different_path),
             Err(V1PostgresImportError::SourceManifestMismatch)
+        );
+        assert_eq!(
+            require_source_manifest(&missing, &manifest_digest(&[("a.rs", "a")])),
+            Ok(manifest_digest(&[("a.rs", "a")]))
+        );
+    }
+
+    #[test]
+    fn importer_normalizes_only_the_v1_synthetic_module_start_sentinel() {
+        assert_eq!(normalize_legacy_start_column(-1, "module"), Ok(0));
+        assert_eq!(normalize_legacy_start_column(7, "module"), Ok(7));
+        assert_eq!(normalize_legacy_start_column(0, "function"), Ok(0));
+        assert_eq!(
+            normalize_legacy_start_column(-1, "function"),
+            Err(V1PostgresImportError::InvalidSourceData {
+                field: "start_column"
+            })
         );
     }
 

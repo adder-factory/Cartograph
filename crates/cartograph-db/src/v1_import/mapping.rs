@@ -694,10 +694,10 @@ fn source_span(
         {
             spans.push((start, end));
         }
-        if spans.len() == 1 {
-            spans[0]
-        } else {
-            return Err(invalid_source("coordinate_encoding"));
+        match spans.as_slice() {
+            [span] => *span,
+            [] if file.language == "vb6" => legacy_block_span(file, node)?,
+            _ => return Err(invalid_source("coordinate_encoding")),
         }
     } else {
         // A validated v1 body hash proves this row came through createNode, whose tree-sitter
@@ -711,6 +711,18 @@ fn source_span(
         return Err(invalid_source("node_span"));
     }
     Ok((start, end))
+}
+
+fn legacy_block_span(
+    file: &SourceFile,
+    node: &SourceNode,
+) -> Result<(usize, usize), V1PostgresImportError> {
+    let starts = source_position_candidates(file, node.start_line, node.start_column)?;
+    let start = unique_position(&starts).ok_or_else(|| invalid_source("coordinate_encoding"))?;
+    let (_, end) = source_line_bounds(file, node.end_line)?;
+    (start <= end)
+        .then_some((start, end))
+        .ok_or_else(|| invalid_source("node_span"))
 }
 
 #[cfg(test)]
@@ -1164,6 +1176,16 @@ mod tests {
     }
 
     #[test]
+    fn legacy_block_extractors_fall_back_when_the_name_end_column_is_not_on_the_end_line() {
+        let source = "Public Type Person\nEnd Type\n";
+        let mut file = source_file(source);
+        file.language = "vb6".to_owned();
+        let mut node = source_node("Person", 12, 18);
+        node.end_line = 2;
+        assert_eq!(source_span(&file, &node), Ok((12, source.len() - 1)));
+    }
+
+    #[test]
     fn scip_placeholder_is_bound_to_the_normalized_path() {
         let path = "src/generated.rs";
         let digest = sha256_hex(path.as_bytes());
@@ -1182,6 +1204,9 @@ mod tests {
             nodes: vec![node],
             edges: Vec::new(),
             references: Vec::new(),
+            source_revision: ContentDigest::from_bytes(
+                [DEF_USE_TEST_DIGEST_BYTE; TEST_DIGEST_BYTES],
+            ),
             fingerprint: ContentDigest::from_bytes([DEF_USE_TEST_DIGEST_BYTE; TEST_DIGEST_BYTES]),
             source_bytes: u64::try_from(OWNER_SOURCE.len())
                 .unwrap_or_else(|_| panic!("owner source length overflowed")),
@@ -1220,6 +1245,9 @@ mod tests {
             nodes: vec![node],
             edges: Vec::new(),
             references: Vec::new(),
+            source_revision: ContentDigest::from_bytes(
+                [MAX_ID_TEST_DIGEST_BYTE; TEST_DIGEST_BYTES],
+            ),
             fingerprint: ContentDigest::from_bytes([MAX_ID_TEST_DIGEST_BYTE; TEST_DIGEST_BYTES]),
             source_bytes: u64::try_from("x\n".len())
                 .unwrap_or_else(|_| panic!("maximum-id source length overflowed")),
@@ -1282,6 +1310,7 @@ mod tests {
                 nodes: vec![node],
                 edges: Vec::new(),
                 references: Vec::new(),
+                source_revision: ContentDigest::from_bytes([u8::try_from(index).unwrap_or(0); 32]),
                 fingerprint: ContentDigest::from_bytes([u8::try_from(index).unwrap_or(0); 32]),
                 source_bytes: u64::try_from(source.len())
                     .unwrap_or_else(|_| panic!("signature fixture length overflowed")),

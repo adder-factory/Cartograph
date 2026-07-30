@@ -332,7 +332,7 @@ impl<'project> ChatSmokeRequest<'project> {
 const SUMMARIZE_SMOKE: ChatSmokeTarget = ChatSmokeTarget {
     tier: ProjectLlmTier::Summarize,
     label: "summarize",
-    required: true,
+    required: false,
 };
 const ASK_SMOKE: ChatSmokeTarget = ChatSmokeTarget {
     tier: ProjectLlmTier::Ask,
@@ -354,7 +354,6 @@ const CLASSIFY_SMOKE: ChatSmokeTarget = ChatSmokeTarget {
 #[serde(rename_all = "snake_case")]
 enum OverallSmokeStatus {
     Ok,
-    Warn,
     Fail,
 }
 
@@ -468,14 +467,15 @@ fn render_credential_migration(report: &ProjectCredentialMigrationReport) {
     );
 }
 
-/// Apply only missing required LLM tiers for `doctor --fix`.
+/// Apply only the missing embedding tier for `doctor --fix`.
 ///
-/// Existing tier choices and credentials are never replaced. A detected Ollama
-/// endpoint is reused; otherwise the checksum-pinned minimal llama.cpp model
-/// set is installed and configured. Starting provider processes remains an
-/// explicit operator action.
+/// Summarization, chat, classification, and reranking remain optional. Existing
+/// tier choices and credentials are never replaced. A detected Ollama endpoint
+/// is reused; otherwise the checksum-pinned minimal llama.cpp embedding model is
+/// installed and configured. Starting provider processes remains an explicit
+/// operator action.
 pub(super) async fn doctor_fix_missing_tiers(project: &Path) -> Result<Vec<String>, String> {
-    let required = [ProjectLlmTier::Embedding, ProjectLlmTier::Summarize];
+    let required = [ProjectLlmTier::Embedding];
     let mut missing = Vec::new();
     for tier in required {
         match load_exact_project_llm_tier(project, tier) {
@@ -896,13 +896,7 @@ async fn run_smoke(arguments: SmokeArguments) -> Result<ExitCode, String> {
         smoke_rerank(&arguments.path, timeout),
     );
     let rows = vec![embedding, summarize, ask, local, classify, rerank];
-    let overall_status = if rows.iter().any(|row| row.status == SmokeStatus::Fail) {
-        OverallSmokeStatus::Fail
-    } else if rows.iter().any(|row| row.status == SmokeStatus::Skip) {
-        OverallSmokeStatus::Warn
-    } else {
-        OverallSmokeStatus::Ok
-    };
+    let overall_status = overall_smoke_status(&rows);
     let report = SmokeReport {
         overall_status,
         rows,
@@ -1074,6 +1068,14 @@ fn failed_row(input: SmokeRowInput) -> SmokeRow {
     input.into_row(SmokeStatus::Fail)
 }
 
+fn overall_smoke_status(rows: &[SmokeRow]) -> OverallSmokeStatus {
+    if rows.iter().any(|row| row.status == SmokeStatus::Fail) {
+        OverallSmokeStatus::Fail
+    } else {
+        OverallSmokeStatus::Ok
+    }
+}
+
 fn missing_row(tier: &'static str, required: bool, started: Instant) -> SmokeRow {
     SmokeRow {
         tier,
@@ -1085,11 +1087,22 @@ fn missing_row(tier: &'static str, required: bool, started: Instant) -> SmokeRow
         model: None,
         endpoint: None,
         duration_ms: elapsed_ms(started),
-        detail: if required {
-            format!("{tier} LLM tier is not configured")
-        } else {
-            format!("{tier} tier is not configured; summarize/cosine fallback remains active")
-        },
+        detail: missing_tier_detail(tier, required),
+    }
+}
+
+fn missing_tier_detail(tier: &str, required: bool) -> String {
+    if required {
+        return format!("{tier} LLM tier is not configured");
+    }
+    match tier {
+        "summarize" => "summarize tier is not configured; indexed source and deterministic retrieval remain active".to_owned(),
+        "rerank" => {
+            "rerank tier is not configured; semantic cosine ordering remains active".to_owned()
+        }
+        _ => format!(
+            "{tier} tier is not configured; retrieval remains available without generated chat"
+        ),
     }
 }
 
@@ -1680,7 +1693,14 @@ mod tests {
         assert!(required.detail.contains("not configured"));
         let optional = missing_row("ask", false, Instant::now());
         assert_eq!(optional.status, SmokeStatus::Skip);
-        assert!(optional.detail.contains("fallback"));
+        assert!(optional.detail.contains("without generated chat"));
+        let optional_summarize = missing_row("summarize", false, Instant::now());
+        assert_eq!(optional_summarize.status, SmokeStatus::Skip);
+        assert!(
+            optional_summarize
+                .detail
+                .contains("deterministic retrieval")
+        );
         let ok = ok_row(
             SmokeRowInput::new("summarize", Instant::now(), "bounded response").with_configuration(
                 Some("fixture".to_owned()),
@@ -1694,11 +1714,32 @@ mod tests {
         ));
         let report = SmokeReport {
             overall_status: OverallSmokeStatus::Fail,
-            rows: vec![required, optional, ok, failed],
+            rows: vec![required, optional, optional_summarize, ok, failed],
             duration_ms: 1,
         };
         render_smoke(&report);
         assert!(elapsed_ms(Instant::now()) <= 1_000);
+    }
+
+    #[test]
+    fn optional_unconfigured_smoke_tiers_do_not_degrade_passing_configured_tiers() {
+        let rows = vec![
+            ok_row(SmokeRowInput::new(
+                "embedding",
+                Instant::now(),
+                "bounded response",
+            )),
+            missing_row("summarize", false, Instant::now()),
+            missing_row("ask", false, Instant::now()),
+            missing_row("local", false, Instant::now()),
+            missing_row("classify", false, Instant::now()),
+            ok_row(SmokeRowInput::new(
+                "rerank",
+                Instant::now(),
+                "bounded response",
+            )),
+        ];
+        assert_eq!(overall_smoke_status(&rows), OverallSmokeStatus::Ok);
     }
 
     #[tokio::test]

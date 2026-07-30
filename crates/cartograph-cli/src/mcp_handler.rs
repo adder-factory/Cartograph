@@ -3074,7 +3074,7 @@ fn recommended_llm_preset(configured: &[Value], detected: &[Value]) -> &'static 
 
 fn required_llm_tiers_missing(root: &Path) -> Result<BTreeSet<ProjectLlmTier>, ToolError> {
     let mut missing = BTreeSet::new();
-    for tier in [ProjectLlmTier::Embedding, ProjectLlmTier::Summarize] {
+    for tier in [ProjectLlmTier::Embedding] {
         if load_project_llm_tier(root, tier)
             .map_err(project_llm_error)?
             .is_none()
@@ -5901,6 +5901,7 @@ impl FindNameTools<'_> {
             "mode": "semantic",
             "execution": packet.execution(),
             "semanticReadiness": packet.semantic_readiness(),
+            "rerank": packet.rerank_report(),
             "fallback": packet.fallback(),
             "abstention": packet.abstention(),
             "items": items,
@@ -9502,38 +9503,9 @@ impl SummaryReviewTools<'_> {
         )?;
         let schema = optional_bool(&arguments, "schema")?.unwrap_or(false);
         if schema {
-            reject_present(&arguments, &["query", "limit", "timeoutMs", "allowStale"])?;
-            let tables = optional_string_array(
-                &arguments,
-                "tables",
-                StringArrayBounds::new(SQL_MAXIMUM_TABLES, SQL_TABLE_NAME_MAXIMUM_BYTES),
-            )?;
-            let compact = optional_bool(&arguments, "compact")?.unwrap_or(false);
-            let mut relations =
-                serde_json::to_value(read_only_sql_schema()).map_err(|_| ToolError::internal())?;
-            if !tables.is_empty()
-                && let Some(rows) = relations.as_array_mut()
-            {
-                let requested = tables
-                    .iter()
-                    .map(|table| table.to_ascii_lowercase())
-                    .collect::<BTreeSet<_>>();
-                rows.retain(|row| {
-                    row.get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| requested.contains(&name.to_ascii_lowercase()))
-                });
-            }
-            return json_result(&json!({
-                "relations": relations,
-                "requestedTables": tables,
-                "compact": compact,
-                "physicalTablesExposed": false,
-                "projectScoped": true,
-                "contract": "stable_generation_fenced_virtual_schema"
-            }));
+            return sql_schema_result(&arguments);
         }
-        reject_present(&arguments, &["tables", "compact"])?;
+        let compact = sql_query_compaction(&arguments)?;
         let query = required_bounded_text(&arguments, "query", SQL_QUERY_MAXIMUM_BYTES)?;
         let limit = optional_integer(
             &arguments,
@@ -9554,7 +9526,7 @@ impl SummaryReviewTools<'_> {
         let allow_stale = optional_bool(&arguments, "allowStale")?.unwrap_or(false);
         let (project_id, freshness) =
             current_project_for_evidence(self, cancellation, allow_stale).await?;
-        fresh_json_result(
+        fresh_json_result_with_compaction(
             freshness,
             &self
                 .runtime
@@ -9562,6 +9534,7 @@ impl SummaryReviewTools<'_> {
                 .execute_read_only_sql(&project_id, &request)
                 .await
                 .map_err(sql_error)?,
+            compact,
         )
     }
 
@@ -10697,7 +10670,7 @@ fn prepare_storage_migration(
         ADMIN_MAINTENANCE_TIMEOUT,
     );
     let revision =
-        V1PostgresSourceRevision::new(identity.repository_fingerprint, identity.source_revision);
+        V1PostgresSourceRevision::new(identity.repository_fingerprint, identity.v1_source_manifest);
     let source = V1PostgresSource::new(
         source_schema,
         handler.runtime.project_root_for_host_operations(),
@@ -17624,17 +17597,50 @@ fn summaries_definition() -> Result<ToolDefinition, ToolContractError> {
 
 fn sql_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, ToolContractError> {
     let schema = json!({
-        "query": {"type": "string", "minLength": 1, "maxLength": SQL_QUERY_MAXIMUM_BYTES},
-        "schema": {"type": "boolean"},
-        "tables": {"type": "array", "maxItems": SQL_MAXIMUM_TABLES, "items": {"type": "string", "minLength": 1, "maxLength": SQL_TABLE_NAME_MAXIMUM_BYTES}},
-        "compact": {"type": "boolean"},
-        "limit": {"type": "integer", "minimum": 1, "maximum": SQL_MAXIMUM_LIMIT},
-        "timeoutMs": {"type": "integer", "minimum": SQL_MINIMUM_TIMEOUT_MS, "maximum": SQL_MAXIMUM_TIMEOUT_MS},
-        "allowStale": {"type": "boolean"}
+        "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": SQL_QUERY_MAXIMUM_BYTES,
+            "description": "Query mode: one project-scoped read-only SELECT, WITH, or simple EXPLAIN. Omit when schema is true."
+        },
+        "schema": {
+            "type": "boolean",
+            "description": "Schema mode: set true to list the stable logical relations. Do not also pass query."
+        },
+        "tables": {
+            "type": "array",
+            "maxItems": SQL_MAXIMUM_TABLES,
+            "items": {"type": "string", "minLength": 1, "maxLength": SQL_TABLE_NAME_MAXIMUM_BYTES},
+            "description": "Schema mode only: optional case-insensitive logical relation names. Unknown names are reported with the available names."
+        },
+        "compact": {
+            "type": "boolean",
+            "default": false,
+            "description": "Both modes: minify the text response while preserving identical structured content."
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": SQL_MAXIMUM_LIMIT,
+            "default": SQL_DEFAULT_LIMIT,
+            "description": "Maximum returned rows in query mode or logical relations in schema mode."
+        },
+        "timeoutMs": {
+            "type": "integer",
+            "minimum": SQL_MINIMUM_TIMEOUT_MS,
+            "maximum": SQL_MAXIMUM_TIMEOUT_MS,
+            "default": SQL_DEFAULT_TIMEOUT_MS,
+            "description": "Query-mode statement deadline. Accepted but explicitly ignored in schema mode."
+        },
+        "allowStale": {
+            "type": "boolean",
+            "default": false,
+            "description": "Query mode: permit the current indexed generation when source is stale. Accepted but explicitly ignored in schema mode."
+        }
     });
     read_definition(ReadDefinition {
         name: SQL_TOOL,
-        description: "Project-scoped read-only PostgreSQL escape hatch. schema lists logical current-generation relations; queries accept one SELECT/WITH or simple EXPLAIN under a read-only transaction, statement timeout, relation allowlist, row clipping, and output cap. Physical/cross-project tables are not exposed.",
+        description: "Project-scoped read-only PostgreSQL escape hatch with two explicit modes: pass schema:true without query to list logical current-generation relations, or pass query without schema:true to execute one SELECT/WITH or simple EXPLAIN. compact works in both modes and limit caps relations or rows. Queries run under a read-only transaction, statement timeout, relation allowlist, row clipping, and output cap. Physical/cross-project tables are not exposed.",
         schema,
         required: &[],
         annotations,
@@ -18418,9 +18424,123 @@ async fn fresh_cursor_json_result(
     }))
 }
 
+fn sql_query_compaction(arguments: &Map<String, Value>) -> Result<bool, ToolError> {
+    if arguments.contains_key("tables") {
+        return Err(safe_error(
+            ToolErrorCode::InvalidArguments,
+            "SQL table filters require schema:true; omit tables when executing a query",
+        ));
+    }
+    let compact = optional_bool(arguments, "compact")?.unwrap_or(false);
+    if !arguments.contains_key("query") {
+        return Err(safe_error(
+            ToolErrorCode::InvalidArguments,
+            "Provide one read-only SQL query or set schema:true to inspect logical relations",
+        ));
+    }
+    Ok(compact)
+}
+
+fn sql_schema_result(arguments: &Map<String, Value>) -> Result<ToolResult, ToolError> {
+    if arguments.contains_key("query") {
+        return Err(safe_error(
+            ToolErrorCode::InvalidArguments,
+            "Use either schema:true or query, not both in the same SQL call",
+        ));
+    }
+    let tables = optional_string_array(
+        arguments,
+        "tables",
+        StringArrayBounds::new(SQL_MAXIMUM_TABLES, SQL_TABLE_NAME_MAXIMUM_BYTES),
+    )?;
+    let compact = optional_bool(arguments, "compact")?.unwrap_or(false);
+    let relation_limit = optional_integer(
+        arguments,
+        "limit",
+        NumericBounds::new(1, SQL_DEFAULT_LIMIT, SQL_MAXIMUM_LIMIT),
+    )?;
+    let _timeout_ms = optional_integer(
+        arguments,
+        "timeoutMs",
+        NumericBounds::new(
+            SQL_MINIMUM_TIMEOUT_MS,
+            SQL_DEFAULT_TIMEOUT_MS,
+            SQL_MAXIMUM_TIMEOUT_MS,
+        ),
+    )?;
+    let _allow_stale = optional_bool(arguments, "allowStale")?;
+    let ignored_arguments = ["timeoutMs", "allowStale"]
+        .into_iter()
+        .filter(|key| arguments.contains_key(*key))
+        .collect::<Vec<_>>();
+
+    let mut relations =
+        serde_json::to_value(read_only_sql_schema()).map_err(|_| ToolError::internal())?;
+    let available_tables = relations
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let available = available_tables
+        .iter()
+        .map(|table| table.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let requested = tables
+        .iter()
+        .map(|table| table.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let unknown_tables = tables
+        .iter()
+        .filter(|table| !available.contains(&table.to_ascii_lowercase()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut truncated = false;
+    if let Some(rows) = relations.as_array_mut() {
+        if !requested.is_empty() {
+            rows.retain(|row| {
+                row.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| requested.contains(&name.to_ascii_lowercase()))
+            });
+        }
+        truncated = rows.len() > usize::from(relation_limit);
+        rows.truncate(usize::from(relation_limit));
+    }
+    json_result_with_compaction(
+        &json!({
+            "relations": relations,
+            "requestedTables": tables,
+            "unknownTables": unknown_tables,
+            "availableTables": available_tables,
+            "relationLimit": relation_limit,
+            "truncated": truncated,
+            "ignoredArguments": ignored_arguments,
+            "compact": compact,
+            "physicalTablesExposed": false,
+            "projectScoped": true,
+            "contract": "stable_generation_fenced_virtual_schema"
+        }),
+        compact,
+    )
+}
+
 fn json_result(value: &impl Serialize) -> Result<ToolResult, ToolError> {
+    json_result_with_compaction(value, false)
+}
+
+fn json_result_with_compaction(
+    value: &impl Serialize,
+    compact: bool,
+) -> Result<ToolResult, ToolError> {
     let structured = serde_json::to_value(value).map_err(|_| ToolError::internal())?;
-    let text = serde_json::to_string_pretty(&structured).map_err(|_| ToolError::internal())?;
+    let text = if compact {
+        serde_json::to_string(&structured)
+    } else {
+        serde_json::to_string_pretty(&structured)
+    }
+    .map_err(|_| ToolError::internal())?;
     let structured = match structured {
         Value::Object(object) => object,
         value => Map::from_iter([("result".to_owned(), value)]),
@@ -18452,10 +18572,21 @@ fn fresh_json_result(
     freshness: IndexFreshness,
     evidence: &impl Serialize,
 ) -> Result<ToolResult, ToolError> {
-    json_result(&FreshEvidence {
-        freshness,
-        evidence,
-    })
+    fresh_json_result_with_compaction(freshness, evidence, false)
+}
+
+fn fresh_json_result_with_compaction(
+    freshness: IndexFreshness,
+    evidence: &impl Serialize,
+    compact: bool,
+) -> Result<ToolResult, ToolError> {
+    json_result_with_compaction(
+        &FreshEvidence {
+            freshness,
+            evidence,
+        },
+        compact,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -23344,6 +23475,88 @@ mod tests {
     }
 
     #[test]
+    fn sql_contract_makes_both_modes_and_shared_controls_explicit() {
+        let definition = sql_definition(read_only_annotations())
+            .unwrap_or_else(|error| panic!("SQL definition failed: {error}"));
+        let definition = serde_json::to_value(definition)
+            .unwrap_or_else(|error| panic!("SQL definition serialization failed: {error}"));
+        let properties = &definition["inputSchema"]["properties"];
+        assert!(
+            properties["query"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Query mode"))
+        );
+        assert!(
+            properties["schema"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Schema mode"))
+        );
+        assert!(
+            properties["compact"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Both modes"))
+        );
+        assert!(
+            properties["limit"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("rows") && description.contains("relations")
+                })
+        );
+    }
+
+    #[test]
+    fn sql_schema_mode_tolerates_shared_controls_and_reports_unknown_tables() {
+        let arguments = Map::from_iter([
+            ("schema".to_owned(), json!(true)),
+            ("compact".to_owned(), json!(true)),
+            ("limit".to_owned(), json!(20)),
+            ("timeoutMs".to_owned(), json!(1_000)),
+            ("allowStale".to_owned(), json!(true)),
+            (
+                "tables".to_owned(),
+                json!(["symbols", "physical_search_documents", "nodes"]),
+            ),
+        ]);
+        let result = sql_schema_result(&arguments)
+            .unwrap_or_else(|error| panic!("schema controls failed: {error:?}"));
+        assert!(
+            result
+                .primary_text()
+                .is_some_and(|text| !text.contains('\n'))
+        );
+        let structured = result
+            .structured_content()
+            .unwrap_or_else(|| panic!("schema result omitted structured content"));
+        assert_eq!(structured["relationLimit"], 20);
+        assert_eq!(structured["relations"][0]["name"], "symbols");
+        assert_eq!(structured["relations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            structured["unknownTables"],
+            json!(["nodes", "physical_search_documents"])
+        );
+        assert_eq!(
+            structured["ignoredArguments"],
+            json!(["timeoutMs", "allowStale"])
+        );
+    }
+
+    #[test]
+    fn sql_query_mode_accepts_compact_and_rejects_schema_filters() {
+        let compact = Map::from_iter([
+            ("query".to_owned(), json!("SELECT * FROM files")),
+            ("compact".to_owned(), json!(true)),
+        ]);
+        assert_eq!(sql_query_compaction(&compact), Ok(true));
+
+        let tables = Map::from_iter([
+            ("query".to_owned(), json!("SELECT * FROM files")),
+            ("tables".to_owned(), json!(["files"])),
+        ]);
+        assert!(sql_query_compaction(&tables).is_err());
+    }
+
+    #[test]
     fn review_mode_inference_preserves_all_five_v1_routes() {
         assert_eq!(infer_review_mode(&Map::new()), Ok("risk"));
         assert_eq!(
@@ -26360,13 +26573,20 @@ test("handles an order", () => expect(handleOrder("42")).toContain("42"));
         execute_live_tool(
             &handler,
             SQL_TOOL,
-            json!({"schema": true, "tables": ["symbols", "edges"]}),
+            json!({
+                "schema": true,
+                "tables": ["symbols", "edges", "search_documents"],
+                "compact": true,
+                "limit": 20,
+                "timeoutMs": 1_000,
+                "allowStale": false
+            }),
         )
         .await;
         execute_live_tool(
             &handler,
             SQL_TOOL,
-            json!({"query": "SELECT simple_name, symbol_kind FROM symbols ORDER BY simple_name LIMIT 10", "limit": 10}),
+            json!({"query": "SELECT simple_name, symbol_kind FROM symbols ORDER BY simple_name LIMIT 10", "limit": 10, "compact": true}),
         )
         .await;
         execute_live_tool(

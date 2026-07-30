@@ -700,7 +700,7 @@ impl VectorSearchRequest {
 }
 
 /// One current-generation nearest-neighbor result with exact provenance.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct VectorSearchHit {
     pub(crate) generation_id: GenerationId,
     pub(crate) document_id: DocumentId,
@@ -711,6 +711,29 @@ pub struct VectorSearchHit {
     pub(crate) document_kind: DocumentKind,
     pub(crate) qualified_name: String,
     pub(crate) distance: f64,
+    #[serde(skip)]
+    pub(crate) rerank_text: Option<String>,
+}
+
+impl fmt::Debug for VectorSearchHit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VectorSearchHit")
+            .field("generation_id", &self.generation_id)
+            .field("document_id", &self.document_id)
+            .field("file_id", &self.file_id)
+            .field("symbol_id", &self.symbol_id)
+            .field("path", &self.path)
+            .field("language", &self.language)
+            .field("document_kind", &self.document_kind)
+            .field("qualified_name", &self.qualified_name)
+            .field("distance", &self.distance)
+            .field(
+                "rerank_text_bytes",
+                &self.rerank_text.as_ref().map(String::len),
+            )
+            .finish()
+    }
 }
 
 /// Unvalidated stored-vector neighbor query for one exact current symbol.
@@ -898,6 +921,14 @@ impl VectorSearchHit {
     #[must_use]
     pub fn qualified_name(&self) -> &str {
         &self.qualified_name
+    }
+
+    /// Bounded current-generation text reserved for an optional reranker call.
+    ///
+    /// This source-bearing field is deliberately omitted from serialization.
+    #[must_use]
+    pub fn rerank_text(&self) -> Option<&str> {
+        self.rerank_text.as_deref()
     }
 
     /// Cosine distance reported by pgvector; smaller is nearer.
@@ -1110,5 +1141,36 @@ mod tests {
         ] {
             assert!(SimilarSymbolsRequest::new(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn vector_search_hit_keeps_rerank_text_internal_and_debug_safe() {
+        let source_text = "fn private_candidate() { secret_call(); }";
+        let hit = VectorSearchHit {
+            generation_id: GenerationId::parse(GENERATION)
+                .unwrap_or_else(|error| panic!("generation fixture failed: {error}")),
+            document_id: DocumentId::parse(DOCUMENT)
+                .unwrap_or_else(|error| panic!("document fixture failed: {error}")),
+            file_id: None,
+            symbol_id: Some(
+                SymbolId::parse(SYMBOL)
+                    .unwrap_or_else(|error| panic!("symbol fixture failed: {error}")),
+            ),
+            path: "src/private.rs".to_owned(),
+            language: "rust".to_owned(),
+            document_kind: DocumentKind::Symbol,
+            qualified_name: "private_candidate".to_owned(),
+            distance: 0.25,
+            rerank_text: Some(source_text.to_owned()),
+        };
+
+        assert_eq!(hit.rerank_text(), Some(source_text));
+        let debug = format!("{hit:?}");
+        assert!(!debug.contains(source_text));
+        assert!(debug.contains("rerank_text_bytes"));
+        let serialized = serde_json::to_string(&hit)
+            .unwrap_or_else(|error| panic!("hit serialization failed: {error}"));
+        assert!(!serialized.contains(source_text));
+        assert!(!serialized.contains("rerank_text"));
     }
 }
