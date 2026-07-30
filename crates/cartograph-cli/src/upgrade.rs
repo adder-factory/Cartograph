@@ -631,16 +631,10 @@ fn replace_executable(staged: TempPath, executable: &Path) -> Result<(), String>
     let _ = fs::remove_file(&backup);
     fs::rename(executable, &backup)
         .map_err(|_| "could not move the running executable aside".to_owned())?;
-    match staged.persist(executable) {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            let _ = fs::rename(&backup, executable);
-            Err(
-                "could not replace the running executable; the prior binary was restored"
-                    .to_owned(),
-            )
-        }
-    }
+    staged.persist(executable).map_err(|_| {
+        let _ = fs::rename(&backup, executable);
+        "could not replace the running executable; the prior binary was restored".to_owned()
+    })
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
