@@ -884,7 +884,7 @@ fn set_private_archive_permissions(path: &Path) -> Result<(), ManagedDatabaseErr
 
 #[cfg(not(unix))]
 fn set_private_archive_permissions(_path: &Path) -> Result<(), ManagedDatabaseError> {
-    Ok(())
+    Err(ManagedDatabaseError::CredentialAclUnsupported)
 }
 
 fn prefer_archive_cleanup<T>(
@@ -1109,6 +1109,15 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o077, 0);
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn backup_archive_creation_fails_without_private_acl_support() {
+        assert_eq!(
+            set_private_archive_permissions(Path::new("archive.dump")),
+            Err(ManagedDatabaseError::CredentialAclUnsupported)
+        );
     }
 
     #[test]

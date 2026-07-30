@@ -398,6 +398,7 @@ fn install_binary_in_place(executable: &Path, bytes: &[u8], version: &str) -> Re
         .write_all(bytes)
         .and_then(|()| staged.as_file().sync_all())
         .map_err(|_| "could not write the staged native update".to_owned())?;
+    #[cfg(unix)]
     set_executable(staged.as_file())?;
     let staged = staged.into_temp_path();
     verify_staged_binary(staged.as_ref(), version)?;
@@ -615,11 +616,6 @@ fn set_executable(file: &fs::File) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     file.set_permissions(fs::Permissions::from_mode(0o755))
         .map_err(|_| "could not mark the native update executable".to_owned())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_file: &fs::File) -> Result<(), String> {
-    Ok(())
 }
 
 #[cfg(unix)]

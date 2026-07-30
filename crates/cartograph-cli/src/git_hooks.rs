@@ -267,6 +267,7 @@ fn atomic_write_hook(directory: &Path, path: &Path, bytes: &[u8]) -> Result<(), 
         .write_all(bytes)
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|_| format!("could not stage hook {}", path.display()))?;
+    #[cfg(unix)]
     set_executable(temporary.as_file())?;
     temporary
         .persist(path)
@@ -279,11 +280,6 @@ fn set_executable(file: &File) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     file.set_permissions(fs::Permissions::from_mode(0o700))
         .map_err(|_| "could not make a Git hook executable".to_owned())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_file: &File) -> Result<(), String> {
-    Ok(())
 }
 
 fn compose_hook(existing: Option<&str>, command: &str) -> String {

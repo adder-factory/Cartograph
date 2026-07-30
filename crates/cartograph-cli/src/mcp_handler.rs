@@ -3278,6 +3278,7 @@ fn prepare_admin_project_root(
             ));
         }
     };
+    #[cfg(unix)]
     if state_directory_created {
         set_private_state_directory_permissions(&state)?;
     }
@@ -3360,11 +3361,6 @@ fn set_private_state_directory_permissions(path: &Path) -> Result<(), ToolError>
             "the .cartograph state directory could not be made private",
         )
     })
-}
-
-#[cfg(not(unix))]
-fn set_private_state_directory_permissions(_path: &Path) -> Result<(), ToolError> {
-    Ok(())
 }
 
 fn parse_admin_database_settings(

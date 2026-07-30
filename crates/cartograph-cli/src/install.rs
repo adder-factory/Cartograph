@@ -1,8 +1,7 @@
 mod jsonc;
 
 use std::{
-    env,
-    fs::{self, File},
+    env, fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -1728,7 +1727,10 @@ fn remove_owned(
     }
     let parent = safe_config_parent(path, &config.allowed_root)?;
     fs::remove_file(path).map_err(|_| InstallError::WriteConfig)?;
+    #[cfg(unix)]
     sync_parent(parent)?;
+    #[cfg(not(unix))]
+    let _ = parent;
     Ok(file_report(path, InstallAction::Removed))
 }
 
@@ -1967,25 +1969,24 @@ fn write_atomic(input: &AtomicWrite<'_>) -> Result<(), InstallError> {
     }
     let mut file =
         tempfile::NamedTempFile::new_in(parent).map_err(|_| InstallError::WriteConfig)?;
+    #[cfg(unix)]
     set_atomic_permissions(file.as_file(), unix_mode)?;
+    #[cfg(not(unix))]
+    let _ = unix_mode;
     file.write_all(contents)
         .and_then(|()| file.as_file().sync_all())
         .map_err(|_| InstallError::WriteConfig)?;
     file.persist(path).map_err(|_| InstallError::WriteConfig)?;
+    #[cfg(unix)]
     sync_parent(parent)?;
     Ok(())
 }
 
 #[cfg(unix)]
-fn set_atomic_permissions(file: &File, unix_mode: u32) -> Result<(), InstallError> {
+fn set_atomic_permissions(file: &fs::File, unix_mode: u32) -> Result<(), InstallError> {
     use std::os::unix::fs::PermissionsExt as _;
     file.set_permissions(fs::Permissions::from_mode(unix_mode))
         .map_err(|_| InstallError::WriteConfig)
-}
-
-#[cfg(not(unix))]
-const fn set_atomic_permissions(_file: &File, _unix_mode: u32) -> Result<(), InstallError> {
-    Ok(())
 }
 
 fn safe_config_parent<'a>(path: &'a Path, allowed_root: &Path) -> Result<&'a Path, InstallError> {
@@ -2034,11 +2035,6 @@ fn sync_parent(parent: &Path) -> Result<(), InstallError> {
     fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| InstallError::WriteConfig)
-}
-
-#[cfg(not(unix))]
-const fn sync_parent(_parent: &Path) -> Result<(), InstallError> {
-    Ok(())
 }
 
 fn path_text(path: &Path) -> Result<&str, InstallError> {

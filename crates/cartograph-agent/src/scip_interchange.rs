@@ -5,9 +5,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(unix)]
-use std::fs::File;
-
 use cartograph_db::{InterchangeSnapshot, InterchangeSnapshotError, InterchangeSnapshotRequest};
 use cartograph_domain::{ContentDigest, GenerationId, NormalizedPath};
 use cartograph_extract::{SourceReadOptions, SourceRoot};
@@ -623,6 +620,7 @@ fn atomic_write_path(path: &Path, bytes: &[u8]) -> Result<(), ProjectError> {
     temporary
         .persist(path)
         .map_err(|_| ProjectError::ScipOverlayInvalid)?;
+    #[cfg(unix)]
     sync_parent(parent)?;
     Ok(())
 }
@@ -651,14 +649,9 @@ fn ensure_overlay_directory(root: &Path) -> Result<PathBuf, ProjectError> {
 
 #[cfg(unix)]
 fn sync_parent(parent: &Path) -> Result<(), ProjectError> {
-    File::open(parent)
+    std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| ProjectError::ScipOverlayInvalid)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-const fn sync_parent(_parent: &Path) -> Result<(), ProjectError> {
     Ok(())
 }
 

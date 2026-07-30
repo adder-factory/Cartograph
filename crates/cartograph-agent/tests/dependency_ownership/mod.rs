@@ -16,6 +16,7 @@ use cartograph_test_support as _;
 use futures_util as _;
 use globset as _;
 use ignore as _;
+#[cfg(unix)]
 use libc as _;
 use memchr as _;
 use num_traits as _;

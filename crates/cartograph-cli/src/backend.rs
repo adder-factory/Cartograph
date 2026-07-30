@@ -409,7 +409,9 @@ fn ensure_state_directory(paths: &StatePaths) -> Result<(), String> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("backend state path is not a safe directory".to_owned());
     }
-    set_private_directory(&paths.directory)
+    #[cfg(unix)]
+    set_private_directory(&paths.directory)?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -417,11 +419,6 @@ fn set_private_directory(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .map_err(|_| "could not secure the backend state directory".to_owned())
-}
-
-#[cfg(not(unix))]
-fn set_private_directory(_path: &Path) -> Result<(), String> {
-    Ok(())
 }
 
 fn build_specs(project: &Path, binary: &str) -> Result<Vec<BackendSpec>, String> {
@@ -1121,6 +1118,7 @@ fn write_pid_record(row: &BackendRow, pid: u32) -> Result<(), String> {
         .write_all(&bytes)
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|_| "backend pid state could not be written".to_owned())?;
+    #[cfg(unix)]
     set_private_file(temporary.as_file())?;
     temporary
         .persist(&row.pid_file_path)
@@ -1133,11 +1131,6 @@ fn set_private_file(file: &File) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|_| "backend state permissions could not be secured".to_owned())
-}
-
-#[cfg(not(unix))]
-fn set_private_file(_file: &File) -> Result<(), String> {
-    Ok(())
 }
 
 async fn run_stop(arguments: StopArguments) -> Result<ExitCode, String> {
