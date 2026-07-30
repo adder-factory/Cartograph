@@ -24,6 +24,10 @@ const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const OTHER_ACCESS_MODE_MASK: u32 = 0o077;
 #[cfg(unix)]
 const OTHER_WRITE_MODE_MASK: u32 = 0o022;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const ACL_MODE_LENGTH: usize = 10;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const ACL_MODE_WITH_MARKER_LENGTH: usize = 11;
 
 pub(super) struct CredentialStore {
     path: PathBuf,
@@ -336,20 +340,94 @@ fn validate_no_extended_acl(path: &Path) -> Result<(), ManagedDatabaseError> {
     if !output.status.success() {
         return Err(ManagedDatabaseError::CredentialAclUnsupported);
     }
-    let listing = String::from_utf8_lossy(&output.stdout);
-    let mode = listing
-        .split_whitespace()
-        .next()
-        .ok_or(ManagedDatabaseError::CredentialAclUnsupported)?;
-    if mode.contains('+') {
-        return Err(ManagedDatabaseError::CredentialExtendedAcl);
-    }
-    Ok(())
+    validate_acl_listing(&output.stdout)
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
+fn validate_no_extended_acl(path: &Path) -> Result<(), ManagedDatabaseError> {
+    let output = std::process::Command::new("/bin/ls")
+        .arg("-ld")
+        .arg("--")
+        .arg(path)
+        .output()
+        .map_err(|_| ManagedDatabaseError::CredentialAclUnsupported)?;
+    if !output.status.success() {
+        return Err(ManagedDatabaseError::CredentialAclUnsupported);
+    }
+    validate_acl_listing(&output.stdout)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_acl_listing(listing: &[u8]) -> Result<(), ManagedDatabaseError> {
+    let listing =
+        std::str::from_utf8(listing).map_err(|_| ManagedDatabaseError::CredentialAclUnsupported)?;
+    let mode = listing
+        .split_ascii_whitespace()
+        .next()
+        .ok_or(ManagedDatabaseError::CredentialAclUnsupported)?;
+    let mode = mode.as_bytes();
+    if !valid_acl_mode_prefix(mode) {
+        return Err(ManagedDatabaseError::CredentialAclUnsupported);
+    }
+    match mode.len() {
+        ACL_MODE_LENGTH => Ok(()),
+        ACL_MODE_WITH_MARKER_LENGTH => match mode.last().copied() {
+            Some(b'+') => Err(ManagedDatabaseError::CredentialExtendedAcl),
+            #[cfg(target_os = "linux")]
+            Some(b'.') => Ok(()),
+            #[cfg(target_os = "macos")]
+            Some(b'@') => Ok(()),
+            Some(_) | None => Err(ManagedDatabaseError::CredentialAclUnsupported),
+        },
+        _ => Err(ManagedDatabaseError::CredentialAclUnsupported),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn valid_acl_mode_prefix(mode: &[u8]) -> bool {
+    let ([
+        file_type,
+        owner_read,
+        owner_write,
+        owner_execute,
+        group_read,
+        group_write,
+        group_execute,
+        other_read,
+        other_write,
+        other_execute,
+    ]
+    | [
+        file_type,
+        owner_read,
+        owner_write,
+        owner_execute,
+        group_read,
+        group_write,
+        group_execute,
+        other_read,
+        other_write,
+        other_execute,
+        _,
+    ]) = mode
+    else {
+        return false;
+    };
+    matches!(*file_type, b'-' | b'd')
+        && matches!(*owner_read, b'r' | b'-')
+        && matches!(*owner_write, b'w' | b'-')
+        && matches!(*owner_execute, b'x' | b's' | b'S' | b'-')
+        && matches!(*group_read, b'r' | b'-')
+        && matches!(*group_write, b'w' | b'-')
+        && matches!(*group_execute, b'x' | b's' | b'S' | b'-')
+        && matches!(*other_read, b'r' | b'-')
+        && matches!(*other_write, b'w' | b'-')
+        && matches!(*other_execute, b'x' | b't' | b'T' | b'-')
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn validate_no_extended_acl(_path: &Path) -> Result<(), ManagedDatabaseError> {
-    Ok(())
+    Err(ManagedDatabaseError::CredentialAclUnsupported)
 }
 
 #[cfg(unix)]
@@ -720,6 +798,43 @@ mod tests {
             store.load(),
             Err(ManagedDatabaseError::CredentialExtendedAcl)
         ));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn acl_listing_parser_rejects_extended_access_and_malformed_output() {
+        assert_eq!(
+            validate_acl_listing(b"-rw------- 1 owner group 64 Jul 30 12:00 credential"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_acl_listing(b"-rw-------+ 1 owner group 64 Jul 30 12:00 credential"),
+            Err(ManagedDatabaseError::CredentialExtendedAcl)
+        );
+        for malformed in [
+            &b""[..],
+            &b"garbage 1 owner group 64 Jul 30 12:00 credential"[..],
+            &b"-rw------ 1 owner group 64 Jul 30 12:00 credential"[..],
+            &b"-zw------- 1 owner group 64 Jul 30 12:00 credential"[..],
+            &b"-rw-------? 1 owner group 64 Jul 30 12:00 credential"[..],
+            &b"-rw-------@@ 1 owner group 64 Jul 30 12:00 credential"[..],
+            &[0xff, b' ', b'x'][..],
+        ] {
+            assert_eq!(
+                validate_acl_listing(malformed),
+                Err(ManagedDatabaseError::CredentialAclUnsupported)
+            );
+        }
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            validate_acl_listing(b"-rw-------. 1 owner group 64 Jul 30 12:00 credential"),
+            Ok(())
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            validate_acl_listing(b"-rw-------@ 1 owner group 64 Jul 30 12:00 credential"),
+            Ok(())
+        );
     }
 
     #[test]

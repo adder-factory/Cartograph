@@ -2064,6 +2064,7 @@ fn write_config_value_guarded(
     }
     let mut temporary =
         NamedTempFile::new_in(&directory).map_err(|_| ProjectLlmConfigError::WriteFailed)?;
+    #[cfg(unix)]
     set_private_permissions(temporary.as_file())?;
     temporary
         .write_all(&bytes)
@@ -2100,6 +2101,7 @@ fn acquire_config_write_lock(directory: &Path) -> Result<ConfigWriteLock, Projec
     {
         return Err(ProjectLlmConfigError::ProjectUnavailable);
     }
+    #[cfg(unix)]
     set_private_permissions(&file)?;
     match file.try_lock() {
         Ok(()) => Ok(ConfigWriteLock { _file: file }),
@@ -2115,11 +2117,6 @@ fn set_private_permissions(file: &File) -> Result<(), ProjectLlmConfigError> {
     use std::os::unix::fs::PermissionsExt as _;
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|_| ProjectLlmConfigError::WriteFailed)
-}
-
-#[cfg(not(unix))]
-const fn set_private_permissions(_file: &File) -> Result<(), ProjectLlmConfigError> {
-    Ok(())
 }
 
 fn config_path(project_root: &Path) -> Result<PathBuf, ProjectLlmConfigError> {

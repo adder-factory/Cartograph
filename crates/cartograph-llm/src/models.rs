@@ -341,6 +341,7 @@ async fn download_to_partial(
         .open(partial)
         .await
         .map_err(|_| InstallModelsError::WriteFailed)?;
+    #[cfg(unix)]
     set_private_permissions(&output).await?;
     let mut stream = response.bytes_stream();
     let mut downloaded = 0_u64;
@@ -383,11 +384,6 @@ async fn set_private_permissions(file: &tokio::fs::File) -> Result<(), InstallMo
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .await
         .map_err(|_| InstallModelsError::WriteFailed)
-}
-
-#[cfg(not(unix))]
-async fn set_private_permissions(_file: &tokio::fs::File) -> Result<(), InstallModelsError> {
-    Ok(())
 }
 
 fn installed(model: RecommendedModel) -> InstalledModel {
