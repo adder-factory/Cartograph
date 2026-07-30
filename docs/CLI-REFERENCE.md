@@ -1,15 +1,19 @@
 # Native CLI reference
 
-The installed executable is `cartograph`. Run `cartograph <command> --help` for
-the exact bounds and confirmation phrases in the installed version.
+Last release audit: 2026-07-30 (`v2.10.0`).
 
-## Coding commands
+The installed executable is `cartograph`. Run `cartograph <command> --help` for
+the exact bounds and confirmation phrases in the installed version. This page
+lists the complete top-level command inventory and selected high-use forms;
+subcommand help remains the authority for every option and default.
+
+## High-use coding forms
 
 ```text
 cartograph index [PROJECT]
 cartograph status [PROJECT]
-cartograph find <QUERY> --by auto|name|path|reference|bm25|hybrid
-cartograph context <TASK> [--exact-name NAME] [--exact-path PATH]
+cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid
+cartograph context <TASK> [--exact-name NAME] [--exact-path PATH] [--exact-reference TEXT]
 cartograph entry-points [--bucket routes|cli|cli-commands|mcp-tools|cli-files|public-exports]
   [--limit 20]
 cartograph graph <SYMBOL_ID> --direction callers|callees|both|impact
@@ -17,7 +21,8 @@ cartograph graph <SYMBOL_ID> --direction path --to <TARGET_SYMBOL_ID>
   [--edge-kind calls|imports|references|implements|extends|tests|type-of|returns|instantiates|overrides|decorates|field-access|def-use|exports|contains]
 cartograph graph <SYMBOL_ID> --direction similar
   [--k 5] [--min-score 0.3] [--same-language] [--model-id <UUID>]
-cartograph affected <SYMBOL_ID>
+cartograph affected [CHANGED_FILE ...] [--stdin | --files CHANGED_FILE ...]
+cartograph affected --symbol-id <SYMBOL_ID>
 cartograph show <SYMBOL_ID>
 cartograph review --ref <GIT_REF>
 cartograph doctor [PROJECT]
@@ -50,19 +55,57 @@ and truncation flag. V2 includes exported constants, types, enums, traits,
 modules, components, and resources in the public surface in addition to v1's
 function/class categories.
 
+## Complete top-level command inventory
+
+This inventory contains every non-hidden v2.10.0 top-level command advertised
+by `cartograph --help`. Hidden compatibility adapters and Clap's generated
+`help` command are intentionally excluded.
+
+<!-- CARTOGRAPH_TOP_LEVEL_COMMANDS_START -->
+
+- Project and runtime: `index`, `status`, `embed`, `embedding-status`, `show`,
+  `export`, `similar`, `sync-if-dirty`, `install-hooks`, `mcp-budget`,
+  `completions`, `guide`, `doctor`.
+- Code intelligence and agent state: `ask`, `blame`, `changed-since`, `context`,
+  `compare-to-ref`, `digest`, `explore`, `find`, `node`, `files`,
+  `entry-points`, `at-range`, `graph`, `affected`, `tests-for`, `biomarkers`,
+  `coverage`, `dead-code`, `deps`, `hotspots`, `host`, `history`, `imports`,
+  `note`, `propose-rename`, `role`, `session`, `summaries`, `sql`,
+  `trace-to-culprits`, `verify`, `review`, `playbook`, `admin`.
+- Configuration and lifecycle: `backend`, `llm`, `upgrade`, `install`,
+  `uninstall`, `serve`, `db`.
+
+<!-- CARTOGRAPH_TOP_LEVEL_COMMANDS_END -->
+
 ## MCP and agent configuration
 
 ```text
 cartograph serve --mcp [--managed-database-port PORT] [--profile coding|core|full|read-only|review]
-cartograph install --yes --target codex|claude|cursor --location local [--managed-database-port PORT]
-cartograph uninstall --yes --target codex|claude|cursor --location local
+cartograph install --yes --target <TARGET[,TARGET...]> --location local [--managed-database-port PORT]
+cartograph uninstall --yes --target <TARGET[,TARGET...]> --location local
 ```
 
-Install/uninstall modifies only project-local agent configuration, preserves
-unrelated entries, and pins the absolute native executable. For a non-default
-managed port, the installer also pins the non-secret loopback port in the
-portable server arguments. Restart the host after a configuration or binary
-change.
+The 19 concrete host target IDs are:
+
+<!-- CARTOGRAPH_INSTALL_TARGETS_START -->
+
+`claude`, `cursor`, `codex`, `codebuddy`, `copilot`, `codewhale`, `zed`,
+`opencode`, `hermes`, `gemini`, `antigravity`, `kiro`, `factory`, `rovo`,
+`qoder`, `bob`, `kimi`, `pi`, and `reasonix`.
+
+<!-- CARTOGRAPH_INSTALL_TARGETS_END -->
+
+`--target` also accepts the selectors `auto`, `all`, and `none`. All concrete
+targets support global configuration. Project-local configuration is supported
+for every target except `hermes`, `antigravity`, and `reasonix`. A project-local
+selection skips those targets without writing elsewhere; text output prints a
+warning, while JSON omits a report for each skipped target.
+
+Install/uninstall preserves unrelated entries and pins the absolute native
+executable. With `--location local`, it modifies only project-local agent
+configuration. For a non-default managed port, the installer also pins the
+non-secret loopback port in the portable server arguments. Restart the host
+after a configuration or binary change.
 
 ## Database lifecycle
 

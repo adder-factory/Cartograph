@@ -101,6 +101,11 @@ Implemented language-level behavior includes:
   call/member reference shapes;
 - component/template, Salesforce markup, MyBatis, VB6, properties, Liquid, and
   BG3/Osiris domain semantics;
+- bounded npm/Composer/Cargo package and workspace manifest facts, including
+  dependency-section provenance, workspace membership/exclusions, and
+  target-specific Cargo dependencies;
+- Fastify object-form routes and NestJS HTTP, GraphQL, message-pattern, and
+  WebSocket handler relationships after deterministic framework detection;
 - edge kinds required by current graph retrieval, with confidence, provenance,
   and represented site count.
 

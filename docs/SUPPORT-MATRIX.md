@@ -1,5 +1,7 @@
 # Support Matrix
 
+Last implementation audit: 2026-07-30 (`v2.10.0`).
+
 Cartograph v2 supports all 73 v1.1.33 language modes plus native TOML: 74 modes
 total. The source of truth is `cartograph_domain::SourceLanguage::ALL`; native
 extractor strategy lives in `crates/cartograph-extract/src/language.rs`, and
@@ -142,7 +144,7 @@ Special cases:
 
 | Ecosystem | Signals |
 |---|---|
-| JavaScript / TypeScript | Angular routes, Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander/Yargs/CAC CLI commands |
+| JavaScript / TypeScript | Angular routes, Express routes, Hono routes and mounted sub-routers, Fastify object-form routes, Bun.serve routes, NestJS HTTP/GraphQL/message/WebSocket handlers, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander/Yargs/CAC CLI commands |
 | Python | Django, Flask, FastAPI route/controller patterns, and NeuG graph resource landmarks |
 | PHP | Laravel facades/routes, Drupal routes/services/hooks/plugins/service tags, Symfony routes/controllers, and CodeIgniter 3 routes/controller/model/library conventions |
 | Ruby | Rails routes and controller conventions |
@@ -165,6 +167,7 @@ framework, so generic codebases do not pay the full resolver cost.
 | Zod / Pydantic | Schema nodes, fields, and enum-like members |
 | GraphQL SDL | Types, fields, enums, interfaces, and references |
 | Prisma / SQL | Models, tables, views, functions, triggers, schemas, and table references |
+| Package/workspace manifests | npm `package.json`, Composer `composer.json`, and Cargo `Cargo.toml` package/workspace landmarks; dependency sections; npm workspace patterns; Cargo members, exclusions, workspace dependencies, and target-specific dependencies |
 | Env/config refs | Env-var, config-key, feature-flag, and build-context reference edges |
 | Dynamic imports | String import and dynamic import edges |
 | Dynamic dispatch | Bounded TS/JS object/Map dispatch-table call edges marked `INFERRED` |

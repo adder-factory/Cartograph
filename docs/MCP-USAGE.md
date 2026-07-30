@@ -1,5 +1,7 @@
 # MCP usage for coding agents
 
+Last release audit: 2026-07-30 (`v2.10.0`).
+
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
 truth over the live checkout. The optional `cartograph_ask`, role, summary, and
@@ -55,7 +57,11 @@ hot-reload an upgraded MCP process.
 Tool lists are deterministic, and a tool hidden by the selected profile cannot
 be called by name. Use the narrowest profile that supports the workflow.
 
-## Tools
+## Selected high-use tools
+
+The full profile advertises 35 tools. The table below highlights the normal
+coding loop; see the [complete CLI/MCP alignment inventory](cli-mcp-alignment.md#public-mcp-tools)
+for all 35 wire contracts and their CLI families.
 
 | Tool | Purpose |
 | --- | --- |

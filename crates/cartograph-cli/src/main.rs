@@ -4377,6 +4377,157 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    fn marked_section<'document>(
+        document: &'document str,
+        start: &str,
+        end: &str,
+    ) -> &'document str {
+        document
+            .split_once(start)
+            .and_then(|(_, remainder)| remainder.split_once(end))
+            .map_or_else(
+                || panic!("documentation markers `{start}` / `{end}` were missing"),
+                |(section, _)| section,
+            )
+    }
+
+    fn backtick_values(section: &str) -> std::collections::BTreeSet<String> {
+        section
+            .split('`')
+            .enumerate()
+            .filter(|(index, _)| index % 2 == 1)
+            .map(|(_, value)| value.to_owned())
+            .collect()
+    }
+
+    fn fenced_words(section: &str) -> std::collections::BTreeSet<String> {
+        section
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("```"))
+            .flat_map(str::split_whitespace)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn public_cli_reference_tracks_commands_targets_and_affected_forms() {
+        const README: &str = include_str!("../../../README.md");
+        const CLI_REFERENCE: &str = include_str!("../../../docs/CLI-REFERENCE.md");
+
+        let mut command = generated_cli::command()
+            .unwrap_or_else(|error| panic!("generated CLI command failed: {error}"));
+        command.build();
+        let expected_commands = command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set() && subcommand.get_name() != "help")
+            .map(|subcommand| subcommand.get_name().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let documented_commands = backtick_values(marked_section(
+            CLI_REFERENCE,
+            "<!-- CARTOGRAPH_TOP_LEVEL_COMMANDS_START -->",
+            "<!-- CARTOGRAPH_TOP_LEVEL_COMMANDS_END -->",
+        ));
+        assert_eq!(documented_commands, expected_commands);
+
+        let expected_targets = InstallTarget::ALL
+            .into_iter()
+            .map(|target| target.label().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let documented_targets = backtick_values(marked_section(
+            CLI_REFERENCE,
+            "<!-- CARTOGRAPH_INSTALL_TARGETS_START -->",
+            "<!-- CARTOGRAPH_INSTALL_TARGETS_END -->",
+        ));
+        assert_eq!(documented_targets, expected_targets);
+
+        for document in [README, CLI_REFERENCE] {
+            assert!(!document.contains("cartograph affected <SYMBOL_ID>"));
+            assert!(document.contains("cartograph affected --symbol-id <SYMBOL_ID>"));
+        }
+        assert!(
+            generated_cli::parse_from(["cartograph", "affected", "src/lib.rs"]).is_ok(),
+            "documented file-driven affected form did not parse"
+        );
+        assert!(
+            generated_cli::parse_from([
+                "cartograph",
+                "affected",
+                "--symbol-id",
+                "11111111-1111-4111-8111-111111111111",
+            ])
+            .is_ok(),
+            "documented symbol-driven affected form did not parse"
+        );
+    }
+
+    #[test]
+    fn public_mcp_inventory_and_bundled_skill_track_current_contracts() {
+        const MCP_USAGE: &str = include_str!("../../../docs/MCP-USAGE.md");
+        const MCP_ALIGNMENT: &str = include_str!("../../../docs/cli-mcp-alignment.md");
+        const BUNDLED_SKILL: &str = include_str!("../assets/cartograph-skill.md");
+
+        let expected_tools = mcp_handler::tool_definitions()
+            .unwrap_or_else(|error| panic!("MCP definitions failed: {error}"))
+            .into_iter()
+            .map(|definition| {
+                definition
+                    .name()
+                    .strip_prefix("cartograph_")
+                    .unwrap_or_else(|| panic!("tool name lacked Cartograph prefix"))
+                    .to_owned()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let documented_tools = fenced_words(marked_section(
+            MCP_ALIGNMENT,
+            "<!-- CARTOGRAPH_MCP_TOOLS_START -->",
+            "<!-- CARTOGRAPH_MCP_TOOLS_END -->",
+        ));
+        assert_eq!(documented_tools, expected_tools);
+        assert_eq!(expected_tools.len(), 35);
+        assert!(MCP_USAGE.contains("Selected high-use tools"));
+        assert!(MCP_USAGE.contains("full profile advertises 35 tools"));
+
+        for profile in McpProfile::value_variants() {
+            let spelling = profile
+                .to_possible_value()
+                .unwrap_or_else(|| panic!("MCP profile had no CLI spelling"));
+            let documented = format!("`{}`", spelling.get_name());
+            assert!(
+                BUNDLED_SKILL.contains(&documented),
+                "bundled skill omitted MCP profile {documented}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_docs_identify_current_audit_and_historical_benchmarks() {
+        const VERSIONED_DOCS: [&str; 6] = [
+            include_str!("../../../docs/CLI-REFERENCE.md"),
+            include_str!("../../../docs/MCP-USAGE.md"),
+            include_str!("../../../docs/SUPPORT-MATRIX.md"),
+            include_str!("../../../docs/LANGUAGE-COVERAGE-REPORT.md"),
+            include_str!("../../../docs/v2/ARCHITECTURE.md"),
+            include_str!("../../../docs/v2/benchmarks/PATCH-TASK-EVALUATION.md"),
+        ];
+        const HISTORICAL_BENCHMARKS: [&str; 2] = [
+            include_str!("../../../docs/v2/benchmarks/INDEX-SCALING.md"),
+            include_str!("../../../docs/v2/benchmarks/NATIVE-CORPUS-SCALING.md"),
+        ];
+
+        let release = format!("`v{}`", env!("CARGO_PKG_VERSION"));
+        for document in VERSIONED_DOCS {
+            assert!(
+                document.contains(&release),
+                "release-audited documentation omitted {release}"
+            );
+        }
+        for document in HISTORICAL_BENCHMARKS {
+            assert!(document.contains("Historical benchmark:"));
+            assert!(document.contains("`pg_search` 0.25.0"));
+            assert!(document.contains("pgvector 0.8.4+"));
+        }
+    }
+
     fn walk_cli_contract(
         command: &clap::Command,
         parent: &[String],

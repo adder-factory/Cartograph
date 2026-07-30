@@ -1,7 +1,12 @@
 # V2 native real-corpus scaling benchmark
 
-Status: v2.0.0 release-candidate extractor/resolver and digest-v4 contract
+Status: historical v2.0.0 release-candidate extractor/resolver and digest-v4 contract
+
 Measured: 2026-07-24
+
+> Historical benchmark: the environment and figures below are preserved release
+> evidence, not current installation guidance. The v2.10.0 runtime contract is
+> PostgreSQL 18.4+, `pg_search` 0.25.0, and pgvector 0.8.4+.
 
 The committed
 [`bulk-relations-v2`](./native-corpus-scaling-aarch64-2026-07-24-bulk-relations-v2.json),

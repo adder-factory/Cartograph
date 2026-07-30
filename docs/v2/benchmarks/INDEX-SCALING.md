@@ -1,7 +1,12 @@
 # V2 bounded-index scaling benchmark
 
-Status: release-candidate digest-v4 and byte-aware scheduler evidence
+Status: historical v2.0.0 release-candidate digest-v4 and byte-aware scheduler evidence
+
 Measured: 2026-07-24
+
+> Historical benchmark: the environment and figures below are preserved release
+> evidence, not current installation guidance. The v2.10.0 runtime contract is
+> PostgreSQL 18.4+, `pg_search` 0.25.0, and pgvector 0.8.4+.
 
 The committed 2026-07-22 [original](./index-scaling-aarch64-2026-07-22.json)
 and [digest-v2](./index-scaling-aarch64-2026-07-22-digest-v2.json) reports remain

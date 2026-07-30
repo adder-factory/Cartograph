@@ -1,7 +1,8 @@
 # V2 native patch-task evaluation
 
-Status: locked v1.1.33 parity gate  
-Measured: 2026-07-24
+Status: locked v1.1.33 parity gate and current `v2.10.0` release evidence
+
+Measured: 2026-07-30
 
 ## Result
 
@@ -11,7 +12,7 @@ impact, and affected-test evidence meet the frozen v1.1.33 patch-task floors.
 The gate does not invoke Bun, TypeScript, an LLM, an embedding service, or a
 SQLite library/database.
 
-| Metric | Frozen v1.1.33 floor | Native v2 result |
+| Metric | Frozen v1.1.33 requirement | Native v2.10.0 result |
 | --- | ---: | ---: |
 | Hit@5 | 1.0000 | 1.0000 |
 | MRR | 1.0000 | 1.0000 |
@@ -19,13 +20,18 @@ SQLite library/database.
 | Edit-site recall | 1.0000 | 1.0000 |
 | Affected-test recall | 1.0000 | 1.0000 |
 | Abstention accuracy | 1.0000 | 1.0000 |
-| Mean payload bytes | 3,927 | 1,176.00 |
-| Mean estimated tokens | at most 982 | 294.20 |
+| Mean payload bytes | 3,927 | 1,419.80 |
+| Mean estimated tokens | at most 982 | 355.40 |
 
 One invocation evaluates the complete corpus twice and compares the full
 ordered reports for exact equality. Both passes produced the figures above,
 including identical evidence membership, BM25 ranks, predicted edit files,
 test selections, abstentions, payload bytes, and aggregate scores.
+
+The recorded result comes from the successful exact-main
+[v2.10.0 Rust gate](https://github.com/adder-factory/cartograph/actions/runs/30575543412)
+at commit `13bbee8740e98d37c4a2f913b4b7f9f3500aa500`. The emitted report retained
+both locked fingerprints and all six quality scores at 1.000000.
 
 ## Locked contract
 
@@ -101,8 +107,13 @@ selection channel, and every bounded context/review evidence item with rank,
 path, qualified name, and provenance. It omits latency and repeated opaque row
 identities, which do not help an agent decide where to edit or which tests to
 run. The typed primary edit-candidate evidence raises precision to 1.0000 while
-the complete decision payload remains 294.20 tokens on average, instead of
+the complete decision payload remains 355.40 tokens on average, instead of
 silently comparing two differently bloated payloads.
+
+The current result is about 64% below the frozen 982-token v1.1.33 ceiling. It
+is also about 21% larger than the 294.20-token v2.0.0 snapshot measured on
+2026-07-24. That older number is historical, not the current release result;
+this page does not relabel the increase as a token-efficiency improvement.
 
 ## Failure and cleanup behavior
 
@@ -123,9 +134,12 @@ variables therefore cannot hang or redirect the release gate.
 The recorded run used:
 
 - PostgreSQL 18.4;
-- `pg_search` 0.23.5;
-- pgvector 0.8.1; and
-- the local Apple arm64 Rust debug integration-test profile.
+- `pg_search` 0.25.0;
+- pgvector 0.8.4;
+- digest-pinned image
+  `paradedb/paradedb:0.25.0@sha256:6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7`;
+- stable Rust 1.97.1; and
+- the GitHub-hosted x86-64 Linux Rust debug integration-test profile.
 
 ## Reproduce
 

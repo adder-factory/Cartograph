@@ -169,7 +169,7 @@ cartograph status .
 cartograph context 'fix authentication token validation' --project-path .
 cartograph find 'validateToken' --by name --project-path .
 cartograph graph <symbol-id> --direction impact --project-path .
-cartograph affected <symbol-id> --project-path .
+cartograph affected --symbol-id <symbol-id> --project-path .
 cartograph review --ref main --project-path .
 ```
 
@@ -195,16 +195,21 @@ have deterministic tool lists; a narrower profile cannot call hidden tools.
 
 ### CLI surface
 
+These are selected high-use forms, not the complete command inventory. Run
+`cartograph --help` for the installed binary or see the
+[CLI reference](docs/CLI-REFERENCE.md) for every top-level command.
+
 ```text
 cartograph index [PROJECT]
 cartograph status [PROJECT]
-cartograph find <QUERY> --by name|path|reference|bm25
-cartograph context <TASK> [--exact-name NAME] [--exact-path PATH]
+cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid
+cartograph context <TASK> [--exact-name NAME] [--exact-path PATH] [--exact-reference TEXT]
 cartograph entry-points [--bucket public-exports] [--limit 20]
 cartograph graph <SYMBOL_ID> --direction callers|callees|both|impact
 cartograph graph <SYMBOL_ID> --direction path --to <TARGET_SYMBOL_ID>
 cartograph graph <SYMBOL_ID> --direction similar --k 5 --min-score 0.3
-cartograph affected <SYMBOL_ID>
+cartograph affected [CHANGED_FILE ...]
+cartograph affected --symbol-id <SYMBOL_ID>
 cartograph review --ref <GIT_REF>
 cartograph serve --mcp [--profile coding|core|full|read-only|review]
 cartograph doctor [PROJECT]

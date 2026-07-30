@@ -39,10 +39,10 @@ status. Do not delete locks or database state while an owner is alive.
 | `cartograph_review` | Git-ref plus staged/unstaged/untracked review evidence |
 | `cartograph_admin` | Explicit index/sync/embed job start, status, and cancellation |
 
-The MCP profiles are `core`, `read-only`, and `review`. Use the narrowest profile
-that supports the task. MCP requests have hard input/output limits, deadlines,
-cancellation, and stable error codes; preserve those errors rather than retrying
-an unbounded variant.
+The MCP profiles are `coding`, `core`, `full`, `read-only`, and `review`. Use the
+narrowest profile that supports the task. MCP requests have hard input/output
+limits, deadlines, cancellation, and stable error codes; preserve those errors
+rather than retrying an unbounded variant.
 
 If MCP transport is unavailable, say so and use the equivalent native CLI as a
 control path. A successful CLI call does not prove an already-open host has

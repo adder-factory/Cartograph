@@ -1,6 +1,6 @@
 # CLI and MCP alignment
 
-Last release audit: 2026-07-24.
+Last release audit: 2026-07-30 (`v2.10.0`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands
 and 35 bounded MCP tools. Shared schemas generate ordinary CLI adapters where
@@ -20,6 +20,8 @@ pgvector-off mode; PostgreSQL graph functionality remains.
 
 ## Public MCP tools
 
+<!-- CARTOGRAPH_MCP_TOOLS_START -->
+
 ```text
 admin              affected            ask
 at_range           biomarkers          blame
@@ -34,6 +36,8 @@ role               session              sql
 status             summaries            tests_for
 trace_to_culprits  verify
 ```
+
+<!-- CARTOGRAPH_MCP_TOOLS_END -->
 
 Each appears on the wire with the `cartograph_` prefix. Profiles (`coding`,
 `core`, `full`, `read-only`, and `review`) deliberately expose subsets; a
