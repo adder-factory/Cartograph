@@ -102,6 +102,9 @@ const ABORT_PROGRESS_TIMEOUT: Duration = Duration::from_millis(400);
 const ABORT_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 const ABORT_COPY_TIMEOUT: Duration = Duration::from_millis(100);
 const ABORT_RESULT_BOUND: Duration = Duration::from_secs(2);
+const BLOCKED_PUBLICATION_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+const BLOCKED_PUBLICATION_COPY_TIMEOUT: Duration = Duration::from_millis(500);
+const BLOCKED_PUBLICATION_RESULT_BOUND: Duration = Duration::from_secs(3);
 const COPY_CANCEL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const COPY_CANCEL_GRACE: Duration = Duration::from_millis(20);
 const COPY_CANCEL_TIMEOUT: Duration = Duration::from_millis(200);
@@ -2148,9 +2151,12 @@ async fn blocked_publication_is_aborted_reaped_and_leaves_no_active_query() {
     {
         panic!("publication abort advisory lock failed: {error}");
     }
-    let supervisor = IndexerSupervisor::new(fixture.database.clone(), abort_config());
+    // This test must first complete the bounded empty-generation COPY so it can
+    // exercise the deliberately blocked publication. Keep that admission
+    // independent from the shorter abort-path COPY budget used by other tests.
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), blocked_publication_config());
     let result = tokio::time::timeout(
-        ABORT_RESULT_BOUND,
+        BLOCKED_PUBLICATION_RESULT_BOUND,
         supervisor.run(request(target.clone()), move |context| async move {
             context
                 .prepare_generation(GenerationContents::new(
@@ -2514,6 +2520,15 @@ fn abort_config() -> SupervisorConfig {
         .with_progress_timeout(ABORT_PROGRESS_TIMEOUT)
         .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
         .with_copy_timeout(ABORT_COPY_TIMEOUT)
+}
+
+fn blocked_publication_config() -> SupervisorConfig {
+    SupervisorConfig::new(BLOCKED_PUBLICATION_OPERATION_TIMEOUT)
+        .with_heartbeat_interval(ABORT_HEARTBEAT_INTERVAL)
+        .with_heartbeat_timeout(ABORT_HEARTBEAT_TIMEOUT)
+        .with_progress_timeout(ABORT_PROGRESS_TIMEOUT)
+        .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
+        .with_copy_timeout(BLOCKED_PUBLICATION_COPY_TIMEOUT)
 }
 
 fn copy_cancel_config() -> SupervisorConfig {
