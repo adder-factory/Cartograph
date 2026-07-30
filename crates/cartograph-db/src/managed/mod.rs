@@ -25,8 +25,11 @@ pub const MANAGED_DATABASE_IMAGE: &str = concat!(
 /// Default loopback port for the first managed Cartograph database.
 pub const DEFAULT_MANAGED_DATABASE_PORT: u16 = 55_432;
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
-const DEFAULT_MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_MAINTENANCE_TIMEOUT: Duration = Duration::from_mins(15);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const HEX_NIBBLE_BITS: u8 = 4;
+const HEX_NIBBLE_MASK: u8 = 0x0f;
+const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// Owned Cartograph PostgreSQL lifecycle manager.
 pub struct ManagedDatabase {
@@ -144,7 +147,7 @@ pub enum ManagedDestructiveOperation {
     Remove,
     /// Replace an owned container with the exact supported image digest.
     Upgrade,
-    /// Repair required generation-local ParadeDB BM25 relations.
+    /// Repair required generation-local `ParadeDB` BM25 relations.
     RebuildDerivedIndexes,
 }
 
@@ -221,16 +224,24 @@ pub struct ManagedUpgradeReport {
     pub schema: String,
 }
 
-/// Aggregate catalog health for required generation-local ParadeDB BM25 relations.
+/// Aggregate catalog health for required generation-local `ParadeDB` BM25 relations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct ManagedDerivedIndexHealth {
+pub struct ManagedDerivedIndexAvailability {
     /// Whether the generation-relation catalog exists.
     pub present: bool,
     /// Whether every required generation relation has a valid index.
     pub valid: bool,
     /// Whether every required generation relation has an index ready for use.
     pub ready: bool,
-    /// The catalog reports ParadeDB's BM25-capable access method.
+}
+
+/// Aggregate catalog health for required generation-local `ParadeDB` BM25 relations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ManagedDerivedIndexHealth {
+    /// Catalog presence, validity, and readiness evidence.
+    #[serde(flatten)]
+    pub availability: ManagedDerivedIndexAvailability,
+    /// The catalog reports `ParadeDB`'s BM25-capable access method.
     pub bm25_access_method: bool,
 }
 
@@ -238,12 +249,19 @@ impl ManagedDerivedIndexHealth {
     /// Whether all catalog invariants required for BM25 queries hold.
     #[must_use]
     pub const fn healthy(self) -> bool {
-        self.present && self.valid && self.ready && self.bm25_access_method
+        self.availability.present
+            && self.availability.valid
+            && self.availability.ready
+            && self.bm25_access_method
     }
 }
 
 impl ManagedDatabase {
     /// Build a lifecycle manager for one existing project root and loopback port.
+    /// # Errors
+    ///
+    /// Returns an error if the project root, loopback port, environment schema,
+    /// or derived managed-resource identity is invalid.
     pub fn new(project_root: impl AsRef<Path>, port: u16) -> Result<Self, ManagedDatabaseError> {
         let schema =
             DatabaseSchema::from_env().map_err(|_| ManagedDatabaseError::DatabaseSchema)?;
@@ -269,6 +287,10 @@ impl ManagedDatabase {
     ///
     /// This never creates credentials or starts Docker; callers use
     /// [`Self::lifecycle`] first.
+    /// # Errors
+    ///
+    /// Returns an error if private credentials are missing/unsafe, their URL
+    /// cannot be built for the configured port, or database settings are invalid.
     pub fn connection_settings(&self) -> Result<DatabaseSettings, ManagedDatabaseError> {
         let credentials = self.credentials.load()?;
         let url = credentials.database_url(self.port)?;
@@ -278,6 +300,10 @@ impl ManagedDatabase {
     }
 
     /// Mint a single-use destructive capability only for the exact acknowledgement.
+    /// # Errors
+    ///
+    /// Returns an error unless `acknowledgement` exactly matches the selected
+    /// destructive operation's confirmation phrase.
     pub fn confirm_destructive_operation(
         &self,
         operation: ManagedDestructiveOperation,
@@ -330,6 +356,10 @@ fn validate_destructive_confirmation(
 impl ManagedDatabaseLifecycle<'_> {
     /// Start or reuse the owned database, initialize extensions, and prove all
     /// v2 capabilities live.
+    /// # Errors
+    ///
+    /// Returns an error if Docker/ownership/credential checks fail or startup,
+    /// readiness, migrations, capability proof, or rollback cannot complete.
     pub async fn start(&self) -> Result<ManagedStartReport, ManagedDatabaseError> {
         self.database.docker.ensure_available().await?;
         let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
@@ -510,6 +540,10 @@ impl ManagedDatabaseLifecycle<'_> {
     }
 
     /// Return state without creating credentials, volumes, or containers.
+    /// # Errors
+    ///
+    /// Returns an error if Docker inspection fails or an existing container,
+    /// volume, label, mount, or published port is not owned as expected.
     pub async fn status(&self) -> Result<ManagedDatabaseStatus, ManagedDatabaseError> {
         self.database.docker.ensure_available().await?;
         let Some(inspection) = self
@@ -540,6 +574,10 @@ impl ManagedDatabaseLifecycle<'_> {
     /// Return exact filesystem bytes available to the validated project-owned
     /// database mount. External PostgreSQL deployments must supply equivalent
     /// operator-observed headroom themselves.
+    /// # Errors
+    ///
+    /// Returns an error if the owned container/volume cannot be verified,
+    /// the database is unhealthy, or Docker cannot read mount headroom.
     pub async fn available_storage_bytes(&self) -> Result<u64, ManagedDatabaseError> {
         self.database.docker.ensure_available().await?;
         let inspection = self
@@ -563,6 +601,10 @@ impl ManagedDatabaseLifecycle<'_> {
 
     /// Stop only the project-owned container. Missing/stopped is an idempotent
     /// success; a foreign name collision is refused.
+    /// # Errors
+    ///
+    /// Returns an error if Docker or the lifecycle lock fails, a name collision
+    /// is foreign, or the owned running/paused container cannot be stopped.
     pub async fn stop(&self) -> Result<bool, ManagedDatabaseError> {
         self.database.docker.ensure_available().await?;
         let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
@@ -618,6 +660,10 @@ impl ManagedDatabaseLifecycle<'_> {
     }
 
     /// Read a bounded tail from only the project-owned container.
+    /// # Errors
+    ///
+    /// Returns an error if Docker inspection fails, the container is missing
+    /// or foreign, or the bounded log tail cannot be read.
     pub async fn logs(&self, tail: u16) -> Result<String, ManagedDatabaseError> {
         self.database.docker.ensure_available().await?;
         let inspection = self
@@ -706,7 +752,8 @@ impl ManagedDatabaseLifecycle<'_> {
                     .await
             }
             (StartTransition::Stop, "created" | "exited" | "dead")
-            | (StartTransition::Pause, "paused") => Ok(()),
+            | (StartTransition::Pause, "paused")
+            | (StartTransition::None, _) => Ok(()),
             (StartTransition::Pause, "running") => {
                 self.database
                     .docker
@@ -714,8 +761,7 @@ impl ManagedDatabaseLifecycle<'_> {
                     .pause_container(&self.database.identity.container_name)
                     .await
             }
-            (StartTransition::None, _) => Ok(()),
-            (StartTransition::Pause, _) | (StartTransition::Stop, _) => {
+            (StartTransition::Pause | StartTransition::Stop, _) => {
                 Err(ManagedDatabaseError::UnsupportedContainerState)
             }
         }
@@ -1081,9 +1127,18 @@ fn project_hash(project_root: &Path) -> String {
     let digest = blake3::hash(project_root.as_os_str().as_encoded_bytes());
     let mut encoded = String::with_capacity(16);
     for byte in &digest.as_bytes()[..8] {
-        encoded.push_str(&format!("{byte:02x}"));
+        push_lower_hex_byte(&mut encoded, *byte);
     }
     encoded
+}
+
+fn push_lower_hex_byte(output: &mut String, byte: u8) {
+    output.push(char::from(
+        LOWER_HEX_DIGITS[usize::from(byte >> HEX_NIBBLE_BITS)],
+    ));
+    output.push(char::from(
+        LOWER_HEX_DIGITS[usize::from(byte & HEX_NIBBLE_MASK)],
+    ));
 }
 
 fn ensure_loopback_port_available(port: u16) -> Result<(), ManagedDatabaseError> {

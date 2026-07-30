@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_domain::{ContentDigest, GenerationId, NormalizedPath, ProjectId};
 use cartograph_extract::{NativeExtractor, SourceReadOptions, SourceRoot};
+use memchr::memchr_iter;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -18,6 +19,12 @@ pub struct TestEvidenceOptions {
 }
 
 impl TestEvidenceOptions {
+    /// Creates validated test-evidence limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TestEvidenceError::InvalidOptions`] when `cases_per_file` is
+    /// zero or exceeds the retained cases allowed for one test file.
     pub const fn new(cases_per_file: u16) -> Result<Self, TestEvidenceError> {
         if cases_per_file == 0 || cases_per_file > MAXIMUM_CASES_PER_FILE {
             return Err(TestEvidenceError::InvalidOptions);
@@ -59,16 +66,22 @@ pub struct TestEvidenceReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum TestEvidenceError {
     #[error("test evidence options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("test evidence requires a current generation")]
+    /// No current indexed generation is available.
     NotIndexed,
     #[error("test evidence storage is unavailable")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
     #[error("test evidence source is unavailable")]
+    /// Required source evidence could not be read safely.
     SourceUnavailable,
     #[error("test evidence source or generation changed")]
+    /// Live source no longer matches the generation or digest fence.
     SourceChanged,
     #[error("test evidence was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
 }
 
@@ -76,6 +89,11 @@ impl ProjectRuntime {
     /// Mine fresh test titles/declarations for exact affected paths without
     /// persisting source literals. Every file hash must still match the
     /// immutable current generation.
+    /// # Errors
+    ///
+    /// Returns an error when the path set is empty or excessive, the requested
+    /// project/generation is not current, fingerprints or source cannot be read,
+    /// source/generation identity changes, or cancellation wins.
     pub async fn test_evidence(
         &self,
         project_id: ProjectId,
@@ -381,16 +399,9 @@ const fn identifier_continue(byte: u8) -> bool {
 }
 
 fn one_based_line(bytes: &[u8], offset: usize) -> u32 {
-    u32::try_from(
-        bytes
-            .get(..offset)
-            .unwrap_or_default()
-            .iter()
-            .filter(|byte| **byte == b'\n')
-            .count(),
-    )
-    .unwrap_or(u32::MAX)
-    .saturating_add(1)
+    u32::try_from(memchr_iter(b'\n', bytes.get(..offset).unwrap_or_default()).count())
+        .unwrap_or(u32::MAX)
+        .saturating_add(1)
 }
 
 #[cfg(test)]

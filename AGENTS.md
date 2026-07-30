@@ -359,9 +359,15 @@ For repository work, the minimum Rust gates are:
 ```sh
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace
+RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps
+cargo test --locked --workspace --all-features
 cargo deny --all-features check
 ```
+
+These gates use the exact stable toolchain in `rust-toolchain.toml`. Do not use
+nightly-only tools or diagnostic overrides to clear them. A separate scheduled
+latest-stable canary detects future compiler and Clippy changes without making
+production builds float away from the reviewed toolchain.
 
 The live workflow additionally proves PostgreSQL/ParadeDB capabilities,
 migrations, deterministic COPY/publication, leases, fault handling,

@@ -20,6 +20,10 @@ const MODEL_REGISTRY_LOCK_NAMESPACE: &str = "cartograph-v2-embedding-model-regis
 
 impl CartographDatabase {
     /// Register immutable non-secret model metadata, or return the exact idempotent row.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, immutable model identity
+    /// conflicts with existing metadata, or registry/HNSW setup cannot commit.
     pub async fn register_embedding_model(
         &self,
         registration: EmbeddingModelRegistration,
@@ -42,6 +46,10 @@ impl CartographDatabase {
     }
 
     /// Retire one model only after every current old-model project has a ready replacement.
+    /// # Errors
+    ///
+    /// Returns an error if either model is missing/mismatched, replacement
+    /// coverage is incomplete for any current project, or retirement cannot commit.
     pub async fn retire_embedding_model(
         &self,
         request: RetireEmbeddingModelRequest,

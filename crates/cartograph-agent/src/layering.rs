@@ -82,6 +82,7 @@ pub struct LayerViolation {
 
 impl LayerViolation {
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> &str {
         &self.symbol_id
     }
@@ -112,11 +113,13 @@ pub struct LayerAnalysisReport {
 
 impl LayerAnalysisReport {
     #[must_use]
+    /// Returns the violations.
     pub fn violations(&self) -> &[LayerViolation] {
         &self.violations
     }
 
     #[must_use]
+    /// Consumes this value and returns its violations.
     pub fn into_violations(self) -> Vec<LayerViolation> {
         self.violations
     }
@@ -126,17 +129,26 @@ impl LayerAnalysisReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum LayerAnalysisError {
     #[error("the Cartograph layer configuration is invalid or exceeds its bound")]
+    /// Configuration violates a required provider or resource contract.
     InvalidConfiguration,
     #[error("current import evidence is unavailable")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
     #[error("layer violation source coordinates are unavailable")]
+    /// Required source evidence could not be read safely.
     SourceUnavailable,
     #[error("layer analysis was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
 }
 
 impl ProjectRuntime {
     /// Evaluate exact resolved imports against opt-in `.cartograph/config.json` layer policy.
+    /// # Errors
+    ///
+    /// Returns an error when layer configuration is malformed, unsafe, or
+    /// excessive; current import or source-coordinate evidence is unavailable;
+    /// the blocking evaluator fails; or cancellation wins.
     pub async fn analyze_layers(
         &self,
         project_id: &ProjectId,
@@ -422,6 +434,7 @@ fn is_excepted(exceptions: &[CompiledException], route: ImportRoute<'_>) -> bool
     })
 }
 
+#[derive(Clone, Copy)]
 struct ImportRoute<'a> {
     importer: &'a str,
     to_layer: &'a str,

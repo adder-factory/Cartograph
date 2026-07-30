@@ -16,20 +16,29 @@ const DEFAULT_PARSE_CACHE_CONTRACTS: u64 = 2;
 const PARSE_CACHE_AMPLIFICATION_MINIMUM_BYTES: u64 = 64 * 1024 * 1024;
 const PARSE_CACHE_AMPLIFICATION_ALLOWANCE_BYTES: u64 = 64 * 1024 * 1024;
 const PARSE_CACHE_AMPLIFICATION_MULTIPLIER: u64 = 4;
-const STALE_READY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const STALE_READY_AGE: Duration = Duration::from_hours(24);
 
 /// One bounded relation-level storage and autovacuum signal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableStorageUsage {
+    /// Relation for this record.
     pub relation: String,
+    /// Number of bytes used by the heap.
     pub heap_bytes: u64,
+    /// Number of bytes used by the index.
     pub index_bytes: u64,
+    /// Number of bytes used by the toast.
     pub toast_bytes: u64,
+    /// Number of bytes used by the total.
     pub total_bytes: u64,
+    /// Number of estimated live rows.
     pub estimated_live_rows: u64,
+    /// Number of estimated dead rows.
     pub estimated_dead_rows: u64,
+    /// Optional last autovacuum, when available.
     pub last_autovacuum: Option<String>,
+    /// Number of autovacuum entries.
     pub autovacuum_count: u64,
 }
 
@@ -37,11 +46,17 @@ pub struct TableStorageUsage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStorageUsage {
+    /// Index for this record.
     pub index: String,
+    /// Table for this record.
     pub table: String,
+    /// Access method for this record.
     pub access_method: String,
+    /// Allocated byte size.
     pub bytes: u64,
+    /// Whether the catalog entry is valid.
     pub valid: bool,
+    /// Whether the catalog entry is ready for queries.
     pub ready: bool,
 }
 
@@ -49,12 +64,19 @@ pub struct IndexStorageUsage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParseCacheStorageUsage {
+    /// Number of rows.
     pub rows: u64,
+    /// Number of contracts.
     pub contracts: u64,
+    /// Number of bytes used by the logical payload.
     pub logical_payload_bytes: u64,
+    /// Number of bytes used by the stored payload.
     pub stored_payload_bytes: u64,
+    /// Number of bytes used by the schema stored payload.
     pub schema_stored_payload_bytes: u64,
+    /// Number of bytes used by the physical relation.
     pub physical_relation_bytes: u64,
+    /// Number of bytes used by the physical overhead.
     pub physical_overhead_bytes: u64,
 }
 
@@ -63,10 +85,15 @@ pub struct ParseCacheStorageUsage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationDeduplicationAssessment {
+    /// Number of duplicate content groups.
     pub duplicate_content_groups: u64,
+    /// Number of redundant generations.
     pub redundant_generations: u64,
+    /// Number of bytes used by the estimated redundant source.
     pub estimated_redundant_source_bytes: u64,
+    /// Whether the current schema can safely deduplicate immutable generation data.
     pub mutation_supported: bool,
+    /// Required migration for this record.
     pub required_migration: &'static str,
 }
 
@@ -74,15 +101,25 @@ pub struct GenerationDeduplicationAssessment {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageWarning {
+    /// Represents the parse cache contract budget exceeded storage warning.
     ParseCacheContractBudgetExceeded,
+    /// Represents the parse cache row budget exceeded storage warning.
     ParseCacheRowBudgetExceeded,
+    /// Represents the parse cache payload budget exceeded storage warning.
     ParseCachePayloadBudgetExceeded,
+    /// Represents the parse cache physical amplification storage warning.
     ParseCachePhysicalAmplification,
+    /// Represents the stale ready generation storage warning.
     StaleReadyGeneration,
+    /// Represents the invalid concurrent index artifact storage warning.
     InvalidConcurrentIndexArtifact,
+    /// Represents the dead tuple pressure storage warning.
     DeadTuplePressure,
+    /// Represents the duplicate generation content storage warning.
     DuplicateGenerationContent,
+    /// Represents the relation list truncated storage warning.
     RelationListTruncated,
+    /// Represents the index list truncated storage warning.
     IndexListTruncated,
 }
 
@@ -91,25 +128,44 @@ pub enum StorageWarning {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageUsageReport {
+    /// Number of bytes used by the database.
     pub database_bytes: u64,
+    /// Number of bytes used by the schema.
     pub schema_bytes: u64,
+    /// Number of bytes used by the heap.
     pub heap_bytes: u64,
+    /// Number of bytes used by the index.
     pub index_bytes: u64,
+    /// Number of bytes used by the btree index.
     pub btree_index_bytes: u64,
+    /// Number of bytes used by the toast.
     pub toast_bytes: u64,
+    /// Generation storage for this record.
     pub generation_storage: GenerationStorageSummary,
+    /// Parse cache for this record.
     pub parse_cache: ParseCacheStorageUsage,
+    /// Number of stale ready generations.
     pub stale_ready_generations: u64,
+    /// Bounded tables included in this result.
     pub tables: Vec<TableStorageUsage>,
+    /// Bounded indexes included in this result.
     pub indexes: Vec<IndexStorageUsage>,
+    /// Whether additional table-storage rows were omitted.
     pub tables_truncated: bool,
+    /// Whether additional index-storage rows were omitted.
     pub indexes_truncated: bool,
+    /// Deduplication for this record.
     pub deduplication: GenerationDeduplicationAssessment,
+    /// Bounded warnings included in this result.
     pub warnings: Vec<StorageWarning>,
 }
 
 impl CartographDatabase {
     /// Inspect bounded schema storage under one repeatable transaction.
+    /// # Errors
+    ///
+    /// Returns an error if the row limit or timeout is invalid, the project is
+    /// unavailable, or repeatable-read storage statistics cannot be queried or decoded.
     pub async fn storage_usage(
         &self,
         project_id: &ProjectId,
@@ -159,12 +215,12 @@ impl CartographDatabase {
             deduplication,
         });
         Ok(StorageUsageReport {
-            database_bytes: totals.database_bytes,
-            schema_bytes: totals.schema_bytes,
-            heap_bytes: totals.heap_bytes,
-            index_bytes: totals.index_bytes,
-            btree_index_bytes: totals.btree_index_bytes,
-            toast_bytes: totals.toast_bytes,
+            database_bytes: totals.database,
+            schema_bytes: totals.schema,
+            heap_bytes: totals.heap,
+            index_bytes: totals.index,
+            btree_index_bytes: totals.btree_index,
+            toast_bytes: totals.toast,
             generation_storage,
             parse_cache,
             stale_ready_generations,
@@ -179,19 +235,19 @@ impl CartographDatabase {
 }
 
 struct StorageTotals {
-    database_bytes: u64,
-    schema_bytes: u64,
-    heap_bytes: u64,
-    index_bytes: u64,
-    btree_index_bytes: u64,
-    toast_bytes: u64,
+    database: u64,
+    schema: u64,
+    heap: u64,
+    index: u64,
+    btree_index: u64,
+    toast: u64,
 }
 
 async fn load_storage_totals(
     connection: &mut sqlx_postgres::PgConnection,
     database: &CartographDatabase,
 ) -> Result<StorageTotals, StorageError> {
-    let statement = r#"WITH tables AS (
+    let statement = r"WITH tables AS (
             SELECT classes.oid,
                    pg_relation_size(classes.oid)::bigint AS heap_bytes,
                    pg_indexes_size(classes.oid)::bigint AS index_bytes,
@@ -221,19 +277,19 @@ async fn load_storage_totals(
                    tables.total_bytes - tables.heap_bytes - tables.index_bytes, 0
                )), 0)::bigint AS toast_bytes,
                (SELECT bytes FROM btree) AS btree_index_bytes
-        FROM tables"#;
+        FROM tables";
     let row = query(statement)
         .bind(database.schema.as_str())
         .fetch_one(connection)
         .await
         .map_err(|_| database_error("storage-totals"))?;
     Ok(StorageTotals {
-        database_bytes: nonnegative(&row, "database_bytes")?,
-        schema_bytes: nonnegative(&row, "schema_bytes")?,
-        heap_bytes: nonnegative(&row, "heap_bytes")?,
-        index_bytes: nonnegative(&row, "index_bytes")?,
-        btree_index_bytes: nonnegative(&row, "btree_index_bytes")?,
-        toast_bytes: nonnegative(&row, "toast_bytes")?,
+        database: nonnegative(&row, "database_bytes")?,
+        schema: nonnegative(&row, "schema_bytes")?,
+        heap: nonnegative(&row, "heap_bytes")?,
+        index: nonnegative(&row, "index_bytes")?,
+        btree_index: nonnegative(&row, "btree_index_bytes")?,
+        toast: nonnegative(&row, "toast_bytes")?,
     })
 }
 
@@ -380,7 +436,7 @@ async fn load_table_storage(
     database: &CartographDatabase,
     limit: u16,
 ) -> Result<(Vec<TableStorageUsage>, bool), StorageError> {
-    let statement = r#"SELECT classes.relname,
+    let statement = r"SELECT classes.relname,
                pg_relation_size(classes.oid)::bigint AS heap_bytes,
                pg_indexes_size(classes.oid)::bigint AS index_bytes,
                GREATEST(
@@ -402,7 +458,7 @@ async fn load_table_storage(
         WHERE namespaces.nspname = $1
           AND classes.relkind IN ('r', 'p', 'm')
         ORDER BY total_bytes DESC, classes.relname
-        LIMIT $2"#;
+        LIMIT $2";
     let rows = query(statement)
         .bind(database.schema.as_str())
         .bind(i64::from(limit))
@@ -440,7 +496,7 @@ async fn load_index_storage(
     database: &CartographDatabase,
     limit: u16,
 ) -> Result<(Vec<IndexStorageUsage>, bool), StorageError> {
-    let statement = r#"SELECT indexes.relname AS index_name,
+    let statement = r"SELECT indexes.relname AS index_name,
                tables.relname AS table_name,
                methods.amname AS access_method,
                pg_relation_size(indexes.oid)::bigint AS bytes,
@@ -458,7 +514,7 @@ async fn load_index_storage(
             ON methods.oid = indexes.relam
         WHERE namespaces.nspname = $1
         ORDER BY bytes DESC, indexes.relname
-        LIMIT $2"#;
+        LIMIT $2";
     let rows = query(statement)
         .bind(database.schema.as_str())
         .bind(i64::from(limit))
@@ -545,6 +601,7 @@ async fn load_deduplication(
     })
 }
 
+#[derive(Clone, Copy)]
 struct StorageWarningInput<'a> {
     parse_cache: ParseCacheStorageUsage,
     stale_ready_generations: u64,

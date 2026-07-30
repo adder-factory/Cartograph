@@ -365,11 +365,11 @@ fn encode_symbol(context: &CopyGenerationContext, symbol: &SymbolInput) -> Vec<u
     row.number(symbol.start_line);
     row.number(symbol.end_line);
     row.text(symbol.structural_digest.as_str());
-    row.optional_text(symbol.visibility.map(|visibility| visibility.as_str()));
-    row.number(symbol.exported);
-    row.number(symbol.default_export);
-    row.number(symbol.async_symbol);
-    row.number(symbol.static_member);
+    row.optional_text(symbol.visibility.map(cartograph_domain::Visibility::as_str));
+    row.number(symbol.export.exported);
+    row.number(symbol.export.default_export);
+    row.number(symbol.execution.async_symbol);
+    row.number(symbol.execution.static_member);
     row.number(symbol.declaration_only);
     row.optional_number(
         symbol
@@ -406,13 +406,13 @@ fn encode_reference(context: &CopyGenerationContext, reference: &ReferenceInput)
         reference
             .owner_symbol_id
             .as_ref()
-            .map(|symbol| symbol.as_str()),
+            .map(cartograph_domain::SymbolId::as_str),
     );
     row.optional_text(
         reference
             .target_symbol_id
             .as_ref()
-            .map(|symbol| symbol.as_str()),
+            .map(cartograph_domain::SymbolId::as_str),
     );
     row.text(&reference.reference_name);
     row.text(&reference.reference_kind);
@@ -430,8 +430,18 @@ fn encode_document(context: &CopyGenerationContext, document: &CanonicalSearchDo
     row.text(context.project_id.as_str());
     row.text(context.generation_id.as_str());
     row.text(document.document_id.as_str());
-    row.optional_text(document.file_id.as_ref().map(|file| file.as_str()));
-    row.optional_text(document.symbol_id.as_ref().map(|symbol| symbol.as_str()));
+    row.optional_text(
+        document
+            .file_id
+            .as_ref()
+            .map(cartograph_domain::FileId::as_str),
+    );
+    row.optional_text(
+        document
+            .symbol_id
+            .as_ref()
+            .map(cartograph_domain::SymbolId::as_str),
+    );
     row.text(&document.path);
     row.text(&document.language);
     row.text(document.kind.as_str());
@@ -461,12 +471,11 @@ impl TextRow {
     }
 
     fn optional_text(&mut self, value: Option<&str>) {
-        match value {
-            Some(value) => self.text(value),
-            None => {
-                self.delimiter();
-                self.bytes.extend_from_slice(br"\N");
-            }
+        if let Some(value) = value {
+            self.text(value);
+        } else {
+            self.delimiter();
+            self.bytes.extend_from_slice(br"\N");
         }
     }
 
@@ -475,12 +484,11 @@ impl TextRow {
     }
 
     fn optional_number(&mut self, value: Option<impl Display>) {
-        match value {
-            Some(value) => self.number(value),
-            None => {
-                self.delimiter();
-                self.bytes.extend_from_slice(br"\N");
-            }
+        if let Some(value) = value {
+            self.number(value);
+        } else {
+            self.delimiter();
+            self.bytes.extend_from_slice(br"\N");
         }
     }
 

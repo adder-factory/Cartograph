@@ -13,8 +13,11 @@ use url::Url;
 
 use crate::{ProjectLlmProvider, ProjectLlmTier, ProjectLlmTierConfig, load_project_llm_tier};
 
+/// Public constant defining the chat API key environment.
 pub const CHAT_API_KEY_ENV: &str = "CARTOGRAPH_CHAT_API_KEY";
+/// Public constant defining the chat endpoint environment.
 pub const CHAT_ENDPOINT_ENV: &str = "CARTOGRAPH_CHAT_ENDPOINT";
+/// Public constant defining the chat model environment.
 pub const CHAT_MODEL_ENV: &str = "CARTOGRAPH_CHAT_MODEL";
 pub const CHAT_TIMEOUT_MS_ENV: &str = "CARTOGRAPH_CHAT_TIMEOUT_MS";
 pub const CHAT_MAX_INPUT_BYTES_ENV: &str = "CARTOGRAPH_CHAT_MAX_INPUT_BYTES";
@@ -73,6 +76,10 @@ impl std::fmt::Debug for ChatSettings {
 
 impl ChatSettings {
     /// A completely absent endpoint/model disables grounded chat; partial config fails closed.
+    /// # Errors
+    ///
+    /// Returns an error for non-Unicode/partial endpoint-model configuration,
+    /// invalid model/key values, or malformed/out-of-range numeric bounds.
     pub fn try_from_env() -> Result<Option<Self>, ChatError> {
         let endpoint = optional_env(CHAT_ENDPOINT_ENV)?;
         let model = optional_env(CHAT_MODEL_ENV)?;
@@ -111,6 +118,10 @@ impl ChatSettings {
     }
 
     /// Prefer the explicit process environment, then load one project tier.
+    /// # Errors
+    ///
+    /// Returns an error for a non-chat tier, invalid environment settings, an
+    /// unreadable/invalid project tier, or unsupported provider configuration.
     pub fn try_from_project(
         project_root: &Path,
         tier: ProjectLlmTier,
@@ -130,6 +141,10 @@ impl ChatSettings {
     }
 
     /// Build a chat transport from one already-validated exact project tier.
+    /// # Errors
+    ///
+    /// Returns an error if provider-specific endpoint/model/key/binary settings
+    /// cannot be converted into bounded chat transport settings.
     pub fn from_project_config(config: &ProjectLlmTierConfig) -> Result<Self, ChatError> {
         let mut settings = match config.provider() {
             ProjectLlmProvider::OpenAiCompat => {
@@ -155,6 +170,12 @@ impl ChatSettings {
         Ok(settings)
     }
 
+    /// Creates validated bounded chat settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the endpoint is not permitted HTTPS/loopback HTTP,
+    /// or model/API-key text is empty, oversized, or contains control characters.
     pub fn new(
         endpoint: &str,
         model: impl Into<String>,
@@ -207,7 +228,7 @@ impl ChatSettings {
             model,
             api_key: Some(api_key),
             claude_bin: None,
-            timeout: Duration::from_millis(60_000),
+            timeout: Duration::from_mins(1),
             maximum_input_bytes: DEFAULT_MAXIMUM_INPUT_BYTES,
             maximum_response_bytes: DEFAULT_MAXIMUM_RESPONSE_BYTES,
             maximum_output_tokens: DEFAULT_MAXIMUM_OUTPUT_TOKENS,
@@ -252,6 +273,10 @@ impl ChatSettings {
 
     /// Apply validated per-request endpoint/model overrides while preserving
     /// credentials and every existing response/input bound.
+    /// # Errors
+    ///
+    /// Returns an error if an endpoint override targets a non-OpenAI provider,
+    /// the endpoint is unsafe/invalid, or the model override violates text bounds.
     pub fn with_overrides(
         mut self,
         endpoint: Option<&str>,
@@ -271,7 +296,7 @@ impl ChatSettings {
             {
                 return Err(invalid(CHAT_MODEL_ENV));
             }
-            self.model = model.to_owned();
+            model.clone_into(&mut self.model);
         }
         Ok(self)
     }
@@ -296,6 +321,7 @@ pub struct GroundedChatRequest<'request> {
 
 impl<'request> GroundedChatRequest<'request> {
     #[must_use]
+    /// Creates a validated grounded chat request.
     pub const fn new(
         system: &'request str,
         question: &'request str,
@@ -319,6 +345,7 @@ pub struct ChatMessageRequest<'request> {
 
 impl<'request> ChatMessageRequest<'request> {
     #[must_use]
+    /// Creates a validated chat message request.
     pub const fn new(
         system: &'request str,
         prompt: &'request str,
@@ -360,6 +387,7 @@ impl ChatCompletion {
     }
 }
 
+/// Client for bounded OpenAI-compatible chat-completion requests.
 #[derive(Clone)]
 pub struct OpenAiChatClient {
     settings: ChatSettings,
@@ -367,6 +395,12 @@ pub struct OpenAiChatClient {
 }
 
 impl OpenAiChatClient {
+    /// Creates a client after validating its transport configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no TLS crypto provider can be installed or the
+    /// redirect-free bounded `reqwest` client cannot be built.
     pub fn new(settings: ChatSettings) -> Result<Self, ChatError> {
         crate::ensure_tls_crypto_provider().map_err(|_| ChatError::ClientUnavailable)?;
         let client = reqwest::Client::builder()
@@ -380,6 +414,10 @@ impl OpenAiChatClient {
     }
 
     /// Ask the configured model using one trusted system policy and one bounded evidence payload.
+    /// # Errors
+    ///
+    /// Returns an error if system/question/evidence input exceeds its bounds or
+    /// the configured backend times out, rejects, malforms, or oversizes its response.
     pub async fn complete(
         &self,
         request: GroundedChatRequest<'_>,
@@ -398,6 +436,10 @@ impl OpenAiChatClient {
     }
 
     /// Send one bounded prompt without consulting or framing project/index evidence.
+    /// # Errors
+    ///
+    /// Returns an error if system/prompt/token bounds are invalid or the
+    /// configured backend times out, rejects, malforms, or oversizes its response.
     pub async fn complete_message(
         &self,
         request: ChatMessageRequest<'_>,
@@ -712,22 +754,34 @@ struct ClaudeBridgeContentBlock {
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+/// Errors produced while processing chat.
 pub enum ChatError {
     #[error("Cartograph chat configuration is incomplete")]
+    /// Required provider configuration is missing.
     IncompleteConfiguration,
     #[error("Cartograph chat configuration field {field} is invalid")]
-    InvalidConfiguration { field: &'static str },
+    /// Configuration violates a required provider or resource contract.
+    InvalidConfiguration {
+        /// Configuration field that violated its documented bound or format.
+        field: &'static str,
+    },
     #[error("Cartograph chat request exceeds configured bounds")]
+    /// The request exceeded its declared size or item ceiling.
     RequestLimit,
     #[error("Cartograph chat HTTP client is unavailable")]
+    /// A safe bounded HTTP client could not be constructed.
     ClientUnavailable,
     #[error("Cartograph chat endpoint is unavailable")]
+    /// The configured endpoint could not complete the bounded request.
     EndpointUnavailable,
     #[error("Cartograph chat endpoint rejected the request")]
+    /// The configured backend rejected the bounded request.
     BackendRejected,
     #[error("Cartograph chat response exceeds configured bounds")]
+    /// The response exceeded its declared size or item ceiling.
     ResponseLimit,
     #[error("Cartograph chat endpoint returned an invalid response")]
+    /// The backend response violates the expected bounded schema.
     InvalidResponse,
 }
 
@@ -840,7 +894,7 @@ fn validated_completion(
     model: String,
     finish_reason: Option<String>,
 ) -> Result<ChatCompletion, ChatError> {
-    let content = content.trim().to_owned();
+    let content = trim_owned(content);
     if !valid_completion_content(&content)
         || !valid_completion_model(&model)
         || !valid_finish_reason(finish_reason.as_deref())
@@ -877,13 +931,22 @@ fn normalize_anthropic_endpoint(raw: &str) -> Result<Url, ChatError> {
 }
 
 fn validated_model(model: String) -> Result<String, ChatError> {
-    let model = model.trim().to_owned();
+    let model = trim_owned(model);
     if model.is_empty() || model.len() > MAXIMUM_MODEL_BYTES || model.chars().any(char::is_control)
     {
         Err(invalid(CHAT_MODEL_ENV))
     } else {
         Ok(model)
     }
+}
+
+fn trim_owned(mut value: String) -> String {
+    let leading = value.len().saturating_sub(value.trim_start().len());
+    if leading > 0 {
+        value.drain(..leading);
+    }
+    value.truncate(value.trim_end().len());
+    value
 }
 
 fn required_api_key(value: Option<String>) -> Result<SecretString, ChatError> {

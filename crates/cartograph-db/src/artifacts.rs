@@ -59,6 +59,12 @@ impl Default for SummaryCandidatePolicy {
 }
 
 impl SummaryCandidatePolicy {
+    /// Creates a validated summary candidate policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the default line floor is too large, there are too
+    /// many kind overrides, or an override kind/floor violates its bound.
     pub fn new(
         minimum_body_lines: u32,
         minimum_body_lines_by_kind: BTreeMap<String, u32>,
@@ -100,9 +106,13 @@ fn valid_summary_kind_override(kind: &str, floor: u32) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentArtifactKind {
+    /// Free-form bounded agent note.
     Note,
+    /// Inferred symbol-role artifact.
     Role,
+    /// Model or structural summary artifact.
     Summary,
+    /// Artifact owned by an agent session.
     Session,
 }
 
@@ -131,10 +141,15 @@ impl AgentArtifactKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentArtifactScope {
+    /// Artifact applies to the complete project.
     Project,
+    /// Artifact applies to one normalized module.
     Module,
+    /// Artifact applies to one indexed file.
     File,
+    /// Artifact applies to one indexed symbol.
     Symbol,
+    /// Artifact applies to one agent session.
     Session,
 }
 
@@ -165,10 +180,15 @@ impl AgentArtifactScope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentArtifactState {
+    /// Represents the pending artifact state state.
     Pending,
+    /// Represents the active artifact state state.
     Active,
+    /// Represents the complete artifact state state.
     Complete,
+    /// Represents the stale artifact state state.
     Stale,
+    /// Represents the archived artifact state state.
     Archived,
 }
 
@@ -216,6 +236,7 @@ pub struct AgentArtifactContent {
 
 impl AgentArtifactContent {
     #[must_use]
+    /// Creates the bounded scope key and body for a new artifact.
     pub fn new(scope_key: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             scope_key: scope_key.into(),
@@ -226,6 +247,10 @@ impl AgentArtifactContent {
 
 impl NewAgentArtifact {
     /// Create a bounded active artifact without generation coupling.
+    /// # Errors
+    ///
+    /// Returns an error if the scope key or active-state body is empty,
+    /// oversized, or contains a NUL byte.
     pub fn new(
         kind: AgentArtifactKind,
         scope: AgentArtifactScope,
@@ -247,6 +272,9 @@ impl NewAgentArtifact {
     }
 
     /// Attach bounded JSON-object provenance.
+    /// # Errors
+    ///
+    /// Returns an error if metadata is not a bounded serializable JSON object.
     pub fn with_metadata(mut self, metadata: Value) -> Result<Self, StorageError> {
         validate_metadata(&metadata)?;
         self.metadata = metadata;
@@ -268,6 +296,10 @@ impl NewAgentArtifact {
     }
 
     /// Select an explicit lifecycle state.
+    /// # Errors
+    ///
+    /// Returns an error if the existing body is incompatible with the selected
+    /// lifecycle state's emptiness or byte-length contract.
     pub fn with_state(mut self, state: AgentArtifactState) -> Result<Self, StorageError> {
         validate_body(&self.body, state)?;
         self.state = state;
@@ -291,6 +323,9 @@ pub struct AgentArtifactQuery<'query> {
 
 impl<'query> AgentArtifactQuery<'query> {
     /// Create an unfiltered bounded listing.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is zero or exceeds the artifact listing cap.
     pub fn new(limit: u16) -> Result<Self, StorageError> {
         validate_limit(limit, MAX_ARTIFACT_LIMIT)?;
         Ok(Self {
@@ -307,17 +342,24 @@ impl<'query> AgentArtifactQuery<'query> {
     }
 
     #[must_use]
+    /// Sets the kind and returns the updated value.
     pub const fn with_kind(mut self, kind: AgentArtifactKind) -> Self {
         self.kind = Some(kind);
         self
     }
 
     #[must_use]
+    /// Sets the scope and returns the updated value.
     pub const fn with_scope(mut self, scope: AgentArtifactScope) -> Self {
         self.scope = Some(scope);
         self
     }
 
+    /// Sets the scope key and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `scope_key` is empty, oversized, or contains a NUL byte.
     pub fn with_scope_key(mut self, scope_key: &'query str) -> Result<Self, StorageError> {
         validate_scope_key(scope_key)?;
         self.scope_key = Some(scope_key);
@@ -325,6 +367,10 @@ impl<'query> AgentArtifactQuery<'query> {
     }
 
     /// Filter exact bounded body labels, used for role listings.
+    /// # Errors
+    ///
+    /// Returns an error if `body` is empty, exceeds the exact-label byte cap,
+    /// or contains a NUL byte.
     pub fn with_body(mut self, body: &'query str) -> Result<Self, StorageError> {
         if body.is_empty() || body.len() > 256 || body.contains('\0') {
             return Err(StorageError::InvalidInput {
@@ -336,6 +382,10 @@ impl<'query> AgentArtifactQuery<'query> {
     }
 
     /// Filter a note subtype stored in validated metadata.
+    /// # Errors
+    ///
+    /// Returns an error unless `note_kind` is `note`, `question`, `followup`,
+    /// or `bookmark`.
     pub fn with_note_kind(mut self, note_kind: &'query str) -> Result<Self, StorageError> {
         if !matches!(note_kind, "note" | "question" | "followup" | "bookmark") {
             return Err(StorageError::InvalidInput { field: "note_kind" });
@@ -345,6 +395,9 @@ impl<'query> AgentArtifactQuery<'query> {
     }
 
     /// Restrict results to artifacts written at or after a Unix-millisecond instant.
+    /// # Errors
+    ///
+    /// Returns an error if the Unix-millisecond value is negative or non-finite.
     pub fn since_unix_ms(mut self, since_unix_ms: f64) -> Result<Self, StorageError> {
         if !since_unix_ms.is_finite() || since_unix_ms < 0.0 {
             return Err(StorageError::InvalidInput { field: "since" });
@@ -361,6 +414,7 @@ impl<'query> AgentArtifactQuery<'query> {
     }
 
     #[must_use]
+    /// Sets the state and returns the updated value.
     pub const fn with_state(mut self, state: AgentArtifactState) -> Self {
         self.state = Some(state);
         self
@@ -543,17 +597,32 @@ pub struct NeighborSummarySaveRequest<'a> {
     similarity: f64,
 }
 
+#[derive(Clone, Copy)]
+/// Validated and bounded neighbor summary save input.
 pub struct NeighborSummarySaveInput<'a> {
+    /// Stable symbol ID for this record.
     pub symbol_id: &'a SymbolId,
+    /// Digest-fenced source digest for this record.
     pub source_digest: &'a ContentDigest,
+    /// Stable neighbor symbol ID for this record.
     pub neighbor_symbol_id: &'a SymbolId,
+    /// Neighbor summary for this record.
     pub neighbor_summary: &'a str,
+    /// Summary for this record.
     pub summary: &'a str,
+    /// Stable embedding model ID for this record.
     pub embedding_model_id: &'a ModelId,
+    /// Similarity for this record.
     pub similarity: f64,
 }
 
 impl<'a> NeighborSummarySaveRequest<'a> {
+    /// Creates a validated neighbor summary save request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if source and neighbor are identical, similarity is
+    /// non-finite/outside zero to one, or the complete summary body is invalid.
     pub fn new(input: NeighborSummarySaveInput<'a>) -> Result<Self, StorageError> {
         let NeighborSummarySaveInput {
             symbol_id,
@@ -626,6 +695,7 @@ struct SummarySaveFields<'a> {
 }
 
 /// Shared digest fence, text, model, and evidence bound for a file or module summary write.
+#[derive(Clone, Copy)]
 pub struct SummarySaveInput<'a> {
     expected_digest: &'a ContentDigest,
     anchor_digest: &'a ContentDigest,
@@ -636,6 +706,7 @@ pub struct SummarySaveInput<'a> {
 
 impl<'a> SummarySaveInput<'a> {
     #[must_use]
+    /// Creates a validated summary save input.
     pub const fn new(
         expected_digest: &'a ContentDigest,
         anchor_digest: &'a ContentDigest,
@@ -651,18 +722,21 @@ impl<'a> SummarySaveInput<'a> {
     }
 
     #[must_use]
+    /// Sets the model and returns the updated value.
     pub const fn with_model(mut self, model: &'a str) -> Self {
         self.model = model;
         self
     }
 
     #[must_use]
+    /// Sets the item limit and returns the updated value.
     pub const fn with_item_limit(mut self, item_limit: u16) -> Self {
         self.item_limit = item_limit;
         self
     }
 }
 
+/// Validated and bounded pending structural summary query.
 pub struct PendingStructuralSummaryQuery<'a> {
     project_id: &'a ProjectId,
     after_symbol_id: Option<&'a SymbolId>,
@@ -672,6 +746,7 @@ pub struct PendingStructuralSummaryQuery<'a> {
 
 impl<'a> PendingStructuralSummaryQuery<'a> {
     #[must_use]
+    /// Creates a validated pending structural summary query.
     pub const fn new(
         project_id: &'a ProjectId,
         limit: u16,
@@ -686,12 +761,14 @@ impl<'a> PendingStructuralSummaryQuery<'a> {
     }
 
     #[must_use]
+    /// Returns the after symbol.
     pub const fn after_symbol(mut self, symbol_id: Option<&'a SymbolId>) -> Self {
         self.after_symbol_id = symbol_id;
         self
     }
 }
 
+/// Validated and bounded pending neighbor summary query.
 pub struct PendingNeighborSummaryQuery<'a> {
     project_id: &'a ProjectId,
     expected_generation_id: &'a GenerationId,
@@ -702,6 +779,7 @@ pub struct PendingNeighborSummaryQuery<'a> {
 
 impl<'a> PendingNeighborSummaryQuery<'a> {
     #[must_use]
+    /// Creates a validated pending neighbor summary query.
     pub const fn new(
         project_id: &'a ProjectId,
         expected_generation_id: &'a GenerationId,
@@ -717,18 +795,21 @@ impl<'a> PendingNeighborSummaryQuery<'a> {
     }
 
     #[must_use]
+    /// Returns the after symbol.
     pub const fn after_symbol(mut self, symbol_id: Option<&'a SymbolId>) -> Self {
         self.after_symbol_id = symbol_id;
         self
     }
 
     #[must_use]
+    /// Sets the limit and returns the updated value.
     pub const fn with_limit(mut self, limit: u16) -> Self {
         self.limit = limit;
         self
     }
 }
 
+/// Validated and bounded pending model summary query.
 pub struct PendingModelSummaryQuery<'a> {
     project_id: &'a ProjectId,
     model: &'a str,
@@ -738,6 +819,7 @@ pub struct PendingModelSummaryQuery<'a> {
 
 impl<'a> PendingModelSummaryQuery<'a> {
     #[must_use]
+    /// Creates a validated pending model summary query.
     pub const fn new(
         project_id: &'a ProjectId,
         model: &'a str,
@@ -752,12 +834,14 @@ impl<'a> PendingModelSummaryQuery<'a> {
     }
 
     #[must_use]
+    /// Sets the limit and returns the updated value.
     pub const fn with_limit(mut self, limit: u16) -> Self {
         self.limit = limit;
         self
     }
 }
 
+/// Validated and bounded symbol summary save input.
 pub struct SymbolSummarySaveInput<'a> {
     project_id: &'a ProjectId,
     symbol_id: &'a SymbolId,
@@ -768,6 +852,7 @@ pub struct SymbolSummarySaveInput<'a> {
 
 impl<'a> SymbolSummarySaveInput<'a> {
     #[must_use]
+    /// Creates a validated symbol summary save input.
     pub const fn new(
         project_id: &'a ProjectId,
         symbol_id: &'a SymbolId,
@@ -783,18 +868,21 @@ impl<'a> SymbolSummarySaveInput<'a> {
     }
 
     #[must_use]
+    /// Sets the summary and returns the updated value.
     pub const fn with_summary(mut self, summary: &'a str) -> Self {
         self.summary = summary;
         self
     }
 
     #[must_use]
+    /// Sets the model and returns the updated value.
     pub const fn with_model(mut self, model: &'a str) -> Self {
         self.model = model;
         self
     }
 }
 
+/// Validated and bounded structural symbol summary save input.
 pub struct StructuralSymbolSummarySaveInput<'a> {
     project_id: &'a ProjectId,
     symbol_id: &'a SymbolId,
@@ -804,6 +892,7 @@ pub struct StructuralSymbolSummarySaveInput<'a> {
 
 impl<'a> StructuralSymbolSummarySaveInput<'a> {
     #[must_use]
+    /// Creates a validated structural symbol summary save input.
     pub const fn new(
         project_id: &'a ProjectId,
         symbol_id: &'a SymbolId,
@@ -818,12 +907,14 @@ impl<'a> StructuralSymbolSummarySaveInput<'a> {
     }
 
     #[must_use]
+    /// Sets the summary and returns the updated value.
     pub const fn with_summary(mut self, summary: &'a str) -> Self {
         self.summary = summary;
         self
     }
 }
 
+/// Validated and bounded symbol role save input.
 pub struct SymbolRoleSaveInput<'a> {
     project_id: &'a ProjectId,
     symbol_id: &'a SymbolId,
@@ -833,6 +924,7 @@ pub struct SymbolRoleSaveInput<'a> {
 
 impl<'a> SymbolRoleSaveInput<'a> {
     #[must_use]
+    /// Creates a validated symbol role save input.
     pub const fn new(project_id: &'a ProjectId, symbol_id: &'a SymbolId, role: &'a str) -> Self {
         Self {
             project_id,
@@ -843,6 +935,7 @@ impl<'a> SymbolRoleSaveInput<'a> {
     }
 
     #[must_use]
+    /// Sets the metadata and returns the updated value.
     pub fn with_metadata(mut self, metadata: Value) -> Self {
         self.metadata = metadata;
         self
@@ -862,6 +955,7 @@ struct ArtifactReadRequest<'a> {
     operation: &'static str,
 }
 
+#[derive(Clone, Copy)]
 struct SummaryRollupDigestInput<'a> {
     domain: &'a str,
     scope_key: &'a str,
@@ -871,6 +965,7 @@ struct SummaryRollupDigestInput<'a> {
     anchor_digest: &'a ContentDigest,
 }
 
+#[derive(Clone, Copy)]
 struct ModuleSummaryRollupDigestInput<'a> {
     directory: &'a str,
     total_items: u64,
@@ -912,6 +1007,12 @@ impl<'a> SummarySaveFields<'a> {
 }
 
 impl<'a> ModuleSummarySaveRequest<'a> {
+    /// Creates a validated module summary save request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if model/body/digest/evidence fields or the module
+    /// roll-up item count violate summary-save bounds.
     pub fn new(
         directory: &'a NormalizedPath,
         input: SummarySaveInput<'a>,
@@ -922,6 +1023,12 @@ impl<'a> ModuleSummarySaveRequest<'a> {
         })
     }
 
+    /// Sets the generation mode and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `generation_mode` is a recognized bounded
+    /// summary-generation provenance value.
     pub fn with_generation_mode(self, generation_mode: &'static str) -> Result<Self, StorageError> {
         validate_summary_generation_mode(generation_mode)?;
         Ok(Self {
@@ -932,6 +1039,12 @@ impl<'a> ModuleSummarySaveRequest<'a> {
 }
 
 impl<'a> FileSummarySaveRequest<'a> {
+    /// Creates a validated file summary save request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if model/body/digest/evidence fields or the file
+    /// roll-up item count violate summary-save bounds.
     pub fn new(
         path: &'a NormalizedPath,
         input: SummarySaveInput<'a>,
@@ -942,6 +1055,12 @@ impl<'a> FileSummarySaveRequest<'a> {
         })
     }
 
+    /// Sets the generation mode and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `generation_mode` is a recognized bounded
+    /// summary-generation provenance value.
     pub fn with_generation_mode(
         mut self,
         generation_mode: &'static str,
@@ -1004,16 +1123,19 @@ pub struct CurrentModuleSummaryPage {
 
 impl CurrentModuleSummaryPage {
     #[must_use]
+    /// Returns the summaries.
     pub fn summaries(&self) -> &[CurrentModuleSummary] {
         &self.summaries
     }
 
     #[must_use]
+    /// Returns the total.
     pub const fn total(&self) -> u64 {
         self.total
     }
 
     #[must_use]
+    /// Whether the page limit omitted additional module summaries.
     pub const fn truncated(&self) -> bool {
         self.truncated
     }
@@ -1021,16 +1143,19 @@ impl CurrentModuleSummaryPage {
 
 impl CurrentModuleSummary {
     #[must_use]
+    /// Returns the directory.
     pub fn directory(&self) -> &str {
         &self.directory
     }
 
     #[must_use]
+    /// Returns the summary.
     pub fn summary(&self) -> &str {
         &self.summary
     }
 
     #[must_use]
+    /// Returns the metadata.
     pub const fn metadata(&self) -> &Value {
         &self.metadata
     }
@@ -1138,36 +1263,43 @@ impl PendingSummarySymbol {
 
 impl StructuralSummaryEdge {
     #[must_use]
+    /// Returns the edge kind.
     pub fn edge_kind(&self) -> &str {
         &self.edge_kind
     }
 
     #[must_use]
+    /// Returns the target symbol ID.
     pub fn target_symbol_id(&self) -> &str {
         &self.target_symbol_id
     }
 
     #[must_use]
+    /// Returns the target kind.
     pub fn target_kind(&self) -> &str {
         &self.target_kind
     }
 
     #[must_use]
+    /// Returns the target name.
     pub fn target_name(&self) -> &str {
         &self.target_name
     }
 
     #[must_use]
+    /// Returns the target qualified name.
     pub fn target_qualified_name(&self) -> &str {
         &self.target_qualified_name
     }
 
     #[must_use]
+    /// Returns the target path.
     pub fn target_path(&self) -> &str {
         &self.target_path
     }
 
     #[must_use]
+    /// Returns the target summary.
     pub fn target_summary(&self) -> Option<&str> {
         self.target_summary.as_deref()
     }
@@ -1175,66 +1307,79 @@ impl StructuralSummaryEdge {
 
 impl PendingStructuralSummary {
     #[must_use]
+    /// Returns the generation ID.
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> &str {
         &self.symbol_id
     }
 
     #[must_use]
+    /// Returns the path.
     pub fn path(&self) -> &str {
         &self.path
     }
 
     #[must_use]
+    /// Returns the symbol kind.
     pub fn symbol_kind(&self) -> &str {
         &self.symbol_kind
     }
 
     #[must_use]
+    /// Returns the name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
     #[must_use]
+    /// Returns the qualified name.
     pub fn qualified_name(&self) -> &str {
         &self.qualified_name
     }
 
     #[must_use]
+    /// Returns the signature.
     pub fn signature(&self) -> &str {
         &self.signature
     }
 
     #[must_use]
+    /// Returns the code.
     pub fn code(&self) -> &str {
         &self.code
     }
 
     #[must_use]
+    /// Returns the start line.
     pub const fn start_line(&self) -> u32 {
         self.start_line
     }
 
     #[must_use]
+    /// Returns the end line.
     pub const fn end_line(&self) -> u32 {
         self.end_line
     }
 
     #[must_use]
+    /// Returns the content hash.
     pub fn content_hash(&self) -> &str {
         &self.content_hash
     }
 
     #[must_use]
+    /// Returns the declaration only.
     pub const fn declaration_only(&self) -> bool {
         self.declaration_only
     }
 
     #[must_use]
+    /// Returns the edges.
     pub fn edges(&self) -> &[StructuralSummaryEdge] {
         &self.edges
     }
@@ -1242,26 +1387,31 @@ impl PendingStructuralSummary {
 
 impl PendingNeighborSummary {
     #[must_use]
+    /// Returns the generation ID.
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> &str {
         &self.symbol_id
     }
 
     #[must_use]
+    /// Returns the symbol kind.
     pub fn symbol_kind(&self) -> &str {
         &self.symbol_kind
     }
 
     #[must_use]
+    /// Returns the name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
     #[must_use]
+    /// Returns the content hash.
     pub fn content_hash(&self) -> &str {
         &self.content_hash
     }
@@ -1269,26 +1419,31 @@ impl PendingNeighborSummary {
 
 impl NeighborSummarySource {
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> &str {
         &self.symbol_id
     }
 
     #[must_use]
+    /// Returns the symbol kind.
     pub fn symbol_kind(&self) -> &str {
         &self.symbol_kind
     }
 
     #[must_use]
+    /// Returns the name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
     #[must_use]
+    /// Returns the summary.
     pub fn summary(&self) -> &str {
         &self.summary
     }
 
     #[must_use]
+    /// Returns the model.
     pub fn model(&self) -> &str {
         &self.model
     }
@@ -1296,36 +1451,43 @@ impl NeighborSummarySource {
 
 impl PendingFileSummary {
     #[must_use]
+    /// Returns the generation ID.
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
     #[must_use]
+    /// Returns the path.
     pub fn path(&self) -> &str {
         &self.path
     }
 
     #[must_use]
+    /// Returns the content hash.
     pub fn content_hash(&self) -> &str {
         &self.content_hash
     }
 
     #[must_use]
+    /// Returns the file content hash.
     pub fn file_content_hash(&self) -> &str {
         &self.file_content_hash
     }
 
     #[must_use]
+    /// Returns the summarized symbols.
     pub const fn summarized_symbols(&self) -> u64 {
         self.summarized_symbols
     }
 
     #[must_use]
+    /// Returns the items.
     pub fn items(&self) -> &[SummaryRollupItem] {
         &self.items
     }
 
     #[must_use]
+    /// Returns whether additional roll-up evidence items were omitted.
     pub const fn items_truncated(&self) -> bool {
         self.items_truncated
     }
@@ -1333,36 +1495,43 @@ impl PendingFileSummary {
 
 impl PendingModuleSummary {
     #[must_use]
+    /// Returns the generation ID.
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
     #[must_use]
+    /// Returns the directory.
     pub fn directory(&self) -> &str {
         &self.directory
     }
 
     #[must_use]
+    /// Returns the content hash.
     pub fn content_hash(&self) -> &str {
         &self.content_hash
     }
 
     #[must_use]
+    /// Returns the summarized symbols.
     pub const fn summarized_symbols(&self) -> u64 {
         self.summarized_symbols
     }
 
     #[must_use]
+    /// Returns the tool export constants.
     pub const fn tool_export_constants(&self) -> u64 {
         self.tool_export_constants
     }
 
     #[must_use]
+    /// Returns the items.
     pub fn items(&self) -> &[ModuleSummaryRollupItem] {
         &self.items
     }
 
     #[must_use]
+    /// Returns whether additional roll-up evidence items were omitted.
     pub const fn items_truncated(&self) -> bool {
         self.items_truncated
     }
@@ -1370,26 +1539,31 @@ impl PendingModuleSummary {
 
 impl ModuleSummaryRollupItem {
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> &str {
         &self.symbol_id
     }
 
     #[must_use]
+    /// Returns the path.
     pub fn path(&self) -> &str {
         &self.path
     }
 
     #[must_use]
+    /// Returns the qualified name.
     pub fn qualified_name(&self) -> &str {
         &self.qualified_name
     }
 
     #[must_use]
+    /// Returns the symbol kind.
     pub fn symbol_kind(&self) -> &str {
         &self.symbol_kind
     }
 
     #[must_use]
+    /// Returns the summary.
     pub fn summary(&self) -> &str {
         &self.summary
     }
@@ -1397,21 +1571,25 @@ impl ModuleSummaryRollupItem {
 
 impl SummaryRollupItem {
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> &str {
         &self.symbol_id
     }
 
     #[must_use]
+    /// Returns the qualified name.
     pub fn qualified_name(&self) -> &str {
         &self.qualified_name
     }
 
     #[must_use]
+    /// Returns the symbol kind.
     pub fn symbol_kind(&self) -> &str {
         &self.symbol_kind
     }
 
     #[must_use]
+    /// Returns the summary.
     pub fn summary(&self) -> &str {
         &self.summary
     }
@@ -1419,46 +1597,55 @@ impl SummaryRollupItem {
 
 impl PendingRoleSymbol {
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> &str {
         &self.symbol_id
     }
 
     #[must_use]
+    /// Returns the path.
     pub fn path(&self) -> &str {
         &self.path
     }
 
     #[must_use]
+    /// Returns the language.
     pub fn language(&self) -> &str {
         &self.language
     }
 
     #[must_use]
+    /// Returns the symbol kind.
     pub fn symbol_kind(&self) -> &str {
         &self.symbol_kind
     }
 
     #[must_use]
+    /// Returns the qualified name.
     pub fn qualified_name(&self) -> &str {
         &self.qualified_name
     }
 
     #[must_use]
+    /// Returns the signature.
     pub fn signature(&self) -> &str {
         &self.signature
     }
 
     #[must_use]
+    /// Returns the description.
     pub fn description(&self) -> &str {
         &self.description
     }
 
     #[must_use]
+    /// Returns the code.
     pub fn code(&self) -> &str {
         &self.code
     }
 
     #[must_use]
+    /// Performs the bounded exported operation.
     pub const fn exported(&self) -> bool {
         self.exported
     }
@@ -1466,6 +1653,10 @@ impl PendingRoleSymbol {
 
 impl CartographDatabase {
     /// Append a note/session artifact. Roles and summaries use replacement semantics below.
+    /// # Errors
+    ///
+    /// Returns an error if artifact fields are invalid or PostgreSQL cannot
+    /// insert and decode the project-scoped append-only record.
     pub async fn create_agent_artifact(
         &self,
         project_id: &ProjectId,
@@ -1475,6 +1666,10 @@ impl CartographDatabase {
     }
 
     /// Replace the current role or summary for one exact scope.
+    /// # Errors
+    ///
+    /// Returns an error unless the artifact is an unarchived role/summary with
+    /// valid fields, or if its scoped upsert cannot be decoded.
     pub async fn replace_scoped_agent_artifact(
         &self,
         project_id: &ProjectId,
@@ -1501,14 +1696,14 @@ impl CartographDatabase {
         validate_artifact(artifact)?;
         let schema = quoted_schema(&self.schema);
         let conflict = if replace_scope {
-            r#"ON CONFLICT (project_id, artifact_kind, scope_kind, scope_key)
+            r"ON CONFLICT (project_id, artifact_kind, scope_kind, scope_key)
                WHERE artifact_kind IN ('role', 'summary') AND state <> 'archived'
                DO UPDATE SET body = EXCLUDED.body,
                              metadata = EXCLUDED.metadata,
                              generation_id = EXCLUDED.generation_id,
                              source_digest = EXCLUDED.source_digest,
                              state = EXCLUDED.state,
-                             updated_at = clock_timestamp()"#
+                             updated_at = clock_timestamp()"
         } else {
             ""
         };
@@ -1546,6 +1741,10 @@ impl CartographDatabase {
     }
 
     /// List artifacts newest-first under bounded optional filters.
+    /// # Errors
+    ///
+    /// Returns an error if filter/limit validation fails or a matching artifact
+    /// row, metadata object, identity, or timestamp is malformed.
     pub async fn list_agent_artifacts(
         &self,
         project_id: &ProjectId,
@@ -1633,6 +1832,10 @@ impl CartographDatabase {
     }
 
     /// Batch-read current file paragraphs for one small rendered listing.
+    /// # Errors
+    ///
+    /// Returns an error if paths are empty/too numerous/non-normalized, JSON
+    /// encoding fails, or a current file summary row is malformed.
     pub async fn current_file_summary_texts(
         &self,
         project_id: &ProjectId,
@@ -1684,6 +1887,10 @@ impl CartographDatabase {
     }
 
     /// Read one exact module paragraph or a bounded path-ordered module page.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is invalid or module summary body/metadata/
+    /// count rows cannot be queried, parsed, or decoded.
     pub async fn current_module_summaries(
         &self,
         project_id: &ProjectId,
@@ -1748,6 +1955,10 @@ impl CartographDatabase {
     }
 
     /// Delete one exact project-owned artifact. Returns false when it was absent.
+    /// # Errors
+    ///
+    /// Returns an error if `artifact_id` is not a canonical UUID or PostgreSQL
+    /// cannot delete the exact project-owned row.
     pub async fn delete_agent_artifact(
         &self,
         project_id: &ProjectId,
@@ -1774,6 +1985,10 @@ impl CartographDatabase {
     }
 
     /// Delete one exact project-owned artifact by its monotonic compatibility identity.
+    /// # Errors
+    ///
+    /// Returns an error if `artifact_id` is zero or not representable as a
+    /// positive PostgreSQL `bigint`, or the scoped delete fails.
     pub async fn delete_agent_artifact_by_id(
         &self,
         project_id: &ProjectId,
@@ -1801,6 +2016,10 @@ impl CartographDatabase {
     }
 
     /// Aggregate current persisted symbol-role labels without a row limit.
+    /// # Errors
+    ///
+    /// Returns an error if current digest-compatible role labels/counts cannot
+    /// be queried or a count is negative/malformed.
     pub async fn agent_role_distribution(
         &self,
         project_id: &ProjectId,
@@ -1848,6 +2067,10 @@ impl CartographDatabase {
     /// A summary counts only when it belongs to the visible generation and
     /// echoes the symbol's current structural digest. Stale artifacts remain
     /// durable for auditability but never inflate readiness.
+    /// # Errors
+    ///
+    /// Returns an error if default candidate policy encoding fails or current
+    /// eligible/matched summary aggregates cannot be queried or decoded.
     pub async fn current_summary_coverage(
         &self,
         project_id: &ProjectId,
@@ -1857,6 +2080,10 @@ impl CartographDatabase {
     }
 
     /// Aggregate summary coverage under the exact configured candidate floor.
+    /// # Errors
+    ///
+    /// Returns an error if kind-floor policy encoding fails or coverage counts
+    /// and per-model JSON cannot be queried, parsed, or decoded.
     pub async fn current_summary_coverage_with_policy(
         &self,
         project_id: &ProjectId,
@@ -1947,6 +2174,10 @@ impl CartographDatabase {
     }
 
     /// Pull a deterministic bounded batch of missing or stale symbol summaries.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` or default policy encoding is invalid, or a
+    /// missing/stale current symbol summary candidate cannot be decoded.
     pub async fn pending_symbol_summaries(
         &self,
         project_id: &ProjectId,
@@ -1964,6 +2195,10 @@ impl CartographDatabase {
     ///
     /// A digest-compatible complete summary from any producer wins. This lets an
     /// LLM or agent race safely with the structural pass without being downgraded.
+    /// # Errors
+    ///
+    /// Returns an error if the page bound is invalid or a digest-compatible
+    /// structural candidate and bounded evidence cannot be queried or decoded.
     pub async fn pending_structural_summaries(
         &self,
         request: PendingStructuralSummaryQuery<'_>,
@@ -1976,112 +2211,8 @@ impl CartographDatabase {
         } = request;
         validate_limit(limit, MAX_STRUCTURAL_SUMMARY_BATCH)?;
         let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"WITH current AS (
-                    SELECT current_generation_id AS generation_id
-                    FROM {schema}."projects"
-                    WHERE project_id = CAST($1 AS uuid)
-                ), candidates AS MATERIALIZED (
-                    SELECT symbols.generation_id, symbols.symbol_id,
-                           files.normalized_path, symbols.symbol_kind,
-                           COALESCE(NULLIF(documents.metadata ->> 'name', ''),
-                                    symbols.qualified_name) AS name,
-                           symbols.qualified_name, symbols.signature, documents.code,
-                           symbols.start_line, symbols.end_line,
-                           symbols.structural_digest, symbols.declaration_only
-                    FROM {schema}."symbols" AS symbols
-                    JOIN current ON current.generation_id = symbols.generation_id
-                    JOIN {schema}."files" AS files
-                      ON files.project_id = symbols.project_id
-                     AND files.generation_id = symbols.generation_id
-                     AND files.file_id = symbols.file_id
-                    LEFT JOIN {schema}."search_documents" AS documents
-                      ON documents.project_id = symbols.project_id
-                     AND documents.generation_id = symbols.generation_id
-                     AND documents.symbol_id = symbols.symbol_id
-                     AND documents.document_kind = 'symbol'
-                    LEFT JOIN {schema}."agent_artifacts" AS cached
-                      ON cached.project_id = symbols.project_id
-                     AND cached.artifact_kind = 'summary'
-                     AND cached.scope_kind = 'symbol'
-                     AND cached.scope_key = symbols.symbol_id::text
-                     AND cached.state = 'complete'
-                     AND cached.source_digest = symbols.structural_digest
-                    WHERE symbols.project_id = CAST($1 AS uuid)
-                      AND symbols.symbol_kind IN (
-                          'class', 'function', 'method', 'interface', 'struct',
-                          'trait', 'protocol', 'enum', 'type_alias', 'component', 'route'
-                      )
-                      AND length(COALESCE(documents.natural_text, '')) < $7
-                      AND cached.id IS NULL
-                      AND ($2::uuid IS NULL OR symbols.symbol_id > $2::uuid)
-                    ORDER BY symbols.symbol_id
-                    LIMIT $3
-                )
-                SELECT candidates.generation_id::text AS generation_id,
-                       candidates.symbol_id::text AS symbol_id,
-                       candidates.normalized_path AS path,
-                       candidates.symbol_kind AS symbol_kind,
-                       candidates.name AS name,
-                       candidates.qualified_name AS qualified_name,
-                       left(candidates.signature, $4) AS signature,
-                       left(candidates.code, $6) AS code,
-                       candidates.start_line AS start_line,
-                       candidates.end_line AS end_line,
-                       candidates.structural_digest AS content_hash,
-                       candidates.declaration_only AS declaration_only,
-                       COALESCE((
-                           SELECT jsonb_agg(
-                               jsonb_build_object(
-                                   'edgeKind', edges.edge_kind,
-                                   'targetSymbolId', targets.symbol_id::text,
-                                   'targetKind', targets.symbol_kind,
-                                   'targetName', COALESCE(
-                                       NULLIF(target_docs.metadata ->> 'name', ''),
-                                       targets.qualified_name
-                                   ),
-                                   'targetQualifiedName', targets.qualified_name,
-                                   'targetPath', target_files.normalized_path,
-                                   'targetSummary', COALESCE(
-                                       left(target_summaries.body, $5),
-                                       NULLIF(left(target_docs.natural_text, $5), '')
-                                   )
-                               ) ORDER BY edges.edge_kind, targets.qualified_name,
-                                          targets.symbol_id
-                           )
-                           FROM {schema}."edges" AS edges
-                           JOIN {schema}."symbols" AS targets
-                             ON targets.project_id = edges.project_id
-                            AND targets.generation_id = edges.generation_id
-                            AND targets.symbol_id = edges.target_symbol_id
-                           JOIN {schema}."files" AS target_files
-                             ON target_files.project_id = targets.project_id
-                            AND target_files.generation_id = targets.generation_id
-                            AND target_files.file_id = targets.file_id
-                           LEFT JOIN {schema}."agent_artifacts" AS target_summaries
-                             ON target_summaries.project_id = targets.project_id
-                            AND target_summaries.artifact_kind = 'summary'
-                            AND target_summaries.scope_kind = 'symbol'
-                            AND target_summaries.scope_key = targets.symbol_id::text
-                            AND target_summaries.state = 'complete'
-                            AND target_summaries.source_digest = targets.structural_digest
-                           LEFT JOIN LATERAL (
-                               SELECT documents.natural_text, documents.metadata
-                               FROM {schema}."search_documents" AS documents
-                               WHERE documents.project_id = targets.project_id
-                                 AND documents.generation_id = targets.generation_id
-                                 AND documents.symbol_id = targets.symbol_id
-                                 AND documents.document_kind = 'symbol'
-                               ORDER BY documents.id
-                               LIMIT 1
-                           ) AS target_docs ON true
-                           WHERE edges.project_id = CAST($1 AS uuid)
-                             AND edges.generation_id = candidates.generation_id
-                             AND edges.source_symbol_id = candidates.symbol_id
-                       ), '[]'::jsonb)::text AS edges
-                FROM candidates
-                ORDER BY candidates.symbol_id"#,
-        );
+        let statement = include_str!("sql/artifacts_pending_structural_summaries.sql")
+            .replace("{schema}", &schema);
         let rows = self
             .artifact_read(
                 ArtifactReadRequest {
@@ -2104,6 +2235,10 @@ impl CartographDatabase {
     }
 
     /// Page current embedded symbols which still lack an exact summary.
+    /// # Errors
+    ///
+    /// Returns an error if the page bound is invalid, the expected generation
+    /// is stale, or an embedded unsummarized symbol row is malformed.
     pub async fn pending_neighbor_summaries(
         &self,
         request: PendingNeighborSummaryQuery<'_>,
@@ -2179,6 +2314,10 @@ impl CartographDatabase {
     /// Read exact current summaries for a bounded semantic-neighbor candidate set.
     /// Summaries already produced by neighbor propagation are excluded to prevent
     /// transitive semantic drift.
+    /// # Errors
+    ///
+    /// Returns an error if the symbol set is empty/oversized, the generation is
+    /// stale, or a non-propagated current summary source cannot be decoded.
     pub async fn neighbor_summary_sources(
         &self,
         project_id: &ProjectId,
@@ -2241,6 +2380,10 @@ impl CartographDatabase {
     }
 
     /// Pull a deterministic bounded batch under the configured summary floor.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` or kind-floor policy encoding is invalid, or
+    /// a digest-incompatible current summary candidate is malformed.
     pub async fn pending_symbol_summaries_with_policy(
         &self,
         project_id: &ProjectId,
@@ -2257,6 +2400,10 @@ impl CartographDatabase {
     }
 
     /// Pull candidates whose structural digest and exact model do not both match.
+    /// # Errors
+    ///
+    /// Returns an error if model/limit/policy validation fails or a current
+    /// candidate lacking that exact model/digest summary cannot be decoded.
     pub async fn pending_symbol_summaries_for_model_with_policy(
         &self,
         request: PendingModelSummaryQuery<'_>,
@@ -2381,6 +2528,10 @@ impl CartographDatabase {
 
     /// Pull current files whose bounded symbol-summary roll-up has no exact
     /// model, source, anchor, and evidence-compatible cached paragraph.
+    /// # Errors
+    ///
+    /// Returns an error if model/page/item/cursor validation fails or bounded
+    /// file roll-up evidence and digests cannot be queried or decoded.
     pub async fn pending_file_summaries(
         &self,
         request: PendingSummaryRollupQuery<'_>,
@@ -2402,89 +2553,8 @@ impl CartographDatabase {
             })?;
         }
         let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"WITH current AS (
-                    SELECT current_generation_id AS generation_id
-                    FROM {schema}."projects"
-                    WHERE project_id = CAST($1 AS uuid)
-                ), ranked AS (
-                    SELECT files.generation_id,
-                           files.normalized_path,
-                           files.content_hash,
-                           symbols.symbol_id,
-                           symbols.qualified_name,
-                           symbols.symbol_kind,
-                           left(summaries.body, $6) AS summary,
-                           summaries.updated_at,
-                           COUNT(*) OVER (PARTITION BY files.file_id) AS summarized_symbols,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY files.file_id
-                               ORDER BY symbols.exported DESC,
-                                        (symbols.visibility = 'public') DESC,
-                                        symbols.pagerank DESC NULLS LAST,
-                                        symbols.start_line,
-                                        symbols.symbol_id
-                           ) AS evidence_rank
-                    FROM {schema}."files" AS files
-                    JOIN current ON current.generation_id = files.generation_id
-                    JOIN {schema}."symbols" AS symbols
-                      ON symbols.project_id = files.project_id
-                     AND symbols.generation_id = files.generation_id
-                     AND symbols.file_id = files.file_id
-                    JOIN {schema}."agent_artifacts" AS summaries
-                      ON summaries.project_id = symbols.project_id
-                     AND summaries.artifact_kind = 'summary'
-                     AND summaries.scope_kind = 'symbol'
-                     AND summaries.scope_key = symbols.symbol_id::text
-                     AND summaries.source_digest = symbols.structural_digest
-                     AND summaries.state = 'complete'
-                    WHERE files.project_id = CAST($1 AS uuid)
-                      AND ($3::text IS NULL OR files.normalized_path > $3)
-                ), rollups AS (
-                    SELECT generation_id,
-                           normalized_path,
-                           content_hash,
-                           MAX(summarized_symbols)::bigint AS summarized_symbols,
-                           MAX(updated_at) AS latest_symbol_summary_at,
-                           jsonb_agg(
-                               jsonb_build_object(
-                                   'symbolId', symbol_id::text,
-                                   'qualifiedName', qualified_name,
-                                   'symbolKind', symbol_kind,
-                                   'summary', summary
-                               ) ORDER BY evidence_rank
-                           ) FILTER (WHERE evidence_rank <= $5) AS items
-                    FROM ranked
-                    GROUP BY generation_id, normalized_path, content_hash
-                )
-                SELECT rollups.generation_id::text,
-                       rollups.normalized_path,
-                       rollups.content_hash,
-                       rollups.summarized_symbols,
-                       rollups.items::text,
-                       rollups.summarized_symbols > $5
-                FROM rollups
-                LEFT JOIN {schema}."agent_artifacts" AS cached
-                  ON cached.project_id = CAST($1 AS uuid)
-                 AND cached.artifact_kind = 'summary'
-                 AND cached.scope_kind = 'file'
-                 AND cached.scope_key = rollups.normalized_path
-                 AND cached.state = 'complete'
-                WHERE cached.id IS NULL
-                   OR cached.generation_id IS DISTINCT FROM rollups.generation_id
-                   OR (
-                        $2 <> 'structural:v2'
-                        AND cached.metadata ->> 'model' IS DISTINCT FROM $2
-                   )
-                   OR cached.metadata ->> 'anchorDigest' IS DISTINCT FROM $7
-                   OR cached.metadata ->> 'fileContentHash' IS DISTINCT FROM rollups.content_hash
-                   OR cached.metadata ->> 'summarizedSymbols'
-                        IS DISTINCT FROM rollups.summarized_symbols::text
-                   OR cached.metadata ->> 'rollupDigest' IS DISTINCT FROM cached.source_digest
-                   OR cached.updated_at < rollups.latest_symbol_summary_at
-                ORDER BY rollups.normalized_path
-                LIMIT $4"#,
-        );
+        let statement =
+            include_str!("sql/artifacts_pending_file_summaries.sql").replace("{schema}", &schema);
         let rows = self
             .artifact_read(
                 ArtifactReadRequest {
@@ -2510,6 +2580,10 @@ impl CartographDatabase {
 
     /// Pull immediate source directories whose bounded symbol roll-up has no
     /// exact model, anchor, generation, and evidence-compatible paragraph.
+    /// # Errors
+    ///
+    /// Returns an error if model/page/item/cursor validation fails or bounded
+    /// immediate-directory roll-up evidence cannot be queried or decoded.
     pub async fn pending_module_summaries(
         &self,
         request: PendingSummaryRollupQuery<'_>,
@@ -2531,119 +2605,8 @@ impl CartographDatabase {
             })?;
         }
         let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"WITH current AS (
-                    SELECT current_generation_id AS generation_id
-                    FROM {schema}."projects"
-                    WHERE project_id = CAST($1 AS uuid)
-                ), summarized AS (
-                    SELECT files.generation_id,
-                           regexp_replace(files.normalized_path, '/[^/]+$', '') AS directory,
-                           files.normalized_path,
-                           symbols.symbol_id,
-                           symbols.qualified_name,
-                           symbols.symbol_kind,
-                           symbols.exported,
-                           symbols.visibility,
-                           symbols.pagerank,
-                           symbols.start_line,
-                           left(summaries.body, $6) AS summary,
-                           summaries.updated_at
-                    FROM {schema}."files" AS files
-                    JOIN current ON current.generation_id = files.generation_id
-                    JOIN {schema}."symbols" AS symbols
-                      ON symbols.project_id = files.project_id
-                     AND symbols.generation_id = files.generation_id
-                     AND symbols.file_id = files.file_id
-                    JOIN {schema}."agent_artifacts" AS summaries
-                      ON summaries.project_id = symbols.project_id
-                     AND summaries.artifact_kind = 'summary'
-                     AND summaries.scope_kind = 'symbol'
-                     AND summaries.scope_key = symbols.symbol_id::text
-                     AND summaries.source_digest = symbols.structural_digest
-                     AND summaries.state = 'complete'
-                    WHERE files.project_id = CAST($1 AS uuid)
-                      AND POSITION('/' IN files.normalized_path) > 0
-                ), tool_counts AS (
-                    SELECT files.generation_id,
-                           regexp_replace(files.normalized_path, '/[^/]+$', '') AS directory,
-                           COUNT(*)::bigint AS tool_export_constants
-                    FROM {schema}."files" AS files
-                    JOIN current ON current.generation_id = files.generation_id
-                    JOIN {schema}."symbols" AS symbols
-                      ON symbols.project_id = files.project_id
-                     AND symbols.generation_id = files.generation_id
-                     AND symbols.file_id = files.file_id
-                    WHERE files.project_id = CAST($1 AS uuid)
-                      AND POSITION('/' IN files.normalized_path) > 0
-                      AND symbols.symbol_kind = 'constant'
-                      AND symbols.qualified_name ~ '_TOOL$'
-                    GROUP BY files.generation_id, directory
-                ), ranked AS (
-                    SELECT summarized.*,
-                           COUNT(*) OVER (PARTITION BY directory) AS summarized_symbols,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY directory
-                               ORDER BY exported DESC,
-                                        (visibility = 'public') DESC,
-                                        pagerank DESC NULLS LAST,
-                                        normalized_path,
-                                        start_line,
-                                        symbol_id
-                           ) AS evidence_rank
-                    FROM summarized
-                    WHERE ($3::text IS NULL OR directory > $3)
-                ), rollups AS (
-                    SELECT generation_id,
-                           directory,
-                           MAX(summarized_symbols)::bigint AS summarized_symbols,
-                           MAX(updated_at) AS latest_symbol_summary_at,
-                           jsonb_agg(
-                               jsonb_build_object(
-                                   'symbolId', symbol_id::text,
-                                   'path', normalized_path,
-                                   'qualifiedName', qualified_name,
-                                   'symbolKind', symbol_kind,
-                                   'summary', summary
-                               ) ORDER BY evidence_rank
-                           ) FILTER (WHERE evidence_rank <= $5) AS items
-                    FROM ranked
-                    GROUP BY generation_id, directory
-                    HAVING MAX(summarized_symbols) >= $8
-                )
-                SELECT rollups.generation_id::text AS generation_id,
-                       rollups.directory AS directory,
-                       rollups.summarized_symbols AS summarized_symbols,
-                       COALESCE(tool_counts.tool_export_constants, 0)
-                           AS tool_export_constants,
-                       rollups.items::text AS items,
-                       rollups.summarized_symbols > $5 AS items_truncated
-                FROM rollups
-                LEFT JOIN tool_counts
-                  ON tool_counts.generation_id = rollups.generation_id
-                 AND tool_counts.directory = rollups.directory
-                LEFT JOIN {schema}."agent_artifacts" AS cached
-                  ON cached.project_id = CAST($1 AS uuid)
-                 AND cached.artifact_kind = 'summary'
-                 AND cached.scope_kind = 'module'
-                 AND cached.scope_key = rollups.directory
-                 AND cached.state = 'complete'
-                WHERE cached.id IS NULL
-                   OR cached.generation_id IS DISTINCT FROM rollups.generation_id
-                   OR (
-                        $2 <> 'structural:v2'
-                        AND cached.metadata ->> 'model' IS DISTINCT FROM $2
-                   )
-                   OR cached.metadata ->> 'anchorDigest' IS DISTINCT FROM $7
-                   OR cached.metadata ->> 'summarizedSymbols'
-                        IS DISTINCT FROM rollups.summarized_symbols::text
-                   OR cached.metadata ->> 'toolExportConstants'
-                        IS DISTINCT FROM COALESCE(tool_counts.tool_export_constants, 0)::text
-                   OR cached.metadata ->> 'rollupDigest' IS DISTINCT FROM cached.source_digest
-                   OR cached.updated_at < rollups.latest_symbol_summary_at
-                ORDER BY rollups.directory
-                LIMIT $4"#,
-        );
+        let statement =
+            include_str!("sql/artifacts_pending_module_summaries.sql").replace("{schema}", &schema);
         let rows = self
             .artifact_read(
                 ArtifactReadRequest {
@@ -2670,6 +2633,10 @@ impl CartographDatabase {
 
     /// Pull a deterministic batch whose current structural digest has neither
     /// a high-confidence structural role nor a role from this exact model.
+    /// # Errors
+    ///
+    /// Returns an error if model/result bounds are invalid or pending current
+    /// role candidates and their bounded source text cannot be decoded.
     pub async fn pending_symbol_roles(
         &self,
         project_id: &ProjectId,
@@ -2762,6 +2729,10 @@ impl CartographDatabase {
     }
 
     /// Save a summary only when its echoed structural digest still matches current source.
+    /// # Errors
+    ///
+    /// Returns an error if summary/model validation fails, the structural
+    /// digest is stale, or the exact current-symbol upsert cannot be decoded.
     pub async fn save_symbol_summary(
         &self,
         input: SymbolSummarySaveInput<'_>,
@@ -2846,6 +2817,10 @@ impl CartographDatabase {
     /// Publish a deterministic structural fallback without replacing a
     /// digest-compatible summary produced by an LLM or agent. `None` means
     /// either the source generation changed or a higher-quality writer won.
+    /// # Errors
+    ///
+    /// Returns an error if the summary body is invalid or PostgreSQL cannot
+    /// apply the current-digest, higher-quality-writer-preserving upsert.
     pub async fn save_structural_symbol_summary(
         &self,
         input: StructuralSymbolSummarySaveInput<'_>,
@@ -2922,6 +2897,10 @@ impl CartographDatabase {
     /// Publish one transparent semantic-neighbor fallback under exact source,
     /// target, generation, kind, and summary-body fences. A current summary
     /// from any producer wins the race and yields `None`.
+    /// # Errors
+    ///
+    /// Returns an error if neighbor/model/body fields are invalid or exact
+    /// source/target/generation/digest/summary fences cannot be evaluated.
     pub async fn save_neighbor_symbol_summary(
         &self,
         project_id: &ProjectId,
@@ -3014,6 +2993,10 @@ impl CartographDatabase {
     }
 
     /// Save a file roll-up only if its exact bounded source evidence is still current.
+    /// # Errors
+    ///
+    /// Returns an error if current generation/evidence differs from the echoed
+    /// file roll-up contract or the transactional summary upsert cannot commit.
     pub async fn save_file_summary(
         &self,
         project_id: &ProjectId,
@@ -3027,7 +3010,7 @@ impl CartographDatabase {
             .map_err(|_| database_error("save-file-summary"))?;
         set_local_statement_timeout(&mut transaction, ARTIFACT_TIMEOUT)
             .await
-            .map_err(|_| database_error("save-file-summary"))?;
+            .map_err(|()| database_error("save-file-summary"))?;
         let lock = format!(
             r#"SELECT current_generation_id::text
                 FROM {schema}."projects"
@@ -3056,20 +3039,7 @@ impl CartographDatabase {
         if pending.content_hash() != request.fields.expected_digest.as_str() {
             return Err(StorageError::CurrentGenerationChanged);
         }
-        let metadata = serde_json::to_string(&serde_json::json!({
-            "model": request.fields.model,
-            "anchorDigest": request.fields.anchor_digest.as_str(),
-            "fileContentHash": pending.file_content_hash(),
-            "summarizedSymbols": pending.summarized_symbols(),
-            "evidenceItems": pending.items().len(),
-            "itemsTruncated": pending.items_truncated(),
-            "rollupDigest": request.fields.expected_digest.as_str(),
-            "generationMode": request.fields.generation_mode,
-            "protocol": "symbol_to_file_v2",
-        }))
-        .map_err(|_| StorageError::InvalidInput {
-            field: "artifact_metadata",
-        })?;
+        let metadata = file_summary_metadata(request.fields, &pending)?;
         let upsert = scoped_summary_upsert_statement(
             &schema,
             request.fields.generation_mode == "structural_rule",
@@ -3123,6 +3093,10 @@ impl CartographDatabase {
     }
 
     /// Save a module roll-up only if its exact immediate-directory evidence is current.
+    /// # Errors
+    ///
+    /// Returns an error if current generation/evidence differs from the echoed
+    /// immediate-directory contract or the summary upsert cannot commit.
     pub async fn save_module_summary(
         &self,
         project_id: &ProjectId,
@@ -3136,7 +3110,7 @@ impl CartographDatabase {
             .map_err(|_| database_error("save-module-summary"))?;
         set_local_statement_timeout(&mut transaction, ARTIFACT_TIMEOUT)
             .await
-            .map_err(|_| database_error("save-module-summary"))?;
+            .map_err(|()| database_error("save-module-summary"))?;
         let lock = format!(
             r#"SELECT current_generation_id::text
                 FROM {schema}."projects"
@@ -3217,6 +3191,10 @@ impl CartographDatabase {
     /// carry the classification forward without another model call when the
     /// declaration is unchanged. A changed declaration intentionally leaves
     /// the old artifact generation-bound and pending reclassification.
+    /// # Errors
+    ///
+    /// Returns an error if role/metadata validation fails, the symbol is not in
+    /// the current generation, or the digest-bound role upsert cannot be decoded.
     pub async fn save_symbol_role(
         &self,
         input: SymbolRoleSaveInput<'_>,
@@ -3303,6 +3281,26 @@ impl CartographDatabase {
         )
         .await
     }
+}
+
+fn file_summary_metadata(
+    fields: SummarySaveFields<'_>,
+    pending: &PendingFileSummary,
+) -> Result<String, StorageError> {
+    serde_json::to_string(&serde_json::json!({
+        "model": fields.model,
+        "anchorDigest": fields.anchor_digest.as_str(),
+        "fileContentHash": pending.file_content_hash(),
+        "summarizedSymbols": pending.summarized_symbols(),
+        "evidenceItems": pending.items().len(),
+        "itemsTruncated": pending.items_truncated(),
+        "rollupDigest": fields.expected_digest.as_str(),
+        "generationMode": fields.generation_mode,
+        "protocol": "symbol_to_file_v2",
+    }))
+    .map_err(|_| StorageError::InvalidInput {
+        field: "artifact_metadata",
+    })
 }
 
 fn file_summary_evidence_statement(schema: &str) -> String {

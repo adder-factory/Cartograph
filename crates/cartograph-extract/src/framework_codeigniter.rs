@@ -122,16 +122,17 @@ fn scan_loaded_resources(
                 cursor = close + 1;
                 continue;
             };
-            let alias = next_quoted_after_comma(source, resource.quote_end + 1, close)
-                .map(|quoted| quoted.value.to_owned())
-                .unwrap_or_else(|| {
+            let alias = next_quoted_after_comma(source, resource.quote_end + 1, close).map_or_else(
+                || {
                     resource
                         .value
                         .rsplit('/')
                         .next()
                         .unwrap_or(resource.value)
                         .to_owned()
-                });
+                },
+                |quoted| quoted.value.to_owned(),
+            );
             let class = ci_class_name(resource.value);
             builder.add_reference_near_with_resolution(FrameworkNearReferenceInput {
                 name: resource.value,

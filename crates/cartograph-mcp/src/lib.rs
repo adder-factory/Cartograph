@@ -4,6 +4,9 @@
 //! services can be adapted later without allowing MCP transport code to reach
 //! through crate boundaries into database or indexing internals.
 
+#[cfg(test)]
+use cartograph_search as _;
+
 mod cancellation;
 mod error;
 mod profile;

@@ -1,3 +1,7 @@
+//! Live PostgreSQL integration coverage for Cartograph storage contracts.
+
+mod dependency_ownership;
+
 use std::{
     env, process,
     sync::atomic::{AtomicU32, Ordering},
@@ -18,14 +22,14 @@ use cartograph_db::{
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, FileId, FileParseStatus, GenerationId, ModelId,
-    ProjectId, ProjectOperation, SymbolId,
+    ProjectId, ProjectOperation, SymbolId, SymbolKind,
 };
 use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
-const LEASE_DURATION: Duration = Duration::from_secs(60);
+const LEASE_DURATION: Duration = Duration::from_mins(1);
 const VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
 const PROJECT_FINGERPRINT: &str =
@@ -61,6 +65,29 @@ static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     let fixture = open_fixture().await;
     migrate(&fixture).await;
+    let scenario = setup_semantic_scenario(&fixture).await;
+    assert_embedding_writes_and_readiness(&fixture, &scenario).await;
+    assert_vector_similarity(&fixture, &scenario).await;
+    assert_semantic_clone_findings(&fixture, &scenario).await;
+    let stale_cursor = prepare_replacement_and_retire(&fixture, &scenario).await;
+    assert_generation_cursor_refresh(&fixture, &scenario, stale_cursor).await;
+    assert_semantic_retention(&fixture, &scenario).await;
+
+    drop(fixture.database);
+    drop_schema(&fixture.pool, &fixture.schema).await;
+    fixture.pool.close().await;
+}
+
+struct SemanticScenario {
+    project: ProjectId,
+    first: GenerationId,
+    selector_a: cartograph_db::EmbeddingModelSelector,
+    selector_b: cartograph_db::EmbeddingModelSelector,
+    first_page: cartograph_db::PendingEmbeddingPage,
+    second_page: cartograph_db::PendingEmbeddingPage,
+}
+
+async fn setup_semantic_scenario(fixture: &Fixture) -> SemanticScenario {
     let model_a = model_registration(ModelFixture::A);
     let model_b = model_registration(ModelFixture::B);
     let selector_a = model_a.selector();
@@ -102,7 +129,7 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         0,
     )
     .await;
-    assert_dimension_trigger_rejects(&fixture, &project, &first, &selector_a).await;
+    assert_dimension_trigger_rejects(fixture, &project, &first, &selector_a).await;
     assert_readiness(
         &fixture.database,
         &project,
@@ -130,7 +157,22 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         DOCUMENT_C
     );
     assert!(second_page.next_cursor().is_none());
+    SemanticScenario {
+        project,
+        first,
+        selector_a,
+        selector_b,
+        first_page,
+        second_page,
+    }
+}
 
+async fn assert_embedding_writes_and_readiness(fixture: &Fixture, scenario: &SemanticScenario) {
+    let project = &scenario.project;
+    let first = &scenario.first;
+    let selector_a = &scenario.selector_a;
+    let first_page = &scenario.first_page;
+    let second_page = &scenario.second_page;
     let rollback = fixture
         .database
         .upsert_current_document_embeddings(
@@ -153,13 +195,13 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         )
         .await;
     assert_eq!(rollback, Err(SemanticStorageError::SourceDigestChanged));
-    assert_embedding_count(&fixture, &first, selector_a.model_id(), 0).await;
+    assert_embedding_count(fixture, first, selector_a.model_id(), 0).await;
 
     let first_write = upsert_documents(
         &fixture.database,
-        &project,
-        &first,
-        &selector_a,
+        project,
+        first,
+        selector_a,
         &first_page.documents()[..2],
     )
     .await;
@@ -167,9 +209,9 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     assert_eq!(first_write.written(), 2);
     let repeated_write = upsert_documents(
         &fixture.database,
-        &project,
-        &first,
-        &selector_a,
+        project,
+        first,
+        selector_a,
         &first_page.documents()[..2],
     )
     .await;
@@ -177,8 +219,8 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     assert_eq!(repeated_write.unchanged(), 2);
     assert_readiness(
         &fixture.database,
-        &project,
-        &selector_a,
+        project,
+        selector_a,
         SemanticReadinessState::CoverageIncomplete,
         3,
         2,
@@ -187,26 +229,32 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
 
     upsert_documents(
         &fixture.database,
-        &project,
-        &first,
-        &selector_a,
+        project,
+        first,
+        selector_a,
         second_page.documents(),
     )
     .await;
     assert_readiness(
         &fixture.database,
-        &project,
-        &selector_a,
+        project,
+        selector_a,
         SemanticReadinessState::Ready,
         3,
         3,
     )
     .await;
+}
+
+async fn assert_vector_similarity(fixture: &Fixture, scenario: &SemanticScenario) {
+    let project = &scenario.project;
+    let first = &scenario.first;
+    let selector_a = &scenario.selector_a;
     let hits = vector_search(
         &fixture.database,
-        &project,
-        &first,
-        &selector_a,
+        project,
+        first,
+        selector_a,
         [1.0, 0.0, 0.0],
     )
     .await;
@@ -228,7 +276,7 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     let materialized = fixture
         .database
         .rebuild_current_similarity_edges(
-            &project,
+            project,
             SimilarityMaterializationPolicy::new(2, 0.0, STATEMENT_TIMEOUT)
                 .unwrap_or_else(|error| panic!("similarity policy failed: {error}")),
         )
@@ -261,9 +309,39 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         similar.hits()[0].symbol().symbol_id().map(SymbolId::as_str),
         Some(SYMBOL_B)
     );
+    assert_eq!(
+        similar.hits()[0].symbol().symbol_kind(),
+        Some(SymbolKind::Function)
+    );
+
+    let language_filtered = fixture
+        .database
+        .similar_current_symbols(
+            SimilarSymbolsRequest::new(SimilarSymbolsInput {
+                project_id: project.clone(),
+                expected_generation_id: first.clone(),
+                source_symbol_id: symbol(SYMBOL_A),
+                model_id: Some(selector_a.model_id().clone()),
+                limit: 1,
+                minimum_score: 0.0,
+                same_language: true,
+                statement_timeout: STATEMENT_TIMEOUT,
+            })
+            .unwrap_or_else(|error| panic!("language-filtered request failed: {error}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("language-filtered similarity query failed: {error}"));
+    assert_eq!(
+        language_filtered.hits()[0].symbol().symbol_kind(),
+        Some(SymbolKind::Function)
+    );
+}
+
+async fn assert_semantic_clone_findings(fixture: &Fixture, scenario: &SemanticScenario) {
+    let project = &scenario.project;
     let findings = fixture
         .database
-        .current_structural_findings(&project, 100)
+        .current_structural_findings(project, 100)
         .await
         .unwrap_or_else(|error| panic!("semantic clone findings failed: {error}"));
     let findings = serde_json::to_value(findings)
@@ -296,11 +374,20 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     assert!(!findings.iter().any(|finding| {
         finding["qualifiedName"] == "gamma_symbol" && finding["finding"] == "duplicate_code"
     }));
+}
 
-    register_model(&fixture.database, model_b.clone()).await;
+async fn prepare_replacement_and_retire(
+    fixture: &Fixture,
+    scenario: &SemanticScenario,
+) -> cartograph_db::EmbeddingPageCursor {
+    let project = &scenario.project;
+    let first = &scenario.first;
+    let selector_a = &scenario.selector_a;
+    let selector_b = &scenario.selector_b;
+    register_model(&fixture.database, model_registration(ModelFixture::B)).await;
     let hnsw_b = fixture
         .database
-        .ensure_embedding_model_hnsw(&selector_b, STATEMENT_TIMEOUT)
+        .ensure_embedding_model_hnsw(selector_b, STATEMENT_TIMEOUT)
         .await
         .unwrap_or_else(|error| panic!("model B HNSW creation failed: {error}"));
     assert!(hnsw_b.ready());
@@ -319,12 +406,12 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         premature_retirement,
         Err(SemanticStorageError::ReplacementNotReady)
     );
-    let model_b_page = pending_page(&fixture.database, &project, &selector_b, None).await;
+    let model_b_page = pending_page(&fixture.database, project, selector_b, None).await;
     upsert_documents(
         &fixture.database,
-        &project,
-        &first,
-        &selector_b,
+        project,
+        first,
+        selector_b,
         model_b_page.documents(),
     )
     .await;
@@ -333,22 +420,22 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         .cloned()
         .unwrap_or_else(|| panic!("model B first page did not expose a cursor"));
     let model_b_tail = if let Some(cursor) = model_b_page.next_cursor().cloned() {
-        pending_page(&fixture.database, &project, &selector_b, Some(cursor)).await
+        pending_page(&fixture.database, project, selector_b, Some(cursor)).await
     } else {
         panic!("model B first page unexpectedly contained every fixture document")
     };
     upsert_documents(
         &fixture.database,
-        &project,
-        &first,
-        &selector_b,
+        project,
+        first,
+        selector_b,
         model_b_tail.documents(),
     )
     .await;
     assert_readiness(
         &fixture.database,
-        &project,
-        &selector_b,
+        project,
+        selector_b,
         SemanticReadinessState::Ready,
         3,
         3,
@@ -369,15 +456,24 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     assert!(retired.state().is_retired());
     assert_readiness(
         &fixture.database,
-        &project,
-        &selector_a,
+        project,
+        selector_a,
         SemanticReadinessState::ModelRetired,
         3,
         3,
     )
     .await;
+    stale_cursor
+}
 
-    let second = publish_generation(&fixture.database, &project, 2).await;
+async fn assert_generation_cursor_refresh(
+    fixture: &Fixture,
+    scenario: &SemanticScenario,
+    stale_cursor: cartograph_db::EmbeddingPageCursor,
+) {
+    let project = &scenario.project;
+    let selector_b = &scenario.selector_b;
+    let second = publish_generation(&fixture.database, project, 2).await;
     let stale_page = PendingEmbeddingPageRequest::new(PendingEmbeddingPageInput {
         project_id: project.clone(),
         model: selector_b.clone(),
@@ -394,19 +490,24 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
             .await,
         Err(SemanticStorageError::CurrentGenerationChanged)
     );
-    let current_page = pending_page(&fixture.database, &project, &selector_b, None).await;
+    let current_page = pending_page(&fixture.database, project, selector_b, None).await;
     assert_eq!(current_page.generation_id(), &second);
     assert!(current_page.documents().is_empty());
     assert_readiness(
         &fixture.database,
-        &project,
-        &selector_b,
+        project,
+        selector_b,
         SemanticReadinessState::Ready,
         3,
         3,
     )
     .await;
+}
 
+async fn assert_semantic_retention(fixture: &Fixture, scenario: &SemanticScenario) {
+    let project = &scenario.project;
+    let first = &scenario.first;
+    let selector_b = &scenario.selector_b;
     let lease = fixture
         .database
         .acquire_lease(LeaseRequest::new(
@@ -460,11 +561,11 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
         .release_lease(&lease)
         .await
         .unwrap_or_else(|error| panic!("retention lease release failed: {error}"));
-    assert_embedding_count(&fixture, &first, selector_b.model_id(), 0).await;
+    assert_embedding_count(fixture, first, selector_b.model_id(), 0).await;
     assert_readiness(
         &fixture.database,
-        &project,
-        &selector_b,
+        project,
+        selector_b,
         SemanticReadinessState::Ready,
         3,
         3,
@@ -473,14 +574,10 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     assert!(
         fixture
             .database
-            .embedding_model_hnsw_status(&selector_b)
+            .embedding_model_hnsw_status(selector_b)
             .await
             .is_ok_and(|status| status.ready())
     );
-
-    drop(fixture.database);
-    drop_schema(&fixture.pool, &fixture.schema).await;
-    fixture.pool.close().await;
 }
 
 #[tokio::test]
@@ -488,39 +585,7 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
 async fn retired_embedding_maintenance_is_auditable_dry_run_first_and_model_scoped() {
     let fixture = open_fixture().await;
     migrate(&fixture).await;
-    let model_a = model_registration(ModelFixture::A);
-    let model_b = model_registration(ModelFixture::B);
-    let selector_a = model_a.selector();
-    let selector_b = model_b.selector();
-    register_model(&fixture.database, model_a).await;
-    register_model(&fixture.database, model_b).await;
-    fixture
-        .database
-        .ensure_embedding_model_hnsw(&selector_a, STATEMENT_TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("model A HNSW creation failed: {error}"));
-    fixture
-        .database
-        .ensure_embedding_model_hnsw(&selector_b, STATEMENT_TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("model B HNSW creation failed: {error}"));
-
-    let project = register_project(&fixture.database).await;
-    let generation = publish_generation(&fixture.database, &project, 20).await;
-    embed_all_pending(&fixture.database, &project, &generation, &selector_a).await;
-    embed_all_pending(&fixture.database, &project, &generation, &selector_b).await;
-    fixture
-        .database
-        .retire_embedding_model(
-            RetireEmbeddingModelRequest::new(
-                selector_a.clone(),
-                selector_b.clone(),
-                STATEMENT_TIMEOUT,
-            )
-            .unwrap_or_else(|error| panic!("retirement request failed: {error}")),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("model retirement failed: {error}"));
+    let project = setup_retired_embedding_fixture(&fixture).await;
 
     let before = fixture
         .database
@@ -595,6 +660,43 @@ async fn retired_embedding_maintenance_is_auditable_dry_run_first_and_model_scop
     drop(fixture.database);
     drop_schema(&fixture.pool, &fixture.schema).await;
     fixture.pool.close().await;
+}
+
+async fn setup_retired_embedding_fixture(fixture: &Fixture) -> ProjectId {
+    let model_a = model_registration(ModelFixture::A);
+    let model_b = model_registration(ModelFixture::B);
+    let selector_a = model_a.selector();
+    let selector_b = model_b.selector();
+    register_model(&fixture.database, model_a).await;
+    register_model(&fixture.database, model_b).await;
+    fixture
+        .database
+        .ensure_embedding_model_hnsw(&selector_a, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("model A HNSW creation failed: {error}"));
+    fixture
+        .database
+        .ensure_embedding_model_hnsw(&selector_b, STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("model B HNSW creation failed: {error}"));
+
+    let project = register_project(&fixture.database).await;
+    let generation = publish_generation(&fixture.database, &project, 20).await;
+    embed_all_pending(&fixture.database, &project, &generation, &selector_a).await;
+    embed_all_pending(&fixture.database, &project, &generation, &selector_b).await;
+    fixture
+        .database
+        .retire_embedding_model(
+            RetireEmbeddingModelRequest::new(
+                selector_a.clone(),
+                selector_b.clone(),
+                STATEMENT_TIMEOUT,
+            )
+            .unwrap_or_else(|error| panic!("retirement request failed: {error}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("model retirement failed: {error}"));
+    project
 }
 
 #[tokio::test]
@@ -973,19 +1075,19 @@ async fn assert_filtered_hnsw_plan(
         .await
         .unwrap_or_else(|error| panic!("filtered HNSW explain begin failed: {error}"));
     query(
-        r#"SELECT set_config('hnsw.iterative_scan', 'strict_order', true),
+        r"SELECT set_config('hnsw.iterative_scan', 'strict_order', true),
                   set_config('hnsw.ef_search', '200', true),
                   set_config('hnsw.max_scan_tuples', '100000', true),
-                  set_config('hnsw.scan_mem_multiplier', '8', true)"#,
+                  set_config('hnsw.scan_mem_multiplier', '8', true)",
     )
     .execute(&mut *transaction)
     .await
     .unwrap_or_else(|error| panic!("filtered HNSW explain settings failed: {error}"));
     let settings = query(
-        r#"SELECT current_setting('hnsw.iterative_scan') AS iterative_scan,
+        r"SELECT current_setting('hnsw.iterative_scan') AS iterative_scan,
                   current_setting('hnsw.ef_search') AS ef_search,
                   current_setting('hnsw.max_scan_tuples') AS max_scan_tuples,
-                  current_setting('hnsw.scan_mem_multiplier') AS scan_mem_multiplier"#,
+                  current_setting('hnsw.scan_mem_multiplier') AS scan_mem_multiplier",
     )
     .fetch_one(&mut *transaction)
     .await
@@ -1161,10 +1263,8 @@ fn semantic_symbol(id: &str, file_id: &str, name: &str, structural_hash: &str) -
         end_line: 8,
         structural_digest: digest(structural_hash),
         visibility: None,
-        exported: true,
-        default_export: false,
-        async_symbol: false,
-        static_member: false,
+        export: cartograph_domain::SymbolExportFlags::named(true),
+        execution: cartograph_domain::SymbolExecutionFlags::default(),
         declaration_only: false,
         betweenness_ppb: None,
         pagerank_ppb: None,

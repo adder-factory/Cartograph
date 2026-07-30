@@ -1,16 +1,33 @@
-use cartograph_domain::{DocumentId, DocumentKind, GenerationId, NormalizedPath, SourceLanguage};
+//! Integration coverage for deterministic multi-channel retrieval fusion.
+
+use cartograph_db as _;
+use cartograph_domain::{
+    DocumentId, DocumentKind, GenerationId, NormalizedPath, SourceLanguage, SymbolKind,
+};
 use cartograph_search::{
     ChannelCandidate, ChannelResults, HybridSearchInput, LexicalComponent, RerankReport,
     RerankState, RetrievalAbstention, RetrievalChannel, RetrievalChannels, RetrievalDocument,
-    RetrievalDocumentInput, RetrievalExecution, RetrievalFallback, SearchMode, SemanticReadiness,
-    fuse_search,
+    RetrievalDocumentInput, RetrievalExecution, RetrievalFallback, RetrievalPreference, SearchMode,
+    SemanticReadiness, fuse_search,
 };
+use serde as _;
+use thiserror as _;
+use tokio as _;
 
 const RESULT_LIMIT: u16 = 20;
+const MAXIMUM_CHANNEL_CANDIDATES: u16 = 100;
+const RRF_OFFSET: f64 = 60.0;
 const LEXICAL_PRIMARY_SCORE: f64 = 12.5;
 const LEXICAL_SECONDARY_SCORE: f64 = 8.25;
 const SEMANTIC_PRIMARY_SCORE: f64 = 0.91;
 const SEMANTIC_SECONDARY_SCORE: f64 = 0.82;
+
+fn assert_score(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= f64::EPSILON,
+        "score mismatch: expected {expected}, got {actual}"
+    );
+}
 
 #[test]
 fn reciprocal_rank_fusion_retains_channel_provenance_and_raw_values() {
@@ -47,9 +64,9 @@ fn reciprocal_rank_fusion_retains_channel_provenance_and_raw_values() {
         RetrievalChannel::Lexical
     );
     assert_eq!(first.contributions()[0].rank(), 2);
-    assert_eq!(
+    assert_score(
         first.contributions()[0].raw_score(),
-        LEXICAL_SECONDARY_SCORE
+        LEXICAL_SECONDARY_SCORE,
     );
     assert_eq!(
         first.contributions()[0].lexical_components(),
@@ -60,7 +77,7 @@ fn reciprocal_rank_fusion_retains_channel_provenance_and_raw_values() {
         RetrievalChannel::Semantic
     );
     assert_eq!(first.contributions()[1].rank(), 1);
-    assert_eq!(first.contributions()[1].raw_score(), SEMANTIC_PRIMARY_SCORE);
+    assert_score(first.contributions()[1].raw_score(), SEMANTIC_PRIMARY_SCORE);
     assert!(first.reciprocal_rank_score() > packet.items()[1].reciprocal_rank_score());
 }
 
@@ -93,6 +110,64 @@ fn fusion_is_repeatable_across_candidate_and_channel_completion_order() {
 }
 
 #[test]
+fn fusion_properties_hold_for_every_four_document_rank_permutation() {
+    let orders = rank_orders();
+    for lexical_order in &orders {
+        for semantic_order in &orders {
+            let lexical = ranked_candidates(lexical_order, RetrievalChannel::Lexical);
+            let semantic = ranked_candidates(semantic_order, RetrievalChannel::Semantic);
+            let expected = fused_with_order(lexical.clone(), semantic.clone(), false);
+
+            let mut reversed_lexical = lexical;
+            reversed_lexical.reverse();
+            let mut reversed_semantic = semantic;
+            reversed_semantic.reverse();
+            let completion_reversed = fused_with_order(reversed_lexical, reversed_semantic, true);
+            assert_eq!(completion_reversed, expected);
+
+            assert_eq!(expected.items().len(), lexical_order.len());
+            for (index, item) in expected.items().iter().enumerate() {
+                let expected_rank = u16::try_from(index + 1)
+                    .unwrap_or_else(|error| panic!("fixture rank conversion failed: {error}"));
+                assert_eq!(item.rank(), expected_rank);
+                assert_eq!(item.contributions().len(), 2);
+                assert_eq!(item.contributions()[0].channel(), RetrievalChannel::Lexical);
+                assert_eq!(
+                    item.contributions()[1].channel(),
+                    RetrievalChannel::Semantic
+                );
+                let identifier = item
+                    .document()
+                    .qualified_name()
+                    .trim_start_matches("symbol_");
+                let lexical_rank = rank_of(lexical_order, identifier);
+                let semantic_rank = rank_of(semantic_order, identifier);
+                let oracle =
+                    reciprocal_rank_oracle(lexical_rank) + reciprocal_rank_oracle(semantic_rank);
+                assert_score(item.reciprocal_rank_score(), oracle);
+            }
+            for adjacent in expected.items().windows(2) {
+                assert!(adjacent[0].reciprocal_rank_score() >= adjacent[1].reciprocal_rank_score());
+            }
+        }
+    }
+}
+
+#[test]
+fn smaller_result_limits_are_exact_prefixes_and_report_omissions() {
+    let candidates = ranked_candidates(&["a", "b", "c", "z"], RetrievalChannel::Lexical);
+    let complete = lexical_packet_with_limit(candidates.clone(), 4);
+    assert!(!complete.truncated());
+
+    for limit in 1_u16..=4 {
+        let bounded = lexical_packet_with_limit(candidates.clone(), limit);
+        let bounded_length = usize::from(limit);
+        assert_eq!(bounded.items(), &complete.items()[..bounded_length]);
+        assert_eq!(bounded.truncated(), limit < 4);
+    }
+}
+
+#[test]
 fn equal_rrf_scores_use_stable_document_tie_breaks() {
     let lexical = channel(
         RetrievalChannel::Lexical,
@@ -108,6 +183,81 @@ fn equal_rrf_scores_use_stable_document_tie_breaks() {
         (lexical, semantic),
     );
     assert_eq!(paths(&packet), vec!["src/a.rs", "src/z.rs"]);
+}
+
+#[test]
+fn production_preference_promotes_definitions_without_hiding_tests_or_parameters() {
+    let ranked = vec![
+        typed_candidate(
+            "a",
+            "tests/search.rs",
+            DocumentKind::Test,
+            SymbolKind::Function,
+            (1, 12.0),
+        ),
+        typed_candidate(
+            "b",
+            "src/search.rs",
+            DocumentKind::Symbol,
+            SymbolKind::Parameter,
+            (2, 11.0),
+        ),
+        typed_candidate(
+            "c",
+            "src/search.rs",
+            DocumentKind::Symbol,
+            SymbolKind::Import,
+            (3, 10.0),
+        ),
+        typed_candidate(
+            "z",
+            "src/search.rs",
+            DocumentKind::Symbol,
+            SymbolKind::Function,
+            (4, 9.0),
+        ),
+    ];
+    let neutral = input(SearchMode::Deterministic, SemanticReadiness::NotConfigured)
+        .with_channel(channel(RetrievalChannel::Lexical, ranked.clone()))
+        .and_then(fuse_search)
+        .unwrap_or_else(|error| panic!("neutral fusion failed: {error}"));
+    assert_eq!(
+        paths(&neutral),
+        vec![
+            "tests/search.rs",
+            "src/search.rs",
+            "src/search.rs",
+            "src/search.rs",
+        ]
+    );
+
+    let preferred = input(SearchMode::Deterministic, SemanticReadiness::NotConfigured)
+        .with_preference(RetrievalPreference::ProductionDefinitions)
+        .with_channel(channel(RetrievalChannel::Lexical, ranked))
+        .and_then(fuse_search)
+        .unwrap_or_else(|error| panic!("preferred fusion failed: {error}"));
+    let kinds = preferred
+        .items()
+        .iter()
+        .map(|item| item.document().symbol_kind())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        preferred.preference(),
+        RetrievalPreference::ProductionDefinitions
+    );
+    assert_eq!(
+        kinds,
+        vec![
+            Some(SymbolKind::Function),
+            Some(SymbolKind::Parameter),
+            Some(SymbolKind::Import),
+            Some(SymbolKind::Function),
+        ]
+    );
+    assert_eq!(
+        preferred.items()[3].document().document_kind(),
+        DocumentKind::Test
+    );
 }
 
 #[test]
@@ -213,7 +363,25 @@ fn empty_inputs_abstain_and_limits_are_explicit() {
 #[test]
 fn malformed_channel_inputs_fail_closed() {
     assert!(ChannelCandidate::new(document("a", "src/a.rs"), 0, 1.0).is_err());
+    assert!(
+        ChannelCandidate::new(
+            document("a", "src/a.rs"),
+            MAXIMUM_CHANNEL_CANDIDATES + 1,
+            1.0,
+        )
+        .is_err()
+    );
     assert!(ChannelCandidate::new(document("a", "src/a.rs"), 1, f64::NAN).is_err());
+    assert!(ChannelCandidate::new(document("a", "src/a.rs"), 1, f64::INFINITY).is_err());
+    assert!(ChannelCandidate::new(document("a", "src/a.rs"), 1, f64::NEG_INFINITY).is_err());
+    assert!(
+        HybridSearchInput::new(
+            SearchMode::Hybrid,
+            SemanticReadiness::Ready,
+            MAXIMUM_CHANNEL_CANDIDATES + 1,
+        )
+        .is_err()
+    );
     let duplicate_rank = ChannelResults::new(
         RetrievalChannel::Lexical,
         vec![
@@ -395,6 +563,75 @@ fn fused_with_order(
     fuse_search(input).unwrap_or_else(|error| panic!("fusion failed: {error}"))
 }
 
+fn lexical_packet_with_limit(
+    candidates: Vec<ChannelCandidate>,
+    result_limit: u16,
+) -> cartograph_search::HybridSearchPacket {
+    HybridSearchInput::new(
+        SearchMode::Deterministic,
+        SemanticReadiness::NotConfigured,
+        result_limit,
+    )
+    .and_then(|value| {
+        value.with_channel(ChannelResults::new(RetrievalChannel::Lexical, candidates)?)
+    })
+    .and_then(fuse_search)
+    .unwrap_or_else(|error| panic!("bounded lexical fusion failed: {error}"))
+}
+
+fn rank_orders() -> Vec<[&'static str; 4]> {
+    let mut order = ["a", "b", "c", "z"];
+    let mut output = Vec::new();
+    collect_rank_orders(&mut order, 0, &mut output);
+    output
+}
+
+fn collect_rank_orders(
+    order: &mut [&'static str; 4],
+    start: usize,
+    output: &mut Vec<[&'static str; 4]>,
+) {
+    if start == order.len() {
+        output.push(*order);
+        return;
+    }
+    for index in start..order.len() {
+        order.swap(start, index);
+        collect_rank_orders(order, start + 1, output);
+        order.swap(start, index);
+    }
+}
+
+fn ranked_candidates(order: &[&str; 4], channel: RetrievalChannel) -> Vec<ChannelCandidate> {
+    order
+        .iter()
+        .enumerate()
+        .map(|(index, identifier)| {
+            let rank = u16::try_from(index + 1)
+                .unwrap_or_else(|error| panic!("fixture rank conversion failed: {error}"));
+            let path = format!("src/{identifier}.rs");
+            let score = 100.0 - f64::from(rank);
+            match channel {
+                RetrievalChannel::Lexical => lexical_candidate(identifier, &path, (rank, score)),
+                RetrievalChannel::Semantic => candidate(identifier, &path, (rank, score)),
+            }
+        })
+        .collect()
+}
+
+fn rank_of(order: &[&str; 4], identifier: &str) -> u16 {
+    let index = order
+        .iter()
+        .position(|candidate| *candidate == identifier)
+        .unwrap_or_else(|| panic!("identifier {identifier} was absent from rank fixture"));
+    u16::try_from(index + 1)
+        .unwrap_or_else(|error| panic!("fixture rank conversion failed: {error}"))
+}
+
+fn reciprocal_rank_oracle(rank: u16) -> f64 {
+    1.0 / (RRF_OFFSET + f64::from(rank))
+}
+
 fn input(mode: SearchMode, readiness: SemanticReadiness) -> HybridSearchInput {
     HybridSearchInput::new(mode, readiness, RESULT_LIMIT)
         .unwrap_or_else(|error| panic!("hybrid input failed: {error}"))
@@ -413,6 +650,40 @@ fn candidate(id: &str, path: &str, ranking: (u16, f64)) -> ChannelCandidate {
     let (rank, score) = ranking;
     ChannelCandidate::new(document(id, path), rank, score)
         .unwrap_or_else(|error| panic!("candidate failed: {error}"))
+}
+
+fn typed_candidate(
+    id: &str,
+    path: &str,
+    document_kind: DocumentKind,
+    symbol_kind: SymbolKind,
+    ranking: (u16, f64),
+) -> ChannelCandidate {
+    let document = typed_document(id, path, document_kind, symbol_kind);
+    ChannelCandidate::new(document, ranking.0, ranking.1)
+        .unwrap_or_else(|error| panic!("typed candidate failed: {error}"))
+}
+
+fn typed_document(
+    id: &str,
+    path: &str,
+    document_kind: DocumentKind,
+    symbol_kind: SymbolKind,
+) -> RetrievalDocument {
+    let document_id = DocumentId::parse(document_uuid(id))
+        .unwrap_or_else(|error| panic!("document id fixture failed: {error}"));
+    let path = NormalizedPath::parse(path)
+        .unwrap_or_else(|error| panic!("document path fixture failed: {error}"));
+    RetrievalDocument::new(RetrievalDocumentInput {
+        document_id,
+        generation_id: primary_generation(),
+        path,
+        language: SourceLanguage::Rust,
+        document_kind,
+    })
+    .with_symbol_kind(symbol_kind)
+    .with_qualified_name(format!("symbol_{id}"))
+    .unwrap_or_else(|error| panic!("qualified name fixture failed: {error}"))
 }
 
 fn document(id: &str, path: &str) -> RetrievalDocument {

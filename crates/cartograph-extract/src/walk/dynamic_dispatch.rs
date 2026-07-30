@@ -122,7 +122,7 @@ struct DispatchTableCollector<'state, 'source, 'cancel, 'tree> {
     tables: &'state mut Vec<DispatchTable<'tree>>,
 }
 
-impl<'source, 'cancel, 'tree> DispatchTableCollector<'_, 'source, 'cancel, 'tree> {
+impl<'tree> DispatchTableCollector<'_, '_, '_, 'tree> {
     fn collect(&mut self, node: Node<'tree>, depth: usize) -> Result<(), ExtractError> {
         self.budget.visits.observe(self.builder, depth)?;
         if node.kind() == "variable_declarator" && self.tables.len() < MAX_TABLES {

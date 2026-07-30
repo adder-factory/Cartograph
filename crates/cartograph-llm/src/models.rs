@@ -15,7 +15,7 @@ use tokio::io::AsyncWriteExt as _;
 
 const MAXIMUM_INSTALL_CONCURRENCY: u16 = 4;
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 const MAXIMUM_REDIRECTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -71,6 +71,12 @@ pub struct InstallModelsOptions {
 }
 
 impl InstallModelsOptions {
+    /// Creates a validated model-install policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the destination path is empty or `concurrency` is
+    /// zero or above the bounded downloader maximum.
     pub fn new(
         directory: impl Into<PathBuf>,
         minimal: bool,
@@ -95,7 +101,9 @@ impl InstallModelsOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledModel {
+    /// Filename for this record.
     pub filename: String,
+    /// Verified on-disk model size in bytes.
     pub size_bytes: u64,
 }
 
@@ -103,32 +111,47 @@ pub struct InstalledModel {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallModelsReport {
+    /// Models downloaded and checksum-verified by this invocation.
     pub downloaded: Vec<InstalledModel>,
+    /// Existing models whose size and checksum already matched.
     pub skipped_verified: Vec<InstalledModel>,
+    /// Total response-body bytes persisted by this invocation.
     pub bytes_downloaded: u64,
+    /// Whether only the minimal recommended model set is selected.
     pub minimal: bool,
+    /// Maximum number of downloads executed concurrently.
     pub concurrency: u16,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+/// Errors produced while processing install models.
 pub enum InstallModelsError {
     #[error("Cartograph model install options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("Cartograph model directory is unavailable")]
+    /// The target directory could not be created or opened safely.
     DirectoryUnavailable,
     #[error("Cartograph model target is not a safe regular file")]
+    /// The target is not a safe regular file owned by this operation.
     UnsafeTarget,
     #[error("Cartograph model download endpoint is unavailable")]
+    /// The configured endpoint could not complete the bounded request.
     EndpointUnavailable,
     #[error("Cartograph model download endpoint rejected the request")]
+    /// The configured backend rejected the bounded request.
     BackendRejected,
     #[error("Cartograph model download was idle for too long")]
+    /// The response body made no progress before the idle deadline.
     IdleTimeout,
     #[error("Cartograph model download size does not match the signed manifest")]
+    /// Downloaded bytes do not match the pinned model size.
     SizeMismatch,
     #[error("Cartograph model checksum does not match the signed manifest")]
+    /// Downloaded bytes do not match the pinned SHA-256 digest.
     ChecksumMismatch,
     #[error("Cartograph model file could not be written atomically")]
+    /// The bounded output could not be written atomically.
     WriteFailed,
 }
 
@@ -139,6 +162,10 @@ enum InstallDisposition {
 
 /// Download the curated v1.1.33-compatible GGUF set with stronger checksum,
 /// redirect, idle, and atomic-publication guarantees.
+/// # Errors
+///
+/// Returns an error if destination/TLS/client setup fails or a bounded download
+/// violates HTTPS redirects, size, idle timeout, checksum, or atomic-file safety.
 pub async fn install_recommended_models(
     options: InstallModelsOptions,
 ) -> Result<InstallModelsReport, InstallModelsError> {
@@ -199,7 +226,6 @@ pub async fn install_recommended_models(
 async fn prepare_directory(directory: &Path) -> Result<(), InstallModelsError> {
     match tokio::fs::symlink_metadata(directory).await {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
-        Ok(_) => Err(InstallModelsError::DirectoryUnavailable),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             tokio::fs::create_dir_all(directory)
                 .await
@@ -213,7 +239,7 @@ async fn prepare_directory(directory: &Path) -> Result<(), InstallModelsError> {
                 Err(InstallModelsError::DirectoryUnavailable)
             }
         }
-        Err(_) => Err(InstallModelsError::DirectoryUnavailable),
+        Ok(_) | Err(_) => Err(InstallModelsError::DirectoryUnavailable),
     }
 }
 
@@ -315,6 +341,7 @@ async fn download_to_partial(
         .open(partial)
         .await
         .map_err(|_| InstallModelsError::WriteFailed)?;
+    #[cfg(unix)]
     set_private_permissions(&output).await?;
     let mut stream = response.bytes_stream();
     let mut downloaded = 0_u64;
@@ -357,11 +384,6 @@ async fn set_private_permissions(file: &tokio::fs::File) -> Result<(), InstallMo
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .await
         .map_err(|_| InstallModelsError::WriteFailed)
-}
-
-#[cfg(not(unix))]
-async fn set_private_permissions(_file: &tokio::fs::File) -> Result<(), InstallModelsError> {
-    Ok(())
 }
 
 fn installed(model: RecommendedModel) -> InstalledModel {

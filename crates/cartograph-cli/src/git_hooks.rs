@@ -33,7 +33,7 @@ struct HookChange {
     status: &'static str,
 }
 
-pub(super) fn run_install_hooks(request: InstallHooksRequest) -> Result<String, String> {
+pub(super) fn run_install_hooks(request: &InstallHooksRequest) -> Result<String, String> {
     let hooks = parse_hooks(request.hooks.as_deref())?;
     let command = validate_command(request.command.as_deref())?;
     let root =
@@ -47,7 +47,7 @@ pub(super) fn run_install_hooks(request: InstallHooksRequest) -> Result<String, 
     }
     let mut changes = Vec::new();
     for hook in &hooks {
-        changes.push(change_hook(HookChangeRequest {
+        changes.push(change_hook(&HookChangeRequest {
             directory: &target.directory,
             hook,
             command: &command,
@@ -59,7 +59,7 @@ pub(super) fn run_install_hooks(request: InstallHooksRequest) -> Result<String, 
     let default_directory = default_hooks_directory(&root)?;
     if target.source != "default" && default_directory != target.directory {
         for hook in &hooks {
-            let cleanup = change_hook(HookChangeRequest {
+            let cleanup = change_hook(&HookChangeRequest {
                 directory: &default_directory,
                 hook,
                 command: &command,
@@ -189,8 +189,8 @@ struct HookChangeRequest<'a> {
     dry_run: bool,
 }
 
-fn change_hook(input: HookChangeRequest<'_>) -> Result<HookChange, String> {
-    let HookChangeRequest {
+fn change_hook(input: &HookChangeRequest<'_>) -> Result<HookChange, String> {
+    let &HookChangeRequest {
         directory,
         hook,
         command,
@@ -267,6 +267,7 @@ fn atomic_write_hook(directory: &Path, path: &Path, bytes: &[u8]) -> Result<(), 
         .write_all(bytes)
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|_| format!("could not stage hook {}", path.display()))?;
+    #[cfg(unix)]
     set_executable(temporary.as_file())?;
     temporary
         .persist(path)
@@ -279,11 +280,6 @@ fn set_executable(file: &File) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     file.set_permissions(fs::Permissions::from_mode(0o700))
         .map_err(|_| "could not make a Git hook executable".to_owned())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_file: &File) -> Result<(), String> {
-    Ok(())
 }
 
 fn compose_hook(existing: Option<&str>, command: &str) -> String {

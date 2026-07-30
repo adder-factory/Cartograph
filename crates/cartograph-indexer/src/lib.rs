@@ -1,5 +1,14 @@
 //! Lease-owned, bounded indexing supervision for Cartograph v2.
 
+#[cfg(test)]
+use cartograph_config as _;
+#[cfg(test)]
+use cartograph_test_support as _;
+#[cfg(test)]
+use sqlx_core as _;
+#[cfg(test)]
+use sqlx_postgres as _;
+
 mod config;
 mod native_extraction;
 mod native_pipeline;

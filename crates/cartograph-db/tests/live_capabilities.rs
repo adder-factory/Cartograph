@@ -1,3 +1,7 @@
+//! Live PostgreSQL integration coverage for Cartograph storage contracts.
+
+mod dependency_ownership;
+
 use std::env;
 
 use cartograph_config::DatabaseSettings;
@@ -8,10 +12,9 @@ const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + ParadeDB test database"]
 async fn live_database_satisfies_every_v2_capability() {
-    let database_url = match env::var(TEST_DATABASE_URL_ENV) {
-        Ok(database_url) => database_url,
-        Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
-    };
+    let database_url = env::var(TEST_DATABASE_URL_ENV).unwrap_or_else(|error| {
+        panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test: {error}")
+    });
     let settings = match DatabaseSettings::parse(&database_url, Some("2"), Some("10000")) {
         Ok(settings) => settings,
         Err(error) => panic!("test database settings failed validation: {error}"),

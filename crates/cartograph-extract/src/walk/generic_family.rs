@@ -81,8 +81,7 @@ pub(super) fn visit_declaration(
         body_node: body.or(definition.then_some(node)),
         declaration_only: is_callable(kind) && body.is_none() && !definition,
         signature: None,
-        exported,
-        default_export: false,
+        export: crate::SymbolExportFlags::named(exported),
         async_symbol: source_prefix_contains(node, builder.context.source(), "async"),
         static_member: source_prefix_contains(node, builder.context.source(), "static"),
         visibility,
@@ -701,6 +700,7 @@ fn generic_visibility(node: Node<'_>, source: &str) -> Option<Visibility> {
     None
 }
 
+#[derive(Clone, Copy)]
 struct GenericExportInput<'a> {
     language: SourceLanguage,
     top_level: bool,

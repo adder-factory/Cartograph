@@ -1,3 +1,7 @@
+//! Live PostgreSQL integration coverage for Cartograph storage contracts.
+
+mod dependency_ownership;
+
 use std::{
     env, process,
     sync::atomic::{AtomicU32, Ordering},
@@ -664,10 +668,9 @@ impl std::fmt::Display for GuardedSchema {
 }
 
 async fn open_isolated_database() -> (CartographDatabase, sqlx_postgres::PgPool, GuardedSchema) {
-    let database_url = match env::var(TEST_DATABASE_URL_ENV) {
-        Ok(database_url) => database_url,
-        Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
-    };
+    let database_url = env::var(TEST_DATABASE_URL_ENV).unwrap_or_else(|error| {
+        panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test: {error}")
+    });
     let schema = format!(
         "cartograph_lease_it_{}_{}",
         process::id(),

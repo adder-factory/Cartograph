@@ -15,5 +15,5 @@ pub use import::{
 };
 pub use model::{
     CartographScipEdge, SYMBOL_ROLE_DEFINITION, ScipDocument, ScipError, ScipIndex, ScipOccurrence,
-    ScipRelationship, ScipSymbolInformation,
+    ScipRelationship, ScipRelationshipRoles, ScipSymbolInformation,
 };

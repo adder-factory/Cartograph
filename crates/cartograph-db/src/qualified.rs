@@ -51,10 +51,10 @@ impl QualifiedCentralityComparator {
 /// Stable qualified-query ordering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QualifiedSymbolSort {
-    /// ParadeDB relevance first, then deterministic declaration order.
+    /// `ParadeDB` relevance first, then deterministic declaration order.
     #[default]
     Relevance,
-    /// Directed PageRank descending, with unranked symbols last.
+    /// Directed `PageRank` descending, with unranked symbols last.
     Centrality,
 }
 
@@ -207,13 +207,13 @@ impl QualifiedSymbolHit {
         &self.symbol
     }
 
-    /// Directed calls/references PageRank, when computed.
+    /// Directed calls/references `PageRank`, when computed.
     #[must_use]
     pub const fn centrality(&self) -> Option<f64> {
         self.centrality
     }
 
-    /// ParadeDB score when the query retained free text.
+    /// `ParadeDB` score when the query retained free text.
     #[must_use]
     pub const fn lexical_score(&self) -> Option<f64> {
         self.lexical_score
@@ -249,6 +249,10 @@ impl QualifiedSymbolPage {
 
 impl CartographDatabase {
     /// Execute all field-qualified predicates in PostgreSQL before applying the response limit.
+    /// # Errors
+    ///
+    /// Returns an error if text/filter/result bounds are invalid, the expected
+    /// generation is not current, or qualified symbol rows cannot be read.
     pub async fn qualified_current_symbols(
         &self,
         input: QualifiedSymbolQuery<'_>,
@@ -258,6 +262,10 @@ impl CartographDatabase {
     }
 
     /// Execute field-qualified search under an explicit PostgreSQL statement timeout.
+    /// # Errors
+    ///
+    /// Returns an error if the explicit deadline or query fields are invalid,
+    /// the generation fence fails, or a qualified result cannot be decoded.
     pub async fn qualified_current_symbols_bounded(
         &self,
         input: QualifiedSymbolQuery<'_>,
@@ -285,11 +293,11 @@ impl CartographDatabase {
             .await?;
             (
                 format!(
-                    r#"INNER JOIN {} AS documents
+                    r"INNER JOIN {} AS documents
                            ON documents.project_id = symbols.project_id
                           AND documents.generation_id = symbols.generation_id
                           AND documents.symbol_id = symbols.symbol_id
-                          AND documents.document_kind = 'symbol'"#,
+                          AND documents.document_kind = 'symbol'",
                     relation.qualified_table(&self.schema)
                 ),
                 "AND documents.qualified_name ||| $15",
@@ -356,6 +364,124 @@ struct QualifiedSymbolSql<'a> {
     primary_order: &'a str,
 }
 
+const QUALIFIED_SYMBOL_SQL_TEMPLATE: &str = r#"SELECT symbols.generation_id::text, symbols.symbol_id::text,
+           symbols.file_id::text, files.normalized_path, files.language,
+           symbols.symbol_kind, symbols.qualified_name, symbols.signature,
+           symbols.start_line, symbols.end_line,
+           symbols.visibility, symbols.exported, symbols.default_export,
+           symbols.async_symbol, symbols.static_member, symbols.declaration_only,
+           symbols.pagerank, {lexical_score} AS lexical_score,
+           count(*) OVER ()::bigint AS exact_total
+    FROM {schema}."symbols" AS symbols
+    INNER JOIN {schema}."files" AS files
+        ON files.project_id = symbols.project_id
+       AND files.generation_id = symbols.generation_id
+       AND files.file_id = symbols.file_id
+    {document_join}
+    WHERE symbols.project_id = CAST($1 AS uuid)
+      AND symbols.generation_id = CAST($2 AS uuid)
+      AND (cardinality(CAST($3 AS text[])) = 0 OR symbols.symbol_kind = ANY(CAST($3 AS text[])))
+      AND (cardinality(CAST($4 AS text[])) = 0 OR files.language = ANY(CAST($4 AS text[])))
+      AND (
+            cardinality(CAST($5 AS text[])) = 0
+            OR EXISTS (
+                SELECT 1 FROM unnest(CAST($5 AS text[])) AS prefix(value)
+                WHERE files.normalized_path = prefix.value
+                   OR starts_with(files.normalized_path, prefix.value || '/')
+            )
+          )
+      AND (
+            cardinality(CAST($6 AS text[])) = 0
+            OR EXISTS (
+                SELECT 1 FROM unnest(CAST($6 AS text[])) AS path_filter(value)
+                WHERE strpos(lower(files.normalized_path), lower(path_filter.value)) > 0
+            )
+          )
+      AND (
+            cardinality(CAST($7 AS text[])) = 0
+            OR EXISTS (
+                SELECT 1 FROM unnest(CAST($7 AS text[])) AS name_filter(value)
+                WHERE strpos(lower(symbols.simple_name), lower(name_filter.value)) > 0
+            )
+          )
+      AND (
+            cardinality(CAST($8 AS text[])) = 0
+            OR EXISTS (
+                SELECT 1 FROM unnest(CAST($8 AS text[])) AS signature_filter(value)
+                WHERE strpos(lower(symbols.signature), lower(signature_filter.value)) > 0
+            )
+          )
+      AND (
+            cardinality(CAST($9 AS text[])) = 0
+            OR EXISTS (
+                SELECT 1
+                FROM {schema}."edges" AS caller_edge
+                INNER JOIN {schema}."symbols" AS call_target
+                    ON call_target.project_id = caller_edge.project_id
+                   AND call_target.generation_id = caller_edge.generation_id
+                   AND call_target.symbol_id = caller_edge.target_symbol_id
+                WHERE caller_edge.project_id = symbols.project_id
+                  AND caller_edge.generation_id = symbols.generation_id
+                  AND caller_edge.source_symbol_id = symbols.symbol_id
+                  AND caller_edge.edge_kind = 'calls'
+                  AND (
+                        call_target.simple_name = ANY(CAST($9 AS text[]))
+                        OR call_target.qualified_name = ANY(CAST($9 AS text[]))
+                      )
+            )
+          )
+      AND (
+            cardinality(CAST($10 AS text[])) = 0
+            OR EXISTS (
+                SELECT 1
+                FROM {schema}."edges" AS callee_edge
+                INNER JOIN {schema}."symbols" AS call_source
+                    ON call_source.project_id = callee_edge.project_id
+                   AND call_source.generation_id = callee_edge.generation_id
+                   AND call_source.symbol_id = callee_edge.source_symbol_id
+                WHERE callee_edge.project_id = symbols.project_id
+                  AND callee_edge.generation_id = symbols.generation_id
+                  AND callee_edge.target_symbol_id = symbols.symbol_id
+                  AND callee_edge.edge_kind = 'calls'
+                  AND (
+                        call_source.simple_name = ANY(CAST($10 AS text[]))
+                        OR call_source.qualified_name = ANY(CAST($10 AS text[]))
+                      )
+            )
+          )
+      AND (
+            cardinality(CAST($11 AS text[])) = 0
+            OR EXISTS (
+                SELECT 1
+                FROM {schema}."edges" AS dependency_edge
+                INNER JOIN {schema}."symbols" AS dependency_target
+                    ON dependency_target.project_id = dependency_edge.project_id
+                   AND dependency_target.generation_id = dependency_edge.generation_id
+                   AND dependency_target.symbol_id = dependency_edge.target_symbol_id
+                WHERE dependency_edge.project_id = symbols.project_id
+                  AND dependency_edge.generation_id = symbols.generation_id
+                  AND dependency_edge.source_symbol_id = symbols.symbol_id
+                  AND dependency_edge.edge_kind = ANY(ARRAY[
+                        'calls', 'imports', 'extends', 'implements', 'type_of',
+                        'returns', 'instantiates', 'overrides'
+                      ]::text[])
+                  AND (
+                        dependency_target.simple_name = ANY(CAST($11 AS text[]))
+                        OR dependency_target.qualified_name = ANY(CAST($11 AS text[]))
+                      )
+            )
+          )
+      AND (
+            CAST($12 AS text) IS NULL
+            OR (CAST($12 AS text) = 'gt' AND symbols.pagerank > CAST($13 AS double precision))
+            OR (CAST($12 AS text) = 'ge' AND symbols.pagerank >= CAST($13 AS double precision))
+            OR (CAST($12 AS text) = 'lt' AND (symbols.pagerank IS NULL OR symbols.pagerank < CAST($13 AS double precision)))
+            OR (CAST($12 AS text) = 'le' AND (symbols.pagerank IS NULL OR symbols.pagerank <= CAST($13 AS double precision)))
+          )
+      {text_predicate}
+    ORDER BY {primary_order}
+    LIMIT $14"#;
+
 fn qualified_symbol_sql(input: QualifiedSymbolSql<'_>) -> String {
     let QualifiedSymbolSql {
         schema,
@@ -364,125 +490,12 @@ fn qualified_symbol_sql(input: QualifiedSymbolSql<'_>) -> String {
         lexical_score,
         primary_order,
     } = input;
-    format!(
-        r#"SELECT symbols.generation_id::text, symbols.symbol_id::text,
-                   symbols.file_id::text, files.normalized_path, files.language,
-                   symbols.symbol_kind, symbols.qualified_name, symbols.signature,
-                   symbols.start_line, symbols.end_line,
-                   symbols.visibility, symbols.exported, symbols.default_export,
-                   symbols.async_symbol, symbols.static_member, symbols.declaration_only,
-                   symbols.pagerank, {lexical_score} AS lexical_score,
-                   count(*) OVER ()::bigint AS exact_total
-            FROM {schema}."symbols" AS symbols
-            INNER JOIN {schema}."files" AS files
-                ON files.project_id = symbols.project_id
-               AND files.generation_id = symbols.generation_id
-               AND files.file_id = symbols.file_id
-            {document_join}
-            WHERE symbols.project_id = CAST($1 AS uuid)
-              AND symbols.generation_id = CAST($2 AS uuid)
-              AND (cardinality(CAST($3 AS text[])) = 0 OR symbols.symbol_kind = ANY(CAST($3 AS text[])))
-              AND (cardinality(CAST($4 AS text[])) = 0 OR files.language = ANY(CAST($4 AS text[])))
-              AND (
-                    cardinality(CAST($5 AS text[])) = 0
-                    OR EXISTS (
-                        SELECT 1 FROM unnest(CAST($5 AS text[])) AS prefix(value)
-                        WHERE files.normalized_path = prefix.value
-                           OR starts_with(files.normalized_path, prefix.value || '/')
-                    )
-                  )
-              AND (
-                    cardinality(CAST($6 AS text[])) = 0
-                    OR EXISTS (
-                        SELECT 1 FROM unnest(CAST($6 AS text[])) AS path_filter(value)
-                        WHERE strpos(lower(files.normalized_path), lower(path_filter.value)) > 0
-                    )
-                  )
-              AND (
-                    cardinality(CAST($7 AS text[])) = 0
-                    OR EXISTS (
-                        SELECT 1 FROM unnest(CAST($7 AS text[])) AS name_filter(value)
-                        WHERE strpos(lower(symbols.simple_name), lower(name_filter.value)) > 0
-                    )
-                  )
-              AND (
-                    cardinality(CAST($8 AS text[])) = 0
-                    OR EXISTS (
-                        SELECT 1 FROM unnest(CAST($8 AS text[])) AS signature_filter(value)
-                        WHERE strpos(lower(symbols.signature), lower(signature_filter.value)) > 0
-                    )
-                  )
-              AND (
-                    cardinality(CAST($9 AS text[])) = 0
-                    OR EXISTS (
-                        SELECT 1
-                        FROM {schema}."edges" AS caller_edge
-                        INNER JOIN {schema}."symbols" AS call_target
-                            ON call_target.project_id = caller_edge.project_id
-                           AND call_target.generation_id = caller_edge.generation_id
-                           AND call_target.symbol_id = caller_edge.target_symbol_id
-                        WHERE caller_edge.project_id = symbols.project_id
-                          AND caller_edge.generation_id = symbols.generation_id
-                          AND caller_edge.source_symbol_id = symbols.symbol_id
-                          AND caller_edge.edge_kind = 'calls'
-                          AND (
-                                call_target.simple_name = ANY(CAST($9 AS text[]))
-                                OR call_target.qualified_name = ANY(CAST($9 AS text[]))
-                              )
-                    )
-                  )
-              AND (
-                    cardinality(CAST($10 AS text[])) = 0
-                    OR EXISTS (
-                        SELECT 1
-                        FROM {schema}."edges" AS callee_edge
-                        INNER JOIN {schema}."symbols" AS call_source
-                            ON call_source.project_id = callee_edge.project_id
-                           AND call_source.generation_id = callee_edge.generation_id
-                           AND call_source.symbol_id = callee_edge.source_symbol_id
-                        WHERE callee_edge.project_id = symbols.project_id
-                          AND callee_edge.generation_id = symbols.generation_id
-                          AND callee_edge.target_symbol_id = symbols.symbol_id
-                          AND callee_edge.edge_kind = 'calls'
-                          AND (
-                                call_source.simple_name = ANY(CAST($10 AS text[]))
-                                OR call_source.qualified_name = ANY(CAST($10 AS text[]))
-                              )
-                    )
-                  )
-              AND (
-                    cardinality(CAST($11 AS text[])) = 0
-                    OR EXISTS (
-                        SELECT 1
-                        FROM {schema}."edges" AS dependency_edge
-                        INNER JOIN {schema}."symbols" AS dependency_target
-                            ON dependency_target.project_id = dependency_edge.project_id
-                           AND dependency_target.generation_id = dependency_edge.generation_id
-                           AND dependency_target.symbol_id = dependency_edge.target_symbol_id
-                        WHERE dependency_edge.project_id = symbols.project_id
-                          AND dependency_edge.generation_id = symbols.generation_id
-                          AND dependency_edge.source_symbol_id = symbols.symbol_id
-                          AND dependency_edge.edge_kind = ANY(ARRAY[
-                                'calls', 'imports', 'extends', 'implements', 'type_of',
-                                'returns', 'instantiates', 'overrides'
-                              ]::text[])
-                          AND (
-                                dependency_target.simple_name = ANY(CAST($11 AS text[]))
-                                OR dependency_target.qualified_name = ANY(CAST($11 AS text[]))
-                              )
-                    )
-                  )
-              AND (
-                    CAST($12 AS text) IS NULL
-                    OR (CAST($12 AS text) = 'gt' AND symbols.pagerank > CAST($13 AS double precision))
-                    OR (CAST($12 AS text) = 'ge' AND symbols.pagerank >= CAST($13 AS double precision))
-                    OR (CAST($12 AS text) = 'lt' AND (symbols.pagerank IS NULL OR symbols.pagerank < CAST($13 AS double precision)))
-                    OR (CAST($12 AS text) = 'le' AND (symbols.pagerank IS NULL OR symbols.pagerank <= CAST($13 AS double precision)))
-                  )
-              {text_predicate}
-            ORDER BY {primary_order}
-            LIMIT $14"#
-    )
+    QUALIFIED_SYMBOL_SQL_TEMPLATE
+        .replace("{schema}", schema)
+        .replace("{document_join}", document_join)
+        .replace("{text_predicate}", text_predicate)
+        .replace("{lexical_score}", lexical_score)
+        .replace("{primary_order}", primary_order)
 }
 
 fn validate_query(input: &QualifiedSymbolQuery<'_>) -> Result<(), StorageError> {

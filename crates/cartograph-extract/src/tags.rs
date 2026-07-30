@@ -13,7 +13,8 @@ use tree_sitter::{Language, Node, Query, QueryCursor, QueryCursorOptions, Stream
 
 use crate::{
     Containment, ExtractError, ExtractedFile, ExtractedReference, ExtractedSymbol,
-    ExtractionDiagnostic, SourceSnapshot,
+    ExtractionDiagnostic, SourceSnapshot, SymbolExecutionFlags, SymbolExportFlags,
+    SymbolImplementationFlags,
     budget::{
         ExtractionBudget, containment_budget_bytes, diagnostic_budget_bytes, native_output_limit,
         reference_budget_bytes, symbol_budget_bytes,
@@ -98,6 +99,7 @@ struct DigestFrame<'tree> {
 
 type DefinitionDigests = HashMap<usize, Option<ContentDigest>>;
 
+#[derive(Clone, Copy)]
 pub(crate) struct TagExtractionInput<'tree, 'input> {
     pub(crate) snapshot: &'input SourceSnapshot,
     pub(crate) root: Node<'tree>,
@@ -522,7 +524,7 @@ fn emit_tag_definitions(
 
 fn build_tag_definition(
     input: DefinitionBuildInput<'_, '_, '_, '_>,
-    identities: &mut SymbolIdentity,
+    identities: &mut SymbolIdentity<'_>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<BuiltTagDefinition, ExtractError> {
     let qualified_name = if let Some(parent) = input.parent {
@@ -589,12 +591,9 @@ fn build_tag_definition(
         body_search_text: String::new(),
         body_search_truncated: false,
         health,
-        declaration_only: false,
-        test_symbol: false,
-        exported: false,
-        default_export: false,
-        async_symbol: false,
-        static_member: false,
+        implementation: SymbolImplementationFlags::default(),
+        export: SymbolExportFlags::default(),
+        execution: SymbolExecutionFlags::default(),
         visibility: None,
         structural_digest: input.structural_digest,
         clone_shape_digest,
@@ -849,27 +848,29 @@ fn next_digest_child<'tree>(
     input: NextDigestChildInput<'_, 'tree>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Option<Node<'tree>>, ExtractError> {
-    while input.frame.next_child < input.frame.node.child_count() {
+    let NextDigestChildInput {
+        frame,
+        visited,
+        node_limit,
+    } = input;
+    while frame.next_child < frame.node.child_count() {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
-        let child_index = input.frame.next_child;
-        input.frame.next_child = input.frame.next_child.saturating_add(1);
-        *input.visited = input
-            .visited
-            .checked_add(1)
-            .ok_or(ExtractError::OutputLimit)?;
-        if *input.visited > input.node_limit {
+        let child_index = frame.next_child;
+        frame.next_child = frame.next_child.saturating_add(1);
+        *visited = visited.checked_add(1).ok_or(ExtractError::OutputLimit)?;
+        if *visited > node_limit {
             return Err(ExtractError::OutputLimit);
         }
         let child_index = u32::try_from(child_index).map_err(|_| ExtractError::OutputLimit)?;
-        let Some(child) = input.frame.node.child(child_index) else {
+        let Some(child) = frame.node.child(child_index) else {
             continue;
         };
         if is_comment_node(child) {
             continue;
         }
-        input.frame.child_count = input.frame.child_count.saturating_add(1);
+        frame.child_count = frame.child_count.saturating_add(1);
         return Ok(Some(child));
     }
     Ok(None)
@@ -934,7 +935,7 @@ fn is_comment_node(node: Node<'_>) -> bool {
     node.kind().contains("comment")
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct RawCaptureState<'tree> {
     role: Option<RawRole>,
     role_node: Option<Node<'tree>>,

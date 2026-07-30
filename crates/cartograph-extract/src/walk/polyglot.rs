@@ -159,15 +159,13 @@ pub(super) fn capture_usage(
         | (SourceLanguage::Python, "call") => {
             references::capture_invocation(builder, node, references::InvocationKind::Call)
         }
-        (SourceLanguage::Rust, "field_expression") => {
+        (SourceLanguage::Rust, "field_expression")
+        | (SourceLanguage::Go, "selector_expression") => {
             references::capture_member_field(builder, node, "field")
         }
         (SourceLanguage::Rust, "scoped_identifier") => capture_rust_value_path(builder, node),
         (SourceLanguage::Python, "attribute") => {
             references::capture_member_field(builder, node, "attribute")
-        }
-        (SourceLanguage::Go, "selector_expression") => {
-            references::capture_member_field(builder, node, "field")
         }
         (SourceLanguage::Rust, "macro_invocation") => capture_rust_macro(builder, node),
         _ => Ok(()),
@@ -474,8 +472,7 @@ fn emit_container_symbol(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: declaration.exported,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(declaration.exported, false),
         async_symbol: false,
         static_member: false,
         visibility: declaration.visibility,
@@ -593,8 +590,7 @@ fn emit_callable_symbol(
         body_node: input.body,
         declaration_only: input.body.is_none(),
         signature: builder.context.callable_signature(input.declaration.node)?,
-        exported: input.declaration.exported,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(input.declaration.exported, false),
         async_symbol: input.declaration.async_symbol,
         static_member: false,
         visibility: input.declaration.visibility,
@@ -626,6 +622,7 @@ fn emit_rust_callable_parameters(
     result
 }
 
+#[derive(Clone, Copy)]
 struct RustCallableParameters<'a> {
     callable: Node<'a>,
     owner: &'a SymbolId,
@@ -659,8 +656,7 @@ fn emit_rust_parameters_in_scope(
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: false,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(false, false),
             async_symbol: false,
             static_member: false,
             visibility: None,
@@ -711,8 +707,7 @@ fn emit_leaf_symbol(
         body_node: input.declaration.node.child_by_field_name("value"),
         declaration_only: false,
         signature: None,
-        exported: input.declaration.exported,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(input.declaration.exported, false),
         async_symbol: false,
         static_member: false,
         visibility: input.declaration.visibility,
@@ -917,7 +912,6 @@ fn emit_rust_use_bindings(
                 },
             )
         }
-        "crate" | "self" | "super" | "use_wildcard" | "metavariable" => Ok(()),
         _ => Ok(()),
     }
 }
@@ -1366,8 +1360,7 @@ fn visit_go_package(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: false,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(false, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -1447,8 +1440,7 @@ fn emit_import_symbol_and_reference(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: false,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(false, false),
         async_symbol: false,
         static_member: false,
         visibility: None,

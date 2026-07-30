@@ -47,7 +47,7 @@ pub struct CapabilityReport {
     pub postgres_version_num: i32,
     /// Display PostgreSQL server version.
     pub postgres_version: String,
-    /// Installed pg_search extension version, when present.
+    /// Installed `pg_search` extension version, when present.
     pub pg_search_version: Option<String>,
     /// Installed pgvector extension version, when present.
     pub pgvector_version: Option<String>,
@@ -72,12 +72,20 @@ struct CheckInput {
     remediation: &'static str,
 }
 
-/// Probe PostgreSQL, ParadeDB, and pgvector without mutating the database.
+/// Probe PostgreSQL, `ParadeDB`, and pgvector without mutating the database.
+/// # Errors
+///
+/// Returns an error if a required PostgreSQL version, extension, preload,
+/// BM25, vector, or tokenizer capability cannot be probed successfully.
 pub async fn probe_capabilities(pool: &PgPool) -> Result<CapabilityReport, DatabaseError> {
     probe_capabilities_bounded(pool, DEFAULT_CAPABILITY_PROBE_TIMEOUT).await
 }
 
 /// Probe required capabilities under an explicit PostgreSQL-side deadline.
+/// # Errors
+///
+/// Returns an error if the deadline cannot be installed or any required
+/// PostgreSQL, extension, BM25, vector, preload, or tokenizer check fails.
 pub async fn probe_capabilities_bounded(
     pool: &PgPool,
     statement_timeout: Duration,

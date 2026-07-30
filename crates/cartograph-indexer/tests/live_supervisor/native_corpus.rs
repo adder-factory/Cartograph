@@ -90,14 +90,14 @@ const MAX_SUPERVISOR_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SUPERVISOR_TASKS: usize = 64;
 const ITEM_TIMEOUT: Duration = Duration::from_secs(30);
 const STAGE_TIMEOUT: Duration = Duration::from_secs(45);
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const OPERATION_TIMEOUT: Duration = Duration::from_mins(2);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(1);
 const PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
 const CANCELLATION_GRACE: Duration = Duration::from_secs(5);
 const COPY_TIMEOUT: Duration = Duration::from_secs(30);
 const LEASE_DURATION: Duration = Duration::from_secs(90);
-const CHILD_TIMEOUT: Duration = Duration::from_secs(180);
+const CHILD_TIMEOUT: Duration = Duration::from_mins(3);
 const CHILD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const RSS_SAMPLE_INTERVAL: Duration = Duration::from_millis(25);
 const MEDIAN_PERCENTILE: usize = 50;
@@ -478,9 +478,8 @@ async fn prove_timed_out_child_cleanup() -> CorpusResult<()> {
         hang: true,
     })
     .await;
-    let failure = match result {
-        Ok(_) => return Err(error("deliberately-hung-child-did-not-time-out")),
-        Err(failure) => failure,
+    let Err(failure) = result else {
+        return Err(error("deliberately-hung-child-did-not-time-out"));
     };
     if !failure.contains("was killed and reaped") {
         return Err(error("timed-out-child-was-not-killed-and-reaped"));
@@ -506,10 +505,8 @@ async fn run_parent() -> CorpusResult<()> {
                 tail(&output.stdout),
                 tail(&output.stderr)
             );
-            return Err(with_cleanup_result(
-                failure,
-                cleanup_child_schemas(&schema_prefix).await,
-            ));
+            let cleanup = cleanup_child_schemas(&schema_prefix).await;
+            return Err(with_cleanup_result(&failure, &cleanup));
         }
         let report = output
             .stdout
@@ -607,28 +604,25 @@ async fn run_worker_child_with_options(
         command.env(CHILD_HANG_ENV, "1");
     }
     let mut child = command.spawn().map_err(|_| error("spawn-worker-child"))?;
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(result) => result.map_err(|_| error("wait-worker-child"))?,
-        Err(_) => {
-            let kill_result = child.start_kill();
-            child
-                .wait()
-                .await
-                .map_err(|_| error("reap-timed-out-worker-child"))?;
-            let disposition = if kill_result.is_ok() {
-                "was killed and reaped"
-            } else {
-                "exited during the kill request and was reaped"
-            };
-            let timeout_failure = format!(
-                "worker child {workers} exceeded {} milliseconds, {disposition}",
-                timeout.as_millis()
-            );
-            return Err(with_cleanup_result(
-                timeout_failure,
-                cleanup_child_schemas(schema_prefix).await,
-            ));
-        }
+    let status = if let Ok(result) = tokio::time::timeout(timeout, child.wait()).await {
+        result.map_err(|_| error("wait-worker-child"))?
+    } else {
+        let kill_result = child.start_kill();
+        child
+            .wait()
+            .await
+            .map_err(|_| error("reap-timed-out-worker-child"))?;
+        let disposition = if kill_result.is_ok() {
+            "was killed and reaped"
+        } else {
+            "exited during the kill request and was reaped"
+        };
+        let timeout_failure = format!(
+            "worker child {workers} exceeded {} milliseconds, {disposition}",
+            timeout.as_millis()
+        );
+        let cleanup = cleanup_child_schemas(schema_prefix).await;
+        return Err(with_cleanup_result(&timeout_failure, &cleanup));
     };
     Ok(WorkerChildOutput {
         status,
@@ -747,7 +741,7 @@ async fn cleanup_child_schemas(prefix: &str) -> CorpusResult<()> {
     result
 }
 
-fn with_cleanup_result(primary: String, cleanup: CorpusResult<()>) -> String {
+fn with_cleanup_result(primary: &str, cleanup: &CorpusResult<()>) -> String {
     match cleanup {
         Ok(()) => format!("{primary}; parent removed all child schemas"),
         Err(cleanup_failure) => {

@@ -23,6 +23,7 @@ struct ImportEmission<'tree, 'text> {
     raw_signature: &'text str,
 }
 
+#[derive(Clone, Copy)]
 struct BindingEmission<'tree, 'text> {
     node: Node<'tree>,
     kind: ImportBindingKind,
@@ -363,8 +364,7 @@ fn emit_import(
             body_node: None,
             declaration_only: false,
             signature,
-            exported: false,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(false, false),
             async_symbol: false,
             static_member: false,
             visibility: None,
@@ -429,10 +429,9 @@ fn visit_container(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: visibility == Some(Visibility::Public),
-        default_export: false,
+        export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
         async_symbol: false,
-        static_member: modifiers.static_symbol
+        static_member: modifiers.contains(ManagedModifier::Static)
             || (builder.context.snapshot.language() == SourceLanguage::Java
                 && matches!(
                     builder.native_owner_kinds.last(),
@@ -494,8 +493,7 @@ fn emit_primary_constructor(
         body_node: None,
         declaration_only: false,
         signature,
-        exported: input.visibility == Some(Visibility::Public),
-        default_export: false,
+        export: crate::SymbolExportFlags::new(input.visibility == Some(Visibility::Public), false),
         async_symbol: false,
         static_member: false,
         visibility: input.visibility,
@@ -661,10 +659,9 @@ fn visit_callable(
         body_node: body,
         declaration_only: body.is_none(),
         signature: managed_signature(builder, return_type, parameters)?,
-        exported: visibility == Some(Visibility::Public),
-        default_export: false,
-        async_symbol: modifiers.async_symbol,
-        static_member: modifiers.static_symbol,
+        export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
+        async_symbol: modifiers.contains(ManagedModifier::Async),
+        static_member: modifiers.contains(ManagedModifier::Static),
         visibility,
     };
     let id = builder.emit_symbol(pending)?;
@@ -774,7 +771,7 @@ fn emit_annotated_parameters(
 ) -> Result<(), ExtractError> {
     for parameter in named_children(parameters) {
         builder.context.ensure_active()?;
-        if !managed_modifiers(builder, parameter)?.decorated {
+        if !managed_modifiers(builder, parameter)?.contains(ManagedModifier::Decorated) {
             continue;
         }
         let Some(name_node) = parameter.child_by_field_name("name") else {
@@ -792,8 +789,7 @@ fn emit_annotated_parameters(
             body_node: None,
             declaration_only: false,
             signature,
-            exported: false,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(false, false),
             async_symbol: false,
             static_member: false,
             visibility: None,
@@ -843,10 +839,9 @@ fn visit_property(
         body_node: body,
         declaration_only,
         signature: managed_typed_name(builder, type_node, &name)?,
-        exported: visibility == Some(Visibility::Public),
-        default_export: false,
+        export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
         async_symbol: false,
-        static_member: modifiers.static_symbol,
+        static_member: modifiers.contains(ManagedModifier::Static),
         visibility,
     };
     let id = builder.emit_symbol(pending)?;
@@ -907,12 +902,11 @@ fn visit_variables(
                 .then(|| managed_typed_name(builder, type_node, &name))
                 .transpose()?
                 .flatten(),
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: input.kind == SymbolKind::Field
-                && (modifiers.static_symbol
-                    || modifiers.const_symbol
+                && (modifiers.contains(ManagedModifier::Static)
+                    || modifiers.contains(ManagedModifier::Const)
                     || (builder.context.snapshot.language() == SourceLanguage::Java
                         && matches!(
                             builder.native_owner_kinds.last(),
@@ -1007,8 +1001,7 @@ fn visit_enum_member(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: true,
         visibility: Some(Visibility::Public),
@@ -1017,27 +1010,39 @@ fn visit_enum_member(
     capture_decorators(builder, node, &id)
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct ManagedModifiers {
-    public: bool,
-    private: bool,
-    protected: bool,
-    internal: bool,
-    static_symbol: bool,
-    async_symbol: bool,
-    const_symbol: bool,
-    decorated: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+enum ManagedModifier {
+    Public = 1 << 0,
+    Private = 1 << 1,
+    Protected = 1 << 2,
+    Internal = 1 << 3,
+    Static = 1 << 4,
+    Async = 1 << 5,
+    Const = 1 << 6,
+    Decorated = 1 << 7,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ManagedModifiers(u16);
+
 impl ManagedModifiers {
+    const fn contains(self, modifier: ManagedModifier) -> bool {
+        self.0 & modifier as u16 != 0
+    }
+
+    const fn insert(&mut self, modifier: ManagedModifier) {
+        self.0 |= modifier as u16;
+    }
+
     const fn explicit_visibility(self) -> Option<Visibility> {
-        if self.public {
+        if self.contains(ManagedModifier::Public) {
             Some(Visibility::Public)
-        } else if self.private {
+        } else if self.contains(ManagedModifier::Private) {
             Some(Visibility::Private)
-        } else if self.protected {
+        } else if self.contains(ManagedModifier::Protected) {
             Some(Visibility::Protected)
-        } else if self.internal {
+        } else if self.contains(ManagedModifier::Internal) {
             Some(Visibility::Internal)
         } else {
             None
@@ -1110,17 +1115,17 @@ fn update_modifier(kind: &str, text: &str, modifiers: &mut ManagedModifiers) {
         kind
     };
     match token {
-        "public" => modifiers.public = true,
-        "private" => modifiers.private = true,
-        "protected" => modifiers.protected = true,
-        "internal" => modifiers.internal = true,
-        "static" => modifiers.static_symbol = true,
-        "async" => modifiers.async_symbol = true,
-        "const" => modifiers.const_symbol = true,
+        "public" => modifiers.insert(ManagedModifier::Public),
+        "private" => modifiers.insert(ManagedModifier::Private),
+        "protected" => modifiers.insert(ManagedModifier::Protected),
+        "internal" => modifiers.insert(ManagedModifier::Internal),
+        "static" => modifiers.insert(ManagedModifier::Static),
+        "async" => modifiers.insert(ManagedModifier::Async),
+        "const" => modifiers.insert(ManagedModifier::Const),
         _ => {}
     }
     if is_decorator(kind) {
-        modifiers.decorated = true;
+        modifiers.insert(ManagedModifier::Decorated);
     }
 }
 

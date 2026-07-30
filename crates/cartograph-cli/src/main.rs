@@ -1,11 +1,14 @@
 #![recursion_limit = "256"]
+//! Native 64-bit command-line and MCP entry point for Cartograph v2.
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("Cartograph v2 supports only 64-bit operating systems.");
 
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     io::{IsTerminal as _, Read as _, Write as _},
     path::{Path, PathBuf},
     process::{self, Command as ProcessCommand, ExitCode, Stdio},
@@ -49,7 +52,10 @@ use install::{
     InstallLocation as AgentInstallLocation, InstallReport, InstallRequest, InstallRequestInput,
     InstallTarget,
 };
-use mcp_handler::{AGENT_PLAYBOOK, CartographMcpHandler, HandlerDefaults};
+use mcp_handler::{
+    AGENT_PLAYBOOK, CartographMcpHandler, HandlerDefaults, HandlerEvidenceDefaults,
+    HandlerExecutionDefaults,
+};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use url::Url;
@@ -81,8 +87,8 @@ const MAXIMUM_IMPORT_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const EXCESSIVE_IMPORT_SOURCE_BYTES_TEXT: &str = "536870913";
 const DEFAULT_IMPORT_OUTPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_IMPORT_WORKING_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const MAINTENANCE_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
-const MAINTENANCE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(4 * 60);
+const MAINTENANCE_LEASE_DURATION: Duration = Duration::from_mins(5);
+const MAINTENANCE_STATEMENT_TIMEOUT: Duration = Duration::from_mins(4);
 const MAXIMUM_TRANSIENT_FILE_BYTES: usize = 10 * 1024 * 1024;
 const KIBIBYTE: usize = 1_024;
 const MEBIBYTE: usize = KIBIBYTE * KIBIBYTE;
@@ -608,7 +614,7 @@ enum Command {
         #[arg(long)]
         no_startup_sync: bool,
     },
-    /// Verify PostgreSQL 18, ParadeDB, pgvector, and code tokenization.
+    /// Verify PostgreSQL 18, `ParadeDB`, pgvector, and code tokenization.
     Doctor {
         /// Existing project root used to discover managed credentials when no URL is exported.
         #[arg(default_value = ".")]
@@ -626,7 +632,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Manage Cartograph's project-owned PostgreSQL + ParadeDB container.
+    /// Manage Cartograph's project-owned PostgreSQL + `ParadeDB` container.
     Db {
         #[command(subcommand)]
         command: DatabaseCommand,
@@ -651,7 +657,7 @@ enum DatabaseCommand {
     Remove(DatabaseDestructiveArguments),
     /// Replace an owned older container with the supported image and rollback on failure.
     Upgrade(DatabaseDestructiveArguments),
-    /// Inspect or transactionally rebuild the derived ParadeDB BM25 index.
+    /// Inspect or transactionally rebuild the derived `ParadeDB` BM25 index.
     DerivedIndex(DatabaseDerivedIndexArguments),
     /// Validate or resume a PostgreSQL-only v1.1.33 schema import.
     ImportV1(V1ImportArguments),
@@ -1025,13 +1031,17 @@ struct AgentInstallArguments {
     location: InstallLocation,
     project_path: PathBuf,
     managed_database_port: Option<u16>,
-    yes: bool,
-    permissions: bool,
-    hooks: bool,
+    behavior: AgentInstallBehavior,
     command: Option<String>,
     print_config: Option<String>,
     format: OutputFormat,
     remove: bool,
+}
+
+struct AgentInstallBehavior {
+    yes: bool,
+    permissions: bool,
+    hooks: bool,
 }
 
 struct McpServeArguments {
@@ -1039,14 +1049,15 @@ struct McpServeArguments {
     project_path: PathBuf,
     managed_database_port: Option<u16>,
     profile: McpProfile,
-    daemon: bool,
-    no_daemon: bool,
-    daemon_child: bool,
     no_write_tools: bool,
-    allow_stale_default: bool,
-    low_tokens_default: bool,
+    defaults: McpServeDefaults,
     disable_tool: Vec<String>,
     no_startup_sync: bool,
+}
+
+struct McpServeDefaults {
+    allow_stale: bool,
+    low_tokens: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1497,9 +1508,11 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
                 location,
                 project_path,
                 managed_database_port,
-                yes,
-                permissions: !no_permissions,
-                hooks: !no_hooks,
+                behavior: AgentInstallBehavior {
+                    yes,
+                    permissions: !no_permissions,
+                    hooks: !no_hooks,
+                },
                 command,
                 print_config,
                 format,
@@ -1518,9 +1531,11 @@ async fn run_operator_command(command: Command) -> Result<ExitCode, String> {
                 location,
                 project_path,
                 managed_database_port: None,
-                yes: true,
-                permissions: false,
-                hooks: false,
+                behavior: AgentInstallBehavior {
+                    yes: true,
+                    permissions: false,
+                    hooks: false,
+                },
                 command: None,
                 print_config: None,
                 format,
@@ -1539,9 +1554,9 @@ async fn run_runtime_operator_command(command: Command) -> Result<ExitCode, Stri
             project_path,
             managed_database_port,
             profile,
-            daemon,
-            no_daemon,
-            daemon_child,
+            daemon: _,
+            no_daemon: _,
+            daemon_child: _,
             no_write_tools,
             allow_stale_default,
             low_tokens_default,
@@ -1553,12 +1568,11 @@ async fn run_runtime_operator_command(command: Command) -> Result<ExitCode, Stri
                 project_path,
                 managed_database_port,
                 profile,
-                daemon,
-                no_daemon,
-                daemon_child,
                 no_write_tools,
-                allow_stale_default,
-                low_tokens_default,
+                defaults: McpServeDefaults {
+                    allow_stale: allow_stale_default,
+                    low_tokens: low_tokens_default,
+                },
                 disable_tool,
                 no_startup_sync,
             })
@@ -1643,7 +1657,7 @@ async fn run_auxiliary_operator_command(command: Command) -> Result<ExitCode, St
             command,
             remove,
             dry_run,
-        } => run_install_hooks_command(git_hooks::InstallHooksRequest {
+        } => run_install_hooks_command(&git_hooks::InstallHooksRequest {
             project_path: path,
             hooks,
             command,
@@ -1656,7 +1670,7 @@ async fn run_auxiliary_operator_command(command: Command) -> Result<ExitCode, St
             disable_tool,
             top,
             json,
-        } => run_mcp_budget_command(McpBudgetCommandInput {
+        } => run_mcp_budget_command(&McpBudgetCommandInput {
             profile,
             no_write_tools,
             disable_tool,
@@ -1755,18 +1769,18 @@ async fn run_similar_command(input: SimilarCommandInput) -> Result<ExitCode, Str
     generated_cli::run_direct("cartograph_graph", input.project_path, arguments).await
 }
 
-fn run_install_hooks_command(request: git_hooks::InstallHooksRequest) -> Result<ExitCode, String> {
+fn run_install_hooks_command(request: &git_hooks::InstallHooksRequest) -> Result<ExitCode, String> {
     let output = git_hooks::run_install_hooks(request)?;
     print!("{output}");
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_mcp_budget_command(input: McpBudgetCommandInput) -> Result<ExitCode, String> {
+fn run_mcp_budget_command(input: &McpBudgetCommandInput) -> Result<ExitCode, String> {
     let definitions =
         mcp_handler::tool_definitions().map_err(|_| "MCP tool contracts are invalid".to_owned())?;
     let registered = definitions
         .iter()
-        .map(|definition| definition.name())
+        .map(cartograph_mcp::ToolDefinition::name)
         .collect::<std::collections::BTreeSet<_>>();
     if let Some(unknown) = input
         .disable_tool
@@ -2477,7 +2491,7 @@ struct AgentInstallContext {
 
 impl AgentInstallContext {
     fn request(&self, target: InstallTarget) -> Result<InstallRequest, String> {
-        let request = InstallRequest::new(InstallRequestInput {
+        let request = InstallRequest::new(&InstallRequestInput {
             project_root: &self.project_path,
             executable: &self.executable,
             target,
@@ -2557,7 +2571,7 @@ impl AgentInstallContext {
             .command
             .clone()
             .or_else(|| self.executable.to_str().map(str::to_owned));
-        match git_hooks::run_install_hooks(git_hooks::InstallHooksRequest {
+        match git_hooks::run_install_hooks(&git_hooks::InstallHooksRequest {
             project_path: self.project_path.clone(),
             hooks: None,
             command: hook_command,
@@ -2565,11 +2579,10 @@ impl AgentInstallContext {
             dry_run: false,
         }) {
             Ok(output) if matches!(self.format, OutputFormat::Text) => print!("{output}"),
-            Ok(_) => {}
             Err(error) if matches!(self.format, OutputFormat::Text) => {
                 eprintln!("Git hooks were not installed: {error}");
             }
-            Err(_) => {}
+            Ok(_) | Err(_) => {}
         }
     }
 }
@@ -2580,9 +2593,12 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
         location,
         project_path,
         managed_database_port,
-        yes,
-        permissions,
-        hooks,
+        behavior:
+            AgentInstallBehavior {
+                yes,
+                permissions,
+                hooks,
+            },
         command,
         print_config,
         format,
@@ -2650,7 +2666,7 @@ fn resolve_install_targets(
                 if !target.supports(context.location) {
                     continue;
                 }
-                let request = InstallRequest::new(InstallRequestInput {
+                let request = InstallRequest::new(&InstallRequestInput {
                     project_root: &context.project_path,
                     executable: &context.executable,
                     target,
@@ -2775,12 +2791,12 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
         project_path,
         managed_database_port,
         profile,
-        daemon: _daemon,
-        no_daemon: _no_daemon,
-        daemon_child: _daemon_child,
         no_write_tools,
-        allow_stale_default,
-        low_tokens_default,
+        defaults:
+            McpServeDefaults {
+                allow_stale: allow_stale_default,
+                low_tokens: low_tokens_default,
+            },
         disable_tool,
         no_startup_sync,
     } = arguments;
@@ -2808,10 +2824,14 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
         .map_err(|error| error.to_string())?
         .configured(
             HandlerDefaults {
-                allow_stale: allow_stale_default,
-                low_tokens: low_tokens_default,
-                trace_calls: !read_only_mode,
-                read_only: read_only_mode,
+                evidence: HandlerEvidenceDefaults {
+                    allow_stale: allow_stale_default,
+                    low_tokens: low_tokens_default,
+                },
+                execution: HandlerExecutionDefaults {
+                    trace_calls: !read_only_mode,
+                    read_only: read_only_mode,
+                },
             },
             managed_database_port,
         );
@@ -2822,7 +2842,7 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
         mcp_handler::tool_definitions().map_err(|_| "MCP tool contracts are invalid".to_owned())?;
     let registered = definitions
         .iter()
-        .map(|definition| definition.name())
+        .map(cartograph_mcp::ToolDefinition::name)
         .collect::<std::collections::BTreeSet<_>>();
     if let Some(unknown) = disable_tool
         .iter()
@@ -2936,15 +2956,14 @@ fn max_file_size_error(raw: &str) -> String {
 }
 
 fn git_worktree_dirty(project_path: &PathBuf) -> bool {
-    let mut child = match ProcessCommand::new("git")
+    let Ok(mut child) = ProcessCommand::new("git")
         .args(["status", "--porcelain=v1", "-z", "--untracked-files=normal"])
         .current_dir(project_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return false,
+    else {
+        return false;
     };
     let Some(mut stdout) = child.stdout.take() else {
         let _ = child.kill();
@@ -2954,18 +2973,12 @@ fn git_worktree_dirty(project_path: &PathBuf) -> bool {
     let mut byte = [0_u8; 1];
     let read = stdout.read(&mut byte);
     drop(stdout);
-    match read {
-        Ok(0) => child.wait().map_or(true, |status| !status.success()),
-        Ok(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            true
-        }
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            true
-        }
+    if let Ok(0) = read {
+        child.wait().map_or(true, |status| !status.success())
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+        true
     }
 }
 
@@ -3565,7 +3578,7 @@ async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<Exi
     let database = CartographDatabase::new(pool, settings.schema().clone());
     if let Err(error) = database.verify_current_schema().await {
         database.close().await;
-        return Err(current_schema_guidance(error));
+        return Err(current_schema_guidance(&error));
     }
     let result = if arguments.apply {
         let headroom = match headroom_authority {
@@ -3628,12 +3641,12 @@ async fn open_current_read_only_runtime(project_path: &PathBuf) -> Result<Projec
         .map_err(|error| error.to_string())?;
     if let Err(error) = runtime.database().verify_current_schema().await {
         runtime.close().await;
-        return Err(current_schema_guidance(error));
+        return Err(current_schema_guidance(&error));
     }
     Ok(runtime)
 }
 
-fn current_schema_guidance(error: cartograph_db::MigrationError) -> String {
+fn current_schema_guidance(error: &cartograph_db::MigrationError) -> String {
     format!(
         "{error}; run `cartograph db start --project-path .` or the approved external migration workflow before retrying"
     )
@@ -3703,9 +3716,9 @@ fn render_text_report(report: &CapabilityReport) -> String {
             CheckStatus::Pass => "✓",
             CheckStatus::Fail => "✗",
         };
-        output.push_str(&format!("\n{marker} {} — {}\n", check.id, check.message));
+        let _ = write!(output, "\n{marker} {} — {}\n", check.id, check.message);
         if let Some(remediation) = check.remediation {
-            output.push_str(&format!("  Fix: {remediation}\n"));
+            let _ = writeln!(output, "  Fix: {remediation}");
         }
     }
     output
@@ -3886,7 +3899,7 @@ async fn build_doctor_report_with_settings(
 
     check_native_executable(&mut checks);
     if !input.skip_project_checks {
-        check_or_fix_project_state(ProjectStateCheckInput {
+        check_or_fix_project_state(&mut ProjectStateCheckInput {
             project_path: &project_path,
             fix: input.fix,
             fixes: &mut fixes_applied,
@@ -3904,9 +3917,7 @@ async fn build_doctor_report_with_settings(
         apply_llm_doctor_fix(&project_path, &mut fixes_applied, &mut checks).await;
     }
 
-    if !external_database {
-        check_managed_database(&project_path, &mut checks).await;
-    } else {
+    if external_database {
         checks.push(doctor_pass(
             "database-source",
             if input.explicit_database_settings.is_some() {
@@ -3915,6 +3926,8 @@ async fn build_doctor_report_with_settings(
                 "Using validated external PostgreSQL settings from the process environment."
             },
         ));
+    } else {
+        check_managed_database(&project_path, &mut checks).await;
     }
 
     let (database, settings) =
@@ -3969,7 +3982,7 @@ fn native_executable_path_is_safe(path: &Path) -> bool {
         .is_some_and(|metadata| metadata.file_type().is_file())
 }
 
-fn check_or_fix_project_state(input: ProjectStateCheckInput<'_>) -> Result<(), String> {
+fn check_or_fix_project_state(input: &mut ProjectStateCheckInput<'_>) -> Result<(), String> {
     let state = input.project_path.join(".cartograph");
     match fs::symlink_metadata(&state) {
         Ok(metadata) if metadata.file_type().is_dir() => input.checks.push(doctor_pass(
@@ -4006,7 +4019,7 @@ fn check_or_fix_project_state(input: ProjectStateCheckInput<'_>) -> Result<(), S
                 "project-state",
                 "The project is not initialized yet.",
                 "Run `cartograph doctor --fix` or `cartograph db start`.".to_owned(),
-            ))
+            ));
         }
         Err(_) => input.checks.push(doctor_fail(
             "project-state",
@@ -4337,7 +4350,7 @@ fn render_doctor_report(report: &DoctorReport) -> String {
     if !report.fixes_applied.is_empty() {
         output.push_str("\nRepairs applied:\n");
         for fix in &report.fixes_applied {
-            output.push_str(&format!("- {fix}\n"));
+            let _ = writeln!(output, "- {fix}");
         }
     }
     for check in &report.checks {
@@ -4346,9 +4359,9 @@ fn render_doctor_report(report: &DoctorReport) -> String {
             DoctorStatus::Warn => "⚠",
             DoctorStatus::Fail => "✗",
         };
-        output.push_str(&format!("\n{marker} {} — {}\n", check.id, check.message));
+        let _ = write!(output, "\n{marker} {} — {}\n", check.id, check.message);
         if let Some(remediation) = &check.remediation {
-            output.push_str(&format!("  Fix: {remediation}\n"));
+            let _ = writeln!(output, "  Fix: {remediation}");
         }
     }
     output.push_str(if report.ready {
@@ -4364,63 +4377,66 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    fn walk_cli_contract(
+        command: &clap::Command,
+        parent: &[String],
+        rows: &mut BTreeMap<String, Value>,
+    ) {
+        let mut path = parent.to_vec();
+        path.push(command.get_name().to_owned());
+        let path_key = path.join(" ");
+        let mut aliases = command
+            .get_all_aliases()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        aliases.sort();
+        let mut options = command
+            .get_arguments()
+            .flat_map(|argument| {
+                argument
+                    .get_long()
+                    .into_iter()
+                    .chain(argument.get_all_aliases().unwrap_or_default())
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        options.sort();
+        let mut positionals = command
+            .get_positionals()
+            .map(|argument| {
+                let id = match argument.get_id().as_str() {
+                    "__compat_ask_path" | "project_path" => "path",
+                    "__compat_files_target" => "target",
+                    value => value,
+                };
+                (argument.get_index().unwrap_or(usize::MAX), id.to_owned())
+            })
+            .collect::<Vec<_>>();
+        positionals.sort_by_key(|(index, _)| *index);
+        rows.insert(
+            path_key.clone(),
+            serde_json::json!({
+                "path": path_key,
+                "aliases": aliases,
+                "options": options,
+                "positionals": positionals
+                    .into_iter()
+                    .map(|(_, positional)| positional)
+                    .collect::<Vec<_>>(),
+            }),
+        );
+        for child in command.get_subcommands() {
+            walk_cli_contract(child, &path, rows);
+        }
+    }
+
     #[test]
     fn v1_1_33_cli_tree_remains_available_except_browser_viewer() {
-        fn walk(command: &clap::Command, parent: &[String], rows: &mut BTreeMap<String, Value>) {
-            let mut path = parent.to_vec();
-            path.push(command.get_name().to_owned());
-            let path_key = path.join(" ");
-            let mut aliases = command
-                .get_all_aliases()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            aliases.sort();
-            let mut options = command
-                .get_arguments()
-                .flat_map(|argument| {
-                    argument
-                        .get_long()
-                        .into_iter()
-                        .chain(argument.get_all_aliases().unwrap_or_default())
-                        .map(str::to_owned)
-                })
-                .collect::<Vec<_>>();
-            options.sort();
-            let mut positionals = command
-                .get_positionals()
-                .map(|argument| {
-                    let id = match argument.get_id().as_str() {
-                        "__compat_ask_path" => "path",
-                        "__compat_files_target" => "target",
-                        "project_path" => "path",
-                        value => value,
-                    };
-                    (argument.get_index().unwrap_or(usize::MAX), id.to_owned())
-                })
-                .collect::<Vec<_>>();
-            positionals.sort_by_key(|(index, _)| *index);
-            rows.insert(
-                path_key.clone(),
-                serde_json::json!({
-                    "path": path_key,
-                    "aliases": aliases,
-                    "options": options,
-                    "positionals": positionals
-                        .into_iter()
-                        .map(|(_, positional)| positional)
-                        .collect::<Vec<_>>(),
-                }),
-            );
-            for child in command.get_subcommands() {
-                walk(child, &path, rows);
-            }
-        }
-
         let mut command = generated_cli::command()
             .unwrap_or_else(|error| panic!("generated CLI command failed: {error}"));
         command.build();
         let mut current = BTreeMap::new();
-        walk(&command, &[], &mut current);
+        walk_cli_contract(&command, &[], &mut current);
         let tool_contracts = mcp_handler::tool_definitions()
             .unwrap_or_else(|error| panic!("MCP definitions failed: {error}"))
             .into_iter()
@@ -4700,9 +4716,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not create managed port fixture: {error}"));
         let result =
             resolve_database_settings_with_port(&directory.path().to_path_buf(), Some(55_435));
-        let error = match result {
-            Ok(_) => panic!("missing managed credentials unexpectedly resolved"),
-            Err(error) => error,
+        let Err(error) = result else {
+            panic!("missing managed credentials unexpectedly resolved");
         };
 
         assert!(error.contains("cartograph db start --project-path <path>"));
@@ -4741,9 +4756,11 @@ mod tests {
             location: InstallLocation::Local,
             project_path: directory.path().to_path_buf(),
             managed_database_port: Some(55_435),
-            yes: true,
-            permissions: false,
-            hooks: false,
+            behavior: AgentInstallBehavior {
+                yes: true,
+                permissions: false,
+                hooks: false,
+            },
             command: None,
             print_config: Some("codex".to_owned()),
             format: OutputFormat::Json,
@@ -4826,7 +4843,10 @@ mod tests {
         ])
         .unwrap_or_else(|error| panic!("graph similar CLI did not parse: {error}"));
         assert!(matches!(graph_similar, generated_cli::ParsedCli::Tool(_)));
+    }
 
+    #[test]
+    fn cli_parses_file_entry_point_and_range_commands() {
         let files = generated_cli::parse_from([
             "cartograph",
             "files",
@@ -4924,7 +4944,10 @@ mod tests {
                 command: llm_commands::LlmCommand::Install(_)
             }
         ));
+    }
 
+    #[test]
+    fn cli_parses_database_lifecycle_and_maintenance_commands() {
         let database = Cli::try_parse_from(["cartograph", "db", "start"])
             .unwrap_or_else(|error| panic!("database start CLI did not parse: {error}"));
         assert!(matches!(
@@ -5021,7 +5044,10 @@ mod tests {
             ])
             .is_err()
         );
+    }
 
+    #[test]
+    fn cli_parses_credential_migration_and_backend_cleanup_commands() {
         let credential_migration = Cli::try_parse_from([
             "cartograph",
             "llm",

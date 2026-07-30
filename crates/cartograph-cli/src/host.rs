@@ -107,11 +107,10 @@ struct DiscoveryDirectoryInput<'input> {
 }
 
 fn discovery_children(
-    input: DiscoveryDirectoryInput<'_>,
+    input: &mut DiscoveryDirectoryInput<'_>,
 ) -> Result<Vec<PathBuf>, HostInspectionError> {
-    let entries = match fs::read_dir(input.directory) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(Vec::new()),
+    let Ok(entries) = fs::read_dir(input.directory) else {
+        return Ok(Vec::new());
     };
     let mut children = Vec::new();
     for entry in entries.flatten() {
@@ -198,7 +197,7 @@ fn discover_projects_blocking(
             break;
         }
         visited = visited.saturating_add(1);
-        let children = discovery_children(DiscoveryDirectoryInput {
+        let children = discovery_children(&mut DiscoveryDirectoryInput {
             directory: &directory,
             depth,
             max_depth,
@@ -260,6 +259,7 @@ pub(crate) struct InstallTargetDetection {
     config_path: &'static str,
 }
 
+#[derive(Clone, Copy)]
 struct HostConfigTarget<'path> {
     target: &'static str,
     location: &'static str,
@@ -297,12 +297,12 @@ pub(crate) fn detect_install_targets(
         location,
         DiagnosticLocation::Local | DiagnosticLocation::Both
     ) {
-        detections.push(detect_toml(HostConfigTarget::local(
+        detections.push(detect_toml(&HostConfigTarget::local(
             "codex",
             &project_root.join(".codex/config.toml"),
             ".codex/config.toml",
         )));
-        detections.push(detect_json(JsonHostConfigTarget {
+        detections.push(detect_json(&JsonHostConfigTarget {
             config: HostConfigTarget::local(
                 "cursor",
                 &project_root.join(".cursor/mcp.json"),
@@ -312,7 +312,7 @@ pub(crate) fn detect_install_targets(
             project_root,
         }));
         if let Some(home) = home.as_ref() {
-            detections.push(detect_json(JsonHostConfigTarget {
+            detections.push(detect_json(&JsonHostConfigTarget {
                 config: HostConfigTarget::local(
                     "claude",
                     &home.join(".claude.json"),
@@ -328,12 +328,12 @@ pub(crate) fn detect_install_targets(
         DiagnosticLocation::Global | DiagnosticLocation::Both
     ) && let Some(home) = home.as_ref()
     {
-        detections.push(detect_toml(HostConfigTarget::global(
+        detections.push(detect_toml(&HostConfigTarget::global(
             "codex",
             &home.join(".codex/config.toml"),
             "~/.codex/config.toml",
         )));
-        detections.push(detect_json(JsonHostConfigTarget {
+        detections.push(detect_json(&JsonHostConfigTarget {
             config: HostConfigTarget::global(
                 "cursor",
                 &home.join(".cursor/mcp.json"),
@@ -342,7 +342,7 @@ pub(crate) fn detect_install_targets(
             mode: JsonDetection::TopLevel,
             project_root,
         }));
-        detections.push(detect_json(JsonHostConfigTarget {
+        detections.push(detect_json(&JsonHostConfigTarget {
             config: HostConfigTarget::global(
                 "claude",
                 &home.join(".claude.json"),
@@ -371,13 +371,13 @@ fn bounded_text(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
-fn detect_toml(config: HostConfigTarget<'_>) -> InstallTargetDetection {
+fn detect_toml(config: &HostConfigTarget<'_>) -> InstallTargetDetection {
     let HostConfigTarget {
         target,
         location,
         path,
         config_path,
-    } = config;
+    } = *config;
     let text = bounded_text(path);
     let parsed = text
         .as_deref()
@@ -403,13 +403,14 @@ enum JsonDetection {
     ClaudeProject,
 }
 
+#[derive(Clone, Copy)]
 struct JsonHostConfigTarget<'path> {
     config: HostConfigTarget<'path>,
     mode: JsonDetection,
     project_root: &'path Path,
 }
 
-fn detect_json(config: JsonHostConfigTarget<'_>) -> InstallTargetDetection {
+fn detect_json(config: &JsonHostConfigTarget<'_>) -> InstallTargetDetection {
     let JsonHostConfigTarget {
         config:
             HostConfigTarget {
@@ -420,7 +421,7 @@ fn detect_json(config: JsonHostConfigTarget<'_>) -> InstallTargetDetection {
             },
         mode,
         project_root,
-    } = config;
+    } = *config;
     let text = bounded_text(path);
     let parsed = text
         .as_deref()
@@ -535,7 +536,7 @@ mod tests {
     fn host_config_detection_distinguishes_missing_invalid_and_configured_targets() {
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let codex = root.path().join("config.toml");
-        let missing = detect_toml(HostConfigTarget::local(
+        let missing = detect_toml(&HostConfigTarget::local(
             "codex",
             &codex,
             ".codex/config.toml",
@@ -546,7 +547,7 @@ mod tests {
 
         fs::write(&codex, "not = [valid")
             .unwrap_or_else(|error| panic!("invalid TOML fixture failed: {error}"));
-        let invalid = detect_toml(HostConfigTarget::local(
+        let invalid = detect_toml(&HostConfigTarget::local(
             "codex",
             &codex,
             ".codex/config.toml",
@@ -560,7 +561,7 @@ mod tests {
             "[mcp_servers.cartograph]\ncommand = '/usr/local/bin/cartograph'\n",
         )
         .unwrap_or_else(|error| panic!("valid TOML fixture failed: {error}"));
-        let configured = detect_toml(HostConfigTarget::local(
+        let configured = detect_toml(&HostConfigTarget::local(
             "codex",
             &codex,
             ".codex/config.toml",
@@ -575,7 +576,7 @@ mod tests {
             br#"{"mcpServers":{"cartograph":{"command":"cartograph"}}}"#,
         )
         .unwrap_or_else(|error| panic!("cursor fixture failed: {error}"));
-        let cursor_detection = detect_json(JsonHostConfigTarget {
+        let cursor_detection = detect_json(&JsonHostConfigTarget {
             config: HostConfigTarget::local("cursor", &cursor, ".cursor/mcp.json"),
             mode: JsonDetection::TopLevel,
             project_root: root.path(),
@@ -598,7 +599,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("Claude fixture encode failed: {error}")),
         )
         .unwrap_or_else(|error| panic!("Claude fixture failed: {error}"));
-        let claude_detection = detect_json(JsonHostConfigTarget {
+        let claude_detection = detect_json(&JsonHostConfigTarget {
             config: HostConfigTarget::local("claude", &claude, "~/.claude.json (project entry)"),
             mode: JsonDetection::ClaudeProject,
             project_root: root.path(),

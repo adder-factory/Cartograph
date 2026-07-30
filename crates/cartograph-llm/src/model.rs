@@ -142,7 +142,10 @@ pub enum EmbeddingError {
     IncompleteConfiguration,
     /// One named configuration field is malformed or outside hard bounds.
     #[error("Cartograph embedding configuration field {field} is invalid")]
-    InvalidConfiguration { field: &'static str },
+    InvalidConfiguration {
+        /// Configuration field that violated its documented bound or format.
+        field: &'static str,
+    },
     /// Input count or UTF-8 bytes exceeded the configured admission policy.
     #[error("Cartograph embedding request exceeds configured bounds")]
     RequestLimit,

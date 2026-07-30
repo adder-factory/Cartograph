@@ -22,6 +22,10 @@ pub struct FileDriftOptions {
 
 impl FileDriftOptions {
     /// Compare exact current file mtimes against a caller-supplied threshold.
+    /// # Errors
+    ///
+    /// Returns [`FileDriftError::InvalidOptions`] when the timestamp exceeds
+    /// JavaScript Date's exact accepted millisecond range.
     pub const fn since(threshold_unix_ms: u64) -> Result<Self, FileDriftError> {
         if threshold_unix_ms > MAXIMUM_UNIX_MILLISECONDS {
             return Err(FileDriftError::InvalidOptions);
@@ -33,6 +37,10 @@ impl FileDriftOptions {
     }
 
     /// Override the retained rows per added/modified/deleted bucket.
+    /// # Errors
+    ///
+    /// Returns [`FileDriftError::InvalidOptions`] when `limit` is zero or
+    /// exceeds the retained rows allowed for each drift bucket.
     pub const fn with_bucket_limit(mut self, limit: u16) -> Result<Self, FileDriftError> {
         if limit == 0 || limit > MAXIMUM_BUCKET_LIMIT {
             return Err(FileDriftError::InvalidOptions);
@@ -55,7 +63,9 @@ impl Default for FileDriftOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileDriftBasis {
+    /// Represents the indexed content hash file drift basis.
     IndexedContentHash,
+    /// Represents the modification time file drift basis.
     ModificationTime,
 }
 
@@ -84,16 +94,22 @@ pub struct FileDriftReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum FileDriftError {
     #[error("file drift options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("file drift requires a published project generation")]
+    /// No current indexed generation is available.
     NotIndexed,
     #[error("file drift database evidence is unavailable")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
     #[error("file drift source evidence is unavailable")]
+    /// Required source evidence could not be read safely.
     SourceUnavailable,
     #[error("the current generation changed during file drift analysis")]
+    /// The current generation changed before the operation completed.
     GenerationChanged,
     #[error("file drift analysis was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
 }
 
@@ -101,6 +117,11 @@ impl ProjectRuntime {
     /// Compare supported live source with the current PostgreSQL manifest.
     /// Without a threshold, modified means an exact digest mismatch; with a
     /// threshold it means only that the live mtime is newer than that instant.
+    /// # Errors
+    ///
+    /// Returns an error when no current generation exists, database
+    /// fingerprints or live source cannot be read safely, cancellation wins,
+    /// or the current generation changes before the comparison is fenced.
     pub async fn file_drift(
         &self,
         options: FileDriftOptions,
@@ -117,7 +138,7 @@ impl ProjectRuntime {
             .database()
             .current_file_fingerprints(&before.project_id)
             .await
-            .map_err(map_storage_error)?;
+            .map_err(|error| map_storage_error(&error))?;
         let permit = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(FileDriftError::Cancelled),
@@ -310,7 +331,7 @@ fn modification_milliseconds(metadata: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn map_storage_error(error: StorageError) -> FileDriftError {
+fn map_storage_error(error: &StorageError) -> FileDriftError {
     match error {
         StorageError::CurrentGenerationChanged => FileDriftError::GenerationChanged,
         _ => FileDriftError::StorageUnavailable,

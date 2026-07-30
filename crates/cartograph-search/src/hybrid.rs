@@ -2,6 +2,7 @@ use std::{cmp::Ordering, collections::BTreeMap, collections::BTreeSet};
 
 use cartograph_domain::{
     DocumentId, DocumentKind, FileId, GenerationId, NormalizedPath, SourceLanguage, SymbolId,
+    SymbolKind,
 };
 use serde::Serialize;
 
@@ -22,6 +23,17 @@ pub enum SearchMode {
     Hybrid,
     /// Use hybrid retrieval when semantic evidence is ready, otherwise degrade explicitly.
     Auto,
+}
+
+/// Query-aware ordering policy applied after channel scores are retained unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalPreference {
+    /// Preserve pure reciprocal-rank ordering.
+    #[default]
+    Neutral,
+    /// Prefer production declarations over parameters, imports, fixtures, benches, and tests.
+    ProductionDefinitions,
 }
 
 /// Caller-owned assessment of whether semantic evidence is safe to query.
@@ -104,16 +116,28 @@ impl RerankReport {
     }
 
     /// Record a configured model that had no semantic candidates.
+    /// # Errors
+    ///
+    /// Returns an error if `model` is empty, contains a NUL byte, or exceeds
+    /// the bounded model-identifier length.
     pub fn skipped_no_candidates(model: impl Into<String>) -> Result<Self, RetrievalError> {
         Self::for_model(RerankState::SkippedNoCandidates, model, 0)
     }
 
     /// Record a configured model that received no non-empty bounded text.
+    /// # Errors
+    ///
+    /// Returns an error if `model` is empty, contains a NUL byte, or exceeds
+    /// the bounded model-identifier length.
     pub fn skipped_no_text(model: impl Into<String>) -> Result<Self, RetrievalError> {
         Self::for_model(RerankState::SkippedNoText, model, 0)
     }
 
     /// Record one successful complete rerank response.
+    /// # Errors
+    ///
+    /// Returns an error if `model` is invalid or `reranked_documents` is zero
+    /// or exceeds the maximum fusion window.
     pub fn applied(
         model: impl Into<String>,
         reranked_documents: u16,
@@ -125,6 +149,10 @@ impl RerankReport {
     }
 
     /// Record a configured or malformed tier that could not be used.
+    /// # Errors
+    ///
+    /// Returns an error if the optional model identifier is empty, contains a
+    /// NUL byte, or exceeds its byte bound.
     pub fn unavailable(model: Option<String>) -> Result<Self, RetrievalError> {
         if model.as_deref().is_some_and(invalid_rerank_model) {
             return Err(invalid("rerank_model"));
@@ -236,10 +264,15 @@ pub struct RetrievalDocument {
 
 /// Stable document identity shared by lexical and semantic retrieval channels.
 pub struct RetrievalDocumentInput {
+    /// Stable document ID for this record.
     pub document_id: DocumentId,
+    /// Stable generation ID for this record.
     pub generation_id: GenerationId,
+    /// Project-relative path for this record.
     pub path: NormalizedPath,
+    /// Language for this record.
     pub language: SourceLanguage,
+    /// Document kind for this record.
     pub document_kind: DocumentKind,
 }
 
@@ -252,6 +285,8 @@ struct RetrievalDocumentDetails {
     path: NormalizedPath,
     language: SourceLanguage,
     document_kind: DocumentKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_kind: Option<SymbolKind>,
     qualified_name: String,
 }
 
@@ -275,6 +310,7 @@ impl RetrievalDocument {
                 path,
                 language,
                 document_kind,
+                symbol_kind: None,
                 qualified_name: String::new(),
             },
         }
@@ -294,7 +330,18 @@ impl RetrievalDocument {
         self
     }
 
+    /// Attach the exact extracted symbol category used by result preference policy.
+    #[must_use]
+    pub const fn with_symbol_kind(mut self, symbol_kind: SymbolKind) -> Self {
+        self.details.symbol_kind = Some(symbol_kind);
+        self
+    }
+
     /// Attach a bounded qualified name without exposing source or query text.
+    /// # Errors
+    ///
+    /// Returns an error if `qualified_name` contains a NUL byte or exceeds the
+    /// context-anchor byte limit.
     pub fn with_qualified_name(
         mut self,
         qualified_name: impl Into<String>,
@@ -337,6 +384,12 @@ impl RetrievalDocument {
         self.details.document_kind
     }
 
+    /// Extracted symbol category when the search document is symbol-backed.
+    #[must_use]
+    pub const fn symbol_kind(&self) -> Option<SymbolKind> {
+        self.details.symbol_kind
+    }
+
     /// Optional current-generation file identity.
     #[must_use]
     pub const fn file_id(&self) -> Option<&FileId> {
@@ -366,13 +419,17 @@ pub struct ChannelCandidate {
 }
 
 impl ChannelCandidate {
-    /// Create a channel candidate while rejecting zero rank and non-finite scores.
+    /// Create a channel candidate with a rank inside the bounded fusion window.
+    /// # Errors
+    ///
+    /// Returns an error if `rank` is outside the one-based fusion window or
+    /// `raw_score` is not finite.
     pub fn new(
         document: RetrievalDocument,
         rank: u16,
         raw_score: f64,
     ) -> Result<Self, RetrievalError> {
-        if rank == 0 {
+        if rank == 0 || rank > MAXIMUM_FUSED_RESULTS {
             return Err(invalid("channel_rank"));
         }
         if !raw_score.is_finite() {
@@ -430,6 +487,10 @@ pub struct ChannelResults {
 
 impl ChannelResults {
     /// Validate unique ranks/documents and normalize candidate order.
+    /// # Errors
+    ///
+    /// Returns an error if candidates exceed the channel bound, contain a
+    /// duplicate document/rank, or belong to an incompatible channel.
     pub fn new(
         channel: RetrievalChannel,
         mut candidates: Vec<ChannelCandidate>,
@@ -489,6 +550,10 @@ impl RetrievalChannels {
     }
 
     /// Attach one completed channel; duplicate completion fails closed.
+    /// # Errors
+    ///
+    /// Returns an error if a result for the same lexical or semantic channel
+    /// has already been attached.
     pub fn with_channel(mut self, results: ChannelResults) -> Result<Self, RetrievalError> {
         let target = match results.channel {
             RetrievalChannel::Lexical => &mut self.lexical,
@@ -533,11 +598,16 @@ pub struct HybridSearchInput {
     mode: SearchMode,
     semantic_readiness: SemanticReadiness,
     result_limit: u16,
+    preference: RetrievalPreference,
     channels: RetrievalChannels,
 }
 
 impl HybridSearchInput {
     /// Create a bounded fusion request before independently executing channels.
+    /// # Errors
+    ///
+    /// Returns an error if `result_limit` is zero or exceeds the maximum fused
+    /// result window.
     pub const fn new(
         mode: SearchMode,
         semantic_readiness: SemanticReadiness,
@@ -550,11 +620,16 @@ impl HybridSearchInput {
             mode,
             semantic_readiness,
             result_limit,
+            preference: RetrievalPreference::Neutral,
             channels: RetrievalChannels::new(),
         })
     }
 
     /// Attach one independently completed channel; duplicate channels fail closed.
+    /// # Errors
+    ///
+    /// Returns an error if a result for the same lexical or semantic channel
+    /// has already been attached.
     pub fn with_channel(mut self, results: ChannelResults) -> Result<Self, RetrievalError> {
         self.channels = self.channels.with_channel(results)?;
         Ok(self)
@@ -564,6 +639,13 @@ impl HybridSearchInput {
     #[must_use]
     pub fn with_channels(mut self, channels: RetrievalChannels) -> Self {
         self.channels = channels;
+        self
+    }
+
+    /// Select a deterministic result-order preference without changing channel scores.
+    #[must_use]
+    pub const fn with_preference(mut self, preference: RetrievalPreference) -> Self {
+        self.preference = preference;
         self
     }
 }
@@ -658,6 +740,7 @@ struct HybridSearchDetails {
     requested_mode: SearchMode,
     execution: RetrievalExecution,
     semantic_readiness: SemanticReadiness,
+    preference: RetrievalPreference,
     rerank: RerankReport,
     fallback: Option<RetrievalFallback>,
     abstention: Option<RetrievalAbstention>,
@@ -688,6 +771,12 @@ impl HybridSearchPacket {
     #[must_use]
     pub const fn semantic_readiness(&self) -> SemanticReadiness {
         self.details.semantic_readiness
+    }
+
+    /// Query-aware result-order preference applied after fusion.
+    #[must_use]
+    pub const fn preference(&self) -> RetrievalPreference {
+        self.details.preference
     }
 
     /// Optional semantic reranker outcome for this exact packet.
@@ -732,28 +821,40 @@ struct FusionAccumulator {
 }
 
 /// Fuse already-ranked independent channels using reciprocal-rank fusion.
+/// # Errors
+///
+/// Returns an error if selected channels disagree on generation identity,
+/// contain invalid ranks, or cannot be assigned bounded fused ranks.
 pub fn fuse_search(input: HybridSearchInput) -> Result<HybridSearchPacket, RetrievalError> {
-    let selected = select_channels(&input);
+    let HybridSearchInput {
+        mode,
+        semantic_readiness,
+        result_limit,
+        preference,
+        channels,
+    } = input;
+    let selected = select_channels(mode, semantic_readiness, &channels);
     let execution = retrieval_execution(&selected);
-    let fallback = retrieval_fallback(&input, &selected);
+    let fallback = retrieval_fallback(mode, semantic_readiness, &selected);
     let abstention = retrieval_abstention(&selected);
     let (generation_id, mut items) = fuse_selected_channels(&selected)?;
-    items.sort_by(fused_item_order);
+    items.sort_by(|left, right| fused_item_order(left, right, preference));
     assign_fused_ranks(&mut items)?;
-    let packet_was_truncated = items.len() > usize::from(input.result_limit);
-    items.truncate(usize::from(input.result_limit));
-    let channel_was_truncated = selected.iter().any(|channel| channel.truncated());
-    let rerank = if input.mode == SearchMode::Deterministic {
+    let packet_was_truncated = items.len() > usize::from(result_limit);
+    items.truncate(usize::from(result_limit));
+    let channel_was_truncated = selected.iter().any(ChannelResults::truncated);
+    let rerank = if mode == SearchMode::Deterministic {
         RerankReport::not_requested()
     } else {
-        input.channels.rerank.clone()
+        channels.rerank
     };
     Ok(HybridSearchPacket {
         details: HybridSearchDetails {
             generation_id,
-            requested_mode: input.mode,
+            requested_mode: mode,
             execution,
-            semantic_readiness: input.semantic_readiness,
+            semantic_readiness,
+            preference,
             rerank,
             fallback,
             abstention,
@@ -773,13 +874,17 @@ impl SelectedChannels<'_> {
     }
 }
 
-fn select_channels(input: &HybridSearchInput) -> SelectedChannels<'_> {
-    let semantic_is_allowed = input.mode != SearchMode::Deterministic
-        && input.semantic_readiness == SemanticReadiness::Ready;
+fn select_channels(
+    mode: SearchMode,
+    semantic_readiness: SemanticReadiness,
+    channels: &RetrievalChannels,
+) -> SelectedChannels<'_> {
+    let semantic_is_allowed =
+        mode != SearchMode::Deterministic && semantic_readiness == SemanticReadiness::Ready;
     SelectedChannels {
-        lexical: input.channels.lexical.as_ref(),
+        lexical: channels.lexical.as_ref(),
         semantic: semantic_is_allowed
-            .then_some(input.channels.semantic.as_ref())
+            .then_some(channels.semantic.as_ref())
             .flatten(),
     }
 }
@@ -807,13 +912,14 @@ fn retrieval_abstention(selected: &SelectedChannels<'_>) -> Option<RetrievalAbst
 }
 
 fn retrieval_fallback(
-    input: &HybridSearchInput,
+    mode: SearchMode,
+    semantic_readiness: SemanticReadiness,
     selected: &SelectedChannels<'_>,
 ) -> Option<RetrievalFallback> {
-    if input.mode == SearchMode::Deterministic {
+    if mode == SearchMode::Deterministic {
         return None;
     }
-    if input.semantic_readiness != SemanticReadiness::Ready {
+    if semantic_readiness != SemanticReadiness::Ready {
         return Some(RetrievalFallback::SemanticNotReady);
     }
     fallback_for_ready_channels(selected)
@@ -823,14 +929,13 @@ fn fallback_for_ready_channels(selected: &SelectedChannels<'_>) -> Option<Retrie
     match (selected.lexical, selected.semantic) {
         (None, Some(_)) => Some(RetrievalFallback::LexicalUnavailable),
         (Some(_), None) => Some(RetrievalFallback::SemanticUnavailable),
-        (None, None) => None,
         (Some(lexical), Some(semantic)) if lexical.candidates.is_empty() => {
             (!semantic.candidates.is_empty()).then_some(RetrievalFallback::LexicalEmpty)
         }
         (Some(lexical), Some(semantic)) if semantic.candidates.is_empty() => {
             (!lexical.candidates.is_empty()).then_some(RetrievalFallback::SemanticEmpty)
         }
-        (Some(_), Some(_)) => None,
+        (None, None) | (Some(_), Some(_)) => None,
     }
 }
 
@@ -927,10 +1032,18 @@ fn fused_item(mut accumulator: FusionAccumulator) -> FusedSearchItem {
     }
 }
 
-fn fused_item_order(left: &FusedSearchItem, right: &FusedSearchItem) -> Ordering {
-    right
-        .reciprocal_rank_score
-        .total_cmp(&left.reciprocal_rank_score)
+fn fused_item_order(
+    left: &FusedSearchItem,
+    right: &FusedSearchItem,
+    preference: RetrievalPreference,
+) -> Ordering {
+    preference_tier(left, preference)
+        .cmp(&preference_tier(right, preference))
+        .then_with(|| {
+            right
+                .reciprocal_rank_score
+                .total_cmp(&left.reciprocal_rank_score)
+        })
         .then_with(|| best_raw_rank(left).cmp(&best_raw_rank(right)))
         .then_with(|| left.document.path().cmp(right.document.path()))
         .then_with(|| {
@@ -943,6 +1056,66 @@ fn fused_item_order(left: &FusedSearchItem, right: &FusedSearchItem) -> Ordering
                 .document_id()
                 .cmp(right.document.document_id())
         })
+}
+
+fn preference_tier(item: &FusedSearchItem, preference: RetrievalPreference) -> u8 {
+    if preference == RetrievalPreference::Neutral {
+        return 0;
+    }
+    let document = item.document();
+    if document.document_kind() == DocumentKind::Test {
+        return 3;
+    }
+    if is_auxiliary_path(document.path().as_str()) {
+        return 2;
+    }
+    match document.symbol_kind() {
+        Some(SymbolKind::Parameter | SymbolKind::Import) => 2,
+        Some(
+            SymbolKind::Property
+            | SymbolKind::Field
+            | SymbolKind::Variable
+            | SymbolKind::EnumMember
+            | SymbolKind::Export,
+        ) => 1,
+        Some(
+            SymbolKind::File
+            | SymbolKind::Module
+            | SymbolKind::Class
+            | SymbolKind::Struct
+            | SymbolKind::Union
+            | SymbolKind::Interface
+            | SymbolKind::Trait
+            | SymbolKind::Protocol
+            | SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Constant
+            | SymbolKind::Enum
+            | SymbolKind::TypeAlias
+            | SymbolKind::Namespace
+            | SymbolKind::Route
+            | SymbolKind::Component
+            | SymbolKind::Table
+            | SymbolKind::Resource,
+        )
+        | None => 0,
+    }
+}
+
+fn is_auxiliary_path(path: &str) -> bool {
+    path.split('/').any(|segment| {
+        matches!(
+            segment,
+            "bench"
+                | "benches"
+                | "benchmark"
+                | "benchmarks"
+                | "example"
+                | "examples"
+                | "fixture"
+                | "fixtures"
+        )
+    })
 }
 
 fn best_raw_rank(item: &FusedSearchItem) -> u16 {

@@ -72,6 +72,7 @@ pub(crate) struct FrontierExpansion {
     pub(crate) truncated: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct FrontierInput<'input> {
     pub(crate) frontier: &'input [SymbolId],
     pub(crate) arcs: &'input [GraphArc],

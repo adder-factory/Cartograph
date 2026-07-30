@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::{
     Containment, ExtractError, ExtractedFile, ExtractedImportBinding, ExtractedReference,
-    ExtractedSymbol, ImportBindingKind, SourceSnapshot,
+    ExtractedSymbol, ImportBindingKind, SourceSnapshot, SymbolExecutionFlags, SymbolExportFlags,
+    SymbolImplementationFlags,
     budget::{
         ExtractionBudget, containment_budget_bytes, import_binding_budget_bytes,
         reference_budget_bytes, symbol_budget_bytes,
@@ -49,8 +50,7 @@ struct SymbolOptions {
     signature: Option<String>,
     body_search_text: String,
     declaration_only: bool,
-    exported: bool,
-    default_export: bool,
+    export: SymbolExportFlags,
     async_symbol: bool,
     static_member: bool,
     visibility: Option<Visibility>,
@@ -139,26 +139,30 @@ struct SourceSliceInput<'source> {
     end: usize,
 }
 
-struct OwnedRangeInput {
-    owner: SymbolId,
+#[derive(Clone, Copy)]
+struct OwnedRangeInput<'owner> {
+    owner: &'owner SymbolId,
     start: usize,
     end: usize,
 }
 
-struct OwnedSourceInput<'source> {
-    owner: SymbolId,
+#[derive(Clone, Copy)]
+struct OwnedSourceInput<'owner, 'source> {
+    owner: &'owner SymbolId,
     source: &'source str,
     offset: usize,
 }
 
+#[derive(Clone, Copy)]
 struct MybatisMapperInput<'source> {
     tags: &'source [MarkupTag<'source>],
     namespace: &'source str,
     namespace_offset: usize,
 }
 
-struct MybatisBodyInput<'source> {
-    owner: SymbolId,
+#[derive(Clone, Copy)]
+struct MybatisBodyInput<'owner, 'source> {
+    owner: &'owner SymbolId,
     namespace: &'source str,
     statement: &'source str,
     start: usize,
@@ -276,12 +280,15 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
             body_search_text: options.body_search_text,
             body_search_truncated: false,
             health: crate::SymbolHealthMetrics::default(),
-            declaration_only: options.declaration_only,
-            test_symbol: false,
-            exported: options.exported,
-            default_export: options.default_export,
-            async_symbol: options.async_symbol,
-            static_member: options.static_member,
+            implementation: SymbolImplementationFlags {
+                declaration_only: options.declaration_only,
+                test_symbol: false,
+            },
+            export: options.export,
+            execution: SymbolExecutionFlags {
+                async_symbol: options.async_symbol,
+                static_member: options.static_member,
+            },
             visibility: options.visibility,
             structural_digest,
             clone_shape_digest,
@@ -571,7 +578,7 @@ fn extract_properties(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Extract
                 .at(line_start + key_start, line_start + key_end)
                 .with_options(SymbolOptions {
                     body_search_text: key.clone(),
-                    exported: true,
+                    export: SymbolExportFlags::named(true),
                     visibility: Some(Visibility::Public),
                     ..SymbolOptions::default()
                 }),
@@ -1020,8 +1027,7 @@ fn extract_component_file(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Ext
         .at(0, component_span_end)
         .with_options(SymbolOptions {
             body_search_text: format!("component {component_name}"),
-            exported: true,
-            default_export: true,
+            export: SymbolExportFlags::new(true, true),
             visibility: Some(Visibility::Public),
             ..SymbolOptions::default()
         }),
@@ -1038,7 +1044,7 @@ fn extract_component_file(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Ext
                 extract_embedded_script(
                     builder,
                     OwnedRangeInput {
-                        owner: component.clone(),
+                        owner: &component,
                         start: script_start,
                         end: script_end,
                     },
@@ -1056,11 +1062,11 @@ fn extract_component_file(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Ext
             )?;
         }
         if !tag.closing {
-            extract_template_attribute_calls(builder, component.clone(), tag)?;
+            extract_template_attribute_calls(builder, &component, tag)?;
         }
     }
     let excluded = component_non_template_ranges(&tags);
-    extract_template_expression_calls(builder, component, &excluded)
+    extract_template_expression_calls(builder, &component, &excluded)
 }
 
 fn component_non_template_ranges(tags: &[MarkupTag<'_>]) -> Vec<std::ops::Range<usize>> {
@@ -1079,7 +1085,7 @@ fn component_non_template_ranges(tags: &[MarkupTag<'_>]) -> Vec<std::ops::Range<
 
 fn extract_embedded_script(
     builder: &mut CustomBuilder<'_, '_>,
-    input: OwnedRangeInput,
+    input: OwnedRangeInput<'_>,
 ) -> Result<(), ExtractError> {
     let source = builder.source();
     for (line_relative, line) in physical_lines(&source[input.start..input.end]) {
@@ -1087,7 +1093,7 @@ fn extract_embedded_script(
         scan_embedded_script_line(
             builder,
             EmbeddedScriptLine {
-                owner: &input.owner,
+                owner: input.owner,
                 absolute: input.start + line_relative,
                 source: line,
             },
@@ -1143,7 +1149,7 @@ fn scan_embedded_script_line(
         extract_svelte_store_references(
             builder,
             OwnedSourceInput {
-                owner: input.owner.clone(),
+                owner: input.owner,
                 source: &clean,
                 offset: input.absolute,
             },
@@ -1152,6 +1158,7 @@ fn scan_embedded_script_line(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct EmbeddedScriptImport<'source> {
     line: EmbeddedScriptLine<'source>,
     import: ScriptImport<'source>,
@@ -1206,6 +1213,7 @@ fn add_embedded_script_import(
     )
 }
 
+#[derive(Clone, Copy)]
 struct EmbeddedScriptDeclaration<'source> {
     line: EmbeddedScriptLine<'source>,
     declaration: ScriptDeclaration<'source>,
@@ -1231,8 +1239,10 @@ fn add_embedded_script_declaration(
         .at(name_start, name_start + input.declaration.name.len())
         .with_options(SymbolOptions {
             body_search_text: format!("{} {}", kind.as_str(), input.declaration.name),
-            exported: input.declaration.exported,
-            default_export: input.declaration.default_export,
+            export: SymbolExportFlags::new(
+                input.declaration.exported,
+                input.declaration.default_export,
+            ),
             async_symbol: input.declaration.async_symbol,
             visibility: input.declaration.exported.then_some(Visibility::Public),
             parent: Some(input.line.owner.clone()),
@@ -1242,6 +1252,7 @@ fn add_embedded_script_declaration(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct EmbeddedScriptCallScan<'line, 'clean> {
     line: EmbeddedScriptLine<'line>,
     clean: &'clean str,
@@ -1289,6 +1300,7 @@ fn framework_virtual_module(language: SourceLanguage, module: &str) -> bool {
     })
 }
 
+#[derive(Clone, Copy)]
 struct ScriptImport<'source> {
     local: &'source str,
     imported: &'source str,
@@ -1326,6 +1338,7 @@ fn parse_script_import(line: &str) -> Option<ScriptImport<'_>> {
     })
 }
 
+#[derive(Clone, Copy)]
 struct ScriptDeclaration<'source> {
     kind: SymbolKind,
     name: &'source str,
@@ -1478,7 +1491,7 @@ fn starts_uppercase_ascii(value: &str) -> bool {
 
 fn extract_template_attribute_calls(
     builder: &mut CustomBuilder<'_, '_>,
-    owner: SymbolId,
+    owner: &SymbolId,
     tag: MarkupTag<'_>,
 ) -> Result<(), ExtractError> {
     for key in ["@click", "v-on:click", "on:click", "onclick", "action"] {
@@ -1512,7 +1525,7 @@ fn extract_template_attribute_calls(
 
 fn extract_template_expression_calls(
     builder: &mut CustomBuilder<'_, '_>,
-    owner: SymbolId,
+    owner: &SymbolId,
     excluded: &[std::ops::Range<usize>],
 ) -> Result<(), ExtractError> {
     let source = builder.source();
@@ -1542,7 +1555,7 @@ fn extract_template_expression_calls(
                 extract_svelte_store_references(
                     builder,
                     OwnedSourceInput {
-                        owner: owner.clone(),
+                        owner,
                         source: &mask_literals_and_comments(expression),
                         offset: content_start,
                     },
@@ -1566,7 +1579,7 @@ fn extract_template_expression_calls(
 
 fn extract_svelte_store_references(
     builder: &mut CustomBuilder<'_, '_>,
-    input: OwnedSourceInput<'_>,
+    input: OwnedSourceInput<'_, '_>,
 ) -> Result<(), ExtractError> {
     let bytes = input.source.as_bytes();
     let mut cursor = 0;
@@ -1626,7 +1639,7 @@ fn extract_salesforce_markup(builder: &mut CustomBuilder<'_, '_>) -> Result<(), 
     extract_salesforce_expression_refs(
         builder,
         OwnedSourceInput {
-            owner: context.component,
+            owner: &context.component,
             source,
             offset: 0,
         },
@@ -1668,7 +1681,7 @@ fn initialize_salesforce_markup(
             .at(0, end)
             .with_options(SymbolOptions {
                 body_search_text: format!("salesforce {} {name}", language.as_str()),
-                exported: true,
+                export: SymbolExportFlags::named(true),
                 visibility: Some(Visibility::Public),
                 ..SymbolOptions::default()
             }),
@@ -1680,7 +1693,7 @@ fn initialize_salesforce_markup(
                 .at(0, end)
                 .with_options(SymbolOptions {
                     body_search_text: format!("route {route}"),
-                    exported: true,
+                    export: SymbolExportFlags::named(true),
                     visibility: Some(Visibility::Public),
                     parent: Some(component.clone()),
                     ..SymbolOptions::default()
@@ -1801,7 +1814,7 @@ fn salesforce_component_name(raw: &str) -> String {
 
 fn extract_salesforce_expression_refs(
     builder: &mut CustomBuilder<'_, '_>,
-    input: OwnedSourceInput<'_>,
+    input: OwnedSourceInput<'_, '_>,
 ) -> Result<(), ExtractError> {
     let mut cursor = 0;
     while let Some(relative) = input.source[cursor..].find("{!") {
@@ -1904,7 +1917,7 @@ fn initialize_vb6_container(
             .at(container_offset.min(container_end - 1), container_end)
             .with_options(SymbolOptions {
                 body_search_text: format!("{} {container_name}", container_kind.as_str()),
-                exported: true,
+                export: SymbolExportFlags::named(true),
                 visibility: Some(Visibility::Public),
                 ..SymbolOptions::default()
             }),
@@ -1986,7 +1999,9 @@ fn add_vb6_declaration(
             .at(start, start + declaration.name.len())
             .with_options(SymbolOptions {
                 body_search_text: format!("{} {}", declaration.kind.as_str(), declaration.name),
-                exported: declaration.visibility == Some(Visibility::Public),
+                export: SymbolExportFlags::named(
+                    declaration.visibility == Some(Visibility::Public),
+                ),
                 visibility: declaration.visibility,
                 static_member: declaration.static_member,
                 parent: parent.map(|scope| scope.id),
@@ -2104,7 +2119,7 @@ fn vb6_declaration(
         index += 1;
     }
     vb6_keyword_declaration(VbDeclarationContext {
-        tokens,
+        tokens: &tokens,
         index,
         parent,
         container_kind,
@@ -2113,8 +2128,9 @@ fn vb6_declaration(
     })
 }
 
-struct VbDeclarationContext<'source> {
-    tokens: Vec<(usize, &'source str)>,
+#[derive(Clone, Copy)]
+struct VbDeclarationContext<'tokens, 'source> {
+    tokens: &'tokens [(usize, &'source str)],
     index: usize,
     parent: Option<VbBlock>,
     container_kind: SymbolKind,
@@ -2122,7 +2138,9 @@ struct VbDeclarationContext<'source> {
     static_member: bool,
 }
 
-fn vb6_keyword_declaration(context: VbDeclarationContext<'_>) -> Option<VbDeclaration<'_>> {
+fn vb6_keyword_declaration<'source>(
+    context: VbDeclarationContext<'_, 'source>,
+) -> Option<VbDeclaration<'source>> {
     let lower = context.tokens.get(context.index)?.1.to_ascii_lowercase();
     match lower.as_str() {
         "sub" | "function" => Some(VbDeclaration {
@@ -2307,7 +2325,7 @@ fn extract_mybatis_mapper(
         )
         .with_options(SymbolOptions {
             body_search_text: format!("mybatis mapper {simple_namespace}"),
-            exported: true,
+            export: SymbolExportFlags::named(true),
             visibility: Some(Visibility::Public),
             ..SymbolOptions::default()
         }),
@@ -2368,7 +2386,7 @@ fn scan_mybatis_mapper_tag(
             .at(id_offset, id_offset + id.len())
             .with_options(SymbolOptions {
                 body_search_text: format!("mybatis {} {id}", input.tag.name),
-                exported: is_statement,
+                export: SymbolExportFlags::named(is_statement),
                 visibility: is_statement.then_some(Visibility::Public),
                 parent: Some(state.module.clone()),
                 ..SymbolOptions::default()
@@ -2387,6 +2405,7 @@ fn scan_mybatis_mapper_tag(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct MybatisTagReferenceInput<'source, 'owner> {
     state: &'owner MybatisMapperState<'source>,
     tag: IndexedMarkupTag<'source>,
@@ -2455,7 +2474,7 @@ fn add_mybatis_body_reference(
         extract_mybatis_body_refs(
             builder,
             MybatisBodyInput {
-                owner: input.owner.clone(),
+                owner: input.owner,
                 namespace: input.state.namespace,
                 statement: input.statement,
                 start: body_start,
@@ -2468,7 +2487,7 @@ fn add_mybatis_body_reference(
 
 fn extract_mybatis_body_refs(
     builder: &mut CustomBuilder<'_, '_>,
-    input: MybatisBodyInput<'_>,
+    input: MybatisBodyInput<'_, '_>,
 ) -> Result<(), ExtractError> {
     let body = &builder.source()[input.start..input.end];
     for tag in markup_tags(body) {
@@ -2557,7 +2576,7 @@ fn extract_mybatis_config(
                 .at(offset, offset + alias.len())
                 .with_options(SymbolOptions {
                     body_search_text: format!("mybatis type alias {alias}"),
-                    exported: true,
+                    export: SymbolExportFlags::named(true),
                     visibility: Some(Visibility::Public),
                     ..SymbolOptions::default()
                 }),
@@ -2638,7 +2657,7 @@ fn scan_anubis_declaration(
                 )
                 .with_options(SymbolOptions {
                     body_search_text: format!("anubis {} {name}", kind.as_str()),
-                    exported: true,
+                    export: SymbolExportFlags::named(true),
                     visibility: Some(Visibility::Public),
                     ..SymbolOptions::default()
                 }),
@@ -2868,7 +2887,7 @@ fn extract_bg3_stats(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractE
                 .at(line_start + offset, line_start + offset + name.len())
                 .with_options(SymbolOptions {
                     body_search_text: format!("bg3 {shape} {name}"),
-                    exported: true,
+                    export: SymbolExportFlags::named(true),
                     visibility: Some(Visibility::Public),
                     ..SymbolOptions::default()
                 }),
@@ -2944,7 +2963,7 @@ fn extract_osiris(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractErro
             .at(0, builder.source().len().min(goal_name.len().max(1)))
             .with_options(SymbolOptions {
                 body_search_text: format!("osiris goal {goal_name}"),
-                exported: true,
+                export: SymbolExportFlags::named(true),
                 visibility: Some(Visibility::Public),
                 ..SymbolOptions::default()
             }),
@@ -3302,7 +3321,7 @@ fn extract_osiris_declaration(
             )
             .with_options(SymbolOptions {
                 body_search_text: format!("osiris api {name}"),
-                exported: true,
+                export: SymbolExportFlags::named(true),
                 visibility: Some(Visibility::Public),
                 parent: Some(input.goal),
                 ..SymbolOptions::default()
@@ -3348,7 +3367,7 @@ fn extract_bg3_json(
             }
         }
         Value::Object(fields) => extract_bg3_object(builder, fields, parent)?,
-        Value::String(raw) => add_bg3_references(builder, raw, parent)?,
+        Value::String(raw) => add_bg3_references(builder, raw, parent.as_ref())?,
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
     Ok(())
@@ -3364,7 +3383,7 @@ fn extract_bg3_object(
         if let Some(raw) = child.as_str()
             && !is_bg3_name_key(key)
         {
-            add_bg3_references(builder, raw, next_parent.clone())?;
+            add_bg3_references(builder, raw, next_parent.as_ref())?;
             continue;
         }
         extract_bg3_json(builder, child, next_parent.clone())?;
@@ -3394,7 +3413,7 @@ fn bg3_object_parent(
                 .at(offset, (offset + name.len()).min(builder.source().len()))
                 .with_options(SymbolOptions {
                     body_search_text: format!("bg3 resource {name}"),
-                    exported: parent.is_none(),
+                    export: SymbolExportFlags::named(parent.is_none()),
                     visibility: parent.is_none().then_some(Visibility::Public),
                     parent,
                     ..SymbolOptions::default()
@@ -3406,14 +3425,14 @@ fn bg3_object_parent(
 fn add_bg3_references(
     builder: &mut CustomBuilder<'_, '_>,
     raw: &str,
-    parent: Option<SymbolId>,
+    parent: Option<&SymbolId>,
 ) -> Result<(), ExtractError> {
     let base = builder.source().find(raw).unwrap_or(0);
     for token in bg3_reference_tokens(raw) {
         let relative = raw.find(token).unwrap_or(0);
         if base + relative + token.len() <= builder.source().len() {
             builder.add_reference(
-                CustomReferenceInput::new(parent.clone(), token, ReferenceKind::References)
+                CustomReferenceInput::new(parent.cloned(), token, ReferenceKind::References)
                     .at(base + relative, base + relative + token.len()),
             )?;
         }
@@ -3504,7 +3523,7 @@ fn scan_bg3_content(
             .at(offset, offset + handle.len())
             .with_options(SymbolOptions {
                 body_search_text: format!("localized content {handle}"),
-                exported: true,
+                export: SymbolExportFlags::named(true),
                 visibility: Some(Visibility::Public),
                 parent: regions.last().and_then(|(id, _)| id.clone()),
                 ..SymbolOptions::default()
@@ -3574,7 +3593,7 @@ fn add_bg3_object(
             .at(name_offset, name_offset + name.len())
             .with_options(SymbolOptions {
                 body_search_text: format!("bg3 resource {name}"),
-                exported: top_level,
+                export: SymbolExportFlags::named(top_level),
                 visibility: top_level.then_some(Visibility::Public),
                 parent: input.regions.last().and_then(|(id, _)| id.clone()),
                 ..SymbolOptions::default()

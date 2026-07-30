@@ -1,11 +1,12 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
 use cartograph_extract::{ExtractedFile, NativeExtractor, SourceLimits, SourceSnapshot};
 
 const SOURCE_LIMIT: usize = 1024 * 1024;
-
-#[test]
-fn sql_ddl_emits_schema_objects_columns_and_cross_object_relations() {
-    let source = r#"
+const SCHEMA_SOURCE: &str = r#"
 CREATE SCHEMA reporting;
 CREATE TYPE order_status AS ENUM ('pending', 'shipped', 'sk_live_must_not_escape');
 CREATE TYPE point AS (x FLOAT, y FLOAT);
@@ -29,8 +30,11 @@ CREATE TRIGGER orders_audit AFTER INSERT ON reporting.orders
 SELECT * FROM reporting.orders;
 CREATE INDEX idx_orders_user ON reporting.orders(user_id);
 "#;
-    let first = extract("db/schema.sql", source);
-    let second = extract("db/schema.sql", source);
+
+#[test]
+fn sql_ddl_emits_schema_objects_columns_and_cross_object_relations() {
+    let first = extract("db/schema.sql", SCHEMA_SOURCE);
+    let second = extract("db/schema.sql", SCHEMA_SOURCE);
     assert_eq!(first, second);
 
     for (kind, qualified_name, signature) in [

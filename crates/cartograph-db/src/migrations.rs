@@ -1127,6 +1127,10 @@ pub enum MigrationError {
 impl CartographDatabase {
     /// Verify the immutable migration ledger without creating a schema, applying
     /// migrations, or performing derived-index maintenance.
+    /// # Errors
+    ///
+    /// Returns an error if the ledger cannot be read or its version sequence,
+    /// names, checksums, or expected migration set are inconsistent.
     pub async fn verify_current_schema(&self) -> Result<MigrationReport, MigrationError> {
         let quoted_schema = crate::database::quoted_schema(&self.schema);
         let mut connection =
@@ -1142,11 +1146,19 @@ impl CartographDatabase {
 
     /// Verify hard capabilities, then apply append-only migrations under a
     /// transaction-scoped advisory lock.
+    /// # Errors
+    ///
+    /// Returns an error if required capabilities fail, the advisory lock or
+    /// transaction cannot be acquired, or an append-only migration cannot commit.
     pub async fn migrate(&self) -> Result<MigrationReport, MigrationError> {
         self.migrate_inner(None).await
     }
 
     /// Apply append-only migrations with a PostgreSQL-side statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline cannot be installed, capability or
+    /// ledger validation fails, or a locked append-only migration cannot commit.
     pub async fn migrate_bounded(
         &self,
         statement_timeout: Duration,

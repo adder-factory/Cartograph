@@ -11,6 +11,7 @@ on:
     paths:
       - Cargo.toml
       - Cargo.lock
+      - clippy.toml
       - rust-toolchain.toml
       - 'crates/**'
       - 'deploy/paradedb/**'
@@ -19,10 +20,15 @@ on:
       - 'scripts/pull-pinned-image.sh'
       - '.github/workflows/v2-rust.yml'
       - '.github/workflows/release.yml'
+      - '.github/workflows/stable-canary.yml'
+      - '.github/dependabot.yml'
+      - 'scripts/sonar-rust.sh'
+      - sonar-project.properties
   pull_request:
     paths:
       - Cargo.toml
       - Cargo.lock
+      - clippy.toml
       - rust-toolchain.toml
       - 'crates/**'
       - 'deploy/paradedb/**'
@@ -31,6 +37,10 @@ on:
       - 'scripts/pull-pinned-image.sh'
       - '.github/workflows/v2-rust.yml'
       - '.github/workflows/release.yml'
+      - '.github/workflows/stable-canary.yml'
+      - '.github/dependabot.yml'
+      - 'scripts/sonar-rust.sh'
+      - sonar-project.properties
 
 permissions:
   contents: read
@@ -41,7 +51,7 @@ concurrency:
 
 jobs:
   quality:
-    name: format + clippy + unit + PostgreSQL-only
+    name: format + clippy + rustdoc + unit + PostgreSQL-only
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -75,8 +85,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      - name: Strict public API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --all-features --no-deps
+
       - name: Unit tests
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-features
 
       - name: Dependency advisories, licenses, bans, and sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -225,6 +240,46 @@ jobs:
         run: scripts/test-windows-rust-release-paths.ps1
 
       - name: Windows all-target, all-feature Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Save Rust dependency cache
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+  macos-portability:
+    name: macOS strict compile portability
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Restore Rust dependency cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cartograph-rust-${{ runner.os }}-v2-macos-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: |
+            cartograph-rust-${{ runner.os }}-v2-macos-
+
+      - name: macOS all-target, all-feature Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Save Rust dependency cache
@@ -450,7 +505,12 @@ jobs:
             context 'locate the structural status query path' \
             --project-path "$GITHUB_WORKSPACE" --format json \
             >/tmp/cartograph-self-context.json
-          jq -e '.freshness == "current" and (.evidence | length) > 0' \
+          jq -e '
+            .freshness == "current"
+            and .evidence.packet.abstention == null
+            and (.evidence.packet.evidence | type == "array")
+            and (.evidence.packet.evidence | length) > 0
+          ' \
             /tmp/cartograph-self-context.json >/dev/null
 
       - name: Native CLI/MCP summary, role, graph, history, session, and watcher integration tests
@@ -523,6 +583,7 @@ jobs:
     needs:
       - quality
       - windows-portability
+      - macos-portability
       - linux-release-portability
       - paradedb
     runs-on: ubuntu-latest
@@ -557,6 +618,7 @@ jobs:
               requiredJobs: [
                 "quality",
                 "windows-portability",
+                "macos-portability",
                 "linux-release-portability",
                 "paradedb/database",
                 "paradedb/runtime",

@@ -1,3 +1,8 @@
+//! Live PostgreSQL integration coverage for the bounded indexing supervisor.
+
+#[path = "../test_support/dependency_ownership.rs"]
+mod dependency_ownership;
+
 use std::{
     env,
     future::{Future, pending, poll_fn},
@@ -755,10 +760,28 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
     assert_eq!(current.generation_id(), &generation_id);
     assert_native_edge_kind(&fixture, &generation_id, EdgeKind::Instantiates).await;
     assert_native_unresolved_reference(&fixture, &generation_id, "format").await;
+    assert_native_retrieval_and_coverage(&fixture, &generation_id).await;
+    assert_native_framework_findings(&fixture).await;
+    assert_eq!(
+        supervisor.status().await.state(),
+        SupervisorState::Completed
+    );
+    assert!(matches!(
+        fixture.database.lease_status(&target).await,
+        Ok(None)
+    ));
+
+    fixture.close().await;
+}
+
+async fn assert_native_retrieval_and_coverage(
+    fixture: &DatabaseFixture,
+    generation_id: &GenerationId,
+) {
     let hits = match fixture
         .database
         .search_current_code(SearchQuery::new(
-            CurrentGenerationLookup::new(&fixture.project, &generation_id),
+            CurrentGenerationLookup::new(&fixture.project, generation_id),
             "Service",
             NATIVE_SEARCH_LIMIT,
         ))
@@ -768,12 +791,12 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
         Err(error) => panic!("native generation BM25 search failed: {error}"),
     };
     assert!(hits.iter().any(|hit| {
-        hit.generation_id() == &generation_id && hit.qualified_name().contains("Service")
+        hit.generation_id() == generation_id && hit.qualified_name().contains("Service")
     }));
-    assert_parser_only_bm25_hits(&fixture, &generation_id).await;
-    assert_admitted_family_bm25_hits(&fixture, &generation_id).await;
-    assert_generic_family_bm25_hits(&fixture, &generation_id).await;
-    assert_custom_family_bm25_hits(&fixture, &generation_id).await;
+    assert_parser_only_bm25_hits(fixture, generation_id).await;
+    assert_admitted_family_bm25_hits(fixture, generation_id).await;
+    assert_generic_family_bm25_hits(fixture, generation_id).await;
+    assert_custom_family_bm25_hits(fixture, generation_id).await;
     let imports = fixture
         .database
         .current_imports(&fixture.project, 50)
@@ -797,7 +820,9 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
         .current_structural_hotspots(&fixture.project, 100)
         .await
         .unwrap_or_else(|error| panic!("current hotspot insights failed: {error}"));
-    assert_eq!(hotspots.len(), NATIVE_EXPECTED_FILES as usize);
+    let expected_files = usize::try_from(NATIVE_EXPECTED_FILES)
+        .unwrap_or_else(|error| panic!("native file count does not fit usize: {error}"));
+    assert_eq!(hotspots.len(), expected_files);
     let coverage = fixture
         .database
         .current_structural_coverage(&fixture.project, 50)
@@ -816,14 +841,19 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
         !dead_code.is_empty(),
         "the deliberately disconnected fixture must produce dead-code candidates"
     );
+}
+
+async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
     let unused_exports = fixture
         .database
         .query_current_structural_findings(
             &fixture.project,
             &StructuralFindingQuery::new(100)
                 .and_then(|query| query.with_finding(Some("unused_export")))
-                .map(|query| query.with_minimum_severity(StructuralFindingSeverity::Info))
-                .unwrap_or_else(|error| panic!("unused-export query was invalid: {error}")),
+                .map_or_else(
+                    |error| panic!("unused-export query was invalid: {error}"),
+                    |query| query.with_minimum_severity(StructuralFindingSeverity::Info),
+                ),
         )
         .await
         .unwrap_or_else(|error| panic!("current structural findings failed: {error}"));
@@ -858,16 +888,6 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
         .current_structural_finding_stats(&fixture.project)
         .await
         .unwrap_or_else(|error| panic!("current structural finding stats failed: {error}"));
-    assert_eq!(
-        supervisor.status().await.state(),
-        SupervisorState::Completed
-    );
-    assert!(matches!(
-        fixture.database.lease_status(&target).await,
-        Ok(None)
-    ));
-
-    fixture.close().await;
 }
 
 fn write_native_live_project(root: &std::path::Path) {
@@ -1384,10 +1404,9 @@ async fn blocked_supervised_copy_rolls_back_backend_query_and_advisory_locks() {
         }),
     )
     .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(_) => panic!("blocked supervised COPY exceeded its absolute deadline"),
-    };
+    let result = result.unwrap_or_else(|error| {
+        panic!("blocked supervised COPY exceeded its absolute deadline: {error}")
+    });
     assert!(
         matches!(
             result,
@@ -1456,13 +1475,13 @@ async fn requested_cancellation_reaps_inflight_copy_before_external_unlock() {
     });
     wait_for_schema_lock(&fixture.pool, &fixture.schema, "search_documents").await;
     assert!(supervisor.cancel());
-    let result = match tokio::time::timeout(ABORT_RESULT_BOUND, handle).await {
-        Ok(result) => match result {
-            Ok(result) => result,
-            Err(error) => panic!("cancelled COPY supervisor task failed: {error}"),
-        },
-        Err(_) => panic!("cancelled COPY waited for the external table lock"),
-    };
+    let joined = tokio::time::timeout(ABORT_RESULT_BOUND, handle)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("cancelled COPY waited for the external table lock: {error}")
+        });
+    let result =
+        joined.unwrap_or_else(|error| panic!("cancelled COPY supervisor task failed: {error}"));
     assert!(matches!(
         result,
         Err(SupervisorError::Cancelled {
@@ -1622,7 +1641,7 @@ async fn requested_cancellation_fails_owned_generation_and_releases_lease() {
     let handle = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
-                let _staged = staged;
+                drop(staged);
                 assert!(
                     context
                         .progress()
@@ -1670,7 +1689,7 @@ async fn progress_stall_cancels_work_and_marks_generation_failed() {
     let supervisor = IndexerSupervisor::new(fixture.database.clone(), stalled_config());
     let result = supervisor
         .run(request(target.clone()), move |context| async move {
-            let _staged = staged;
+            drop(staged);
             let mut cancellation = context.cancellation();
             cancellation.cancelled().await;
             Err::<ReadyGeneration, _>(PipelineFailure::new(PipelineStage::Discover))
@@ -1711,7 +1730,7 @@ async fn lost_lease_cancels_without_mutating_new_owners_generation() {
     let handle = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
-                let _staged = staged;
+                drop(staged);
                 assert!(
                     context
                         .progress()
@@ -1770,7 +1789,7 @@ async fn operation_deadline_cancels_despite_continuous_progress() {
     let supervisor = IndexerSupervisor::new(fixture.database.clone(), deadline_config());
     let result = supervisor
         .run(request(target.clone()), move |context| async move {
-            let _staged = staged;
+            drop(staged);
             assert!(
                 context
                     .progress()
@@ -1831,7 +1850,7 @@ async fn noncooperative_work_is_dropped_after_visible_cancellation_grace() {
     let handle = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
-                let _staged = staged;
+                drop(staged);
                 let _drop_flag = DropFlag(drop_observer);
                 assert!(
                     context
@@ -1905,7 +1924,7 @@ async fn cancellation_during_blocked_acquisition_reaps_work_and_leaves_recoverab
                 request_with_duration(request_target, BOUNDARY_LEASE_DURATION),
                 move |_| async move {
                     work_observer.store(true, Ordering::Release);
-                    let _staged = staged;
+                    drop(staged);
                     Err::<ReadyGeneration, _>(PipelineFailure::new(PipelineStage::Discover))
                 },
             )
@@ -1913,13 +1932,13 @@ async fn cancellation_during_blocked_acquisition_reaps_work_and_leaves_recoverab
     });
     wait_for_database_lock(&fixture.pool, &fixture.schema).await;
     assert!(supervisor.cancel());
-    let result = match tokio::time::timeout(ABORT_RESULT_BOUND, handle).await {
-        Ok(result) => match result {
-            Ok(result) => result,
-            Err(error) => panic!("blocked-acquisition supervisor task failed: {error}"),
-        },
-        Err(_) => panic!("bounded acquisition reconciliation waited for the external blocker"),
-    };
+    let joined = tokio::time::timeout(ABORT_RESULT_BOUND, handle)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("bounded acquisition reconciliation waited for the external blocker: {error}")
+        });
+    let result = joined
+        .unwrap_or_else(|error| panic!("blocked-acquisition supervisor task failed: {error}"));
     // Cancellation may linearize before the exact probe starts (cancelled) or
     // while the access-exclusive lock prevents proof (ambiguous). Both exits
     // must reap every database task before returning.
@@ -1929,7 +1948,7 @@ async fn cancellation_during_blocked_acquisition_reaps_work_and_leaves_recoverab
             Err(SupervisorError::Cancelled {
                 reason: CancellationReason::Requested,
                 grace_exceeded: false
-            }) | Err(SupervisorError::AmbiguousOutcome {
+            } | SupervisorError::AmbiguousOutcome {
                 operation: "acquire"
             })
         ),
@@ -1966,7 +1985,7 @@ async fn timed_out_acquisition_keeps_one_exact_attempt_and_recovers_its_token() 
     let result = supervisor
         .run(request(target.clone()), move |_| async move {
             work_observer.store(true, Ordering::Release);
-            let _staged = staged;
+            drop(staged);
             Err::<ReadyGeneration, _>(PipelineFailure::new(PipelineStage::Discover))
         })
         .await;
@@ -2103,7 +2122,7 @@ async fn timed_out_cleanup_reconciles_failure_and_exact_release_atomically() {
     let handle = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
-                let _staged = staged;
+                drop(staged);
                 let mut cancellation = context.cancellation();
                 cancellation.cancelled().await;
                 Err::<ReadyGeneration, _>(PipelineFailure::new(PipelineStage::Read))
@@ -2168,10 +2187,9 @@ async fn blocked_publication_is_aborted_reaped_and_leaves_no_active_query() {
         }),
     )
     .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(_) => panic!("blocked publication exceeded its absolute supervisor deadline"),
-    };
+    let result = result.unwrap_or_else(|error| {
+        panic!("blocked publication exceeded its absolute supervisor deadline: {error}")
+    });
     assert!(
         matches!(
             result,
@@ -2210,7 +2228,7 @@ async fn blocked_cleanup_is_aborted_reaped_and_leaves_no_active_query() {
         if work_release.await.is_err() {
             return Err(PipelineFailure::new(PipelineStage::Read));
         }
-        let _staged = staged;
+        drop(staged);
         Err::<ReadyGeneration, _>(PipelineFailure::new(PipelineStage::Read))
     });
     let hold_generation_lock = async {
@@ -2234,9 +2252,10 @@ async fn blocked_cleanup_is_aborted_reaped_and_leaves_no_active_query() {
         {
             panic!("cleanup abort generation lock failed: {error}");
         }
-        if release_work.send(()).is_err() {
-            panic!("cleanup abort work release was not observed");
-        }
+        assert!(
+            release_work.send(()).is_ok(),
+            "cleanup abort work release was not observed"
+        );
         wait_for_supervisor_state(&supervisor, SupervisorState::Failed).await;
         assert_no_active_schema_work(&fixture).await;
         assert_generation_advisories_available(&fixture, &target).await;
@@ -2246,10 +2265,9 @@ async fn blocked_cleanup_is_aborted_reaped_and_leaves_no_active_query() {
         tokio::join!(run, hold_generation_lock)
     })
     .await;
-    let (result, ()) = match joined {
-        Ok(joined) => joined,
-        Err(_) => panic!("blocked cleanup exceeded its absolute supervisor deadline"),
-    };
+    let (result, ()) = joined.unwrap_or_else(|error| {
+        panic!("blocked cleanup exceeded its absolute supervisor deadline: {error}")
+    });
     assert!(
         matches!(
             result,
@@ -2283,7 +2301,7 @@ async fn heartbeat_uncertainty_drops_root_and_reaps_registered_children_without_
     let handle = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
-                let _staged = staged;
+                drop(staged);
                 let _root_drop = DropFlag(root_observer);
                 let child = match context.spawn(1, async move {
                     let _child_drop = DropFlag(child_observer);
@@ -2318,13 +2336,13 @@ async fn heartbeat_uncertainty_drops_root_and_reaps_registered_children_without_
     {
         panic!("could not lock exact lease row: {error}");
     }
-    let result = match tokio::time::timeout(UNCERTAIN_RESULT_BOUND, handle).await {
-        Ok(result) => match result {
-            Ok(result) => result,
-            Err(error) => panic!("uncertain-heartbeat supervisor task failed: {error}"),
-        },
-        Err(_) => panic!("heartbeat uncertainty incorrectly waited for cancellation grace"),
-    };
+    let joined = tokio::time::timeout(UNCERTAIN_RESULT_BOUND, handle)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("heartbeat uncertainty incorrectly waited for cancellation grace: {error}")
+        });
+    let result = joined
+        .unwrap_or_else(|error| panic!("uncertain-heartbeat supervisor task failed: {error}"));
     assert!(
         matches!(
             result,
@@ -2425,13 +2443,13 @@ async fn heartbeat_uncertainty_reaps_concurrent_copy_before_returning() {
     {
         panic!("combined uncertainty lease row lock failed: {error}");
     }
-    let result = match tokio::time::timeout(ABORT_RESULT_BOUND, handle).await {
-        Ok(result) => match result {
-            Ok(result) => result,
-            Err(error) => panic!("combined uncertainty supervisor task failed: {error}"),
-        },
-        Err(_) => panic!("heartbeat uncertainty did not reap blocked COPY before its bound"),
-    };
+    let joined = tokio::time::timeout(ABORT_RESULT_BOUND, handle)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("heartbeat uncertainty did not reap blocked COPY before its bound: {error}")
+        });
+    let result = joined
+        .unwrap_or_else(|error| panic!("combined uncertainty supervisor task failed: {error}"));
     assert!(
         matches!(
             result,
@@ -2604,10 +2622,9 @@ async fn open_fixture() -> DatabaseFixture {
 }
 
 async fn open_fixture_with_schema(schema: &str) -> DatabaseFixture {
-    let database_url = match env::var(TEST_DATABASE_URL_ENV) {
-        Ok(database_url) => database_url,
-        Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
-    };
+    let database_url = env::var(TEST_DATABASE_URL_ENV).unwrap_or_else(|error| {
+        panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test: {error}")
+    });
     let settings = DatabaseSettings::parse(&database_url, Some("8"), Some("10000"))
         .and_then(|settings| settings.with_schema(schema));
     let settings = match settings {
@@ -2683,13 +2700,13 @@ async fn wait_for_schema_lock(pool: &sqlx_postgres::PgPool, schema: &str, relati
     let pattern = format!("%{schema}%{relation}%");
     for _ in 0..LEASE_WAIT_ATTEMPTS {
         let row = query(
-            r#"SELECT EXISTS (
+            r"SELECT EXISTS (
                     SELECT 1 FROM pg_stat_activity
                     WHERE application_name = 'cartograph-v2'
                       AND state = 'active'
                       AND wait_event_type = 'Lock'
                       AND query ILIKE $1
-                )"#,
+                )",
         )
         .bind(&pattern)
         .fetch_one(pool)
@@ -2706,13 +2723,13 @@ async fn wait_for_query_absent(pool: &sqlx_postgres::PgPool, schema: &str, query
     let schema_pattern = format!("%{schema}%");
     for _ in 0..LEASE_WAIT_ATTEMPTS {
         let row = query(
-            r#"SELECT NOT EXISTS (
+            r"SELECT NOT EXISTS (
                     SELECT 1 FROM pg_stat_activity
                     WHERE application_name = 'cartograph-v2'
                       AND state = 'active'
                       AND query ILIKE $1
                       AND query ILIKE $2
-                )"#,
+                )",
         )
         .bind(&schema_pattern)
         .bind(query_fragment)
@@ -2731,10 +2748,9 @@ async fn assert_no_active_schema_work(fixture: &DatabaseFixture) {
 }
 
 async fn assert_generation_advisories_available(fixture: &DatabaseFixture, target: &LeaseTarget) {
-    let generation_id = match target.generation_id() {
-        Some(generation_id) => generation_id,
-        None => panic!("advisory-lock fixture requires a generation-bound target"),
-    };
+    let generation_id = target
+        .generation_id()
+        .unwrap_or_else(|| panic!("advisory-lock fixture requires a generation-bound target"));
     let operation_key = format!(
         "cartograph-v2-operation:{}:{}:{}",
         fixture.schema,
@@ -2752,9 +2768,9 @@ async fn assert_generation_advisories_available(fixture: &DatabaseFixture, targe
         Err(error) => panic!("advisory-lock probe connection failed: {error}"),
     };
     let acquired = query(
-        r#"SELECT
+        r"SELECT
                 pg_try_advisory_lock(hashtextextended($1, 0)),
-                pg_try_advisory_lock(hashtextextended($2, 0))"#,
+                pg_try_advisory_lock(hashtextextended($2, 0))",
     )
     .bind(&operation_key)
     .bind(&generation_key)
@@ -2763,9 +2779,9 @@ async fn assert_generation_advisories_available(fixture: &DatabaseFixture, targe
     let acquired =
         acquired.and_then(|row| Ok((row.try_get::<bool, _>(0)?, row.try_get::<bool, _>(1)?)));
     let released = query(
-        r#"SELECT
+        r"SELECT
                 pg_advisory_unlock(hashtextextended($1, 0)),
-                pg_advisory_unlock(hashtextextended($2, 0))"#,
+                pg_advisory_unlock(hashtextextended($2, 0))",
     )
     .bind(&operation_key)
     .bind(&generation_key)
@@ -3083,14 +3099,18 @@ fn canonical(facts: GenerationFacts) -> CanonicalGenerationFacts {
         NATIVE_MAX_GENERATION_BYTES.saturating_mul(4),
     )
     .unwrap_or_else(|error| panic!("supervisor validation limits were invalid: {error}"));
-    validate_generation_facts(facts, limits, || false)
-        .map(|(facts, _)| facts)
-        .unwrap_or_else(|error| panic!("supervisor fixture was invalid: {error}"))
+    validate_generation_facts(facts, limits, || false).map_or_else(
+        |error| panic!("supervisor fixture was invalid: {error}"),
+        |(facts, _)| facts,
+    )
 }
 
 fn large_copy_probe_document() -> SearchDocumentInput {
     let mut document = copy_probe_document();
     document.code = "x".repeat(LARGE_COPY_CODE_BYTES);
-    document.natural_text = "large payload COPY deadline probe".to_owned();
+    document.natural_text.clear();
+    document
+        .natural_text
+        .push_str("large payload COPY deadline probe");
     document
 }

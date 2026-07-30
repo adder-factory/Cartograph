@@ -26,7 +26,7 @@ const MAXIMUM_FILES_PER_TAGGED_COMMIT: u16 = 50;
 const COMPARE_ADMISSION_LIMIT: u16 = MAXIMUM_FILES_PER_TAGGED_COMMIT + 1;
 const COMPARE_CONCURRENCY: usize = 8;
 const MAXIMUM_GIT_LOG_BYTES: usize = 128 * 1024 * 1024;
-const GIT_LOG_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const GIT_LOG_TIMEOUT: Duration = Duration::from_mins(2);
 const MAXIMUM_ATTRIBUTIONS: usize = 500_000;
 const ISSUE_RECORD_MARKER: &str = "CARTOGRAPH_ISSUE";
 
@@ -45,6 +45,12 @@ impl Default for IssueHistoryIndexOptions {
 }
 
 impl IssueHistoryIndexOptions {
+    /// Sets the maximum commits and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IssueHistoryIndexError::InvalidOptions`] when
+    /// `maximum_commits` is zero or exceeds the issue-history ceiling.
     pub const fn with_maximum_commits(
         mut self,
         maximum_commits: u32,
@@ -59,9 +65,13 @@ impl IssueHistoryIndexOptions {
 
 /// Exact generation, scan bounds, and cancellation scope for issue-history refresh.
 pub struct IssueHistoryIndexRequest {
+    /// Stable project ID for this record.
     pub project_id: ProjectId,
+    /// Stable generation ID for this record.
     pub generation_id: GenerationId,
+    /// Options for this record.
     pub options: IssueHistoryIndexOptions,
+    /// Cancellation for this record.
     pub cancellation: ProjectCancellation,
 }
 
@@ -69,23 +79,35 @@ pub struct IssueHistoryIndexRequest {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum IssueHistoryIndexError {
     #[error("issue-history options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("issue-history requires a Git repository with HEAD")]
+    /// The project root is not inside the required Git repository.
     NotGitRepository,
     #[error("issue-history Git evidence is unavailable or malformed")]
+    /// The bounded Git subprocess could not be executed.
     GitUnavailable,
     #[error("issue-history source comparison failed")]
+    /// Git could not compare the requested revisions completely.
     ComparisonFailed,
     #[error("issue-history exceeded its deterministic relation bound")]
+    /// Derived relationships exceeded their declared ceiling.
     RelationLimit,
     #[error("issue-history indexing was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
     #[error("issue-history persistence failed")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
 }
 
 impl ProjectRuntime {
     /// Rebuild issue-tagged symbol evidence for one exact current generation.
+    /// # Errors
+    ///
+    /// Returns an error when the checkout lacks readable bounded Git history,
+    /// an issue commit cannot be compared completely, attribution limits are
+    /// exceeded, cancellation wins, or generation-fenced persistence fails.
     pub async fn refresh_issue_history(
         &self,
         input: IssueHistoryIndexRequest,
@@ -110,31 +132,7 @@ impl ProjectRuntime {
             return Err(IssueHistoryIndexError::Cancelled);
         }
         let head = git_head(self).await?;
-        let requested = options
-            .maximum_commits
-            .checked_add(1)
-            .ok_or(IssueHistoryIndexError::InvalidOptions)?
-            .to_string();
-        let output = run_git_bounded(
-            self.project_root_for_host_operations(),
-            &[
-                "log",
-                "--no-merges",
-                "-z",
-                "--format=CARTOGRAPH_ISSUE%n%H%n%B",
-                "--max-count",
-                &requested,
-                "HEAD",
-                "--",
-            ],
-            GitCommandBounds::new(MAXIMUM_GIT_LOG_BYTES, GIT_LOG_TIMEOUT),
-        )
-        .await
-        .map_err(|_| IssueHistoryIndexError::GitUnavailable)?;
-        if !output.success {
-            return Err(IssueHistoryIndexError::GitUnavailable);
-        }
-        let scan = parse_issue_commits(&output.stdout, options.maximum_commits)?;
+        let scan = load_issue_commits(self, options.maximum_commits).await?;
         let tagged_commits = u64::try_from(scan.commits.len()).unwrap_or(u64::MAX);
         let root = self.project_root_for_host_operations();
         let comparisons = stream::iter(scan.commits.into_iter().enumerate())
@@ -248,6 +246,36 @@ impl ProjectRuntime {
             .await
             .map_err(|_| IssueHistoryIndexError::StorageUnavailable)
     }
+}
+
+async fn load_issue_commits(
+    runtime: &ProjectRuntime,
+    maximum_commits: u32,
+) -> Result<IssueCommitScan, IssueHistoryIndexError> {
+    let requested = maximum_commits
+        .checked_add(1)
+        .ok_or(IssueHistoryIndexError::InvalidOptions)?
+        .to_string();
+    let output = run_git_bounded(
+        runtime.project_root_for_host_operations(),
+        &[
+            "log",
+            "--no-merges",
+            "-z",
+            "--format=CARTOGRAPH_ISSUE%n%H%n%B",
+            "--max-count",
+            &requested,
+            "HEAD",
+            "--",
+        ],
+        GitCommandBounds::new(MAXIMUM_GIT_LOG_BYTES, GIT_LOG_TIMEOUT),
+    )
+    .await
+    .map_err(|_| IssueHistoryIndexError::GitUnavailable)?;
+    if !output.success {
+        return Err(IssueHistoryIndexError::GitUnavailable);
+    }
+    parse_issue_commits(&output.stdout, maximum_commits)
 }
 
 pub(crate) struct PreparedIssueHistory {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{cmp::Ordering, collections::BTreeMap, collections::BTreeSet};
 
 use crate::{
     AffectedTest, ContextAbstention, ContextGraphDirection, ContextPacket, EditCandidate,
@@ -77,14 +77,16 @@ fn build_edit_candidates(task: &str, evidence: &[EvidenceItem]) -> EditCandidate
             continue;
         }
         let entry = candidates.entry(item.path().to_owned()).or_default();
-        if matched > entry.matched_term_count {
-            entry.matched_term_count = matched;
-            entry.best_rank = Some(rank);
-            entry.qualified_names.clear();
-        } else if matched == entry.matched_term_count {
-            entry.best_rank = minimum_rank(entry.best_rank, Some(rank));
-        } else {
-            continue;
+        match matched.cmp(&entry.matched_term_count) {
+            Ordering::Greater => {
+                entry.matched_term_count = matched;
+                entry.best_rank = Some(rank);
+                entry.qualified_names.clear();
+            }
+            Ordering::Equal => {
+                entry.best_rank = minimum_rank(entry.best_rank, Some(rank));
+            }
+            Ordering::Less => continue,
         }
         entry
             .qualified_names

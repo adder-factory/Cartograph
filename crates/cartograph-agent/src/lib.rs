@@ -4,6 +4,15 @@
 //! the complete source-to-publication operation. CLI and MCP adapters consume
 //! this public service instead of reaching into database or indexer internals.
 
+#[cfg(test)]
+use cartograph_test_support as _;
+#[cfg(test)]
+use sha2 as _;
+#[cfg(test)]
+use sqlx_core as _;
+#[cfg(test)]
+use sqlx_postgres as _;
+
 use std::{
     collections::BTreeSet,
     fs::{File, OpenOptions},
@@ -161,19 +170,19 @@ const ONE_WORKER: u16 = 1;
 const TWO_WORKERS: u16 = 2;
 const FOUR_WORKERS: u16 = 4;
 const EIGHT_WORKERS: u16 = 8;
-const DEFAULT_ITEM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const DEFAULT_STAGE_TIMEOUT: Duration = Duration::from_secs(90 * 60);
-const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+const DEFAULT_ITEM_TIMEOUT: Duration = Duration::from_mins(5);
+const DEFAULT_STAGE_TIMEOUT: Duration = Duration::from_mins(90);
+const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_hours(2);
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_mins(10);
 const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(10);
-const DEFAULT_COPY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_COPY_TIMEOUT: Duration = Duration::from_mins(3);
+const DEFAULT_LEASE_DURATION: Duration = Duration::from_mins(5);
 const DEFAULT_STAGING_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTOMATIC_RETENTION_KEEP_SUPERSEDED: u32 = 2;
 const AUTOMATIC_RETENTION_MAXIMUM_DELETIONS: u32 = 32;
-const AUTOMATIC_RETENTION_LEASE_DURATION: Duration = Duration::from_secs(2 * 60);
+const AUTOMATIC_RETENTION_LEASE_DURATION: Duration = Duration::from_mins(2);
 const AUTOMATIC_RETENTION_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATIC_RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTOMATIC_RETENTION_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -215,6 +224,10 @@ impl Default for IndexOptions {
 
 impl IndexOptions {
     /// Cap the corpus-aware worker selector at a validated value in 1..=16.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `value` is zero or exceeds
+    /// the maximum supported indexing worker count.
     pub const fn with_max_workers(mut self, value: u16) -> Result<Self, ProjectError> {
         if value == 0 || value > MAX_CONFIGURED_WORKERS {
             return Err(ProjectError::InvalidOptions);
@@ -231,6 +244,10 @@ impl IndexOptions {
     }
 
     /// Restrict the maximum admitted bytes for any one source file.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `value` is zero or exceeds
+    /// the hard per-file source byte ceiling.
     pub const fn with_max_source_bytes(mut self, value: usize) -> Result<Self, ProjectError> {
         if value == 0 || value > DEFAULT_MAX_SOURCE_BYTES {
             return Err(ProjectError::InvalidOptions);
@@ -285,13 +302,21 @@ pub struct NativeIndexMetrics {
 /// Exact cache activity proving how much source was reparsed without weakening global resolution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct NativeParseCacheMetrics {
+    /// Number of hits.
     pub hits: u64,
+    /// Number of misses.
     pub misses: u64,
+    /// Number of bypassed.
     pub bypassed: u64,
+    /// Number of parsed files.
     pub parsed_files: u64,
+    /// Number of writes.
     pub writes: u64,
+    /// Number of corruptions.
     pub corruptions: u64,
+    /// Number of read errors.
     pub read_errors: u64,
+    /// Number of write errors.
     pub write_errors: u64,
 }
 
@@ -386,17 +411,25 @@ pub struct IndexReport {
 pub enum GenerationRetentionStatus {
     /// A bounded cleanup transaction committed under an exact migration lease.
     Completed {
+        /// Generation rows removed or preserved by the retention transaction.
         report: GenerationRetentionReport,
+        /// Parse-cache rows removed or preserved under the same lease.
         parse_cache: NativeParseCacheRetentionReport,
     },
     /// Cleanup committed, but releasing its bounded lease could not be confirmed.
     CompletedWithWarning {
+        /// Generation rows removed or preserved by the committed transaction.
         report: GenerationRetentionReport,
+        /// Parse-cache retention report, absent when that phase did not complete.
         parse_cache: Option<NativeParseCacheRetentionReport>,
+        /// Stable warning describing the unconfirmed lease-release outcome.
         warning: &'static str,
     },
     /// Cleanup was safely deferred because another writer won or storage was unavailable.
-    Deferred { reason: &'static str },
+    Deferred {
+        /// Stable reason the bounded cleanup could not safely start.
+        reason: &'static str,
+    },
 }
 
 /// Monotonic phase timing evidence for one index/no-op request.
@@ -422,9 +455,15 @@ pub struct IndexProfile {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum HistoryIndexStatus {
     /// Durable history/co-change relations were refreshed for current HEAD.
-    Indexed { report: HistoryRefreshReport },
+    Indexed {
+        /// Exact commit/file history counts written by the refresh.
+        report: HistoryRefreshReport,
+    },
     /// Code indexing succeeded but Git history was unavailable within its bounds.
-    Unavailable { reason: &'static str },
+    Unavailable {
+        /// Stable source-safe reason history indexing could not run.
+        reason: &'static str,
+    },
 }
 
 /// Honest issue-tagged symbol-history outcome attached to every index request.
@@ -432,9 +471,15 @@ pub enum HistoryIndexStatus {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum IssueHistoryIndexStatus {
     /// Durable symbol/issue attributions were refreshed for the exact current generation.
-    Indexed { report: IssueHistoryRefreshReport },
+    Indexed {
+        /// Exact issue-attribution counts written by the refresh.
+        report: IssueHistoryRefreshReport,
+    },
     /// Code indexing succeeded but issue-tagged history was disabled or unavailable.
-    Unavailable { reason: &'static str },
+    Unavailable {
+        /// Stable source-safe reason issue-history indexing could not run.
+        reason: &'static str,
+    },
 }
 
 /// Read-only project state with an honest live-source freshness decision.
@@ -546,9 +591,14 @@ impl Drop for AbortTaskOnDrop {
 struct IndexEnrichmentPolicy {
     refresh_history: bool,
     history_enabled: bool,
-    churn_enabled: bool,
-    co_change_enabled: bool,
+    history_channels: HistoryEnrichmentChannels,
     issue_history_enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HistoryEnrichmentChannels {
+    churn: bool,
+    co_change: bool,
 }
 
 struct TimedHistoryPreparation {
@@ -578,8 +628,10 @@ fn index_enrichment_policy(
     IndexEnrichmentPolicy {
         refresh_history: options.refresh_history,
         history_enabled: options.refresh_history && (churn_enabled || co_change_enabled),
-        churn_enabled,
-        co_change_enabled,
+        history_channels: HistoryEnrichmentChannels {
+            churn: churn_enabled,
+            co_change: co_change_enabled,
+        },
         issue_history_enabled: options.refresh_history && source_settings.enable_issue_history(),
     }
 }
@@ -621,7 +673,12 @@ async fn prepare_optional_history(
     let result = runtime
         .prepare_git_history(HistoryIndexOptions::default(), cancellation)
         .await
-        .map(|history| history.with_channels(policy.churn_enabled, policy.co_change_enabled));
+        .map(|history| {
+            history.with_channels(
+                policy.history_channels.churn,
+                policy.history_channels.co_change,
+            )
+        });
     Some(TimedHistoryPreparation {
         result,
         elapsed_millis: monotonic_millis(started.elapsed()),
@@ -804,16 +861,13 @@ async fn maintain_generation_retention(
     runtime: &ProjectRuntime,
     project_id: &ProjectId,
 ) -> GenerationRetentionStatus {
-    let policy = match GenerationRetentionPolicy::new(
+    let Ok(policy) = GenerationRetentionPolicy::new(
         AUTOMATIC_RETENTION_KEEP_SUPERSEDED,
         AUTOMATIC_RETENTION_MAXIMUM_DELETIONS,
-    ) {
-        Ok(policy) => policy,
-        Err(_) => {
-            return GenerationRetentionStatus::Deferred {
-                reason: "invalid_policy",
-            };
-        }
+    ) else {
+        return GenerationRetentionStatus::Deferred {
+            reason: "invalid_policy",
+        };
     };
     let target = LeaseTarget::new(project_id.clone(), ProjectOperation::Migration, None);
     let lease = match runtime
@@ -888,6 +942,10 @@ async fn maintain_generation_retention(
 
 impl ProjectRuntime {
     /// Inspect a checkout without connecting to PostgreSQL.
+    /// # Errors
+    ///
+    /// Returns an error when the checkout root cannot be canonicalized as a
+    /// directory or its bounded source/config/SCIP manifest cannot be read safely.
     pub fn inspect_source_identity(
         project_root: impl AsRef<Path>,
     ) -> Result<ProjectSourceIdentity, ProjectError> {
@@ -907,6 +965,10 @@ impl ProjectRuntime {
     }
 
     /// Open a project and apply the append-only v2 schema after capability proof.
+    /// # Errors
+    ///
+    /// Returns an error when the checkout root is unavailable, PostgreSQL
+    /// cannot be connected, or append-only schema migration fails.
     pub async fn connect(
         project_root: impl AsRef<Path>,
         settings: &DatabaseSettings,
@@ -940,6 +1002,10 @@ impl ProjectRuntime {
     /// Doctor and other read-only health checks use this boundary after an
     /// explicit capability probe. Normal runtime startup must use [`Self::connect`]
     /// so append-only migrations are applied before serving queries.
+    /// # Errors
+    ///
+    /// Returns an error when the checkout root is unavailable or PostgreSQL
+    /// cannot be connected with the supplied settings.
     pub async fn connect_read_only(
         project_root: impl AsRef<Path>,
         settings: &DatabaseSettings,
@@ -969,6 +1035,10 @@ impl ProjectRuntime {
     /// shared `CARTOGRAPH_DATABASE_URL` is configured. The pool and schema are
     /// cloned cheaply; project identity and all source access remain rooted in
     /// the newly canonicalized checkout.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::ProjectRootUnavailable`] when the checkout root
+    /// cannot be canonicalized as an existing directory.
     pub fn with_database(
         project_root: impl AsRef<Path>,
         database: CartographDatabase,
@@ -1009,6 +1079,11 @@ impl ProjectRuntime {
     }
 
     /// Normalize a project-relative path or an existing absolute path contained by this checkout.
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty or contains NUL, a relative
+    /// path is invalid, or an absolute path is missing, outside the checkout,
+    /// not a file, or not representable as a normalized project path.
     pub fn normalized_project_path(&self, input: &str) -> Result<NormalizedPath, ProjectError> {
         if input.is_empty() || input.contains('\0') {
             return Err(ProjectError::InvalidOptions);
@@ -1030,6 +1105,10 @@ impl ProjectRuntime {
 
     /// Ensure durable project-scoped agent state can be written before the first index.
     /// This registers only stable privacy-preserving identities; it does not create a generation.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::RegisterFailed`] when the stable project identity
+    /// cannot be registered in PostgreSQL.
     pub async fn register_agent_state_project(&self) -> Result<ProjectId, ProjectError> {
         self.database
             .register_project(NewProject::new(
@@ -1041,12 +1120,21 @@ impl ProjectRuntime {
     }
 
     /// Inspect durable state and compare it with a complete live source manifest.
+    /// # Errors
+    ///
+    /// Returns an error when durable project status or the bounded live source
+    /// manifest cannot be read, or the source scan cannot be scheduled.
     pub async fn status(&self) -> Result<ProjectStatus, ProjectError> {
         self.status_with_cancellation(ProjectCancellation::new())
             .await
     }
 
     /// Inspect durable state with a cancellable, blocking-pool source scan.
+    /// # Errors
+    ///
+    /// Returns an error when durable project status or the bounded live source
+    /// manifest cannot be read, the source scan cannot be scheduled, or
+    /// `cancellation` wins.
     pub async fn status_with_cancellation(
         &self,
         cancellation: ProjectCancellation,
@@ -1055,18 +1143,27 @@ impl ProjectRuntime {
     }
 
     /// Build and atomically publish one complete generation, or return an exact no-op.
+    /// # Errors
+    ///
+    /// Returns an error when options or source policy are invalid, source
+    /// discovery fails, a generation/extraction/COPY/publication stage fails,
+    /// or failed pre-publication work cannot be reconciled safely.
     pub async fn index(&self, options: IndexOptions) -> Result<IndexReport, ProjectError> {
-        self.index_with_cancellation(options, ProjectCancellation::new())
-            .await
+        Box::pin(self.index_with_cancellation(options, ProjectCancellation::new())).await
     }
 
     /// Build and publish one generation while cooperatively reconciling cancellation.
+    /// # Errors
+    ///
+    /// Returns an error when options or source policy are invalid, source
+    /// discovery fails, a generation/extraction/COPY/publication stage fails,
+    /// cancellation wins, or failed pre-publication work cannot be reconciled safely.
     pub async fn index_with_cancellation(
         &self,
         options: IndexOptions,
         cancellation: ProjectCancellation,
     ) -> Result<IndexReport, ProjectError> {
-        index_project_with_cancellation(self, options, cancellation).await
+        Box::pin(index_project_with_cancellation(self, options, cancellation)).await
     }
 
     async fn attach_history(
@@ -1231,7 +1328,7 @@ impl ProjectRuntime {
         let cancellation_signal = cancellation.clone();
         let cancellation_task = AbortTaskOnDrop::new(tokio::spawn(async move {
             cancellation_signal.cancelled().await;
-            cancellation_supervisor.cancel();
+            let _cancellation_was_new = cancellation_supervisor.cancel();
         }));
         let request = SupervisorRequest::new(target, process_owner(), DEFAULT_LEASE_DURATION);
         let source_root = SourceRoot::open_with_policy(&self.root, discovery_policy)
@@ -1484,6 +1581,10 @@ pub struct ProjectWatchFilter {
 impl ProjectWatchFilter {
     /// Load the same project include, exclude, and language policy used by a
     /// source scan. Callers should replace this snapshot after config changes.
+    /// # Errors
+    ///
+    /// Returns an error when `.cartograph/config.json` source policy is
+    /// malformed, unsafe, oversized, or cannot be read from `project_root`.
     pub fn load(project_root: &Path) -> Result<Self, ProjectError> {
         let source_policy = project_source_policy(project_root)?;
         Ok(Self {
@@ -1514,12 +1615,57 @@ impl ProjectWatchFilter {
 
 #[derive(Clone, Copy)]
 struct SourceIndexPolicy {
-    enable_centrality: bool,
-    enable_betweenness: bool,
-    extract_docstrings: bool,
-    track_call_sites: bool,
-    duplicate_code_partial_clones: bool,
+    centrality: SourceCentralityPolicy,
+    retention: SourceRetentionPolicy,
+    partial_clones: bool,
     duplicate_code_allowlist_digest: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+struct SourceCentralityPolicy {
+    page_rank: bool,
+    betweenness: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SourceRetentionPolicy {
+    docstrings: bool,
+    call_sites: bool,
+}
+
+impl SourceIndexPolicy {
+    fn from_settings(settings: &ProjectSourceSettings) -> Self {
+        Self {
+            centrality: SourceCentralityPolicy {
+                page_rank: settings.enable_centrality(),
+                betweenness: settings.enable_betweenness(),
+            },
+            retention: SourceRetentionPolicy {
+                docstrings: settings.extract_docstrings(),
+                call_sites: settings.track_call_sites(),
+            },
+            partial_clones: settings.duplicate_code_partial_clones(),
+            duplicate_code_allowlist_digest: duplicate_code_allowlist_digest(
+                settings.duplicate_code_allowlist(),
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    fn full(duplicate_code_allowlist_digest: [u8; 32]) -> Self {
+        Self {
+            centrality: SourceCentralityPolicy {
+                page_rank: true,
+                betweenness: true,
+            },
+            retention: SourceRetentionPolicy {
+                docstrings: true,
+                call_sites: true,
+            },
+            partial_clones: false,
+            duplicate_code_allowlist_digest,
+        }
+    }
 }
 
 impl ProjectSourcePolicy {
@@ -1540,16 +1686,7 @@ impl ProjectSourcePolicy {
         Ok(Self {
             discovery,
             maximum_file_bytes: settings.maximum_file_bytes(),
-            index: SourceIndexPolicy {
-                enable_centrality: settings.enable_centrality(),
-                enable_betweenness: settings.enable_betweenness(),
-                extract_docstrings: settings.extract_docstrings(),
-                track_call_sites: settings.track_call_sites(),
-                duplicate_code_partial_clones: settings.duplicate_code_partial_clones(),
-                duplicate_code_allowlist_digest: duplicate_code_allowlist_digest(
-                    settings.duplicate_code_allowlist(),
-                ),
-            },
+            index: SourceIndexPolicy::from_settings(settings),
         })
     }
 }
@@ -1768,7 +1905,7 @@ fn read_open_scip_overlay(
     };
     let mut hasher = blake3::Hasher::new();
     let mut total = 0_usize;
-    let mut buffer = [0_u8; SCIP_READ_BUFFER_BYTES];
+    let mut buffer = vec![0_u8; SCIP_READ_BUFFER_BYTES];
     loop {
         if cancelled() {
             return Err(ProjectError::RequestCancelled);
@@ -1829,11 +1966,11 @@ fn source_index_policy_digest(source: &ContentDigest, policy: SourceIndexPolicy)
     hasher.update(SOURCE_INDEX_POLICY_DOMAIN);
     hasher.update(source.as_str().as_bytes());
     hasher.update(&[
-        u8::from(policy.enable_centrality),
-        u8::from(policy.enable_betweenness),
-        u8::from(policy.extract_docstrings),
-        u8::from(policy.track_call_sites),
-        u8::from(policy.duplicate_code_partial_clones),
+        u8::from(policy.centrality.page_rank),
+        u8::from(policy.centrality.betweenness),
+        u8::from(policy.retention.docstrings),
+        u8::from(policy.retention.call_sites),
+        u8::from(policy.partial_clones),
     ]);
     hasher.update(&policy.duplicate_code_allowlist_digest);
     ContentDigest::from_bytes(*hasher.finalize().as_bytes())
@@ -1980,11 +2117,11 @@ fn pipeline_config(
         parallelism,
         deadlines,
     )
-    .with_page_rank(policy.enable_centrality)
-    .with_betweenness(policy.enable_betweenness)
-    .with_docstrings(policy.extract_docstrings)
-    .with_call_sites(policy.track_call_sites)
-    .with_partial_clones(policy.duplicate_code_partial_clones))
+    .with_page_rank(policy.centrality.page_rank)
+    .with_betweenness(policy.centrality.betweenness)
+    .with_docstrings(policy.retention.docstrings)
+    .with_call_sites(policy.retention.call_sites)
+    .with_partial_clones(policy.partial_clones))
 }
 
 fn supervisor_config() -> SupervisorConfig {
@@ -2106,6 +2243,9 @@ mod tests {
 
     #[test]
     fn worker_selector_is_corpus_aware_bounded_and_monotonic() {
+        const OVERSIZED_CORPUS: usize = EIGHT_WORKER_MAX_FILES * EIGHT_WORKER_MAX_FILES;
+        const CALLER_CAP: u16 = 3;
+
         let hardware = std::thread::available_parallelism()
             .ok()
             .and_then(|value| u16::try_from(value.get()).ok())
@@ -2149,8 +2289,6 @@ mod tests {
             select_worker_count(256, 6_145_536, MAX_CONFIGURED_WORKERS),
             MAX_CONFIGURED_WORKERS.min(hardware)
         );
-        const OVERSIZED_CORPUS: usize = EIGHT_WORKER_MAX_FILES * EIGHT_WORKER_MAX_FILES;
-        const CALLER_CAP: u16 = 3;
         assert_eq!(
             select_worker_count(OVERSIZED_CORPUS, u64::MAX, CALLER_CAP),
             CALLER_CAP.min(hardware)
@@ -2217,14 +2355,7 @@ mod tests {
                 max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
                 discovery_policy: DiscoveryPolicy::v1_defaults()
                     .unwrap_or_else(|error| panic!("default discovery policy failed: {error}")),
-                index_policy: SourceIndexPolicy {
-                    enable_centrality: true,
-                    enable_betweenness: true,
-                    extract_docstrings: true,
-                    track_call_sites: true,
-                    duplicate_code_partial_clones: false,
-                    duplicate_code_allowlist_digest: duplicate_code_allowlist_digest(&[]),
-                },
+                index_policy: SourceIndexPolicy::full(duplicate_code_allowlist_digest(&[])),
             },
             || false,
         )
@@ -2559,14 +2690,7 @@ mod tests {
                 max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
                 discovery_policy: DiscoveryPolicy::v1_defaults()
                     .unwrap_or_else(|error| panic!("default discovery policy failed: {error}")),
-                index_policy: SourceIndexPolicy {
-                    enable_centrality: true,
-                    enable_betweenness: true,
-                    extract_docstrings: true,
-                    track_call_sites: true,
-                    duplicate_code_partial_clones: false,
-                    duplicate_code_allowlist_digest: duplicate_code_allowlist_digest(&[]),
-                },
+                index_policy: SourceIndexPolicy::full(duplicate_code_allowlist_digest(&[])),
                 cancellation,
             })));
         }

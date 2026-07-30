@@ -10,7 +10,7 @@ use crate::{
     database::{quoted_schema, set_local_statement_timeout},
 };
 
-const ISSUE_HISTORY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const ISSUE_HISTORY_TIMEOUT: Duration = Duration::from_mins(5);
 const MAXIMUM_ATTRIBUTIONS: usize = 500_000;
 const INSERT_CHUNK: usize = 5_000;
 const MAXIMUM_ISSUES_PER_SYMBOL: u16 = 500;
@@ -23,8 +23,11 @@ const MAXIMUM_COMMIT_GROUPS: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueAttributionKind {
+    /// The commit modified an existing symbol.
     Modified,
+    /// The commit introduced the symbol.
     Added,
+    /// The commit removed the historical symbol.
     Removed,
 }
 
@@ -58,13 +61,23 @@ pub struct SymbolIssueAttribution {
 
 /// Validated inputs for one symbol attribution.
 pub struct SymbolIssueAttributionInput {
+    /// Stable symbol ID for this record.
     pub symbol_id: SymbolId,
+    /// Positive issue number parsed from the tagged commit.
     pub issue_number: u64,
+    /// Commit sha for this record.
     pub commit_sha: String,
+    /// Kind for this record.
     pub kind: IssueAttributionKind,
 }
 
 impl SymbolIssueAttribution {
+    /// Creates a validated symbol issue attribution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the issue number is zero/out of PostgreSQL range or
+    /// `commit_sha` is not a valid bounded hexadecimal commit identity.
     pub fn new(input: SymbolIssueAttributionInput) -> Result<Self, IssueHistoryError> {
         if input.issue_number == 0
             || input.issue_number > 9_223_372_036_854_775_807_u64
@@ -94,15 +107,27 @@ pub struct IssueHistoryRefreshMetadata {
 
 /// Git-scan provenance for one issue-history refresh.
 pub struct IssueHistoryRefreshMetadataInput {
+    /// Head commit for this record.
     pub head_commit: String,
+    /// Number of commits scanned.
     pub commits_scanned: u64,
+    /// Number of tagged commits.
     pub tagged_commits: u64,
+    /// Number of oversized commits skipped.
     pub oversized_commits_skipped: u64,
+    /// Number of comparison failures skipped.
     pub comparison_failures_skipped: u64,
+    /// Whether additional matching rows were omitted.
     pub truncated: bool,
 }
 
 impl IssueHistoryRefreshMetadata {
+    /// Validates provenance and counters for one issue-history refresh.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the head commit is invalid or tagged/skipped counters
+    /// exceed the commit totals they describe.
     pub fn new(input: IssueHistoryRefreshMetadataInput) -> Result<Self, IssueHistoryError> {
         if !valid_commit_sha(&input.head_commit)
             || input.tagged_commits > input.commits_scanned
@@ -132,11 +157,19 @@ pub struct IssueHistoryRefreshRequest {
 
 /// Bounded issue rows and provenance supplied by one Git scan.
 pub struct IssueHistoryRefreshInput {
+    /// Metadata for this record.
     pub metadata: IssueHistoryRefreshMetadata,
+    /// Bounded attributions included in this result.
     pub attributions: Vec<SymbolIssueAttribution>,
 }
 
 impl IssueHistoryRefreshRequest {
+    /// Validates and binds a refresh payload to one project generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the attribution payload exceeds the bounded atomic
+    /// refresh maximum.
     pub fn new(
         project_id: ProjectId,
         generation_id: GenerationId,
@@ -158,14 +191,23 @@ impl IssueHistoryRefreshRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueHistoryRefreshReport {
+    /// Stable generation ID for this record.
     pub generation_id: GenerationId,
+    /// Head commit for this record.
     pub head_commit: String,
+    /// Number of commits scanned.
     pub commits_scanned: u64,
+    /// Number of tagged commits.
     pub tagged_commits: u64,
+    /// Number of oversized commits skipped.
     pub oversized_commits_skipped: u64,
+    /// Number of comparison failures skipped.
     pub comparison_failures_skipped: u64,
+    /// Number of candidates.
     pub candidates: u64,
+    /// Number of attributions written.
     pub attributions_written: u64,
+    /// Whether additional matching rows were omitted.
     pub truncated: bool,
 }
 
@@ -173,8 +215,11 @@ pub struct IssueHistoryRefreshReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolIssueRecord {
+    /// Positive issue number parsed from the tagged commit.
     pub issue_number: u64,
+    /// Commit sha for this record.
     pub commit_sha: String,
+    /// Kind for this record.
     pub kind: IssueAttributionKind,
 }
 
@@ -182,10 +227,15 @@ pub struct SymbolIssueRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolIssuePeer {
+    /// Stable symbol ID for this record.
     pub symbol_id: SymbolId,
+    /// Project-relative path for this record.
     pub path: String,
+    /// Qualified name for this record.
     pub qualified_name: String,
+    /// Issue-tagged commits shared with the anchor symbol.
     pub co_occurrences: u64,
+    /// Bounded shared commits included in this result.
     pub shared_commits: Vec<String>,
 }
 
@@ -193,9 +243,13 @@ pub struct SymbolIssuePeer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolIssueCommitPeer {
+    /// Stable symbol ID for this record.
     pub symbol_id: SymbolId,
+    /// Project-relative path for this record.
     pub path: String,
+    /// Qualified name for this record.
     pub qualified_name: String,
+    /// Symbol kind for this record.
     pub symbol_kind: String,
 }
 
@@ -203,32 +257,47 @@ pub struct SymbolIssueCommitPeer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolIssueCommitPeers {
+    /// Commit sha for this record.
     pub commit_sha: String,
+    /// Total matching peers before the per-commit page bound.
     pub total: u64,
+    /// Bounded peers included in this result.
     pub peers: Vec<SymbolIssueCommitPeer>,
+    /// Whether additional matching rows were omitted.
     pub truncated: bool,
 }
 
 /// Bounded issue evidence query for one current symbol.
 pub struct SymbolIssueQuery<'query> {
+    /// Stable project ID for this record.
     pub project_id: &'query ProjectId,
+    /// Stable symbol ID for this record.
     pub symbol_id: &'query SymbolId,
+    /// Maximum number of entries returned by this bounded request.
     pub limit: u16,
 }
 
 /// Bounded co-attribution query for one current symbol.
 pub struct SymbolIssuePeerQuery<'query> {
+    /// Stable project ID for this record.
     pub project_id: &'query ProjectId,
+    /// Stable symbol ID for this record.
     pub symbol_id: &'query SymbolId,
+    /// Minimum number of shared required by this request.
     pub minimum_shared: u16,
+    /// Maximum number of entries returned by this bounded request.
     pub limit: u16,
 }
 
 /// Bounded current-symbol query for exact issue-tagged commits.
 pub struct IssueCommitSymbolPeerQuery<'query> {
+    /// Stable project ID for this record.
     pub project_id: &'query ProjectId,
+    /// Stable excluded symbol ID for this record.
     pub excluded_symbol_id: &'query SymbolId,
+    /// Commits for this record.
     pub commits: &'query [String],
+    /// Maximum peers returned for each supplied commit.
     pub per_commit_limit: u16,
 }
 
@@ -236,12 +305,19 @@ pub struct IssueCommitSymbolPeerQuery<'query> {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum IssueHistoryError {
     #[error("issue-history input is invalid or exceeds its bound")]
+    /// Supplied input violates a documented bound or invariant.
     InvalidInput,
     #[error("issue-history generation is no longer current")]
+    /// The current generation changed before publication completed.
     CurrentGenerationChanged,
     #[error("Cartograph PostgreSQL issue-history operation failed during {operation}")]
-    DatabaseOperation { operation: &'static str },
+    /// PostgreSQL could not complete the named operation.
+    DatabaseOperation {
+        /// Bounded operation label identifying the failed PostgreSQL phase.
+        operation: &'static str,
+    },
     #[error("Cartograph PostgreSQL issue-history row violates its durable contract")]
+    /// A stored row violates its durable typed contract.
     CorruptStoredValue,
 }
 
@@ -254,6 +330,10 @@ struct CurrentGenerationFence<'fence> {
 
 impl CartographDatabase {
     /// Remove issue-derived evidence when the project explicitly disables the feature.
+    /// # Errors
+    ///
+    /// Returns an error if the generation fence is not current or the bounded
+    /// transactional deletion of disabled issue evidence cannot commit.
     pub async fn clear_issue_history(
         &self,
         project_id: &ProjectId,
@@ -301,6 +381,10 @@ impl CartographDatabase {
     }
 
     /// Atomically replace issue attributions only when the named generation remains current.
+    /// # Errors
+    ///
+    /// Returns an error if the generation changes, the refresh rows violate
+    /// database constraints, or atomic replacement/provenance commit fails.
     pub async fn replace_issue_history(
         &self,
         request: IssueHistoryRefreshRequest,
@@ -362,6 +446,10 @@ impl CartographDatabase {
     }
 
     /// Read bounded issue evidence for one current symbol.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is zero/too large or current symbol issue
+    /// rows cannot be queried or decoded.
     pub async fn current_symbol_issues(
         &self,
         request: SymbolIssueQuery<'_>,
@@ -388,10 +476,14 @@ impl CartographDatabase {
             .fetch_all(&self.pool)
             .await
             .map_err(|_| database_error("read-symbol"))?;
-        rows.into_iter().map(decode_issue).collect()
+        rows.iter().map(decode_issue).collect()
     }
 
     /// Rank current symbols by issue-tagged commits shared with one anchor.
+    /// # Errors
+    ///
+    /// Returns an error if shared-commit/result bounds are invalid or ranked
+    /// current symbol peers cannot be queried or decoded.
     pub async fn current_symbol_issue_peers(
         &self,
         request: SymbolIssuePeerQuery<'_>,
@@ -459,10 +551,14 @@ impl CartographDatabase {
             .fetch_all(&self.pool)
             .await
             .map_err(|_| database_error("read-peers"))?;
-        rows.into_iter().map(decode_peer).collect()
+        rows.iter().map(decode_peer).collect()
     }
 
     /// Count current-generation symbol/issue rows without reading their contents.
+    /// # Errors
+    ///
+    /// Returns an error if PostgreSQL cannot count current attributions or the
+    /// stored count is negative or otherwise not representable as `u64`.
     pub async fn current_issue_history_attribution_count(
         &self,
         project_id: &ProjectId,
@@ -489,6 +585,10 @@ impl CartographDatabase {
     }
 
     /// Fetch current modified-symbol peers for many exact issue-tagged commits in one query.
+    /// # Errors
+    ///
+    /// Returns an error if commit identities/count bounds are invalid or the
+    /// batched current modified-symbol peer rows cannot be queried or decoded.
     pub async fn current_issue_commit_symbol_peers(
         &self,
         request: IssueCommitSymbolPeerQuery<'_>,
@@ -726,7 +826,7 @@ async fn require_current_generation(
     }
 }
 
-fn decode_issue(row: sqlx_postgres::PgRow) -> Result<SymbolIssueRecord, IssueHistoryError> {
+fn decode_issue(row: &sqlx_postgres::PgRow) -> Result<SymbolIssueRecord, IssueHistoryError> {
     let issue_number = row
         .try_get::<i64, _>(0)
         .ok()
@@ -750,7 +850,7 @@ fn decode_issue(row: sqlx_postgres::PgRow) -> Result<SymbolIssueRecord, IssueHis
     })
 }
 
-fn decode_peer(row: sqlx_postgres::PgRow) -> Result<SymbolIssuePeer, IssueHistoryError> {
+fn decode_peer(row: &sqlx_postgres::PgRow) -> Result<SymbolIssuePeer, IssueHistoryError> {
     let symbol_id = row
         .try_get::<String, _>(0)
         .ok()

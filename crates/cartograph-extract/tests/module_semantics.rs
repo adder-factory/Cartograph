@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
 use cartograph_extract::{
     ExtractedFile, ImportBindingKind, NativeExtractor, SourceLimits, SourceSnapshot,
@@ -7,7 +11,7 @@ const SOURCE_LIMIT: usize = 1024 * 1024;
 
 #[test]
 fn dynamic_import_bindings_are_ast_native_and_preserve_original_names() {
-    let source = r#"
+    let source = r"
 export async function load() {
   const { foo, bar: alias } = await import('./target.js');
   const module = await import('./target.js');
@@ -16,7 +20,7 @@ export async function load() {
   return [foo, alias, inline];
 }
 type Loaded = import('./types.js').Widget;
-"#;
+";
     let first = extract("src/consumer.ts", source);
     let second = extract("src/consumer.ts", source);
     assert_eq!(first, second);
@@ -111,7 +115,7 @@ fn wildcard_and_namespace_reexports_retain_explicit_project_semantics() {
         .iter()
         .find(|symbol| symbol.kind == SymbolKind::Export && symbol.qualified_name == "tools")
         .unwrap_or_else(|| panic!("missing namespace export: {:?}", extracted.symbols));
-    assert!(namespace.exported);
+    assert!(namespace.export.exported);
     for module in ["./public.js", "./tools.js"] {
         assert!(extracted.references.iter().any(|reference| {
             reference.kind == ReferenceKind::Imports && reference.name == module

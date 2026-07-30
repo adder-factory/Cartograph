@@ -21,6 +21,10 @@ pub struct DerivedStorePrunePolicy {
 
 impl DerivedStorePrunePolicy {
     /// Keep orphaned rows newer than `maximum_age` and cap each physical store.
+    /// # Errors
+    ///
+    /// Returns an error if `maximum_deletions_per_store` is zero or exceeds
+    /// the per-store deletion-batch maximum.
     pub const fn new(
         maximum_age: Duration,
         maximum_deletions_per_store: u32,
@@ -35,11 +39,13 @@ impl DerivedStorePrunePolicy {
     }
 
     #[must_use]
+    /// Returns the maximum age.
     pub const fn maximum_age(self) -> Duration {
         self.maximum_age
     }
 
     #[must_use]
+    /// Returns the maximum deletions per store.
     pub const fn maximum_deletions_per_store(self) -> u32 {
         self.maximum_deletions_per_store
     }
@@ -54,6 +60,7 @@ pub struct DerivedStorePruneRequest<'a> {
 
 impl<'a> DerivedStorePruneRequest<'a> {
     #[must_use]
+    /// Creates a validated derived store prune request.
     pub const fn new(
         policy: DerivedStorePrunePolicy,
         fence: &'a LeaseFence,
@@ -71,18 +78,27 @@ impl<'a> DerivedStorePruneRequest<'a> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DerivedStorePruneReport {
+    /// Cutoff for this record.
     pub cutoff: String,
+    /// Maximum number of age millis permitted by this request.
     pub maximum_age_millis: u64,
+    /// Maximum number of deletions per store permitted by this request.
     pub maximum_deletions_per_store: u32,
+    /// Number of summaries pruned.
     pub summaries_pruned: u64,
+    /// Number of roles pruned.
     pub roles_pruned: u64,
+    /// Number of embeddings pruned.
     pub embeddings_pruned: u64,
+    /// Whether additional derived artifact candidates were omitted.
     pub artifacts_truncated: bool,
+    /// Whether additional historical embedding candidates were omitted.
     pub embeddings_truncated: bool,
 }
 
 impl DerivedStorePruneReport {
     #[must_use]
+    /// Returns the total pruned.
     pub const fn total_pruned(&self) -> u64 {
         self.summaries_pruned + self.roles_pruned + self.embeddings_pruned
     }
@@ -92,13 +108,20 @@ impl DerivedStorePruneReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum DerivedStorePruneError {
     #[error("Cartograph derived-store prune policy is invalid")]
+    /// The supplied policy contains inconsistent or out-of-range limits.
     InvalidPolicy,
     #[error("Cartograph derived-store prune lost its exact migration lease fence")]
+    /// The operation lost its exact project lease fence.
     LeaseFenceLost,
     #[error("Cartograph derived-store prune project does not exist")]
+    /// No durable project matches the supplied identity.
     ProjectNotFound,
     #[error("Cartograph PostgreSQL derived-store prune failed during {operation}")]
-    DatabaseOperation { operation: &'static str },
+    /// PostgreSQL could not complete the named operation.
+    DatabaseOperation {
+        /// Bounded operation label identifying the failed PostgreSQL phase.
+        operation: &'static str,
+    },
 }
 
 impl CartographDatabase {
@@ -108,6 +131,10 @@ impl CartographDatabase {
     /// Notes, sessions, active/current vectors, structural generations, and
     /// model indexes are never candidates. The caller must hold the exact
     /// project-wide migration lease used by generation retention.
+    /// # Errors
+    ///
+    /// Returns an error if the timeout or lease fence is invalid/stale, a
+    /// protected row becomes eligible, or a bounded derived-store delete fails.
     pub async fn prune_cold_derived_store(
         &self,
         request: DerivedStorePruneRequest<'_>,

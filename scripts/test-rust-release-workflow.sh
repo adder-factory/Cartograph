@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VALIDATION="$ROOT/.github/workflows/v2-rust.yml"
 RELEASE="$ROOT/.github/workflows/release.yml"
+STABLE_CANARY="$ROOT/.github/workflows/stable-canary.yml"
 PULL_HELPER="$ROOT/scripts/pull-pinned-image.sh"
 SMOKE_HELPER="$ROOT/scripts/smoke-rust-release.sh"
 UNIX_BUILD_HELPER="$ROOT/scripts/build-rust-release.sh"
@@ -50,11 +51,63 @@ push_branches="$(awk '
   in_push && in_branches { print }
 ' "$VALIDATION" | sed '/^[[:space:]]*$/d')"
 [[ "$push_branches" == '      - main' ]] || fail 'push validation must be scoped only to main'
-for parallel_job in linux-release-portability paradedb; do
+for parallel_job in windows-portability macos-portability linux-release-portability paradedb; do
   if job_block "$VALIDATION" "$parallel_job" | grep -Fq 'needs: quality'; then
     fail "independent gate $parallel_job is serialized behind quality"
   fi
 done
+grep -Fq 'cargo doc --locked --workspace --all-features --no-deps' "$VALIDATION" || \
+  fail 'strict all-feature rustdoc validation is missing'
+grep -Fq 'cargo test --locked --workspace --all-features' "$VALIDATION" || \
+  fail 'unit tests do not exercise all features'
+grep -Fq '.evidence.packet.abstention == null' "$VALIDATION" || \
+  fail 'candidate self-index context does not reject an abstaining packet'
+grep -Fq '(.evidence.packet.evidence | type == "array")' "$VALIDATION" || \
+  fail 'candidate self-index context does not require the packet evidence array'
+grep -Fq '(.evidence.packet.evidence | length) > 0' "$VALIDATION" || \
+  fail 'candidate self-index context does not require real retrieval evidence'
+if grep -Fq '(.evidence | length) > 0' "$VALIDATION"; then
+  fail 'candidate self-index context still accepts a merely nonempty response envelope'
+fi
+self_context_filter='.
+  | .freshness == "current"
+  and .evidence.packet.abstention == null
+  and (.evidence.packet.evidence | type == "array")
+  and (.evidence.packet.evidence | length) > 0'
+if jq -e "$self_context_filter" <<<'{"freshness":"current","evidence":{"packet":{"abstention":null,"evidence":[]}}}' \
+  >/dev/null; then
+  fail 'candidate self-index context accepts an empty evidence packet'
+fi
+if jq -e "$self_context_filter" <<<'{"freshness":"current","evidence":{"packet":{"abstention":"no-match","evidence":[{}]}}}' \
+  >/dev/null; then
+  fail 'candidate self-index context accepts an abstaining packet'
+fi
+jq -e "$self_context_filter" \
+  <<<'{"freshness":"current","evidence":{"packet":{"abstention":null,"evidence":[{}]}}}' \
+  >/dev/null || fail 'candidate self-index context rejects real current evidence'
+grep -Fq 'macos-portability:' "$VALIDATION" || fail 'macOS strict portability gate is missing'
+grep -Fq 'cargo +stable clippy --locked --workspace --all-targets --all-features -- -D warnings' \
+  "$STABLE_CANARY" || fail 'latest-stable strict compatibility canary is missing'
+grep -Fq 'Verify the reviewed production pin tracks latest stable' "$STABLE_CANARY" || \
+  fail 'latest-stable canary does not detect a stale production toolchain pin'
+canary_clippy_line="$(grep -nF 'name: All-target, all-feature Clippy on latest stable' \
+  "$STABLE_CANARY" | cut -d: -f1)"
+canary_tests_line="$(grep -nF 'name: All-feature tests on latest stable' \
+  "$STABLE_CANARY" | cut -d: -f1)"
+canary_rustdoc_line="$(grep -nF 'name: Strict all-feature rustdoc on latest stable' \
+  "$STABLE_CANARY" | cut -d: -f1)"
+canary_pin_line="$(grep -nF 'name: Verify the reviewed production pin tracks latest stable' \
+  "$STABLE_CANARY" | cut -d: -f1)"
+[[ "$canary_pin_line" -gt "$canary_clippy_line" && \
+  "$canary_pin_line" -gt "$canary_tests_line" && \
+  "$canary_pin_line" -gt "$canary_rustdoc_line" ]] || \
+  fail 'stale-pin reporting can skip latest-stable compatibility evidence'
+if grep -Fq 'continue-on-error:' "$STABLE_CANARY"; then
+  fail 'latest-stable compatibility or stale-pin reporting was made non-blocking'
+fi
+if grep -Eiq 'nightly|miri|sanitizer|cargo[- ]fuzz' "$STABLE_CANARY"; then
+  fail 'production compatibility canary must use stable Rust only'
+fi
 grep -Fq 'strategy:' "$VALIDATION" || fail 'live PostgreSQL shards are missing'
 for shard in database runtime operations; do
   grep -Fq -- "- $shard" "$VALIDATION" || fail "live shard $shard is missing"
@@ -109,6 +162,10 @@ grep -Fq 'MACOSX_DEPLOYMENT_TARGET=26.0' "$UNIX_BUILD_HELPER" || \
   fail 'macOS release binaries do not require the current major version'
 grep -Fq 'minos 26.0' "$UNIX_BUILD_HELPER" || \
   fail 'macOS release binaries do not verify their minimum OS contract'
+grep -Fq "TARGET_ROOT=\"\${CARGO_TARGET_DIR:-target}\"" "$UNIX_BUILD_HELPER" || \
+  fail 'release builds do not honor an isolated Cargo target directory'
+grep -Fq -- '--env CARGO_TARGET_DIR=/tmp/cartograph-target' "$LINUX_BUILD_HELPER" || \
+  fail 'Linux container builds can follow a host target symlink'
 grep -Fq 'requires glibc 2.41 or newer' "$UNIX_INSTALLER" || \
   fail 'the Unix installer does not reject old Linux before download'
 grep -Fq 'requires macOS 26 or newer' "$UNIX_INSTALLER" || \
@@ -120,16 +177,16 @@ if grep -Fq 'Swatinem/rust-cache@' "$VALIDATION" "$RELEASE"; then
 fi
 CACHE_ACTION_SHA='55cc8345863c7cc4c66a329aec7e433d2d1c52a9'
 restore_count="$(literal_count "actions/cache/restore@$CACHE_ACTION_SHA")"
-[[ "$restore_count" == 4 ]] || fail 'every Rust cache restore must use pinned actions/cache v6.1.0'
+[[ "$restore_count" == 5 ]] || fail 'every Rust cache restore must use pinned actions/cache v6.1.0'
 save_count="$(literal_count "actions/cache/save@$CACHE_ACTION_SHA")"
-[[ "$save_count" == 3 ]] || fail 'bounded main, Windows, and release cache saves are missing'
+[[ "$save_count" == 4 ]] || fail 'bounded main, Windows, macOS, and release cache saves are missing'
 for cache_path in \
   '.cargo/registry/index/' \
   '.cargo/registry/cache/' \
   '.cargo/git/db/' \
   'target/'; do
   path_count="$(literal_count "$cache_path")"
-  [[ "$path_count" == 7 ]] || fail "Rust cache path coverage changed for $cache_path"
+  [[ "$path_count" == 9 ]] || fail "Rust cache path coverage changed for $cache_path"
 done
 grep -Fq 'steps.rust-cache.outputs.cache-primary-key' "$VALIDATION" || \
   fail 'main cache saves are not bound to their exact restored primary key'
@@ -144,7 +201,7 @@ grep -Fq -- '-v2-ubuntu-' "$VALIDATION" || \
   fail 'live shards do not reuse the compiled Ubuntu workspace cache'
 
 unpinned_actions="$({
-  grep -hE '^[[:space:]]*(- )?uses:' "$VALIDATION" "$RELEASE"
+  grep -hE '^[[:space:]]*(- )?uses:' "$VALIDATION" "$RELEASE" "$STABLE_CANARY"
 } | grep -Ev 'uses: (\./|[^[:space:]]+@[0-9a-f]{40}([[:space:]]|$))' || true)"
 if [[ -n "$unpinned_actions" ]]; then
   printf 'Unpinned release action references:\n%s\n' "$unpinned_actions" >&2

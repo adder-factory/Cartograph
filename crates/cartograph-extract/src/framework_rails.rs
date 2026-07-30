@@ -82,6 +82,7 @@ struct RouteScope {
     module: String,
 }
 
+#[derive(Clone, Copy)]
 struct RouteLineInput<'line, 'scope> {
     line_start: usize,
     line: &'line str,

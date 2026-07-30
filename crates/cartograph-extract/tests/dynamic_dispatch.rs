@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage};
 use cartograph_extract::{
     DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractedFile, NativeExtractor, SourceLimits,
@@ -8,7 +12,7 @@ const SOURCE_LIMIT: usize = 1024 * 1024;
 
 #[test]
 fn object_and_map_dispatch_tables_emit_bounded_source_exact_target_references() {
-    let source = r#"
+    let source = r"
 function startHandler() {}
 function stopHandler() {}
 function openHandler() {}
@@ -28,7 +32,7 @@ export function dispatch(kind: string) {
   HANDLERS[kind]?.();
   ACTIONS.get(kind)?.();
 }
-"#;
+";
     let first = extract("src/dispatch.ts", source);
     let second = extract("src/dispatch.ts", source);
     assert_eq!(first, second);
@@ -62,7 +66,7 @@ export function dispatch(kind: string) {
 
 #[test]
 fn unused_wrong_kind_and_overwide_dispatch_tables_do_not_invent_edges() {
-    let source = r#"
+    let source = r"
 function one() {}
 function two() {}
 function three() {}
@@ -80,7 +84,7 @@ const WIDE = { one, two, three, four, five, six, seven, eight, nine, ten, eleven
 UNUSED;
 WRONG_KIND['one']();
 WIDE['one']();
-"#;
+";
     let extracted = extract("src/negative.ts", source);
     assert!(extracted.references.iter().all(|reference| {
         !reference

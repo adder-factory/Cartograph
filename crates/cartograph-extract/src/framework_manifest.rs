@@ -13,6 +13,7 @@ const MAX_MANIFEST_ENTRIES: usize = 4_096;
 const MAX_JSON_NESTING: usize = 64;
 const JSON_CANCEL_BYTES: usize = 4_096;
 
+#[derive(Clone, Copy)]
 struct CargoDependencyScan<'manifest> {
     owner: Option<&'manifest SymbolId>,
     source: &'manifest str,
@@ -359,20 +360,19 @@ fn add_package(
     builder: &mut FrameworkBuilder<'_, '_>,
     input: ManifestSpanInput<'_>,
 ) -> Result<Option<SymbolId>, ExtractError> {
+    let ManifestSpanInput {
+        ecosystem,
+        value,
+        span,
+    } = input;
     let directory = manifest_identity_directory(builder.path());
     builder.add_landmark_with_id(LandmarkInput {
         kind: SymbolKind::Resource,
-        name: input.value.to_owned(),
-        identity: format!(
-            "manifest-package-{}::{}::manifest-dir::{directory}",
-            input.ecosystem, input.value
-        ),
-        start: input.span.start,
-        end: input.span.end,
-        body_search_text: format!(
-            "{} package dependency manifest {}",
-            input.ecosystem, input.value
-        ),
+        name: value.to_owned(),
+        identity: format!("manifest-package-{ecosystem}::{value}::manifest-dir::{directory}"),
+        start: span.start,
+        end: span.end,
+        body_search_text: format!("{ecosystem} package dependency manifest {value}"),
         target: None,
     })
 }
@@ -462,7 +462,12 @@ fn add_workspace_entry(
     input: ManifestSpanInput<'_>,
     kind: WorkspaceEntryKind,
 ) -> Result<(), ExtractError> {
-    let Some(pattern) = normalized_workspace_pattern(builder.path(), input.value) else {
+    let ManifestSpanInput {
+        ecosystem,
+        value,
+        span,
+    } = input;
+    let Some(pattern) = normalized_workspace_pattern(builder.path(), value) else {
         return Ok(());
     };
     let workspace_directory = manifest_directory(builder.path());
@@ -472,14 +477,13 @@ fn add_workspace_entry(
     };
     builder.add_landmark(LandmarkInput {
         kind: SymbolKind::Resource,
-        name: format!("{} workspace {label} {pattern}", input.ecosystem),
+        name: format!("{ecosystem} workspace {label} {pattern}"),
         identity: format!(
-            "manifest-workspace-{identity_label}-{}::{workspace_directory}::pattern::{pattern}",
-            input.ecosystem,
+            "manifest-workspace-{identity_label}-{ecosystem}::{workspace_directory}::pattern::{pattern}",
         ),
-        start: input.span.start,
-        end: input.span.end,
-        body_search_text: format!("{} workspace {search_label} {pattern}", input.ecosystem),
+        start: span.start,
+        end: span.end,
+        body_search_text: format!("{ecosystem} workspace {search_label} {pattern}"),
         target: None,
     })
 }

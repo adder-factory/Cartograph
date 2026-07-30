@@ -252,6 +252,10 @@ pub struct V1PostgresImportLimits {
 
 impl V1PostgresImportLimits {
     /// Build hard source-row, source-byte, and canonical validation ceilings.
+    /// # Errors
+    ///
+    /// Returns an error if source-row or source-byte limits are zero or exceed
+    /// the importer hard ceilings.
     pub const fn new(
         maximum_rows: u64,
         maximum_source_bytes: u64,
@@ -577,10 +581,8 @@ struct SourceNode {
     signature: Option<String>,
     body_hash: String,
     visibility: Option<String>,
-    is_exported: bool,
-    is_default_export: bool,
-    is_async: bool,
-    is_static: bool,
+    export: cartograph_domain::SymbolExportFlags,
+    execution: cartograph_domain::SymbolExecutionFlags,
 }
 
 struct SourceEdge {
@@ -612,6 +614,7 @@ struct DecodedSourceReference {
     raw_extra_lines: Option<String>,
 }
 
+#[derive(Clone, Copy)]
 struct ReferenceHashEvidence<'a> {
     reference: &'a SourceReference,
     raw_candidates: Option<&'a str>,
@@ -756,6 +759,10 @@ impl InitializedImport {
 
 impl CartographDatabase {
     /// Validate a frozen v1.1.33 PostgreSQL schema and checkout without mutation.
+    /// # Errors
+    ///
+    /// Returns an error if source schema/version, frozen checkout bytes,
+    /// identities, row/byte bounds, or canonical validation do not match.
     pub async fn dry_run_v1_postgres_import(
         &self,
         request: &V1PostgresImportRequest,
@@ -766,6 +773,10 @@ impl CartographDatabase {
     }
 
     /// Import and publish, resuming any exact matching durable checkpoint.
+    /// # Errors
+    ///
+    /// Returns an error if preflight or confirmation fails, a lease/checkpoint
+    /// is incompatible, publication races, or any durable import stage fails.
     pub async fn import_v1_postgres(
         &self,
         request: V1PostgresImportRequest,
@@ -775,31 +786,37 @@ impl CartographDatabase {
     }
 
     /// Import with cooperative interruption at explicit durable milestones.
-    pub async fn import_v1_postgres_with_observer<Observe>(
-        &self,
+    pub fn import_v1_postgres_with_observer<'database, Observe>(
+        &'database self,
         request: V1PostgresImportRequest,
         mut interrupt: Observe,
-    ) -> Result<V1PostgresImportReport, V1PostgresImportError>
+    ) -> impl Future<Output = Result<V1PostgresImportReport, V1PostgresImportError>> + 'database
     where
-        Observe: FnMut(V1PostgresImportCheckpoint) -> bool,
+        Observe: FnMut(V1PostgresImportCheckpoint) -> bool + 'database,
     {
-        let initialized = initialize_import(self, &request, &mut interrupt).await?;
-        match reconcile_initialized_import(self, initialized, request.execution.statement_timeout)
+        Box::pin(async move {
+            let initialized = initialize_import(self, &request, &mut interrupt).await?;
+            match reconcile_initialized_import(
+                self,
+                initialized,
+                request.execution.statement_timeout,
+            )
             .await?
-        {
-            ImportDisposition::Complete(report) => Ok(report),
-            ImportDisposition::Active(active) => {
-                execute_active_import(
-                    self,
-                    ActiveImportInvocation {
-                        request: &request,
-                        active: *active,
-                    },
-                    &mut interrupt,
-                )
-                .await
+            {
+                ImportDisposition::Complete(report) => Ok(report),
+                ImportDisposition::Active(active) => {
+                    execute_active_import(
+                        self,
+                        ActiveImportInvocation {
+                            request: &request,
+                            active: *active,
+                        },
+                        &mut interrupt,
+                    )
+                    .await
+                }
             }
-        }
+        })
     }
 }
 
@@ -1193,7 +1210,7 @@ async fn register_import_project(
         request.execution.statement_timeout,
     )
     .await
-    .map_err(|_| database_error("register-project-statement-timeout"))?;
+    .map_err(|()| database_error("register-project-statement-timeout"))?;
     let destination = crate::database::quoted_schema(&database.schema);
     let sql = format!(
         r#"INSERT INTO {destination}."projects" (root_identity, repository_fingerprint)
@@ -1393,41 +1410,15 @@ fn finalize_source_analysis(
     ensure_analysis_active(deadline)?;
     let admission = admit_mapping(&source, request.limits)?;
     let mut raw_facts = map_source_facts(&source, deadline)?;
-    apply_page_rank(&mut raw_facts, || Instant::now() >= deadline).map_err(
-        |error| match error {
-            crate::PageRankError::Cancelled => V1PostgresImportError::AnalysisDeadline,
-            crate::PageRankError::WorkerFailed => V1PostgresImportError::CanonicalValidation,
+    apply_import_centrality(&mut raw_facts, deadline)?;
+    let facts = validate_import_facts(
+        raw_facts,
+        &ImportValidation {
+            limits: request.limits.validation,
+            source_retained_bytes: admission.source_retained_bytes,
+            deadline,
         },
     )?;
-    apply_sampled_betweenness(&mut raw_facts, || Instant::now() >= deadline).map_err(|error| {
-        match error {
-            crate::BetweennessError::Cancelled => V1PostgresImportError::AnalysisDeadline,
-            crate::BetweennessError::WorkerFailed => V1PostgresImportError::CanonicalValidation,
-        }
-    })?;
-    let validation_working_bytes = request
-        .limits
-        .validation
-        .maximum_working_bytes()
-        .checked_sub(admission.source_retained_bytes)
-        .ok_or(V1PostgresImportError::SourceLimit)?;
-    let validation_limits = GenerationValidationLimits::new(
-        request
-            .limits
-            .validation
-            .maximum_output_bytes()
-            .min(validation_working_bytes),
-        validation_working_bytes,
-    )
-    .map_err(|_| V1PostgresImportError::SourceLimit)?;
-    let (facts, _) =
-        validate_generation_facts(raw_facts, validation_limits, || Instant::now() >= deadline)
-            .map_err(|error| match error {
-                crate::GenerationValidationError::Cancelled => {
-                    V1PostgresImportError::AnalysisDeadline
-                }
-                _ => V1PostgresImportError::CanonicalValidation,
-            })?;
     let counts = canonical_counts(&facts)?;
     Ok(V1Analysis {
         report: V1PostgresDryRunReport {
@@ -1438,6 +1429,60 @@ fn finalize_source_analysis(
             source_bytes: source.source_bytes,
         },
         facts: Some(facts),
+    })
+}
+
+fn apply_import_centrality(
+    raw_facts: &mut GenerationFacts,
+    deadline: Instant,
+) -> Result<(), V1PostgresImportError> {
+    apply_page_rank(raw_facts, || Instant::now() >= deadline).map_err(|error| match error {
+        crate::PageRankError::Cancelled => V1PostgresImportError::AnalysisDeadline,
+        crate::PageRankError::WorkerFailed | crate::PageRankError::NumericOverflow => {
+            V1PostgresImportError::CanonicalValidation
+        }
+    })?;
+    apply_sampled_betweenness(raw_facts, || Instant::now() >= deadline).map_err(
+        |error| match error {
+            crate::BetweennessError::Cancelled => V1PostgresImportError::AnalysisDeadline,
+            crate::BetweennessError::WorkerFailed | crate::BetweennessError::NumericOverflow => {
+                V1PostgresImportError::CanonicalValidation
+            }
+        },
+    )?;
+    Ok(())
+}
+
+struct ImportValidation {
+    limits: GenerationValidationLimits,
+    source_retained_bytes: u64,
+    deadline: Instant,
+}
+
+fn validate_import_facts(
+    raw_facts: GenerationFacts,
+    validation: &ImportValidation,
+) -> Result<CanonicalGenerationFacts, V1PostgresImportError> {
+    let validation_working_bytes = validation
+        .limits
+        .maximum_working_bytes()
+        .checked_sub(validation.source_retained_bytes)
+        .ok_or(V1PostgresImportError::SourceLimit)?;
+    let validation_limits = GenerationValidationLimits::new(
+        validation
+            .limits
+            .maximum_output_bytes()
+            .min(validation_working_bytes),
+        validation_working_bytes,
+    )
+    .map_err(|_| V1PostgresImportError::SourceLimit)?;
+    validate_generation_facts(raw_facts, validation_limits, || {
+        Instant::now() >= validation.deadline
+    })
+    .map(|(facts, _)| facts)
+    .map_err(|error| match error {
+        crate::GenerationValidationError::Cancelled => V1PostgresImportError::AnalysisDeadline,
+        _ => V1PostgresImportError::CanonicalValidation,
     })
 }
 
@@ -1797,7 +1842,7 @@ fn source_preflight_sql(request: &V1PostgresImportRequest) -> String {
     let sql = SOURCE_PREFLIGHT_SQL_TEMPLATE
         .replace("{source}", &source)
         .replace("{version}", &V1_SCHEMA_VERSION.to_string());
-    replace_preflight_field_limits(sql, request)
+    replace_preflight_field_limits(&sql, request)
 }
 
 fn native_import_languages() -> Vec<String> {
@@ -1808,7 +1853,7 @@ fn native_import_languages() -> Vec<String> {
         .collect()
 }
 
-fn replace_preflight_field_limits(sql: String, request: &V1PostgresImportRequest) -> String {
+fn replace_preflight_field_limits(sql: &str, request: &V1PostgresImportRequest) -> String {
     sql.replace("{max_path}", &MAXIMUM_LEGACY_PATH_BYTES.to_string())
         .replace(
             "{max_content_hash}",
@@ -2022,6 +2067,7 @@ struct DecodedSourceFile {
     actual_size: u64,
 }
 
+#[derive(Clone, Copy)]
 struct Utf16Position {
     line_start: usize,
     line_end: usize,
@@ -2081,10 +2127,10 @@ fn require_source_manifest(
     let actual = manifest
         .finish()
         .map_err(|_| invalid_source("source_manifest_count"))?;
-    if expected != &actual {
-        Err(V1PostgresImportError::SourceManifestMismatch)
-    } else {
+    if expected == &actual {
         Ok(actual)
+    } else {
+        Err(V1PostgresImportError::SourceManifestMismatch)
     }
 }
 
@@ -2327,10 +2373,14 @@ fn decode_source_node(row: &sqlx_postgres::PgRow) -> Result<SourceNode, V1Postgr
         signature: read_named_optional_string(row, "signature", "signature")?,
         body_hash: read_named_string(row, "body_hash", "body_hash")?,
         visibility: read_named_optional_string(row, "visibility", "visibility")?,
-        is_exported: read_legacy_bool(row, "is_exported", "is_exported")?,
-        is_default_export: read_legacy_bool(row, "is_default_export", "is_default_export")?,
-        is_async: read_legacy_bool(row, "is_async", "is_async")?,
-        is_static: read_legacy_bool(row, "is_static", "is_static")?,
+        export: cartograph_domain::SymbolExportFlags::new(
+            read_legacy_bool(row, "is_exported", "is_exported")?,
+            read_legacy_bool(row, "is_default_export", "is_default_export")?,
+        ),
+        execution: cartograph_domain::SymbolExecutionFlags {
+            async_symbol: read_legacy_bool(row, "is_async", "is_async")?,
+            static_member: read_legacy_bool(row, "is_static", "is_static")?,
+        },
     })
 }
 
@@ -2483,7 +2533,7 @@ async fn initialize_import_run(
         initialization.request.execution.statement_timeout,
     )
     .await
-    .map_err(|_| database_error("initialize-statement-timeout"))?;
+    .map_err(|()| database_error("initialize-statement-timeout"))?;
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "{IMPORT_LOCK_NAMESPACE}:{}:{}:{}",
@@ -2744,7 +2794,7 @@ async fn append_checkpoint(
         .map_err(|_| database_error("checkpoint-begin"))?;
     crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
         .await
-        .map_err(|_| database_error("checkpoint-statement-timeout"))?;
+        .map_err(|()| database_error("checkpoint-statement-timeout"))?;
     let update_sql = format!(
         r#"UPDATE {destination}."v1_import_runs"
             SET checkpoint = $2, updated_at = clock_timestamp()
@@ -2807,7 +2857,7 @@ async fn load_generation_state(
         .map_err(|_| database_error("load-generation-state-begin"))?;
     crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
         .await
-        .map_err(|_| database_error("load-generation-state-timeout"))?;
+        .map_err(|()| database_error("load-generation-state-timeout"))?;
     let destination = crate::database::quoted_schema(&database.schema);
     let sql = format!(
         r#"SELECT state AS generation_state FROM {destination}."index_generations"
@@ -2850,7 +2900,7 @@ async fn verify_destination(
         .map_err(|_| database_error("verify-destination-isolation"))?;
     crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
         .await
-        .map_err(|_| database_error("verify-destination-timeout"))?;
+        .map_err(|()| database_error("verify-destination-timeout"))?;
     let destination = crate::database::quoted_schema(&database.schema);
     let sql = format!(
         r#"SELECT generations.content_digest, generations.content_digest_version,
@@ -3110,10 +3160,10 @@ fn hash_node(hasher: &mut blake3::Hasher, node: &SourceNode) {
     hash_optional_field(hasher, node.signature.as_deref());
     hash_optional_field(hasher, node.visibility.as_deref());
     for value in [
-        node.is_exported,
-        node.is_default_export,
-        node.is_async,
-        node.is_static,
+        node.export.exported,
+        node.export.default_export,
+        node.execution.async_symbol,
+        node.execution.static_member,
     ] {
         hash_field(hasher, &[u8::from(value)]);
     }

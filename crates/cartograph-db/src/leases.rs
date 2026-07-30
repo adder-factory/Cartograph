@@ -10,7 +10,7 @@ use crate::{CartographDatabase, database::audited_query};
 
 const LEASE_LOCK_NAMESPACE: &str = "cartograph-v2-operation";
 const MIN_LEASE_DURATION: Duration = Duration::from_secs(1);
-const MAX_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
+const MAX_LEASE_DURATION: Duration = Duration::from_mins(5);
 const MAX_PROCESS_START_BYTES: usize = 256;
 const STATUS_OWNER_PID_COLUMN: usize = 0;
 const STATUS_OWNER_PROCESS_START_COLUMN: usize = 1;
@@ -333,6 +333,10 @@ struct AcquireTransactionInput<'a> {
 impl CartographDatabase {
     /// Remove only database-clock-expired lease rows for one project.
     /// Live ownership tokens are never selected by this maintenance path.
+    /// # Errors
+    ///
+    /// Returns an error if PostgreSQL cannot delete only rows whose expiry is
+    /// at or before the database clock.
     pub async fn remove_expired_leases(&self, project_id: &ProjectId) -> Result<u64, LeaseError> {
         let schema = crate::database::quoted_schema(&self.schema);
         let sql = format!(
@@ -353,6 +357,10 @@ impl CartographDatabase {
     /// The generated token is deliberately inaccessible to the caller. The
     /// attempt is consumed by [`Self::acquire_reconcilable_lease`], while the
     /// separate probe can only observe whether that exact attempt committed.
+    /// # Errors
+    ///
+    /// Returns an error if target/owner/duration fields are invalid or a
+    /// cryptographically opaque lease identifier cannot be generated.
     pub fn prepare_lease_acquisition(
         request: LeaseRequest,
     ) -> Result<(LeaseAcquisitionAttempt, LeaseAcquisitionProbe), LeaseError> {
@@ -366,12 +374,20 @@ impl CartographDatabase {
     }
 
     /// Acquire the project's only live write lease, replacing expired project rows atomically.
+    /// # Errors
+    ///
+    /// Returns an error if the request is invalid, a live lease conflicts, or
+    /// the atomic expired-row takeover and lease decode fails.
     pub async fn acquire_lease(&self, request: LeaseRequest) -> Result<ProjectLease, LeaseError> {
         let (attempt, _) = Self::prepare_lease_acquisition(request)?;
         self.acquire_reconcilable_lease(attempt).await
     }
 
     /// Acquire an operation lease under a PostgreSQL-side statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error if request/deadline validation fails, a live lease
+    /// conflicts, or the bounded atomic acquisition cannot commit.
     pub async fn acquire_lease_bounded(
         &self,
         request: LeaseRequest,
@@ -383,6 +399,10 @@ impl CartographDatabase {
     }
 
     /// Consume one opaque attempt and acquire or take over its target lease.
+    /// # Errors
+    ///
+    /// Returns an error if the single-use attempt is invalid, another live
+    /// owner holds the target, or its exact-token acquisition fails.
     pub async fn acquire_reconcilable_lease(
         &self,
         attempt: LeaseAcquisitionAttempt,
@@ -395,6 +415,10 @@ impl CartographDatabase {
     /// A statement-timeout rollback may be retried once inside this same
     /// single-use capability. The exact token never returns to the caller and
     /// cannot be reused for a later takeover.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline/attempt is invalid, a live owner
+    /// conflicts, or both bounded exact-token acquisition attempts fail.
     pub async fn acquire_reconcilable_lease_bounded(
         &self,
         attempt: LeaseAcquisitionAttempt,
@@ -469,6 +493,10 @@ impl CartographDatabase {
     }
 
     /// Extend a lease only when its exact token is still current and unexpired.
+    /// # Errors
+    ///
+    /// Returns an error if lease duration is invalid, the exact token is lost
+    /// or expired, PostgreSQL fails, or the new expiry cannot be decoded.
     pub async fn heartbeat_lease(&self, lease: &mut ProjectLease) -> Result<(), LeaseError> {
         let duration_millis = duration_millis(lease.duration)?;
         let schema = crate::database::quoted_schema(&self.schema);
@@ -487,6 +515,10 @@ impl CartographDatabase {
 
     /// Extend a lease inside an explicitly rolled-back transaction with a
     /// PostgreSQL-side deadline shorter than the supervising client deadline.
+    /// # Errors
+    ///
+    /// Returns an error if duration/deadline setup fails, the exact token is
+    /// lost or expired, or the bounded heartbeat transaction cannot commit.
     pub async fn heartbeat_lease_bounded(
         &self,
         lease: &mut ProjectLease,
@@ -550,11 +582,19 @@ impl CartographDatabase {
     }
 
     /// Release a lease only when its exact token is still current and unexpired.
+    /// # Errors
+    ///
+    /// Returns an error if the exact token is no longer live or PostgreSQL
+    /// cannot atomically delete and commit that lease row.
     pub async fn release_lease(&self, lease: &ProjectLease) -> Result<(), LeaseError> {
         self.release_lease_inner(lease, None).await
     }
 
     /// Release an exact lease token under a PostgreSQL-side statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error if deadline setup fails, the token is lost/expired, or
+    /// the bounded exact-token delete cannot commit.
     pub async fn release_lease_bounded(
         &self,
         lease: &ProjectLease,
@@ -619,6 +659,10 @@ impl CartographDatabase {
     }
 
     /// Read current or expired owner metadata without mutating lease state.
+    /// # Errors
+    ///
+    /// Returns an error if owner/timestamp/generation fields cannot be queried
+    /// or decoded from the target lease row.
     pub async fn lease_status(
         &self,
         target: &LeaseTarget,
@@ -649,6 +693,10 @@ impl CartographDatabase {
     }
 
     /// Recover only the exact opaque acquisition attempt after an ambiguous response.
+    /// # Errors
+    ///
+    /// Returns an error if PostgreSQL cannot read or decode the exact opaque
+    /// acquisition token's committed lease state.
     pub async fn reconcile_acquisition(
         &self,
         probe: &LeaseAcquisitionProbe,
@@ -657,6 +705,10 @@ impl CartographDatabase {
     }
 
     /// Reconcile an opaque attempt under a PostgreSQL-side statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error if deadline setup fails or the exact opaque attempt's
+    /// bounded reconciliation cannot be queried, decoded, or committed.
     pub async fn reconcile_acquisition_bounded(
         &self,
         probe: &LeaseAcquisitionProbe,
@@ -827,7 +879,7 @@ pub(crate) fn project_lock_key(
     schema: &cartograph_config::DatabaseSchema,
     project_id: &ProjectId,
 ) -> String {
-    format!("{LEASE_LOCK_NAMESPACE}:{}:{}", schema.as_str(), project_id,)
+    format!("{LEASE_LOCK_NAMESPACE}:{}:{}", schema.as_str(), project_id)
 }
 
 fn decode_status(row: &PgRow, target: &LeaseTarget) -> Result<LeaseStatus, LeaseError> {

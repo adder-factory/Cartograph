@@ -29,7 +29,7 @@ pub(crate) async fn begin_bounded<'a>(
         .map_err(|_| database_error(operation))?;
     crate::database::set_local_statement_timeout(&mut transaction, timeout)
         .await
-        .map_err(|_| database_error("semantic-statement-timeout"))?;
+        .map_err(|()| database_error("semantic-statement-timeout"))?;
     Ok(transaction)
 }
 
@@ -48,10 +48,10 @@ pub(crate) async fn configure_filtered_hnsw_scan(
     connection: &mut PgConnection,
 ) -> Result<(), SemanticStorageError> {
     query(
-        r#"SELECT set_config('hnsw.iterative_scan', 'strict_order', true),
+        r"SELECT set_config('hnsw.iterative_scan', 'strict_order', true),
                   set_config('hnsw.ef_search', $1, true),
                   set_config('hnsw.max_scan_tuples', $2, true),
-                  set_config('hnsw.scan_mem_multiplier', $3, true)"#,
+                  set_config('hnsw.scan_mem_multiplier', $3, true)",
     )
     .bind(HNSW_EF_SEARCH)
     .bind(HNSW_MAX_SCAN_TUPLES)
@@ -178,10 +178,10 @@ pub(crate) fn require_selector(
     model: RegisteredEmbeddingModel,
     selector: &EmbeddingModelSelector,
 ) -> Result<RegisteredEmbeddingModel, SemanticStorageError> {
-    if model.selector != *selector {
-        Err(SemanticStorageError::ModelMismatch)
-    } else {
+    if model.selector == *selector {
         Ok(model)
+    } else {
+        Err(SemanticStorageError::ModelMismatch)
     }
 }
 

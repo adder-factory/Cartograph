@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph project-runtime and agent evidence contracts.
+
+mod dependency_ownership;
+
 use std::{
     collections::BTreeSet,
     env, fs,
@@ -23,10 +27,15 @@ mod fixture;
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
 const TOP_K: usize = 5;
-const LIVE_TEST_TIMEOUT: Duration = Duration::from_secs(180);
+const LIVE_TEST_TIMEOUT: Duration = Duration::from_mins(3);
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const BASELINE_EDIT_PRECISION: f64 = 0.866_666_666_666_666_8;
 const BASELINE_ESTIMATED_TOKENS: f64 = 982.0;
+const SCORE_TOLERANCE: f64 = 1.0e-12;
+
+fn score_matches(actual: f64, expected: f64) -> bool {
+    (actual - expected).abs() <= SCORE_TOLERANCE
+}
 
 type EvalResult<T> = Result<T, String>;
 
@@ -111,13 +120,12 @@ async fn native_patch_task_gate_meets_v1_1_33_and_repeats_exactly() {
         .unwrap_or_else(|error| panic!("patch-task database settings failed: {error}"));
     let cleanup_settings = settings.clone();
     let mut task = tokio::spawn(run_live_evaluation(settings));
-    let outcome = match tokio::time::timeout(LIVE_TEST_TIMEOUT, &mut task).await {
-        Ok(joined) => joined.map_err(|_| "patch-task evaluation task panicked".to_owned()),
-        Err(_) => {
-            task.abort();
-            let _ = task.await;
-            Err("patch-task evaluation exceeded its 180-second deadline".to_owned())
-        }
+    let outcome = if let Ok(joined) = tokio::time::timeout(LIVE_TEST_TIMEOUT, &mut task).await {
+        joined.map_err(|_| "patch-task evaluation task panicked".to_owned())
+    } else {
+        task.abort();
+        let _ = task.await;
+        Err("patch-task evaluation exceeded its 180-second deadline".to_owned())
     };
     let cleanup = drop_schema(&cleanup_settings, &schema).await;
     if let Err(error) = cleanup {
@@ -634,22 +642,29 @@ fn assert_report_meets_baseline(report: &EvaluationReport) {
         fixture::FIXTURE_SOURCE_FINGERPRINT
     );
     assert_eq!(report.scores.len(), 5);
-    assert_eq!(report.mean_hit_at_5, 1.0, "hit@5 regressed");
-    assert_eq!(report.mean_mrr, 1.0, "MRR regressed: {:#?}", report.scores);
+    assert!(score_matches(report.mean_hit_at_5, 1.0), "hit@5 regressed");
+    assert!(
+        score_matches(report.mean_mrr, 1.0),
+        "MRR regressed: {:#?}",
+        report.scores
+    );
     assert!(
         report.mean_edit_precision >= BASELINE_EDIT_PRECISION,
         "edit precision regressed: {}\n{:#?}",
         report.mean_edit_precision,
         report.scores,
     );
-    assert_eq!(report.mean_edit_recall, 1.0, "edit recall regressed");
-    assert_eq!(
-        report.mean_test_recall, 1.0,
+    assert!(
+        score_matches(report.mean_edit_recall, 1.0),
+        "edit recall regressed"
+    );
+    assert!(
+        score_matches(report.mean_test_recall, 1.0),
         "test recall regressed: {:#?}",
         report.scores
     );
-    assert_eq!(
-        report.abstention_accuracy, 1.0,
+    assert!(
+        score_matches(report.abstention_accuracy, 1.0),
         "abstention accuracy regressed"
     );
     assert!(
@@ -658,16 +673,24 @@ fn assert_report_meets_baseline(report: &EvaluationReport) {
         report.mean_estimated_tokens
     );
     for score in &report.scores {
-        assert_eq!(score.hit_at_5, 1.0, "{} missed hit@5", score.case_id);
-        assert_eq!(score.mrr, 1.0, "{} MRR regressed", score.case_id);
-        assert_eq!(
-            score.edit_recall, 1.0,
+        assert!(
+            score_matches(score.hit_at_5, 1.0),
+            "{} missed hit@5",
+            score.case_id
+        );
+        assert!(
+            score_matches(score.mrr, 1.0),
+            "{} MRR regressed",
+            score.case_id
+        );
+        assert!(
+            score_matches(score.edit_recall, 1.0),
             "{} edit recall regressed",
             score.case_id
         );
         if let Some(test_recall) = score.test_recall {
-            assert_eq!(
-                test_recall, 1.0,
+            assert!(
+                score_matches(test_recall, 1.0),
                 "{} affected-test recall regressed",
                 score.case_id
             );

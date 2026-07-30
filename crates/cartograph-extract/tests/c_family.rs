@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind, Visibility};
@@ -74,7 +78,7 @@ Point *makePoint(Point *point) {
 
 #[test]
 fn cpp_extracts_scoped_methods_visibility_inheritance_aliases_and_member_calls() {
-    let source = r#"#include <vector>
+    let source = r"#include <vector>
 class Widget : public Base {
 public:
   int field;
@@ -83,7 +87,7 @@ public:
 
 using Alias = Widget;
 int Widget::other() { return run(); }
-"#;
+";
     let extracted = extract("src/widget.cpp", source);
 
     let class = assert_symbol(&extracted, SymbolKind::Class, "Widget", "Widget");
@@ -127,7 +131,7 @@ int Widget::other() { return run(); }
 }
 
 #[test]
-fn c_family_preserves_locked_v1_macro_recovery_and_cpp_call_chains_safely() {
+fn c_family_preserves_locked_v1_macro_recovery() {
     let recovered = extract(
         "src/video.c",
         "AX_VIN_GLB_API AX_S32 AX_VIN_Init(AX_VOID) { return 0; }\n",
@@ -150,7 +154,10 @@ fn c_family_preserves_locked_v1_macro_recovery_and_cpp_call_chains_safely() {
             || !((reference.kind == ReferenceKind::Returns && reference.name == "AX_VIN_GLB_API")
                 || (reference.kind == ReferenceKind::TypeOf && reference.name == "AX_VOID"))
     }));
+}
 
+#[test]
+fn c_family_recovers_macro_prefixed_cpp_containers() {
     let cases = [
         (
             "SOME_TEMPLATE_MACRO\nclass MyClass { void method() {} };",
@@ -199,7 +206,10 @@ fn c_family_preserves_locked_v1_macro_recovery_and_cpp_call_chains_safely() {
     );
     assert_symbol(&regular, SymbolKind::Class, "Vec", "Vec");
     assert_symbol(&regular, SymbolKind::Class, "Simple", "Simple");
+}
 
+#[test]
+fn cpp_call_chains_and_constructions_remain_safe() {
     let calls = extract(
         "src/calls.cpp",
         r#"int use() {
@@ -223,14 +233,14 @@ fn c_family_preserves_locked_v1_macro_recovery_and_cpp_call_chains_safely() {
 
     let receiver_calls = extract(
         "src/receiver.cpp",
-        r#"struct Worker {
+        r"struct Worker {
   void run() {}
   void dispatch(Worker *worker) {
     worker->run();
     this->run();
   }
 };
-"#,
+",
     );
     assert_reference(
         &receiver_calls,
@@ -247,14 +257,14 @@ fn c_family_preserves_locked_v1_macro_recovery_and_cpp_call_chains_safely() {
 
     let constructions = extract(
         "src/constructions.cpp",
-        r#"namespace Demo { template<typename T> class Gadget {}; }
+        r"namespace Demo { template<typename T> class Gadget {}; }
 class Widget {};
 void build() {
   auto *widget = new Widget();
   auto *gadget = new Demo::Gadget<int>();
   auto *bytes = new char[4];
 }
-"#,
+",
     );
     assert_reference(
         &constructions,
@@ -323,13 +333,13 @@ fn c_family_locks_forward_typedef_header_routing_and_doxygen() {
 fn cuda_kernel_launch_and_host_calls_share_the_c_family_contract() {
     let extracted = extract(
         "kernels/fill.cu",
-        r#"#include <cuda_runtime.h>
+        r"#include <cuda_runtime.h>
 __global__ void fillKernel(float *out) { out[0] = 1.0f; }
 void launchFill(float *out) {
   fillKernel<<<1, 32>>>(out);
   cudaDeviceSynchronize();
 }
-"#,
+",
     );
 
     assert_eq!(extracted.language, SourceLanguage::Cuda);
@@ -360,21 +370,21 @@ fn shader_modes_extract_structures_functions_signatures_and_calls() {
         (
             "shader.frag",
             SourceLanguage::Glsl,
-            r#"struct Light { vec3 position; float intensity; };
+            r"struct Light { vec3 position; float intensity; };
 float square(float value) { return value * value; }
 vec3 normal(vec3 input) { return normalize(input); }
 void main() { square(2.0); }
-"#,
+",
             ["square", "normalize"].as_slice(),
             "a7a37cf341b9bc4d434806fc0ba2c6fc33e85178538d48c5943a41e6473594eb",
         ),
         (
             "shader.hlsl",
             SourceLanguage::Hlsl,
-            r#"struct VSInput { float4 pos : POSITION; };
+            r"struct VSInput { float4 pos : POSITION; };
 float helper(float value) { return value; }
 float4 main(float4 pos : POSITION) : SV_Position { return helper(pos.x).xxxx; }
-"#,
+",
             ["helper"].as_slice(),
             "a10342b0f59e98799cb4fe6a9d739d5c7a2e3521b32faf9395b4b34bdccf4ccc",
         ),
@@ -589,10 +599,10 @@ fn canonical_facts(extracted: &ExtractedFile) -> Vec<String> {
             symbol.signature.as_deref().unwrap_or_default(),
             symbol.docstring.as_deref().unwrap_or_default(),
             symbol.body_search_text,
-            symbol.declaration_only,
-            symbol.exported,
-            symbol.async_symbol,
-            symbol.static_member,
+            symbol.implementation.declaration_only,
+            symbol.export.exported,
+            symbol.execution.async_symbol,
+            symbol.execution.static_member,
             symbol.visibility
         )
     }));

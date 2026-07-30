@@ -1,0 +1,14 @@
+doc-valid-idents = [
+    "BLAKE3",
+    "BM25",
+    "Cartograph",
+    "JSON-RPC",
+    "MCP",
+    "Postgres",
+    "PostgreSQL",
+    "RFC9562",
+    "SQL",
+    "UUID",
+    "UUIDv8",
+    "..",
+]

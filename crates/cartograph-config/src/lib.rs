@@ -71,6 +71,11 @@ pub struct DatabaseSchema(String);
 impl DatabaseSchema {
     /// Load the optional process setting, falling back to Cartograph's default
     /// schema while applying the same identifier validation as config files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidDatabaseSchema`] when the environment
+    /// value is non-Unicode or is not a valid unquoted PostgreSQL identifier.
     pub fn from_env() -> Result<Self, ConfigError> {
         match env::var(DATABASE_SCHEMA_ENV) {
             Ok(schema) => Self::parse(&schema),
@@ -81,6 +86,11 @@ impl DatabaseSchema {
 
     /// Parse a conservative unquoted PostgreSQL identifier and normalize it to
     /// lowercase before the database layer quotes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidDatabaseSchema`] when `raw` is empty,
+    /// non-ASCII, too long, or contains invalid identifier characters.
     pub fn parse(raw: &str) -> Result<Self, ConfigError> {
         let mut bytes = raw.bytes();
         let valid_first = bytes
@@ -107,6 +117,11 @@ impl DatabaseSchema {
 
 impl DatabaseSettings {
     /// Load settings from the process environment and validate every value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] when a required setting is absent or any
+    /// supplied database, bound, timeout, TLS, or schema value is invalid.
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url =
             env::var(DATABASE_URL_ENV).map_err(|_| ConfigError::MissingDatabaseUrl)?;
@@ -127,19 +142,24 @@ impl DatabaseSettings {
 
     /// Validate settings supplied by a non-environment boundary, such as a
     /// future project config loader.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] when the database URL is not an accepted
+    /// PostgreSQL URL or either numeric setting is outside its hard bound.
     pub fn parse(
         database_url: &str,
         max_connections: Option<&str>,
         acquire_timeout_ms: Option<&str>,
     ) -> Result<Self, ConfigError> {
         validate_database_url(database_url)?;
-        let max_connections = parse_bounded_nonzero_u32(BoundedIntegerInput {
+        let max_connections = parse_bounded_nonzero_u32(&BoundedIntegerInput {
             key: DATABASE_MAX_CONNECTIONS_ENV,
             raw: max_connections,
             default: DEFAULT_MAX_CONNECTIONS,
             maximum: MAX_CONNECTIONS_LIMIT,
         })?;
-        let acquire_timeout_ms = parse_bounded_nonzero_u64(BoundedIntegerInput {
+        let acquire_timeout_ms = parse_bounded_nonzero_u64(&BoundedIntegerInput {
             key: DATABASE_ACQUIRE_TIMEOUT_MS_ENV,
             raw: acquire_timeout_ms,
             default: DEFAULT_ACQUIRE_TIMEOUT_MS,
@@ -157,6 +177,11 @@ impl DatabaseSettings {
     }
 
     /// Replace the connection-pool cap using the same hard bound as environment input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidBoundedInteger`] when `value` is zero or
+    /// exceeds the supported connection limit.
     pub fn with_max_connections(mut self, value: u32) -> Result<Self, ConfigError> {
         self.max_connections = NonZeroU32::new(value)
             .filter(|value| value.get() <= MAX_CONNECTIONS_LIMIT)
@@ -169,8 +194,13 @@ impl DatabaseSettings {
     }
 
     /// Replace the pool/initial-connect acquisition timeout in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidBoundedInteger`] when `value` is zero or
+    /// exceeds the supported acquisition timeout.
     pub fn with_acquire_timeout_ms(mut self, value: u64) -> Result<Self, ConfigError> {
-        let value = parse_bounded_nonzero_u64(BoundedIntegerInput {
+        let value = parse_bounded_nonzero_u64(&BoundedIntegerInput {
             key: DATABASE_ACQUIRE_TIMEOUT_MS_ENV,
             raw: Some(&value.to_string()),
             default: DEFAULT_ACQUIRE_TIMEOUT_MS,
@@ -181,8 +211,13 @@ impl DatabaseSettings {
     }
 
     /// Replace the PostgreSQL session statement timeout in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidBoundedInteger`] when `raw` is malformed,
+    /// zero, or exceeds the supported query timeout.
     pub fn with_query_timeout_ms(mut self, raw: Option<&str>) -> Result<Self, ConfigError> {
-        let value = parse_bounded_nonzero_u64(BoundedIntegerInput {
+        let value = parse_bounded_nonzero_u64(&BoundedIntegerInput {
             key: DATABASE_QUERY_TIMEOUT_MS_ENV,
             raw,
             default: DEFAULT_QUERY_TIMEOUT_MS,
@@ -200,6 +235,11 @@ impl DatabaseSettings {
     }
 
     /// Replace the default schema with a validated project/deployment schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidDatabaseSchema`] when `raw` is not a
+    /// bounded unquoted PostgreSQL identifier.
     pub fn with_schema(mut self, raw: &str) -> Result<Self, ConfigError> {
         self.schema = DatabaseSchema::parse(raw)?;
         Ok(self)
@@ -301,7 +341,7 @@ fn validate_database_url(database_url: &str) -> Result<(), ConfigError> {
 }
 
 fn parse_bounded_nonzero_u32(
-    input: BoundedIntegerInput<'_, u32>,
+    input: &BoundedIntegerInput<'_, u32>,
 ) -> Result<NonZeroU32, ConfigError> {
     let value = match input.raw {
         Some(raw) => raw.parse::<u32>().ok(),
@@ -317,7 +357,7 @@ fn parse_bounded_nonzero_u32(
     Ok(value)
 }
 
-fn parse_bounded_nonzero_u64(input: BoundedIntegerInput<'_, u64>) -> Result<u64, ConfigError> {
+fn parse_bounded_nonzero_u64(input: &BoundedIntegerInput<'_, u64>) -> Result<u64, ConfigError> {
     match input.raw {
         Some(raw) => raw.parse::<u64>().ok(),
         None => Some(input.default),
@@ -357,9 +397,8 @@ mod tests {
     fn rejects_sqlite_without_echoing_the_secret_input() {
         let input = "sqlite:///tmp/private-cartograph.db?password=should-not-leak";
         let error = DatabaseSettings::parse(input, None, None).err();
-        let error = match error {
-            Some(error) => error,
-            None => panic!("SQLite URL was accepted"),
+        let Some(error) = error else {
+            panic!("SQLite URL was accepted");
         };
 
         assert_eq!(error, ConfigError::UnsupportedDatabaseScheme);

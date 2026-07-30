@@ -1,9 +1,17 @@
-use std::collections::{BTreeMap, BTreeSet};
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind, Visibility};
 use cartograph_extract::{
     ExtractError, ExtractedFile, ImportBindingKind, NativeExtractor, SnapshotError, SourceLimits,
-    SourceSnapshot, native_extraction_reservation, native_output_limit,
+    SourceSnapshot, SymbolExecutionFlags, SymbolExportFlags, native_extraction_reservation,
+    native_output_limit,
 };
 use serde::Deserialize;
 
@@ -47,10 +55,10 @@ struct OracleSymbol {
     end_column: u32,
     signature: Option<String>,
     docstring: Option<String>,
-    exported: bool,
-    default_export: bool,
-    async_symbol: bool,
-    static_member: bool,
+    #[serde(flatten)]
+    export: SymbolExportFlags,
+    #[serde(flatten)]
+    execution: SymbolExecutionFlags,
     visibility: Option<String>,
 }
 
@@ -467,9 +475,11 @@ fn import_bindings_preserve_module_imported_and_local_names() {
 #[test]
 fn body_search_text_is_bounded_identifier_only_and_literal_safe() {
     const SECRET: &str = "sk-live-body-secret-should-never-be-indexed";
-    let calls = (0..BODY_SEARCH_CALL_COUNT)
-        .map(|index| format!("client.operation_{index}(value);"))
-        .collect::<String>();
+    let mut calls = String::new();
+    for index in 0..BODY_SEARCH_CALL_COUNT {
+        write!(calls, "client.operation_{index}(value);")
+            .unwrap_or_else(|error| panic!("failed to build body-search fixture: {error}"));
+    }
     let source = format!(
         "export function execute(client: Client, value: Value): void {{ {calls} throw new Error('{SECRET}'); }}\n"
     );
@@ -486,9 +496,11 @@ fn body_search_text_is_bounded_identifier_only_and_literal_safe() {
 
 #[test]
 fn javascript_chained_calls_and_iifes_keep_bounded_static_targets() {
-    let fields = (0..320)
-        .map(|index| format!("field_{index}: {index},"))
-        .collect::<String>();
+    let mut fields = String::new();
+    for index in 0..320 {
+        write!(fields, "field_{index}: {index},")
+            .unwrap_or_else(|error| panic!("failed to build chained-call fixture: {error}"));
+    }
     let iife_padding = "x".repeat(5 * 1024);
     let source = format!(
         "const schema = base.extend({{{fields}}}).transform((value) => value).parse(input);\n\
@@ -529,9 +541,11 @@ fn javascript_chained_calls_and_iifes_keep_bounded_static_targets() {
 
 #[test]
 fn dense_schema_facts_fit_below_the_parser_memory_reservation() {
-    let fields = (0..320)
-        .map(|index| format!("field_{index}: z.string(),"))
-        .collect::<String>();
+    let mut fields = String::new();
+    for index in 0..320 {
+        write!(fields, "field_{index}: z.string(),")
+            .unwrap_or_else(|error| panic!("failed to build dense-schema fixture: {error}"));
+    }
     let source = format!("export const schema = z.object({{{fields}}});\n");
     let file = extract("src/dense-schema.ts", &source);
     let retained = file.modeled_retained_bytes();
@@ -572,20 +586,21 @@ fn declaration_only_overloads_are_explicit_and_keep_one_implementation() {
     assert_eq!(
         parse
             .iter()
-            .filter(|symbol| symbol.declaration_only)
+            .filter(|symbol| symbol.implementation.declaration_only)
             .count(),
         2
     );
     let implementations = parse
         .iter()
-        .filter(|symbol| !symbol.declaration_only)
+        .filter(|symbol| !symbol.implementation.declaration_only)
         .collect::<Vec<_>>();
     assert_eq!(implementations.len(), 1);
     assert!(implementations[0].body_search_text.contains("String"));
     assert!(
         file.symbols
             .iter()
-            .any(|symbol| symbol.qualified_name == "Runner::run" && symbol.declaration_only)
+            .any(|symbol| symbol.qualified_name == "Runner::run"
+                && symbol.implementation.declaration_only)
     );
 }
 
@@ -725,11 +740,17 @@ fn assert_managed_symbol_floor(file: &ExtractedFile, expected: &ManagedCase) {
         );
         assert_eq!(symbol.signature, baseline.signature, "{baseline:?}");
         assert_eq!(
-            symbol.default_export, baseline.default_export,
+            symbol.export.default_export, baseline.export.default_export,
             "{baseline:?}"
         );
-        assert_eq!(symbol.async_symbol, baseline.async_symbol, "{baseline:?}");
-        assert_eq!(symbol.static_member, baseline.static_member, "{baseline:?}");
+        assert_eq!(
+            symbol.execution.async_symbol, baseline.execution.async_symbol,
+            "{baseline:?}"
+        );
+        assert_eq!(
+            symbol.execution.static_member, baseline.execution.static_member,
+            "{baseline:?}"
+        );
         assert_eq!(
             symbol.visibility.map(Visibility::as_str),
             baseline.visibility.as_deref(),
@@ -751,12 +772,18 @@ fn assert_managed_symbol_floor(file: &ExtractedFile, expected: &ManagedCase) {
         }
         if symbol.visibility == Some(Visibility::Public) {
             assert!(
-                !baseline.exported,
+                !baseline.export.exported,
                 "the v1 capture unexpectedly exported a managed symbol"
             );
-            assert!(symbol.exported, "v2 did not expose a public managed symbol");
+            assert!(
+                symbol.export.exported,
+                "v2 did not expose a public managed symbol"
+            );
         } else {
-            assert_eq!(symbol.exported, baseline.exported, "{baseline:?}");
+            assert_eq!(
+                symbol.export.exported, baseline.export.exported,
+                "{baseline:?}"
+            );
         }
     }
 }
@@ -860,7 +887,7 @@ fn assert_managed_improvements(file: &ExtractedFile, expected: &ManagedCase) {
                 !matches!(symbol.kind, SymbolKind::Import | SymbolKind::Namespace)
                     && symbol.visibility == Some(Visibility::Public)
             })
-            .all(|symbol| symbol.exported)
+            .all(|symbol| symbol.export.exported)
     );
     for baseline in expected
         .references
@@ -934,11 +961,31 @@ fn normalize_managed_name(value: &str, namespace_prefix: &str) -> String {
         .to_owned()
 }
 
+fn projected_parameter_uses<'file>(
+    file: &'file ExtractedFile,
+    names: &BTreeMap<&'file str, &'file str>,
+    kinds: &BTreeMap<&'file str, SymbolKind>,
+) -> BTreeSet<(&'file str, &'file str)> {
+    file.containments
+        .iter()
+        .filter_map(|edge| {
+            if kinds.get(edge.child.as_str()) != Some(&SymbolKind::Parameter) {
+                return None;
+            }
+            names
+                .get(edge.child.as_str())
+                .map(|name| (edge.parent.as_str(), *name))
+        })
+        .collect()
+}
+
 fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
     let projected_ids = file
         .symbols
         .iter()
-        .filter(|symbol| !symbol.declaration_only && symbol.kind != SymbolKind::Parameter)
+        .filter(|symbol| {
+            !symbol.implementation.declaration_only && symbol.kind != SymbolKind::Parameter
+        })
         .map(|symbol| symbol.id.as_str())
         .collect::<BTreeSet<_>>();
     let names = file
@@ -951,18 +998,7 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
         .iter()
         .map(|symbol| (symbol.id.as_str(), symbol.kind))
         .collect::<BTreeMap<_, _>>();
-    let parameter_uses = file
-        .containments
-        .iter()
-        .filter_map(|edge| {
-            if kinds.get(edge.child.as_str()) != Some(&SymbolKind::Parameter) {
-                return None;
-            }
-            names
-                .get(edge.child.as_str())
-                .map(|name| (edge.parent.as_str(), *name))
-        })
-        .collect::<BTreeSet<_>>();
+    let parameter_uses = projected_parameter_uses(file, &names, &kinds);
     OracleCase {
         path: file.path.as_str().to_owned(),
         language: file.language.as_str().to_owned(),
@@ -980,10 +1016,8 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
                 end_column: symbol.span.end_column(),
                 signature: symbol.signature.clone(),
                 docstring: symbol.docstring.clone(),
-                exported: symbol.exported,
-                default_export: symbol.default_export,
-                async_symbol: symbol.async_symbol,
-                static_member: symbol.static_member,
+                export: symbol.export,
+                execution: symbol.execution,
                 visibility: symbol.visibility.map(|value| value.as_str().to_owned()),
             })
             .collect(),

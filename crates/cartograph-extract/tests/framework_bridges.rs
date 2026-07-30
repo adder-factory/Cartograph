@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
 use cartograph_extract::{NativeExtractor, SourceLimits, SourceSnapshot};
 
@@ -7,14 +11,14 @@ const SOURCE_LIMIT: usize = 1024 * 1024;
 fn react_native_objc_and_jvm_exports_become_typed_native_methods() {
     let objc = extract(
         "ios/RCTGeolocation.m",
-        r#"
+        r"
 @implementation RCTGeolocation
 RCT_EXPORT_MODULE(Geolocation)
 RCT_EXPORT_METHOD(getCurrentPosition:(RCTResponseSenderBlock)callback) {}
 RCT_REMAP_METHOD(compute, nativeCompute:(double)value) {}
 RCT_EXPORT_METHOD(addListener:(NSString *)name) {}
 @end
-"#,
+",
         SourceLanguage::ObjectiveC,
     );
     assert_landmark(&objc, SymbolKind::Resource, "Geolocation");
@@ -24,7 +28,7 @@ RCT_EXPORT_METHOD(addListener:(NSString *)name) {}
 
     let kotlin = extract(
         "android/ScannerModule.kt",
-        r#"
+        r"
 class ScannerModule {
   @ReactMethod
   fun startScan() {}
@@ -32,7 +36,7 @@ class ScannerModule {
   @ReactMethod
   fun removeListeners(count: Int) {}
 }
-"#,
+",
         SourceLanguage::Kotlin,
     );
     assert_landmark(&kotlin, SymbolKind::Method, "startScan");
@@ -63,7 +67,7 @@ public class HapticsModule: Module {
 
     let spec = extract(
         "src/MyViewNativeComponent.ts",
-        r#"
+        r"
 import codegenNativeComponent from 'react-native/Libraries/Utilities/codegenNativeComponent';
 interface NativeProps {
   readonly color?: string;
@@ -71,7 +75,7 @@ interface NativeProps {
   onTap?: () => void;
 }
 export default codegenNativeComponent<NativeProps>('MyView');
-"#,
+",
         SourceLanguage::TypeScript,
     );
     assert_landmark(&spec, SymbolKind::Component, "MyView");
@@ -81,14 +85,14 @@ export default codegenNativeComponent<NativeProps>('MyView');
 
     let objc_view = extract(
         "ios/RNTFooManager.m",
-        r#"
+        r"
 @interface RNTFooManager : RCTViewManager
 @end
 @implementation RNTFooManager
 RCT_EXPORT_VIEW_PROPERTY(color, NSString)
 RCT_EXPORT_VIEW_PROPERTY(enabled, BOOL)
 @end
-"#,
+",
         SourceLanguage::ObjectiveC,
     );
     assert_landmark(&objc_view, SymbolKind::Component, "RNTFoo");
@@ -114,14 +118,14 @@ class FooViewManager : SimpleViewManager<FooView>() {
 fn javascript_native_calls_emit_bounded_module_and_method_references() {
     let javascript = extract(
         "src/native.ts",
-        r#"
+        r"
 import { NativeModules, TurboModuleRegistry } from 'react-native';
 NativeModules.Geolocation.getCurrentPosition();
 NativeModules.Geolocation.addListener('ignored');
 const Device = TurboModuleRegistry.getEnforcing<Spec>('DeviceInfo');
 const Haptics = requireNativeModule('ExpoHaptics');
 Haptics.notificationAsync();
-"#,
+",
         SourceLanguage::TypeScript,
     );
     for module in ["Geolocation", "DeviceInfo", "ExpoHaptics"] {
@@ -156,13 +160,13 @@ Haptics.notificationAsync();
 
     let turbo = extract(
         "src/NativeDeviceInfo.ts",
-        r#"
+        r"
 interface Spec extends TurboModule {
   getConstants(): { model: string; version: string };
   ping(value: string): void;
 }
 export default TurboModuleRegistry.getEnforcing<Spec>('DeviceInfo');
-"#,
+",
         SourceLanguage::TypeScript,
     );
     assert_bridge_landmark(&turbo, "getConstants", "turbo-module-spec-method");
@@ -173,13 +177,13 @@ export default TurboModuleRegistry.getEnforcing<Spec>('DeviceInfo');
 fn swift_objc_exports_are_explicit_selector_aware_and_comment_safe() {
     let objc = extract(
         "ios/Player.m",
-        r#"
+        r"
 @implementation Player
 - (void)playWithSong:(NSString *)song {}
 - (void)setDisplayName:(NSString *)name {}
 // RCT_EXPORT_METHOD(commentedOut:(NSString *)value) {}
 @end
-"#,
+",
         SourceLanguage::ObjectiveC,
     );
     assert_bridge_landmark(&objc, "play", "objc-swift-method");
@@ -189,7 +193,7 @@ fn swift_objc_exports_are_explicit_selector_aware_and_comment_safe() {
 
     let swift = extract(
         "ios/SwiftPlayer.swift",
-        r#"
+        r"
 @objcMembers
 class SwiftPlayer {
   func play(song: String) {}
@@ -200,7 +204,7 @@ class ExplicitPlayer {
   @objc(playWithTrack:)
   func perform(track: String) {}
 }
-"#,
+",
         SourceLanguage::Swift,
     );
     assert_bridge_landmark(&swift, "play", "swift-objc-method");
@@ -213,7 +217,7 @@ class ExplicitPlayer {
 fn react_native_event_channels_keep_static_producers_consumers_and_handlers() {
     let javascript = extract(
         "src/events.ts",
-        r#"
+        r"
 import { NativeEventEmitter, NativeModules } from 'react-native';
 function handleReady() {}
 const emitter = new NativeEventEmitter(NativeModules.Device);
@@ -221,7 +225,7 @@ emitter.addListener('device.ready', handleReady);
 emitter.addListener(dynamicEvent, handleDynamic);
 emitter.addListener('secret-token', shouldNeverPersist);
 // emitter.addListener('commented.event', commentedHandler);
-"#,
+",
         SourceLanguage::TypeScript,
     );
     assert!(javascript.symbols.iter().any(|symbol| {

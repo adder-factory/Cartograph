@@ -12,9 +12,10 @@ mod source;
 
 pub use source::{
     FileParseStatus, InvalidNormalizedPath, InvalidSourceSpan, NormalizedPath, ReferenceKind,
-    SourceLanguage, SourcePosition, SourceSpan, SymbolKind, Visibility,
-    callable_signature_is_literal_free, declaration_value_is_search_safe,
-    symbol_signature_is_search_safe, v1_language_registry_digest, v2_language_additions_digest,
+    SourceLanguage, SourcePosition, SourceSpan, SymbolExecutionFlags, SymbolExportFlags,
+    SymbolImplementationFlags, SymbolKind, Visibility, callable_signature_is_literal_free,
+    declaration_value_is_search_safe, symbol_signature_is_search_safe, v1_language_registry_digest,
+    v2_language_additions_digest,
 };
 
 const UUID_TEXT_LENGTH: usize = 36;
@@ -56,6 +57,11 @@ macro_rules! define_id {
 
         impl $name {
             /// Parse and normalize a UUID without losing the identifier brand.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`InvalidId`] when `raw` is not a canonicalizable,
+            /// non-nil UUID.
             pub fn parse(raw: &str) -> Result<Self, InvalidId> {
                 normalize_uuid(raw).map(Self)
             }
@@ -113,6 +119,11 @@ pub struct ContentDigest(String);
 
 impl ContentDigest {
     /// Parse a 32-byte digest rendered as hexadecimal text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidDigest`] when `raw` is not exactly 64 hexadecimal
+    /// characters.
     pub fn parse(raw: &str) -> Result<Self, InvalidDigest> {
         let canonical = raw.to_ascii_lowercase();
         let valid = canonical.len() == BLAKE3_HEX_LENGTH
@@ -192,6 +203,11 @@ pub enum ProjectOperation {
 
 impl ProjectOperation {
     /// Parse the stable PostgreSQL representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidProjectOperation`] when `raw` is not a known durable
+    /// operation name.
     pub fn parse(raw: &str) -> Result<Self, InvalidProjectOperation> {
         match raw {
             "index" => Ok(Self::Index),
@@ -285,6 +301,11 @@ impl GenerationDigestVersion {
     }
 
     /// Validate a PostgreSQL value before it enters generation type-state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidGenerationDigestVersion`] when `value` does not name a
+    /// supported digest contract.
     pub const fn from_database_value(value: i16) -> Result<Self, InvalidGenerationDigestVersion> {
         match value {
             candidate if candidate == Self::V1.database_value() => Ok(Self::V1),
@@ -324,6 +345,11 @@ pub struct SourceManifestDigestBuilder {
 
 impl SourceManifestDigestBuilder {
     /// Begin an exact-size manifest. Entries must be pushed in ascending normalized-path order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidSourceManifest`] when `files` cannot be represented by
+    /// the stable manifest encoding.
     pub fn new(files: usize) -> Result<Self, InvalidSourceManifest> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(SOURCE_MANIFEST_DIGEST_DOMAIN);
@@ -336,6 +362,11 @@ impl SourceManifestDigestBuilder {
     }
 
     /// Add one normalized path and its BLAKE3 content digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidSourceManifest`] when too many entries are pushed, the
+    /// paths are not strictly ascending, or an encoded length is unsupported.
     pub fn push(
         &mut self,
         path: &NormalizedPath,
@@ -357,6 +388,11 @@ impl SourceManifestDigestBuilder {
     }
 
     /// Finalize only after the declared number of entries was supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidSourceManifest`] when fewer entries were pushed than
+    /// declared at construction.
     pub fn finish(self) -> Result<ContentDigest, InvalidSourceManifest> {
         if self.remaining != 0 {
             return Err(InvalidSourceManifest);

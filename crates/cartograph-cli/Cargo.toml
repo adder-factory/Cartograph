@@ -24,6 +24,7 @@ cartograph-mcp = { path = "../cartograph-mcp" }
 cartograph-search = { path = "../cartograph-search" }
 clap.workspace = true
 notify.workspace = true
+num-traits.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true

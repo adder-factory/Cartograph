@@ -26,7 +26,11 @@ impl CartographDatabase {
         &self.schema
     }
 
-    /// Re-probe the live PostgreSQL 18, ParadeDB, pgvector, and tokenizer contract.
+    /// Re-probe the live PostgreSQL 18, `ParadeDB`, pgvector, and tokenizer contract.
+    /// # Errors
+    ///
+    /// Returns an error if any required PostgreSQL, `ParadeDB`, pgvector,
+    /// preload, BM25, or tokenizer probe fails.
     pub async fn capability_report(&self) -> Result<crate::CapabilityReport, crate::DatabaseError> {
         crate::probe_capabilities(&self.pool).await
     }
@@ -227,7 +231,7 @@ where
         .map_err(|_| database_error())?;
     set_local_statement_timeout(&mut transaction, statement_timeout)
         .await
-        .map_err(|_| database_error())?;
+        .map_err(|()| database_error())?;
     let rows = bind(query(AssertSqlSafe(statement)))
         .fetch_all(&mut *transaction)
         .await

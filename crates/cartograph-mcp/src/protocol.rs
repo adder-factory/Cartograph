@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -22,7 +26,7 @@ pub const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_MAX_INPUT_BYTES: usize = 1_048_576;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 4_194_304;
 const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 32;
-const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_secs(60);
+const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_mins(1);
 const MIN_INPUT_BYTES: usize = 128;
 const MAX_INPUT_BYTES: usize = 16 * 1_048_576;
 const MIN_OUTPUT_BYTES: usize = 512;
@@ -37,7 +41,9 @@ const MAX_INSTRUCTIONS_BYTES: usize = 16 * 1_024;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
+    /// A bounded string identifier.
     String(String),
+    /// A signed integer identifier exactly representable by JSON.
     Integer(i64),
 }
 
@@ -50,6 +56,11 @@ pub struct ServerMetadata {
 
 impl ServerMetadata {
     /// Validate explicit implementation metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidServerMetadata`] when either component is
+    /// empty, oversized, or contains control characters.
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Result<Self, ConfigError> {
         let metadata = Self {
             name: name.into(),
@@ -122,6 +133,11 @@ impl ServerLimitsInput {
 
 impl ServerLimits {
     /// Validate explicit input/output/concurrency/deadline bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the matching [`ConfigError`] when any supplied limit falls
+    /// outside the server's hard resource policy.
     pub const fn new(input: ServerLimitsInput) -> Result<Self, ConfigError> {
         let ServerLimitsInput {
             max_input_bytes,
@@ -192,7 +208,7 @@ pub struct ServerConfig {
     protocol_version: String,
     instructions: Option<String>,
     profile: ToolProfile,
-    disabled_tools: BTreeMap<String, ()>,
+    disabled_tools: BTreeSet<String>,
     read_only_tools_only: bool,
     limits: ServerLimits,
 }
@@ -206,13 +222,18 @@ impl ServerConfig {
             protocol_version: DEFAULT_PROTOCOL_VERSION.to_owned(),
             instructions: None,
             profile,
-            disabled_tools: BTreeMap::new(),
+            disabled_tools: BTreeSet::new(),
             read_only_tools_only: false,
             limits,
         }
     }
 
     /// Override the advertised protocol version for a future negotiated slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidProtocolVersion`] when the value is empty,
+    /// oversized, or contains characters other than digits and hyphens.
     pub fn with_protocol_version(
         mut self,
         protocol_version: impl Into<String>,
@@ -231,6 +252,11 @@ impl ServerConfig {
     }
 
     /// Advertise bounded, project-independent guidance in the initialize response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidInstructions`] when the guidance is empty,
+    /// oversized, or contains a NUL byte.
     pub fn with_instructions(
         mut self,
         instructions: impl Into<String>,
@@ -259,6 +285,11 @@ impl ServerConfig {
     }
 
     /// Remove exact validated tool names from the advertised/callable surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidServerMetadata`] when a name is empty,
+    /// oversized, or contains characters outside the tool-name alphabet.
     pub fn with_disabled_tools<I, S>(mut self, names: I) -> Result<Self, ConfigError>
     where
         I: IntoIterator<Item = S>,
@@ -274,7 +305,7 @@ impl ServerConfig {
             {
                 return Err(ConfigError::InvalidServerMetadata);
             }
-            self.disabled_tools.insert(name, ());
+            self.disabled_tools.insert(name);
         }
         Ok(self)
     }
@@ -303,11 +334,16 @@ pub struct ProtocolServer {
     config: ServerConfig,
     handler: Arc<dyn ToolHandler>,
     tools: Arc<Vec<ToolDefinition>>,
-    tool_names: Arc<BTreeMap<String, ()>>,
+    tool_names: Arc<BTreeSet<String>>,
 }
 
 impl ProtocolServer {
     /// Validate a product adapter's immutable registry and bind it to MCP.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when any tool contract is invalid or a tool name
+    /// is duplicated.
     pub fn new<H>(config: ServerConfig, handler: H) -> Result<Self, ConfigError>
     where
         H: ToolHandler,
@@ -316,27 +352,32 @@ impl ProtocolServer {
     }
 
     /// Bind an already shared product adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when any tool contract is invalid or a tool name
+    /// is duplicated.
     pub fn from_shared(
         config: ServerConfig,
         handler: Arc<dyn ToolHandler>,
     ) -> Result<Self, ConfigError> {
         let definitions = handler.tools();
-        let mut all_names = BTreeMap::new();
+        let mut all_names = BTreeSet::new();
         let mut tools = Vec::new();
-        let mut tool_names = BTreeMap::new();
+        let mut tool_names = BTreeSet::new();
         for definition in definitions {
-            if all_names.insert(definition.name().to_owned(), ()).is_some() {
+            if !all_names.insert(definition.name().to_owned()) {
                 return Err(ConfigError::DuplicateToolName);
             }
             if definition.included_in(config.profile)
-                && !config.disabled_tools.contains_key(definition.name())
+                && !config.disabled_tools.contains(definition.name())
                 && (!config.read_only_tools_only
                     || definition
                         .annotations()
                         .is_some_and(|annotations| annotations.read_only_hint == Some(true))
                     || definition.has_read_only_carve_out())
             {
-                tool_names.insert(definition.name().to_owned(), ());
+                tool_names.insert(definition.name().to_owned());
                 tools.push(definition);
             }
         }
@@ -350,6 +391,11 @@ impl ProtocolServer {
     }
 
     /// Serve one newline-delimited JSON-RPC connection with bounded backpressure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServeError`] when bounded input, output, or response-channel
+    /// processing fails.
     pub async fn serve<R, W>(&self, input: R, output: W) -> Result<(), ServeError>
     where
         R: AsyncRead + Send + Unpin + 'static,
@@ -437,6 +483,11 @@ impl ProtocolServer {
     }
 
     /// Serve stdin/stdout without writing any non-protocol bytes to stdout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServeError`] when the stdio transport cannot be read, written,
+    /// or reconciled.
     pub async fn serve_stdio(&self) -> Result<(), ServeError> {
         self.serve(tokio::io::stdin(), tokio::io::stdout()).await
     }
@@ -562,15 +613,12 @@ impl ProtocolServer {
         if session.phase != SessionPhase::Ready {
             return send_response(&session.output, not_initialized(request.id)).await;
         }
-        let cursor = match parse_cursor(request.params) {
-            Ok(cursor) => cursor,
-            Err(()) => {
-                return send_response(
-                    &session.output,
-                    invalid_params(Some(request.id), "Invalid tools/list parameters"),
-                )
-                .await;
-            }
+        let Ok(cursor) = parse_cursor(request.params) else {
+            return send_response(
+                &session.output,
+                invalid_params(Some(request.id), "Invalid tools/list parameters"),
+            )
+            .await;
         };
         if cursor.is_some() {
             return send_response(
@@ -608,7 +656,7 @@ impl ProtocolServer {
             )
             .await;
         };
-        if !self.tool_names.contains_key(&call.name) {
+        if !self.tool_names.contains(&call.name) {
             return send_response(
                 &session.output,
                 JsonRpcResponse::error(
@@ -773,7 +821,7 @@ async fn dispatch_notification(notification: InboundNotification, session: &mut 
     match notification.method.as_str() {
         "notifications/initialized"
             if session.phase == SessionPhase::InitializeResponded
-                && valid_optional_object(&notification.params) =>
+                && valid_optional_object(notification.params.as_ref()) =>
         {
             session.phase = SessionPhase::Ready;
         }
@@ -790,7 +838,7 @@ async fn dispatch_notification(notification: InboundNotification, session: &mut 
 }
 
 async fn ping(request: InboundRequest, session: &ConnectionState) -> Result<(), ServeError> {
-    if !valid_optional_object(&request.params) {
+    if !valid_optional_object(request.params.as_ref()) {
         return send_response(
             &session.output,
             invalid_params(Some(request.id), "Invalid ping parameters"),
@@ -946,8 +994,8 @@ async fn execute_tool(execution: ToolExecution) -> JsonRpcResponse {
         joined = &mut worker => {
             let result = match joined {
                 Ok(Ok(result)) => result,
-                Ok(Err(error)) => ToolResult::from_error(error),
-                Err(_) => ToolResult::from_error(crate::ToolError::internal()),
+                Ok(Err(error)) => ToolResult::from_error(&error),
+                Err(_) => ToolResult::from_error(&crate::ToolError::internal()),
             };
             match serde_json::to_value(result) {
                 Ok(value) => JsonRpcResponse::success(id, value),
@@ -968,18 +1016,15 @@ fn parse_message(bytes: &[u8]) -> Option<Result<InboundMessage, ProtocolFault>> 
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return None;
     }
-    let value = match serde_json::from_slice::<Value>(bytes) {
-        Ok(value) => value,
-        Err(_) => {
-            return Some(Err(ProtocolFault {
-                id: None,
-                error: ErrorSpec::new(
-                    ErrorCode::PARSE_ERROR,
-                    "Parse error",
-                    StableErrorCode::ParseError,
-                ),
-            }));
-        }
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return Some(Err(ProtocolFault {
+            id: None,
+            error: ErrorSpec::new(
+                ErrorCode::PARSE_ERROR,
+                "Parse error",
+                StableErrorCode::ParseError,
+            ),
+        }));
     };
     let Some(object) = value.as_object() else {
         return Some(Err(invalid_request(None)));
@@ -1057,8 +1102,8 @@ fn not_initialized(id: RequestId) -> JsonRpcResponse {
     )
 }
 
-fn valid_optional_object(params: &Option<Value>) -> bool {
-    matches!(params, None | Some(Value::Null) | Some(Value::Object(_)))
+fn valid_optional_object(params: Option<&Value>) -> bool {
+    matches!(params, None | Some(Value::Null | Value::Object(_)))
 }
 
 fn parse_cursor(params: Option<Value>) -> Result<Option<String>, ()> {

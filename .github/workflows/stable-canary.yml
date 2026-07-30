@@ -1,0 +1,72 @@
+name: latest stable Rust canary
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: latest-stable-rust-canary
+  cancel-in-progress: true
+
+jobs:
+  strict-compatibility:
+    name: latest stable compatibility (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-26
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the newest stable compiler and strict components
+        run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+
+      - name: Record the compiler under test
+        run: rustc +stable --version --verbose
+
+      - name: Verify the channel resolved to a stable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(rustc +stable --version --verbose | sed -n 's/^release: //p')"
+          if [[ ! "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "The stable channel resolved to unexpected release metadata: $release" >&2
+            exit 1
+          fi
+
+      - name: All-target, all-feature Clippy on latest stable
+        run: cargo +stable clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: All-feature tests on latest stable
+        if: runner.os == 'Linux'
+        run: cargo +stable test --locked --workspace --all-features
+
+      - name: Strict all-feature rustdoc on latest stable
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +stable doc --locked --workspace --all-features --no-deps
+
+      # Keep this assertion blocking, but run it last so a newly released
+      # stable compiler still yields complete compatibility evidence before
+      # reporting that the reviewed production pin needs an explicit bump.
+      - name: Verify the reviewed production pin tracks latest stable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest="$(rustc +stable --version --verbose | sed -n 's/^release: //p')"
+          pinned="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+          if [[ "$pinned" != "$latest" ]]; then
+            echo "rust-toolchain.toml pins $pinned while latest stable is $latest" >&2
+            exit 1
+          fi

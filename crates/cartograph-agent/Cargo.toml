@@ -22,7 +22,8 @@ cartograph-scip = { path = "../cartograph-scip" }
 futures-util.workspace = true
 globset.workspace = true
 ignore.workspace = true
-libc.workspace = true
+memchr.workspace = true
+num-traits.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -30,8 +31,12 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 cartograph-test-support = { path = "../cartograph-test-support" }
+sha2.workspace = true
 sqlx-core.workspace = true
 sqlx-postgres.workspace = true
 

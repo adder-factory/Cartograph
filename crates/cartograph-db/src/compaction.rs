@@ -9,7 +9,7 @@ use crate::{CartographDatabase, database::quoted_schema};
 const MAXIMUM_COMPACTION_INDEXES: u16 = 64;
 const MAXIMUM_COMPACTION_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MINIMUM_INDEX_BYTES: u64 = 1024 * 1024;
-const MAXIMUM_STATEMENT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const MAXIMUM_STATEMENT_TIMEOUT: Duration = Duration::from_hours(24);
 const HEADROOM_MULTIPLIER: u64 = 2;
 const HEADROOM_ALLOWANCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAXIMUM_INVALID_ARTIFACTS: usize = 64;
@@ -17,14 +17,17 @@ const COMPACTION_LOCK_NAMESPACE: &str = "cartograph-v2-online-compaction";
 const AUTOMATIC_MAXIMUM_INDEXES: u16 = 32;
 const AUTOMATIC_MAXIMUM_CANDIDATE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const AUTOMATIC_MINIMUM_INDEX_BYTES: u64 = 8 * 1024 * 1024;
-const AUTOMATIC_STATEMENT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const AUTOMATIC_STATEMENT_TIMEOUT: Duration = Duration::from_mins(15);
 
 /// One exact B-tree candidate selected for an online rebuild.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCompactionCandidate {
+    /// Index for this record.
     pub index: String,
+    /// Table for this record.
     pub table: String,
+    /// Allocated byte size.
     pub bytes: u64,
 }
 
@@ -34,10 +37,15 @@ pub struct StorageCompactionCandidate {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvalidIndexArtifact {
+    /// Index for this record.
     pub index: String,
+    /// Table for this record.
     pub table: String,
+    /// Allocated byte size.
     pub bytes: u64,
+    /// Whether the catalog entry is valid.
     pub valid: bool,
+    /// Whether the catalog entry is ready for queries.
     pub ready: bool,
 }
 
@@ -53,13 +61,23 @@ pub struct StorageCompactionPolicy {
 /// Caller-selected online-compaction bounds validated as one typed input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StorageCompactionPolicyInput {
+    /// Maximum number of indexes permitted by this request.
     pub maximum_indexes: u16,
+    /// Number of bytes used by the maximum candidate.
     pub maximum_candidate_bytes: u64,
+    /// Number of bytes used by the minimum index.
     pub minimum_index_bytes: u64,
+    /// Statement timeout for this record.
     pub statement_timeout: Duration,
 }
 
 impl StorageCompactionPolicy {
+    /// Creates a validated storage compaction policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if index-count, candidate-byte, minimum-size, or
+    /// statement-timeout bounds are zero, inconsistent, or above their maxima.
     pub fn new(input: StorageCompactionPolicyInput) -> Result<Self, StorageCompactionError> {
         if input.maximum_indexes == 0 || input.maximum_indexes > MAXIMUM_COMPACTION_INDEXES {
             return Err(StorageCompactionError::InvalidPolicy);
@@ -87,6 +105,7 @@ impl StorageCompactionPolicy {
     }
 
     #[must_use]
+    /// Returns the conservative policy used by automatic dry-run planning.
     pub const fn automatic_plan() -> Self {
         Self {
             maximum_indexes: AUTOMATIC_MAXIMUM_INDEXES,
@@ -107,12 +126,19 @@ impl Default for StorageCompactionPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCompactionPlan {
+    /// Bounded candidates included in this result.
     pub candidates: Vec<StorageCompactionCandidate>,
+    /// Bounded invalid artifacts included in this result.
     pub invalid_artifacts: Vec<InvalidIndexArtifact>,
+    /// Total invalid concurrent-index artifacts observed before paging.
     pub invalid_artifact_total: u64,
+    /// Whether additional invalid concurrent-index artifacts were omitted.
     pub invalid_artifacts_truncated: bool,
+    /// Number of bytes used by the candidate.
     pub candidate_bytes: u64,
+    /// Number of bytes used by the required headroom.
     pub required_headroom_bytes: u64,
+    /// Whether additional matching rows were omitted.
     pub truncated: bool,
 }
 
@@ -120,8 +146,11 @@ pub struct StorageCompactionPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageCompactionStopReason {
+    /// Represents the reindex failed storage compaction stop reason.
     ReindexFailed,
+    /// Represents the timeout restore failed storage compaction stop reason.
     TimeoutRestoreFailed,
+    /// Represents the advisory unlock failed storage compaction stop reason.
     AdvisoryUnlockFailed,
 }
 
@@ -129,12 +158,19 @@ pub enum StorageCompactionStopReason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCompactionReport {
+    /// Plan for this record.
     pub plan: StorageCompactionPlan,
+    /// Whether the operation reports changes without applying them.
     pub dry_run: bool,
+    /// Bounded reindexed included in this result.
     pub reindexed: Vec<StorageCompactionCandidate>,
+    /// Number of bytes before.
     pub bytes_before: u64,
+    /// Number of bytes after.
     pub bytes_after: u64,
+    /// Optional stopped at, when available.
     pub stopped_at: Option<String>,
+    /// Optional stop reason, when available.
     pub stop_reason: Option<StorageCompactionStopReason>,
 }
 
@@ -142,21 +178,37 @@ pub struct StorageCompactionReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum StorageCompactionError {
     #[error("Cartograph storage compaction policy is invalid")]
+    /// The supplied policy contains inconsistent or out-of-range limits.
     InvalidPolicy,
     #[error("Cartograph storage compaction requires verified free-space headroom")]
+    /// Free-space headroom could not be measured safely.
     HeadroomUnavailable,
     #[error("Cartograph storage compaction has insufficient free-space headroom")]
+    /// Verified free space is below the online rebuild requirement.
     InsufficientHeadroom,
     #[error("another Cartograph online compaction is active")]
+    /// A conflicting maintenance operation currently owns the resource.
     Busy,
     #[error("Cartograph PostgreSQL compaction failed during {operation}")]
-    DatabaseOperation { operation: &'static str },
+    /// PostgreSQL could not complete the named operation.
+    DatabaseOperation {
+        /// Bounded operation label identifying the failed PostgreSQL phase.
+        operation: &'static str,
+    },
     #[error("Cartograph PostgreSQL compaction found corrupt catalog {field}")]
-    CorruptCatalog { field: &'static str },
+    /// PostgreSQL catalog rows violate the expected index contract.
+    CorruptCatalog {
+        /// Catalog field whose stored value violated the compaction contract.
+        field: &'static str,
+    },
 }
 
 impl CartographDatabase {
     /// Build a bounded, read-only B-tree compaction plan.
+    /// # Errors
+    ///
+    /// Returns an error if the policy is invalid or PostgreSQL cannot inspect
+    /// the bounded set of eligible valid B-tree indexes.
     pub async fn storage_compaction_plan(
         &self,
         policy: StorageCompactionPolicy,
@@ -168,6 +220,10 @@ impl CartographDatabase {
     /// Apply one dry-run plan one index at a time with `REINDEX INDEX
     /// CONCURRENTLY`. The caller must provide observed free bytes; external
     /// deployments cannot infer filesystem headroom through PostgreSQL.
+    /// # Errors
+    ///
+    /// Returns an error if policy or headroom checks fail, an index identity
+    /// changes, or a concurrent reindex cannot complete safely.
     pub async fn compact_storage_online(
         &self,
         policy: StorageCompactionPolicy,
@@ -384,7 +440,7 @@ async fn load_plan(
     database: &CartographDatabase,
     policy: StorageCompactionPolicy,
 ) -> Result<StorageCompactionPlan, StorageCompactionError> {
-    let statement = r#"SELECT indexes.relname AS index_name,
+    let statement = r"SELECT indexes.relname AS index_name,
                tables.relname AS table_name,
                pg_relation_size(indexes.oid)::bigint AS bytes,
                count(*) OVER ()::bigint AS total_candidates
@@ -407,7 +463,7 @@ async fn load_plan(
           AND constraints.oid IS NULL
           AND pg_relation_size(indexes.oid) >= $2
         ORDER BY bytes DESC, indexes.relname
-        LIMIT $3"#;
+        LIMIT $3";
     let rows = query(statement)
         .bind(database.schema.as_str())
         .bind(
@@ -470,7 +526,7 @@ async fn load_plan(
 async fn load_invalid_artifacts(
     database: &CartographDatabase,
 ) -> Result<InvalidIndexArtifactInventory, StorageCompactionError> {
-    let statement = r#"SELECT indexes.relname AS index_name,
+    let statement = r"SELECT indexes.relname AS index_name,
                tables.relname AS table_name,
                pg_relation_size(indexes.oid)::bigint AS bytes,
                catalog.indisvalid,
@@ -487,7 +543,7 @@ async fn load_invalid_artifacts(
           AND (NOT catalog.indisvalid OR NOT catalog.indisready
                OR indexes.relname ~ '_cc(new|old)[0-9]*$')
         ORDER BY bytes DESC, indexes.relname
-        LIMIT $2"#;
+        LIMIT $2";
     let rows = query(statement)
         .bind(database.schema.as_str())
         .bind(
@@ -536,12 +592,12 @@ async fn load_candidate_bytes(
         .iter()
         .map(|candidate| candidate.index.clone())
         .collect::<Vec<_>>();
-    let statement = r#"SELECT COALESCE(sum(pg_relation_size(indexes.oid)), 0)::bigint AS bytes
+    let statement = r"SELECT COALESCE(sum(pg_relation_size(indexes.oid)), 0)::bigint AS bytes
         FROM pg_catalog.pg_class AS indexes
         INNER JOIN pg_catalog.pg_namespace AS namespaces
             ON namespaces.oid = indexes.relnamespace
         WHERE namespaces.nspname = $1
-          AND indexes.relname = ANY($2::text[])"#;
+          AND indexes.relname = ANY($2::text[])";
     let row = query(statement)
         .bind(database.schema.as_str())
         .bind(names)

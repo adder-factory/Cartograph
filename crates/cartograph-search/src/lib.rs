@@ -15,7 +15,8 @@ pub use hybrid::{
     ChannelCandidate, ChannelContribution, ChannelResults, FusedSearchItem, HybridSearchInput,
     HybridSearchPacket, LexicalComponent, RerankReport, RerankState, RetrievalAbstention,
     RetrievalChannel, RetrievalChannels, RetrievalDocument, RetrievalDocumentInput,
-    RetrievalExecution, RetrievalFallback, SearchMode, SemanticReadiness, fuse_search,
+    RetrievalExecution, RetrievalFallback, RetrievalPreference, SearchMode, SemanticReadiness,
+    fuse_search,
 };
 pub use intent::{ContextGraphDirection, TaskIntent};
 pub use model::{
@@ -83,7 +84,12 @@ fn fixture_retrieval() -> HybridSearchPacket {
 pub mod test_support {
     use cartograph_domain::{DocumentKind, SourceLanguage, SymbolId};
 
-    use super::*;
+    use super::{
+        ContextGraphDirection, ContextPacket, IndexFreshness, PacketAssembly,
+        ReferenceEvidenceFixture, ReferenceSpanPrecision, SearchEvidenceFixture, TaskIntent,
+        assemble_packet, enrich_search_evidence_fixture, fixture_generation, fixture_retrieval,
+        reference_evidence_fixture,
+    };
 
     const OWNER_SYMBOL_ID: &str = "11111111-1111-4111-8111-111111111111";
     const TARGET_SYMBOL_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -484,7 +490,11 @@ mod contract_tests {
         assert_eq!(graph.from_symbol_id(), &from);
         assert_eq!(graph.to_symbol_id(), &to);
         assert_eq!(graph.site_count(), u64::from(GRAPH_SITE_COUNT));
-        assert_eq!(graph.confidence(), SECOND_EDGE_CONFIDENCE);
+        assert!(
+            (graph.confidence() - SECOND_EDGE_CONFIDENCE).abs() <= f32::EPSILON,
+            "graph confidence changed: {}",
+            graph.confidence()
+        );
         assert_eq!(graph.provenance(), "extractor_fixture");
         let serialized = serde_json::to_string(&evidence)
             .unwrap_or_else(|error| panic!("graph evidence did not serialize: {error}"));
@@ -876,12 +886,10 @@ mod contract_tests {
         assert!(debug.contains("<redacted:1>"));
         assert!(!debug.contains("private-service"));
 
-        let truncation = ReviewTruncation {
-            graph: true,
-            affected_tests: true,
-            evidence: true,
-            ..ReviewTruncation::default()
-        };
+        let truncation = ReviewTruncation::default()
+            .with_graph_truncation(true)
+            .with_affected_tests_truncation(true)
+            .with_evidence(true);
         assert!(truncation.graph());
         assert!(truncation.affected_tests());
         assert!(truncation.evidence());
@@ -954,6 +962,39 @@ mod contract_tests {
     }
 
     #[test]
+    fn code_search_query_expansion_bridges_natural_language_to_identifier_terms() {
+        let bm25 = LexicalQuery::for_code_search(
+            "How are generation-local BM25 tables checked before a search runs?",
+            20,
+        )
+        .unwrap_or_else(|error| panic!("BM25 query expansion failed: {error}"));
+        for term in [
+            "generation_search_relation",
+            "relation",
+            "require",
+            "validate",
+        ] {
+            assert!(bm25.query().contains(term), "missing expansion: {term}");
+        }
+
+        let freshness = LexicalQuery::for_code_search(
+            "How does freshness decide whether a live checkout matches the current generation?",
+            20,
+        )
+        .unwrap_or_else(|error| panic!("freshness query expansion failed: {error}"));
+        for term in ["project_status", "source_revision", "scan_source", "digest"] {
+            assert!(
+                freshness.query().contains(term),
+                "missing expansion: {term}",
+            );
+        }
+
+        let bounded = LexicalQuery::for_code_search("x".repeat(CONTEXT_QUERY_MAXIMUM_BYTES), 20)
+            .unwrap_or_else(|error| panic!("bounded query expansion failed: {error}"));
+        assert_eq!(bounded.query().len(), CONTEXT_QUERY_MAXIMUM_BYTES);
+    }
+
+    #[test]
     fn review_packet_exposes_freshness_abstention_and_per_stage_truncation() {
         let path = NormalizedPath::parse("src/service.rs")
             .unwrap_or_else(|error| panic!("review path fixture failed: {error}"));
@@ -1000,11 +1041,9 @@ mod contract_tests {
             )],
             affected_tests: Vec::new(),
             evidence_limit: PACKET_EVIDENCE_LIMIT,
-            truncation: ReviewTruncation {
-                changed_files: true,
-                symbol_roots: true,
-                ..ReviewTruncation::default()
-            },
+            truncation: ReviewTruncation::default()
+                .with_changed_files_truncation(true)
+                .with_symbol_roots_truncation(true),
         });
         assert_eq!(stale.abstention(), Some(ReviewAbstention::StaleIndex));
         assert_eq!(stale.confidence(), RetrievalConfidence::Low);

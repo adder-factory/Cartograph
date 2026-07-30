@@ -36,6 +36,7 @@ enum RelationScanKind {
     Query,
 }
 
+#[derive(Clone, Copy)]
 struct RelationEmission<'tree, 'owner> {
     root: Node<'tree>,
     owner: &'owner SymbolId,
@@ -161,8 +162,7 @@ fn emit_table(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -216,8 +216,7 @@ fn emit_columns(
             body_node: None,
             declaration_only: false,
             signature,
-            exported: false,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(false, false),
             async_symbol: false,
             static_member: false,
             visibility: None,
@@ -260,24 +259,31 @@ fn scan_foreign_keys(
     builder: &mut ExtractionBuilder<'_, '_>,
     input: RelationScanInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    input.budget.visits.observe(builder, input.depth)?;
+    let RelationScanInput {
+        node,
+        owner,
+        depth,
+        budget,
+        seen,
+    } = input;
+    budget.visits.observe(builder, depth)?;
     let mut references_next = false;
-    for child in named_children(input.node) {
+    for child in named_children(node) {
         if child.kind() == "keyword_references" {
             references_next = true;
             continue;
         }
         if references_next && child.kind() == "object_reference" {
             if let Some(name) = qualified_name(builder, child)?
-                && input.seen.insert(name.clone())
+                && seen.insert(name.clone())
             {
-                if input.seen.len() > MAX_RELATIONS_PER_DECLARATION {
+                if seen.len() > MAX_RELATIONS_PER_DECLARATION {
                     return Err(ExtractError::OutputLimit);
                 }
                 emit_relation(
                     builder,
                     RelationInput {
-                        owner: input.owner,
+                        owner,
                         node: child,
                         name,
                         kind: ReferenceKind::References,
@@ -291,10 +297,10 @@ fn scan_foreign_keys(
             builder,
             RelationScanInput {
                 node: child,
-                owner: input.owner,
-                depth: input.depth.saturating_add(1),
-                budget: &mut *input.budget,
-                seen: &mut *input.seen,
+                owner,
+                depth: depth.saturating_add(1),
+                budget: &mut *budget,
+                seen: &mut *seen,
             },
         )?;
     }
@@ -305,20 +311,27 @@ fn scan_query_relations(
     builder: &mut ExtractionBuilder<'_, '_>,
     input: RelationScanInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    input.budget.visits.observe(builder, input.depth)?;
-    if input.node.kind() == "relation"
-        && let Some(reference) = direct_child(input.node, "object_reference")
+    let RelationScanInput {
+        node,
+        owner,
+        depth,
+        budget,
+        seen,
+    } = input;
+    budget.visits.observe(builder, depth)?;
+    if node.kind() == "relation"
+        && let Some(reference) = direct_child(node, "object_reference")
         && let Some(name) = qualified_name(builder, reference)?
     {
         let identity = name.to_ascii_lowercase();
-        if input.seen.insert(identity) {
-            if input.seen.len() > MAX_RELATIONS_PER_DECLARATION {
+        if seen.insert(identity) {
+            if seen.len() > MAX_RELATIONS_PER_DECLARATION {
                 return Err(ExtractError::OutputLimit);
             }
             emit_relation(
                 builder,
                 RelationInput {
-                    owner: input.owner,
+                    owner,
                     node: reference,
                     name,
                     kind: ReferenceKind::References,
@@ -327,15 +340,15 @@ fn scan_query_relations(
         }
         return Ok(());
     }
-    for child in named_children(input.node) {
+    for child in named_children(node) {
         scan_query_relations(
             builder,
             RelationScanInput {
                 node: child,
-                owner: input.owner,
-                depth: input.depth.saturating_add(1),
-                budget: &mut *input.budget,
-                seen: &mut *input.seen,
+                owner,
+                depth: depth.saturating_add(1),
+                budget: &mut *budget,
+                seen: &mut *seen,
             },
         )?;
     }
@@ -372,8 +385,7 @@ fn emit_function(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -413,8 +425,7 @@ fn emit_trigger(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -478,8 +489,7 @@ fn emit_type(builder: &mut ExtractionBuilder<'_, '_>, node: Node<'_>) -> Result<
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -536,8 +546,7 @@ fn emit_enum_members(
             body_node: None,
             declaration_only: false,
             signature: Some(value),
-            exported: false,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(false, false),
             async_symbol: false,
             static_member: false,
             visibility: None,
@@ -571,8 +580,7 @@ fn emit_schema(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,

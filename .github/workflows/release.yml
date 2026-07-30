@@ -135,6 +135,7 @@ jobs:
               and .requiredJobs == [
                 "quality",
                 "windows-portability",
+                "macos-portability",
                 "linux-release-portability",
                 "paradedb/database",
                 "paradedb/runtime",

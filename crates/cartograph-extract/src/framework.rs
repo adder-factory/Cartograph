@@ -7,6 +7,7 @@ use cartograph_domain::{
 
 use crate::{
     Containment, ExtractError, ExtractedFile, ExtractedReference, ExtractedSymbol, SourceSnapshot,
+    SymbolExecutionFlags, SymbolExportFlags, SymbolImplementationFlags,
     budget::{
         ExtractionBudget, containment_budget_bytes, diagnostic_budget_bytes,
         import_binding_budget_bytes, reference_budget_bytes, symbol_budget_bytes,
@@ -95,6 +96,7 @@ pub(crate) struct LandmarkInput<'target> {
     pub(crate) target: Option<(&'target str, Option<&'target str>, usize, usize)>,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct FrameworkRouteInput<'target> {
     pub(crate) method: &'target str,
     pub(crate) path: &'target str,
@@ -104,6 +106,7 @@ pub(crate) struct FrameworkRouteInput<'target> {
     pub(crate) handler: Option<(&'target str, usize, usize)>,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct FrameworkResolvedRouteInput<'target> {
     pub(crate) method: &'target str,
     pub(crate) path: &'target str,
@@ -122,6 +125,7 @@ pub(crate) struct FrameworkReferenceInput<'reference> {
     pub(crate) end: usize,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct FrameworkNearReferenceInput<'reference> {
     pub(crate) name: &'reference str,
     pub(crate) resolution_name: Option<&'reference str>,
@@ -130,6 +134,7 @@ pub(crate) struct FrameworkNearReferenceInput<'reference> {
     pub(crate) end: usize,
 }
 
+#[derive(Clone, Copy)]
 struct FrameworkSignalReferenceInput<'reference> {
     name: &'reference str,
     start: usize,
@@ -261,6 +266,7 @@ const HONO_GENERIC_ROUTE_MARKERS: &[&str] = &[
     ".use(",
 ];
 
+#[derive(Clone, Copy)]
 struct FrameworkSymbolIdentity<'identity> {
     path: &'identity str,
     kind: SymbolKind,
@@ -539,12 +545,9 @@ impl<'source, 'cancel> FrameworkBuilder<'source, 'cancel> {
             body_search_text,
             body_search_truncated: false,
             health: crate::SymbolHealthMetrics::default(),
-            declaration_only: false,
-            test_symbol: false,
-            exported: true,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
+            implementation: SymbolImplementationFlags::default(),
+            export: SymbolExportFlags::named(true),
+            execution: SymbolExecutionFlags::default(),
             visibility: Some(Visibility::Public),
             clone_shape_digest: structural_digest.clone(),
             structural_digest,
@@ -717,7 +720,7 @@ fn scan_framework_signals(
     scan_flutter_material_routes(builder, source)?;
     for (statement_start, statement) in StatementRanges::new(source) {
         builder.check_cancelled()?;
-        if hints.routes {
+        if hints.routing.routes {
             scan_route_statement(
                 builder,
                 RouteStatementInput {
@@ -784,8 +787,7 @@ fn scan_swiftui_components(
             let declaration = source.find(&marker)?;
             let header_end = source[declaration..]
                 .find('{')
-                .map(|offset| declaration + offset)
-                .unwrap_or(source.len());
+                .map_or(source.len(), |offset| declaration + offset);
             let is_view = source[declaration..header_end]
                 .split(':')
                 .nth(1)
@@ -1061,7 +1063,7 @@ fn sveltekit_route(path: &str) -> Option<String> {
     ) {
         return None;
     }
-    route_from_segments(directory.split('/'))
+    Some(route_from_segments(directory.split('/')))
 }
 
 fn nuxt_route(path: &str) -> Option<String> {
@@ -1072,7 +1074,7 @@ fn nuxt_route(path: &str) -> Option<String> {
             return None;
         }
         let stem = strip_final_extension(remainder);
-        let route = route_from_segments(stem.split('/'))?;
+        let route = route_from_segments(stem.split('/'));
         return Some(if route == "/" {
             "/api".to_owned()
         } else {
@@ -1084,7 +1086,9 @@ fn nuxt_route(path: &str) -> Option<String> {
     if file_extension(remainder) != Some("vue") {
         return None;
     }
-    route_from_segments(strip_final_extension(remainder).split('/'))
+    Some(route_from_segments(
+        strip_final_extension(remainder).split('/'),
+    ))
 }
 
 fn nuxt_middleware_name(path: &str) -> Option<String> {
@@ -1113,7 +1117,7 @@ fn next_route(path: &str, source: &str) -> Option<String> {
         if basename.starts_with('_') || (!source.is_empty() && !source.contains("export default")) {
             return None;
         }
-        return route_from_segments(stem.split('/'));
+        return Some(route_from_segments(stem.split('/')));
     }
     let index = normalized.find("/app/")?;
     let remainder = &normalized[index + "/app/".len()..];
@@ -1125,9 +1129,9 @@ fn next_route(path: &str, source: &str) -> Option<String> {
     {
         return None;
     }
-    route_from_segments(directory.split('/').filter(|segment| {
-        !(segment.starts_with('@') || segment.starts_with('(') && segment.ends_with(')'))
-    }))
+    Some(route_from_segments(directory.split('/').filter(
+        |segment| !(segment.starts_with('@') || segment.starts_with('(') && segment.ends_with(')')),
+    )))
 }
 
 fn strip_final_extension(value: &str) -> &str {
@@ -1138,9 +1142,7 @@ fn file_extension(value: &str) -> Option<&str> {
     value.rsplit_once('.').map(|(_, extension)| extension)
 }
 
-fn route_from_segments<'segment>(
-    segments: impl IntoIterator<Item = &'segment str>,
-) -> Option<String> {
+fn route_from_segments<'segment>(segments: impl IntoIterator<Item = &'segment str>) -> String {
     let mut route = String::new();
     for raw in segments {
         if raw.is_empty() || raw == "index" {
@@ -1167,25 +1169,39 @@ fn route_from_segments<'segment>(
     if route.is_empty() {
         route.push('/');
     }
-    Some(route)
+    route
 }
 
 #[derive(Clone, Copy)]
 struct FrameworkHints {
+    routing: RoutingHints,
+    ecosystem: EcosystemHints,
+}
+
+#[derive(Clone, Copy)]
+struct RoutingHints {
     routes: bool,
+    play_routes: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EcosystemHints {
     angular_or_flutter: bool,
     hono_only: bool,
-    play_routes: bool,
 }
 
 impl FrameworkHints {
     fn detect(language: SourceLanguage, path: &str, source: &str) -> Self {
         Self {
-            routes: framework_route_hint(language, path, source),
-            angular_or_flutter: angular_or_flutter_hint(language, source),
-            hono_only: (source.contains("new Hono") || source.contains("new OpenAPIHono"))
-                && !source.contains("express"),
-            play_routes: is_play_route_path(path),
+            routing: RoutingHints {
+                routes: framework_route_hint(language, path, source),
+                play_routes: is_play_route_path(path),
+            },
+            ecosystem: EcosystemHints {
+                angular_or_flutter: angular_or_flutter_hint(language, source),
+                hono_only: (source.contains("new Hono") || source.contains("new OpenAPIHono"))
+                    && !source.contains("express"),
+            },
         }
     }
 }
@@ -1260,7 +1276,7 @@ fn scan_route_statement(
         start: statement_start,
         statement,
     } = input;
-    if hints.play_routes
+    if hints.routing.play_routes
         && let Some(route) = play_route(statement)
     {
         return builder.add_route(FrameworkRouteInput {
@@ -1289,13 +1305,13 @@ fn scan_route_statement(
         })?;
     }
     scan_standard_route_markers(builder, input)?;
-    if !hints.hono_only {
+    if !hints.ecosystem.hono_only {
         scan_on_route(builder, statement_start, statement)?;
         scan_object_route(builder, statement_start, statement)?;
         scan_router_route(builder, statement_start, statement)?;
     }
     scan_resource_route(builder, statement_start, statement)?;
-    if hints.angular_or_flutter
+    if hints.ecosystem.angular_or_flutter
         && let Some(route) = named_path_route(statement)
     {
         builder.add_route(FrameworkRouteInput {
@@ -1321,7 +1337,7 @@ fn scan_standard_route_markers(
     input: RouteStatementInput<'_>,
 ) -> Result<(), ExtractError> {
     for &marker in ROUTE_MARKERS {
-        if input.hints.hono_only && HONO_GENERIC_ROUTE_MARKERS.contains(&marker.0) {
+        if input.hints.ecosystem.hono_only && HONO_GENERIC_ROUTE_MARKERS.contains(&marker.0) {
             continue;
         }
         scan_standard_route_marker(builder, input, marker)?;
@@ -1846,7 +1862,7 @@ fn scan_configuration_routes(
             continue;
         };
         if let Some((value, relative)) = yaml_scalar(line, "path") {
-            active.path = value.to_owned();
+            value.clone_into(&mut active.path);
             active.path_start = line_start + relative;
         }
         if let Some((value, relative)) =
@@ -2512,10 +2528,15 @@ impl<'source> Iterator for StatementRanges<'source> {
 
 #[derive(Clone, Copy)]
 struct CommentSyntax {
+    line: LineCommentSyntax,
+    html: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LineCommentSyntax {
     python: bool,
     hash: bool,
     dash: bool,
-    html: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2548,7 +2569,7 @@ fn mask_comments(
             cursor += 1;
             continue;
         }
-        if let Some(end) = python_multiline_end(bytes, cursor, syntax.python) {
+        if let Some(end) = python_multiline_end(bytes, cursor, syntax.line.python) {
             mask_comment_bytes(&mut masked, cursor, end);
             cursor = end;
             continue;
@@ -2571,23 +2592,25 @@ fn mask_comments(
 
 fn comment_syntax(language: SourceLanguage) -> CommentSyntax {
     CommentSyntax {
-        python: language == SourceLanguage::Python,
-        hash: matches!(
-            language,
-            SourceLanguage::Python
-                | SourceLanguage::Ruby
-                | SourceLanguage::Yaml
-                | SourceLanguage::Bash
-                | SourceLanguage::Zsh
-                | SourceLanguage::Fish
-                | SourceLanguage::Elixir
-                | SourceLanguage::R
-                | SourceLanguage::Php
-        ),
-        dash: matches!(
-            language,
-            SourceLanguage::Sql | SourceLanguage::Haskell | SourceLanguage::Lua
-        ),
+        line: LineCommentSyntax {
+            python: language == SourceLanguage::Python,
+            hash: matches!(
+                language,
+                SourceLanguage::Python
+                    | SourceLanguage::Ruby
+                    | SourceLanguage::Yaml
+                    | SourceLanguage::Bash
+                    | SourceLanguage::Zsh
+                    | SourceLanguage::Fish
+                    | SourceLanguage::Elixir
+                    | SourceLanguage::R
+                    | SourceLanguage::Php
+            ),
+            dash: matches!(
+                language,
+                SourceLanguage::Sql | SourceLanguage::Haskell | SourceLanguage::Lua
+            ),
+        },
         html: matches!(
             language,
             SourceLanguage::Html
@@ -2639,9 +2662,9 @@ fn comment_kind_at(bytes: &[u8], cursor: usize, syntax: CommentSyntax) -> Option
         Some(CommentKind::Block)
     } else if syntax.html && bytes[cursor..].starts_with(b"<!--") {
         Some(CommentKind::Html)
-    } else if syntax.dash && bytes[cursor..].starts_with(b"--") {
+    } else if syntax.line.dash && bytes[cursor..].starts_with(b"--") {
         Some(CommentKind::Line(2))
-    } else if syntax.hash && bytes[cursor] == b'#' && bytes.get(cursor + 1) != Some(&b'[') {
+    } else if syntax.line.hash && bytes[cursor] == b'#' && bytes.get(cursor + 1) != Some(&b'[') {
         Some(CommentKind::Line(1))
     } else {
         None

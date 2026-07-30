@@ -57,6 +57,7 @@ pub struct GitLineRange {
 
 impl GitLineRange {
     #[must_use]
+    /// Creates a validated Git line range.
     pub const fn new(path: NormalizedPath, start_line: u32, end_line: u32) -> Self {
         Self {
             path,
@@ -75,6 +76,7 @@ pub struct GitLineHistoryRequest {
 
 impl GitLineHistoryRequest {
     #[must_use]
+    /// Creates a validated Git line history request.
     pub const fn new(range: GitLineRange, limit: u16) -> Self {
         Self { range, limit }
     }
@@ -222,6 +224,10 @@ impl TraceCulpritReport {
 
 impl ProjectRuntime {
     /// Read bounded path history without shell interpretation or diff output.
+    /// # Errors
+    ///
+    /// Returns an error when `limit` is zero or excessive, the project root is
+    /// not a Git worktree, or bounded Git history output is unavailable or invalid.
     pub async fn git_history(
         &self,
         path: NormalizedPath,
@@ -234,11 +240,19 @@ impl ProjectRuntime {
     }
 
     /// Attribute an inclusive bounded source-line range to Git commits.
+    /// # Errors
+    ///
+    /// Returns an error when the line range is empty or excessive, the project
+    /// root is not a Git worktree, or bounded blame output is unavailable or invalid.
     pub async fn git_blame(&self, range: GitLineRange) -> Result<Vec<GitBlameLine>, ReviewError> {
         discover_git_blame(&self.root, range).await
     }
 
     /// Read a bounded symbol/range history through Git's line-log engine.
+    /// # Errors
+    ///
+    /// Returns an error when the line range or commit limit is invalid, the
+    /// project root is not a Git worktree, or bounded line-log output fails validation.
     pub async fn git_line_history(
         &self,
         request: GitLineHistoryRequest,
@@ -247,14 +261,22 @@ impl ProjectRuntime {
     }
 
     /// Detect whether rename-aware file history predates a line-log timeline.
+    /// # Errors
+    ///
+    /// Returns an error when the project root is not a Git worktree or
+    /// rename-aware bounded history output is unavailable or invalid.
     pub async fn git_rename_evidence(
         &self,
         path: NormalizedPath,
     ) -> Result<GitRenameEvidence, ReviewError> {
-        discover_git_rename_evidence(&self.root, path).await
+        Box::pin(discover_git_rename_evidence(&self.root, path)).await
     }
 
     /// Resolve changed paths for a bounded list of canonical commits in parallel.
+    /// # Errors
+    ///
+    /// Returns an error when the commit list, per-commit limit, or a commit ID is
+    /// invalid, the project root is not a Git worktree, or bounded Git output fails.
     pub async fn git_commit_paths(
         &self,
         commits: &[String],
@@ -264,12 +286,20 @@ impl ProjectRuntime {
     }
 
     /// Extract project-relative path:line frames and blame up to eight in parallel.
+    /// # Errors
+    ///
+    /// Returns an error when the trace is empty, oversized, or contains NUL;
+    /// the project root is not a Git worktree; or required blame output is invalid.
     pub async fn trace_to_culprits(&self, trace: &str) -> Result<TraceCulpritReport, ReviewError> {
         self.trace_to_culprits_with_limit(trace, MAX_TRACE_FRAMES)
             .await
     }
 
     /// Extract and blame a caller-bounded number of unique project trace frames.
+    /// # Errors
+    ///
+    /// Returns an error when the trace or frame limit is invalid, the project
+    /// root is not a Git worktree, or required bounded blame output is invalid.
     pub async fn trace_to_culprits_with_limit(
         &self,
         trace: &str,
@@ -280,6 +310,10 @@ impl ProjectRuntime {
 }
 
 /// Read bounded path history from an explicit Git worktree.
+/// # Errors
+///
+/// Returns an error when `limit` is zero or excessive, `root` is not a Git
+/// worktree, or bounded history output is unavailable or invalid.
 pub async fn discover_git_history(
     root: impl AsRef<Path>,
     path: NormalizedPath,
@@ -293,6 +327,10 @@ pub async fn discover_git_history(
 }
 
 /// Attribute an inclusive bounded line range in an explicit Git worktree.
+/// # Errors
+///
+/// Returns an error when the range is empty or excessive, `root` is not a Git
+/// worktree, or bounded blame output is unavailable or invalid.
 pub async fn discover_git_blame(
     root: impl AsRef<Path>,
     range: GitLineRange,
@@ -303,6 +341,10 @@ pub async fn discover_git_blame(
 }
 
 /// Read bounded line-range history in an explicit Git worktree.
+/// # Errors
+///
+/// Returns an error when the range or limit is invalid, `root` is not a Git
+/// worktree, or bounded line-log output is unavailable or invalid.
 pub async fn discover_git_line_history(
     root: impl AsRef<Path>,
     request: GitLineHistoryRequest,
@@ -316,15 +358,23 @@ pub async fn discover_git_line_history(
 }
 
 /// Inspect rename-aware path/timestamp evidence in an explicit worktree.
+/// # Errors
+///
+/// Returns an error when `root` is not a Git worktree or rename-aware bounded
+/// history output is unavailable or invalid.
 pub async fn discover_git_rename_evidence(
     root: impl AsRef<Path>,
     path: NormalizedPath,
 ) -> Result<GitRenameEvidence, ReviewError> {
     let root = canonical_root(root.as_ref())?;
-    rename_evidence_for_path(&root, path).await
+    Box::pin(rename_evidence_for_path(&root, path)).await
 }
 
 /// Resolve bounded changed paths for multiple commits with fixed concurrency.
+/// # Errors
+///
+/// Returns an error when the request count, per-commit limit, or a commit ID is
+/// invalid, `root` is not a Git worktree, or bounded Git output fails validation.
 pub async fn discover_git_commit_paths(
     root: impl AsRef<Path>,
     commits: &[String],
@@ -359,6 +409,10 @@ pub async fn discover_git_commit_paths(
 }
 
 /// Resolve stack-trace path:line frames and blame up to eight concurrently.
+/// # Errors
+///
+/// Returns an error when the trace is empty, oversized, or contains NUL;
+/// `root` is not a Git worktree; or required blame output is invalid.
 pub async fn trace_git_culprits(
     root: impl AsRef<Path>,
     trace: &str,
@@ -380,7 +434,7 @@ pub async fn trace_git_culprits_with_limit(
         return Err(ReviewError::InvalidOptions);
     }
     let root = canonical_root(root.as_ref())?;
-    let (locations, truncated) = extract_trace_locations(&root, trace, limit)?;
+    let (locations, truncated) = extract_trace_locations(&root, trace, limit);
     let tasks_root = root.clone();
     let mut frames = stream::iter(locations)
         .map(|(path, line)| {
@@ -702,7 +756,7 @@ fn extract_trace_locations(
     root: &Path,
     trace: &str,
     limit: usize,
-) -> Result<(Vec<(NormalizedPath, u32)>, bool), ReviewError> {
+) -> (Vec<(NormalizedPath, u32)>, bool) {
     let root = root.to_string_lossy();
     let mut locations = BTreeSet::new();
     let mut truncated = false;
@@ -755,7 +809,7 @@ fn extract_trace_locations(
             break;
         }
     }
-    Ok((locations.into_iter().collect(), truncated))
+    (locations.into_iter().collect(), truncated)
 }
 
 fn validate_line_range(start_line: u32, end_line: u32) -> Result<(), ReviewError> {
@@ -830,8 +884,7 @@ mod tests {
     fn trace_location_parser_deduplicates_and_bounds_project_paths() {
         let root = Path::new("/workspace/project");
         let trace = "at run (/workspace/project/src/main.rs:42:5)\nsrc/lib.rs:9\nsrc/lib.rs:9";
-        let (locations, truncated) = extract_trace_locations(root, trace, 50)
-            .unwrap_or_else(|error| panic!("trace did not parse: {error}"));
+        let (locations, truncated) = extract_trace_locations(root, trace, 50);
         assert_eq!(
             locations,
             vec![

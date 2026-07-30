@@ -2,7 +2,7 @@ use std::mem::size_of;
 
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
-    GenerationDigestVersion, SymbolId, Visibility,
+    GenerationDigestVersion, SymbolExecutionFlags, SymbolExportFlags, SymbolId, Visibility,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -49,14 +49,10 @@ pub struct SymbolInput {
     pub structural_digest: ContentDigest,
     /// Language-level declaration visibility when the extractor can prove it.
     pub visibility: Option<Visibility>,
-    /// Whether the declaration is exported from its module or package.
-    pub exported: bool,
-    /// Whether the declaration is the module's default export.
-    pub default_export: bool,
-    /// Whether the declaration is asynchronous.
-    pub async_symbol: bool,
-    /// Whether the declaration is a static member.
-    pub static_member: bool,
+    /// Module export state proven by the extractor.
+    pub export: SymbolExportFlags,
+    /// Async and static execution modifiers proven by the extractor.
+    pub execution: SymbolExecutionFlags,
     /// Whether the source contains a declaration without an implementation body.
     pub declaration_only: bool,
     /// Sampled directed Brandes betweenness, normalized to parts per billion.
@@ -64,7 +60,7 @@ pub struct SymbolInput {
     /// The value is derived from this generation's structural graph and is
     /// therefore intentionally excluded from the logical generation digest.
     pub betweenness_ppb: Option<u32>,
-    /// Directed PageRank over calls and references, normalized to parts per billion.
+    /// Directed `PageRank` over calls and references, normalized to parts per billion.
     ///
     /// Like betweenness, this is derived from the generation graph and excluded
     /// from the logical generation digest.
@@ -151,7 +147,7 @@ pub struct ReferenceInput {
 /// Search document staged as part of one immutable generation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchDocumentInput {
-    /// Stable logical identity, independent of ParadeDB's bigint key field.
+    /// Stable logical identity, independent of `ParadeDB`'s bigint key field.
     pub document_id: DocumentId,
     /// Owning file when the structural file row is available.
     pub file_id: Option<FileId>,
@@ -192,6 +188,10 @@ pub struct GenerationFacts {
 
 impl GenerationFacts {
     /// Cooperatively measure the complete unordered payload, including spare capacities.
+    /// # Errors
+    ///
+    /// Returns an error if measurement is cancelled, retained-size arithmetic
+    /// overflows, or the payload exceeds `maximum_retained_bytes`.
     pub fn measure_retained_bytes<Cancel>(
         &self,
         maximum_retained_bytes: u64,
@@ -236,6 +236,7 @@ pub enum GenerationMemoryModelError {
     MetadataDepth,
 }
 
+/// Validated, canonical search document ready for deterministic persistence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalSearchDocument {
     pub(super) document_id: DocumentId,
@@ -349,7 +350,7 @@ where
         model.poll()?;
         model_document_fields(
             &mut model,
-            DocumentModel {
+            &DocumentModel {
                 document_id: &document.document_id,
                 file_id: document.file_id.as_ref(),
                 symbol_id: document.symbol_id.as_ref(),
@@ -389,7 +390,7 @@ where
         model.poll()?;
         model_document_fields(
             &mut model,
-            DocumentModel {
+            &DocumentModel {
                 document_id: &document.document_id,
                 file_id: document.file_id.as_ref(),
                 symbol_id: document.symbol_id.as_ref(),
@@ -489,7 +490,7 @@ struct DocumentModel<'a> {
 
 fn model_document_fields<Cancel>(
     model: &mut MemoryModel<Cancel>,
-    document: DocumentModel<'_>,
+    document: &DocumentModel<'_>,
 ) -> Result<(), GenerationMemoryModelError>
 where
     Cancel: FnMut() -> bool,

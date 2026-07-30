@@ -45,13 +45,18 @@ Review in this order:
 
    - `cargo fmt --all --check`;
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
-   - `cargo test --locked --workspace`;
+   - `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps`;
+   - `cargo test --locked --workspace --all-features`;
    - `cargo deny --all-features check`;
    - live PostgreSQL 18 + pinned ParadeDB/pgvector integration;
    - migration, backup/restore, upgrade/rollback, derived-index recovery;
    - MCP golden protocol and patch-task evaluation;
    - 1/2/4/8/16-worker determinism and fault injection;
    - Sonar/static analysis and native archive smoke/privacy checks.
+
+Required gates use the exact stable toolchain in `rust-toolchain.toml`. Treat
+nightly-only substitutes, lint suppressions, or diagnostic overrides as a gate
+regression rather than a way to clear findings.
 
 Do not duplicate rustfmt/Clippy output. Focus on intent mismatch, surprising
 edge cases, unsafe state transitions, evidence overclaims, and tests that would

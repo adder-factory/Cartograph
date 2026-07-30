@@ -9,7 +9,7 @@ use crate::{
     database::{quoted_schema, set_local_statement_timeout},
 };
 
-const HISTORY_WRITE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const HISTORY_WRITE_TIMEOUT: Duration = Duration::from_mins(5);
 const HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HISTORY_FILES: usize = 500_000;
 const MAX_HISTORY_PAIRS: usize = 2_000_000;
@@ -30,14 +30,25 @@ pub struct FileHistoryFact {
 /// Validated churn counters for one file-history fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileHistoryMetrics {
+    /// Number of commit entries.
     pub commit_count: u64,
+    /// Number of author entries.
     pub author_count: u64,
+    /// Number of insertions.
     pub insertions: u64,
+    /// Number of deletions.
     pub deletions: u64,
+    /// Unix timestamp of the most recent change.
     pub last_touched_at: Option<u64>,
 }
 
 impl FileHistoryFact {
+    /// Creates a validated file history fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if authors exceed commits or commit/timestamp presence
+    /// is inconsistent.
     pub fn new(path: NormalizedPath, metrics: FileHistoryMetrics) -> Result<Self, StorageError> {
         if metrics.author_count > metrics.commit_count
             || (metrics.commit_count == 0) != metrics.last_touched_at.is_none()
@@ -69,11 +80,19 @@ pub struct FileCochangeFact {
 /// Validated shared-commit metrics for one co-change pair.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FileCochangeMetrics {
+    /// Number of commit entries.
     pub commit_count: u64,
+    /// Confidence for this record.
     pub confidence: f32,
 }
 
 impl FileCochangeFact {
+    /// Creates a validated file cochange fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if paths are not strictly ordered/distinct, commits are
+    /// zero, or confidence is non-finite or outside zero to one.
     pub fn new(
         path_a: NormalizedPath,
         path_b: NormalizedPath,
@@ -112,20 +131,33 @@ pub struct HistoryRefreshRequest {
 /// Git-scan provenance kept separate from the durable relation batches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryRefreshMetadata {
+    /// Whether this value is shallow history.
     pub shallow_history: bool,
+    /// Number of commits scanned.
     pub commits_scanned: u64,
+    /// Whether additional matching rows were omitted.
     pub truncated: bool,
+    /// Number of oversized commits skipped.
     pub oversized_commits_skipped: u64,
 }
 
 /// Bounded history and co-change rows supplied by one Git scan.
 pub struct HistoryRefreshInput {
+    /// Metadata for this record.
     pub metadata: HistoryRefreshMetadata,
+    /// Bounded files included in this result.
     pub files: Vec<FileHistoryFact>,
+    /// Bounded cochanges included in this result.
     pub cochanges: Vec<FileCochangeFact>,
 }
 
 impl HistoryRefreshRequest {
+    /// Creates a validated history refresh request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the head commit is invalid or file/co-change payloads
+    /// exceed their bounded refresh maxima.
     pub fn new(
         project_id: ProjectId,
         head_commit: impl Into<String>,
@@ -163,6 +195,7 @@ pub struct FileHistoryQuery<'query> {
 
 impl<'query> FileHistoryQuery<'query> {
     #[must_use]
+    /// Creates a validated file history query.
     pub const fn new(project_id: &'query ProjectId, limit: u16) -> Self {
         Self {
             project_id,
@@ -173,12 +206,14 @@ impl<'query> FileHistoryQuery<'query> {
     }
 
     #[must_use]
+    /// Returns the for path.
     pub const fn for_path(mut self, path: &'query NormalizedPath) -> Self {
         self.path = Some(path);
         self
     }
 
     #[must_use]
+    /// Sets the minimum commits and returns the updated value.
     pub const fn with_minimum_commits(mut self, minimum_commits: u32) -> Self {
         self.minimum_commits = minimum_commits;
         self
@@ -195,6 +230,7 @@ pub struct FileCochangeQuery<'query> {
 
 impl<'query> FileCochangeQuery<'query> {
     #[must_use]
+    /// Creates a validated file cochange query.
     pub const fn new(
         project_id: &'query ProjectId,
         path: &'query NormalizedPath,
@@ -209,6 +245,7 @@ impl<'query> FileCochangeQuery<'query> {
     }
 
     #[must_use]
+    /// Sets the minimum commits and returns the updated value.
     pub const fn with_minimum_commits(mut self, minimum_commits: u32) -> Self {
         self.minimum_commits = minimum_commits;
         self
@@ -303,6 +340,10 @@ struct CochangeChunkInput<'chunk> {
 
 impl CartographDatabase {
     /// Atomically replace file churn and co-change evidence under one project lock.
+    /// # Errors
+    ///
+    /// Returns an error if the project lock/timeout fails or atomic deletion,
+    /// chunked insertion, and commit of history/co-change rows cannot complete.
     pub async fn replace_file_history(
         &self,
         request: HistoryRefreshRequest,
@@ -315,7 +356,7 @@ impl CartographDatabase {
             .map_err(|_| database_error("history-begin"))?;
         set_local_statement_timeout(&mut transaction, HISTORY_WRITE_TIMEOUT)
             .await
-            .map_err(|_| database_error("history-timeout"))?;
+            .map_err(|()| database_error("history-timeout"))?;
         let lock_key = format!("cartograph:history:{}", request.project_id.as_str());
         query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(lock_key)
@@ -331,7 +372,7 @@ impl CartographDatabase {
             .await
             .map_err(|_| database_error("history-delete-cochanges"))?;
         let delete_files =
-            format!(r#"DELETE FROM {schema}."file_history" WHERE project_id = CAST($1 AS uuid)"#,);
+            format!(r#"DELETE FROM {schema}."file_history" WHERE project_id = CAST($1 AS uuid)"#);
         query(AssertSqlSafe(delete_files))
             .bind(request.project_id.as_str())
             .execute(&mut *transaction)
@@ -379,6 +420,10 @@ impl CartographDatabase {
     /// Atomically remove durable churn and co-change evidence when both
     /// project analysis channels are disabled. This prevents stale rows from
     /// surviving a configuration change.
+    /// # Errors
+    ///
+    /// Returns an error if the project lock/timeout fails or both history
+    /// relation deletes cannot commit atomically.
     pub async fn clear_file_history(&self, project_id: &ProjectId) -> Result<(), StorageError> {
         let schema = quoted_schema(&self.schema);
         let mut transaction = self
@@ -388,7 +433,7 @@ impl CartographDatabase {
             .map_err(|_| database_error("history-clear-begin"))?;
         set_local_statement_timeout(&mut transaction, HISTORY_WRITE_TIMEOUT)
             .await
-            .map_err(|_| database_error("history-clear-timeout"))?;
+            .map_err(|()| database_error("history-clear-timeout"))?;
         let lock_key = format!("cartograph:history:{}", project_id.as_str());
         query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(lock_key)
@@ -414,6 +459,10 @@ impl CartographDatabase {
     }
 
     /// Read persisted churn for current indexed files, hottest first.
+    /// # Errors
+    ///
+    /// Returns an error if the row limit is invalid or current-file churn rows
+    /// cannot be queried or decoded.
     pub async fn current_file_history(
         &self,
         request: FileHistoryQuery<'_>,
@@ -465,6 +514,10 @@ impl CartographDatabase {
     }
 
     /// Read current-file co-change partners for one exact anchor path.
+    /// # Errors
+    ///
+    /// Returns an error if the result limit is invalid or anchor co-change
+    /// partners and normalized confidence values cannot be queried or decoded.
     pub async fn current_file_cochanges(
         &self,
         request: FileCochangeQuery<'_>,
@@ -548,7 +601,7 @@ impl CartographDatabase {
             .map_err(|_| database_error(input.operation))?;
         set_local_statement_timeout(&mut transaction, HISTORY_READ_TIMEOUT)
             .await
-            .map_err(|_| database_error(input.operation))?;
+            .map_err(|()| database_error(input.operation))?;
         let rows = bind(query(AssertSqlSafe(input.statement)).bind(input.project_id.as_str()))
             .fetch_all(&mut *transaction)
             .await

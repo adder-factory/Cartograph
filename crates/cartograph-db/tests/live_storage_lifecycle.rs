@@ -1,3 +1,7 @@
+//! Live PostgreSQL integration coverage for Cartograph storage contracts.
+
+mod dependency_ownership;
+
 use std::{env, process, time::Duration};
 
 use cartograph_config::DatabaseSettings;
@@ -16,8 +20,8 @@ use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
-const LEASE_DURATION: Duration = Duration::from_secs(60);
-const STATEMENT_TIMEOUT: Duration = Duration::from_secs(60);
+const LEASE_DURATION: Duration = Duration::from_mins(1);
+const STATEMENT_TIMEOUT: Duration = Duration::from_mins(1);
 const CASCADE_CHILD_ROWS: u64 = 1_024;
 const CASCADE_FIXTURE_ROWS: u64 = CASCADE_CHILD_ROWS + 6;
 const COMPACTION_LOCK_NAMESPACE: &str = "cartograph-v2-online-compaction";
@@ -55,7 +59,36 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         create_generation_cascade_fixture(&database, &pool, &schema, &project).await;
     let first_ready = prepare_empty_generation(&database, &project, "storage-ready-one").await;
     let second_ready = prepare_empty_generation(&database, &project, "storage-ready-two").await;
+    let migration_lease = assert_generation_retention_fences(
+        &database,
+        &pool,
+        &schema,
+        &project,
+        &cascade_generation,
+    )
+    .await;
+    assert_parse_cache_and_ready_retention(
+        &database,
+        &project,
+        &migration_lease,
+        &first_ready,
+        &second_ready,
+    )
+    .await;
+    assert_online_storage_compaction(&database, &database_url, &pool, &schema).await;
 
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+async fn assert_generation_retention_fences(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    cascade_generation: &GenerationId,
+) -> cartograph_db::ProjectLease {
     let retention_lease = database
         .acquire_lease(LeaseRequest::new(
             LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
@@ -65,19 +98,13 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         .await
         .unwrap_or_else(|error| panic!("storage migration lease failed: {error}"));
     let migration_fence = retention_lease.fence();
-    assert_cascade_row_limit_is_exact(
-        &database,
-        &pool,
-        &schema,
-        &migration_fence,
-        &cascade_generation,
-    )
-    .await;
+    assert_cascade_row_limit_is_exact(database, pool, schema, &migration_fence, cascade_generation)
+        .await;
     assert_cross_schema_cascade_is_detected_and_ddl_is_fenced(
-        &database,
-        &pool,
-        &schema,
-        &project,
+        database,
+        pool,
+        schema,
+        project,
         &migration_fence,
     )
     .await;
@@ -86,8 +113,8 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         .await
         .unwrap_or_else(|error| panic!("initial storage migration lease release failed: {error}"));
     let failed_duplicate =
-        prepare_empty_generation(&database, &project, "storage-failed-duplicate").await;
-    mark_generation_failed(&pool, &schema, &project, &failed_duplicate).await;
+        prepare_empty_generation(database, project, "storage-failed-duplicate").await;
+    mark_generation_failed(pool, schema, project, &failed_duplicate).await;
     let migration_lease = database
         .acquire_lease(LeaseRequest::new(
             LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
@@ -96,8 +123,17 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         ))
         .await
         .unwrap_or_else(|error| panic!("resumed storage migration lease failed: {error}"));
-    age_ready_generations(&pool, &schema, &project).await;
+    age_ready_generations(pool, schema, project).await;
+    migration_lease
+}
 
+async fn assert_parse_cache_and_ready_retention(
+    database: &CartographDatabase,
+    project: &ProjectId,
+    migration_lease: &cartograph_db::ProjectLease,
+    first_ready: &GenerationId,
+    second_ready: &GenerationId,
+) {
     let protected_contract = digest(b"current-extractor-contract");
     let prior_contract = digest(b"prior-extractor-contract");
     let obsolete_contract = digest(b"obsolete-extractor-contract");
@@ -111,13 +147,13 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         (&protected_contract, "src/current.rs", b"current".as_slice()),
     ] {
         database
-            .store_native_parse_cache(&cache_key(&project, contract, path), payload)
+            .store_native_parse_cache(&cache_key(project, contract, path), payload)
             .await
             .unwrap_or_else(|error| panic!("parse cache fixture failed: {error}"));
     }
 
     let before = database
-        .storage_usage(&project, 64, STATEMENT_TIMEOUT)
+        .storage_usage(project, 64, STATEMENT_TIMEOUT)
         .await
         .unwrap_or_else(|error| panic!("storage usage failed: {error}"));
     assert_eq!(before.parse_cache.rows, 3);
@@ -131,13 +167,15 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
 
     let cache_report = database
         .cleanup_native_parse_cache(NativeParseCacheRetentionRequest {
-            project_id: &project,
+            project_id: project,
             protected_contract_digest: &protected_contract,
             policy: NativeParseCacheRetentionPolicy::new(NativeParseCacheRetentionPolicyInput {
-                maximum_contracts: 2,
-                maximum_rows: 2,
-                maximum_payload_bytes: 1024,
-                maximum_deletions: 16,
+                capacity: cartograph_db::NativeParseCacheRetentionCapacity {
+                    contracts: 2,
+                    rows: 2,
+                    payload_bytes: 1024,
+                },
+                deletion_batch: 16,
             })
             .unwrap_or_else(|error| panic!("cache policy failed: {error}")),
             fence: &migration_lease.fence(),
@@ -148,10 +186,10 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
     assert_eq!(cache_report.rows_removed, 1);
     assert_eq!(cache_report.after.rows, 2);
     assert_eq!(cache_report.after.contracts, 2);
-    assert!(!cache_report.over_contract_budget);
+    assert!(!cache_report.pressure.over_contract_budget);
     assert!(
         database
-            .load_native_parse_cache(&cache_key(&project, &protected_contract, "src/current.rs"))
+            .load_native_parse_cache(&cache_key(project, &protected_contract, "src/current.rs"))
             .await
             .unwrap_or_else(|error| panic!("protected cache lookup failed: {error}"))
             .is_some()
@@ -172,13 +210,20 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
     assert_eq!(retention.current_preserved, 0);
     assert_eq!(retention.maintenance, PostRetentionMaintenance::NotNeeded);
     database
-        .release_lease(&migration_lease)
+        .release_lease(migration_lease)
         .await
         .unwrap_or_else(|error| panic!("storage migration lease release failed: {error}"));
     assert_ne!(first_ready, second_ready);
+}
 
-    create_compaction_fixture(&pool, &schema).await;
-    create_invalid_artifact_fixture(&pool, &schema).await;
+async fn assert_online_storage_compaction(
+    database: &CartographDatabase,
+    database_url: &str,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+) {
+    create_compaction_fixture(pool, schema).await;
+    create_invalid_artifact_fixture(pool, schema).await;
     let compaction_policy = StorageCompactionPolicy::new(StorageCompactionPolicyInput {
         maximum_indexes: 4,
         maximum_candidate_bytes: 128 * 1024 * 1024,
@@ -210,11 +255,7 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
             .any(|candidate| candidate.index == "storage_compaction_fixture_idx")
     );
     assert!(compacted.stop_reason.is_none());
-    assert_compaction_cancellation_closes_session(&database_url, &pool, &schema).await;
-
-    drop(database);
-    drop_schema(&pool, &schema).await;
-    pool.close().await;
+    assert_compaction_cancellation_closes_session(database_url, pool, schema).await;
 }
 
 async fn prepare_empty_generation(
@@ -241,8 +282,10 @@ async fn prepare_empty_generation(
     let limits = GenerationValidationLimits::new(1024 * 1024, 4 * 1024 * 1024)
         .unwrap_or_else(|error| panic!("storage validation limits failed: {error}"));
     let canonical = validate_generation_facts(GenerationFacts::default(), limits, || false)
-        .map(|(facts, _)| facts)
-        .unwrap_or_else(|error| panic!("storage generation facts failed: {error}"));
+        .map_or_else(
+            |error| panic!("storage generation facts failed: {error}"),
+            |(facts, _)| facts,
+        );
     let ready = database
         .prepare_generation(GenerationContents::new(staged, canonical), &lease.fence())
         .await
@@ -271,7 +314,29 @@ async fn create_generation_cascade_fixture(
     let generation = staged.generation_id().clone();
     let file_id = "11111111-1111-8111-8111-111111111111";
     let symbol_id = "22222222-2222-8222-8222-222222222222";
+    insert_cascade_symbol_facts(pool, schema, project, &generation, file_id, symbol_id).await;
+    insert_cascade_dependents(pool, schema, project, &generation, symbol_id).await;
+    query(AssertSqlSafe(format!(
+        r#"UPDATE "{schema}"."index_generations"
+            SET state = 'failed'
+            WHERE project_id = $1::uuid AND generation_id = $2::uuid"#
+    )))
+    .bind(project.as_str())
+    .bind(generation.as_str())
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("cascade generation terminalization failed: {error}"));
+    generation
+}
 
+async fn insert_cascade_symbol_facts(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+    file_id: &str,
+    symbol_id: &str,
+) {
     query(AssertSqlSafe(format!(
         r#"INSERT INTO "{schema}"."files" (
                 project_id, generation_id, file_id, normalized_path, language,
@@ -304,6 +369,15 @@ async fn create_generation_cascade_fixture(
     .execute(pool)
     .await
     .unwrap_or_else(|error| panic!("cascade symbol fixture failed: {error}"));
+}
+
+async fn insert_cascade_dependents(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    generation: &GenerationId,
+    symbol_id: &str,
+) {
     let coverage_source = query(AssertSqlSafe(format!(
         r#"INSERT INTO "{schema}"."coverage_sources" (
                 project_id, label, report_format, report_digest
@@ -369,17 +443,6 @@ async fn create_generation_cascade_fixture(
     .execute(pool)
     .await
     .unwrap_or_else(|error| panic!("cascade history refresh fixture failed: {error}"));
-    query(AssertSqlSafe(format!(
-        r#"UPDATE "{schema}"."index_generations"
-            SET state = 'failed'
-            WHERE project_id = $1::uuid AND generation_id = $2::uuid"#
-    )))
-    .bind(project.as_str())
-    .bind(generation.as_str())
-    .execute(pool)
-    .await
-    .unwrap_or_else(|error| panic!("cascade generation terminalization failed: {error}"));
-    generation
 }
 
 async fn assert_cascade_row_limit_is_exact(
@@ -470,6 +533,26 @@ async fn assert_cross_schema_cascade_is_detected_and_ddl_is_fenced(
     project: &ProjectId,
     fence: &cartograph_db::LeaseFence,
 ) {
+    let (external_schema, policy) =
+        assert_cross_schema_ddl_fence(database, pool, schema, fence).await;
+    assert_cross_schema_preservation(
+        database,
+        pool,
+        schema,
+        project,
+        fence,
+        &external_schema,
+        policy,
+    )
+    .await;
+}
+
+async fn assert_cross_schema_ddl_fence(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    fence: &cartograph_db::LeaseFence,
+) -> (String, GenerationRetentionPolicy) {
     let external_schema = format!("{schema}_external");
     query(AssertSqlSafe(format!(
         r#"CREATE SCHEMA "{external_schema}""#
@@ -539,7 +622,18 @@ async fn assert_cross_schema_cascade_is_detected_and_ddl_is_fenced(
         .unwrap_or_else(|_| panic!("cross-schema cascade DDL remained blocked"))
         .unwrap_or_else(|error| panic!("cross-schema cascade DDL task failed: {error}"))
         .unwrap_or_else(|error| panic!("cross-schema cascade DDL failed: {error}"));
+    (external_schema, policy)
+}
 
+async fn assert_cross_schema_preservation(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+    fence: &cartograph_db::LeaseFence,
+    external_schema: &str,
+    policy: GenerationRetentionPolicy,
+) {
     let (generation, file_id, symbol_id) =
         create_minimal_failed_symbol_generation(database, pool, schema, project).await;
     query(AssertSqlSafe(format!(
@@ -694,7 +788,7 @@ async fn wait_for_blocked_fk_lock(
 ) {
     for _ in 0..200 {
         let row = query(
-            r#"SELECT EXISTS (
+            r"SELECT EXISTS (
                     SELECT 1
                     FROM pg_catalog.pg_locks AS locks
                     INNER JOIN pg_catalog.pg_class AS relations
@@ -706,7 +800,7 @@ async fn wait_for_blocked_fk_lock(
                       AND NOT locks.granted
                       AND namespaces.nspname = $2
                       AND relations.relname = $3
-                )"#,
+                )",
         )
         .bind(pid)
         .bind(schema)
@@ -739,14 +833,14 @@ async fn assert_virtual_payload_accounting_and_autovacuum(
     schema: &str,
 ) {
     let generated = query(
-        r#"SELECT attributes.attgenerated::text AS generated
+        r"SELECT attributes.attgenerated::text AS generated
             FROM pg_catalog.pg_attribute AS attributes
             INNER JOIN pg_catalog.pg_class AS classes ON classes.oid = attributes.attrelid
             INNER JOIN pg_catalog.pg_namespace AS namespaces
                 ON namespaces.oid = classes.relnamespace
             WHERE namespaces.nspname = $1
               AND classes.relname = 'native_parse_cache'
-              AND attributes.attname = 'payload_bytes'"#,
+              AND attributes.attname = 'payload_bytes'",
     )
     .bind(schema)
     .fetch_one(pool)
@@ -757,11 +851,11 @@ async fn assert_virtual_payload_accounting_and_autovacuum(
         Some("v")
     );
     let options = query(
-        r#"SELECT reloptions
+        r"SELECT reloptions
             FROM pg_catalog.pg_class AS classes
             INNER JOIN pg_catalog.pg_namespace AS namespaces
                 ON namespaces.oid = classes.relnamespace
-            WHERE namespaces.nspname = $1 AND classes.relname = 'native_parse_cache'"#,
+            WHERE namespaces.nspname = $1 AND classes.relname = 'native_parse_cache'",
     )
     .bind(schema)
     .fetch_one(pool)

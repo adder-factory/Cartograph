@@ -227,6 +227,12 @@ returns native score plus ordered field-component provenance. Typed task intent
 selects explicit qualified-name/code/natural-text boosts; user text remains a
 bound parameter, never interpolated SQL.
 
+Natural-language code searches may append a small deterministic identifier
+alias set inside the same 1 KiB query bound—for example, freshness can add
+`project_status`/`source_revision`, while a checked BM25 table can add
+`require`/`generation_search_relation`. The original query remains intact,
+aliases are deduplicated, and no LLM or repository-specific file rule is used.
+
 Migration/startup reconciliation checks current and ready generation relations
 with unhealthy relations ordered first. It repairs at most 64 per invocation
 from canonical `search_documents`, fails closed when further repair is needed,
@@ -253,9 +259,19 @@ and a query probe succeeds. Readiness is one of `ready`, `not_configured`,
 `not_indexed`, `stale`, or `unavailable` at the agent boundary.
 
 For automatic/hybrid mode, BM25 and eligible semantic requests run concurrently
-under shared cancellation/deadlines. Reciprocal-rank fusion combines ranks—not
-raw BM25/cosine scales—and retains channel rank/score provenance. If semantic
-evidence is not ready or empty, the packet labels the exact lexical fallback.
+under shared cancellation/deadlines. Each channel has an explicit bounded
+candidate window that is independent from the smaller fused result/output
+limit, so a low-token response does not also become a low-recall search.
+Reciprocal-rank fusion combines ranks—not raw BM25/cosine scales—and retains
+channel rank/score provenance. If semantic evidence is not ready or empty, the
+packet labels the exact lexical fallback.
+
+Implementation, change-planning, and architecture queries that do not
+explicitly ask for tests, fixtures, examples, or benchmarks use a disclosed
+`production_definitions` result preference. Exact symbol kinds are read from
+canonical generation-fenced symbol rows, then functions/declarations precede
+parameters, imports, auxiliary paths, and tests without rewriting raw channel
+scores. Explicit auxiliary-code tasks retain neutral RRF ordering.
 
 When `rerankerLlm` is configured, the agent sends only the bounded query and
 bounded source-bearing semantic Top-K candidates to its OpenAI-compatible
@@ -282,8 +298,11 @@ Natural-language context is classified without an LLM into:
 - architecture survey;
 - documentation lookup.
 
-Priority-ordered bounded term tables make classification deterministic. Intent
-selects candidate/exact/evidence/affected-test limits and graph behavior:
+Bounded term tables plus explicit diagnostic, test-question, change-action, and
+implementation-question rules make classification deterministic without
+letting a phrase such as `regression coverage` override the requested change.
+Intent selects independently bounded candidate/exact/evidence/affected-test
+limits and graph behavior:
 symbol/docs avoid irrelevant expansion, implementation/architecture follow
 outgoing calls, and change/test/error requests follow reverse impact with
 affected-test selection.
@@ -298,7 +317,11 @@ edit-site decision.
 
 Packets return generation, intent, freshness, confidence, abstention, channel
 and reranker provenance, primary edit candidates, affected tests, and
-truncation. No query or full source body is persisted as telemetry.
+truncation. MCP low-token projections keep generation/freshness once, retain
+follow-up symbol or document identities and compact provenance, and omit raw
+score detail unless explanation was requested. Low-token and plan requests do
+not collect project tool-usage telemetry unless the caller explicitly opts in.
+No query or full source body is persisted as telemetry.
 
 ## Working-tree overlay and review
 

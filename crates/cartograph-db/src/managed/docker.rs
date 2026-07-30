@@ -10,8 +10,8 @@ use crate::capabilities::{MANAGED_PGVECTOR_VERSION, SUPPORTED_PG_SEARCH_VERSION}
 use super::{ManagedDatabaseError, ManagedResourceIdentity};
 
 const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const DOCKER_IMAGE_PULL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const DOCKER_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DOCKER_IMAGE_PULL_TIMEOUT: Duration = Duration::from_mins(15);
+const DOCKER_ARCHIVE_TIMEOUT: Duration = Duration::from_mins(15);
 const CONTAINER_ARCHIVE_TIMEOUT: &str = "14m";
 const CONTAINER_ARCHIVE_KILL_AFTER: &str = "10s";
 const NORMAL_STOP_POLICY: StopPolicy = StopPolicy {
@@ -637,6 +637,7 @@ fn password_copy_arguments(name: &str, password_file: &Path) -> Vec<OsString> {
     ]
 }
 
+#[derive(Clone, Copy)]
 enum DatabaseArchiveMode {
     Backup,
     Restore,

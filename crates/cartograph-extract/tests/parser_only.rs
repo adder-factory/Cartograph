@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{FileParseStatus, SourceLanguage};
 use cartograph_extract::{NativeExtractor, SnapshotError, SourceLimits, SourceSnapshot};
 

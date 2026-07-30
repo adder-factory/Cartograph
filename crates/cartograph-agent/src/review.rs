@@ -20,7 +20,7 @@ const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1_048_576;
 const HARD_MAX_GIT_OUTPUT_BYTES: usize = 128 * 1_048_576;
 const GIT_READ_CHUNK_BYTES: usize = 8 * 1_024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-const HARD_MAX_GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const HARD_MAX_GIT_COMMAND_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Bounded deterministic options for comparison against one Git revision.
 #[derive(Clone, PartialEq, Eq)]
@@ -32,6 +32,10 @@ pub struct ReviewOptions {
 
 impl ReviewOptions {
     /// Validate a revision expression before it reaches Git.
+    /// # Errors
+    ///
+    /// Returns [`ReviewError::InvalidRef`] when `base_ref` is empty,
+    /// option-shaped, oversized, or contains whitespace or control bytes.
     pub fn new(base_ref: impl Into<String>) -> Result<Self, ReviewError> {
         let base_ref = base_ref.into();
         if !valid_git_ref(&base_ref) {
@@ -45,6 +49,10 @@ impl ReviewOptions {
     }
 
     /// Bound the number of changed files retained in the response.
+    /// # Errors
+    ///
+    /// Returns [`ReviewError::InvalidOptions`] when `limit` is zero or exceeds
+    /// the retained changed-file ceiling.
     pub fn with_max_changed_files(mut self, limit: u16) -> Result<Self, ReviewError> {
         if limit == 0 || limit > MAX_CHANGED_FILES {
             return Err(ReviewError::InvalidOptions);
@@ -94,11 +102,17 @@ impl fmt::Debug for ReviewOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitChangeKind {
+    /// Tracked path added relative to `HEAD`.
     Added,
+    /// Tracked path modified relative to `HEAD`.
     Modified,
+    /// Tracked path deleted relative to `HEAD`.
     Deleted,
+    /// Tracked path changed filesystem type.
     TypeChanged,
+    /// Path has unresolved merge state.
     Unmerged,
+    /// Path is not tracked by Git.
     Untracked,
 }
 
@@ -249,12 +263,22 @@ pub enum ReviewError {
 impl super::ProjectRuntime {
     /// Compare the live checkout to a Git ref and attach deterministic current-generation
     /// exact-path, reverse-impact, and affected-test evidence.
+    /// # Errors
+    ///
+    /// Returns an error when the checkout/ref or bounded Git output is invalid
+    /// or unavailable, project freshness cannot be established, or deterministic
+    /// review evidence cannot be retrieved.
     pub async fn review(&self, options: &ReviewOptions) -> Result<ReviewReport, ReviewError> {
         self.review_with_cancellation(options, super::ProjectCancellation::new())
             .await
     }
 
     /// Compare to a Git ref while keeping the source-freshness scan cancellable.
+    /// # Errors
+    ///
+    /// Returns an error when the checkout/ref or bounded Git output is invalid
+    /// or unavailable, the cancellable freshness scan fails, or deterministic
+    /// review evidence cannot be retrieved.
     pub async fn review_with_cancellation(
         &self,
         options: &ReviewOptions,
@@ -292,6 +316,11 @@ impl super::ProjectRuntime {
 }
 
 /// Discover committed, staged, unstaged, and untracked changes without a shell.
+/// # Errors
+///
+/// Returns an error when `project_root` is unavailable or not a Git worktree,
+/// the validated base ref cannot be resolved, or a bounded Git subprocess
+/// fails, times out, exceeds its output ceiling, or returns unsafe output.
 pub async fn discover_git_comparison(
     project_root: impl AsRef<Path>,
     options: &ReviewOptions,

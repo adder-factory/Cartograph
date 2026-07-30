@@ -12,9 +12,9 @@ use tokio::time::timeout;
 
 use super::{
     ManagedBackupReport, ManagedContainerState, ManagedDatabaseArchives, ManagedDatabaseError,
-    ManagedDatabaseMaintenance, ManagedDerivedIndexHealth, ManagedDestructiveConfirmation,
-    ManagedDestructiveOperation, ManagedInitialization, ManagedRemoveReport, ManagedRestoreReport,
-    ManagedUpgradeReport, container_state,
+    ManagedDatabaseMaintenance, ManagedDerivedIndexAvailability, ManagedDerivedIndexHealth,
+    ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedInitialization,
+    ManagedRemoveReport, ManagedRestoreReport, ManagedUpgradeReport, container_state,
     credentials::DatabaseCredentials,
     docker::{
         ContainerArchivePath, ContainerCreateSpec, ContainerInspection, DatabaseArchiveOperation,
@@ -41,6 +41,10 @@ enum OriginalContainerState {
 
 impl ManagedDatabaseArchives<'_> {
     /// Create and atomically persist a verified custom-format PostgreSQL archive.
+    /// # Errors
+    ///
+    /// Returns an error if the destination is unsafe/existing, the owned
+    /// database is unhealthy, or archive creation, verification, cleanup, or rename fails.
     pub async fn backup(
         &self,
         destination: impl AsRef<Path>,
@@ -130,6 +134,10 @@ impl ManagedDatabaseArchives<'_> {
 
     /// Replace live contents from a verified archive and recover the old state
     /// if either restore or post-restore capability proof fails.
+    /// # Errors
+    ///
+    /// Returns an error if confirmation/archive/ownership checks fail, restore
+    /// or capability proof fails, or the previous state cannot be recovered.
     pub async fn restore(
         &self,
         source: impl AsRef<Path>,
@@ -221,12 +229,11 @@ impl ManagedDatabaseArchives<'_> {
             self.restore_rollback(credentials).await?;
             return Err(ManagedDatabaseError::RestoreFailed);
         }
-        match self.verify_restored_database(credentials).await {
-            Ok(initialized) => Ok(restore_report(initialized, &self.database.schema)),
-            Err(_) => {
-                self.restore_rollback(credentials).await?;
-                Err(ManagedDatabaseError::RestoreVerificationFailed)
-            }
+        if let Ok(initialized) = self.verify_restored_database(credentials).await {
+            Ok(restore_report(initialized, &self.database.schema))
+        } else {
+            self.restore_rollback(credentials).await?;
+            Err(ManagedDatabaseError::RestoreVerificationFailed)
         }
     }
 
@@ -297,6 +304,10 @@ impl ManagedDatabaseArchives<'_> {
 
 impl ManagedDatabaseMaintenance<'_> {
     /// Remove only resources whose labels, project identity, and data mount all match.
+    /// # Errors
+    ///
+    /// Returns an error if confirmation or ownership checks fail, or the exact
+    /// project container, volume, credential, or cleanup operation cannot complete.
     pub async fn remove(
         &self,
         confirmation: ManagedDestructiveConfirmation,
@@ -356,6 +367,10 @@ impl ManagedDatabaseMaintenance<'_> {
 
     /// Replace an owned non-pinned container while retaining the old container
     /// until the new exact-digest instance passes readiness and migration proof.
+    /// # Errors
+    ///
+    /// Returns an error if confirmation/ownership checks fail or replacement,
+    /// readiness, migration, capability proof, cutover, or rollback fails.
     pub async fn upgrade(
         &self,
         confirmation: ManagedDestructiveConfirmation,
@@ -671,7 +686,11 @@ impl ManagedDatabaseMaintenance<'_> {
         }
     }
 
-    /// Read aggregate generation-local ParadeDB BM25 catalog health without mutation.
+    /// Read aggregate generation-local `ParadeDB` BM25 catalog health without mutation.
+    /// # Errors
+    ///
+    /// Returns an error if owned-resource or credential checks fail, the
+    /// database is unhealthy, or the bounded BM25 catalog query times out/fails.
     pub async fn derived_index_health(
         &self,
     ) -> Result<ManagedDerivedIndexHealth, ManagedDatabaseError> {
@@ -691,6 +710,10 @@ impl ManagedDatabaseMaintenance<'_> {
     }
 
     /// Repair missing/invalid generation-local BM25 relations and prove aggregate health.
+    /// # Errors
+    ///
+    /// Returns an error if confirmation/ownership/readiness checks fail or a
+    /// bounded BM25 relation repair or its post-rebuild health proof fails.
     pub async fn rebuild_derived_indexes(
         &self,
         confirmation: ManagedDestructiveConfirmation,
@@ -861,7 +884,7 @@ fn set_private_archive_permissions(path: &Path) -> Result<(), ManagedDatabaseErr
 
 #[cfg(not(unix))]
 fn set_private_archive_permissions(_path: &Path) -> Result<(), ManagedDatabaseError> {
-    Ok(())
+    Err(ManagedDatabaseError::CredentialAclUnsupported)
 }
 
 fn prefer_archive_cleanup<T>(
@@ -952,22 +975,26 @@ fn decode_bm25_health(
 ) -> Result<ManagedDerivedIndexHealth, ManagedDatabaseError> {
     let Some(row) = row else {
         return Ok(ManagedDerivedIndexHealth {
-            present: false,
-            valid: false,
-            ready: false,
+            availability: ManagedDerivedIndexAvailability {
+                present: false,
+                valid: false,
+                ready: false,
+            },
             bm25_access_method: false,
         });
     };
     Ok(ManagedDerivedIndexHealth {
-        present: row
-            .try_get::<bool, _>(0)
-            .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
-        valid: row
-            .try_get::<bool, _>(1)
-            .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
-        ready: row
-            .try_get::<bool, _>(2)
-            .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
+        availability: ManagedDerivedIndexAvailability {
+            present: row
+                .try_get::<bool, _>(0)
+                .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
+            valid: row
+                .try_get::<bool, _>(1)
+                .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
+            ready: row
+                .try_get::<bool, _>(2)
+                .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
+        },
         bm25_access_method: row
             .try_get::<bool, _>(3)
             .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?,
@@ -1085,24 +1112,41 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(unix))]
+    fn backup_archive_creation_fails_without_private_acl_support() {
+        assert_eq!(
+            set_private_archive_permissions(Path::new("archive.dump")),
+            Err(ManagedDatabaseError::CredentialAclUnsupported)
+        );
+    }
+
+    #[test]
     fn derived_index_health_requires_every_catalog_invariant() {
         let healthy = ManagedDerivedIndexHealth {
-            present: true,
-            valid: true,
-            ready: true,
+            availability: ManagedDerivedIndexAvailability {
+                present: true,
+                valid: true,
+                ready: true,
+            },
             bm25_access_method: true,
         };
         assert!(healthy.healthy());
         assert!(
             !ManagedDerivedIndexHealth {
-                valid: false,
+                availability: ManagedDerivedIndexAvailability {
+                    valid: false,
+                    ..healthy.availability
+                },
                 ..healthy
             }
             .healthy()
         );
         assert!(
             !ManagedDerivedIndexHealth {
-                ready: false,
+                availability: ManagedDerivedIndexAvailability {
+                    ready: false,
+                    ..healthy.availability
+                },
                 ..healthy
             }
             .healthy()

@@ -35,6 +35,12 @@ pub struct SourceSearchOptions {
 }
 
 impl SourceSearchOptions {
+    /// Creates validated source-search limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceSearchError::InvalidOptions`] when the pattern is empty,
+    /// oversized, or contains NUL, or when `limit` is zero or excessive.
     pub fn new(pattern: impl Into<String>, limit: u16) -> Result<Self, SourceSearchError> {
         let pattern = pattern.into();
         if pattern.is_empty()
@@ -55,18 +61,21 @@ impl SourceSearchOptions {
     }
 
     #[must_use]
+    /// Sets the case sensitive and returns the updated value.
     pub const fn with_case_sensitive(mut self, case_sensitive: bool) -> Self {
         self.case_sensitive = case_sensitive;
         self
     }
 
     #[must_use]
+    /// Sets the path prefix and returns the updated value.
     pub fn with_path_prefix(mut self, path_prefix: Option<NormalizedPath>) -> Self {
         self.path_prefix = path_prefix;
         self
     }
 
     #[must_use]
+    /// Sets the language and returns the updated value.
     pub const fn with_language(mut self, language: Option<SourceLanguage>) -> Self {
         self.language = language;
         self
@@ -115,21 +124,25 @@ pub struct SourceSearchReport {
 
 impl SourceSearchHit {
     #[must_use]
+    /// Returns the path.
     pub const fn path(&self) -> &NormalizedPath {
         &self.path
     }
 
     #[must_use]
+    /// Returns the language.
     pub fn language(&self) -> &str {
         &self.language
     }
 
     #[must_use]
+    /// Returns the line.
     pub const fn line(&self) -> u32 {
         self.line
     }
 
     #[must_use]
+    /// Returns the snippet.
     pub fn snippet(&self) -> &str {
         &self.snippet
     }
@@ -137,6 +150,7 @@ impl SourceSearchHit {
 
 impl SourceSearchReport {
     #[must_use]
+    /// Returns the hits.
     pub fn hits(&self) -> &[SourceSearchHit] {
         &self.hits
     }
@@ -146,16 +160,22 @@ impl SourceSearchReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum SourceSearchError {
     #[error("source search options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("source search regex is invalid")]
+    /// The supplied regular expression is invalid or exceeds its bound.
     InvalidRegex,
     #[error("source search storage is unavailable")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
     #[error("source search project root is unavailable")]
+    /// The requested project could not be opened safely.
     ProjectUnavailable,
     #[error("source search was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
     #[error("source search worker failed")]
+    /// A supervised worker failed before producing a complete result.
     WorkerFailed,
 }
 
@@ -170,6 +190,11 @@ struct FileScanResult {
 impl ProjectRuntime {
     /// Search current indexed source files with Rust's linear-time regex engine,
     /// then attribute retained hits to the smallest indexed declaration.
+    /// # Errors
+    ///
+    /// Returns an error when the regex cannot be compiled within its size
+    /// limits, current file/range storage or the project root is unavailable,
+    /// a supervised scan worker fails, or cancellation wins.
     pub async fn search_source(
         &self,
         project_id: &ProjectId,
@@ -366,6 +391,7 @@ async fn attribute_source_hits(
         .await
 }
 
+#[derive(Clone, Copy)]
 struct FileScanRequest<'a> {
     root: &'a Path,
     file: &'a FileSurfaceRow,
@@ -408,13 +434,12 @@ fn scan_file(input: FileScanRequest<'_>) -> FileScanResult {
     else {
         return unsafe_file();
     };
-    let Some(metadata) = std::fs::metadata(&canonical)
+    if std::fs::metadata(&canonical)
         .ok()
-        .filter(|metadata| metadata.is_file() && metadata.len() <= MAXIMUM_FILE_BYTES)
-    else {
+        .is_none_or(|metadata| !metadata.is_file() || metadata.len() > MAXIMUM_FILE_BYTES)
+    {
         return unsafe_file();
-    };
-    let _metadata = metadata;
+    }
     let Ok(source) = std::fs::read_to_string(canonical) else {
         return unsafe_file();
     };

@@ -4,13 +4,13 @@ use thiserror::Error;
 
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_WORKER_TASKS: usize = 64;
 const DEFAULT_MAX_WORKER_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WORKER_TASKS: usize = 1_024;
 const MAX_WORKER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_OPERATION_TIMEOUT: Duration = Duration::from_hours(24);
 const MIN_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(2);
 const FINISH_DATABASE_STEPS: u32 = 5;
 const COPY_TIMEOUT_DIVISOR: u32 = 4;

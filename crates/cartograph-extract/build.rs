@@ -1,3 +1,5 @@
+//! Build-time fingerprinting for the native extractor contract.
+
 use std::{
     env,
     error::Error,

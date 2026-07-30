@@ -10,7 +10,7 @@ use crate::{CartographDatabase, database::set_local_statement_timeout};
 
 const MAX_QUERY_BYTES: usize = 64 * 1_024;
 const MAX_QUERY_ROWS: u16 = 1_000;
-const MAX_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_QUERY_TIMEOUT: Duration = Duration::from_mins(1);
 const MAX_ROW_JSON_BYTES: i32 = 4 * 1_024;
 const MAX_RESULT_JSON_BYTES: usize = 1_024 * 1_024;
 
@@ -53,6 +53,10 @@ pub struct ReadOnlySqlRequest {
 
 impl ReadOnlySqlRequest {
     /// Validate one SELECT/WITH or simple EXPLAIN SELECT/WITH statement.
+    /// # Errors
+    ///
+    /// Returns an error if the SQL or execution bounds are invalid, tokenizing
+    /// fails, or the statement is not a single permitted read-only query.
     pub fn new(query: &str, limit: u16, timeout: Duration) -> Result<Self, ReadOnlySqlError> {
         if invalid_read_only_query(query) || invalid_read_only_bounds(limit, timeout) {
             return Err(ReadOnlySqlError::InvalidInput);
@@ -95,9 +99,13 @@ fn invalid_read_only_bounds(limit: u16, timeout: Duration) -> bool {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", untagged)]
 pub enum ReadOnlySqlRow {
+    /// Represents the JSON read only SQL row.
     Json(Value),
+    /// Represents the truncated read only SQL row.
     Truncated {
+        /// Valid JSON prefix retained within the configured row-byte bound.
         row_json_prefix: String,
+        /// Whether the original row exceeded the configured byte bound.
         row_truncated: bool,
     },
 }
@@ -125,17 +133,25 @@ pub struct ReadOnlySqlRelation {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ReadOnlySqlError {
     #[error("Cartograph read-only SQL input is invalid")]
+    /// Supplied input violates a documented bound or invariant.
     InvalidInput,
     #[error("Cartograph SQL accepts only one project-scoped read-only SELECT, WITH, or EXPLAIN")]
+    /// The statement is outside the read-only allowlist.
     Forbidden,
     #[error("Cartograph read-only SQL failed")]
+    /// PostgreSQL could not complete the bounded operation.
     Database,
     #[error("Cartograph read-only SQL returned an invalid bounded row")]
+    /// A PostgreSQL row violates the expected typed shape.
     InvalidRow,
 }
 
 impl CartographDatabase {
     /// Execute one project-scoped SQL query under a read-only transaction and hard deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the read-only transaction or timeout cannot be
+    /// established, PostgreSQL rejects the query, or a result value cannot be encoded.
     pub async fn execute_read_only_sql(
         &self,
         project_id: &ProjectId,
@@ -154,7 +170,7 @@ impl CartographDatabase {
             .map_err(|_| ReadOnlySqlError::Database)?;
         set_local_statement_timeout(&mut transaction, request.timeout)
             .await
-            .map_err(|_| ReadOnlySqlError::Database)?;
+            .map_err(|()| ReadOnlySqlError::Database)?;
         query("SELECT set_config('search_path', 'pg_catalog', true)")
             .execute(&mut *transaction)
             .await
@@ -175,14 +191,14 @@ impl CartographDatabase {
             .await
         } else {
             let statement = format!(
-                r#"WITH {logical}, cartograph_user_query AS ({}),
+                r"WITH {logical}, cartograph_user_query AS ({}),
                     cartograph_bounded_rows AS (
                         SELECT to_jsonb(cartograph_user_query)::text AS row_json
                         FROM cartograph_user_query
                         LIMIT $2
                     )
                     SELECT LEFT(row_json, $3), octet_length(row_json) > $3
-                    FROM cartograph_bounded_rows"#,
+                    FROM cartograph_bounded_rows",
                 request.query
             );
             execute_rows(

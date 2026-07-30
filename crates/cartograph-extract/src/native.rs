@@ -19,6 +19,10 @@ pub struct NativeExtractor {
 
 impl NativeExtractor {
     /// Load one production-admitted native grammar and reject ABI mismatch.
+    /// # Errors
+    ///
+    /// Returns an error if `language` is not production-admitted or its
+    /// implemented grammar/query cannot be loaded with the required ABI.
     pub fn new(language: SourceLanguage) -> Result<Self, ExtractError> {
         if !language.is_native_indexable() {
             return Err(ExtractError::UnsupportedLanguage);
@@ -32,6 +36,10 @@ impl NativeExtractor {
     /// it importable or indexable. Production discovery and indexing must use [`Self::new`]; the
     /// registry admits a mode only after extraction, cross-file resolution, publication, and
     /// retrieval gates all pass.
+    /// # Errors
+    ///
+    /// Returns an error if no executable strategy exists or the language's
+    /// grammar, tags query, or parser ABI cannot be initialized.
     pub fn new_for_capability_validation(language: SourceLanguage) -> Result<Self, ExtractError> {
         let spec = LanguageSpec::for_language(language);
         if !spec.strategy().is_executable() {
@@ -64,11 +72,19 @@ impl NativeExtractor {
     }
 
     /// Extract one immutable snapshot without an external cancellation probe.
+    /// # Errors
+    ///
+    /// Returns an error if snapshot language differs, parsing fails, or custom,
+    /// framework, tag, reference, or test-name extraction fails.
     pub fn extract(&mut self, snapshot: &SourceSnapshot) -> Result<ExtractedFile, ExtractError> {
         self.extract_with_cancellation(snapshot, || false)
     }
 
     /// Extract one snapshot while polling a supervisor-owned cancellation probe.
+    /// # Errors
+    ///
+    /// Returns an error on cancellation, language mismatch, parser failure, or
+    /// failed custom/framework/tag/reference/test-name enrichment.
     pub fn extract_with_cancellation(
         &mut self,
         snapshot: &SourceSnapshot,
