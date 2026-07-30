@@ -1,6 +1,7 @@
 # V2 native patch-task evaluation
 
-Status: locked v1.1.33 parity gate and current `v2.10.0` release evidence
+Status: locked v1.1.33 parity gate and intended `v2.1.0` candidate evidence;
+an exact corrected-tree gate is required before release
 
 Measured: 2026-07-30
 
@@ -12,7 +13,7 @@ impact, and affected-test evidence meet the frozen v1.1.33 patch-task floors.
 The gate does not invoke Bun, TypeScript, an LLM, an embedding service, or a
 SQLite library/database.
 
-| Metric | Frozen v1.1.33 requirement | Native v2.10.0 result |
+| Metric | Frozen v1.1.33 requirement | Native v2.1.0 candidate result |
 | --- | ---: | ---: |
 | Hit@5 | 1.0000 | 1.0000 |
 | MRR | 1.0000 | 1.0000 |
@@ -28,10 +29,12 @@ ordered reports for exact equality. Both passes produced the figures above,
 including identical evidence membership, BM25 ranks, predicted edit files,
 test selections, abstentions, payload bytes, and aggregate scores.
 
-The recorded result comes from the successful exact-main
-[v2.10.0 Rust gate](https://github.com/adder-factory/cartograph/actions/runs/30575543412)
-at commit `13bbee8740e98d37c4a2f913b4b7f9f3500aa500`. The emitted report retained
-both locked fingerprints and all six quality scores at 1.000000.
+The recorded result comes from the successful exact-main, pre-correction
+[misnumbered v2.10.0 Rust gate](https://github.com/adder-factory/cartograph/actions/runs/30575543412)
+at commit `13bbee8740e98d37c4a2f913b4b7f9f3500aa500`. The implementation evidence
+remains applicable to the metadata-only correction, but the final corrected
+tree requires its own exact-SHA gate before release. The emitted report
+retained both locked fingerprints and all six quality scores at 1.000000.
 
 ## Locked contract
 

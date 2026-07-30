@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-07-30 (`v2.10.0`).
+Last release audit: 2026-07-30 (`v2.1.0`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -57,7 +57,7 @@ function/class categories.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.10.0 top-level command advertised
+This inventory contains every non-hidden v2.1.0 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 

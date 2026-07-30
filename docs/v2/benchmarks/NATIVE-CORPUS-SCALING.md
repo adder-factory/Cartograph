@@ -5,7 +5,7 @@ Status: historical v2.0.0 release-candidate extractor/resolver and digest-v4 con
 Measured: 2026-07-24
 
 > Historical benchmark: the environment and figures below are preserved release
-> evidence, not current installation guidance. The v2.10.0 runtime contract is
+> evidence, not current installation guidance. The v2.1.0 runtime contract is
 > PostgreSQL 18.4+, `pg_search` 0.25.0, and pgvector 0.8.4+.
 
 The committed
