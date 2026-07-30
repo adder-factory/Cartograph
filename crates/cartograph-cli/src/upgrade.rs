@@ -151,8 +151,12 @@ fn report_updated(
     latest_version: String,
     installed: InstalledBinary,
 ) -> UpgradeReport {
+    let InstalledBinary {
+        path,
+        launcher_warning,
+    } = installed;
     let mut next_steps = Vec::with_capacity(4);
-    if let Some(warning) = installed.launcher_warning {
+    if let Some(warning) = launcher_warning {
         next_steps.push(format!(
             "The release is installed, but a legacy PATH launcher could not be repointed ({warning}). Re-run `cartograph install` to repair project launchers."
         ));
@@ -162,16 +166,17 @@ fn report_updated(
         "Restart MCP clients so every connection uses the new binary.".to_owned(),
         "Run `cartograph --version` from a new process to verify the update.".to_owned(),
     ]);
+    let message = format!(
+        "Installed the checksum-verified Cartograph {latest_version} binary at {}.",
+        path.display()
+    );
     UpgradeReport {
         status: "updated",
         current_version,
-        latest_version: Some(latest_version.clone()),
+        latest_version: Some(latest_version),
         apply_requested: true,
         applied: true,
-        message: format!(
-            "Installed the checksum-verified Cartograph {latest_version} binary at {}.",
-            installed.path.display()
-        ),
+        message,
         next_steps,
     }
 }
@@ -241,7 +246,7 @@ async fn apply_release(version: &str) -> Result<InstalledBinary, String> {
         env::current_exe().map_err(|_| "could not resolve the running executable".to_owned())?;
     let executable = fs::canonicalize(&executable)
         .map_err(|_| "could not resolve the running executable".to_owned())?;
-    let asset = asset_name()?;
+    let asset = ASSET_NAME.map_err(str::to_owned)?;
     let client = http_client()?;
     let checksums_url = format!("{RELEASE_BASE}/v{version}/SHA256SUMS");
     let asset_url = format!("{RELEASE_BASE}/v{version}/{asset}");
@@ -275,7 +280,7 @@ fn http_client() -> Result<Client, String> {
     Client::builder()
         .user_agent(format!("cartograph/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(2 * 60))
+        .timeout(Duration::from_mins(2))
         .build()
         .map_err(|_| "could not initialize the HTTPS client".to_owned())
 }
@@ -338,7 +343,7 @@ fn install_binary(
     #[cfg(unix)]
     {
         let launcher_path = env::var_os("PATH");
-        install_binary_unix(InstallBinaryInput {
+        install_binary_unix(&InstallBinaryInput {
             executable,
             bytes,
             version,
@@ -365,12 +370,12 @@ struct InstallBinaryInput<'input> {
 }
 
 #[cfg(unix)]
-fn install_binary_unix(input: InstallBinaryInput<'_>) -> Result<InstalledBinary, String> {
+fn install_binary_unix(input: &InstallBinaryInput<'_>) -> Result<InstalledBinary, String> {
     if let Some(layout) = VersionedInstallLayout::detect(input.executable, input.version)? {
         return layout.install(input);
     }
 
-    let InstallBinaryInput {
+    let &InstallBinaryInput {
         executable,
         bytes,
         version,
@@ -448,8 +453,8 @@ impl VersionedInstallLayout {
         }))
     }
 
-    fn install(self, input: InstallBinaryInput<'_>) -> Result<InstalledBinary, String> {
-        let InstallBinaryInput {
+    fn install(self, input: &InstallBinaryInput<'_>) -> Result<InstalledBinary, String> {
+        let &InstallBinaryInput {
             executable: prior_executable,
             bytes,
             version,
@@ -643,29 +648,20 @@ fn replace_executable(staged: TempPath, executable: &Path) -> Result<(), String>
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const fn asset_name() -> Result<&'static str, String> {
-    Ok("cartograph-darwin-arm64")
-}
+const ASSET_NAME: Result<&str, &str> = Ok("cartograph-darwin-arm64");
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn asset_name() -> Result<&'static str, String> {
-    Err("Intel macOS is not supported; use Apple Silicon with macOS 26 or newer".to_owned())
-}
+const ASSET_NAME: Result<&str, &str> =
+    Err("Intel macOS is not supported; use Apple Silicon with macOS 26 or newer");
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const fn asset_name() -> Result<&'static str, String> {
-    Ok("cartograph-linux-arm64")
-}
+const ASSET_NAME: Result<&str, &str> = Ok("cartograph-linux-arm64");
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const fn asset_name() -> Result<&'static str, String> {
-    Ok("cartograph-linux-x64")
-}
+const ASSET_NAME: Result<&str, &str> = Ok("cartograph-linux-x64");
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-const fn asset_name() -> Result<&'static str, String> {
-    Ok("cartograph-windows-x64.exe")
-}
+const ASSET_NAME: Result<&str, &str> = Ok("cartograph-windows-x64.exe");
 
 #[cfg(not(any(
     all(target_os = "macos", target_arch = "aarch64"),
@@ -674,9 +670,8 @@ const fn asset_name() -> Result<&'static str, String> {
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "windows", target_arch = "x86_64")
 )))]
-fn asset_name() -> Result<&'static str, String> {
-    Err("no native release asset exists for this operating system and architecture".to_owned())
-}
+const ASSET_NAME: Result<&str, &str> =
+    Err("no native release asset exists for this operating system and architecture");
 
 fn parse_version(raw: &str) -> Option<Version> {
     let raw = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
@@ -695,9 +690,10 @@ fn parse_version(raw: &str) -> Option<Version> {
         prerelease
             .split('.')
             .map(|part| {
-                part.parse::<u64>()
-                    .map(PrereleasePart::Numeric)
-                    .unwrap_or_else(|_| PrereleasePart::Text(part.to_ascii_lowercase()))
+                part.parse::<u64>().map_or_else(
+                    |_| PrereleasePart::Text(part.to_ascii_lowercase()),
+                    PrereleasePart::Numeric,
+                )
             })
             .collect()
     };
@@ -805,7 +801,7 @@ mod tests {
         assert!(parse("2.0.0-alpha") > parse("2.0.0-1"));
         assert!(parse("2.0.0-alpha.2") > parse("2.0.0-alpha.1"));
         assert!(parse("2.0.0-alpha.1") > parse("2.0.0-alpha"));
-        assert!(asset_name().is_ok());
+        assert!(ASSET_NAME.is_ok());
     }
 
     #[test]
@@ -938,7 +934,7 @@ mod tests {
         let launcher_path = env::join_paths([&launcher_directory])
             .unwrap_or_else(|error| panic!("launcher PATH fixture failed: {error}"));
         let replacement = b"#!/bin/sh\necho 'cartograph 2.0.8'\n";
-        install_binary_unix(InstallBinaryInput {
+        install_binary_unix(&InstallBinaryInput {
             executable: &old_executable,
             bytes: replacement,
             version: "2.0.8",
@@ -1007,7 +1003,7 @@ mod tests {
         let launcher_path = env::join_paths([&launcher_directory])
             .unwrap_or_else(|error| panic!("launcher PATH fixture failed: {error}"));
         let replacement = b"#!/bin/sh\necho 'cartograph 2.0.8'\n";
-        let result = install_binary_unix(InstallBinaryInput {
+        let result = install_binary_unix(&InstallBinaryInput {
             executable: &old_executable,
             bytes: replacement,
             version: "2.0.8",

@@ -12,8 +12,8 @@ use cartograph_llm::{
 use cartograph_search::{
     ChannelCandidate, ChannelResults, DeterministicRetriever, GenerationLexicalRequest,
     HybridSearchInput, HybridSearchPacket, LexicalQuery, RerankReport, RetrievalChannel,
-    RetrievalChannels, RetrievalDocument, RetrievalDocumentInput, RetrievalError, SearchMode,
-    SemanticReadiness, fuse_search,
+    RetrievalChannels, RetrievalDocument, RetrievalDocumentInput, RetrievalError,
+    RetrievalPreference, SearchMode, SemanticReadiness, TaskIntent, fuse_search,
 };
 
 use crate::{ProjectCancellation, ProjectError, ProjectRuntime};
@@ -39,6 +39,7 @@ enum RerankClientState {
     Ready(Box<OpenAiRerankClient>),
 }
 
+#[derive(Clone, Copy)]
 enum RetrievalStageError {
     RequestCancelled,
     GenerationChanged,
@@ -50,6 +51,7 @@ enum RetrievalStageError {
 pub struct RetrievalOptions {
     mode: SearchMode,
     candidate_limit: u16,
+    result_limit: u16,
 }
 
 /// One bounded natural-language retrieval request shared by CLI, MCP, and tests.
@@ -107,6 +109,10 @@ impl RetrievalClientRequest {
 
 impl RetrievalOptions {
     /// Select a mode and a bounded Top-K candidate count.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `candidate_limit` is zero
+    /// or exceeds the per-channel recall-window ceiling.
     pub const fn new(mode: SearchMode, candidate_limit: u16) -> Result<Self, ProjectError> {
         if candidate_limit == 0 || candidate_limit > MAXIMUM_CANDIDATE_LIMIT {
             return Err(ProjectError::InvalidOptions);
@@ -114,6 +120,7 @@ impl RetrievalOptions {
         Ok(Self {
             mode,
             candidate_limit,
+            result_limit: candidate_limit,
         })
     }
 
@@ -129,6 +136,25 @@ impl RetrievalOptions {
         self.candidate_limit
     }
 
+    /// Maximum fused results returned after the channel candidate windows are joined.
+    #[must_use]
+    pub const fn result_limit(self) -> u16 {
+        self.result_limit
+    }
+
+    /// Bound returned results independently from each channel's recall window.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `result_limit` is zero or
+    /// exceeds the fused-result ceiling.
+    pub const fn with_result_limit(mut self, result_limit: u16) -> Result<Self, ProjectError> {
+        if result_limit == 0 || result_limit > MAXIMUM_CANDIDATE_LIMIT {
+            return Err(ProjectError::InvalidOptions);
+        }
+        self.result_limit = result_limit;
+        Ok(self)
+    }
+
     /// Replace only the channel policy while retaining the validated bound.
     #[must_use]
     pub const fn with_mode(mut self, mode: SearchMode) -> Self {
@@ -142,6 +168,7 @@ impl Default for RetrievalOptions {
         Self {
             mode: SearchMode::Auto,
             candidate_limit: DEFAULT_CANDIDATE_LIMIT,
+            result_limit: DEFAULT_CANDIDATE_LIMIT,
         }
     }
 }
@@ -149,6 +176,7 @@ impl Default for RetrievalOptions {
 /// Concurrent channel result plus the exact semantic readiness used by policy selection.
 pub struct PreparedRetrieval {
     semantic_readiness: SemanticReadiness,
+    preference: RetrievalPreference,
     channels: RetrievalChannels,
 }
 
@@ -167,13 +195,10 @@ impl PreparedRetrieval {
 
     fn into_packet(self, options: RetrievalOptions) -> Result<HybridSearchPacket, ProjectError> {
         fuse_search(
-            HybridSearchInput::new(
-                options.mode,
-                self.semantic_readiness,
-                options.candidate_limit,
-            )
-            .map_err(|_| ProjectError::RetrievalOperationFailed)?
-            .with_channels(self.channels),
+            HybridSearchInput::new(options.mode, self.semantic_readiness, options.result_limit)
+                .map_err(|_| ProjectError::RetrievalOperationFailed)?
+                .with_preference(self.preference)
+                .with_channels(self.channels),
         )
         .map_err(|_| ProjectError::RetrievalOperationFailed)
     }
@@ -181,6 +206,11 @@ impl PreparedRetrieval {
 
 impl ProjectRuntime {
     /// Execute bounded lexical and eligible semantic retrieval concurrently.
+    /// # Errors
+    ///
+    /// Returns an error when the query cannot form a bounded lexical request,
+    /// current-generation channel evidence cannot be read consistently, or
+    /// retrieval invariants fail. Endpoint unavailability degrades explicitly.
     pub async fn prepare_retrieval(
         &self,
         request: RetrievalRequest,
@@ -190,6 +220,12 @@ impl ProjectRuntime {
     }
 
     /// Prepare independently ranked channels with caller-owned cancellation.
+    /// # Errors
+    ///
+    /// Returns an error when the query cannot form a bounded lexical request,
+    /// current-generation channel evidence cannot be read consistently,
+    /// retrieval invariants fail, or `cancellation` wins. Endpoint
+    /// unavailability degrades explicitly.
     pub async fn prepare_retrieval_with_cancellation(
         &self,
         request: RetrievalRequest,
@@ -213,6 +249,12 @@ impl ProjectRuntime {
     }
 
     /// Prepare channels with an explicitly validated client for tests and embedded hosts.
+    /// # Errors
+    ///
+    /// Returns an error when the query cannot form a bounded lexical request,
+    /// current-generation channel evidence cannot be read consistently,
+    /// retrieval invariants fail, or the supplied cancellation wins. Endpoint
+    /// failures degrade to readiness evidence when a channel can still answer.
     pub async fn prepare_retrieval_with_client(
         &self,
         input: RetrievalClientRequest,
@@ -254,7 +296,7 @@ impl ProjectRuntime {
                 })
                 .await
             {
-                Err(RetrievalStageError::GenerationChanged) if attempt == 0 => continue,
+                Err(RetrievalStageError::GenerationChanged) if attempt == 0 => {}
                 Err(error) => return Err(project_retrieval_error(error)),
                 Ok(prepared) => return Ok(prepared),
             }
@@ -274,16 +316,17 @@ impl ProjectRuntime {
             rerank_client,
             cancellation,
         } = input;
+        let preference = TaskIntent::classify(query).retrieval_preference(query);
         let generation = self
             .database()
             .current_generation_record(project_id)
             .await
-            .map_err(storage_stage_error)?;
+            .map_err(|error| storage_stage_error(&error))?;
         let Some(generation) = generation else {
-            return prepared_without_generation(options.mode, rerank_client);
+            return prepared_without_generation(options.mode, preference, rerank_client);
         };
         let expected_generation_id = generation.generation_id().clone();
-        let lexical_query = LexicalQuery::new(query, options.candidate_limit)
+        let lexical_query = LexicalQuery::for_code_search(query, options.candidate_limit)
             .map_err(|_| RetrievalStageError::Failed)?;
         let retriever = DeterministicRetriever::new(self.database().clone());
         if options.mode == SearchMode::Deterministic {
@@ -293,6 +336,7 @@ impl ProjectRuntime {
                 project_id,
                 expected_generation_id,
                 lexical_query,
+                preference,
                 cancellation,
             })
             .await;
@@ -307,12 +351,17 @@ impl ProjectRuntime {
             options,
             semantic_client,
             rerank_client,
+            preference,
             cancellation,
         })
         .await
     }
 
     /// Return one compact fused packet suitable for CLI and MCP `find` consumers.
+    /// # Errors
+    ///
+    /// Returns an error when channel preparation fails or the prepared channel
+    /// ranks, generation, or configured result bound cannot form a valid fused packet.
     pub async fn search(
         &self,
         request: RetrievalRequest,
@@ -322,6 +371,10 @@ impl ProjectRuntime {
     }
 
     /// Search with explicit cancellation across the endpoint and both PostgreSQL channels.
+    /// # Errors
+    ///
+    /// Returns an error when channel preparation fails, `cancellation` wins, or
+    /// the prepared ranks, generation, or result bound cannot form a valid fused packet.
     pub async fn search_with_cancellation(
         &self,
         request: RetrievalRequest,
@@ -334,6 +387,11 @@ impl ProjectRuntime {
     }
 
     /// Search through an explicit client without mutating process environment configuration.
+    /// # Errors
+    ///
+    /// Returns an error when explicit-client channel preparation fails,
+    /// cancellation wins, or the prepared ranks, generation, or result bound
+    /// cannot form a valid fused packet.
     pub async fn search_with_client(
         &self,
         input: RetrievalClientRequest,
@@ -367,6 +425,7 @@ struct DeterministicRetrievalRequest<'request> {
     project_id: &'request ProjectId,
     expected_generation_id: GenerationId,
     lexical_query: LexicalQuery,
+    preference: RetrievalPreference,
     cancellation: &'request ProjectCancellation,
 }
 
@@ -380,6 +439,7 @@ struct HybridRetrievalRequest<'request> {
     options: RetrievalOptions,
     semantic_client: &'request SemanticClientState,
     rerank_client: &'request RerankClientState,
+    preference: RetrievalPreference,
     cancellation: &'request ProjectCancellation,
 }
 
@@ -415,6 +475,7 @@ struct SemanticEmbedding {
 
 fn prepared_without_generation(
     mode: SearchMode,
+    preference: RetrievalPreference,
     reranker: &RerankClientState,
 ) -> Result<PreparedRetrieval, RetrievalStageError> {
     let lexical = ChannelResults::new(RetrievalChannel::Lexical, Vec::new())
@@ -430,6 +491,7 @@ fn prepared_without_generation(
     };
     Ok(PreparedRetrieval {
         semantic_readiness,
+        preference,
         channels,
     })
 }
@@ -443,6 +505,7 @@ async fn deterministic_retrieval(
         project_id,
         expected_generation_id,
         lexical_query,
+        preference,
         cancellation,
     } = input;
     let lexical = lexical_channel(LexicalChannelRequest {
@@ -459,6 +522,7 @@ async fn deterministic_retrieval(
         .with_rerank_report(RerankReport::not_requested());
     Ok(PreparedRetrieval {
         semantic_readiness: SemanticReadiness::NotConfigured,
+        preference,
         channels,
     })
 }
@@ -476,6 +540,7 @@ async fn hybrid_retrieval(
         options,
         semantic_client,
         rerank_client,
+        preference,
         cancellation,
     } = input;
     let lexical = lexical_channel(LexicalChannelRequest {
@@ -511,6 +576,7 @@ async fn hybrid_retrieval(
     ensure_generation_current(runtime, project_id, &expected_generation_id).await?;
     Ok(PreparedRetrieval {
         semantic_readiness: semantic.readiness,
+        preference,
         channels,
     })
 }
@@ -589,7 +655,7 @@ async fn lexical_channel(
             expected_generation_id,
             query,
         )) => {
-            result.map_err(retrieval_stage_error)
+            result.map_err(|error| retrieval_stage_error(&error))
         },
     }
 }
@@ -789,15 +855,12 @@ async fn rerank_semantic_channel(
             }
         },
     };
-    let reranked = match apply_rerank_scores(&channel, batch.scores()) {
-        Ok(reranked) => reranked,
-        Err(_) => {
-            return Ok((
-                channel,
-                RerankReport::unavailable(Some(client.model().to_owned()))
-                    .map_err(|_| RetrievalStageError::Failed)?,
-            ));
-        }
+    let Ok(reranked) = apply_rerank_scores(&channel, batch.scores()) else {
+        return Ok((
+            channel,
+            RerankReport::unavailable(Some(client.model().to_owned()))
+                .map_err(|_| RetrievalStageError::Failed)?,
+        ));
     };
     let reranked_documents =
         u16::try_from(documents.len()).map_err(|_| RetrievalStageError::Failed)?;
@@ -924,6 +987,9 @@ fn semantic_candidate(
     if let Some(symbol_id) = hit.symbol_id() {
         document = document.with_symbol_id(symbol_id.clone());
     }
+    if let Some(symbol_kind) = hit.symbol_kind() {
+        document = document.with_symbol_kind(symbol_kind);
+    }
     let document = document
         .with_qualified_name(hit.qualified_name())
         .map_err(|_| ProjectError::RetrievalOperationFailed)?;
@@ -950,7 +1016,7 @@ async fn ensure_generation_current(
         .database()
         .current_generation_record(project_id)
         .await
-        .map_err(storage_stage_error)?;
+        .map_err(|error| storage_stage_error(&error))?;
     if current
         .as_ref()
         .is_some_and(|generation| generation.generation_id() == expected_generation_id)
@@ -961,19 +1027,17 @@ async fn ensure_generation_current(
     }
 }
 
-fn storage_stage_error(error: StorageError) -> RetrievalStageError {
+fn storage_stage_error(error: &StorageError) -> RetrievalStageError {
     match error {
         StorageError::CurrentGenerationChanged => RetrievalStageError::GenerationChanged,
         _ => RetrievalStageError::Failed,
     }
 }
 
-fn retrieval_stage_error(error: RetrievalError) -> RetrievalStageError {
+fn retrieval_stage_error(error: &RetrievalError) -> RetrievalStageError {
     match error {
-        RetrievalError::Storage(StorageError::CurrentGenerationChanged) => {
-            RetrievalStageError::GenerationChanged
-        }
-        RetrievalError::Semantic(SemanticStorageError::CurrentGenerationChanged) => {
+        RetrievalError::Storage(StorageError::CurrentGenerationChanged)
+        | RetrievalError::Semantic(SemanticStorageError::CurrentGenerationChanged) => {
             RetrievalStageError::GenerationChanged
         }
         RetrievalError::InvalidInput { .. }
@@ -1020,6 +1084,10 @@ mod tests {
             DEFAULT_CANDIDATE_LIMIT
         );
         assert_eq!(
+            RetrievalOptions::default().result_limit(),
+            DEFAULT_CANDIDATE_LIMIT
+        );
+        assert_eq!(
             RetrievalOptions::new(SearchMode::Hybrid, 0),
             Err(ProjectError::InvalidOptions)
         );
@@ -1030,6 +1098,43 @@ mod tests {
             ),
             Err(ProjectError::InvalidOptions)
         );
+    }
+
+    #[test]
+    fn deeper_channel_candidates_can_fuse_into_a_smaller_result_window() {
+        let lexical = ChannelResults::new(
+            RetrievalChannel::Lexical,
+            vec![
+                semantic_fixture_candidate("a", "src/a.rs", 1, 1.0),
+                semantic_fixture_candidate("c", "src/c.rs", 2, 0.9),
+                semantic_fixture_candidate("b", "src/b.rs", 3, 0.8),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("lexical fixture failed: {error}"));
+        let semantic = ChannelResults::new(
+            RetrievalChannel::Semantic,
+            vec![semantic_fixture_candidate("b", "src/b.rs", 1, 0.95)],
+        )
+        .unwrap_or_else(|error| panic!("semantic fixture failed: {error}"));
+        let options = RetrievalOptions::new(SearchMode::Hybrid, 3)
+            .and_then(|options| options.with_result_limit(1))
+            .unwrap_or_else(|error| panic!("separate retrieval limits failed: {error}"));
+        let packet = PreparedRetrieval {
+            semantic_readiness: SemanticReadiness::Ready,
+            preference: RetrievalPreference::Neutral,
+            channels: RetrievalChannels::new()
+                .with_channel(lexical)
+                .and_then(|channels| channels.with_channel(semantic))
+                .unwrap_or_else(|error| panic!("retrieval channels failed: {error}")),
+        }
+        .into_packet(options)
+        .unwrap_or_else(|error| panic!("retrieval fusion failed: {error}"));
+
+        assert_eq!(options.candidate_limit(), 3);
+        assert_eq!(options.result_limit(), 1);
+        assert_eq!(packet.items().len(), 1);
+        assert_eq!(packet.items()[0].document().path().as_str(), "src/b.rs");
+        assert!(packet.truncated());
     }
 
     #[test]
@@ -1079,7 +1184,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(paths, vec!["src/b.rs", "src/c.rs", "src/a.rs"]);
-        assert_eq!(reranked.candidates()[0].raw_score(), f64::from(0.9_f32));
+        assert!(
+            (reranked.candidates()[0].raw_score() - f64::from(0.9_f32)).abs() <= f64::EPSILON,
+            "rerank score changed: {}",
+            reranked.candidates()[0].raw_score()
+        );
         assert_eq!(reranked.candidates()[0].rank(), 1);
         assert!(apply_rerank_scores(&channel, &[0.1]).is_err());
     }

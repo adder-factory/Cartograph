@@ -47,6 +47,10 @@ pub struct GenerationValidationLimits {
 
 impl GenerationValidationLimits {
     /// Require nonzero limits with enough working room to retain the output.
+    /// # Errors
+    ///
+    /// Returns an error if either limit is zero, the working limit is below
+    /// the output limit, or retained validation memory exceeds its hard cap.
     pub const fn new(
         maximum_output_bytes: u64,
         maximum_working_bytes: u64,
@@ -79,28 +83,28 @@ impl GenerationValidationLimits {
 /// Fixed-size proof of bounded canonical validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenerationValidationReport {
-    input_bytes: u64,
-    output_bytes: u64,
-    charged_high_water_bytes: u64,
+    input: u64,
+    output: u64,
+    charged_high_water: u64,
 }
 
 impl GenerationValidationReport {
     /// Conservative raw input bytes retained at validation admission.
     #[must_use]
     pub const fn input_bytes(self) -> u64 {
-        self.input_bytes
+        self.input
     }
 
     /// Conservative canonical output bytes retained for COPY.
     #[must_use]
     pub const fn output_bytes(self) -> u64 {
-        self.output_bytes
+        self.output
     }
 
     /// Monotonic conservative allocation charge; released allocations remain charged.
     #[must_use]
     pub const fn charged_high_water_bytes(self) -> u64 {
-        self.charged_high_water_bytes
+        self.charged_high_water
     }
 }
 
@@ -198,9 +202,9 @@ where
         let output_bytes = measurement.retained_bytes();
         self.charge(measurement.transient_bytes())?;
         Ok(GenerationValidationReport {
-            input_bytes: self.input_bytes,
-            output_bytes,
-            charged_high_water_bytes: self.charged_bytes,
+            input: self.input_bytes,
+            output: output_bytes,
+            charged_high_water: self.charged_bytes,
         })
     }
 }
@@ -222,6 +226,10 @@ fn validate_and_reduce(facts: GenerationFacts) -> Result<CanonicalGenerationFact
 }
 
 /// Validate, reduce, digest, and bound one unordered payload with cooperative polling.
+/// # Errors
+///
+/// Returns an error if validation is cancelled, memory/output bounds are
+/// exceeded, identities conflict, or cross-table relationships are invalid.
 pub fn validate_generation_facts<Cancel>(
     facts: GenerationFacts,
     limits: GenerationValidationLimits,
@@ -1072,10 +1080,8 @@ mod tests {
             end_line: 1,
             structural_digest: digest(),
             visibility: None,
-            exported: false,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
+            export: cartograph_domain::SymbolExportFlags::default(),
+            execution: cartograph_domain::SymbolExecutionFlags::default(),
             declaration_only: false,
             betweenness_ppb: None,
             pagerank_ppb: None,
@@ -1558,7 +1564,10 @@ mod tests {
         .unwrap_or_else(|error| panic!("repeated edge sites were rejected: {error}"));
         assert_eq!(canonical.edges().len(), 1);
         assert_eq!(canonical.edges()[0].site_count, REDUCED_EDGE_SITE_COUNT);
-        assert_eq!(canonical.edges()[0].confidence, MAXIMUM_EDGE_CONFIDENCE);
+        assert_eq!(
+            canonical.edges()[0].confidence.to_bits(),
+            MAXIMUM_EDGE_CONFIDENCE.to_bits()
+        );
 
         let mut changed = canonical.edges()[0].clone();
         changed.site_count = CHANGED_EDGE_SITE_COUNT;

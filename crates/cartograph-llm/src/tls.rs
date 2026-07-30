@@ -10,6 +10,10 @@ pub struct TlsProviderUnavailable;
 /// Cartograph installs ring only when the embedding application has not
 /// already selected a provider. A concurrent successful installation is also
 /// accepted.
+/// # Errors
+///
+/// Returns an error only when neither an existing default provider nor the
+/// bundled ring provider can become rustls's process-wide default.
 pub fn ensure_tls_crypto_provider() -> Result<(), TlsProviderUnavailable> {
     if rustls::crypto::CryptoProvider::get_default().is_some() {
         return Ok(());

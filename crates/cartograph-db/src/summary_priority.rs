@@ -27,21 +27,25 @@ pub struct SummaryPriorityEnqueueReport {
 
 impl SummaryPriorityEnqueueReport {
     #[must_use]
+    /// Returns the candidates.
     pub const fn candidates(&self) -> u64 {
         self.candidates
     }
 
     #[must_use]
+    /// Returns the enqueued.
     pub const fn enqueued(&self) -> u64 {
         self.enqueued
     }
 
     #[must_use]
+    /// Returns the refreshed.
     pub const fn refreshed(&self) -> u64 {
         self.refreshed
     }
 
     #[must_use]
+    /// Returns the affected.
     pub const fn affected(&self) -> u64 {
         self.enqueued.saturating_add(self.refreshed)
     }
@@ -60,6 +64,7 @@ pub struct SummaryPriorityQueueStats {
 
 impl SummaryPriorityQueueStats {
     #[must_use]
+    /// Returns the pending.
     pub const fn pending(&self) -> u64 {
         self.pending
     }
@@ -75,6 +80,7 @@ pub struct SummaryPriorityFailure {
 
 impl SummaryPriorityFailure {
     #[must_use]
+    /// Returns the evicted.
     pub const fn evicted(self) -> bool {
         self.evicted
     }
@@ -84,6 +90,10 @@ impl CartographDatabase {
     /// Enqueue unsummarized current symbols whose exact simple names match
     /// bounded intent terms. Duplicate demand refreshes recency and count but
     /// deliberately preserves the poison-attempt budget.
+    /// # Errors
+    ///
+    /// Returns an error if token/count bounds or JSON encoding fail, or the
+    /// current-generation candidate upsert cannot complete.
     pub async fn enqueue_summary_candidates_for_intent(
         &self,
         project_id: &ProjectId,
@@ -167,7 +177,7 @@ impl CartographDatabase {
             .map_err(|_| database_error("enqueue-summary-priority"))?;
         set_local_statement_timeout(&mut transaction, SUMMARY_PRIORITY_TIMEOUT)
             .await
-            .map_err(|_| database_error("enqueue-summary-priority"))?;
+            .map_err(|()| database_error("enqueue-summary-priority"))?;
         let row = query(AssertSqlSafe(statement))
             .bind(project_id.as_str())
             .bind(encoded)
@@ -188,6 +198,10 @@ impl CartographDatabase {
     }
 
     /// Read exact queue health for the currently published generation.
+    /// # Errors
+    ///
+    /// Returns an error if queue aggregates cannot be queried or pending,
+    /// request, retry, or timestamp fields violate their stored contract.
     pub async fn summary_priority_queue_stats(
         &self,
         project_id: &ProjectId,
@@ -220,6 +234,10 @@ impl CartographDatabase {
     }
 
     /// Increment a failed queued-symbol attempt and evict it at the bounded cap.
+    /// # Errors
+    ///
+    /// Returns an error if the current queue row cannot be locked/decoded or
+    /// its bounded attempt increment/eviction cannot commit atomically.
     pub async fn record_summary_priority_failure(
         &self,
         project_id: &ProjectId,
@@ -243,7 +261,7 @@ impl CartographDatabase {
             .map_err(|_| database_error("record-summary-priority-failure"))?;
         set_local_statement_timeout(&mut transaction, SUMMARY_PRIORITY_TIMEOUT)
             .await
-            .map_err(|_| database_error("record-summary-priority-failure"))?;
+            .map_err(|()| database_error("record-summary-priority-failure"))?;
         let row = query(AssertSqlSafe(select))
             .bind(project_id.as_str())
             .bind(symbol_id.as_str())

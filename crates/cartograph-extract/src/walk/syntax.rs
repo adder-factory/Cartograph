@@ -101,6 +101,7 @@ const OCTAL_RADIX: u32 = 8;
 const BINARY_RADIX: u32 = 2;
 const GO_NON_MAGIC_INTEGERS: &[u128] = &[7, 24, 30, 60, 365, 1_000, 1_024, 86_400];
 
+#[derive(Clone, Copy)]
 struct SensitiveMetricInput<'tree, 'source> {
     declaration: Node<'tree>,
     body: Option<Node<'tree>>,
@@ -176,6 +177,7 @@ struct TextMetricInput<'source> {
     async_symbol: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct SymbolHealthInput<'tree, 'source> {
     pub(crate) declaration: Node<'tree>,
     pub(crate) body: Option<Node<'tree>>,
@@ -2068,7 +2070,9 @@ fn normalize_preceding_comments(
                 }
                 continue;
             }
-            if !normalized.is_empty() {
+            if normalized.is_empty() {
+                ensure_fact_string_length(cleaned.len())?;
+            } else {
                 let separators = pending_blank_lines.saturating_add(1);
                 let next_length = normalized
                     .len()
@@ -2079,8 +2083,6 @@ fn normalize_preceding_comments(
                 for _ in 0..separators {
                     normalized.push('\n');
                 }
-            } else {
-                ensure_fact_string_length(cleaned.len())?;
             }
             pending_blank_lines = 0;
             push_cancellable(&mut normalized, cleaned, cancelled)?;
@@ -2343,6 +2345,8 @@ fn text_for<'source>(source: &'source str, node: Node<'_>) -> &'source str {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use tree_sitter::Parser;
 
     use super::{
@@ -2359,17 +2363,20 @@ mod tests {
 
     #[test]
     fn flat_tree_digest_polls_cancellation_without_collecting_the_tree() {
-        let source = (0..FLAT_DECLARATIONS)
-            .map(|index| format!("const value_{index} = {index};\n"))
-            .collect::<String>();
+        let mut source = String::new();
+        for index in 0..FLAT_DECLARATIONS {
+            assert!(
+                writeln!(&mut source, "const value_{index} = {index};").is_ok(),
+                "writing to a String is infallible"
+            );
+        }
         let mut parser = Parser::new();
         let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
         if let Err(error) = parser.set_language(&language) {
             panic!("test grammar setup failed: {error}");
         }
-        let tree = match parser.parse(&source, None) {
-            Some(tree) => tree,
-            None => panic!("test parser did not produce a tree"),
+        let Some(tree) = parser.parse(&source, None) else {
+            panic!("test parser did not produce a tree");
         };
         let mut polls = 0_usize;
         let result = structural_digest(tree.root_node(), &source, &mut || {
@@ -2389,9 +2396,8 @@ mod tests {
         if let Err(error) = parser.set_language(&language) {
             panic!("test grammar setup failed: {error}");
         }
-        let tree = match parser.parse(&source, None) {
-            Some(tree) => tree,
-            None => panic!("test parser did not produce a tree"),
+        let Some(tree) = parser.parse(&source, None) else {
+            panic!("test parser did not produce a tree");
         };
         let mut polls = 0_usize;
         let result = structural_digest(tree.root_node(), &source, &mut || {

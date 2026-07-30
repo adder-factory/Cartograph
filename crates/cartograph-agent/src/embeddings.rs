@@ -18,7 +18,7 @@ const DEFAULT_EMBEDDING_WORKERS: u16 = 4;
 const MAXIMUM_EMBEDDING_WORKERS: u16 = 16;
 const MAXIMUM_PENDING_DOCUMENTS: u16 = 128;
 const MAXIMUM_PENDING_SOURCE_BYTES: u64 = 16 * 1_024 * 1_024;
-const SEMANTIC_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const SEMANTIC_STATEMENT_TIMEOUT: Duration = Duration::from_mins(5);
 const MODEL_PROVIDER: &str = "openai-compatible";
 const DIMENSION_PROBE: &str = "Cartograph embedding dimension probe";
 
@@ -30,6 +30,10 @@ pub struct EmbeddingOptions {
 
 impl EmbeddingOptions {
     /// Override endpoint/database batch concurrency in 1..=16.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `workers` is zero or
+    /// exceeds the embedding concurrency ceiling.
     pub const fn with_max_workers(mut self, workers: u16) -> Result<Self, ProjectError> {
         if workers == 0 || workers > MAXIMUM_EMBEDDING_WORKERS {
             return Err(ProjectError::InvalidOptions);
@@ -114,12 +118,22 @@ impl EmbeddingSweepReport {
 
 impl ProjectRuntime {
     /// Probe the configured model and return non-mutating current semantic readiness.
+    /// # Errors
+    ///
+    /// Returns an error when endpoint/model configuration is unavailable, the
+    /// dimension probe or current-project lookup fails, PostgreSQL readiness
+    /// cannot be read, or the operation is cancelled.
     pub async fn embedding_status(&self) -> Result<EmbeddingStatusReport, ProjectError> {
         self.embedding_status_with_cancellation(ProjectCancellation::new())
             .await
     }
 
     /// Probe readiness with caller-owned cooperative endpoint/database cancellation.
+    /// # Errors
+    ///
+    /// Returns an error when endpoint/model configuration is unavailable, the
+    /// dimension probe or current-project lookup fails, PostgreSQL readiness
+    /// cannot be read, or `cancellation` wins.
     pub async fn embedding_status_with_cancellation(
         &self,
         cancellation: ProjectCancellation,
@@ -130,6 +144,11 @@ impl ProjectRuntime {
     }
 
     /// Probe readiness with an explicitly constructed, already validated client.
+    /// # Errors
+    ///
+    /// Returns an error when the model probe is invalid or unavailable, no
+    /// current indexed project exists, PostgreSQL readiness fails, or
+    /// `cancellation` wins.
     pub async fn embedding_status_with_client(
         &self,
         client: OpenAiEmbeddingClient,
@@ -158,6 +177,11 @@ impl ProjectRuntime {
     }
 
     /// Embed every missing current search document, then prove model-specific HNSW readiness.
+    /// # Errors
+    ///
+    /// Returns an error when configured endpoint/model validation fails, no
+    /// current indexed project exists, a bounded embedding or PostgreSQL
+    /// operation fails, or the sweep is cancelled.
     pub async fn embed_current(
         &self,
         options: EmbeddingOptions,
@@ -167,6 +191,11 @@ impl ProjectRuntime {
     }
 
     /// Run a resumable embedding sweep with caller-owned cooperative cancellation.
+    /// # Errors
+    ///
+    /// Returns an error when configured endpoint/model validation fails, no
+    /// current indexed project exists, a bounded embedding or PostgreSQL
+    /// operation fails, or `cancellation` wins.
     pub async fn embed_current_with_cancellation(
         &self,
         options: EmbeddingOptions,
@@ -178,6 +207,11 @@ impl ProjectRuntime {
     }
 
     /// Run a sweep with an explicitly constructed, already validated endpoint client.
+    /// # Errors
+    ///
+    /// Returns an error when the client returns an invalid model or vector,
+    /// no current indexed project exists, a bounded page/write/HNSW operation
+    /// fails, an option-derived size overflows, or cancellation wins.
     pub async fn embed_current_with_client(
         &self,
         input: EmbeddingClientRequest,

@@ -13,10 +13,10 @@ const MAXIMUM_SEARCH_RELATION_BYTE_BUDGET: u64 = 64 * 1_024 * 1_024 * 1_024;
 const MAXIMUM_DDL_RELATIONS: u32 = 64;
 const DEFAULT_CASCADE_ROW_BUDGET: u64 = 5_000_000;
 const DEFAULT_SEARCH_RELATION_BYTE_BUDGET: u64 = 8 * 1_024 * 1_024 * 1_024;
-const DEFAULT_STALE_STAGING_AGE: Duration = Duration::from_secs(10 * 60);
-const MAXIMUM_STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const DEFAULT_STALE_READY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const MAXIMUM_STALE_READY_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const DEFAULT_STALE_STAGING_AGE: Duration = Duration::from_mins(10);
+const MAXIMUM_STALE_STAGING_AGE: Duration = Duration::from_hours(24);
+const DEFAULT_STALE_READY_AGE: Duration = Duration::from_hours(24);
+const MAXIMUM_STALE_READY_AGE: Duration = Duration::from_hours(720);
 const POST_RETENTION_VACUUM_ROW_THRESHOLD: u64 = 100_000;
 const RETENTION_ROW_TABLES: [&str; 15] = [
     "index_generations",
@@ -76,6 +76,10 @@ impl<'a> GenerationRetentionRequest<'a> {
 
 impl GenerationRetentionPolicy {
     /// Preserve the newest `recent_superseded` histories and bound one cleanup batch.
+    /// # Errors
+    ///
+    /// Returns an error if `maximum_deletions` is zero or exceeds the cleanup
+    /// batch maximum.
     pub const fn new(
         recent_superseded: u32,
         maximum_deletions: u32,
@@ -100,6 +104,10 @@ impl GenerationRetentionPolicy {
 
     /// Override how old an unleased ready generation must be before it can be
     /// reconciled. Current pointers and incomplete imports remain protected.
+    /// # Errors
+    ///
+    /// Returns an error if `stale_ready_age` is zero or exceeds the maximum
+    /// eligible age window.
     pub fn with_stale_ready_age(
         mut self,
         stale_ready_age: Duration,
@@ -112,6 +120,10 @@ impl GenerationRetentionPolicy {
     }
 
     /// Override how old an unleased staging generation must be before collection.
+    /// # Errors
+    ///
+    /// Returns an error if `stale_staging_age` is zero or exceeds the maximum
+    /// eligible age window.
     pub fn with_stale_staging_age(
         mut self,
         stale_staging_age: Duration,
@@ -124,6 +136,10 @@ impl GenerationRetentionPolicy {
     }
 
     /// Override exact row, physical relation-byte, and DDL-count work caps.
+    /// # Errors
+    ///
+    /// Returns an error if any cascade-row, search-relation-byte, or DDL count
+    /// cap is zero or exceeds its cleanup hard maximum.
     pub const fn with_work_limits(
         mut self,
         maximum_cascade_rows: u64,
@@ -240,11 +256,16 @@ impl GenerationRetentionReport {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum PostRetentionMaintenance {
     #[default]
+    /// Represents the not needed post retention maintenance.
     NotNeeded,
+    /// Represents the completed post retention maintenance.
     Completed {
+        /// Number of PostgreSQL tables considered for post-retention analysis.
         tables_attempted: u64,
     },
+    /// Represents the deferred post retention maintenance.
     Deferred {
+        /// Stable reason the bounded maintenance step could not run.
         reason: &'static str,
     },
 }
@@ -277,6 +298,10 @@ impl CartographDatabase {
     /// imports, and the configured newest superseded histories are never
     /// candidates. The caller must hold an exact, unexpired project
     /// `migration` lease that is not generation-bound.
+    /// # Errors
+    ///
+    /// Returns an error if the migration lease/deadline is invalid, protected
+    /// generations become candidates, work caps are exceeded, or cleanup fails.
     pub async fn cleanup_generations(
         &self,
         request: GenerationRetentionRequest<'_>,
@@ -663,11 +688,11 @@ async fn load_candidate_work(
         .collect::<Vec<_>>()
         .join(" + ");
     let sql = format!(
-        r#"SELECT
+        r"SELECT
                 {cascade_count} AS cascade_rows,
                 COALESCE(pg_total_relation_size(to_regclass($3)), 0)::bigint
                     AS search_relation_bytes,
-                to_regclass($3) IS NOT NULL AS search_relation_present"#,
+                to_regclass($3) IS NOT NULL AS search_relation_present",
     );
     let row = query(AssertSqlSafe(sql))
         .bind(context.fence.target().project_id().as_str())
@@ -694,7 +719,7 @@ async fn verify_retention_cascade_catalog(
     context: &RetentionContext<'_>,
 ) -> Result<(), GenerationRetentionError> {
     let rows = query(
-        r#"WITH RECURSIVE cascade_relations(oid, nspname, relname) AS (
+        r"WITH RECURSIVE cascade_relations(oid, nspname, relname) AS (
                 SELECT relations.oid, namespaces.nspname, relations.relname
                 FROM pg_catalog.pg_class AS relations
                 INNER JOIN pg_catalog.pg_namespace AS namespaces
@@ -716,7 +741,7 @@ async fn verify_retention_cascade_catalog(
             SELECT nspname, relname
             FROM cascade_relations
             WHERE nspname <> $1 OR relname <> 'index_generations'
-            ORDER BY nspname, relname"#,
+            ORDER BY nspname, relname",
     )
     .bind(context.database.schema.as_str())
     .fetch_all(connection)
@@ -1021,8 +1046,8 @@ mod tests {
             Err(GenerationRetentionError::InvalidPolicy)
         );
         assert!(matches!(
-            policy.with_stale_staging_age(Duration::from_secs(60)),
-            Ok(updated) if updated.stale_staging_age() == Duration::from_secs(60)
+            policy.with_stale_staging_age(Duration::from_mins(1)),
+            Ok(updated) if updated.stale_staging_age() == Duration::from_mins(1)
         ));
     }
 

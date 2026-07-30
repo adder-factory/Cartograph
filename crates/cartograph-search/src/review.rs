@@ -16,6 +16,7 @@ pub(crate) struct ReviewAssembly {
     pub(crate) truncation: ReviewTruncation,
 }
 
+#[derive(Clone, Copy)]
 struct ReviewClassificationInput<'input> {
     generation: Option<&'input GenerationEvidence>,
     freshness: IndexFreshness,

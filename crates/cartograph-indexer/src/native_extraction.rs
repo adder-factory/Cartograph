@@ -26,6 +26,10 @@ pub struct NativeExtractionStageConfig {
 
 impl NativeExtractionStageConfig {
     /// Validate native parse capacity and independent item/stage cleanup bounds.
+    /// # Errors
+    ///
+    /// Returns an error if worker/queue capacity overflows, item timeout is
+    /// zero, the stage deadline has elapsed, or cleanup bounds are inconsistent.
     pub fn new(
         capacity: StageCapacity,
         item_timeout: Duration,
@@ -101,6 +105,9 @@ impl<Inputs, Observer> NativeExtractionRequest<Inputs, Observer> {
 /// reservations/backpressure belongs in the later supervised persistence pipeline.
 pub trait NativeExtractionObserver: Send {
     /// Consume one in-order borrowed output while its parse reservation remains held.
+    /// # Errors
+    ///
+    /// Returns an error when the observer rejects the in-order extracted file.
     fn observe(&mut self, file: &ExtractedFile) -> Result<(), NativeExtractionObserverError>;
 }
 
@@ -210,6 +217,10 @@ pub enum NativeExtractionStageError {
 /// The iterator must not retain all source payloads outside the admitted window. Native parsing
 /// runs inside `block_in_place`, so Tokio moves unrelated async control work off that worker while
 /// the tree-sitter progress callback observes parent, sibling, and deadline cancellation.
+/// # Errors
+///
+/// Returns an error if no multi-thread Tokio runtime is active, parsing is
+/// cancelled/times out, an extractor fails, or the ordered observer rejects output.
 pub async fn run_native_extraction_stage<Inputs, Observer>(
     runner: &StageRunner,
     request: NativeExtractionRequest<Inputs, Observer>,
@@ -441,7 +452,7 @@ mod tests {
             DigestObserver::new(StageMetrics::new()),
         );
         assert!(matches!(
-            run_native_extraction_stage(&runner, request).await,
+            Box::pin(run_native_extraction_stage(&runner, request)).await,
             Err(NativeExtractionStageError::Runtime)
         ));
         drop(cancellation);
@@ -452,8 +463,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn native_extraction_is_ordered_and_identical_across_worker_counts() {
-        let one = run(SERIAL_WORKERS).await;
-        let four = run(PARALLEL_WORKERS).await;
+        let one = Box::pin(run(SERIAL_WORKERS)).await;
+        let four = Box::pin(run(PARALLEL_WORKERS)).await;
         assert_eq!(one.0, four.0);
         assert_eq!(one.1.digest, four.1.digest);
         assert_eq!(one.1.files, four.1.files);
@@ -467,7 +478,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn many_file_outputs_are_consumed_while_their_reservation_is_held() {
-        let (report, output, metrics) = run_count(PARALLEL_WORKERS, MANY_FIXTURE_COUNT).await;
+        let (report, output, metrics) =
+            Box::pin(run_count(PARALLEL_WORKERS, MANY_FIXTURE_COUNT)).await;
         let snapshot = metric_snapshot(&metrics);
 
         assert_eq!(
@@ -482,7 +494,7 @@ mod tests {
     }
 
     async fn run(workers: usize) -> (super::NativeExtractionReport, DigestOutput) {
-        let (report, output, _) = run_count(workers, FIXTURE_COUNT).await;
+        let (report, output, _) = Box::pin(run_count(workers, FIXTURE_COUNT)).await;
         (report, output)
     }
 
@@ -504,7 +516,7 @@ mod tests {
         let observer = DigestObserver::new(metrics.clone());
         let request = NativeExtractionRequest::new(config, snapshots(count), observer)
             .with_metrics(metrics.clone());
-        let result = run_native_extraction_stage(&runner, request).await;
+        let result = Box::pin(run_native_extraction_stage(&runner, request)).await;
         let completed = match result {
             Ok(completed) => completed,
             Err(error) => panic!("native extraction stage failed: {error}"),
@@ -636,11 +648,14 @@ mod tests {
             hash_span(hasher, symbol.span);
             hash_optional_text(hasher, symbol.signature.as_deref());
             hash_optional_text(hasher, symbol.docstring.as_deref());
-            hash_bool(hasher, symbol.exported);
-            hash_bool(hasher, symbol.default_export);
-            hash_bool(hasher, symbol.async_symbol);
-            hash_bool(hasher, symbol.static_member);
-            hash_optional_text(hasher, symbol.visibility.map(|value| value.as_str()));
+            hash_bool(hasher, symbol.export.exported);
+            hash_bool(hasher, symbol.export.default_export);
+            hash_bool(hasher, symbol.execution.async_symbol);
+            hash_bool(hasher, symbol.execution.static_member);
+            hash_optional_text(
+                hasher,
+                symbol.visibility.map(cartograph_domain::Visibility::as_str),
+            );
             hash_text(hasher, symbol.structural_digest.as_str());
         }
         hash_number(
@@ -656,7 +671,13 @@ mod tests {
             u64::try_from(file.references.len()).unwrap_or(u64::MAX),
         );
         for reference in &file.references {
-            hash_optional_text(hasher, reference.owner.as_ref().map(|owner| owner.as_str()));
+            hash_optional_text(
+                hasher,
+                reference
+                    .owner
+                    .as_ref()
+                    .map(cartograph_domain::SymbolId::as_str),
+            );
             hash_text(hasher, &reference.name);
             hash_text(hasher, reference.kind.as_str());
             hash_span(hasher, reference.span);

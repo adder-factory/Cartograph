@@ -38,12 +38,20 @@ impl<Cancel> SourceReadOptions<Cancel> {
 
 impl SourceRoot {
     /// Resolve and validate one directory root before any project-relative reads.
+    /// # Errors
+    ///
+    /// Returns an error if the default discovery policy cannot be built or
+    /// `root` cannot be canonicalized as a readable directory.
     pub fn open(root: &Path) -> Result<Self, SourceReadError> {
         let policy = DiscoveryPolicy::v1_defaults().map_err(|_| SourceReadError::InvalidPolicy)?;
         Self::open_with_policy(root, policy)
     }
 
     /// Resolve a directory root with one validated project discovery policy.
+    /// # Errors
+    ///
+    /// Returns an error if `root` cannot be canonicalized, statted, or proven
+    /// to be a directory.
     pub fn open_with_policy(
         root: &Path,
         discovery_policy: DiscoveryPolicy,
@@ -60,6 +68,10 @@ impl SourceRoot {
     }
 
     /// Read one supported source file under the configured root.
+    /// # Errors
+    ///
+    /// Returns an error if policy rejects the path, resolution escapes the
+    /// root, the file is unsafe/unreadable/oversized, or snapshot validation fails.
     pub fn read(
         &self,
         path: &NormalizedPath,
@@ -69,6 +81,10 @@ impl SourceRoot {
     }
 
     /// Read in bounded chunks while polling a supervisor-owned cancellation probe.
+    /// # Errors
+    ///
+    /// Returns an error on cancellation, policy rejection, root escape,
+    /// symlink/non-file input, read/size drift, I/O failure, or invalid snapshot bytes.
     pub fn read_with_cancellation<Cancel>(
         &self,
         path: &NormalizedPath,
@@ -115,7 +131,7 @@ impl SourceRoot {
         let mut utf8 = Utf8Accumulator::with_capacity(capacity)?;
         let mut hasher = blake3::Hasher::new();
         let mut byte_size = 0_usize;
-        let mut chunk = [0_u8; READ_CHUNK_BYTES];
+        let mut chunk = vec![0_u8; READ_CHUNK_BYTES];
         loop {
             if cancelled() {
                 return Err(SourceReadError::Cancelled);

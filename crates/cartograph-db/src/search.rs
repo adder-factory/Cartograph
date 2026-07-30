@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use cartograph_domain::{DocumentId, FileId, GenerationId, ProjectId, SymbolId};
+use cartograph_domain::{DocumentId, FileId, GenerationId, ProjectId, SymbolId, SymbolKind};
 use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -21,10 +21,11 @@ const HIT_PATH_COLUMN: usize = 4;
 const HIT_LANGUAGE_COLUMN: usize = 5;
 const HIT_DOCUMENT_KIND_COLUMN: usize = 6;
 const HIT_QUALIFIED_NAME_COLUMN: usize = 7;
-const HIT_SCORE_COLUMN: usize = 8;
-const HIT_QUALIFIED_NAME_MATCH_COLUMN: usize = 9;
-const HIT_CODE_MATCH_COLUMN: usize = 10;
-const HIT_NATURAL_TEXT_MATCH_COLUMN: usize = 11;
+const HIT_SYMBOL_KIND_COLUMN: usize = 8;
+const HIT_SCORE_COLUMN: usize = 9;
+const HIT_QUALIFIED_NAME_MATCH_COLUMN: usize = 10;
+const HIT_CODE_MATCH_COLUMN: usize = 11;
+const HIT_NATURAL_TEXT_MATCH_COLUMN: usize = 12;
 const SEARCH_COMPONENT_CAPACITY: usize = 3;
 
 #[derive(Clone, Copy)]
@@ -60,7 +61,7 @@ impl SearchQuery {
     }
 }
 
-/// Deterministically ordered ParadeDB evidence from the current generation.
+/// Deterministically ordered `ParadeDB` evidence from the current generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchComponent {
@@ -72,7 +73,7 @@ pub enum SearchComponent {
     NaturalText,
 }
 
-/// Deterministically ordered ParadeDB evidence from the current generation.
+/// Deterministically ordered `ParadeDB` evidence from the current generation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SearchHit {
     document_id: DocumentId,
@@ -83,6 +84,8 @@ pub struct SearchHit {
     language: String,
     document_kind: String,
     qualified_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_kind: Option<SymbolKind>,
     score: f64,
     components: Vec<SearchComponent>,
 }
@@ -136,7 +139,13 @@ impl SearchHit {
         &self.qualified_name
     }
 
-    /// Native ParadeDB BM25 score; only ordering within this candidate channel
+    /// Exact extracted symbol category when retained in current search metadata.
+    #[must_use]
+    pub const fn symbol_kind(&self) -> Option<SymbolKind> {
+        self.symbol_kind
+    }
+
+    /// Native `ParadeDB` BM25 score; only ordering within this candidate channel
     /// is meaningful.
     #[must_use]
     pub const fn score(&self) -> f64 {
@@ -154,6 +163,10 @@ impl SearchHit {
 impl CartographDatabase {
     /// Search code-aware names/source and natural-language evidence from only
     /// the generation referenced by the project's current pointer.
+    /// # Errors
+    ///
+    /// Returns an error if query/result bounds are invalid, the generation or
+    /// BM25 relation is unavailable, or a ranked code hit cannot be decoded.
     pub async fn search_current_code(
         &self,
         input: SearchQuery,
@@ -163,6 +176,10 @@ impl CartographDatabase {
     }
 
     /// Search current BM25 evidence under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the explicit deadline or query bounds are invalid,
+    /// the generation fence fails, or `ParadeDB` cannot complete the search.
     pub async fn search_current_code_bounded(
         &self,
         input: SearchQuery,
@@ -173,6 +190,10 @@ impl CartographDatabase {
     }
 
     /// Search only code-aware qualified names, excluding source/natural text hits.
+    /// # Errors
+    ///
+    /// Returns an error if query/result bounds are invalid, name-tokenized BM25
+    /// is unavailable, or a qualified-name hit cannot be decoded.
     pub async fn search_current_names(
         &self,
         input: SearchQuery,
@@ -186,6 +207,10 @@ impl CartographDatabase {
     }
 
     /// Search only summaries, docstrings, and test-derived natural language.
+    /// # Errors
+    ///
+    /// Returns an error if query/result bounds are invalid, intent fields are
+    /// unavailable in BM25, or a natural-language hit cannot be decoded.
     pub async fn search_current_intent(
         &self,
         input: SearchQuery,
@@ -198,8 +223,12 @@ impl CartographDatabase {
         .await
     }
 
-    /// Search only qualified source-code names with ParadeDB typo tolerance.
+    /// Search only qualified source-code names with `ParadeDB` typo tolerance.
     /// The edit distance is deliberately limited to Tantivy's efficient 1..=2 range.
+    /// # Errors
+    ///
+    /// Returns an error if `edit_distance` is outside 1..=2, query/result
+    /// bounds are invalid, or the fuzzy `ParadeDB` name search fails.
     pub async fn search_current_names_fuzzy(
         &self,
         input: SearchQuery,
@@ -285,6 +314,13 @@ impl CartographDatabase {
                     documents.language,
                     documents.document_kind,
                     documents.qualified_name,
+                    (
+                        SELECT symbols.symbol_kind
+                        FROM {}."symbols" AS symbols
+                        WHERE symbols.project_id = documents.project_id
+                          AND symbols.generation_id = documents.generation_id
+                          AND symbols.symbol_id = documents.symbol_id
+                    ) AS symbol_kind,
                     pdb.score(documents.id)::double precision,
                     {qualified_name_match},
                     {code_match},
@@ -295,6 +331,7 @@ impl CartographDatabase {
                   AND {matches}
                 ORDER BY pdb.score(documents.id) DESC, documents.id ASC
                 LIMIT $3"#,
+            crate::database::quoted_schema(&self.schema),
             relation.qualified_table(&self.schema)
         );
         let rows = query(AssertSqlSafe(sql))
@@ -329,6 +366,11 @@ fn decode_hit(row: &sqlx_postgres::PgRow) -> Result<SearchHit, StorageError> {
     let language = read_stored_string(row, HIT_LANGUAGE_COLUMN, "language")?;
     let document_kind = read_stored_string(row, HIT_DOCUMENT_KIND_COLUMN, "document_kind")?;
     let qualified_name = read_stored_string(row, HIT_QUALIFIED_NAME_COLUMN, "qualified_name")?;
+    let symbol_kind = row
+        .try_get::<Option<String>, _>(HIT_SYMBOL_KIND_COLUMN)
+        .map_err(|_| corrupt("symbol_kind"))?
+        .map(|value| SymbolKind::from_stable_str(&value).ok_or_else(|| corrupt("symbol_kind")))
+        .transpose()?;
     let score = row
         .try_get::<f64, _>(HIT_SCORE_COLUMN)
         .map_err(|_| corrupt("score"))?;
@@ -357,6 +399,7 @@ fn decode_hit(row: &sqlx_postgres::PgRow) -> Result<SearchHit, StorageError> {
         language,
         document_kind,
         qualified_name,
+        symbol_kind,
         score,
         components,
     })

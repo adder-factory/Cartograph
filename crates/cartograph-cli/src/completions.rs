@@ -52,7 +52,7 @@ complete -c cartograph -f -a "(__cartograph_complete)"
 "#
         }
         CompletionShell::Powershell => {
-            r#"# cartograph shell completion for PowerShell
+            r"# cartograph shell completion for PowerShell
 Register-ArgumentCompleter -Native -CommandName cartograph -ScriptBlock {
   param($wordToComplete, $commandAst, $cursorPosition)
   $words = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
@@ -62,7 +62,7 @@ Register-ArgumentCompleter -Native -CommandName cartograph -ScriptBlock {
     [System.Management.Automation.CompletionResult]::new($completion, $completion, 'ParameterValue', $completion)
   }
 }
-"#
+"
         }
     }
 }

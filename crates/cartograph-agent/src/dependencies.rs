@@ -81,21 +81,32 @@ pub struct DependencyAuditReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum DependencyAuditError {
     #[error("the project root is unavailable")]
+    /// The project root could not be resolved or read safely.
     ProjectRootUnavailable,
     #[error("a package manifest is malformed or exceeds its bound")]
+    /// A package manifest is malformed or violates the workspace contract.
     InvalidManifest,
     #[error("workspace discovery exceeds a deterministic bound")]
+    /// Workspace expansion exceeded its declared package ceiling.
     WorkspaceLimit,
     #[error("a workspace pattern is invalid")]
+    /// A workspace member pattern is malformed or escapes the root.
     InvalidWorkspacePattern,
     #[error("the dependency audit was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
     #[error("indexed import evidence is unavailable")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
 }
 
 impl ProjectRuntime {
     /// Audit package declarations against exact current-generation imports and bounded live config.
+    /// # Errors
+    ///
+    /// Returns an error when the project root or a manifest cannot be read and
+    /// validated within bounds, workspace expansion is unsafe or excessive,
+    /// current import evidence is unavailable, or cancellation wins.
     pub async fn audit_javascript_dependencies(
         &self,
         project_id: &ProjectId,
@@ -590,6 +601,7 @@ fn manifest_scripts(records: &[ManifestRecord]) -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
 struct BinNameScan<'a> {
     root: &'a Path,
     records: &'a [ManifestRecord],

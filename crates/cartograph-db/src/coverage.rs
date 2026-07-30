@@ -9,7 +9,7 @@ use crate::{
     database::{ProjectReadRequest, quoted_schema, read_project_rows, set_local_statement_timeout},
 };
 
-const COVERAGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const COVERAGE_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_COVERAGE_TARGETS: i64 = 1_000_000;
 const COVERAGE_TARGET_OVERFLOW_PROBE: i64 = MAX_COVERAGE_TARGETS + 1;
 const MAX_COVERAGE_FACTS: usize = 1_000_000;
@@ -31,26 +31,31 @@ pub struct CoverageTarget {
 
 impl CoverageTarget {
     #[must_use]
+    /// Returns the generation ID.
     pub const fn generation_id(&self) -> &GenerationId {
         &self.generation_id
     }
 
     #[must_use]
+    /// Returns the symbol ID.
     pub const fn symbol_id(&self) -> &SymbolId {
         &self.symbol_id
     }
 
     #[must_use]
+    /// Returns the path.
     pub const fn path(&self) -> &NormalizedPath {
         &self.path
     }
 
     #[must_use]
+    /// Returns the start line.
     pub const fn start_line(&self) -> u32 {
         self.start_line
     }
 
     #[must_use]
+    /// Returns the end line.
     pub const fn end_line(&self) -> u32 {
         self.end_line
     }
@@ -64,8 +69,14 @@ pub struct CoverageCount {
 }
 
 impl CoverageCount {
+    /// Public constant defining the zero.
     pub const ZERO: Self = Self { found: 0, hit: 0 };
 
+    /// Creates a validated coverage count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `hit` exceeds `found`.
     pub fn new(found: u64, hit: u64) -> Result<Self, StorageError> {
         if hit > found {
             Err(StorageError::InvalidInput {
@@ -88,6 +99,8 @@ pub struct SymbolCoverageFact {
 }
 
 impl SymbolCoverageFact {
+    #[must_use]
+    /// Creates a validated symbol coverage fact.
     pub fn new(symbol_id: SymbolId, lines: CoverageCount, functions: CoverageCount) -> Self {
         Self {
             symbol_id,
@@ -101,9 +114,13 @@ impl SymbolCoverageFact {
 
 /// Identity and provenance for one current-generation coverage replacement.
 pub struct CoverageLoadInput {
+    /// Stable project ID for this record.
     pub project_id: ProjectId,
+    /// Stable generation ID for this record.
     pub generation_id: GenerationId,
+    /// Source label for this record.
     pub source_label: String,
+    /// Digest-fenced report digest for this record.
     pub report_digest: ContentDigest,
 }
 
@@ -118,6 +135,12 @@ pub struct CoverageLoadRequest {
 }
 
 impl CoverageLoadRequest {
+    /// Creates a validated coverage load request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source label is empty, oversized, or contains a
+    /// NUL byte, or the fact count exceeds the atomic load bound.
     pub fn new(
         input: CoverageLoadInput,
         facts: Vec<SymbolCoverageFact>,
@@ -147,6 +170,12 @@ impl CoverageLoadRequest {
         })
     }
 
+    /// Sets the metadata and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if metadata is not a JSON object, cannot be encoded, or
+    /// exceeds the coverage metadata byte limit.
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Result<Self, StorageError> {
         let bytes = serde_json::to_vec(&metadata).map_err(|_| StorageError::InvalidInput {
             field: "coverage_metadata",
@@ -203,6 +232,11 @@ pub struct SymbolCoverageQuery {
 }
 
 impl SymbolCoverageQuery {
+    /// Creates a validated symbol coverage query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is zero or exceeds the bounded coverage row maximum.
     pub fn new(limit: u16) -> Result<Self, StorageError> {
         validate_source_and_limit(None, limit)?;
         Ok(Self {
@@ -217,6 +251,12 @@ impl SymbolCoverageQuery {
         })
     }
 
+    /// Sets the source and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the optional source label is empty, oversized, or
+    /// contains a NUL byte.
     pub fn with_source(mut self, source: Option<&str>) -> Result<Self, StorageError> {
         validate_source(source)?;
         self.source = source.map(ToOwned::to_owned);
@@ -224,29 +264,49 @@ impl SymbolCoverageQuery {
     }
 
     #[must_use]
+    /// Sets the symbol and returns the updated value.
     pub fn with_symbol(mut self, symbol_id: Option<SymbolId>) -> Self {
         self.symbol_id = symbol_id;
         self
     }
 
     #[must_use]
+    /// Sets the include tests and returns the updated value.
     pub const fn with_include_tests(mut self, include_tests: bool) -> Self {
         self.include_tests = include_tests;
         self
     }
 
+    /// Sets the maximum fraction and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the optional maximum is not finite or lies outside
+    /// the inclusive coverage-fraction range from zero to one.
     pub fn with_maximum_fraction(mut self, value: Option<f64>) -> Result<Self, StorageError> {
         validate_fraction(value, "coverage_fraction")?;
         self.maximum_fraction = value;
         Ok(self)
     }
 
+    /// Sets the minimum centrality and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the optional minimum is not finite or lies outside
+    /// the inclusive centrality range from zero to one.
     pub fn with_minimum_centrality(mut self, value: Option<f64>) -> Result<Self, StorageError> {
         validate_fraction(value, "coverage_centrality")?;
         self.minimum_centrality = value;
         Ok(self)
     }
 
+    /// Sets the symbol kinds and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there are too many kinds or any kind is empty,
+    /// oversized, or contains a NUL byte.
     pub fn with_symbol_kinds(mut self, kinds: Vec<String>) -> Result<Self, StorageError> {
         if kinds.len() > 64
             || kinds
@@ -265,6 +325,12 @@ impl SymbolCoverageQuery {
         Ok(self)
     }
 
+    /// Sets the path prefix and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the optional prefix is empty, absolute, oversized,
+    /// or contains a NUL byte.
     pub fn with_path_prefix(mut self, prefix: Option<&str>) -> Result<Self, StorageError> {
         if prefix.is_some_and(|value| {
             value.is_empty()
@@ -305,6 +371,10 @@ pub struct CoverageStats {
 
 impl CartographDatabase {
     /// Load every current symbol span for deterministic parallel LCOV joining.
+    /// # Errors
+    ///
+    /// Returns an error if current symbol spans cannot be queried/decoded or
+    /// the target count exceeds the deterministic LCOV join bound.
     pub async fn current_coverage_targets(
         &self,
         project_id: &ProjectId,
@@ -350,6 +420,10 @@ impl CartographDatabase {
     }
 
     /// Replace one source snapshot with PostgreSQL array-UNNEST bulk batches.
+    /// # Errors
+    ///
+    /// Returns an error if fact bounds are exceeded, the requested generation
+    /// is not current, or the transactional source/fact replacement fails.
     pub async fn replace_current_symbol_coverage(
         &self,
         request: CoverageLoadRequest,
@@ -367,13 +441,9 @@ impl CartographDatabase {
             .map_err(|_| database_error("coverage-load-begin"))?;
         set_local_statement_timeout(&mut transaction, COVERAGE_TIMEOUT)
             .await
-            .map_err(|_| database_error("coverage-load-timeout"))?;
-        let current = format!(
-            r#"SELECT current_generation_id::text
-                FROM {schema}."projects"
-                WHERE project_id = CAST($1 AS uuid)
-                FOR UPDATE"#,
-        );
+            .map_err(|()| database_error("coverage-load-timeout"))?;
+        let current =
+            include_str!("sql/coverage_current_generation.sql").replace("{schema}", &schema);
         let generation = query(AssertSqlSafe(current))
             .bind(request.project_id.as_str())
             .fetch_optional(&mut *transaction)
@@ -390,17 +460,7 @@ impl CartographDatabase {
                 field: "coverage_metadata",
             }
         })?;
-        let upsert = format!(
-            r#"INSERT INTO {schema}."coverage_sources" (
-                    project_id, label, report_format, report_digest, report_metadata
-                ) VALUES (CAST($1 AS uuid), $2, 'lcov', $3, CAST($4 AS jsonb))
-                ON CONFLICT (project_id, label) DO UPDATE
-                SET report_format = EXCLUDED.report_format,
-                    report_digest = EXCLUDED.report_digest,
-                    report_metadata = EXCLUDED.report_metadata,
-                    loaded_at = clock_timestamp()
-                RETURNING source_id::text"#,
-        );
+        let upsert = include_str!("sql/coverage_source_upsert.sql").replace("{schema}", &schema);
         let source_id = query(AssertSqlSafe(upsert))
             .bind(request.project_id.as_str())
             .bind(&request.source_label)
@@ -410,12 +470,7 @@ impl CartographDatabase {
             .await
             .and_then(|row| row.try_get::<String, _>(0))
             .map_err(|_| database_error("coverage-source-upsert"))?;
-        let delete = format!(
-            r#"DELETE FROM {schema}."symbol_coverage"
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)
-                  AND source_id = CAST($3 AS uuid)"#,
-        );
+        let delete = include_str!("sql/coverage_symbol_delete.sql").replace("{schema}", &schema);
         query(AssertSqlSafe(delete))
             .bind(request.project_id.as_str())
             .bind(request.generation_id.as_str())
@@ -423,20 +478,7 @@ impl CartographDatabase {
             .execute(&mut *transaction)
             .await
             .map_err(|_| database_error("coverage-replace-delete"))?;
-        let insert = format!(
-            r#"INSERT INTO {schema}."symbol_coverage" (
-                    project_id, generation_id, source_id, symbol_id,
-                    lines_found, lines_hit, functions_found, functions_hit
-                )
-                SELECT CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid),
-                       CAST(rows.symbol_id AS uuid), rows.lines_found, rows.lines_hit,
-                       rows.functions_found, rows.functions_hit
-                FROM UNNEST(
-                    $4::text[], $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[]
-                ) AS rows(
-                    symbol_id, lines_found, lines_hit, functions_found, functions_hit
-                )"#,
-        );
+        let insert = include_str!("sql/coverage_symbol_insert.sql").replace("{schema}", &schema);
         for chunk in request.facts.chunks(COVERAGE_INSERT_CHUNK) {
             let symbol_ids = chunk
                 .iter()
@@ -472,6 +514,10 @@ impl CartographDatabase {
     }
 
     /// Rank LCOV rows worst-first and compose them with graph/test pressure.
+    /// # Errors
+    ///
+    /// Returns an error if source/filter/limit validation fails or ranked
+    /// current coverage and graph-pressure rows cannot be queried or decoded.
     pub async fn current_symbol_coverage(
         &self,
         project_id: &ProjectId,
@@ -479,111 +525,8 @@ impl CartographDatabase {
     ) -> Result<Vec<SymbolCoverageRecord>, StorageError> {
         validate_source_and_limit(request.source.as_deref(), request.limit)?;
         let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"WITH current AS (
-                    SELECT current_generation_id AS generation_id
-                    FROM {schema}."projects"
-                    WHERE project_id = CAST($1 AS uuid)
-                ), population AS (
-                    SELECT COUNT(*)::double precision AS symbol_count
-                    FROM {schema}."symbols" AS symbols
-                    JOIN current ON current.generation_id = symbols.generation_id
-                    WHERE symbols.project_id = CAST($1 AS uuid)
-                      AND symbols.symbol_kind NOT IN ('file', 'import', 'parameter')
-                ), incoming AS (
-                    SELECT edges.target_symbol_id, SUM(edges.site_count)::bigint AS edge_count
-                    FROM {schema}."edges" AS edges
-                    JOIN current ON current.generation_id = edges.generation_id
-                    WHERE edges.project_id = CAST($1 AS uuid)
-                      AND edges.edge_kind <> 'contains'
-                    GROUP BY edges.target_symbol_id
-                ), test_pressure AS (
-                    SELECT edges.target_symbol_id,
-                           COUNT(DISTINCT files.file_id)::bigint AS test_files
-                    FROM {schema}."edges" AS edges
-                    JOIN current ON current.generation_id = edges.generation_id
-                    JOIN {schema}."symbols" AS sources
-                      ON sources.project_id = edges.project_id
-                     AND sources.generation_id = edges.generation_id
-                     AND sources.symbol_id = edges.source_symbol_id
-                    JOIN {schema}."files" AS files
-                     ON files.project_id = sources.project_id
-                     AND files.generation_id = sources.generation_id
-                     AND files.file_id = sources.file_id
-                    WHERE edges.project_id = CAST($1 AS uuid)
-                      AND (
-                          files.normalized_path ~* '(^|/)(__tests__|tests?|specs?)(/|$)'
-                          OR files.normalized_path ~* '(\.test\.|\.spec\.|_test\.|_spec\.)'
-                          OR EXISTS (
-                              SELECT 1
-                              FROM {schema}."search_documents" AS documents
-                              WHERE documents.project_id = files.project_id
-                                AND documents.generation_id = files.generation_id
-                                AND documents.file_id = files.file_id
-                                AND documents.document_kind = 'test'
-                          )
-                      )
-                    GROUP BY edges.target_symbol_id
-                ), selected AS (
-                    SELECT DISTINCT ON (coverage.symbol_id)
-                           coverage.symbol_id, coverage.project_id, coverage.generation_id,
-                           coverage.lines_found, coverage.lines_hit,
-                           coverage.coverage_fraction, sources.label
-                    FROM {schema}."symbol_coverage" AS coverage
-                    JOIN current ON current.generation_id = coverage.generation_id
-                    JOIN {schema}."coverage_sources" AS sources
-                      ON sources.project_id = coverage.project_id
-                     AND sources.source_id = coverage.source_id
-                    WHERE coverage.project_id = CAST($1 AS uuid)
-                      AND ($2::text IS NULL OR sources.label = $2)
-                    ORDER BY coverage.symbol_id,
-                             coverage.coverage_fraction DESC NULLS LAST,
-                             sources.label
-                ), scored AS (
-                    SELECT selected.symbol_id, files.normalized_path, files.language,
-                           symbols.symbol_kind, symbols.qualified_name, selected.label,
-                           selected.lines_found, selected.lines_hit,
-                           selected.coverage_fraction,
-                           COALESCE(incoming.edge_count, 0)::bigint AS incoming_edges,
-                           COALESCE(test_pressure.test_files, 0)::bigint AS direct_test_files,
-                           LEAST(
-                               1.0,
-                               COALESCE(incoming.edge_count, 0)::double precision
-                               / GREATEST(population.symbol_count - 1.0, 1.0)
-                           ) AS degree_centrality
-                    FROM selected
-                    JOIN {schema}."symbols" AS symbols
-                      ON symbols.project_id = selected.project_id
-                     AND symbols.generation_id = selected.generation_id
-                     AND symbols.symbol_id = selected.symbol_id
-                    JOIN {schema}."files" AS files
-                      ON files.project_id = symbols.project_id
-                     AND files.generation_id = symbols.generation_id
-                     AND files.file_id = symbols.file_id
-                    CROSS JOIN population
-                    LEFT JOIN incoming ON incoming.target_symbol_id = selected.symbol_id
-                    LEFT JOIN test_pressure
-                      ON test_pressure.target_symbol_id = selected.symbol_id
-                )
-                SELECT symbol_id::text, normalized_path, language, symbol_kind,
-                       qualified_name, label, lines_found, lines_hit, coverage_fraction,
-                       incoming_edges, direct_test_files, degree_centrality
-                FROM scored
-                WHERE ($3::text IS NULL OR symbol_id = CAST($3 AS uuid))
-                  AND ($4::boolean OR NOT (
-                      normalized_path ~* '(^|/)(__tests__|tests?|specs?)(/|$)'
-                      OR normalized_path ~* '(\.test\.|\.spec\.|_test\.|_spec\.)'
-                  ))
-                  AND ($5::double precision IS NULL
-                       OR COALESCE(coverage_fraction, 0.0) <= $5)
-                  AND ($6::double precision IS NULL OR degree_centrality >= $6)
-                  AND ($7::text[] IS NULL OR symbol_kind = ANY($7))
-                  AND ($8::text IS NULL OR LEFT(normalized_path, LENGTH($8)) = $8)
-                ORDER BY coverage_fraction ASC NULLS FIRST,
-                         degree_centrality DESC, incoming_edges DESC,
-                         normalized_path, qualified_name, symbol_id
-                LIMIT $9"#,
-        );
+        let statement =
+            include_str!("sql/coverage_current_symbols.sql").replace("{schema}", &schema);
         let symbol_kinds = (!request.symbol_kinds.is_empty()).then(|| request.symbol_kinds.clone());
         let rows = read_project_rows(
             self,
@@ -610,6 +553,10 @@ impl CartographDatabase {
     }
 
     /// Aggregate current coverage across the best row per symbol.
+    /// # Errors
+    ///
+    /// Returns an error if the optional source label is invalid or aggregate
+    /// current-generation counts/fractions cannot be queried or decoded.
     pub async fn current_coverage_stats(
         &self,
         project_id: &ProjectId,
@@ -668,6 +615,12 @@ impl CartographDatabase {
         })
     }
 
+    /// Returns the coverage sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if source metadata/current-symbol counts cannot be
+    /// queried or a stored source record is malformed.
     pub async fn coverage_sources(
         &self,
         project_id: &ProjectId,
@@ -707,6 +660,12 @@ impl CartographDatabase {
         rows.iter().map(decode_source).collect()
     }
 
+    /// Deletes one named coverage source and its generation-scoped facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `source` is empty/oversized/NUL-containing or the
+    /// project-scoped source cascade cannot be deleted.
     pub async fn drop_coverage_source(
         &self,
         project_id: &ProjectId,

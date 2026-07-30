@@ -27,6 +27,7 @@ mod test_names;
 mod walk;
 
 pub use budget::{native_extraction_reservation, native_output_limit, native_read_reservation};
+pub use cartograph_domain::{SymbolExecutionFlags, SymbolExportFlags, SymbolImplementationFlags};
 pub use discovery::{
     DiscoveredSource, DiscoveryLimits, DiscoveryLimitsError, SourceDiscoveryError,
     SourceDiscoveryOptions,

@@ -24,6 +24,7 @@ const JVM_TYPE_OWNER_KINDS: &[SymbolKind] = &[
     SymbolKind::Enum,
 ];
 
+#[derive(Clone, Copy)]
 struct ImportBindingEmission<'tree, 'text> {
     node: Node<'tree>,
     kind: ImportBindingKind,
@@ -46,12 +47,14 @@ struct ConstructorEmission<'tree, 'text> {
     visibility: Option<Visibility>,
 }
 
+#[derive(Clone, Copy)]
 struct PrimaryConstructor<'tree, 'text> {
     parameters: Node<'tree>,
     name: &'text str,
     visibility: Option<Visibility>,
 }
 
+#[derive(Clone, Copy)]
 struct ScalaPrimaryConstructor<'tree, 'text> {
     parameters: Node<'tree>,
     name: &'text str,
@@ -67,24 +70,28 @@ struct OwnedBody<'tree> {
     depth: usize,
 }
 
+#[derive(Clone, Copy)]
 struct TypeAliasEmission<'tree> {
     node: Node<'tree>,
     name_node: Node<'tree>,
     target: Option<Node<'tree>>,
 }
 
+#[derive(Clone, Copy)]
 struct EnumMemberVisit<'tree> {
     node: Node<'tree>,
     depth: usize,
     name_node: Option<Node<'tree>>,
 }
 
+#[derive(Clone, Copy)]
 struct InheritanceCapture<'tree, 'owner> {
     node: Node<'tree>,
     owner: &'owner SymbolId,
     owner_kind: SymbolKind,
 }
 
+#[derive(Clone, Copy)]
 struct TypeReferenceCapture<'tree, 'owner> {
     node: Node<'tree>,
     owner: &'owner SymbolId,
@@ -98,6 +105,7 @@ struct ParameterSignatureInput<'tree, Parameters> {
     return_type: Option<Node<'tree>>,
 }
 
+#[derive(Clone, Copy)]
 struct TypedSignatureInput<'tree, 'text> {
     keyword: &'text str,
     name: &'text str,
@@ -251,8 +259,7 @@ fn visit_groovy_recovered_enum(
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: true,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(true, false),
             async_symbol: false,
             static_member: false,
             visibility: Some(Visibility::Public),
@@ -511,8 +518,7 @@ fn emit_import(
             body_node: None,
             declaration_only: false,
             signature,
-            exported: false,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(false, false),
             async_symbol: false,
             static_member: false,
             visibility: None,
@@ -877,8 +883,7 @@ fn emit_container(
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: false,
             visibility,
@@ -992,8 +997,7 @@ fn emit_constructor(
             body_node: None,
             declaration_only: false,
             signature,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: false,
             visibility,
@@ -1028,8 +1032,7 @@ fn visit_kotlin_secondary_constructor(
             body_node: body,
             declaration_only: false,
             signature,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: false,
             visibility,
@@ -1083,8 +1086,7 @@ fn visit_kotlin_callable(
             body_node: body,
             declaration_only: body.is_none(),
             signature,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol,
             static_member: false,
             visibility,
@@ -1158,8 +1160,7 @@ fn visit_scala_callable(
             body_node: body,
             declaration_only: body.is_none(),
             signature,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member,
             visibility,
@@ -1224,8 +1225,7 @@ fn visit_groovy_callable(
             body_node: body,
             declaration_only: body.is_none(),
             signature,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member,
             visibility,
@@ -1297,8 +1297,7 @@ fn visit_groovy_constructor(
             body_node: body,
             declaration_only: false,
             signature,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: false,
             visibility,
@@ -1500,8 +1499,7 @@ fn emit_kotlin_property_symbol(
                     type_node,
                 },
             )?,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: false,
             visibility,
@@ -1554,8 +1552,7 @@ fn emit_scala_class_parameter(
                     type_node,
                 },
             )?,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: false,
             visibility,
@@ -1622,8 +1619,7 @@ fn visit_scala_binding(
                     type_node,
                 },
             )?,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member,
             visibility,
@@ -1685,8 +1681,7 @@ fn visit_groovy_binding(
             body_node: None,
             declaration_only: false,
             signature: groovy_typed_signature(builder, type_node, &name)?,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member,
             visibility,
@@ -1779,8 +1774,7 @@ fn emit_type_alias(
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: visibility == Some(Visibility::Public),
-            default_export: false,
+            export: crate::SymbolExportFlags::new(visibility == Some(Visibility::Public), false),
             async_symbol: false,
             static_member: false,
             visibility,
@@ -1824,8 +1818,7 @@ fn visit_enum_member(
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: true,
-            default_export: false,
+            export: crate::SymbolExportFlags::new(true, false),
             async_symbol: false,
             static_member: true,
             visibility: Some(Visibility::Public),

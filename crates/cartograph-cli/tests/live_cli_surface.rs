@@ -1,3 +1,7 @@
+//! Live CLI integration coverage across the public command surface.
+
+mod dependency_ownership;
+
 use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::Path,
@@ -27,896 +31,1042 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
         .to_string_lossy()
         .into_owned();
 
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        write_project_fixture(project.path());
-        git(project.path(), &["init", "--initial-branch=main"]);
-        git(
-            project.path(),
-            &["config", "user.email", "cli-surface@example.invalid"],
-        );
-        git(
-            project.path(),
-            &["config", "user.name", "CLI Surface Fixture"],
-        );
-        git(project.path(), &["add", "."]);
-        git(
-            project.path(),
-            &["commit", "-m", "CG-99 establish public CLI surface"],
-        );
-
-        failure(
-            project.path(),
-            &database_url,
-            &read_only_schema,
-            &[
-                "db",
-                "usage",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        failure(
-            project.path(),
-            &database_url,
-            &read_only_schema,
-            &[
-                "db",
-                "compact",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        assert!(
-            !schema_exists(&database_url, &read_only_schema),
-            "read-only database usage created its missing schema"
-        );
-
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &["index", &project_path, "--workers", "2", "--format", "json"],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &["status", &project_path, "--json", "--verbose"],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "db",
-                "usage",
-                "--project-path",
-                &project_path,
-                "--limit",
-                "16",
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "db",
-                "compact",
-                "--project-path",
-                &project_path,
-                "--maximum-indexes",
-                "2",
-                "--minimum-index-bytes",
-                "1048576",
-                "--timeout-seconds",
-                "60",
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "db",
-                "compact",
-                "--project-path",
-                &project_path,
-                "--apply",
-                "--confirm",
-                "compact-online-indexes",
-                "--maximum-indexes",
-                "2",
-                "--minimum-index-bytes",
-                "1048576",
-                "--timeout-seconds",
-                "60",
-                "--available-headroom-bytes",
-                "1073741824",
-                "--format",
-                "json",
-            ],
-        );
-
-        let root = json_success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "find-native",
-                "root",
-                "--by",
-                "name",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        let leaf = json_success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "find-native",
-                "leaf",
-                "--by",
-                "name",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        let root_id = symbol_id(&root, "root")
-            .unwrap_or_else(|| panic!("native find did not return root: {root}"));
-        let leaf_id = symbol_id(&leaf, "leaf")
-            .unwrap_or_else(|| panic!("native find did not return leaf: {leaf}"));
-
-        for (by, query_text) in [
-            ("auto", "order service"),
-            ("hybrid", "order service"),
-            ("path", "src/lib.rs"),
-            ("reference", "leaf"),
-            ("bm25", "order service"),
-        ] {
-            success(
-                project.path(),
-                &database_url,
-                &schema,
-                &[
-                    "find-native",
-                    query_text,
-                    "--by",
-                    by,
-                    "--project-path",
-                    &project_path,
-                    "--format",
-                    "json",
-                ],
-            );
-        }
-        for anchor in [
-            ["--exact-name", "root"],
-            ["--exact-path", "src/lib.rs"],
-            ["--exact-reference", "leaf"],
-        ] {
-            success(
-                project.path(),
-                &database_url,
-                &schema,
-                &[
-                    "context-native",
-                    "change root order behavior",
-                    anchor[0],
-                    anchor[1],
-                    "--mode",
-                    "deterministic",
-                    "--project-path",
-                    &project_path,
-                    "--format",
-                    "json",
-                ],
-            );
-        }
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "files-native",
-                "--dir",
-                "src",
-                "--language",
-                "rust",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "entry-points-native",
-                "--bucket",
-                "public-exports",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "at-range-native",
-                "src/lib.rs",
-                "1",
-                "30",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-
-        for direction in ["callers", "callees", "both", "impact"] {
-            success(
-                project.path(),
-                &database_url,
-                &schema,
-                &[
-                    "graph-native",
-                    &root_id,
-                    "--direction",
-                    direction,
-                    "--project-path",
-                    &project_path,
-                    "--format",
-                    "json",
-                ],
-            );
-        }
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "graph-native",
-                &root_id,
-                "--direction",
-                "path",
-                "--to",
-                &leaf_id,
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "show",
-                &root_id,
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "affected-native",
-                &root_id,
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "review-native",
-                "--ref",
-                "HEAD",
-                "--project-path",
-                &project_path,
-                "--format",
-                "json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "export",
-                &project_path,
-                "--format",
-                "json",
-                "--limit",
-                "100",
-            ],
-        );
-
-        all_succeed(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                vec![
-                    "find",
-                    "root",
-                    "--by",
-                    "name",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "context",
-                    "change root order behavior",
-                    "--mode",
-                    "deterministic",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "files",
-                    "--format",
-                    "symbols",
-                    "--file",
-                    "src/lib.rs",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "graph",
-                    "root",
-                    "--direction",
-                    "callees",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec!["review", "risk", "--project-path", &project_path],
-            ],
-        );
-
-        all_succeed(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                vec!["sync-if-dirty", &project_path, "--quiet"],
-                vec!["install-hooks", &project_path, "--dry-run"],
-                vec!["mcp-budget", "--profile", "coding", "--json"],
-                vec!["completions", "bash"],
-                vec!["__complete", "cartograph", "st"],
-                vec!["guide"],
-                vec!["doctor", &project_path, "--json"],
-                vec![
-                    "db",
-                    "status",
-                    "--project-path",
-                    &project_path,
-                    "--port",
-                    "55432",
-                    "--format",
-                    "json",
-                ],
-                vec![
-                    "admin",
-                    "embedding-status",
-                    "--project-path",
-                    &project_path,
-                    "--json",
-                ],
-                vec![
-                    "admin",
-                    "embedding-audit",
-                    "--project-path",
-                    &project_path,
-                    "--json",
-                ],
-                vec![
-                    "admin",
-                    "embedding-cleanup",
-                    "--project-path",
-                    &project_path,
-                    "--json",
-                ],
-                vec![
-                    "admin",
-                    "embedding-cleanup",
-                    "--project-path",
-                    &project_path,
-                    "--confirm",
-                    "--json",
-                ],
-                vec![
-                    "admin",
-                    "llm-plan",
-                    "--project-path",
-                    &project_path,
-                    "--json",
-                ],
-                vec![
-                    "biomarkers",
-                    "--mode",
-                    "stats",
-                    "--project-path",
-                    &project_path,
-                    "--format",
-                    "json",
-                ],
-                vec![
-                    "coverage",
-                    "--mode",
-                    "structural",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "dead-code",
-                    "--via",
-                    "rule",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "deps",
-                    "--mode",
-                    "coverage",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "hotspots",
-                    "--category",
-                    "all",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "host",
-                    "--mode",
-                    "diagnostics",
-                    "--location",
-                    "local",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "history",
-                    "--mode",
-                    "files",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "imports",
-                    "--source",
-                    "all",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec!["sql", "--schema", "--project-path", &project_path],
-                vec![
-                    "verify",
-                    "--ref",
-                    "HEAD",
-                    "--project-path",
-                    &project_path,
-                    "--format",
-                    "json",
-                ],
-                vec!["playbook", "--project-path", &project_path],
-                vec![
-                    "compare-to-ref",
-                    "--ref",
-                    "HEAD",
-                    "--include-edges",
-                    "--include-biomarkers",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec!["digest", "--project-path", &project_path],
-                vec![
-                    "explore",
-                    "order service",
-                    "--mode",
-                    "deterministic",
-                    "--summary",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "node",
-                    "root",
-                    "--include-callers",
-                    "--include-callees",
-                    "--include-tests",
-                    "--include-biomarkers",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "note",
-                    "add",
-                    "--symbol",
-                    "root",
-                    "--kind",
-                    "note",
-                    "--text",
-                    "Public CLI fixture note",
-                    "--author",
-                    "release-gate",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec!["note", "list", "--project-path", &project_path],
-                vec![
-                    "propose-rename",
-                    "root",
-                    "renamed_root",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "role",
-                    "--symbol",
-                    "root",
-                    "--via",
-                    "rule",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "session",
-                    "create",
-                    "--objective",
-                    "Verify the public command surface",
-                    "--label",
-                    "release-gate",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec!["session", "list", "--project-path", &project_path],
-                vec!["session", "usage", "--project-path", &project_path],
-                vec!["summaries", "pending", "--project-path", &project_path],
-                vec!["tests-for", "root", "--project-path", &project_path],
-                vec![
-                    "tests-for",
-                    "--files",
-                    "src/lib.rs",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "trace-to-culprits",
-                    "at root (src/lib.rs:5:1)",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec!["blame", "root", "--project-path", &project_path],
-                vec!["changed-since", "--project-path", &project_path],
-                vec![
-                    "db",
-                    "prune",
-                    "--confirm",
-                    "prune-old-generations",
-                    "--project-path",
-                    &project_path,
-                    "--format",
-                    "json",
-                ],
-            ],
-        );
-
-        all_succeed(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                vec![
-                    "install",
-                    "--yes",
-                    "--target",
-                    "codex",
-                    "--location",
-                    "local",
-                    "--project-path",
-                    &project_path,
-                    "--no-permissions",
-                    "--no-hooks",
-                    "--format",
-                    "json",
-                ],
-                vec![
-                    "uninstall",
-                    "--target",
-                    "codex",
-                    "--location",
-                    "local",
-                    "--project-path",
-                    &project_path,
-                    "--format",
-                    "json",
-                ],
-                vec![
-                    "db",
-                    "stop",
-                    "--project-path",
-                    &project_path,
-                    "--port",
-                    "55432",
-                ],
-            ],
-        );
-
-        let missing_backup = project
-            .path()
-            .join("missing.backup")
-            .to_string_lossy()
-            .into_owned();
-        all_fail(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                vec!["admin", "status", "--project-path", &project_path, "--json"],
-                vec![
-                    "similar",
-                    "root",
-                    "--min-score",
-                    "2",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec!["mcp-budget", "--disable-tool", "cartograph_missing"],
-                vec![
-                    "ask",
-                    "How does root call leaf?",
-                    "--mode",
-                    "code",
-                    "--retrieval-mode",
-                    "deterministic",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "db",
-                    "restore",
-                    &missing_backup,
-                    "--confirm",
-                    "wrong-confirmation",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "db",
-                    "remove",
-                    "--confirm",
-                    "wrong-confirmation",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "db",
-                    "upgrade",
-                    "--confirm",
-                    "wrong-confirmation",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "db",
-                    "derived-index",
-                    "--rebuild",
-                    "--confirm",
-                    "wrong-confirmation",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "db",
-                    "import-v1",
-                    "--source-schema",
-                    "cartograph_v1",
-                    "--confirm",
-                    "wrong-confirmation",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "db",
-                    "prune",
-                    "--confirm",
-                    "wrong-confirmation",
-                    "--project-path",
-                    &project_path,
-                ],
-                vec![
-                    "db",
-                    "compact",
-                    "--project-path",
-                    &project_path,
-                    "--apply",
-                    "--confirm",
-                    "wrong-confirmation",
-                ],
-            ],
-        );
-
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "llm",
-                "setup",
-                &project_path,
-                "--preset",
-                "custom",
-                "--tier",
-                "chat",
-                "--endpoint",
-                "http://127.0.0.1:65534",
-                "--model",
-                &missing_model,
-                "--yes",
-                "--json",
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &["llm", "migrate-credentials", &project_path, "--json"],
-        );
-        seed_inline_llm_credential(project.path());
-        all_fail(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                vec![
-                    "llm",
-                    "migrate-credentials",
-                    &project_path,
-                    "--tier-env",
-                    "summarize=CARTOGRAPH_LIVE_CLI_MISSING_KEY",
-                ],
-                vec![
-                    "llm",
-                    "migrate-credentials",
-                    &project_path,
-                    "--tier-env",
-                    "summarize=CARTOGRAPH_LIVE_CLI_MISSING_KEY",
-                    "--json",
-                ],
-                vec![
-                    "llm",
-                    "migrate-credentials",
-                    &project_path,
-                    "--apply",
-                    "--confirm",
-                    "wrong-confirmation",
-                ],
-            ],
-        );
-        all_succeed(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                vec!["backend", "status", &project_path, "--json"],
-                vec!["backend", "stop", &project_path, "--json"],
-                vec!["backend", "logs", &project_path, "--lines", "20", "--json"],
-                vec![
-                    "backend",
-                    "cleanup",
-                    &project_path,
-                    "--minimum-age-hours",
-                    "0",
-                    "--maximum-deletions",
-                    "2",
-                ],
-                vec![
-                    "backend",
-                    "cleanup",
-                    &project_path,
-                    "--minimum-age-hours",
-                    "0",
-                    "--maximum-deletions",
-                    "2",
-                    "--json",
-                ],
-                vec![
-                    "backend",
-                    "cleanup",
-                    &project_path,
-                    "--apply",
-                    "--confirm",
-                    "cleanup-backend-junk",
-                    "--minimum-age-hours",
-                    "0",
-                    "--maximum-deletions",
-                    "2",
-                    "--json",
-                ],
-            ],
-        );
-        all_fail(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                vec!["backend", "start", &project_path, "--dry-run", "--json"],
-                vec!["backend", "restart", &project_path, "--dry-run", "--json"],
-                vec![
-                    "backend",
-                    "cleanup",
-                    &project_path,
-                    "--apply",
-                    "--confirm",
-                    "wrong-confirmation",
-                ],
-            ],
-        );
-        success(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "llm",
-                "install",
-                &project_path,
-                "--no-models",
-                "--minimal",
-                "--json",
-            ],
-        );
-        failure(
-            project.path(),
-            &database_url,
-            &schema,
-            &[
-                "llm",
-                "smoke",
-                &project_path,
-                "--timeout-ms",
-                "100",
-                "--json",
-            ],
-        );
-    }));
+    let scenario = LiveCliScenario {
+        project: &project,
+        database_url: &database_url,
+        schema: &schema,
+        read_only_schema: &read_only_schema,
+        project_path: &project_path,
+        missing_model: &missing_model,
+    };
+    let outcome = catch_unwind(AssertUnwindSafe(|| run_live_cli_scenario(&scenario)));
 
     cleanup_schema(&database_url, &schema);
     if let Err(payload) = outcome {
         resume_unwind(payload);
     }
+}
+
+#[derive(Clone, Copy)]
+struct LiveCliScenario<'a> {
+    project: &'a tempfile::TempDir,
+    database_url: &'a str,
+    schema: &'a str,
+    read_only_schema: &'a str,
+    project_path: &'a str,
+    missing_model: &'a str,
+}
+
+struct NativeSymbols {
+    root_id: String,
+    leaf_id: String,
+}
+
+fn run_live_cli_scenario(scenario: &LiveCliScenario<'_>) {
+    prepare_repository_and_verify_read_only(scenario);
+    index_and_verify_storage(scenario);
+    let symbols = verify_native_retrieval(scenario);
+    verify_native_file_surfaces(scenario);
+    verify_native_graph_surfaces(scenario, &symbols);
+    verify_agent_compatibility_surfaces(scenario);
+    verify_operational_surfaces(scenario);
+    verify_analysis_surfaces(scenario);
+    verify_contextual_surfaces(scenario);
+    verify_collaboration_surfaces(scenario);
+    verify_install_surfaces(scenario);
+    verify_invalid_agent_inputs(scenario);
+    verify_invalid_database_inputs(scenario);
+    verify_llm_configuration_surfaces(scenario);
+    verify_backend_surfaces(scenario);
+    verify_llm_runtime_surfaces(scenario);
+}
+
+fn prepare_repository_and_verify_read_only(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let read_only_schema = scenario.read_only_schema;
+    let project_path = scenario.project_path;
+    write_project_fixture(project.path());
+    git(project.path(), &["init", "--initial-branch=main"]);
+    git(
+        project.path(),
+        &["config", "user.email", "cli-surface@example.invalid"],
+    );
+    git(
+        project.path(),
+        &["config", "user.name", "CLI Surface Fixture"],
+    );
+    git(project.path(), &["add", "."]);
+    git(
+        project.path(),
+        &["commit", "-m", "CG-99 establish public CLI surface"],
+    );
+
+    failure(
+        project.path(),
+        database_url,
+        read_only_schema,
+        &[
+            "db",
+            "usage",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    failure(
+        project.path(),
+        database_url,
+        read_only_schema,
+        &[
+            "db",
+            "compact",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        !schema_exists(database_url, read_only_schema),
+        "read-only database usage created its missing schema"
+    );
+}
+
+fn index_and_verify_storage(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &["index", project_path, "--workers", "2", "--format", "json"],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &["status", project_path, "--json", "--verbose"],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "db",
+            "usage",
+            "--project-path",
+            project_path,
+            "--limit",
+            "16",
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "db",
+            "compact",
+            "--project-path",
+            project_path,
+            "--maximum-indexes",
+            "2",
+            "--minimum-index-bytes",
+            "1048576",
+            "--timeout-seconds",
+            "60",
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "db",
+            "compact",
+            "--project-path",
+            project_path,
+            "--apply",
+            "--confirm",
+            "compact-online-indexes",
+            "--maximum-indexes",
+            "2",
+            "--minimum-index-bytes",
+            "1048576",
+            "--timeout-seconds",
+            "60",
+            "--available-headroom-bytes",
+            "1073741824",
+            "--format",
+            "json",
+        ],
+    );
+}
+
+fn verify_native_retrieval(scenario: &LiveCliScenario<'_>) -> NativeSymbols {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    let root = json_success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "find-native",
+            "root",
+            "--by",
+            "name",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    let leaf = json_success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "find-native",
+            "leaf",
+            "--by",
+            "name",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    let root_id = symbol_id(&root, "root")
+        .unwrap_or_else(|| panic!("native find did not return root: {root}"));
+    let leaf_id = symbol_id(&leaf, "leaf")
+        .unwrap_or_else(|| panic!("native find did not return leaf: {leaf}"));
+
+    for (by, query_text) in [
+        ("auto", "order service"),
+        ("hybrid", "order service"),
+        ("path", "src/lib.rs"),
+        ("reference", "leaf"),
+        ("bm25", "order service"),
+    ] {
+        success(
+            project.path(),
+            database_url,
+            schema,
+            &[
+                "find-native",
+                query_text,
+                "--by",
+                by,
+                "--project-path",
+                project_path,
+                "--format",
+                "json",
+            ],
+        );
+    }
+    for anchor in [
+        ["--exact-name", "root"],
+        ["--exact-path", "src/lib.rs"],
+        ["--exact-reference", "leaf"],
+    ] {
+        success(
+            project.path(),
+            database_url,
+            schema,
+            &[
+                "context-native",
+                "change root order behavior",
+                anchor[0],
+                anchor[1],
+                "--mode",
+                "deterministic",
+                "--project-path",
+                project_path,
+                "--format",
+                "json",
+            ],
+        );
+    }
+    NativeSymbols { root_id, leaf_id }
+}
+
+fn verify_native_file_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "files-native",
+            "--dir",
+            "src",
+            "--language",
+            "rust",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "entry-points-native",
+            "--bucket",
+            "public-exports",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "at-range-native",
+            "src/lib.rs",
+            "1",
+            "30",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+}
+
+fn verify_native_graph_surfaces(scenario: &LiveCliScenario<'_>, symbols: &NativeSymbols) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    let root_id = &symbols.root_id;
+    let leaf_id = &symbols.leaf_id;
+    for direction in ["callers", "callees", "both", "impact"] {
+        success(
+            project.path(),
+            database_url,
+            schema,
+            &[
+                "graph-native",
+                root_id,
+                "--direction",
+                direction,
+                "--project-path",
+                project_path,
+                "--format",
+                "json",
+            ],
+        );
+    }
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "graph-native",
+            root_id,
+            "--direction",
+            "path",
+            "--to",
+            leaf_id,
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "show",
+            root_id,
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "affected-native",
+            root_id,
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "review-native",
+            "--ref",
+            "HEAD",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &["export", project_path, "--format", "json", "--limit", "100"],
+    );
+}
+
+fn verify_agent_compatibility_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_succeed(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec![
+                "find",
+                "root",
+                "--by",
+                "name",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "context",
+                "change root order behavior",
+                "--mode",
+                "deterministic",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "files",
+                "--format",
+                "symbols",
+                "--file",
+                "src/lib.rs",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "graph",
+                "root",
+                "--direction",
+                "callees",
+                "--project-path",
+                project_path,
+            ],
+            vec!["review", "risk", "--project-path", project_path],
+        ],
+    );
+}
+
+fn verify_operational_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_succeed(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec!["sync-if-dirty", project_path, "--quiet"],
+            vec!["install-hooks", project_path, "--dry-run"],
+            vec!["mcp-budget", "--profile", "coding", "--json"],
+            vec!["completions", "bash"],
+            vec!["__complete", "cartograph", "st"],
+            vec!["guide"],
+            vec!["doctor", project_path, "--json"],
+            vec![
+                "db",
+                "status",
+                "--project-path",
+                project_path,
+                "--port",
+                "55432",
+                "--format",
+                "json",
+            ],
+            vec![
+                "admin",
+                "embedding-status",
+                "--project-path",
+                project_path,
+                "--json",
+            ],
+            vec![
+                "admin",
+                "embedding-audit",
+                "--project-path",
+                project_path,
+                "--json",
+            ],
+            vec![
+                "admin",
+                "embedding-cleanup",
+                "--project-path",
+                project_path,
+                "--json",
+            ],
+            vec![
+                "admin",
+                "embedding-cleanup",
+                "--project-path",
+                project_path,
+                "--confirm",
+                "--json",
+            ],
+            vec![
+                "admin",
+                "llm-plan",
+                "--project-path",
+                project_path,
+                "--json",
+            ],
+        ],
+    );
+}
+
+fn verify_analysis_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_succeed(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec![
+                "biomarkers",
+                "--mode",
+                "stats",
+                "--project-path",
+                project_path,
+                "--format",
+                "json",
+            ],
+            vec![
+                "coverage",
+                "--mode",
+                "structural",
+                "--project-path",
+                project_path,
+            ],
+            vec!["dead-code", "--via", "rule", "--project-path", project_path],
+            vec!["deps", "--mode", "coverage", "--project-path", project_path],
+            vec![
+                "hotspots",
+                "--category",
+                "all",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "host",
+                "--mode",
+                "diagnostics",
+                "--location",
+                "local",
+                "--project-path",
+                project_path,
+            ],
+            vec!["history", "--mode", "files", "--project-path", project_path],
+            vec!["imports", "--source", "all", "--project-path", project_path],
+            vec!["sql", "--schema", "--project-path", project_path],
+            vec![
+                "verify",
+                "--ref",
+                "HEAD",
+                "--project-path",
+                project_path,
+                "--format",
+                "json",
+            ],
+            vec!["playbook", "--project-path", project_path],
+        ],
+    );
+}
+
+fn verify_contextual_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_succeed(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec![
+                "compare-to-ref",
+                "--ref",
+                "HEAD",
+                "--include-edges",
+                "--include-biomarkers",
+                "--project-path",
+                project_path,
+            ],
+            vec!["digest", "--project-path", project_path],
+            vec![
+                "explore",
+                "order service",
+                "--mode",
+                "deterministic",
+                "--summary",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "node",
+                "root",
+                "--include-callers",
+                "--include-callees",
+                "--include-tests",
+                "--include-biomarkers",
+                "--project-path",
+                project_path,
+            ],
+        ],
+    );
+}
+
+fn verify_collaboration_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_succeed(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec![
+                "note",
+                "add",
+                "--symbol",
+                "root",
+                "--kind",
+                "note",
+                "--text",
+                "Public CLI fixture note",
+                "--author",
+                "release-gate",
+                "--project-path",
+                project_path,
+            ],
+            vec!["note", "list", "--project-path", project_path],
+            vec![
+                "propose-rename",
+                "root",
+                "renamed_root",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "role",
+                "--symbol",
+                "root",
+                "--via",
+                "rule",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "session",
+                "create",
+                "--objective",
+                "Verify the public command surface",
+                "--label",
+                "release-gate",
+                "--project-path",
+                project_path,
+            ],
+            vec!["session", "list", "--project-path", project_path],
+            vec!["session", "usage", "--project-path", project_path],
+            vec!["summaries", "pending", "--project-path", project_path],
+            vec!["tests-for", "root", "--project-path", project_path],
+            vec![
+                "tests-for",
+                "--files",
+                "src/lib.rs",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "trace-to-culprits",
+                "at root (src/lib.rs:5:1)",
+                "--project-path",
+                project_path,
+            ],
+            vec!["blame", "root", "--project-path", project_path],
+            vec!["changed-since", "--project-path", project_path],
+            vec![
+                "db",
+                "prune",
+                "--confirm",
+                "prune-old-generations",
+                "--project-path",
+                project_path,
+                "--format",
+                "json",
+            ],
+        ],
+    );
+}
+
+fn verify_install_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_succeed(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec![
+                "install",
+                "--yes",
+                "--target",
+                "codex",
+                "--location",
+                "local",
+                "--project-path",
+                project_path,
+                "--no-permissions",
+                "--no-hooks",
+                "--format",
+                "json",
+            ],
+            vec![
+                "uninstall",
+                "--target",
+                "codex",
+                "--location",
+                "local",
+                "--project-path",
+                project_path,
+                "--format",
+                "json",
+            ],
+            vec![
+                "db",
+                "stop",
+                "--project-path",
+                project_path,
+                "--port",
+                "55432",
+            ],
+        ],
+    );
+}
+
+fn verify_invalid_agent_inputs(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_fail(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec!["admin", "status", "--project-path", project_path, "--json"],
+            vec![
+                "similar",
+                "root",
+                "--min-score",
+                "2",
+                "--project-path",
+                project_path,
+            ],
+            vec!["mcp-budget", "--disable-tool", "cartograph_missing"],
+            vec![
+                "ask",
+                "How does root call leaf?",
+                "--mode",
+                "code",
+                "--retrieval-mode",
+                "deterministic",
+                "--project-path",
+                project_path,
+            ],
+        ],
+    );
+}
+
+fn verify_invalid_database_inputs(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    let missing_backup = project
+        .path()
+        .join("missing.backup")
+        .to_string_lossy()
+        .into_owned();
+    all_fail(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec![
+                "db",
+                "restore",
+                &missing_backup,
+                "--confirm",
+                "wrong-confirmation",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "db",
+                "remove",
+                "--confirm",
+                "wrong-confirmation",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "db",
+                "upgrade",
+                "--confirm",
+                "wrong-confirmation",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "db",
+                "derived-index",
+                "--rebuild",
+                "--confirm",
+                "wrong-confirmation",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "db",
+                "import-v1",
+                "--source-schema",
+                "cartograph_v1",
+                "--confirm",
+                "wrong-confirmation",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "db",
+                "prune",
+                "--confirm",
+                "wrong-confirmation",
+                "--project-path",
+                project_path,
+            ],
+            vec![
+                "db",
+                "compact",
+                "--project-path",
+                project_path,
+                "--apply",
+                "--confirm",
+                "wrong-confirmation",
+            ],
+        ],
+    );
+}
+
+fn verify_llm_configuration_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    let missing_model = scenario.missing_model;
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "llm",
+            "setup",
+            project_path,
+            "--preset",
+            "custom",
+            "--tier",
+            "chat",
+            "--endpoint",
+            "http://127.0.0.1:65534",
+            "--model",
+            missing_model,
+            "--yes",
+            "--json",
+        ],
+    );
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &["llm", "migrate-credentials", project_path, "--json"],
+    );
+    seed_inline_llm_credential(project.path());
+    all_fail(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec![
+                "llm",
+                "migrate-credentials",
+                project_path,
+                "--tier-env",
+                "summarize=CARTOGRAPH_LIVE_CLI_MISSING_KEY",
+            ],
+            vec![
+                "llm",
+                "migrate-credentials",
+                project_path,
+                "--tier-env",
+                "summarize=CARTOGRAPH_LIVE_CLI_MISSING_KEY",
+                "--json",
+            ],
+            vec![
+                "llm",
+                "migrate-credentials",
+                project_path,
+                "--apply",
+                "--confirm",
+                "wrong-confirmation",
+            ],
+        ],
+    );
+}
+
+fn verify_backend_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    all_succeed(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec!["backend", "status", project_path, "--json"],
+            vec!["backend", "stop", project_path, "--json"],
+            vec!["backend", "logs", project_path, "--lines", "20", "--json"],
+            vec![
+                "backend",
+                "cleanup",
+                project_path,
+                "--minimum-age-hours",
+                "0",
+                "--maximum-deletions",
+                "2",
+            ],
+            vec![
+                "backend",
+                "cleanup",
+                project_path,
+                "--minimum-age-hours",
+                "0",
+                "--maximum-deletions",
+                "2",
+                "--json",
+            ],
+            vec![
+                "backend",
+                "cleanup",
+                project_path,
+                "--apply",
+                "--confirm",
+                "cleanup-backend-junk",
+                "--minimum-age-hours",
+                "0",
+                "--maximum-deletions",
+                "2",
+                "--json",
+            ],
+        ],
+    );
+    all_fail(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            vec!["backend", "start", project_path, "--dry-run", "--json"],
+            vec!["backend", "restart", project_path, "--dry-run", "--json"],
+            vec![
+                "backend",
+                "cleanup",
+                project_path,
+                "--apply",
+                "--confirm",
+                "wrong-confirmation",
+            ],
+        ],
+    );
+}
+
+fn verify_llm_runtime_surfaces(scenario: &LiveCliScenario<'_>) {
+    let project = scenario.project;
+    let database_url = scenario.database_url;
+    let schema = scenario.schema;
+    let project_path = scenario.project_path;
+    success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "llm",
+            "install",
+            project_path,
+            "--no-models",
+            "--minimal",
+            "--json",
+        ],
+    );
+    failure(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "llm",
+            "smoke",
+            project_path,
+            "--timeout-ms",
+            "100",
+            "--json",
+        ],
+    );
 }
 
 fn write_project_fixture(root: &Path) {
@@ -928,7 +1078,7 @@ fn write_project_fixture(root: &Path) {
         .unwrap_or_else(|error| panic!("test fixture directory failed: {error}"));
     std::fs::write(
         root.join("src/lib.rs"),
-        r#"pub fn leaf(value: i32) -> i32 {
+        r"pub fn leaf(value: i32) -> i32 {
     value + 1
 }
 
@@ -940,7 +1090,7 @@ pub struct OrderService;
 impl OrderService {
     pub fn execute(value: i32) -> i32 { root(value) }
 }
-"#,
+",
     )
     .unwrap_or_else(|error| panic!("Rust fixture write failed: {error}"));
     std::fs::write(

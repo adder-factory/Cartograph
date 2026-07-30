@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use cartograph_domain::{ModelId, ProjectId};
+use num_traits::ToPrimitive as _;
 use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::PgConnection;
@@ -20,11 +21,17 @@ const MATERIALIZE_LOCK_NAMESPACE: &str = "cartograph-v2-materialized-similarity"
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SimilarityMaterializationReport {
+    /// Number of models.
     pub models: u64,
+    /// Number of source symbols.
     pub source_symbols: u64,
+    /// Number of model symbol pairs.
     pub model_symbol_pairs: u64,
+    /// Number of edges written.
     pub edges_written: u64,
+    /// Number of neighbors per symbol.
     pub neighbors_per_symbol: u16,
+    /// Minimum number of score millionths required by this request.
     pub minimum_score_millionths: u32,
 }
 
@@ -38,6 +45,10 @@ pub struct SimilarityMaterializationPolicy {
 
 impl SimilarityMaterializationPolicy {
     /// Validate the complete rebuild policy before opening a transaction.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, `neighbors` is out of
+    /// bounds, or `minimum_score` is non-finite/outside zero to one.
     pub fn new(
         neighbors: u16,
         minimum_score: f64,
@@ -77,6 +88,10 @@ impl CartographDatabase {
     /// On-demand vector search remains authoritative when no compatible build
     /// metadata exists. Each model query retains its fixed-dimension cast so
     /// PostgreSQL can use Cartograph's model-specific HNSW expression index.
+    /// # Errors
+    ///
+    /// Returns an error if the project lock/current generation/model metadata
+    /// is unavailable or bounded similarity edge replacement cannot commit.
     pub async fn rebuild_current_similarity_edges(
         &self,
         project_id: &ProjectId,
@@ -163,6 +178,10 @@ impl CartographDatabase {
             .commit()
             .await
             .map_err(|_| database_error("similarity-materialize-commit"))?;
+        let minimum_score_millionths = (minimum_score * 1_000_000.0)
+            .round()
+            .to_u32()
+            .ok_or_else(|| database_error("similarity-materialize-minimum-score"))?;
         Ok(SimilarityMaterializationReport {
             models: u64::try_from(models.len())
                 .map_err(|_| database_error("similarity-materialize-model-count"))?,
@@ -170,7 +189,7 @@ impl CartographDatabase {
             model_symbol_pairs,
             edges_written,
             neighbors_per_symbol: neighbors,
-            minimum_score_millionths: (minimum_score * 1_000_000.0).round() as u32,
+            minimum_score_millionths,
         })
     }
 }

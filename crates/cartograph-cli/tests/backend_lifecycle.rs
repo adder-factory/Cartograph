@@ -1,4 +1,7 @@
 #![cfg(unix)]
+//! Unix lifecycle integration coverage for managed local LLM backends.
+
+mod dependency_ownership;
 
 use std::{
     fs,
@@ -9,7 +12,7 @@ use std::{
 };
 
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 struct ManagedProcessGuard {
     pid: Option<u32>,
@@ -113,8 +116,20 @@ fn process_is_runnable(pid: u32) -> bool {
         && fields.next().is_none()
 }
 
-#[test]
-fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
+struct BackendFixture {
+    root: TempDir,
+    marker: PathBuf,
+    project: String,
+    binary: String,
+}
+
+impl BackendFixture {
+    fn path(&self) -> &Path {
+        self.root.path()
+    }
+}
+
+fn backend_fixture() -> BackendFixture {
     let root = tempdir().unwrap_or_else(|error| panic!("fixture root failed: {error}"));
     let marker = root.path().join(".cartograph");
     fs::create_dir(&marker).unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
@@ -156,25 +171,42 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
     .unwrap_or_else(|error| panic!("config fixture write failed: {error}"));
     let project = root.path().to_string_lossy().into_owned();
     let binary = binary.to_string_lossy().into_owned();
-    let mut guard = ManagedProcessGuard { pid: None };
+    BackendFixture {
+        root,
+        marker,
+        project,
+        binary,
+    }
+}
 
+fn start_backend(fixture: &BackendFixture, guard: &mut ManagedProcessGuard) -> u32 {
     let dry_start = run_backend(
-        root.path(),
-        &["start", &project, "--bin", &binary, "--dry-run", "--json"],
+        fixture.path(),
+        &[
+            "start",
+            &fixture.project,
+            "--bin",
+            &fixture.binary,
+            "--dry-run",
+            "--json",
+        ],
     );
     assert_success(&dry_start, "start dry-run");
     let dry_start = parse_json(&dry_start, "start dry-run");
     assert_eq!(dry_start["dryRun"], true);
     assert_eq!(dry_start["changed"][0]["reason"], "would start");
-    assert!(!marker.join("backends").exists());
+    assert!(!fixture.marker.join("backends").exists());
 
-    let start = run_backend(root.path(), &["start", &project, "--bin", &binary]);
+    let start = run_backend(
+        fixture.path(),
+        &["start", &fixture.project, "--bin", &fixture.binary],
+    );
     assert_success(&start, "start");
     assert!(String::from_utf8_lossy(&start.stdout).contains("started pid"));
-    let first_pid = state_pid(root.path());
+    let first_pid = state_pid(fixture.path());
     guard.track(first_pid);
     assert!(process_is_runnable(first_pid));
-    let state_directory = marker.join("backends");
+    let state_directory = fixture.marker.join("backends");
     assert_eq!(
         fs::metadata(&state_directory)
             .unwrap_or_else(|error| panic!("state directory metadata failed: {error}"))
@@ -183,8 +215,11 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
             & 0o777,
         0o700
     );
+    first_pid
+}
 
-    let status = run_backend(root.path(), &["status", &project, "--json"]);
+fn verify_running_backend(fixture: &BackendFixture) {
+    let status = run_backend(fixture.path(), &["status", &fixture.project, "--json"]);
     assert_success(&status, "status");
     let status = parse_json(&status, "status");
     assert_eq!(status["rows"][0]["state"], "starting");
@@ -192,15 +227,28 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
     assert_eq!(status["rows"][0]["configDrift"], true);
 
     let logs = run_backend(
-        root.path(),
-        &["logs", &project, "--tier", "summarize", "--lines", "10"],
+        fixture.path(),
+        &[
+            "logs",
+            &fixture.project,
+            "--tier",
+            "summarize",
+            "--lines",
+            "10",
+        ],
     );
     assert_success(&logs, "logs");
     assert!(String::from_utf8_lossy(&logs.stdout).contains("fixture backend started"));
 
     let duplicate = run_backend(
-        root.path(),
-        &["start", &project, "--bin", &binary, "--json"],
+        fixture.path(),
+        &[
+            "start",
+            &fixture.project,
+            "--bin",
+            &fixture.binary,
+            "--json",
+        ],
     );
     assert_failure(&duplicate, "duplicate start");
     let duplicate = parse_json(&duplicate, "duplicate start");
@@ -209,14 +257,20 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
             .as_str()
             .is_some_and(|reason| reason.contains("already running as pid"))
     );
+}
 
+fn restart_backend(
+    fixture: &BackendFixture,
+    guard: &mut ManagedProcessGuard,
+    first_pid: u32,
+) -> u32 {
     let dry_restart = run_backend(
-        root.path(),
+        fixture.path(),
         &[
             "restart",
-            &project,
+            &fixture.project,
             "--bin",
-            &binary,
+            &fixture.binary,
             "--tier",
             "summarize",
             "--dry-run",
@@ -230,18 +284,32 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
     );
 
     let restart = run_backend(
-        root.path(),
-        &["restart", &project, "--bin", &binary, "--tier", "summarize"],
+        fixture.path(),
+        &[
+            "restart",
+            &fixture.project,
+            "--bin",
+            &fixture.binary,
+            "--tier",
+            "summarize",
+        ],
     );
     assert_success(&restart, "restart");
     assert!(String::from_utf8_lossy(&restart.stdout).contains("restarted as pid"));
-    let second_pid = state_pid(root.path());
+    let second_pid = state_pid(fixture.path());
     assert_ne!(first_pid, second_pid);
     assert!(!process_is_runnable(first_pid));
     guard.track(second_pid);
     assert!(process_is_runnable(second_pid));
+    second_pid
+}
 
-    let stop = run_backend(root.path(), &["stop", &project, "--json"]);
+fn stop_backend_and_verify_failures(
+    fixture: &BackendFixture,
+    guard: &mut ManagedProcessGuard,
+    second_pid: u32,
+) {
+    let stop = run_backend(fixture.path(), &["stop", &fixture.project, "--json"]);
     assert_success(&stop, "stop");
     assert!(
         parse_json(&stop, "stop")["changed"][0]["reason"]
@@ -250,6 +318,7 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
     );
     assert!(!process_is_runnable(second_pid));
     guard.disarm();
+    let state_directory = fixture.marker.join("backends");
     assert!(
         !state_directory
             .read_dir()
@@ -261,12 +330,12 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
                 .is_some_and(|extension| extension == "json"))
     );
 
-    let stopped = run_backend(root.path(), &["status", &project]);
+    let stopped = run_backend(fixture.path(), &["status", &fixture.project]);
     assert_success(&stopped, "stopped status");
     assert!(String::from_utf8_lossy(&stopped.stdout).contains("Stopped"));
     let missing_tier = run_backend(
-        root.path(),
-        &["logs", &project, "--tier", "ask", "--lines", "10"],
+        fixture.path(),
+        &["logs", &fixture.project, "--tier", "ask", "--lines", "10"],
     );
     assert_failure(&missing_tier, "missing-tier logs");
     assert!(
@@ -275,8 +344,14 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
     );
 
     let early_exit = run_backend(
-        root.path(),
-        &["start", &project, "--bin", "/usr/bin/false", "--json"],
+        fixture.path(),
+        &[
+            "start",
+            &fixture.project,
+            "--bin",
+            "/usr/bin/false",
+            "--json",
+        ],
     );
     assert_failure(&early_exit, "early-exit start");
     assert!(
@@ -284,4 +359,14 @@ fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
             .as_str()
             .is_some_and(|reason| reason.contains("exited during startup"))
     );
+}
+
+#[test]
+fn managed_backend_cli_lifecycle_is_identity_checked_and_auditable() {
+    let fixture = backend_fixture();
+    let mut guard = ManagedProcessGuard { pid: None };
+    let first_pid = start_backend(&fixture, &mut guard);
+    verify_running_backend(&fixture);
+    let second_pid = restart_backend(&fixture, &mut guard, first_pid);
+    stop_backend_and_verify_failures(&fixture, &mut guard, second_pid);
 }

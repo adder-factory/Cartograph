@@ -38,6 +38,10 @@ impl TaskReservationGuard {
 
 impl<T> ScopedTask<T> {
     /// Wait for the worker result without detaching it from supervisor ownership.
+    /// # Errors
+    ///
+    /// Returns an error if the scoped worker reports a pipeline failure or is
+    /// cancelled before delivering its owned result.
     pub async fn join(self) -> Result<T, ScopedTaskError> {
         match self.receiver.await {
             Ok(result) => {
@@ -367,12 +371,11 @@ impl TaskRegistry {
     }
 
     fn release_bytes(&mut self, released: u64) {
-        match self.reserved_bytes.checked_sub(released) {
-            Some(remaining) => self.reserved_bytes = remaining,
-            None => {
-                self.reserved_bytes = 0;
-                self.worker_failed = true;
-            }
+        if let Some(remaining) = self.reserved_bytes.checked_sub(released) {
+            self.reserved_bytes = remaining;
+        } else {
+            self.reserved_bytes = 0;
+            self.worker_failed = true;
         }
     }
 }
@@ -387,13 +390,12 @@ impl CompletionSummary {
         match joined {
             Ok(completion) => match completion.outcome {
                 WorkerOutcome::Failed => self.worker_failed = true,
-                WorkerOutcome::Cancelled => {}
                 WorkerOutcome::Succeeded
                     if !completion.delivered || !completion.observed.load(Ordering::Acquire) =>
                 {
                     self.unobserved_results = true;
                 }
-                WorkerOutcome::Succeeded => {}
+                WorkerOutcome::Cancelled | WorkerOutcome::Succeeded => {}
             },
             Err(error) if error.is_cancelled() => {}
             Err(_) => self.worker_failed = true,

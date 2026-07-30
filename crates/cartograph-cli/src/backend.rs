@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     fs::{self, File, OpenOptions},
-    io::{Read as _, Seek as _, SeekFrom},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -224,11 +225,25 @@ struct BackendRow {
     pid_file_path: PathBuf,
     log_path: PathBuf,
     pid_record: Option<BackendPidRecord>,
-    pid_alive: bool,
-    endpoint_reachable: bool,
-    model_exists: bool,
+    #[serde(flatten)]
+    process_health: BackendProcessHealth,
+    #[serde(flatten)]
+    artifact_health: BackendArtifactHealth,
     state: BackendState,
     state_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendProcessHealth {
+    pid_alive: bool,
+    endpoint_reachable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendArtifactHealth {
+    model_exists: bool,
     config_drift: bool,
 }
 
@@ -361,7 +376,7 @@ pub(super) async fn run(command: BackendCommand) -> Result<ExitCode, String> {
         BackendCommand::Restart(arguments) => run_restart(arguments).await,
         BackendCommand::Stop(arguments) => run_stop(arguments).await,
         BackendCommand::Logs(arguments) => run_logs(arguments).await,
-        BackendCommand::Cleanup(arguments) => run_cleanup(arguments),
+        BackendCommand::Cleanup(arguments) => run_cleanup(&arguments),
     }
 }
 
@@ -426,7 +441,7 @@ fn build_specs(project: &Path, binary: &str) -> Result<Vec<BackendSpec>, String>
         else {
             continue;
         };
-        let Some((key, mut spec)) = build_tier_spec(TierSpecInput {
+        let Some((key, mut spec)) = build_tier_spec(&TierSpecInput {
             tier,
             label,
             config: &config,
@@ -461,8 +476,8 @@ struct TierSpecInput<'a> {
     binary: &'a str,
 }
 
-fn build_tier_spec(input: TierSpecInput<'_>) -> Result<Option<(String, BackendSpec)>, String> {
-    let TierSpecInput {
+fn build_tier_spec(input: &TierSpecInput<'_>) -> Result<Option<(String, BackendSpec)>, String> {
+    let &TierSpecInput {
         tier,
         label,
         config,
@@ -493,8 +508,10 @@ fn build_tier_spec(input: TierSpecInput<'_>) -> Result<Option<(String, BackendSp
     let parallel = config.concurrency().unwrap_or(match tier {
         ProjectLlmTier::Embedding => 4,
         ProjectLlmTier::Ask => 1,
-        ProjectLlmTier::Reranker => 2,
-        ProjectLlmTier::Summarize | ProjectLlmTier::Local | ProjectLlmTier::Classify => 2,
+        ProjectLlmTier::Summarize
+        | ProjectLlmTier::Local
+        | ProjectLlmTier::Classify
+        | ProjectLlmTier::Reranker => 2,
     });
     let mut args = vec![
         "-m".to_owned(),
@@ -613,7 +630,7 @@ fn short_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     let mut output = String::with_capacity(12);
     for byte in digest.iter().take(6) {
-        output.push_str(&format!("{byte:02x}"));
+        let _ = write!(output, "{byte:02x}");
     }
     output
 }
@@ -725,12 +742,16 @@ async fn build_status_row(
         pid_file_path,
         log_path,
         pid_record,
-        pid_alive,
-        endpoint_reachable,
-        model_exists,
+        process_health: BackendProcessHealth {
+            pid_alive,
+            endpoint_reachable,
+        },
+        artifact_health: BackendArtifactHealth {
+            model_exists,
+            config_drift,
+        },
         state,
         state_error,
-        config_drift,
     }
 }
 
@@ -752,8 +773,7 @@ fn discover_orphans(
         seen = seen.saturating_add(1);
         if seen > MAXIMUM_STATE_ENTRIES {
             warnings.push(format!(
-                "backend state directory exceeds the {}-entry inspection bound",
-                MAXIMUM_STATE_ENTRIES
+                "backend state directory exceeds the {MAXIMUM_STATE_ENTRIES}-entry inspection bound"
             ));
             break;
         }
@@ -975,16 +995,16 @@ fn start_skip_reason(row: &BackendRow) -> Option<String> {
     if row.spec.externally_managed {
         return Some("tier is explicitly externally managed".to_owned());
     }
-    if !row.model_exists {
+    if !row.artifact_health.model_exists {
         return Some("configured GGUF model is missing or unsafe".to_owned());
     }
-    if row.pid_alive {
+    if row.process_health.pid_alive {
         return Some(format!(
             "already running as pid {}",
             row.pid_record.as_ref().map_or(0, |record| record.pid)
         ));
     }
-    if row.endpoint_reachable {
+    if row.process_health.endpoint_reachable {
         return Some("endpoint is already held by an external process".to_owned());
     }
     None
@@ -1078,8 +1098,9 @@ fn write_pid_record(row: &BackendRow, pid: u32) -> Result<(), String> {
         pid,
         started_at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-            .unwrap_or(0),
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            }),
         command: row.spec.command.clone(),
         args: row.spec.args.clone(),
         endpoint: row.spec.endpoint.clone(),
@@ -1096,7 +1117,6 @@ fn write_pid_record(row: &BackendRow, pid: u32) -> Result<(), String> {
             .ok_or_else(|| "backend pid target has no parent".to_owned())?,
     )
     .map_err(|_| "backend pid state could not be staged".to_owned())?;
-    use std::io::Write as _;
     temporary
         .write_all(&bytes)
         .and_then(|()| temporary.as_file().sync_all())
@@ -1152,7 +1172,7 @@ async fn stop_row(row: &BackendRow, force: bool) -> Result<Option<String>, Strin
     let Some(record) = &row.pid_record else {
         return Ok(None);
     };
-    if !row.pid_alive {
+    if !row.process_health.pid_alive {
         remove_pid_file(&row.pid_file_path)?;
         return Ok(Some(format!("removed stale pid state for {}", record.pid)));
     }
@@ -1282,12 +1302,14 @@ enum RestartOutcome {
 fn restart_skip_reason(row: &BackendRow) -> Option<String> {
     if row.origin == BackendOrigin::Orphan {
         Some("orphaned state must be reclaimed with backend stop".to_owned())
-    } else if row.spec.externally_managed || (row.endpoint_reachable && row.pid_record.is_none()) {
+    } else if row.spec.externally_managed
+        || (row.process_health.endpoint_reachable && row.pid_record.is_none())
+    {
         Some(format!(
             "external process; relaunch manually with {}",
             render_command(&row.spec)
         ))
-    } else if !row.model_exists || row.state_error.is_some() {
+    } else if !row.artifact_health.model_exists || row.state_error.is_some() {
         Some("backend model or pid state is invalid".to_owned())
     } else {
         None
@@ -1425,8 +1447,8 @@ struct BackendCleanupExecution {
     reclaimed_bytes: u64,
 }
 
-fn run_cleanup(arguments: CleanupArguments) -> Result<ExitCode, String> {
-    let report = backend_cleanup_report(&arguments)?;
+fn run_cleanup(arguments: &CleanupArguments) -> Result<ExitCode, String> {
+    let report = backend_cleanup_report(arguments)?;
     if arguments.json {
         print_json(&report)?;
     } else {
@@ -1552,7 +1574,13 @@ fn inspect_cleanup_entry(
 }
 
 fn is_cleanup_file_name(name: &str) -> bool {
-    name.ends_with(".log.1") || name.ends_with(".json")
+    has_ascii_suffix(name, ".log.1") || has_ascii_suffix(name, ".json")
+}
+
+fn has_ascii_suffix(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
 }
 
 fn cleanup_entry_metadata(
@@ -1587,7 +1615,9 @@ fn cleanup_entry_modified(
 }
 
 fn preserve_unsupported_pid_state(path: &Path, name: &str) -> Result<(), BackendCleanupSkip> {
-    if name.ends_with(".json") && matches!(read_pid_record(path), PidState::UnsupportedVersion) {
+    if has_ascii_suffix(name, ".json")
+        && matches!(read_pid_record(path), PidState::UnsupportedVersion)
+    {
         return Err(BackendCleanupSkip {
             name: Some(name.to_owned()),
             reason: BackendCleanupSkipReason::UNSUPPORTED_STATE_VERSION,
@@ -1600,13 +1630,13 @@ fn classify_cleanup_entry(
     name: &str,
     path: &Path,
 ) -> Option<(BackendCleanupKind, BackendCleanupReason)> {
-    if name.ends_with(".log.1") {
+    if has_ascii_suffix(name, ".log.1") {
         return Some((
             BackendCleanupKind::RotatedLog,
             BackendCleanupReason::BoundedRotatedLog,
         ));
     }
-    if name.ends_with(".json") && matches!(read_pid_record(path), PidState::Invalid(_)) {
+    if has_ascii_suffix(name, ".json") && matches!(read_pid_record(path), PidState::Invalid(_)) {
         return Some((
             BackendCleanupKind::InvalidPidState,
             BackendCleanupReason::StaleInvalidPidState,
@@ -1787,7 +1817,7 @@ fn render_rows(status: &BackendStatusReport) {
         println!("  model: {}", row.spec.model_path.display());
         println!("  log: {}", row.log_path.display());
         println!("  command: {}", render_command(&row.spec));
-        if row.config_drift {
+        if row.artifact_health.config_drift {
             println!("  ⚠ running arguments differ from current config; use backend restart");
         }
         if let Some(error) = &row.state_error {
@@ -1902,7 +1932,7 @@ fn print_json(value: &impl Serialize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     const EMBED_ENDPOINT: &str = "http://127.0.0.1:8080";
     const CHAT_ENDPOINT: &str = "http://127.0.0.1:8081";
@@ -1912,6 +1942,7 @@ mod tests {
     const SECURE_LOCALHOST_ENDPOINT: &str = "https://localhost:8080";
     const REMOTE_ENDPOINT: &str = "http://example.com:8080";
     const UNREACHABLE_ENDPOINT: &str = "http://127.0.0.1:65534";
+    const FIXTURE_BACKEND_ID: &str = "llama-0123456789ab";
 
     #[test]
     fn managed_passthrough_cannot_override_identity_flags() {
@@ -2069,8 +2100,17 @@ mod tests {
         assert!(!root.path().join(".cartograph/backends").exists());
     }
 
-    #[test]
-    fn logs_rotate_at_the_bound_and_cleanup_is_dry_run_first() {
+    struct CleanupFixture {
+        root: TempDir,
+        log: PathBuf,
+        rotated: PathBuf,
+        invalid: PathBuf,
+        future: PathBuf,
+        malicious: PathBuf,
+        unsafe_entry: PathBuf,
+    }
+
+    fn cleanup_fixture() -> CleanupFixture {
         let root = tempdir().unwrap_or_else(|error| panic!("fixture root failed: {error}"));
         fs::create_dir(root.path().join(".cartograph"))
             .unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
@@ -2115,7 +2155,28 @@ mod tests {
             read_pid_record(&future),
             PidState::UnsupportedVersion
         ));
+        CleanupFixture {
+            root,
+            log,
+            rotated,
+            invalid,
+            future,
+            malicious,
+            unsafe_entry,
+        }
+    }
 
+    #[test]
+    fn logs_rotate_at_the_bound_and_cleanup_is_dry_run_first() {
+        let CleanupFixture {
+            root,
+            log,
+            rotated,
+            invalid,
+            future,
+            malicious,
+            unsafe_entry,
+        } = cleanup_fixture();
         let dry_run_arguments = CleanupArguments {
             path: root.path().to_path_buf(),
             apply: false,
@@ -2149,13 +2210,13 @@ mod tests {
         assert!(!encoded.contains(&root.path().to_string_lossy().into_owned()));
         assert!(!encoded.contains("[31m"));
 
-        let dry_run = run_cleanup(dry_run_arguments);
+        let dry_run = run_cleanup(&dry_run_arguments);
         assert_eq!(dry_run, Ok(ExitCode::SUCCESS));
         assert!(rotated.exists());
         assert!(invalid.exists());
         assert!(future.exists());
         assert!(
-            run_cleanup(CleanupArguments {
+            run_cleanup(&CleanupArguments {
                 path: root.path().to_path_buf(),
                 apply: true,
                 confirm: Some("wrong".to_owned()),
@@ -2166,7 +2227,7 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            run_cleanup(CleanupArguments {
+            run_cleanup(&CleanupArguments {
                 path: root.path().to_path_buf(),
                 apply: true,
                 confirm: Some(CLEANUP_CONFIRMATION.to_owned()),
@@ -2254,8 +2315,14 @@ mod tests {
         assert_eq!(BackendTier::Rerank.label(), "rerank");
     }
 
-    #[tokio::test]
-    async fn pid_state_orphan_recovery_and_log_tail_never_trust_unsafe_files() {
+    struct PidFixture {
+        root: TempDir,
+        paths: StatePaths,
+        log: PathBuf,
+        row: BackendRow,
+    }
+
+    fn pid_fixture() -> PidFixture {
         let root = tempdir().unwrap_or_else(|error| panic!("fixture root failed: {error}"));
         let marker = root.path().join(".cartograph");
         fs::create_dir(&marker).unwrap_or_else(|error| panic!("fixture marker failed: {error}"));
@@ -2279,9 +2346,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("unsafe log fixture failed: {error}"));
         assert!(tail_log(&unsafe_log, 2).is_err());
 
-        let fixture_id = "llama-0123456789ab";
         let spec = BackendSpec {
-            id: fixture_id.to_owned(),
+            id: FIXTURE_BACKEND_ID.to_owned(),
             labels: vec!["embed".to_owned()],
             endpoint: UNREACHABLE_ENDPOINT.to_owned(),
             model_path: model.clone(),
@@ -2292,19 +2358,40 @@ mod tests {
             args: vec!["--port".to_owned(), "65534".to_owned()],
             externally_managed: false,
         };
-        let mut row = BackendRow {
+        let row = BackendRow {
             spec: spec.clone(),
             origin: BackendOrigin::Config,
-            pid_file_path: paths.directory.join(format!("{fixture_id}.json")),
+            pid_file_path: paths.directory.join(format!("{FIXTURE_BACKEND_ID}.json")),
             log_path: log.clone(),
             pid_record: None,
-            pid_alive: false,
-            endpoint_reachable: false,
-            model_exists: true,
+            process_health: BackendProcessHealth {
+                pid_alive: false,
+                endpoint_reachable: false,
+            },
+            artifact_health: BackendArtifactHealth {
+                model_exists: true,
+                config_drift: false,
+            },
             state: BackendState::Stopped,
             state_error: None,
-            config_drift: false,
         };
+        PidFixture {
+            root,
+            paths,
+            log,
+            row,
+        }
+    }
+
+    #[tokio::test]
+    async fn pid_state_orphan_recovery_and_log_tail_never_trust_unsafe_files() {
+        let PidFixture {
+            root,
+            paths,
+            log,
+            mut row,
+        } = pid_fixture();
+        assert!(root.path().join(".cartograph").is_dir());
         assert_eq!(
             write_pid_record(&row, 0),
             Err("child process did not report a valid pid".to_owned())
@@ -2324,9 +2411,9 @@ mod tests {
             PidState::Missing
         ));
 
-        let orphan = orphan_spec(fixture_id, &record)
+        let orphan = orphan_spec(FIXTURE_BACKEND_ID, &record)
             .unwrap_or_else(|error| panic!("orphan state failed: {error}"));
-        assert_eq!(orphan.id, fixture_id);
+        assert_eq!(orphan.id, FIXTURE_BACKEND_ID);
         let (orphans, warnings) = discover_orphans(&paths.directory, &BTreeSet::new())
             .unwrap_or_else(|error| panic!("orphan discovery failed: {error}"));
         assert_eq!(orphans.len(), 1);
@@ -2352,7 +2439,7 @@ mod tests {
         ));
 
         let mut missing_model = row.clone();
-        missing_model.model_exists = false;
+        missing_model.artifact_health.model_exists = false;
         missing_model.state = BackendState::MissingModel;
         assert_eq!(
             start_skip_reason(&missing_model).as_deref(),

@@ -1,6 +1,7 @@
 use cartograph_domain::{
     ContentDigest, FileId, FileParseStatus, NormalizedPath, ReferenceKind, SourceLanguage,
-    SourceSpan, SymbolId, SymbolKind, Visibility,
+    SourceSpan, SymbolExecutionFlags, SymbolExportFlags, SymbolId, SymbolImplementationFlags,
+    SymbolKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +78,7 @@ pub struct ExtractedSymbol {
     pub span: SourceSpan,
     /// Deterministic declaration signature when present.
     pub signature: Option<String>,
-    /// Human-authored JSDoc immediately preceding the declaration.
+    /// Human-authored `JSDoc` immediately preceding the declaration.
     pub docstring: Option<String>,
     /// Bounded identifier/keyword text from the implementation with literals omitted.
     pub body_search_text: String,
@@ -85,18 +86,15 @@ pub struct ExtractedSymbol {
     pub body_search_truncated: bool,
     /// Privacy-safe structural and agent-prone detector counters computed from the body AST/text.
     pub health: SymbolHealthMetrics,
-    /// Whether this declaration has no implementation body, such as an overload signature.
-    pub declaration_only: bool,
-    /// Whether this declaration is owned by an inline test scope or test attribute.
-    pub test_symbol: bool,
+    /// Implementation and test-ownership state.
+    #[serde(flatten)]
+    pub implementation: SymbolImplementationFlags,
     /// Explicit module export state.
-    pub exported: bool,
-    /// Explicit default-export state.
-    pub default_export: bool,
-    /// Language async modifier.
-    pub async_symbol: bool,
-    /// Class static modifier.
-    pub static_member: bool,
+    #[serde(flatten)]
+    pub export: SymbolExportFlags,
+    /// Async and static execution modifiers.
+    #[serde(flatten)]
+    pub execution: SymbolExecutionFlags,
     /// Explicit declaration visibility.
     pub visibility: Option<Visibility>,
     /// Whitespace/comment-independent concrete-syntax digest.
@@ -155,13 +153,19 @@ impl CloneTokenProfile {
 pub struct SymbolHealthMetrics {
     /// Distinct source rows containing owned syntax, with comments and opaque literals collapsed.
     pub code_lines: u32,
+    /// Number of parameter entries.
     pub parameter_count: u16,
+    /// Cyclomatic-complexity score for the symbol.
     pub cyclomatic: u16,
+    /// Maximum control-flow nesting depth.
     pub max_nesting: u16,
+    /// Maximum operands observed in one conditional expression.
     pub max_conditional_operands: u16,
     /// Bytes covered by outermost string and numeric literals inside the symbol body.
     pub literal_bytes: u32,
+    /// Suspicious numeric literals not covered by a named-constant exemption.
     pub magic_numbers: u16,
+    /// Hardcoded URL literals found in executable code.
     pub hardcoded_urls: u16,
     /// Credential/PII handling confidence on a bounded integer 0-100 scale.
     pub secrets_score: u16,
@@ -169,21 +173,37 @@ pub struct SymbolHealthMetrics {
     pub secrets_signal_mask: u16,
     /// Count of documented numeric claims disjoint from a constant's current value.
     pub stale_doc_numbers: u16,
+    /// Nested-iteration patterns with a likely accidental quadratic cost.
     pub accidental_quadratic: u16,
+    /// Catch or rescue clauses with an empty body.
     pub empty_catches: u16,
+    /// Synchronous I/O calls made from an asynchronous declaration.
     pub sync_io_in_async: u16,
+    /// Loops that await each iteration sequentially.
     pub sequential_await_loops: u16,
+    /// TypeScript casts that explicitly erase a value to `any`.
     pub ts_any_casts: u16,
+    /// TypeScript diagnostic-suppression directives.
     pub ts_suppressions: u16,
+    /// Debug logging calls retained in the declaration.
     pub debug_logs: u16,
+    /// TODO-like incomplete-implementation markers.
     pub incomplete_markers: u16,
+    /// Dynamic code-evaluation calls.
     pub dynamic_eval: u16,
+    /// Uses of cryptographic hashes that are unsuitable for security decisions.
     pub insecure_hash: u16,
+    /// Uses of non-cryptographic randomness in security-sensitive shapes.
     pub insecure_random: u16,
+    /// HTTP client operations with no detected timeout.
     pub http_without_timeout: u16,
+    /// SQL statements assembled through string concatenation or interpolation.
     pub sql_string_concatenation: u16,
+    /// JSON parses whose result crosses a boundary without validation.
     pub unsafe_json_parse: u16,
+    /// Environment values consumed without detected validation.
     pub unvalidated_env: u16,
+    /// Declarations with an unexpectedly empty implementation body.
     pub empty_body: u16,
 }
 

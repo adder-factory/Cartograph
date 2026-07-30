@@ -96,12 +96,8 @@ pub(super) struct InstallArguments {
     /// Existing project root.
     #[arg(default_value = ".")]
     path: PathBuf,
-    /// Install only embedding and 3B chat models.
-    #[arg(long)]
-    minimal: bool,
-    /// Skip model downloads; useful when another provider manages its models.
-    #[arg(long)]
-    no_models: bool,
+    #[command(flatten)]
+    models: ModelInstallFlags,
     /// Model directory (defaults to ~/.cartograph/models).
     #[arg(long)]
     dir: Option<PathBuf>,
@@ -138,11 +134,21 @@ pub(super) struct InstallArguments {
 }
 
 #[derive(Debug, Args)]
+struct ModelInstallFlags {
+    /// Install only embedding and 3B chat models.
+    #[arg(long)]
+    minimal: bool,
+    /// Skip model downloads; useful when another provider manages its models.
+    #[arg(long)]
+    no_models: bool,
+}
+
+#[derive(Debug, Args)]
 pub(super) struct MigrateCredentialsArguments {
     /// Existing project root.
     #[arg(default_value = ".")]
     path: PathBuf,
-    /// Override a tier's target variable, for example summarize=MY_API_KEY.
+    /// Override a tier's target variable, for example `summarize=MY_API_KEY`.
     #[arg(long = "tier-env", value_parser = parse_tier_environment_override)]
     tier_environments: Vec<TierEnvironmentOverride>,
     /// Atomically rewrite credentials whose environment values match exactly.
@@ -833,7 +839,7 @@ fn prompt_preset(recommended: SetupPreset) -> Result<SetupPreset, String> {
     println!("  5) cloud-open-ai (use non-interactive tier/model flags)");
     println!("  6) custom OpenAI-compatible (use non-interactive flags)");
     println!("  7) skip");
-    print!("Choice [{:?}]: ", recommended);
+    print!("Choice [{recommended:?}]: ");
     io::stdout()
         .flush()
         .map_err(|_| "could not prompt for LLM setup".to_owned())?;
@@ -1143,7 +1149,7 @@ async fn run_install(arguments: InstallArguments) -> Result<ExitCode, String> {
     let report = InstallReport {
         models: model_state.models,
         config_written: model_state.config_written,
-        minimal: arguments.minimal,
+        minimal: arguments.models.minimal,
         database: database.kind,
         database_migrations_applied: database.migrations_applied,
         doctor,
@@ -1167,7 +1173,7 @@ fn prepare_install_project(arguments: &InstallArguments) -> Result<PathBuf, Stri
     }
     let mut state_fixes = Vec::new();
     let mut state_checks = Vec::new();
-    crate::check_or_fix_project_state(crate::ProjectStateCheckInput {
+    crate::check_or_fix_project_state(&mut crate::ProjectStateCheckInput {
         project_path: &project,
         fix: true,
         fixes: &mut state_fixes,
@@ -1232,14 +1238,14 @@ async fn prepare_install_models(
     arguments: &InstallArguments,
 ) -> Result<InstallModelState, String> {
     let directory = arguments.dir.clone().unwrap_or(default_models_directory()?);
-    let models = if arguments.no_models {
+    let models = if arguments.models.no_models {
         None
     } else {
         Some(
             install_recommended_models(
                 InstallModelsOptions::new(
                     directory.clone(),
-                    arguments.minimal,
+                    arguments.models.minimal,
                     arguments.concurrency,
                 )
                 .map_err(|error| error.to_string())?,
@@ -1248,9 +1254,9 @@ async fn prepare_install_models(
             .map_err(|error| error.to_string())?,
         )
     };
-    let config_written = !arguments.no_models;
+    let config_written = !arguments.models.no_models;
     if config_written {
-        let (inputs, cleared) = local_inputs_in(&directory, arguments.minimal)?;
+        let (inputs, cleared) = local_inputs_in(&directory, arguments.models.minimal)?;
         write_project_llm_configuration(project, &inputs, &cleared)
             .map_err(|error| error.to_string())?;
     }
@@ -1487,8 +1493,10 @@ mod tests {
     fn install_arguments() -> InstallArguments {
         InstallArguments {
             path: PathBuf::from("."),
-            minimal: false,
-            no_models: true,
+            models: ModelInstallFlags {
+                minimal: false,
+                no_models: true,
+            },
             dir: None,
             concurrency: 2,
             database_provider: None,

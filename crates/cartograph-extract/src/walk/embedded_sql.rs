@@ -191,33 +191,38 @@ fn scan_literals(
     builder: &mut ExtractionBuilder<'_, '_>,
     input: LiteralScanInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    input.budget.visits.observe(builder, input.depth)?;
+    let LiteralScanInput {
+        node,
+        depth,
+        lines,
+        budget,
+    } = input;
+    budget.visits.observe(builder, depth)?;
     let language = builder.context.snapshot.language();
-    if string_literal_node(input.node, language)
-        && !input
-            .node
+    if string_literal_node(node, language)
+        && !node
             .parent()
             .is_some_and(|parent| string_literal_node(parent, language))
-        && !contains_dynamic_fragment(input.node)
+        && !contains_dynamic_fragment(node)
     {
         scan_literal(
             builder,
             LiteralInput {
-                node: input.node,
-                lines: input.lines,
-                budget: input.budget,
+                node,
+                lines,
+                budget,
             },
         )?;
         return Ok(());
     }
-    for child in named_children(input.node) {
+    for child in named_children(node) {
         scan_literals(
             builder,
             LiteralScanInput {
                 node: child,
-                depth: input.depth.saturating_add(1),
-                lines: input.lines,
-                budget: &mut *input.budget,
+                depth: depth.saturating_add(1),
+                lines,
+                budget: &mut *budget,
             },
         )?;
     }
@@ -258,7 +263,12 @@ fn scan_literal(
     builder: &mut ExtractionBuilder<'_, '_>,
     input: LiteralInput<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let raw = builder.context.text(input.node);
+    let LiteralInput {
+        node,
+        lines,
+        budget,
+    } = input;
+    let raw = builder.context.text(node);
     let Some((content_start, content_end)) = literal_content_bounds(raw) else {
         return Ok(());
     };
@@ -276,16 +286,15 @@ fn scan_literal(
         return Ok(());
     }
     let hits = collect_hits(&tokens, content)?;
-    let owner = owner_for_node(builder, input.node);
+    let owner = owner_for_node(builder, node);
     let source_len = builder.context.source().len();
-    let base = input
-        .node
+    let base = node
         .start_byte()
         .checked_add(content_start)
         .ok_or(ExtractError::InvalidSpan)?;
     for hit in hits {
         builder.context.ensure_active()?;
-        input.budget.admit_reference()?;
+        budget.admit_reference()?;
         let start = base
             .checked_add(hit.start)
             .ok_or(ExtractError::InvalidSpan)?;
@@ -296,9 +305,7 @@ fn scan_literal(
             name: hit.name,
             resolution_name: Some(resolution_name),
             kind: ReferenceKind::References,
-            span: input
-                .lines
-                .span(SourceByteRange::new(start, end, source_len))?,
+            span: lines.span(SourceByteRange::new(start, end, source_len))?,
         })?;
     }
     Ok(())

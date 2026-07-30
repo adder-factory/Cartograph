@@ -38,6 +38,12 @@ pub struct FileSourceOptions {
 }
 
 impl FileSourceOptions {
+    /// Creates validated source-excerpt limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `line_limit` is zero or
+    /// exceeds the maximum returned source lines.
     pub const fn new(line_offset: u32, line_limit: u16) -> Result<Self, ProjectError> {
         if line_limit == 0 || line_limit > MAXIMUM_FILE_LINE_LIMIT {
             return Err(ProjectError::InvalidOptions);
@@ -66,6 +72,7 @@ pub struct FileSourceRequest {
 
 impl FileSourceRequest {
     #[must_use]
+    /// Creates a validated file source request.
     pub const fn new(path: NormalizedPath, options: FileSourceOptions) -> Self {
         Self { path, options }
     }
@@ -95,6 +102,7 @@ pub struct FileSourceContext {
 
 impl FileSourceContext {
     #[must_use]
+    /// Returns whether the live source still matches the indexed digest.
     pub const fn fresh(&self) -> bool {
         self.fresh
     }
@@ -116,6 +124,10 @@ impl SourceContextRequest {
 
 impl SourceContextOptions {
     /// Build symmetric surrounding-line and exact output-byte bounds.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `context_lines` is
+    /// excessive or `maximum_bytes` is outside the accepted excerpt range.
     pub const fn new(context_lines: u16, maximum_bytes: usize) -> Result<Self, ProjectError> {
         if context_lines > MAXIMUM_CONTEXT_LINES
             || maximum_bytes < MINIMUM_EXCERPT_BYTES
@@ -224,6 +236,11 @@ impl SymbolSourceContext {
 impl ProjectRuntime {
     /// Resolve one exact current-generation symbol and return bounded source only
     /// when the complete live checkout still matches that generation.
+    /// # Errors
+    ///
+    /// Returns an error when no stable current generation or exact symbol can
+    /// be read, the bounded live file cannot be captured safely, or generation
+    /// churn prevents a consistent result after the bounded retry.
     pub async fn source_context(
         &self,
         request: SourceContextRequest,
@@ -233,6 +250,11 @@ impl ProjectRuntime {
     }
 
     /// Resolve context while polling one caller-owned cancellation signal.
+    /// # Errors
+    ///
+    /// Returns an error when no stable current generation or exact symbol can
+    /// be read, the bounded live file cannot be captured safely, generation
+    /// churn exhausts the retry, or `cancellation` wins.
     pub async fn source_context_with_cancellation(
         &self,
         request: SourceContextRequest,
@@ -332,6 +354,11 @@ impl ProjectRuntime {
     }
 
     /// Read a bounded line window from one exact indexed file when source is current.
+    /// # Errors
+    ///
+    /// Returns an error when no stable current generation or exact file can be
+    /// read, the bounded live file cannot be captured safely, generation churn
+    /// exhausts the retry, or `cancellation` wins.
     pub async fn file_source_with_cancellation(
         &self,
         request: FileSourceRequest,
@@ -366,14 +393,12 @@ impl ProjectRuntime {
                 Ok(None) if self.generation_is_current(&before).await? => {
                     return Err(ProjectError::FileNotFound);
                 }
-                Ok(None) if attempt + 1 < SOURCE_CONTEXT_ATTEMPTS => continue,
-                Ok(None) => return Err(ProjectError::SourceContextUnavailable),
-                Err(StorageError::CurrentGenerationChanged)
+                Ok(None) | Err(StorageError::CurrentGenerationChanged)
                     if attempt + 1 < SOURCE_CONTEXT_ATTEMPTS =>
                 {
                     continue;
                 }
-                Err(_) => return Err(ProjectError::SourceContextUnavailable),
+                Ok(None) | Err(_) => return Err(ProjectError::SourceContextUnavailable),
             };
             let source = self
                 .scan_source(Some(path.clone()), cancellation.clone())
@@ -474,6 +499,7 @@ fn extract_file_excerpt(
     })
 }
 
+#[derive(Clone, Copy)]
 struct ExcerptRequest<'source> {
     source: &'source str,
     symbol_start: u32,

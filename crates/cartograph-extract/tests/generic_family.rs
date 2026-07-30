@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::SourceLanguage;
 use cartograph_extract::{NativeExtractor, NativeGrammar, SourceLimits, SourceSnapshot};
 
@@ -309,8 +313,8 @@ fn syntax_tree(fixture: &Fixture) -> String {
     parser
         .set_language(&grammar.language())
         .unwrap_or_else(|error| panic!("{} grammar failed: {error}", fixture.path));
-    parser
-        .parse(fixture.source, None)
-        .map(|tree| tree.root_node().to_sexp())
-        .unwrap_or_else(|| "<parser stopped>".to_owned())
+    parser.parse(fixture.source, None).map_or_else(
+        || "<parser stopped>".to_owned(),
+        |tree| tree.root_node().to_sexp(),
+    )
 }

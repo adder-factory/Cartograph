@@ -11,6 +11,8 @@ if [[ -z "$TARGET" || -z "$ASSET_TARGET" ]]; then
   exit 2
 fi
 
+cd "$ROOT"
+
 case "$TARGET:$ASSET_TARGET" in
   aarch64-apple-darwin:darwin-arm64)
     if [[ -n "${MACOSX_DEPLOYMENT_TARGET:-}" && "$MACOSX_DEPLOYMENT_TARGET" != 26.0 ]]; then
@@ -32,7 +34,11 @@ STAGE_NAME="cartograph-$ASSET_TARGET"
 STAGE="$STAGING_ROOT/$STAGE_NAME"
 ARCHIVE="$RELEASE_DIR/$STAGE_NAME.tar.gz"
 DIRECT="$RELEASE_DIR/$STAGE_NAME"
-BINARY="$ROOT/target/$TARGET/release/cartograph"
+TARGET_ROOT="${CARGO_TARGET_DIR:-target}"
+if [[ "$TARGET_ROOT" != /* ]]; then
+  TARGET_ROOT="$ROOT/$TARGET_ROOT"
+fi
+BINARY="$TARGET_ROOT/$TARGET/release/cartograph"
 
 # Rust panic locations and vendored C/C++ grammar diagnostics retain source
 # paths unless both toolchains are remapped. The archive audit below verifies

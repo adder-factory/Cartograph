@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use cartograph_db::{
@@ -29,6 +28,12 @@ pub struct LcovLoadOptions {
 }
 
 impl LcovLoadOptions {
+    /// Creates validated LCOV ingestion limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoverageError::InvalidOptions`] when no report path is supplied
+    /// or the source label is empty, oversized, or contains NUL.
     pub fn new(
         report_paths: Vec<PathBuf>,
         source: impl Into<String>,
@@ -63,29 +68,44 @@ pub struct LcovLoadReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CoverageError {
     #[error("coverage options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("coverage project root is unavailable")]
+    /// The project root could not be resolved or read safely.
     ProjectRootUnavailable,
     #[error("coverage report was not found inside the project")]
+    /// The requested coverage report path does not exist.
     ReportNotFound,
     #[error("coverage report exceeds the byte limit")]
+    /// The coverage report exceeds its declared byte ceiling.
     ReportTooLarge,
     #[error("coverage report is malformed or exceeds structural limits")]
+    /// The coverage report violates the accepted LCOV grammar or bounds.
     InvalidReport,
     #[error("coverage operation was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
     #[error("no conventional LCOV report was found")]
+    /// Automatic discovery found no supported coverage report.
     NoReportFound,
     #[error("the current generation has no symbols")]
+    /// No complete current generation is available for this operation.
     CurrentGenerationUnavailable,
     #[error("LCOV paths did not match current indexed source")]
+    /// No current symbols overlap the admitted coverage records.
     NoMatchingSymbols,
     #[error("coverage persistence failed")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
 }
 
 impl ProjectRuntime {
     /// Load one or more explicit LCOV reports, joining symbol spans in parallel.
+    /// # Errors
+    ///
+    /// Returns an error when cancellation wins; a report path is missing,
+    /// outside the project, oversized, or malformed; no current generation or
+    /// matching symbols exist; or coverage storage cannot be read or replaced.
     pub async fn load_lcov(
         &self,
         options: LcovLoadOptions,
@@ -116,10 +136,10 @@ impl ProjectRuntime {
             .ok_or(CoverageError::CurrentGenerationUnavailable)?;
         let report_files = parsed.lines.len();
         let line_observations = parsed.lines.values().map(BTreeMap::len).sum::<usize>();
-        let data = Arc::new(parsed.lines);
+        let data = parsed.lines;
         let join_cancellation = cancellation.clone();
         let facts = tokio::task::spawn_blocking(move || {
-            join_targets_parallel(targets, data, join_cancellation)
+            join_targets_parallel(&targets, &data, &join_cancellation)
         })
         .await
         .map_err(|_| CoverageError::StorageUnavailable)??;
@@ -160,12 +180,17 @@ impl ProjectRuntime {
     }
 
     /// Discover conventional root/workspace LCOV paths and load them as one source.
+    /// # Errors
+    ///
+    /// Returns an error when no conventional report exists, the source label or
+    /// discovered report is invalid, cancellation wins, no current matching
+    /// symbols exist, or coverage storage cannot be read or replaced.
     pub async fn refresh_lcov(
         &self,
         source: impl Into<String>,
         cancellation: ProjectCancellation,
     ) -> Result<LcovLoadReport, CoverageError> {
-        let paths = discover_reports(&self.root)?;
+        let paths = discover_reports(&self.root);
         if paths.is_empty() {
             return Err(CoverageError::NoReportFound);
         }
@@ -335,24 +360,19 @@ fn normalize_lcov_path(root: &Path, raw: &str) -> Option<NormalizedPath> {
 }
 
 fn join_targets_parallel(
-    targets: Vec<CoverageTarget>,
-    data: Arc<BTreeMap<NormalizedPath, BTreeMap<u32, u64>>>,
-    cancellation: ProjectCancellation,
+    targets: &[CoverageTarget],
+    data: &BTreeMap<NormalizedPath, BTreeMap<u32, u64>>,
+    cancellation: &ProjectCancellation,
 ) -> Result<Vec<SymbolCoverageFact>, CoverageError> {
     let workers = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(1)
+        .map_or(1, std::num::NonZero::get)
         .min(MAX_COVERAGE_WORKERS)
         .min(targets.len().max(1));
     let chunk_size = targets.len().div_ceil(workers).max(1);
     let chunks = std::thread::scope(|scope| {
         targets
             .chunks(chunk_size)
-            .map(|chunk| {
-                let data = data.clone();
-                let cancellation = cancellation.clone();
-                scope.spawn(move || join_target_chunk(chunk, &data, &cancellation))
-            })
+            .map(|chunk| scope.spawn(move || join_target_chunk(chunk, data, cancellation)))
             .collect::<Vec<_>>()
             .into_iter()
             .map(|handle| {
@@ -394,7 +414,7 @@ fn join_target_chunk(
     Ok(facts)
 }
 
-fn discover_reports(root: &Path) -> Result<Vec<PathBuf>, CoverageError> {
+fn discover_reports(root: &Path) -> Vec<PathBuf> {
     let candidates = [
         root.join("coverage/lcov.info"),
         root.join("lcov.info"),
@@ -415,7 +435,7 @@ fn discover_reports(root: &Path) -> Result<Vec<PathBuf>, CoverageError> {
             }
         }
     }
-    Ok(reports.into_iter().collect())
+    reports.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -456,11 +476,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("coverage directory failed: {error}"));
         std::fs::write(directory.path().join("coverage/lcov.info"), "TN:\n")
             .unwrap_or_else(|error| panic!("coverage fixture failed: {error}"));
-        assert_eq!(
-            discover_reports(directory.path())
-                .unwrap_or_else(|error| panic!("discovery failed: {error}"))
-                .len(),
-            1
-        );
+        assert_eq!(discover_reports(directory.path()).len(), 1);
     }
 }

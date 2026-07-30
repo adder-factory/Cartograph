@@ -1,5 +1,8 @@
 //! PostgreSQL-only persistence and capability checks for Cartograph v2.
 
+#[cfg(test)]
+use cartograph_test_support as _;
+
 mod adhoc;
 mod artifacts;
 mod capabilities;
@@ -123,13 +126,15 @@ pub use managed::{
     DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedBackupReport,
     ManagedContainerState, ManagedDatabase, ManagedDatabaseArchives, ManagedDatabaseError,
     ManagedDatabaseLifecycle, ManagedDatabaseMaintenance, ManagedDatabaseStatus,
-    ManagedDerivedIndexHealth, ManagedDestructiveConfirmation, ManagedDestructiveOperation,
-    ManagedRemoveReport, ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
+    ManagedDerivedIndexAvailability, ManagedDerivedIndexHealth, ManagedDestructiveConfirmation,
+    ManagedDestructiveOperation, ManagedRemoveReport, ManagedRestoreReport, ManagedStartReport,
+    ManagedUpgradeReport,
 };
 pub use migrations::{MigrationError, MigrationReport};
 pub use parse_cache::{
-    MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheError, NativeParseCacheKey,
-    NativeParseCacheKeyInput, NativeParseCacheRecord, NativeParseCacheRetentionPolicy,
+    MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheBudgetPressure, NativeParseCacheError,
+    NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheRecord,
+    NativeParseCacheRetentionCapacity, NativeParseCacheRetentionPolicy,
     NativeParseCacheRetentionPolicyInput, NativeParseCacheRetentionReport,
     NativeParseCacheRetentionRequest, NativeParseCacheStats, NativeParseCacheWrite,
 };
@@ -189,6 +194,10 @@ pub use v1_import::{
 };
 
 /// Connect to the configured PostgreSQL database with a bounded pool.
+/// # Errors
+///
+/// Returns an error if the redacted connection URL is invalid, the bounded
+/// pool cannot connect, or per-connection timeout/session setup fails.
 pub async fn connect(settings: &DatabaseSettings) -> Result<PgPool, DatabaseError> {
     let mut options = PgConnectOptions::from_str(settings.url().expose_secret())
         .map_err(|_| DatabaseError::InvalidConnectionOptions)?

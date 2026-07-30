@@ -136,6 +136,7 @@ pub struct FuzzyNameRequest {
 
 impl FuzzyNameRequest {
     #[must_use]
+    /// Creates a validated fuzzy name request.
     pub const fn new(project_id: ProjectId, query: LexicalQuery, edit_distance: u8) -> Self {
         Self {
             project_id,
@@ -154,6 +155,7 @@ pub struct GenerationLexicalRequest {
 
 impl GenerationLexicalRequest {
     #[must_use]
+    /// Creates a validated generation lexical request.
     pub const fn new(
         project_id: ProjectId,
         expected_generation_id: GenerationId,
@@ -181,6 +183,10 @@ impl DeterministicRetriever {
     }
 
     /// Exact fully qualified declaration-name lookup in the published generation.
+    /// # Errors
+    ///
+    /// Returns an error if the current-generation lookup fails or the database
+    /// cannot decode the exact-name symbol records.
     pub async fn exact_name(
         &self,
         project_id: &ProjectId,
@@ -197,6 +203,10 @@ impl DeterministicRetriever {
     }
 
     /// Exact canonical-path lookup with source-ordered declarations.
+    /// # Errors
+    ///
+    /// Returns an error if the generation, file, or source-ordered symbol read
+    /// fails while resolving the canonical path.
     pub async fn exact_path(
         &self,
         project_id: &ProjectId,
@@ -240,6 +250,10 @@ impl DeterministicRetriever {
     }
 
     /// List a bounded current-generation file inventory with optional directory/language filters.
+    /// # Errors
+    ///
+    /// Returns an error if the inventory filters cannot be applied to a stable
+    /// current generation or the backing file query fails.
     pub async fn files(
         &self,
         project_id: &ProjectId,
@@ -249,6 +263,10 @@ impl DeterministicRetriever {
     }
 
     /// Discover typed routes, commands, MCP tools, CLI declarations, and public API boundaries.
+    /// # Errors
+    ///
+    /// Returns an error if entry-point evidence cannot be read from one stable
+    /// generation or a returned bucket violates its bounds.
     pub async fn entry_points(
         &self,
         project_id: &ProjectId,
@@ -258,6 +276,10 @@ impl DeterministicRetriever {
     }
 
     /// Resolve the smallest current-generation symbols overlapping one exact source range.
+    /// # Errors
+    ///
+    /// Returns an error if the file/range lookup fails, the generation changes
+    /// during the read, or overlapping symbols cannot be decoded.
     pub async fn symbols_at_range(
         &self,
         project_id: &ProjectId,
@@ -267,6 +289,10 @@ impl DeterministicRetriever {
     }
 
     /// Find a bounded shortest outgoing dependency path under one generation fence.
+    /// # Errors
+    ///
+    /// Returns an error if either endpoint is unavailable, a graph read fails,
+    /// or the generation changes while assembling the bounded path.
     pub async fn path(
         &self,
         request: &GraphPathRequest,
@@ -275,6 +301,10 @@ impl DeterministicRetriever {
     }
 
     /// Find model-scoped symbol neighbors from a stored current-generation vector.
+    /// # Errors
+    ///
+    /// Returns an error if semantic readiness fails, the requested model or
+    /// source symbol is unavailable, or the bounded vector query times out.
     pub async fn similar(
         &self,
         request: &SimilarRequest,
@@ -283,6 +313,10 @@ impl DeterministicRetriever {
     }
 
     /// Exact source-reference lookup, including unresolved reference evidence.
+    /// # Errors
+    ///
+    /// Returns an error if the current-generation lookup fails or the database
+    /// cannot decode the exact reference records.
     pub async fn exact_reference(
         &self,
         project_id: &ProjectId,
@@ -298,7 +332,11 @@ impl DeterministicRetriever {
         exact_records_at::<ExactReferenceLookup>(&self.database, input).await
     }
 
-    /// Current-generation ParadeDB BM25 with ordered field provenance.
+    /// Current-generation `ParadeDB` BM25 with ordered field provenance.
+    /// # Errors
+    ///
+    /// Returns an error if the current generation cannot be read or `ParadeDB`
+    /// rejects or cannot execute the bounded code query.
     pub async fn bm25(
         &self,
         project_id: ProjectId,
@@ -315,7 +353,11 @@ impl DeterministicRetriever {
         .await
     }
 
-    /// Current-generation ParadeDB fuzzy name search with explicit edit distance.
+    /// Current-generation `ParadeDB` fuzzy name search with explicit edit distance.
+    /// # Errors
+    ///
+    /// Returns an error if the current generation cannot be read or `ParadeDB`
+    /// cannot execute the requested bounded edit-distance search.
     pub async fn fuzzy_name(
         &self,
         request: FuzzyNameRequest,
@@ -340,7 +382,11 @@ impl DeterministicRetriever {
             .map_err(Into::into)
     }
 
-    /// Current-generation ParadeDB name-only search.
+    /// Current-generation `ParadeDB` name-only search.
+    /// # Errors
+    ///
+    /// Returns an error if the current generation cannot be read or `ParadeDB`
+    /// cannot execute the bounded name-field query.
     pub async fn name(
         &self,
         project_id: ProjectId,
@@ -353,7 +399,11 @@ impl DeterministicRetriever {
         .await
     }
 
-    /// Current-generation ParadeDB natural-language intent search.
+    /// Current-generation `ParadeDB` natural-language intent search.
+    /// # Errors
+    ///
+    /// Returns an error if the current generation cannot be read or `ParadeDB`
+    /// cannot execute the natural-language intent query.
     pub async fn intent(
         &self,
         project_id: ProjectId,
@@ -378,6 +428,10 @@ impl DeterministicRetriever {
     }
 
     /// Adapt current BM25 results into a channel that can run concurrently with semantics.
+    /// # Errors
+    ///
+    /// Returns an error if BM25 retrieval fails or a returned hit cannot be
+    /// represented as a bounded lexical channel candidate.
     pub async fn lexical_channel(
         &self,
         project_id: ProjectId,
@@ -388,6 +442,10 @@ impl DeterministicRetriever {
     }
 
     /// Adapt BM25 results while fencing the read to one caller-observed generation.
+    /// # Errors
+    ///
+    /// Returns an error if the fenced BM25 read fails or a returned hit cannot
+    /// be represented as a bounded lexical channel candidate.
     pub async fn lexical_channel_for_generation(
         &self,
         request: GenerationLexicalRequest,
@@ -403,6 +461,10 @@ impl DeterministicRetriever {
     }
 
     /// Follow incoming `calls` edges to discover bounded callers.
+    /// # Errors
+    ///
+    /// Returns an error if the root or current generation is unavailable, a
+    /// caller-edge read fails, or the generation changes during traversal.
     pub async fn callers(
         &self,
         request: &TraversalRequest,
@@ -416,6 +478,10 @@ impl DeterministicRetriever {
     }
 
     /// Follow outgoing `calls` edges to discover bounded callees.
+    /// # Errors
+    ///
+    /// Returns an error if the root or current generation is unavailable, a
+    /// callee-edge read fails, or the generation changes during traversal.
     pub async fn callees(
         &self,
         request: &TraversalRequest,
@@ -429,6 +495,10 @@ impl DeterministicRetriever {
     }
 
     /// Follow incoming and outgoing dependency edges under one generation fence.
+    /// # Errors
+    ///
+    /// Returns an error if either directional traversal fails or both results
+    /// cannot be reconciled under the same generation fence.
     pub async fn both(
         &self,
         request: &TraversalRequest,
@@ -437,6 +507,10 @@ impl DeterministicRetriever {
     }
 
     /// Follow incoming dependency relations to estimate a bounded impact cone.
+    /// # Errors
+    ///
+    /// Returns an error if the root or current generation is unavailable, an
+    /// incoming dependency read fails, or the generation changes mid-query.
     pub async fn impact(
         &self,
         request: &TraversalRequest,
@@ -450,6 +524,10 @@ impl DeterministicRetriever {
     }
 
     /// Discover test files/symbols in a bounded reverse impact cone.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is invalid, reverse traversal fails, or the
+    /// discovered test evidence cannot be bounded under one generation.
     pub async fn affected_tests(
         &self,
         request: &TraversalRequest,
@@ -460,6 +538,10 @@ impl DeterministicRetriever {
 
     /// Assemble compact exact, BM25, graph, and affected-test evidence without
     /// invoking any model or external service.
+    /// # Errors
+    ///
+    /// Returns an error if an exact, lexical, graph, or affected-test read
+    /// fails, or packet evidence violates the request's hard bounds.
     pub async fn context_packet(
         &self,
         request: &ContextRequest,
@@ -468,6 +550,10 @@ impl DeterministicRetriever {
     }
 
     /// Assemble exact/graph/test evidence around caller-precomputed lexical and semantic channels.
+    /// # Errors
+    ///
+    /// Returns an error if the supplied channels are inconsistent or an exact,
+    /// graph, affected-test, or packet-assembly operation fails.
     pub async fn context_packet_with_channels(
         &self,
         request: &ContextRequest,
@@ -478,6 +564,10 @@ impl DeterministicRetriever {
 
     /// Assemble exact changed-file, reverse-impact, and affected-test evidence
     /// for a deterministic compare-to-ref workflow.
+    /// # Errors
+    ///
+    /// Returns an error if changed-file lookup, reverse-impact traversal,
+    /// affected-test discovery, or bounded review assembly fails.
     pub async fn review_packet(
         &self,
         request: &ReviewRequest,
@@ -680,7 +770,7 @@ async fn retrieve_graph_path(
             }));
         };
         match run_graph_path(database, request, generation.generation_id()).await {
-            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            Err(error) if attempt == 0 && is_generation_changed(&error) => {}
             result => return result,
         }
     }
@@ -707,7 +797,7 @@ async fn retrieve_similar_symbols(
             statement_timeout: SEMANTIC_READ_TIMEOUT,
         })?;
         match database.similar_current_symbols(database_request).await {
-            Err(SemanticStorageError::CurrentGenerationChanged) if attempt == 0 => continue,
+            Err(SemanticStorageError::CurrentGenerationChanged) if attempt == 0 => {}
             Err(error) => return Err(error.into()),
             Ok(result) => return Ok(result),
         }
@@ -748,7 +838,7 @@ async fn retrieve_bidirectional_traversal(
             ),
         );
         match traversals {
-            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            Err(error) if attempt == 0 && is_generation_changed(&error) => {}
             Err(error) => return Err(error),
             Ok((incoming, outgoing)) => {
                 return Ok(BidirectionalTraversalResult::new(incoming, outgoing));
@@ -797,7 +887,7 @@ async fn retrieve_traversal_with_retry(
         )
         .await
         {
-            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            Err(error) if attempt == 0 && is_generation_changed(&error) => {}
             result => return result,
         }
     }
@@ -984,6 +1074,9 @@ fn lexical_candidate(hit: &SearchHit, index: usize) -> Result<ChannelCandidate, 
     if let Some(symbol_id) = hit.symbol_id() {
         document = document.with_symbol_id(symbol_id.clone());
     }
+    if let Some(symbol_kind) = hit.symbol_kind() {
+        document = document.with_symbol_kind(symbol_kind);
+    }
     let document = document.with_qualified_name(hit.qualified_name())?;
     let components = hit
         .components()
@@ -1015,6 +1108,7 @@ const fn lexical_component(component: SearchComponent) -> LexicalComponent {
     }
 }
 
+#[derive(Clone, Copy)]
 struct DiscoveryStep<'expansion> {
     depth: u8,
     direction: TraversalDirection,
@@ -1401,7 +1495,7 @@ async fn build_context_packet_with_retry(
             None
         };
         match build_context_packet(retriever, request, channels).await {
-            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            Err(error) if attempt == 0 && is_generation_changed(&error) => {}
             result => return result,
         }
     }
@@ -1437,6 +1531,7 @@ async fn build_context_packet(
             request.semantic_readiness(),
             request.budget().candidate_limit(),
         )?
+        .with_preference(request.intent().retrieval_preference(request.query()))
         .with_channels(channels),
     )?;
     collect_retrieval_evidence(&retrieval, &mut state);
@@ -1495,11 +1590,14 @@ fn empty_context_assembly(
 fn empty_context_retrieval(
     request: &ContextRequest,
 ) -> Result<crate::HybridSearchPacket, RetrievalError> {
-    fuse_search(HybridSearchInput::new(
-        request.search_mode(),
-        request.semantic_readiness(),
-        request.budget().candidate_limit(),
-    )?)
+    fuse_search(
+        HybridSearchInput::new(
+            request.search_mode(),
+            request.semantic_readiness(),
+            request.budget().candidate_limit(),
+        )?
+        .with_preference(request.intent().retrieval_preference(request.query())),
+    )
 }
 
 async fn collect_anchor_evidence(
@@ -1588,7 +1686,7 @@ async fn resolve_context_channels(
     if let Some(channels) = precomputed {
         return Ok(channels);
     }
-    let query = LexicalQuery::new(
+    let query = LexicalQuery::for_code_search(
         input.request.query(),
         input.request.budget().candidate_limit(),
     )?;
@@ -1929,7 +2027,7 @@ async fn build_review_packet_with_retry(
 ) -> Result<ReviewPacket, RetrievalError> {
     for attempt in 0..GENERATION_ATTEMPTS {
         match build_review_packet(retriever, request).await {
-            Err(error) if attempt == 0 && is_generation_changed(&error) => continue,
+            Err(error) if attempt == 0 && is_generation_changed(&error) => {}
             result => return result,
         }
     }
@@ -1982,13 +2080,11 @@ async fn build_review_packet(
         evidence: state.evidence,
         affected_tests: graph.affected_tests,
         evidence_limit: request.budget().evidence_limit(),
-        truncation: ReviewTruncation {
-            changed_files: request.changed_files_truncated(),
-            symbol_roots: state.symbol_roots_truncated,
-            graph: graph.graph_truncated,
-            affected_tests: graph.affected_tests_truncated,
-            evidence: false,
-        },
+        truncation: ReviewTruncation::default()
+            .with_changed_files_truncation(request.changed_files_truncated())
+            .with_symbol_roots_truncation(state.symbol_roots_truncated)
+            .with_graph_truncation(graph.graph_truncated)
+            .with_affected_tests_truncation(graph.affected_tests_truncated),
     }))
 }
 
@@ -2001,10 +2097,8 @@ fn empty_review_assembly(request: &ReviewRequest) -> ReviewAssembly {
         evidence: Vec::new(),
         affected_tests: Vec::new(),
         evidence_limit: request.budget().evidence_limit(),
-        truncation: ReviewTruncation {
-            changed_files: request.changed_files_truncated(),
-            ..ReviewTruncation::default()
-        },
+        truncation: ReviewTruncation::default()
+            .with_changed_files_truncation(request.changed_files_truncated()),
     }
 }
 
@@ -2160,10 +2254,10 @@ mod tests {
 
     #[test]
     fn caller_callee_and_architecture_requests_select_only_declared_directions() {
-        let callers = context_request("trace callers of publish_generation")
+        let incoming_graph_request = context_request("trace callers of publish_generation")
             .with_intent(TaskIntent::ImplementationTrace);
         assert_eq!(
-            callers.graph_direction(),
+            incoming_graph_request.graph_direction(),
             Some(ContextGraphDirection::Callers)
         );
         assert_eq!(
@@ -2171,9 +2265,9 @@ mod tests {
             &[TraversalDirection::Incoming]
         );
 
-        let callees = context_request("trace what publish_generation calls");
+        let outgoing_graph_request = context_request("trace what publish_generation calls");
         assert_eq!(
-            callees.graph_direction(),
+            outgoing_graph_request.graph_direction(),
             Some(ContextGraphDirection::Callees)
         );
         assert_eq!(
@@ -2197,7 +2291,9 @@ mod tests {
         let strongest_anchor = symbol_id(u32::MAX);
         let mut roots = OrderedRoots::default();
         roots.insert(strongest_anchor.clone());
-        for index in 0..MAX_CONTEXT_ROOTS as u32 {
+        let root_count = u32::try_from(MAX_CONTEXT_ROOTS)
+            .unwrap_or_else(|error| panic!("context-root bound does not fit u32: {error}"));
+        for index in 0..root_count {
             roots.insert(symbol_id(index));
         }
         let (bounded, truncated) = bound_context_roots(roots.into_values());

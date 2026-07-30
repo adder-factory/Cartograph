@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{SourceLanguage, SymbolKind};
 use cartograph_extract::{
     EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, NativeExtractor, SourceLimits, SourceSnapshot,

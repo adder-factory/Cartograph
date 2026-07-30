@@ -120,9 +120,9 @@ fn collect_receivers<'source>(
     Ok(receivers)
 }
 
-fn scan_receiver_calls<'source>(
+fn scan_receiver_calls(
     builder: &mut FrameworkBuilder<'_, '_>,
-    input: ReceiverScan<'_, 'source>,
+    input: ReceiverScan<'_, '_>,
 ) -> Result<(), ExtractError> {
     let ReceiverScan {
         source,

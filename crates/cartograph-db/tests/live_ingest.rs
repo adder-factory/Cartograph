@@ -1,3 +1,7 @@
+//! Live PostgreSQL integration coverage for Cartograph storage contracts.
+
+mod dependency_ownership;
+
 use std::{
     env, process,
     sync::atomic::{AtomicU32, Ordering},
@@ -253,10 +257,9 @@ struct DatabaseFixture {
 }
 
 async fn open_fixture() -> DatabaseFixture {
-    let database_url = match env::var(TEST_DATABASE_URL_ENV) {
-        Ok(database_url) => database_url,
-        Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
-    };
+    let database_url = env::var(TEST_DATABASE_URL_ENV).unwrap_or_else(|error| {
+        panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test: {error}")
+    });
     let schema = format!(
         "cartograph_ingest_it_{}_{}",
         process::id(),
@@ -527,10 +530,8 @@ fn symbol_one() -> SymbolInput {
         end_line: 4,
         structural_digest: digest(STRUCTURAL_HASH_ONE),
         visibility: None,
-        exported: true,
-        default_export: false,
-        async_symbol: false,
-        static_member: false,
+        export: cartograph_domain::SymbolExportFlags::named(true),
+        execution: cartograph_domain::SymbolExecutionFlags::default(),
         declaration_only: false,
         betweenness_ppb: None,
         pagerank_ppb: None,
@@ -550,10 +551,8 @@ fn symbol_two() -> SymbolInput {
         end_line: SYMBOL_TWO_END_LINE,
         structural_digest: digest(STRUCTURAL_HASH_TWO),
         visibility: None,
-        exported: false,
-        default_export: false,
-        async_symbol: false,
-        static_member: false,
+        export: cartograph_domain::SymbolExportFlags::default(),
+        execution: cartograph_domain::SymbolExecutionFlags::default(),
         declaration_only: false,
         betweenness_ppb: None,
         pagerank_ppb: None,
@@ -593,9 +592,10 @@ fn canonical(facts: GenerationFacts) -> CanonicalGenerationFacts {
         TEST_VALIDATION_WORKING_BYTES,
     )
     .unwrap_or_else(|error| panic!("ingest validation limits were invalid: {error}"));
-    validate_generation_facts(facts, limits, || false)
-        .map(|(facts, _)| facts)
-        .unwrap_or_else(|error| panic!("ingest fixture was invalid: {error}"))
+    validate_generation_facts(facts, limits, || false).map_or_else(
+        |error| panic!("ingest fixture was invalid: {error}"),
+        |(facts, _)| facts,
+    )
 }
 
 fn document_one(reordered_metadata: bool) -> SearchDocumentInput {

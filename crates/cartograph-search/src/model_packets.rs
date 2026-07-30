@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fmt};
 
 use cartograph_domain::{ContentDigest, GenerationId, NormalizedPath, ProjectId};
-use serde::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use super::{
     AffectedTest, ContextGraphDirection, DEFAULT_REVIEW_AFFECTED_TESTS, DEFAULT_REVIEW_EVIDENCE,
@@ -72,9 +72,13 @@ pub enum ContextAbstention {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkingTreeChangeKind {
+    /// A path was added to the working tree.
     Added,
+    /// A tracked path's contents changed.
     Modified,
+    /// A tracked path changed filesystem type.
     TypeChanged,
+    /// A path is not tracked by Git.
     Untracked,
 }
 
@@ -108,17 +112,28 @@ pub struct WorkingTreeEvidence {
 
 /// Validated input for one bounded live-source overlay result.
 pub struct WorkingTreeEvidenceInput {
+    /// Project-relative path for this record.
     pub path: NormalizedPath,
+    /// Change kind for this record.
     pub change_kind: WorkingTreeChangeKind,
+    /// Digest-fenced content digest for this record.
     pub content_digest: ContentDigest,
+    /// One-based starting source line.
     pub start_line: u32,
+    /// One-based ending source line.
     pub end_line: u32,
+    /// Excerpt for this record.
     pub excerpt: String,
+    /// Bounded matched terms included in this result.
     pub matched_terms: Vec<String>,
 }
 
 impl WorkingTreeEvidence {
     /// Validate one live excerpt before it crosses the agent-facing boundary.
+    /// # Errors
+    ///
+    /// Returns an error if the line span is invalid, the excerpt is empty or
+    /// oversized, or matched terms are empty, oversized, or out of bounds.
     pub fn new(input: WorkingTreeEvidenceInput) -> Result<Self, RetrievalError> {
         if invalid_working_tree_evidence(&input) {
             return Err(invalid("working_tree_evidence"));
@@ -183,10 +198,15 @@ pub struct WorkingTreeOverlay {
 
 /// Validated aggregate counts and evidence for one completed overlay scan.
 pub struct WorkingTreeOverlayInput {
+    /// Number of changed file entries.
     pub changed_file_count: usize,
+    /// Number of considered file entries.
     pub considered_file_count: usize,
+    /// Number of unreadable file entries.
     pub unreadable_file_count: usize,
+    /// Bounded files included in this result.
     pub files: Vec<WorkingTreeEvidence>,
+    /// Whether additional matching evidence was omitted.
     pub truncated: bool,
 }
 
@@ -229,6 +249,10 @@ impl WorkingTreeOverlay {
     }
 
     /// Build a completed bounded scan, deriving `used` versus `no_matches`.
+    /// # Errors
+    ///
+    /// Returns an error if the aggregate counts are inconsistent, no changed
+    /// files were reported, or the evidence list exceeds its hard limit.
     pub fn completed(input: WorkingTreeOverlayInput) -> Result<Self, RetrievalError> {
         if input.changed_file_count == 0
             || input.considered_file_count > input.changed_file_count
@@ -443,6 +467,10 @@ impl Default for ReviewBudgetInput {
 
 impl ReviewBudget {
     /// Build a fully bounded review budget.
+    /// # Errors
+    ///
+    /// Returns an error if any per-file, root, evidence, or affected-test
+    /// limit is zero or exceeds its review hard limit.
     pub fn new(input: ReviewBudgetInput) -> Result<Self, RetrievalError> {
         validate_review_budget(&input)?;
         Ok(input.into())
@@ -532,6 +560,10 @@ impl ReviewRequestOptions {
 
 impl ReviewRequest {
     /// Validate, deduplicate, and sort changed paths before database work.
+    /// # Errors
+    ///
+    /// Returns an error if the number of distinct changed paths exceeds the
+    /// maximum supported by one review request.
     pub fn new(
         project_id: Option<ProjectId>,
         changed_paths: impl IntoIterator<Item = NormalizedPath>,
@@ -601,59 +633,97 @@ pub enum ReviewAbstention {
 }
 
 /// Per-stage review bounds that omitted candidates.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReviewTruncation {
-    pub(crate) changed_files: bool,
-    pub(crate) symbol_roots: bool,
-    pub(crate) graph: bool,
-    pub(crate) affected_tests: bool,
-    pub(crate) evidence: bool,
+    truncated_stages: u8,
 }
 
 impl ReviewTruncation {
+    const CHANGED_FILES: u8 = 1 << 0;
+    const SYMBOL_ROOTS: u8 = 1 << 1;
+    const GRAPH: u8 = 1 << 2;
+    const AFFECTED_TESTS: u8 = 1 << 3;
+    const EVIDENCE: u8 = 1 << 4;
+
+    const fn with_stage(mut self, stage: u8, truncated: bool) -> Self {
+        if truncated {
+            self.truncated_stages |= stage;
+        } else {
+            self.truncated_stages &= !stage;
+        }
+        self
+    }
+
+    pub(crate) const fn with_changed_files_truncation(self, truncated: bool) -> Self {
+        self.with_stage(Self::CHANGED_FILES, truncated)
+    }
+
+    pub(crate) const fn with_symbol_roots_truncation(self, truncated: bool) -> Self {
+        self.with_stage(Self::SYMBOL_ROOTS, truncated)
+    }
+
+    pub(crate) const fn with_graph_truncation(self, truncated: bool) -> Self {
+        self.with_stage(Self::GRAPH, truncated)
+    }
+
+    pub(crate) const fn with_affected_tests_truncation(self, truncated: bool) -> Self {
+        self.with_stage(Self::AFFECTED_TESTS, truncated)
+    }
+
     pub(crate) const fn with_evidence(mut self, evidence: bool) -> Self {
-        self.evidence = evidence;
+        self = self.with_stage(Self::EVIDENCE, evidence);
         self
     }
 
     /// Whether the changed-file bound omitted paths.
     #[must_use]
     pub const fn changed_files(self) -> bool {
-        self.changed_files
+        self.truncated_stages & Self::CHANGED_FILES != 0
     }
 
     /// Whether per-file or total graph-root bounds omitted symbols.
     #[must_use]
     pub const fn symbol_roots(self) -> bool {
-        self.symbol_roots
+        self.truncated_stages & Self::SYMBOL_ROOTS != 0
     }
 
     /// Whether graph breadth/depth bounds omitted impact nodes.
     #[must_use]
     pub const fn graph(self) -> bool {
-        self.graph
+        self.truncated_stages & Self::GRAPH != 0
     }
 
     /// Whether the affected-test limit omitted candidates.
     #[must_use]
     pub const fn affected_tests(self) -> bool {
-        self.affected_tests
+        self.truncated_stages & Self::AFFECTED_TESTS != 0
     }
 
     /// Whether the compact evidence limit omitted candidates.
     #[must_use]
     pub const fn evidence(self) -> bool {
-        self.evidence
+        self.truncated_stages & Self::EVIDENCE != 0
     }
 
     /// Whether any stage reported explicit truncation.
     #[must_use]
     pub const fn any(self) -> bool {
-        self.changed_files
-            || self.symbol_roots
-            || self.graph
-            || self.affected_tests
-            || self.evidence
+        self.truncated_stages != 0
+    }
+}
+
+impl Serialize for ReviewTruncation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("ReviewTruncation", 5)?;
+        state.serialize_field("changed_files", &self.changed_files())?;
+        state.serialize_field("symbol_roots", &self.symbol_roots())?;
+        state.serialize_field("graph", &self.graph())?;
+        state.serialize_field("affected_tests", &self.affected_tests())?;
+        state.serialize_field("evidence", &self.evidence())?;
+        state.end()
     }
 }
 

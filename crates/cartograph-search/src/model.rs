@@ -174,6 +174,10 @@ pub struct TraversalBudget {
 
 impl TraversalBudget {
     /// Validate a traversal budget. Depth and node count must both be non-zero.
+    /// # Errors
+    ///
+    /// Returns an error if `max_depth` or `max_nodes` is zero or exceeds the
+    /// traversal hard limit.
     pub const fn new(max_depth: u8, max_nodes: u16) -> Result<Self, RetrievalError> {
         if max_depth == 0 || max_depth > MAX_DEPTH {
             return Err(invalid("max_depth"));
@@ -248,6 +252,10 @@ pub struct ContextBudget {
 
 impl ContextBudget {
     /// Build a fully bounded packet budget.
+    /// # Errors
+    ///
+    /// Returns an error if any candidate, exact, evidence, or affected-test
+    /// limit is zero or exceeds its packet hard limit.
     pub fn new(input: ContextBudgetInput) -> Result<Self, RetrievalError> {
         validate_context_budget(&input)?;
         Ok(input.into())
@@ -391,6 +399,10 @@ impl ContextRequestOptions {
 
 impl ContextRequest {
     /// Create a bounded context request.
+    /// # Errors
+    ///
+    /// Returns an error if `query` is empty, contains a NUL byte, or exceeds
+    /// the maximum query byte length.
     pub fn new(
         project_id: ProjectId,
         query: impl Into<String>,
@@ -425,6 +437,10 @@ impl ContextRequest {
     }
 
     /// Add one exact lookup anchor while preserving the request bounds.
+    /// # Errors
+    ///
+    /// Returns an error if the request already has the maximum number of
+    /// anchors or the anchor text violates its type-specific byte bound.
     pub fn with_anchor(mut self, anchor: ContextAnchor) -> Result<Self, RetrievalError> {
         if self.anchors.len() >= MAX_ANCHORS {
             return Err(invalid("anchors"));
@@ -510,6 +526,10 @@ pub struct ExactTextQuery<'query> {
 
 impl<'query> ExactTextQuery<'query> {
     /// Validate one exact lookup without copying its text.
+    /// # Errors
+    ///
+    /// Returns an error if `value` is empty, contains a NUL byte, exceeds the
+    /// lookup-text bound, or `limit` is outside the exact-result bounds.
     pub fn new(value: &'query str, limit: u16) -> Result<Self, RetrievalError> {
         validate_lookup_text(value, limit)?;
         Ok(Self { value, limit })
@@ -553,6 +573,10 @@ impl fmt::Debug for ExactPathQuery<'_> {
 
 impl<'query> ExactPathQuery<'query> {
     /// Validate the declaration bound for one canonical path.
+    /// # Errors
+    ///
+    /// Returns an error if `symbol_limit` is zero or exceeds the maximum exact
+    /// declarations returned for one path.
     pub fn new(path: &'query NormalizedPath, symbol_limit: u16) -> Result<Self, RetrievalError> {
         validate_limit(symbol_limit, MAX_EXACT_RESULTS, "symbol_limit")?;
         Ok(Self { path, symbol_limit })
@@ -575,10 +599,28 @@ pub struct LexicalQuery {
 
 impl LexicalQuery {
     /// Validate a BM25 query before database work.
+    /// # Errors
+    ///
+    /// Returns an error if the query is empty, contains a NUL byte, exceeds its
+    /// byte bound, or `limit` is outside the BM25 candidate bounds.
     pub fn new(query: impl Into<String>, limit: u16) -> Result<Self, RetrievalError> {
         validate_limit(limit, MAX_CANDIDATES, "candidate_limit")?;
         Ok(Self {
             query: validate_query(query.into())?,
+            limit,
+        })
+    }
+
+    /// Expand a natural-language code search with bounded deterministic identifier aliases.
+    /// # Errors
+    ///
+    /// Returns an error if the source query is empty, contains a NUL byte,
+    /// exceeds its byte bound, or `limit` exceeds the candidate window.
+    pub fn for_code_search(query: impl Into<String>, limit: u16) -> Result<Self, RetrievalError> {
+        validate_limit(limit, MAX_CANDIDATES, "candidate_limit")?;
+        let query = validate_query(query.into())?;
+        Ok(Self {
+            query: expand_code_query(&query),
             limit,
         })
     }
@@ -589,6 +631,57 @@ impl LexicalQuery {
 
     pub(crate) const fn limit(&self) -> u16 {
         self.limit
+    }
+}
+
+fn expand_code_query(query: &str) -> String {
+    let normalized = query
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let mut seen = normalized
+        .split_ascii_whitespace()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut expanded = query.to_owned();
+    for term in normalized.split_ascii_whitespace() {
+        for alias in code_query_aliases(term) {
+            if seen.contains(*alias)
+                || expanded.len().saturating_add(alias.len()).saturating_add(1)
+                    > CONTEXT_QUERY_MAXIMUM_BYTES
+            {
+                continue;
+            }
+            expanded.push(' ');
+            expanded.push_str(alias);
+            seen.insert((*alias).to_owned());
+        }
+    }
+    expanded
+}
+
+fn code_query_aliases(term: &str) -> &'static [&'static str] {
+    match term {
+        "bm25" => &["generation_search_relation", "search_relation", "relation"],
+        "table" | "tables" => &["relation", "catalog"],
+        "check" | "checked" | "checking" | "checks" => &["require", "validate", "verify"],
+        "run" | "running" | "runs" => &["execute", "query", "request"],
+        "fresh" | "freshness" => &[
+            "project_status",
+            "source_revision",
+            "digest_version",
+            "scan_source",
+        ],
+        "checkout" | "checkouts" => &["source", "project_root"],
+        "match" | "matched" | "matches" | "matching" => &["compare", "digest", "source_revision"],
+        "immutable" => &["content_digest", "generation"],
+        _ => &[],
     }
 }
 
@@ -625,6 +718,10 @@ pub struct TraversalRequest {
 
 impl TraversalRequest {
     /// Validate roots and de-duplicate them without discarding caller relevance order.
+    /// # Errors
+    ///
+    /// Returns an error if de-duplication leaves no roots or the distinct root
+    /// count exceeds the traversal root bound.
     pub fn new(
         project_id: ProjectId,
         roots: impl IntoIterator<Item = SymbolId>,
@@ -656,6 +753,10 @@ impl TraversalRequest {
     }
 
     /// Drop structural edges whose extractor confidence is below this exact threshold.
+    /// # Errors
+    ///
+    /// Returns an error if `minimum` is not finite or lies outside the
+    /// inclusive extractor-confidence range from zero to one.
     pub fn with_minimum_confidence(mut self, minimum: f32) -> Result<Self, RetrievalError> {
         validate_minimum_confidence(minimum)?;
         self.minimum_confidence = minimum;
@@ -709,9 +810,13 @@ pub struct GraphPathRequest {
 
 /// Exact endpoints, project, and work budget for one shortest-path request.
 pub struct GraphPathRequestInput {
+    /// Stable project ID for this record.
     pub project_id: ProjectId,
+    /// Start for this record.
     pub start: SymbolId,
+    /// Target for this record.
     pub target: SymbolId,
+    /// Budget for this record.
     pub budget: TraversalBudget,
 }
 
@@ -728,6 +833,10 @@ pub struct SimilarRequest {
 
 impl SimilarRequest {
     /// Build a bounded semantic-neighbor request with a permissive 0.3 score floor.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is zero or greater than the semantic
+    /// neighbor result maximum.
     pub fn new(
         project_id: ProjectId,
         source_symbol_id: SymbolId,
@@ -754,6 +863,10 @@ impl SimilarRequest {
     }
 
     /// Set an inclusive cosine-similarity floor in the 0..1 range.
+    /// # Errors
+    ///
+    /// Returns an error if `score` is not finite or lies outside the inclusive
+    /// cosine-similarity range from zero to one.
     pub fn with_minimum_score(mut self, score: f64) -> Result<Self, RetrievalError> {
         if !score.is_finite() || !(0.0..=1.0).contains(&score) {
             return Err(invalid("minimum_score"));
@@ -822,6 +935,10 @@ impl GraphPathRequest {
     }
 
     /// Drop path candidates below an exact extractor-confidence threshold.
+    /// # Errors
+    ///
+    /// Returns an error if `minimum` is not finite or lies outside the
+    /// inclusive extractor-confidence range from zero to one.
     pub fn with_minimum_confidence(mut self, minimum: f32) -> Result<Self, RetrievalError> {
         validate_minimum_confidence(minimum)?;
         self.minimum_confidence = minimum;
@@ -874,6 +991,10 @@ pub struct FileInventoryQuery {
 
 impl FileInventoryQuery {
     /// Build a bounded inventory request.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is zero or exceeds the bounded file
+    /// inventory result maximum.
     pub const fn new(limit: u16) -> Result<Self, RetrievalError> {
         if limit == 0 || limit > MAX_FILE_INVENTORY_RESULTS {
             return Err(invalid("file_limit"));
@@ -928,6 +1049,10 @@ pub struct EntryPointsQuery {
 
 impl EntryPointsQuery {
     /// Build an all-bucket request with a per-bucket limit.
+    /// # Errors
+    ///
+    /// Returns an error if the per-bucket `limit` is zero or exceeds the
+    /// bounded entry-point result maximum.
     pub const fn new(limit: u16) -> Result<Self, RetrievalError> {
         if limit == 0 || limit > MAX_ENTRY_POINT_RESULTS {
             return Err(invalid("entry_point_limit"));
@@ -1020,14 +1145,22 @@ pub struct SourceRangeQuery {
 
 /// Exact path, inclusive line range, and result bound for one source lookup.
 pub struct SourceRangeQueryInput {
+    /// Project-relative path for this record.
     pub path: NormalizedPath,
+    /// One-based starting source line.
     pub start_line: u32,
+    /// One-based ending source line.
     pub end_line: u32,
+    /// Maximum number of results returned by this bounded request.
     pub limit: u16,
 }
 
 impl SourceRangeQuery {
     /// Validate an inclusive range and bounded result count before database work.
+    /// # Errors
+    ///
+    /// Returns an error if the range is not one-based and ordered, spans too
+    /// many lines, or `limit` is outside the source-range result bounds.
     pub fn new(input: SourceRangeQueryInput) -> Result<Self, RetrievalError> {
         let SourceRangeQueryInput {
             path,
@@ -1433,7 +1566,7 @@ pub enum EvidenceReason {
     ExactReference,
     /// Validated legacy reference anchor whose byte span is intentionally coarse.
     CoarseReference,
-    /// Current-generation ParadeDB BM25 candidate.
+    /// Current-generation `ParadeDB` BM25 candidate.
     Bm25,
     /// Current-generation semantic candidate.
     Semantic,
@@ -1649,6 +1782,18 @@ impl EvidenceItem {
     #[must_use]
     pub fn qualified_name(&self) -> &str {
         &self.details.qualified_name
+    }
+
+    /// One-based declaration start line when the evidence has an exact symbol span.
+    #[must_use]
+    pub const fn start_line(&self) -> Option<u32> {
+        self.details.start_line
+    }
+
+    /// One-based declaration end line when the evidence has an exact symbol span.
+    #[must_use]
+    pub const fn end_line(&self) -> Option<u32> {
+        self.details.end_line
     }
 
     /// Ordered admission reasons.
@@ -2186,11 +2331,14 @@ pub use packets::{
 };
 pub(crate) use packets::{ContextPacketDetails, EditCandidateInput, ReviewPacketDetails};
 
-fn validate_query(query: String) -> Result<String, RetrievalError> {
-    let query = query.trim().to_owned();
-    if query.is_empty() || query.len() > CONTEXT_QUERY_MAXIMUM_BYTES || query.contains('\0') {
+fn validate_query(mut query: String) -> Result<String, RetrievalError> {
+    let leading_whitespace = query.len() - query.trim_start().len();
+    let trimmed_length = query.trim().len();
+    if trimmed_length == 0 || trimmed_length > CONTEXT_QUERY_MAXIMUM_BYTES || query.contains('\0') {
         return Err(invalid("query"));
     }
+    query.truncate(leading_whitespace + trimmed_length);
+    query.drain(..leading_whitespace);
     Ok(query)
 }
 

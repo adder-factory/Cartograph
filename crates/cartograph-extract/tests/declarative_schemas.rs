@@ -1,11 +1,12 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
 use cartograph_extract::{ExtractedFile, NativeExtractor, SourceLimits, SourceSnapshot};
 
 const SOURCE_LIMIT: usize = 1024 * 1024;
-
-#[test]
-fn graphql_sdl_emits_precise_types_members_relationships_extensions_and_docs() {
-    let source = r#"
+const GRAPHQL_SCHEMA: &str = r#"
 """A graph entity."""
 interface Node { id: ID! }
 
@@ -26,8 +27,11 @@ extend enum Role { VIEWER }
 schema { query: Query }
 query RuntimeQuery { user { id } }
 "#;
-    let first = extract("schema/api.graphql", source);
-    let second = extract("schema/api.graphql", source);
+
+#[test]
+fn graphql_sdl_emits_precise_types_members_relationships_extensions_and_docs() {
+    let first = extract("schema/api.graphql", GRAPHQL_SCHEMA);
+    let second = extract("schema/api.graphql", GRAPHQL_SCHEMA);
     assert_eq!(first, second);
 
     assert_symbol(

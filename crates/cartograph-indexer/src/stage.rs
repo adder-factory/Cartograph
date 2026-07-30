@@ -19,7 +19,7 @@ use crate::{
     task_scope::{TaskReservationGuard, TaskScope},
 };
 
-const MAX_STAGE_CLEANUP_GRACE: Duration = Duration::from_secs(60);
+const MAX_STAGE_CLEANUP_GRACE: Duration = Duration::from_mins(1);
 
 /// Stable contiguous position assigned before parallel stage work begins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -389,6 +389,9 @@ impl StageMetrics {
     }
 
     /// Read an internally consistent metric snapshot.
+    /// # Errors
+    ///
+    /// Returns an error if another thread poisoned the metrics mutex.
     pub fn snapshot(&self) -> Result<StageMetricsSnapshot, StageMetricsError> {
         let state = self
             .state
@@ -850,6 +853,10 @@ impl StageRunner {
     ///
     /// Dropping this future after it starts poisons the supervisor task scope and aborts
     /// retained workers, so an incomplete stage cannot be ignored before publication.
+    /// # Errors
+    ///
+    /// Returns an error if capacity/config admission fails, cancellation or a
+    /// deadline wins, a worker/reducer fails, order is invalid, or cleanup fails.
     pub async fn execute<Key, Input, Output, Inputs, Work, WorkFuture, Accumulator, Reduce>(
         &self,
         execution: StageExecution<Inputs, Work, Accumulator, Reduce>,
@@ -952,8 +959,8 @@ impl StageRunner {
     }
 }
 
-impl<'a, Key, Input, Output, Inputs, Work, WorkFuture, Accumulator, Reduce>
-    StageDriver<'a, Key, Input, Output, Inputs, Work, WorkFuture, Accumulator, Reduce>
+impl<Key, Input, Output, Inputs, Work, WorkFuture, Accumulator, Reduce>
+    StageDriver<'_, Key, Input, Output, Inputs, Work, WorkFuture, Accumulator, Reduce>
 where
     Key: Clone + Send + 'static,
     Input: Send + 'static,
@@ -1263,12 +1270,11 @@ where
                         return Err(StageRunError::Cancelled {
                             stage: self.policy.stage,
                         });
-                    } else {
-                        return Err(StageRunError::Progress {
-                            stage: self.policy.stage,
-                            source,
-                        });
                     }
+                    return Err(StageRunError::Progress {
+                        stage: self.policy.stage,
+                        source,
+                    });
                 }
                 Err(_) if *self.control.cancellation.borrow() => {
                     retained.reservation.cancel();
@@ -1653,7 +1659,7 @@ mod tests {
                     pending::<Result<(), StageItemFailure>>().await
                 }
             }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         let handle = tokio::spawn(async move { runner.execute(execution).await });
         wait_until(|| started.load(Ordering::Acquire)).await;
@@ -1683,7 +1689,7 @@ mod tests {
         let execution = StageExecution::new(
             config(1, 0, deadline),
             StageWorkload::new(inputs, |_| async { Ok::<_, StageItemFailure>(()) }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         cancellation.send_replace(true);
         assert!(matches!(
@@ -1706,7 +1712,7 @@ mod tests {
         let execution = StageExecution::new(
             config(1, 0, stage_deadline),
             StageWorkload::new(inputs, |_| pending::<Result<(), StageItemFailure>>()),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         assert!(matches!(
             runner.execute(execution).await,
@@ -1775,7 +1781,7 @@ mod tests {
             let execution = StageExecution::new(
                 config(1, 0, stage_deadline),
                 StageWorkload::new(inputs, |_| async { Ok::<_, StageItemFailure>(()) }),
-                StageFold::new((), move |_: &mut (), _| {
+                StageFold::new((), move |(): &mut (), _| {
                     if slow_point == SlowPoint::Reducer {
                         std::thread::sleep(DEADLINE_TIMEOUT * 2);
                     }
@@ -1820,7 +1826,7 @@ mod tests {
                     pending::<Result<(), StageItemFailure>>().await
                 }
             }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         assert!(matches!(
             runner.execute(execution).await,
@@ -1849,7 +1855,7 @@ mod tests {
             let execution = StageExecution::new(
                 config(1, 0, deadline),
                 StageWorkload::new(inputs, |_| async { Ok::<_, StageItemFailure>(()) }),
-                StageFold::new((), move |_: &mut (), _| {
+                StageFold::new((), move |(): &mut (), _| {
                     if let Some(entered) = entered.take() {
                         let _ = entered.send(());
                     }
@@ -1914,7 +1920,7 @@ mod tests {
                     Ok::<_, StageItemFailure>(())
                 }
             }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         let handle = tokio::spawn(async move { runner.execute(execution).await });
         wait_until(|| started.load(Ordering::Acquire)).await;
@@ -1942,7 +1948,7 @@ mod tests {
         let execution = StageExecution::new(
             config(1, 0, deadline),
             StageWorkload::new(inputs, |_| async { Ok::<_, StageItemFailure>(()) }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         assert!(matches!(
             runner.execute(execution).await,
@@ -2024,7 +2030,7 @@ mod tests {
         let execution = StageExecution::new(
             config(1, 0, deadline),
             StageWorkload::new(inputs, |_| async { Err::<(), _>(StageItemFailure) }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         )
         .with_metrics(metrics.clone());
         assert!(matches!(
@@ -2055,9 +2061,8 @@ mod tests {
         let metrics = StageMetrics::new();
         let poison_target = metrics.clone();
         let poison = std::thread::spawn(move || {
-            let _guard = match poison_target.state.lock() {
-                Ok(guard) => guard,
-                Err(_) => return,
+            let Ok(_guard) = poison_target.state.lock() else {
+                return;
             };
             panic!("intentional metric-lock poison");
         });
@@ -2066,7 +2071,7 @@ mod tests {
         let execution = StageExecution::new(
             config(1, 0, deadline),
             StageWorkload::new(inputs, |_| async { Ok::<_, StageItemFailure>(()) }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         )
         .with_metrics(metrics);
         assert!(matches!(
@@ -2117,7 +2122,7 @@ mod tests {
                     }
                 }
             }),
-            StageFold::new((), |_: &mut (), _| Err(StageItemFailure)),
+            StageFold::new((), |(): &mut (), _| Err(StageItemFailure)),
         );
         assert!(matches!(
             runner.execute(execution).await,
@@ -2141,7 +2146,7 @@ mod tests {
             StageWorkload::new(inputs, |_| async {
                 panic!("intentional stage worker panic");
             }),
-            StageFold::new((), |_: &mut (), _: StageOutput<usize, ()>| Ok(())),
+            StageFold::new((), |(): &mut (), _: StageOutput<usize, ()>| Ok(())),
         );
         assert!(matches!(
             runner.execute(execution).await,
@@ -2172,7 +2177,7 @@ mod tests {
                 }
                 Err::<(), _>(StageItemFailure)
             }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         assert!(matches!(
             runner.execute(execution).await,
@@ -2218,7 +2223,7 @@ mod tests {
                     })
                 }
             }),
-            StageFold::new((), |_: &mut (), _| Ok(())),
+            StageFold::new((), |(): &mut (), _| Ok(())),
         );
         assert!(matches!(
             runner.execute(execution).await,

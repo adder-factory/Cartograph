@@ -135,6 +135,7 @@ const fn route_delimiter_depth(byte: u8, depth: usize) -> Option<usize> {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ScanRange {
     start: usize,
     end: usize,
@@ -210,6 +211,7 @@ fn scan_route_entries(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct MethodMapInput<'path, 'source> {
     path: &'path Quoted<'source>,
     range: ScanRange,

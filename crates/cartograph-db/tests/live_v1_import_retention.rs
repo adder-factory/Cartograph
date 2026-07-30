@@ -1,3 +1,7 @@
+//! Live PostgreSQL integration coverage for Cartograph storage contracts.
+
+mod dependency_ownership;
+
 use std::{
     env, fs, process,
     sync::atomic::{AtomicU32, Ordering},
@@ -23,7 +27,7 @@ use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
 const PROJECT_FINGERPRINT: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const LEASE_DURATION: Duration = Duration::from_secs(60);
+const LEASE_DURATION: Duration = Duration::from_mins(1);
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 const VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
@@ -39,12 +43,35 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
     let primary_source = source_schema(&fixture.destination_schema, "v1a");
     create_v1_source(&fixture.pool, &primary_source, primary_root.path()).await;
     let primary_request = import_request(&primary_source, primary_root.path(), "primary-import");
-    assert_unsupported_language_fails_preflight(&fixture, &primary_source, &primary_request).await;
+    let imported = assert_resumable_primary_import(
+        &fixture,
+        &primary_source,
+        &primary_request,
+        primary_root.path(),
+    )
+    .await;
+    let rollback_source = assert_rollback_safe_import(&fixture, &primary_source).await;
+    assert_bounded_import_retention(&fixture, &imported, primary_request).await;
+
+    drop(fixture.database);
+    drop_schema(&fixture.pool, &primary_source).await;
+    drop_schema(&fixture.pool, &rollback_source).await;
+    drop_schema(&fixture.pool, &fixture.destination_schema).await;
+    fixture.pool.close().await;
+}
+
+async fn assert_resumable_primary_import(
+    fixture: &Fixture,
+    primary_source: &str,
+    primary_request: &V1PostgresImportRequest,
+    primary_root: &std::path::Path,
+) -> cartograph_db::V1PostgresImportReport {
+    assert_unsupported_language_fails_preflight(fixture, primary_source, primary_request).await;
 
     assert_destination_absent(&fixture.pool, &fixture.destination_schema).await;
     let dry_run = match fixture
         .database
-        .dry_run_v1_postgres_import(&primary_request)
+        .dry_run_v1_postgres_import(primary_request)
         .await
     {
         Ok(report) => report,
@@ -66,7 +93,7 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
         })
         .await;
     assert_eq!(staged, Err(V1PostgresImportError::Interrupted));
-    assert_import_state(&fixture, "staging", "staged", 0).await;
+    assert_import_state(fixture, "staging", "staged", 0).await;
 
     let ready = fixture
         .database
@@ -75,9 +102,9 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
         })
         .await;
     assert_eq!(ready, Err(V1PostgresImportError::Interrupted));
-    assert_import_state(&fixture, "ready", "bm25_rebuilt", 1).await;
+    assert_import_state(fixture, "ready", "bm25_rebuilt", 1).await;
 
-    install_complete_checkpoint_rejection(&fixture).await;
+    install_complete_checkpoint_rejection(fixture).await;
     let rejected_complete = fixture
         .database
         .import_v1_postgres(primary_request.clone())
@@ -88,8 +115,8 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
             operation: "append-checkpoint"
         })
     ));
-    assert_post_publish_checkpoint_failure(&fixture).await;
-    remove_complete_checkpoint_rejection(&fixture).await;
+    assert_post_publish_checkpoint_failure(fixture).await;
+    remove_complete_checkpoint_rejection(fixture).await;
     let imported = match fixture
         .database
         .import_v1_postgres(primary_request.clone())
@@ -101,16 +128,16 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
     assert!(imported.resumed);
     assert_eq!(imported.checkpoint, V1PostgresImportCheckpoint::Complete);
     assert_uuid_v8(imported.generation_id.as_str());
-    assert_published_import(&fixture, &imported.generation_id).await;
+    assert_published_import(fixture, &imported.generation_id).await;
     assert_runtime_identity_resolves_import(
-        &fixture,
+        fixture,
         &imported.project_id,
         &imported.generation_id,
-        primary_root.path(),
+        primary_root,
     )
     .await;
-    assert_no_migration_lease(&fixture).await;
-    assert_source_unchanged(&fixture, &primary_request, &dry_run).await;
+    assert_no_migration_lease(fixture).await;
+    assert_source_unchanged(fixture, primary_request, &dry_run).await;
 
     let repeated = match fixture
         .database
@@ -122,7 +149,10 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
     };
     assert_eq!(repeated.generation_id, imported.generation_id);
     assert!(repeated.resumed);
+    imported
+}
 
+async fn assert_rollback_safe_import(fixture: &Fixture, primary_source: &str) -> String {
     let rollback_root = create_checkout();
     let rollback_source = source_schema(&fixture.destination_schema, "v1b");
     create_v1_source(&fixture.pool, &rollback_source, rollback_root.path()).await;
@@ -144,7 +174,7 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
         })
         .await;
     assert_eq!(staged, Err(V1PostgresImportError::Interrupted));
-    install_copy_rejection(&fixture).await;
+    install_copy_rejection(fixture).await;
     let rejected = fixture
         .database
         .import_v1_postgres(rollback_request.clone())
@@ -155,8 +185,8 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
             operation: "prepare-generation"
         })
     ));
-    assert_rollback_preserved_staging(&fixture, &rollback_source).await;
-    remove_copy_rejection(&fixture).await;
+    assert_rollback_preserved_staging(fixture, &rollback_source).await;
+    remove_copy_rejection(fixture).await;
     if let Err(error) = fixture
         .database
         .import_v1_postgres(rollback_request.clone())
@@ -164,9 +194,16 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
     {
         panic!("rollback retry did not complete: {error}");
     }
-    assert_source_unchanged(&fixture, &rollback_request, &rollback_dry_run).await;
-    assert_stable_legacy_symbol_id(&fixture, &primary_source, &rollback_source).await;
+    assert_source_unchanged(fixture, &rollback_request, &rollback_dry_run).await;
+    assert_stable_legacy_symbol_id(fixture, primary_source, &rollback_source).await;
+    rollback_source
+}
 
+async fn assert_bounded_import_retention(
+    fixture: &Fixture,
+    imported: &cartograph_db::V1PostgresImportReport,
+    primary_request: V1PostgresImportRequest,
+) {
     for sequence in 0_u32..5 {
         publish_document_generation(&fixture.database, &imported.project_id, sequence).await;
     }
@@ -212,8 +249,8 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
     if let Err(error) = fixture.database.release_lease(&retention_lease).await {
         panic!("retention lease release failed: {error}");
     }
-    assert_retained_storage_bound(&fixture, &imported.project_id, &imported.generation_id).await;
-    assert_expired_retention_fence_rolls_back(&fixture, &imported.project_id).await;
+    assert_retained_storage_bound(fixture, &imported.project_id, &imported.generation_id).await;
+    assert_expired_retention_fence_rolls_back(fixture, &imported.project_id).await;
 
     let retained_rerun = match fixture.database.import_v1_postgres(primary_request).await {
         Ok(report) => report,
@@ -221,12 +258,6 @@ async fn v1_import_is_resumable_rollback_safe_and_compatible_with_bounded_retent
     };
     assert_eq!(retained_rerun.generation_id, imported.generation_id);
     assert!(retained_rerun.resumed);
-
-    drop(fixture.database);
-    drop_schema(&fixture.pool, &primary_source).await;
-    drop_schema(&fixture.pool, &rollback_source).await;
-    drop_schema(&fixture.pool, &fixture.destination_schema).await;
-    fixture.pool.close().await;
 }
 
 #[tokio::test]
@@ -421,10 +452,9 @@ struct Fixture {
 }
 
 async fn open_fixture() -> Fixture {
-    let database_url = match env::var(TEST_DATABASE_URL_ENV) {
-        Ok(value) => value,
-        Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
-    };
+    let database_url = env::var(TEST_DATABASE_URL_ENV).unwrap_or_else(|error| {
+        panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test: {error}")
+    });
     let destination_schema = format!(
         "cartograph_cutover_{}_{}",
         process::id(),
@@ -467,6 +497,15 @@ fn create_checkout() -> tempfile::TempDir {
 
 async fn create_v1_source(pool: &sqlx_postgres::PgPool, schema: &str, root: &std::path::Path) {
     let quoted = format!("\"{schema}\"");
+    create_v1_tables(pool, &quoted).await;
+    let source = match fs::read_to_string(root.join("sample.rs")) {
+        Ok(source) => source,
+        Err(error) => panic!("could not read source fixture: {error}"),
+    };
+    seed_v1_source_rows(pool, &quoted, &source).await;
+}
+
+async fn create_v1_tables(pool: &sqlx_postgres::PgPool, quoted: &str) {
     let statements = [
         format!("CREATE SCHEMA {quoted}"),
         format!(
@@ -495,10 +534,9 @@ async fn create_v1_source(pool: &sqlx_postgres::PgPool, schema: &str, root: &std
     if let Err(error) = query(AssertSqlSafe(version)).execute(pool).await {
         panic!("could not seed v1 schema history: {error}");
     }
-    let source = match fs::read_to_string(root.join("sample.rs")) {
-        Ok(source) => source,
-        Err(error) => panic!("could not read source fixture: {error}"),
-    };
+}
+
+async fn seed_v1_source_rows(pool: &sqlx_postgres::PgPool, quoted: &str, source: &str) {
     let file_hash = sha256_hex(source.as_bytes());
     let file_insert = format!(
         "INSERT INTO {quoted}.files (path, content_hash, language, size, errors, node_count, is_test, needs_reextract) VALUES ($1, $2, 'rust', $3, NULL, 2, 0, 0)"
@@ -513,17 +551,15 @@ async fn create_v1_source(pool: &sqlx_postgres::PgPool, schema: &str, root: &std
         panic!("could not seed v1 file: {error}");
     }
     let mut lines = source.lines();
-    let alpha = match lines.next() {
-        Some(line) => line,
-        None => panic!("source fixture lost alpha line"),
+    let Some(alpha) = lines.next() else {
+        panic!("source fixture lost alpha line");
     };
-    let beta = match lines.next() {
-        Some(line) => line,
-        None => panic!("source fixture lost beta line"),
+    let Some(beta) = lines.next() else {
+        panic!("source fixture lost beta line");
     };
     insert_v1_node(
         pool,
-        &quoted,
+        quoted,
         V1NodeFixture {
             id: "function:legacy-alpha",
             qualified_name: "alpha",
@@ -536,7 +572,7 @@ async fn create_v1_source(pool: &sqlx_postgres::PgPool, schema: &str, root: &std
     .await;
     insert_v1_node(
         pool,
-        &quoted,
+        quoted,
         V1NodeFixture {
             id: "function:legacy-beta",
             qualified_name: "beta",
@@ -605,7 +641,7 @@ async fn install_bom_source(pool: &sqlx_postgres::PgPool, schema: &str, root: &s
         .unwrap_or_else(|error| panic!("could not write BOM checkout fixture: {error}"));
     let quoted = format!("\"{schema}\"");
     let update_file = format!(
-        r#"UPDATE {quoted}.files SET content_hash = $1, size = $2 WHERE path = 'sample.rs'"#,
+        r"UPDATE {quoted}.files SET content_hash = $1, size = $2 WHERE path = 'sample.rs'",
     );
     query(AssertSqlSafe(update_file))
         .bind(sha256_hex(source.as_bytes()))
@@ -614,9 +650,9 @@ async fn install_bom_source(pool: &sqlx_postgres::PgPool, schema: &str, root: &s
         .await
         .unwrap_or_else(|error| panic!("could not update BOM file fixture: {error}"));
     let update_node = format!(
-        r#"UPDATE {quoted}.nodes
+        r"UPDATE {quoted}.nodes
             SET start_column = $2, end_column = $3, body_hash = $4
-            WHERE id = $1"#,
+            WHERE id = $1",
     );
     for (id, start_column, end_column, signature, body) in [
         (
@@ -1088,7 +1124,7 @@ async fn install_complete_checkpoint_rejection(fixture: &Fixture) {
 async fn remove_complete_checkpoint_rejection(fixture: &Fixture) {
     let schema = &fixture.destination_schema;
     let statements = [
-        format!(r#"DROP TRIGGER reject_complete_checkpoint ON "{schema}".v1_import_checkpoints"#,),
+        format!(r#"DROP TRIGGER reject_complete_checkpoint ON "{schema}".v1_import_checkpoints"#),
         format!(r#"DROP FUNCTION "{schema}".reject_complete_checkpoint()"#),
     ];
     for statement in statements {
@@ -1419,7 +1455,7 @@ async fn assert_expired_retention_fence_rolls_back(fixture: &Fixture, project_id
         Err(cartograph_db::GenerationRetentionError::LeaseFenceLost)
     );
     let cleanup = [
-        format!(r#"DROP TRIGGER delay_generation_delete ON "{schema}".index_generations"#,),
+        format!(r#"DROP TRIGGER delay_generation_delete ON "{schema}".index_generations"#),
         format!(r#"DROP FUNCTION "{schema}".delay_generation_delete()"#),
     ];
     for statement in cleanup {
@@ -1492,10 +1528,8 @@ fn sha256_digest_hex(bytes: &[u8]) -> String {
 }
 
 fn i32_len(value: usize, field: &str) -> i32 {
-    match i32::try_from(value) {
-        Ok(value) => value,
-        Err(_) => panic!("{field} does not fit PostgreSQL integer"),
-    }
+    i32::try_from(value)
+        .unwrap_or_else(|error| panic!("{field} does not fit PostgreSQL integer: {error}"))
 }
 
 fn read_string(row: &sqlx_postgres::PgRow, index: usize, field: &str) -> String {

@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SymbolKind};
 use cartograph_extract::{ExtractedFile, NativeExtractor, SourceLimits, SourceSnapshot};
 
@@ -5,7 +9,7 @@ const SOURCE_LIMIT: usize = 1024 * 1024;
 
 #[test]
 fn zod_schemas_emit_nested_shape_enums_inline_contracts_and_consumers() {
-    let source = r#"
+    let source = r"
 import { z } from 'zod';
 
 export const UserSchema = z.object({
@@ -21,7 +25,7 @@ export const PublicUser = UserSchema.pick({ name: true });
 function checkRole() { return UserSchema.shape.role; }
 function defineTool(value: unknown) { return value; }
 defineTool({ input: z.object({ query: z.string() }) });
-"#;
+";
     let first = extract("src/contracts.ts", source);
     let second = extract("src/contracts.ts", source);
     assert_eq!(first, second);
@@ -96,7 +100,7 @@ fn zod_recognizer_requires_a_real_zod_import() {
 
 #[test]
 fn pydantic_models_emit_struct_fields_literal_members_and_skip_class_vars() {
-    let source = r#"
+    let source = r"
 from pydantic import BaseModel
 from typing import ClassVar, Literal
 
@@ -111,7 +115,7 @@ class User(BaseModel):
 
 class Account(pydantic.BaseModel):
     id: str
-"#;
+";
     let first = extract("models.py", source);
     let second = extract("models.py", source);
     assert_eq!(first, second);

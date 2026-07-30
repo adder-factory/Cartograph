@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind, Visibility};
 use cartograph_extract::{
     DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractedFile, ImportBindingKind, NativeExtractor,
@@ -5,12 +9,27 @@ use cartograph_extract::{
 };
 
 const SOURCE_LIMIT_BYTES: usize = 256 * 1024;
+const GROUPED_RUST_BINDINGS: &str = r"
+use crate::{nested::{helpers as selected, tools}, tags};
+use external_crate::{Remote, remote_tools};
+use super::*;
+
+pub fn run() {
+    tags::extract();
+    selected::prepare();
+    let callback = selected::prepare;
+    tools::scan();
+    worker.finish();
+    worker.try_get::<bool, _>();
+    assert!(true);
+}
+";
 
 #[test]
 fn rust_extracts_types_methods_calls_and_containment() {
     let file = extract(
         "src/worker.rs",
-        r#"
+        r"
 pub struct Worker {
     value: u32,
 }
@@ -41,7 +60,7 @@ pub async fn async_helper() {}
 pub trait Runnable {
     fn execute(&self);
 }
-"#,
+",
     );
 
     let worker = symbol(&file, "Worker");
@@ -53,15 +72,19 @@ pub trait Runnable {
     assert_eq!(run.health.parameter_count, 0);
     assert_eq!(symbol(&file, "Worker::schedule").health.parameter_count, 4);
     assert_eq!(helper.kind, SymbolKind::Function);
-    assert!(worker.exported && run.exported && helper.exported);
+    assert!(worker.export.exported && run.export.exported && helper.export.exported);
     let private_helper = symbol(&file, "private_helper");
     let crate_helper = symbol(&file, "crate_helper");
-    assert!(!private_helper.exported && private_helper.visibility.is_none());
-    assert!(crate_helper.exported);
+    assert!(!private_helper.export.exported && private_helper.visibility.is_none());
+    assert!(crate_helper.export.exported);
     assert_eq!(crate_helper.visibility, Some(Visibility::Internal));
     assert_eq!(helper.visibility, Some(Visibility::Public));
-    assert!(!symbol(&file, "sync_with_async_block").async_symbol);
-    assert!(symbol(&file, "async_helper").async_symbol);
+    assert!(
+        !symbol(&file, "sync_with_async_block")
+            .execution
+            .async_symbol
+    );
+    assert!(symbol(&file, "async_helper").execution.async_symbol);
     assert!(file.symbols.iter().any(|entry| {
         entry.kind == SymbolKind::Parameter
             && entry.name == "value"
@@ -87,7 +110,7 @@ pub trait Runnable {
     let execute = symbol(&file, "Runnable::execute");
     assert_eq!(runnable.kind, SymbolKind::Trait);
     assert_eq!(execute.kind, SymbolKind::Method);
-    assert!(execute.declaration_only);
+    assert!(execute.implementation.declaration_only);
     for qualified_name in ["Worker::run", "Runnable::execute"] {
         assert_eq!(
             file.symbols
@@ -109,7 +132,7 @@ pub trait Runnable {
 fn rust_extracts_references_from_constant_initializers() {
     let file = extract(
         "src/pending.rs",
-        r#"
+        r"
 pub(crate) struct TransactionCompletion;
 
 impl TransactionCompletion {
@@ -117,7 +140,7 @@ impl TransactionCompletion {
 }
 
 pub(crate) const COMPLETION: TransactionCompletion = TransactionCompletion::new();
-"#,
+",
     );
     let completion = symbol(&file, "COMPLETION");
     assert!(file.references.iter().any(|reference| {
@@ -131,7 +154,7 @@ pub(crate) const COMPLETION: TransactionCompletion = TransactionCompletion::new(
 fn rust_marks_inline_test_scopes_as_test_symbols() {
     let file = extract(
         "src/lib.rs",
-        r#"
+        r"
 fn production() {}
 
 #[cfg(test)]
@@ -143,16 +166,16 @@ mod contract_tests {
 
     fn fixture_helper() {}
 }
-"#,
+",
     );
-    assert!(!symbol(&file, "production").test_symbol);
+    assert!(!symbol(&file, "production").implementation.test_symbol);
     for qualified_name in [
         "contract_tests",
         "contract_tests::exact_case",
         "contract_tests::fixture_helper",
     ] {
         assert!(
-            symbol(&file, qualified_name).test_symbol,
+            symbol(&file, qualified_name).implementation.test_symbol,
             "{qualified_name}"
         );
     }
@@ -160,24 +183,7 @@ mod contract_tests {
 
 #[test]
 fn rust_extracts_grouped_module_bindings_with_full_paths_and_aliases() {
-    let file = extract(
-        "src/native.rs",
-        r#"
-use crate::{nested::{helpers as selected, tools}, tags};
-use external_crate::{Remote, remote_tools};
-use super::*;
-
-pub fn run() {
-    tags::extract();
-    selected::prepare();
-    let callback = selected::prepare;
-    tools::scan();
-    worker.finish();
-    worker.try_get::<bool, _>();
-    assert!(true);
-}
-"#,
-    );
+    let file = extract("src/native.rs", GROUPED_RUST_BINDINGS);
 
     for (module_specifier, local_name) in [
         ("crate::nested::helpers", "selected"),
@@ -223,6 +229,11 @@ pub fn run() {
     assert!(file.references.iter().any(|reference| {
         reference.name == "selected::prepare" && reference.kind == ReferenceKind::References
     }));
+}
+
+#[test]
+fn rust_extracts_receiver_and_macro_calls_with_resolution_hints() {
+    let file = extract("src/native.rs", GROUPED_RUST_BINDINGS);
     let receiver_call = file
         .references
         .iter()
@@ -360,7 +371,7 @@ export function schema(z: any) {
 fn javascript_binding_patterns_emit_lexical_symbols() {
     let file = extract(
         "src/bindings.ts",
-        r#"
+        r"
 export function run(
     { phaseCtx, nested: { count: counter } }: Input,
     [errors]: Error[][],
@@ -370,7 +381,7 @@ export function run(
     onProgress?.(counter);
     return [phaseCtx, errors, formatOnly, structHash];
 }
-"#,
+",
     );
     for parameter in ["phaseCtx", "counter", "errors", "onProgress"] {
         assert_eq!(
@@ -423,7 +434,7 @@ def public_helper(value: str) -> str:
     assert_eq!(file.language, SourceLanguage::Python);
     assert_eq!(class.kind, SymbolKind::Class);
     assert_eq!(method.kind, SymbolKind::Method);
-    assert!(class.exported && !method.exported && helper.exported);
+    assert!(class.export.exported && !method.export.exported && helper.export.exported);
     assert_eq!(decorated.kind, SymbolKind::Method);
     assert!(file.references.iter().any(|reference| {
         reference.owner.as_ref() == Some(&class.id)
@@ -496,7 +507,7 @@ func GoHelper(value int) int {
     assert_eq!(file.language, SourceLanguage::Go);
     assert_eq!(worker.kind, SymbolKind::Struct);
     assert_eq!(run.kind, SymbolKind::Method);
-    assert!(worker.exported && run.exported && helper.exported);
+    assert!(worker.export.exported && run.export.exported && helper.export.exported);
     assert!(
         file.containments
             .iter()
@@ -520,7 +531,7 @@ func GoHelper(value int) int {
     let execute = symbol(&file, "Runner::Execute");
     assert_eq!(runner.kind, SymbolKind::Interface);
     assert_eq!(execute.kind, SymbolKind::Method);
-    assert!(execute.declaration_only);
+    assert!(execute.implementation.declaration_only);
     for qualified_name in ["Worker::Run", "Runner::Execute"] {
         assert_eq!(
             file.symbols
@@ -545,7 +556,7 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
         "src/local.ts",
         "const local = (): void => {};\nexport { local };\n",
     );
-    assert!(symbol(&local, "local").exported);
+    assert!(symbol(&local, "local").export.exported);
 
     let local_alias = extract(
         "src/local-alias.ts",
@@ -553,7 +564,7 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
     );
     let public_local = symbol(&local_alias, "publicLocal");
     assert_eq!(public_local.kind, SymbolKind::Export);
-    assert!(public_local.exported);
+    assert!(public_local.export.exported);
     assert!(local_alias.references.iter().any(|reference| {
         reference.owner.as_ref() == Some(&public_local.id)
             && reference.name == "local"
@@ -565,7 +576,7 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
         "const local = (): void => {};\nexport default local;\n",
     );
     let default_symbol = symbol(&default_local, "local");
-    assert!(default_symbol.exported && default_symbol.default_export);
+    assert!(default_symbol.export.exported && default_symbol.export.default_export);
 
     let barrel = extract(
         "src/barrel.ts",
@@ -573,7 +584,7 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
     );
     let renamed = symbol(&barrel, "renamed");
     assert_eq!(renamed.kind, SymbolKind::Export);
-    assert!(renamed.exported);
+    assert!(renamed.export.exported);
     assert!(barrel.references.iter().any(|reference| {
         reference.owner.as_ref() == Some(&renamed.id)
             && reference.name == "helper"
@@ -584,12 +595,15 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
             && binding.imported_name == "helper"
             && binding.local_name == "helper"
     }));
+}
 
+#[test]
+fn commonjs_require_variants_are_explicit_resolver_evidence() {
     let commonjs = extract(
         "src/consumer.cjs",
         "const helper = require('./helper');\nfunction use() { helper.run(); }\nmodule.exports = { use };\n",
     );
-    assert!(symbol(&commonjs, "use").exported);
+    assert!(symbol(&commonjs, "use").export.exported);
     assert!(commonjs.import_bindings.iter().any(|binding| {
         binding.module_specifier == "./helper"
             && binding.imported_name == "*"
@@ -644,18 +658,21 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
             && reference.name == "local"
             && reference.kind == ReferenceKind::Exports
     }));
+}
 
+#[test]
+fn dynamic_and_shadowed_module_syntax_does_not_invent_bindings() {
     let conditional = extract(
         "src/conditional.cjs",
         "const hidden = () => {};\nif (enabled) { exports.hidden = hidden; }\n",
     );
-    assert!(!symbol(&conditional, "hidden").exported);
+    assert!(!symbol(&conditional, "hidden").export.exported);
 
     let computed = extract(
         "src/computed.cjs",
         "const hidden = () => {};\nmodule.exports = { [name]: hidden };\n",
     );
-    assert!(!symbol(&computed, "hidden").exported);
+    assert!(!symbol(&computed, "hidden").export.exported);
     assert!(
         !computed
             .symbols
@@ -733,7 +750,7 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
         "const exports = {};\nfunction local() {}\nexports.local = local;\n",
     ] {
         let shadowed_export = extract("src/shadowed-export.cjs", source);
-        assert!(!symbol(&shadowed_export, "local").exported);
+        assert!(!symbol(&shadowed_export, "local").export.exported);
     }
 }
 
@@ -741,7 +758,7 @@ fn ts_reexports_and_commonjs_require_are_explicit_resolver_evidence() {
 fn symbol_health_metrics_are_ast_scoped_privacy_safe_and_agent_focused() {
     let file = extract(
         "src/risky.ts",
-        r#"
+        r"
 export async function risky(a: string, b: string, c: string, d: string, e: string) {
   // TODO: replace compatibility cast
   const value = a as any;
@@ -753,7 +770,7 @@ export async function risky(a: string, b: string, c: string, d: string, e: strin
 export function network(url: string) { return fetch(url).then(JSON.parse); }
 export function debugOnly() { console.log('hello'); }
 export function empty() {}
-"#,
+",
     );
     let risky = symbol(&file, "risky");
     assert_eq!(risky.health.parameter_count, 5);
@@ -775,7 +792,7 @@ export function empty() {}
 fn sequential_await_loop_health_is_limited_to_javascript_for_of_bodies() {
     let javascript = extract(
         "src/loops.ts",
-        r#"
+        r"
 export async function sequential(items: string[]) {
   for (const item of items) { await consume(item); }
 }
@@ -795,7 +812,7 @@ export async function nested(items: string[][]) {
     for (const item of group) { await consume(item); }
   }
 }
-"#,
+",
     );
     assert_eq!(
         symbol(&javascript, "sequential")
@@ -817,13 +834,13 @@ export async function nested(items: string[][]) {
 
     let rust = extract(
         "src/loops.rs",
-        r#"
+        r"
 async fn bounded(items: Vec<Item>) {
     for item in items {
         item.consume().await;
     }
 }
-"#,
+",
     );
     assert_eq!(symbol(&rust, "bounded").health.sequential_await_loops, 0);
 }
@@ -878,7 +895,7 @@ fn symbol_health_collapses_multiline_literals_for_code_line_metrics() {
 fn symbol_health_normalizes_typed_numeric_literals_before_magic_number_scoring() {
     let file = extract(
         "src/numbers.rs",
-        r#"
+        r"
 fn benign() {
     let _values = [0_u8, 1_u16, 2_u32, 0x0_u64, 0b1_usize, 0o2_i32];
 }
@@ -886,7 +903,7 @@ fn benign() {
 fn meaningful() {
     let _value = 3_u8;
 }
-"#,
+",
     );
     assert_eq!(symbol(&file, "benign").health.magic_numbers, 0);
     assert_eq!(symbol(&file, "meaningful").health.magic_numbers, 1);
@@ -896,7 +913,7 @@ fn meaningful() {
 fn symbol_health_keeps_else_if_ladders_flat_but_counts_true_nesting() {
     let rust = extract(
         "src/branches.rs",
-        r#"
+        r"
 fn ladder(value: u8) -> u8 {
     if value == 0 { 0 }
     else if value == 1 { 1 }
@@ -911,7 +928,7 @@ fn nested(value: u8) -> u8 {
         if value == 1 { 1 } else { 2 }
     }
 }
-"#,
+",
     );
     assert_eq!(symbol(&rust, "ladder").health.max_nesting, 1);
     assert_eq!(symbol(&rust, "ladder").health.cyclomatic, 4);
@@ -919,7 +936,7 @@ fn nested(value: u8) -> u8 {
 
     let python = extract(
         "src/branches.py",
-        r#"
+        r"
 def ladder(value):
     if value == 0:
         return 0
@@ -928,7 +945,7 @@ def ladder(value):
     elif value == 2:
         return 2
     return 3
-"#,
+",
     );
     assert_eq!(symbol(&python, "ladder").health.max_nesting, 1);
     assert_eq!(symbol(&python, "ladder").health.cyclomatic, 4);
@@ -938,16 +955,16 @@ def ladder(value):
 fn symbol_health_excludes_language_level_receiver_parameters() {
     let typescript = extract(
         "src/receivers.ts",
-        r#"
+        r"
 interface Context {}
 function bound(this: Context, first: string, second: string, third: string, fourth: string) {}
-"#,
+",
     );
     assert_eq!(symbol(&typescript, "bound").health.parameter_count, 4);
 
     let python = extract(
         "src/receivers.py",
-        r#"
+        r"
 class Worker:
     def run(self, first, second, third, fourth):
         return first
@@ -955,7 +972,7 @@ class Worker:
     @classmethod
     def create(cls, first, second, third, fourth):
         return cls()
-"#,
+",
     );
     assert_eq!(symbol(&python, "Worker::run").health.parameter_count, 4);
     assert_eq!(symbol(&python, "Worker::create").health.parameter_count, 4);
@@ -1004,7 +1021,7 @@ export function signPayload(payload: string, secretKey: string) {
 fn clone_shape_digest_detects_alpha_renamed_literal_changed_type_two_clones() {
     let file = extract(
         "src/clones.ts",
-        r#"
+        r"
 export function first(input: number) {
   const doubled = input * 3;
   if (doubled > 9) {
@@ -1020,7 +1037,7 @@ export function second(value: number) {
   }
   return scaled + 11;
 }
-"#,
+",
     );
     let first = symbol(&file, "first");
     let second = symbol(&file, "second");

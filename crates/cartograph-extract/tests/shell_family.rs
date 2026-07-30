@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind};
@@ -37,7 +41,7 @@ fn bash_extracts_functions_variables_constants_imports_and_owned_calls_safely() 
         signature(&extracted, "PUBLIC_LIMIT"),
         Some("= $DEFAULT_LIMIT")
     );
-    assert!(symbol(&extracted, "PUBLIC_LIMIT").exported);
+    assert!(symbol(&extracted, "PUBLIC_LIMIT").export.exported);
     assert_eq!(signature(&extracted, "API_TOKEN"), None);
     assert_eq!(signature(&extracted, "LITERAL_COUNT"), None);
     assert_symbol(&extracted, SymbolKind::Function, "helper", "helper");
@@ -101,7 +105,7 @@ fn fish_extracts_functions_variables_imports_and_owned_calls_safely() {
         signature(&extracted, "FISH_LIMIT"),
         Some("= $DEFAULT_LIMIT")
     );
-    assert!(symbol(&extracted, "FISH_LIMIT").exported);
+    assert!(symbol(&extracted, "FISH_LIMIT").export.exported);
     assert_eq!(signature(&extracted, "FISH_OTHER"), Some("= OTHER_LIMIT"));
     assert_eq!(signature(&extracted, "FISH_SECRET"), None);
     assert_symbol(
@@ -356,7 +360,7 @@ fish_run
         ),
         (
             "scripts/Worker.psm1",
-            r#"using module './Modules/Common.psm1'
+            r"using module './Modules/Common.psm1'
 using module $DynamicModule
 $GlobalLimit = $DEFAULT_LIMIT
 $ApiToken = 'sk_live_fixture_secret'
@@ -374,7 +378,7 @@ function Invoke-Workflow {
 }
 
 Invoke-Workflow
-"#,
+",
             SourceLanguage::PowerShell,
         ),
     ]
@@ -384,8 +388,10 @@ fn extract_fixture(language: SourceLanguage) -> ExtractedFile {
     fixture_cases()
         .into_iter()
         .find(|(_, _, candidate)| *candidate == language)
-        .map(|(path, source, _)| extract(path, source))
-        .unwrap_or_else(|| panic!("missing {language:?} shell fixture"))
+        .map_or_else(
+            || panic!("missing {language:?} shell fixture"),
+            |(path, source, _)| extract(path, source),
+        )
 }
 
 fn extract(path: &str, source: &str) -> ExtractedFile {
@@ -440,10 +446,10 @@ fn canonical_facts(extracted: &ExtractedFile) -> Vec<String> {
             symbol.signature.as_deref().unwrap_or_default(),
             symbol.docstring.as_deref().unwrap_or_default(),
             symbol.body_search_text,
-            symbol.declaration_only,
-            symbol.exported,
-            symbol.async_symbol,
-            symbol.static_member,
+            symbol.implementation.declaration_only,
+            symbol.export.exported,
+            symbol.execution.async_symbol,
+            symbol.execution.static_member,
             symbol.visibility,
         )
     }));

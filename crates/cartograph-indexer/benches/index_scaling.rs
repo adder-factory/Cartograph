@@ -1,3 +1,8 @@
+//! Reproducible live benchmark for deterministic index-worker scaling.
+
+#[path = "../test_support/dependency_ownership.rs"]
+mod dependency_ownership;
+
 use std::{
     env, process,
     sync::{
@@ -17,7 +22,8 @@ use cartograph_db::{
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
-    GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation, SymbolId,
+    GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation, SymbolExecutionFlags,
+    SymbolExportFlags, SymbolId,
 };
 use cartograph_indexer::{
     IndexerSupervisor, PipelineFailure, PipelineStage, StageCapacity, StageDeadlinePolicy,
@@ -63,7 +69,7 @@ const EXPECTED_EDGES: i64 = 255;
 const EXPECTED_REFERENCES: i64 = 255;
 const EXPECTED_DOCUMENTS: i64 = 256;
 const WORKER_MATRIX: [u16; 5] = [1, 2, 4, 8, 16];
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+const OPERATION_TIMEOUT: Duration = Duration::from_mins(1);
 const STAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const ITEM_TIMEOUT: Duration = Duration::from_secs(25);
 const COPY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -71,7 +77,7 @@ const PROGRESS_TIMEOUT: Duration = Duration::from_secs(20);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(500);
 const CLEANUP_GRACE: Duration = Duration::from_secs(5);
-const LEASE_DURATION: Duration = Duration::from_secs(60);
+const LEASE_DURATION: Duration = Duration::from_mins(1);
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -443,9 +449,7 @@ async fn inspect_environment(database_url: &str) -> BenchmarkResult<EnvironmentR
     require(capabilities.ready, "benchmark-database-capabilities")?;
     Ok(EnvironmentReport {
         architecture: std::env::consts::ARCH,
-        logical_cpus: std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(0),
+        logical_cpus: std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
         rust_toolchain: env!("CARGO_PKG_RUST_VERSION"),
         postgres_version_num: capabilities.postgres_version_num,
         postgres_version: capabilities.postgres_version,
@@ -500,7 +504,7 @@ async fn run_clean_sample(request: CleanSampleRequest<'_>) -> BenchmarkResult<Sa
     let cleanup = database.close().await;
     match (result, cleanup) {
         (Ok(observation), Ok(())) => Ok(observation),
-        (Err(primary), Err(cleanup)) => Err(combine(primary, cleanup)),
+        (Err(primary), Err(cleanup)) => Err(combine(&primary, &cleanup)),
         (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
     }
 }
@@ -898,7 +902,7 @@ impl DatabaseFixture {
                 pool.close().await;
                 match cleanup {
                     Ok(()) => Err(primary),
-                    Err(cleanup) => Err(combine(primary, cleanup)),
+                    Err(cleanup) => Err(combine(&primary, &cleanup)),
                 }
             }
         }
@@ -1030,10 +1034,8 @@ fn build_fact_bundle(
             end_line,
             structural_digest: ContentDigest::from_bytes(*structural_hash.as_bytes()),
             visibility: None,
-            exported: true,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
+            export: SymbolExportFlags::named(true),
+            execution: SymbolExecutionFlags::default(),
             declaration_only: false,
             betweenness_ppb: None,
             pagerank_ppb: None,
@@ -1082,6 +1084,26 @@ fn reduce_fact_bundle(
     output: StageOutput<String, FactBundle>,
 ) -> Result<(), StageItemFailure> {
     let (_, bundle) = output.into_parts();
+    facts
+        .files
+        .try_reserve_exact(1)
+        .map_err(|_| StageItemFailure)?;
+    facts
+        .symbols
+        .try_reserve_exact(1)
+        .map_err(|_| StageItemFailure)?;
+    facts
+        .edges
+        .try_reserve_exact(usize::from(bundle.edge.is_some()))
+        .map_err(|_| StageItemFailure)?;
+    facts
+        .references
+        .try_reserve_exact(usize::from(bundle.reference.is_some()))
+        .map_err(|_| StageItemFailure)?;
+    facts
+        .documents
+        .try_reserve_exact(1)
+        .map_err(|_| StageItemFailure)?;
     facts.files.push(bundle.file);
     facts.symbols.push(bundle.symbol);
     if let Some(edge) = bundle.edge {
@@ -1330,14 +1352,15 @@ fn duration_nanos(duration: Duration) -> u64 {
 }
 
 fn nanos_to_millis(nanos: u64) -> f64 {
-    nanos as f64 / 1_000_000.0
+    Duration::from_nanos(nanos).as_secs_f64() * 1_000.0
 }
 
 fn throughput(nanos: u64) -> f64 {
     if nanos == 0 {
         0.0
     } else {
-        ITEM_COUNT as f64 * 1_000_000_000.0 / nanos as f64
+        let items = f64::from(u32::try_from(ITEM_COUNT).unwrap_or(u32::MAX));
+        items / Duration::from_nanos(nanos).as_secs_f64()
     }
 }
 
@@ -1363,7 +1386,7 @@ impl BenchmarkError {
     }
 }
 
-fn combine(primary: BenchmarkError, cleanup: BenchmarkError) -> BenchmarkError {
+fn combine(primary: &BenchmarkError, cleanup: &BenchmarkError) -> BenchmarkError {
     BenchmarkError::Combined {
         primary: primary.code(),
         cleanup: cleanup.code(),

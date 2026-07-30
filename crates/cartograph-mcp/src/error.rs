@@ -34,20 +34,35 @@ impl ErrorCode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StableErrorCode {
+    /// Input was not valid JSON.
     ParseError,
+    /// The JSON-RPC request envelope was invalid.
     InvalidRequest,
+    /// The requested JSON-RPC method is unknown.
     MethodNotFound,
+    /// The method parameters failed validation.
     InvalidParams,
+    /// The server encountered an internal failure.
     InternalError,
+    /// A request arrived before initialization completed.
     ServerNotInitialized,
+    /// A request exceeded its deadline.
     RequestTimeout,
+    /// An input line exceeded the configured byte bound.
     InputTooLarge,
+    /// A serialized response exceeded the configured byte bound.
     OutputTooLarge,
+    /// A request identifier is already active.
     DuplicateRequestId,
+    /// The bounded in-flight request capacity is exhausted.
     ServerBusy,
+    /// The peer cancelled the request.
     RequestCancelled,
+    /// The requested tool is not advertised.
     UnknownTool,
+    /// The supplied pagination cursor is unsupported.
     UnsupportedCursor,
+    /// The connection was initialized more than once.
     AlreadyInitialized,
 }
 
@@ -80,11 +95,17 @@ impl StableErrorCode {
 /// Stable tool-level failure categories exposed to coding agents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolErrorCode {
+    /// Tool arguments failed validation.
     InvalidArguments,
+    /// The requested entity does not exist.
     NotFound,
+    /// Current state conflicts with the requested operation.
     Conflict,
+    /// A required resource is not ready.
     NotReady,
+    /// A required service is unavailable.
     Unavailable,
+    /// An internal failure whose details must remain redacted.
     Internal,
 }
 
@@ -113,6 +134,11 @@ pub struct ToolError {
 impl ToolError {
     /// Construct an agent-visible failure. The caller must pass only text that
     /// is safe to cross the MCP boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolContractError::InvalidSafeError`] for internal categories,
+    /// empty messages, or messages exceeding the public byte bound.
     pub fn safe(
         code: ToolErrorCode,
         safe_message: impl Into<String>,
@@ -173,14 +199,23 @@ impl Error for ToolError {}
 /// Invalid public MCP/tool configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigError {
+    /// Server name or version metadata is invalid.
     InvalidServerMetadata,
+    /// Advertised server instructions are invalid.
     InvalidInstructions,
+    /// The configured protocol version is invalid.
     InvalidProtocolVersion,
+    /// The configured input limit is invalid.
     InvalidInputLimit,
+    /// The configured output limit is invalid.
     InvalidOutputLimit,
+    /// The configured in-flight request limit is invalid.
     InvalidInflightLimit,
+    /// The configured request deadline is invalid.
     InvalidRequestDeadline,
+    /// A tool definition violates the public contract.
     InvalidToolDefinition,
+    /// Two registered tools use the same canonical name.
     DuplicateToolName,
 }
 
@@ -206,11 +241,17 @@ impl Error for ConfigError {}
 /// Invalid tool/profile contract supplied by an adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolContractError {
+    /// The canonical tool name is invalid.
     InvalidName,
+    /// The tool description or title is invalid.
     InvalidDescription,
+    /// The tool input schema is not a JSON object schema.
     InvalidInputSchema,
+    /// The tool is not assigned to any profile.
     EmptyProfiles,
+    /// The requested profile name is invalid.
     InvalidProfile,
+    /// An agent-visible error would violate the safe-error contract.
     InvalidSafeError,
 }
 
@@ -225,9 +266,13 @@ impl Error for ToolContractError {}
 /// Redacted transport lifecycle failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServeError {
+    /// Reading a bounded input line failed.
     InputReadFailed,
+    /// Writing a response failed.
     OutputWriteFailed,
+    /// The bounded response channel closed unexpectedly.
     OutputChannelClosed,
+    /// The response writer task failed.
     OutputTaskFailed,
 }
 

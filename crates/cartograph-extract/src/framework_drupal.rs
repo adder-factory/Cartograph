@@ -38,12 +38,14 @@ struct ServiceState {
     indent: usize,
 }
 
+#[derive(Clone, Copy)]
 struct ServiceLine<'a> {
     service: &'a ServiceState,
     start: usize,
     text: &'a str,
 }
 
+#[derive(Clone, Copy)]
 struct ServiceReference<'a> {
     service: &'a ServiceState,
     value: &'a str,

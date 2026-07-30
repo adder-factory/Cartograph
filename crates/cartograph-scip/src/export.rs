@@ -9,7 +9,7 @@ use crate::{
     model::{
         CartographScipEdge, MAXIMUM_SCIP_BYTES, MAXIMUM_STRING_BYTES, SYMBOL_ROLE_DEFINITION,
         ScipDocument, ScipError, ScipIndex, ScipOccurrence, ScipRelationship,
-        ScipSymbolInformation, ScipSymbolKind,
+        ScipRelationshipRoles, ScipSymbolInformation, ScipSymbolKind,
     },
     symbol::{
         Descriptor, DescriptorSuffix, ScipPackage, append_meta_descriptor, build_symbol_string,
@@ -49,15 +49,24 @@ pub struct ScipExportOptions<'a> {
 }
 
 /// Project and tool metadata attached to one deterministic SCIP export.
+#[derive(Clone, Copy)]
 pub struct ScipExportOptionsInput<'a> {
+    /// Project name for this record.
     pub project_name: &'a str,
+    /// Project version for this record.
     pub project_version: &'a str,
+    /// Tool version for this record.
     pub tool_version: &'a str,
+    /// Project root uri for this record.
     pub project_root_uri: &'a str,
 }
 
 impl<'a> ScipExportOptions<'a> {
     /// Create metadata without retaining source paths or database details.
+    /// # Errors
+    ///
+    /// Returns an error if any required metadata value is empty, oversized, or
+    /// contains a NUL byte.
     pub fn new(input: ScipExportOptionsInput<'a>) -> Result<Self, ScipError> {
         let ScipExportOptionsInput {
             project_name,
@@ -168,6 +177,10 @@ impl ScipExport {
 }
 
 /// Export one immutable PostgreSQL graph snapshot as standard SCIP plus exact typed edges.
+/// # Errors
+///
+/// Returns an error if snapshot identities/relations are inconsistent, source
+/// bytes are unavailable or mismatched, cardinality overflows, or encoding is oversized.
 pub fn export_snapshot<ReadSource>(
     snapshot: &InterchangeSnapshot,
     options: &ScipExportOptions<'_>,
@@ -444,23 +457,18 @@ fn graph_metadata(
 }
 
 fn standard_relationship(edge_kind: &str, target: &str) -> Option<ScipRelationship> {
-    let mut relationship = ScipRelationship {
-        symbol: target.to_owned(),
-        is_reference: false,
-        is_implementation: false,
-        is_type_definition: false,
-        is_definition: false,
-    };
-    match edge_kind {
-        "extends" | "implements" => relationship.is_implementation = true,
-        "overrides" => {
-            relationship.is_reference = true;
-            relationship.is_implementation = true;
-        }
-        "type_of" => relationship.is_type_definition = true,
+    let roles = match edge_kind {
+        "extends" | "implements" => ScipRelationshipRoles::default().with_implementation(true),
+        "overrides" => ScipRelationshipRoles::default()
+            .with_reference(true)
+            .with_implementation(true),
+        "type_of" => ScipRelationshipRoles::default().with_type_definition(true),
         _ => return None,
-    }
-    Some(relationship)
+    };
+    Some(ScipRelationship {
+        symbol: target.to_owned(),
+        roles,
+    })
 }
 
 fn assign_symbols(
@@ -691,6 +699,13 @@ mod tests {
 
     use super::*;
 
+    fn assert_confidence(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= f32::EPSILON,
+            "confidence mismatch: expected {expected}, got {actual}"
+        );
+    }
+
     fn file_id(value: u8) -> FileId {
         FileId::from_uuid_v8([value; 16])
     }
@@ -703,8 +718,8 @@ mod tests {
     fn export_is_deterministic_and_retains_exact_typed_edges() {
         let source = b"fn caller() { callee(); }\nfn callee() {}\n".to_vec();
         let file = file_id(1);
-        let caller = symbol_id(2);
-        let callee = symbol_id(3);
+        let source_symbol = symbol_id(2);
+        let target_symbol = symbol_id(3);
         let snapshot = InterchangeSnapshot {
             generation_id: GenerationId::from_uuid_v8([4; 16]),
             files: vec![InterchangeFile {
@@ -716,7 +731,7 @@ mod tests {
             }],
             symbols: vec![
                 InterchangeSymbol {
-                    symbol_id: caller.clone(),
+                    symbol_id: source_symbol.clone(),
                     file_id: file.clone(),
                     symbol_kind: "function".to_owned(),
                     qualified_name: "caller".to_owned(),
@@ -729,7 +744,7 @@ mod tests {
                     end_line: 1,
                 },
                 InterchangeSymbol {
-                    symbol_id: callee.clone(),
+                    symbol_id: target_symbol.clone(),
                     file_id: file.clone(),
                     symbol_kind: "function".to_owned(),
                     qualified_name: "callee".to_owned(),
@@ -743,8 +758,8 @@ mod tests {
                 },
             ],
             edges: vec![InterchangeEdge {
-                source_symbol_id: caller.clone(),
-                target_symbol_id: callee.clone(),
+                source_symbol_id: source_symbol.clone(),
+                target_symbol_id: target_symbol.clone(),
                 edge_kind: "calls".to_owned(),
                 confidence: 0.95,
                 provenance: "native-exact-project".to_owned(),
@@ -752,8 +767,8 @@ mod tests {
             }],
             references: vec![InterchangeReference {
                 file_id: file,
-                owner_symbol_id: Some(caller),
-                target_symbol_id: Some(callee),
+                owner_symbol_id: Some(source_symbol),
+                target_symbol_id: Some(target_symbol),
                 reference_name: "callee".to_owned(),
                 reference_kind: "calls".to_owned(),
                 start_byte: 14,
@@ -782,6 +797,6 @@ mod tests {
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].site_count, 3);
         assert_eq!(exact[0].provenance, "native-exact-project");
-        assert_eq!(f32::from_bits(exact[0].confidence_bits), 0.95);
+        assert_confidence(f32::from_bits(exact[0].confidence_bits), 0.95);
     }
 }

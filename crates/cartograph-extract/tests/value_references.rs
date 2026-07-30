@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SymbolKind};
 use cartograph_extract::{ExtractedFile, NativeExtractor, SourceLimits, SourceSnapshot};
 
@@ -5,7 +9,7 @@ const SOURCE_LIMIT: usize = 1024 * 1024;
 
 #[test]
 fn callback_object_array_jsx_and_ternary_values_emit_exact_static_references() {
-    let source = r#"
+    let source = r"
 export function saveHandler() {}
 export function cancelHandler() {}
 function configure(value: unknown) { return value; }
@@ -18,7 +22,7 @@ export function wire(pretty: boolean) {
   (pretty ? saveHandler : cancelHandler)();
   return { options, steps, form };
 }
-"#;
+";
     let first = extract("src/wire.tsx", source);
     let second = extract("src/wire.tsx", source);
     assert_eq!(first, second);
@@ -58,7 +62,7 @@ export function wire(pretty: boolean) {
 
 #[test]
 fn member_values_strings_and_ambiguous_same_file_names_do_not_invent_value_edges() {
-    let source = r#"
+    let source = r"
 function duplicated() {}
 class Other { duplicated() {} }
 function uniqueHandler() {}
@@ -67,7 +71,7 @@ function wire() {
   configure('uniqueHandler');
   configure(duplicated);
 }
-"#;
+";
     let extracted = extract("src/negative.ts", source);
     assert!(
         extracted.references.iter().all(|reference| {

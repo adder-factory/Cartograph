@@ -19,6 +19,10 @@ use super::{
 
 impl CartographDatabase {
     /// Prove exact model identity, current coverage, HNSW shape, and live query execution.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline/model identity is invalid or current
+    /// coverage, HNSW catalog shape, and live vector probe cannot be evaluated.
     pub async fn semantic_readiness(
         &self,
         request: SemanticReadinessRequest,
@@ -86,6 +90,7 @@ pub(crate) struct CurrentReadinessTarget<'a> {
     selector: &'a EmbeddingModelSelector,
 }
 
+#[derive(Clone, Copy)]
 struct ReadinessEvidence {
     model_state: EmbeddingModelState,
     documents: u64,
@@ -216,25 +221,22 @@ pub(crate) async fn query_probe(
         .await
         .map_err(|_| database_error("semantic-probe-savepoint"))?;
     let probe = probe_query(connection, target, &vector).await;
-    match probe {
-        Ok(ready) => {
-            query("RELEASE SAVEPOINT cartograph_semantic_probe")
-                .execute(connection)
-                .await
-                .map_err(|_| database_error("semantic-probe-release"))?;
-            Ok(ready)
-        }
-        Err(_) => {
-            query("ROLLBACK TO SAVEPOINT cartograph_semantic_probe")
-                .execute(&mut *connection)
-                .await
-                .map_err(|_| database_error("semantic-probe-rollback"))?;
-            query("RELEASE SAVEPOINT cartograph_semantic_probe")
-                .execute(connection)
-                .await
-                .map_err(|_| database_error("semantic-probe-release"))?;
-            Ok(false)
-        }
+    if let Ok(ready) = probe {
+        query("RELEASE SAVEPOINT cartograph_semantic_probe")
+            .execute(connection)
+            .await
+            .map_err(|_| database_error("semantic-probe-release"))?;
+        Ok(ready)
+    } else {
+        query("ROLLBACK TO SAVEPOINT cartograph_semantic_probe")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| database_error("semantic-probe-rollback"))?;
+        query("RELEASE SAVEPOINT cartograph_semantic_probe")
+            .execute(connection)
+            .await
+            .map_err(|_| database_error("semantic-probe-release"))?;
+        Ok(false)
     }
 }
 

@@ -46,7 +46,7 @@ impl ProjectAutoSync {
             ProjectWatchFilter::load(&root).map_err(|_| AutoSyncError::InvalidProjectPolicy)?,
         ));
         state.active.store(true, Ordering::Release);
-        let watcher = start_watcher(WatcherContext {
+        let watcher = start_watcher(&WatcherContext {
             root,
             events,
             state: state.clone(),
@@ -156,10 +156,10 @@ impl AutoSyncWatcher {
     }
 }
 
-fn start_watcher(context: WatcherContext) -> Result<AutoSyncWatcher, AutoSyncError> {
+fn start_watcher(context: &WatcherContext) -> Result<AutoSyncWatcher, AutoSyncError> {
     let native_config = Config::default().with_follow_symlinks(false);
     if let Ok(mut watcher) =
-        RecommendedWatcher::new(watcher_handler(context.clone()), native_config)
+        RecommendedWatcher::new(watcher_handler((*context).clone()), native_config)
         && watcher
             .watch(&context.root, RecursiveMode::Recursive)
             .is_ok()
@@ -169,7 +169,7 @@ fn start_watcher(context: WatcherContext) -> Result<AutoSyncWatcher, AutoSyncErr
     let poll_config = Config::default()
         .with_follow_symlinks(false)
         .with_poll_interval(FALLBACK_POLL_INTERVAL);
-    let mut watcher = PollWatcher::new(watcher_handler(context.clone()), poll_config)
+    let mut watcher = PollWatcher::new(watcher_handler((*context).clone()), poll_config)
         .map_err(|_| AutoSyncError::WatcherUnavailable)?;
     watcher
         .watch(&context.root, RecursiveMode::Recursive)
@@ -246,7 +246,7 @@ async fn run_auto_sync(input: AutoSyncTask) {
                 }
                 synchronize(&runtime, &state).await;
             }
-            _ = &mut startup_reconciliation, if startup_reconciliation_pending => {
+            () = &mut startup_reconciliation, if startup_reconciliation_pending => {
                 startup_reconciliation_pending = false;
                 reconcile(&runtime, &state).await;
             }
@@ -284,7 +284,7 @@ async fn debounce_events(
                     return true;
                 }
             }
-            _ = &mut deadline => return false,
+            () = &mut deadline => return false,
             event = events.recv() => {
                 if event.is_none() {
                     return true;
@@ -354,8 +354,7 @@ fn debounce_from_env() -> Duration {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (MINIMUM_DEBOUNCE_MILLIS..=MAXIMUM_DEBOUNCE_MILLIS).contains(value))
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_DEBOUNCE)
+        .map_or(DEFAULT_DEBOUNCE, Duration::from_millis)
 }
 
 fn unix_millis() -> u64 {

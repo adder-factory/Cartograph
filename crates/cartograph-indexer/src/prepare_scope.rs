@@ -122,11 +122,8 @@ impl PrepareScope {
         reap_deadline: Instant,
         hard_deadline: Instant,
     ) -> PrepareReap {
-        let handle = match self.close_and_take() {
-            Ok(handle) => handle,
-            Err(()) => {
-                return PrepareReap { all_joined: false };
-            }
+        let Ok(handle) = self.close_and_take() else {
+            return PrepareReap { all_joined: false };
         };
         let Some(mut handle) = handle else {
             return PrepareReap { all_joined: true };

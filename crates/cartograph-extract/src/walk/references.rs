@@ -391,7 +391,6 @@ fn normalized_javascript_call_target(target: Node<'_>, depth: usize) -> Option<N
         }
         // The inner call already records its statically known target. The value it returns is
         // dynamically callable, while arrow/function IIFEs have no stable declaration target.
-        "call_expression" | "arrow_function" | "function_expression" => None,
         _ => None,
     }
 }
@@ -490,9 +489,9 @@ fn is_commonjs_require_selection(builder: &ExtractionBuilder<'_, '_>, node: Node
         .is_some_and(|function| builder.context.text(function).trim() == "require")
 }
 
-fn push_node_reference<'tree>(
+fn push_node_reference(
     builder: &mut ExtractionBuilder<'_, '_>,
-    reference: NodeReference<'tree>,
+    reference: NodeReference<'_>,
 ) -> Result<(), ExtractError> {
     let name = builder.context.owned_text(reference.name)?;
     push_reference(

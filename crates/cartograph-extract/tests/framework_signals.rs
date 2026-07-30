@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
 use cartograph_extract::{ExtractError, NativeExtractor, SourceLimits, SourceSnapshot};
 
@@ -115,7 +119,11 @@ fn framework_routes_cover_major_v1_ecosystems_with_typed_searchable_symbols() {
                         .collect::<Vec<_>>()
                 )
             });
-        assert!(route.exported, "{} route was not public", fixture.path);
+        assert!(
+            route.export.exported,
+            "{} route was not public",
+            fixture.path
+        );
         assert!(
             !format!("{first:?}").contains(SECRET),
             "{} leaked a source literal: {first:?}",
@@ -203,7 +211,7 @@ fn load() {
 fn framework_routes_ignore_comments_and_span_multiline_static_calls() {
     let extracted = extract(
         "src/server.ts",
-        r#"
+        r"
 import express from 'express';
 // app.get('/commented-line', ignored);
 /*
@@ -216,7 +224,7 @@ app.patch(
 router.options('/orders', corsHandler);
 router.use('/admin', adminRouter);
 router.use(authMiddleware);
-"#,
+",
         SourceLanguage::TypeScript,
     );
     let routes = extracted
@@ -264,7 +272,7 @@ test('omitted path uses realpath(".")', async () => {
 fn framework_routes_cover_hono_on_and_fastify_object_forms() {
     let extracted = extract(
         "src/server.ts",
-        r#"
+        r"
 import { Hono } from 'hono';
 import Fastify from 'fastify';
 app.on('PATCH', '/orders/:id', patchOrder);
@@ -273,7 +281,7 @@ fastify.route({
   url: '/orders',
   handler: createOrder,
 });
-"#,
+",
         SourceLanguage::TypeScript,
     );
     let routes = extracted
@@ -374,11 +382,11 @@ fn path_convention_routes_cover_next_sveltekit_and_nuxt_even_when_files_are_empt
 fn framework_routes_cover_resource_axum_chi_and_python_docstring_boundaries() {
     let php = extract(
         "routes/web.php",
-        r#"<?php
+        r"<?php
 # Route::resource('ignored', IgnoredController::class);
 Route::resource('users', UserController::class);
 Route::apiResource('teams', TeamController::class);
-"#,
+",
         SourceLanguage::Php,
     );
     for expected in ["resource:users", "resource:teams"] {
@@ -462,7 +470,7 @@ def real():
 
 #[test]
 fn laravel_routes_keep_source_labels_and_qualified_controller_resolution_hints() {
-    let source = r#"<?php
+    let source = r"<?php
 use App\Http\Controllers\OrderController;
 Route::get('/orders', [OrderController::class, 'index']);
 Route::post('/legacy', 'OrderController@store');
@@ -470,7 +478,7 @@ Route::options('/orders', OrderController::class);
 Route::any('/health', healthCheck);
 Route::resource('users', UserController::class)->only(['index']);
 Route::get('/inline', static fn () => ['ok' => true]);
-"#;
+";
     let php = extract("routes/web.php", source, SourceLanguage::Php);
     let expectations = [
         ("GET /orders", "index", Some("OrderController::index")),
@@ -529,12 +537,12 @@ Route::get('/inline', static fn () => ['ok' => true]);
 fn framework_configuration_routes_cover_symfony_drupal_and_codeigniter() {
     let symfony = extract(
         "config/routes.yaml",
-        r#"
+        r"
 orders_show:
   path: /orders/{id}
   controller: App\Controller\OrderController::show
   methods: [GET]
-"#,
+",
         SourceLanguage::Yaml,
     );
     let route = symfony
@@ -552,13 +560,13 @@ orders_show:
 
     let drupal = extract(
         "modules/custom/orders/orders.routing.yml",
-        r#"
+        r"
 orders.hello:
   path: '/hello'
   defaults:
     _controller: '\Drupal\orders\Controller\HelloController::build'
   methods: [GET]
-"#,
+",
         SourceLanguage::Yaml,
     );
     assert!(
@@ -575,10 +583,10 @@ orders.hello:
 
     let codeigniter = extract(
         "application/config/routes.php",
-        r#"<?php
+        r"<?php
 $route['default_controller'] = 'welcome';
 $route['product/(:num)']['DELETE'] = 'catalog/product_lookup_by_id/$1';
-"#,
+",
         SourceLanguage::Php,
     );
     for expected in ["ANY /", "DELETE /product/(:num)"] {
@@ -634,13 +642,13 @@ likes = neug.Edge("LIKES")
 
     let flutter = extract(
         "lib/main.dart",
-        r#"
+        r"
 import 'package:flutter/material.dart';
 MaterialApp(routes: {
   '/': (context) => HomePage(),
   '/settings': (context) => const SettingsPage(),
 });
-"#,
+",
         SourceLanguage::Dart,
     );
     for expected in ["ANY /", "ANY /settings"] {
@@ -670,7 +678,7 @@ MaterialApp(routes: {
 fn nestjs_routes_join_controller_paths_and_gate_http_graphql_and_rpc_styles() {
     let extracted = extract(
         "src/hybrid.controller.ts",
-        r#"
+        r"
 @Controller('/api/')
 @Resolver('Thing')
 class HybridController {
@@ -701,7 +709,7 @@ class OnlyGraphResolver {
 class NotAController {
   @Get('/orphan') orphan() {}
 }
-"#,
+",
         SourceLanguage::TypeScript,
     );
     let routes = extracted
@@ -738,7 +746,7 @@ class NotAController {
 fn bun_serve_routes_keep_method_maps_top_level_and_reject_nested_config_shapes() {
     let extracted = extract(
         "src/bun-server.ts",
-        r#"
+        r"
 function health() {}
 function listUsers() {}
 function createUser() {}
@@ -752,7 +760,7 @@ Bun.serve({
   nested: { routes: { '/not-top-level': health } },
 });
 // Bun.serve({ routes: { '/commented': health } });
-"#,
+",
         SourceLanguage::TypeScript,
     );
     let routes = extracted
@@ -786,7 +794,7 @@ Bun.serve({
 fn hono_routes_are_receiver_scoped_and_mount_only_the_named_child_router() {
     let extracted = extract(
         "src/hono.ts",
-        r#"
+        r"
 import { Hono } from 'hono';
 const app = new Hono();
 const users = new Hono();
@@ -796,7 +804,7 @@ users.on('purge', '/cache', purgeCache);
 admin.post('/admin', createAdmin);
 database.get('/must-not-exist', unrelated);
 app.route('/api', users);
-"#,
+",
         SourceLanguage::TypeScript,
     );
     let routes = extracted
@@ -939,7 +947,7 @@ end
 fn drupal_services_hooks_plugins_and_tags_are_graph_visible_without_source_reparse() {
     let services = extract(
         "modules/custom/demo/demo.services.yml",
-        r#"
+        r"
 services:
   _defaults:
     autowire: true
@@ -953,7 +961,7 @@ services:
   demo.consumer:
     arguments:
       - !tagged_iterator event_subscriber
-"#,
+",
         SourceLanguage::Yaml,
     );
     for service in ["demo.listener", "demo.alias", "demo.consumer"] {
@@ -995,12 +1003,12 @@ services:
 
     let hooks = extract(
         "modules/custom/demo/demo.module",
-        r#"<?php
+        r"<?php
 /** @implements hook_form_alter(). */
 function demo_form_alter(&$form) {}
 function demo_help() {}
 function unrelated_helper() {}
-"#,
+",
         SourceLanguage::Php,
     );
     for contract in ["hook_form_alter", "hook_help"] {
@@ -1045,7 +1053,7 @@ class ModernBlock {}
 fn codeigniter_controller_routes_and_loaded_resource_calls_keep_convention_identity() {
     let extracted = extract(
         "application/controllers/admin/Users.php",
-        r#"<?php
+        r"<?php
 class Users extends CI_Controller {
   public function index() {}
   public function show($id) {
@@ -1060,7 +1068,7 @@ class Users extends CI_Controller {
   public function _remap($method) {}
   protected function hidden() {}
 }
-"#,
+",
         SourceLanguage::Php,
     );
     let routes = extracted
@@ -1256,13 +1264,13 @@ nix = "0.30"
 fn component_framework_builtins_stores_and_template_boundaries_are_precise() {
     let vue = extract(
         "pages/index.vue",
-        r##"<script setup lang="ts">
+        r#"<script setup lang="ts">
 import { useRoute } from '#imports'
 const props = defineProps<{ message: string }>()
 </script>
 <template><OrderCard @click="submitOrder()" />{{ formatOrder(order) }}</template>
 <style>.fake { content: "{{ styleGhost() }}"; }</style>
-"##,
+"#,
         SourceLanguage::Vue,
     );
     let vue_component = vue
@@ -1270,7 +1278,7 @@ const props = defineProps<{ message: string }>()
         .iter()
         .find(|symbol| symbol.kind == SymbolKind::Component && symbol.name == "index")
         .unwrap_or_else(|| panic!("missing Vue component: {:?}", vue.symbols));
-    assert!(vue_component.exported && vue_component.default_export);
+    assert!(vue_component.export.exported && vue_component.export.default_export);
     assert!(
         vue.symbols
             .iter()

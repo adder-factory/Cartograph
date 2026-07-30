@@ -8,6 +8,7 @@ use std::{
 
 use cartograph_domain::SourceLanguage;
 use futures_util::StreamExt as _;
+use num_traits::ToPrimitive as _;
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Serialize;
@@ -50,11 +51,17 @@ const MAXIMUM_SUMMARY_KIND_BYTES: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectLlmTier {
+    /// Represents the embedding project LLM tier.
     Embedding,
+    /// Represents the summarize project LLM tier.
     Summarize,
+    /// Represents the local project LLM tier.
     Local,
+    /// Represents the ask project LLM tier.
     Ask,
+    /// Represents the classify project LLM tier.
     Classify,
+    /// Represents the reranker project LLM tier.
     Reranker,
 }
 
@@ -63,8 +70,11 @@ pub enum ProjectLlmTier {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectLlmProvider {
+    /// Represents the open ai compat project LLM provider.
     OpenAiCompat,
+    /// Represents the claude bridge project LLM provider.
     ClaudeBridge,
+    /// Represents the anthropic API project LLM provider.
     AnthropicApi,
 }
 
@@ -72,7 +82,9 @@ pub enum ProjectLlmProvider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectSummaryEagerLimit {
+    /// Represents the bounded project summary eager limit.
     Bounded(u64),
+    /// Represents the uncapped project summary eager limit.
     Uncapped,
 }
 
@@ -87,21 +99,25 @@ pub struct ProjectSummarySettings {
 
 impl ProjectSummarySettings {
     #[must_use]
+    /// Returns whether summary generation is enabled.
     pub const fn enabled(&self) -> bool {
         self.enabled
     }
 
     #[must_use]
+    /// Returns the eager limit.
     pub const fn eager_limit(&self) -> ProjectSummaryEagerLimit {
         self.eager_limit
     }
 
     #[must_use]
+    /// Returns the minimum body lines.
     pub const fn minimum_body_lines(&self) -> u32 {
         self.minimum_body_lines
     }
 
     #[must_use]
+    /// Returns the minimum body lines by kind.
     pub const fn minimum_body_lines_by_kind(&self) -> &BTreeMap<String, u32> {
         &self.minimum_body_lines_by_kind
     }
@@ -127,54 +143,59 @@ impl ProjectLlmProvider {
 }
 
 /// Non-secret source discovery settings read from the shared project config boundary.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectSourceSettings {
     maximum_file_bytes: Option<usize>,
     languages: Vec<SourceLanguage>,
     includes: Option<Vec<String>>,
     excludes: Vec<String>,
-    extract_docstrings: bool,
-    track_call_sites: bool,
-    index_submodules: bool,
-    index_embedded_repositories: bool,
-    enable_centrality: bool,
-    enable_betweenness: bool,
-    enable_churn: bool,
-    enable_co_change: bool,
-    enable_biomarkers: bool,
-    enable_issue_history: bool,
-    enable_config_refs: bool,
-    enable_sql_refs: bool,
-    enable_build_context_refs: bool,
-    enable_string_imports: bool,
-    duplicate_code_partial_clones: bool,
+    features: SourceFeatureFlags,
     duplicate_code_allowlist: Vec<String>,
 }
 
-impl Default for ProjectSourceSettings {
-    fn default() -> Self {
-        Self {
-            maximum_file_bytes: None,
-            languages: Vec::new(),
-            includes: None,
-            excludes: Vec::new(),
-            extract_docstrings: true,
-            track_call_sites: true,
-            index_submodules: true,
-            index_embedded_repositories: true,
-            enable_centrality: true,
-            enable_betweenness: true,
-            enable_churn: true,
-            enable_co_change: true,
-            enable_biomarkers: true,
-            enable_issue_history: true,
-            enable_config_refs: true,
-            enable_sql_refs: true,
-            enable_build_context_refs: true,
-            enable_string_imports: true,
-            duplicate_code_partial_clones: false,
-            duplicate_code_allowlist: Vec::new(),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+enum SourceFeature {
+    ExtractDocstrings = 1 << 0,
+    TrackCallSites = 1 << 1,
+    IndexSubmodules = 1 << 2,
+    IndexEmbeddedRepositories = 1 << 3,
+    Centrality = 1 << 4,
+    Betweenness = 1 << 5,
+    Churn = 1 << 6,
+    CoChange = 1 << 7,
+    Biomarkers = 1 << 8,
+    IssueHistory = 1 << 9,
+    ConfigReferences = 1 << 10,
+    SqlReferences = 1 << 11,
+    BuildContextReferences = 1 << 12,
+    StringImports = 1 << 13,
+    DuplicateCodePartialClones = 1 << 14,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceFeatureFlags(u16);
+
+impl SourceFeatureFlags {
+    const DEFAULT_BITS: u16 = (1 << 14) - 1;
+
+    const fn enabled(self, feature: SourceFeature) -> bool {
+        self.0 & feature as u16 != 0
+    }
+
+    const fn set(&mut self, feature: SourceFeature, enabled: bool) {
+        let mask = feature as u16;
+        if enabled {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
         }
+    }
+}
+
+impl Default for SourceFeatureFlags {
+    fn default() -> Self {
+        Self(Self::DEFAULT_BITS)
     }
 }
 
@@ -189,26 +210,30 @@ impl std::fmt::Debug for ProjectSourceSettings {
                 &self.includes.as_ref().map_or(0, Vec::len),
             )
             .field("exclude_patterns", &self.excludes.len())
-            .field("extract_docstrings", &self.extract_docstrings)
-            .field("track_call_sites", &self.track_call_sites)
-            .field("index_submodules", &self.index_submodules)
+            .field("features", &self.features)
+            .field("extract_docstrings", &self.extract_docstrings())
+            .field("track_call_sites", &self.track_call_sites())
+            .field("index_submodules", &self.index_submodules())
             .field(
                 "index_embedded_repositories",
-                &self.index_embedded_repositories,
+                &self.index_embedded_repositories(),
             )
-            .field("enable_centrality", &self.enable_centrality)
-            .field("enable_betweenness", &self.enable_betweenness)
-            .field("enable_churn", &self.enable_churn)
-            .field("enable_co_change", &self.enable_co_change)
-            .field("enable_biomarkers", &self.enable_biomarkers)
-            .field("enable_issue_history", &self.enable_issue_history)
-            .field("enable_config_refs", &self.enable_config_refs)
-            .field("enable_sql_refs", &self.enable_sql_refs)
-            .field("enable_build_context_refs", &self.enable_build_context_refs)
-            .field("enable_string_imports", &self.enable_string_imports)
+            .field("enable_centrality", &self.enable_centrality())
+            .field("enable_betweenness", &self.enable_betweenness())
+            .field("enable_churn", &self.enable_churn())
+            .field("enable_co_change", &self.enable_co_change())
+            .field("enable_biomarkers", &self.enable_biomarkers())
+            .field("enable_issue_history", &self.enable_issue_history())
+            .field("enable_config_refs", &self.enable_config_refs())
+            .field("enable_sql_refs", &self.enable_sql_refs())
+            .field(
+                "enable_build_context_refs",
+                &self.enable_build_context_refs(),
+            )
+            .field("enable_string_imports", &self.enable_string_imports())
             .field(
                 "duplicate_code_partial_clones",
-                &self.duplicate_code_partial_clones,
+                &self.duplicate_code_partial_clones(),
             )
             .field(
                 "duplicate_code_allowlist_patterns",
@@ -220,6 +245,7 @@ impl std::fmt::Debug for ProjectSourceSettings {
 
 impl ProjectSourceSettings {
     #[must_use]
+    /// Returns the maximum file bytes.
     pub const fn maximum_file_bytes(&self) -> Option<usize> {
         self.maximum_file_bytes
     }
@@ -239,86 +265,101 @@ impl ProjectSourceSettings {
     }
 
     #[must_use]
+    /// Returns the excludes.
     pub fn excludes(&self) -> &[String] {
         &self.excludes
     }
 
     #[must_use]
+    /// Returns whether extracted docstrings are retained.
     pub const fn extract_docstrings(&self) -> bool {
-        self.extract_docstrings
+        self.features.enabled(SourceFeature::ExtractDocstrings)
     }
 
     #[must_use]
+    /// Returns whether call-site facts are indexed.
     pub const fn track_call_sites(&self) -> bool {
-        self.track_call_sites
+        self.features.enabled(SourceFeature::TrackCallSites)
     }
 
     #[must_use]
+    /// Returns whether nested Git submodules are indexed.
     pub const fn index_submodules(&self) -> bool {
-        self.index_submodules
+        self.features.enabled(SourceFeature::IndexSubmodules)
     }
 
     #[must_use]
+    /// Returns whether embedded repositories are indexed.
     pub const fn index_embedded_repositories(&self) -> bool {
-        self.index_embedded_repositories
+        self.features
+            .enabled(SourceFeature::IndexEmbeddedRepositories)
     }
 
-    /// Whether v1-compatible PageRank centrality is derived for each generation.
+    /// Whether v1-compatible `PageRank` centrality is derived for each generation.
     #[must_use]
     pub const fn enable_centrality(&self) -> bool {
-        self.enable_centrality
+        self.features.enabled(SourceFeature::Centrality)
     }
 
     /// Whether bounded sampled Brandes betweenness is derived for each generation.
     #[must_use]
     pub const fn enable_betweenness(&self) -> bool {
-        self.enable_betweenness
+        self.features.enabled(SourceFeature::Betweenness)
     }
 
     #[must_use]
+    /// Whether Git churn facts are derived.
     pub const fn enable_churn(&self) -> bool {
-        self.enable_churn
+        self.features.enabled(SourceFeature::Churn)
     }
 
     #[must_use]
+    /// Whether Git co-change relationships are derived.
     pub const fn enable_co_change(&self) -> bool {
-        self.enable_co_change
+        self.features.enabled(SourceFeature::CoChange)
     }
 
     #[must_use]
+    /// Whether static code-health biomarkers are derived.
     pub const fn enable_biomarkers(&self) -> bool {
-        self.enable_biomarkers
+        self.features.enabled(SourceFeature::Biomarkers)
     }
 
     #[must_use]
+    /// Whether issue-tagged Git history is derived.
     pub const fn enable_issue_history(&self) -> bool {
-        self.enable_issue_history
+        self.features.enabled(SourceFeature::IssueHistory)
     }
 
     #[must_use]
+    /// Whether configuration-key references are extracted.
     pub const fn enable_config_refs(&self) -> bool {
-        self.enable_config_refs
+        self.features.enabled(SourceFeature::ConfigReferences)
     }
 
     #[must_use]
+    /// Whether SQL relation references are extracted.
     pub const fn enable_sql_refs(&self) -> bool {
-        self.enable_sql_refs
+        self.features.enabled(SourceFeature::SqlReferences)
     }
 
     #[must_use]
+    /// Whether build-context file references are extracted.
     pub const fn enable_build_context_refs(&self) -> bool {
-        self.enable_build_context_refs
+        self.features.enabled(SourceFeature::BuildContextReferences)
     }
 
     #[must_use]
+    /// Whether import-shaped string literals contribute module edges.
     pub const fn enable_string_imports(&self) -> bool {
-        self.enable_string_imports
+        self.features.enabled(SourceFeature::StringImports)
     }
 
     /// Whether the wider 0.80 Type-3 clone band is enabled in addition to 0.95.
     #[must_use]
     pub const fn duplicate_code_partial_clones(&self) -> bool {
-        self.duplicate_code_partial_clones
+        self.features
+            .enabled(SourceFeature::DuplicateCodePartialClones)
     }
 
     /// Project-relative path globs exempted from every duplicate-code tier.
@@ -352,8 +393,11 @@ impl ProjectLlmTier {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectLlmCredentialSource {
+    /// Represents the none project LLM credential source.
     None,
+    /// Represents the environment project LLM credential source.
     Environment,
+    /// Represents the inline legacy project LLM credential source.
     InlineLegacy,
 }
 
@@ -361,10 +405,15 @@ pub enum ProjectLlmCredentialSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectCredentialMigrationStatus {
+    /// Represents the ready credential migration status state.
     Ready,
+    /// Represents the migrated credential migration status state.
     Migrated,
+    /// Represents the environment missing credential migration status state.
     EnvironmentMissing,
+    /// Represents the environment mismatch credential migration status state.
     EnvironmentMismatch,
+    /// Represents the unsupported provider credential migration status state.
     UnsupportedProvider,
 }
 
@@ -373,8 +422,11 @@ pub enum ProjectCredentialMigrationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectCredentialMigrationEntry {
+    /// Tier for this record.
     pub tier: ProjectLlmTier,
+    /// Optional environment, when available.
     pub environment: Option<String>,
+    /// Status for this record.
     pub status: ProjectCredentialMigrationStatus,
 }
 
@@ -382,9 +434,13 @@ pub struct ProjectCredentialMigrationEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectCredentialMigrationReport {
+    /// Whether migration changes are reported without being written.
     pub dry_run: bool,
+    /// Bounded candidates included in this result.
     pub candidates: Vec<ProjectCredentialMigrationEntry>,
+    /// Number of migrated.
     pub migrated: usize,
+    /// Number of remaining inline.
     pub remaining_inline: usize,
 }
 
@@ -392,8 +448,11 @@ pub struct ProjectCredentialMigrationReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmEndpointProbe {
+    /// Whether the configured endpoint accepted a bounded probe.
     pub reachable: bool,
+    /// Whether the endpoint satisfied the OpenAI-compatible response contract.
     pub openai_compatible: bool,
+    /// Bounded models included in this result.
     pub models: Vec<String>,
 }
 
@@ -422,6 +481,7 @@ impl std::fmt::Debug for ProjectLlmTierConfig {
             .field("endpoint", &"<redacted>")
             .field("model", &self.model)
             .field("ask_model", &self.ask_model)
+            .field("api_key_configured", &self.api_key.is_some())
             .field("credential_source", &self.credential_source)
             .field("timeout_ms", &self.timeout_ms)
             .field("concurrency", &self.concurrency)
@@ -435,26 +495,31 @@ impl std::fmt::Debug for ProjectLlmTierConfig {
 
 impl ProjectLlmTierConfig {
     #[must_use]
+    /// Returns the provider.
     pub const fn provider(&self) -> ProjectLlmProvider {
         self.provider
     }
 
     #[must_use]
+    /// Returns the endpoint.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
     #[must_use]
+    /// Returns the model.
     pub fn model(&self) -> &str {
         &self.model
     }
 
     #[must_use]
+    /// Returns the ask model.
     pub fn ask_model(&self) -> Option<&str> {
         self.ask_model.as_deref()
     }
 
     #[must_use]
+    /// Returns the API key.
     pub fn api_key(&self) -> Option<String> {
         self.api_key
             .as_ref()
@@ -462,36 +527,43 @@ impl ProjectLlmTierConfig {
     }
 
     #[must_use]
+    /// Returns the credential source.
     pub const fn credential_source(&self) -> ProjectLlmCredentialSource {
         self.credential_source
     }
 
     #[must_use]
+    /// Returns the timeout milliseconds.
     pub const fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
     }
 
     #[must_use]
+    /// Returns the concurrency.
     pub const fn concurrency(&self) -> Option<u16> {
         self.concurrency
     }
 
     #[must_use]
+    /// Returns the summary batch size.
     pub const fn summary_batch_size(&self) -> Option<u16> {
         self.summary_batch_size
     }
 
     #[must_use]
+    /// Returns the claude bin.
     pub fn claude_bin(&self) -> Option<&str> {
         self.claude_bin.as_deref()
     }
 
     #[must_use]
+    /// Returns the llama server args.
     pub fn llama_server_args(&self) -> &[String] {
         &self.llama_server_args
     }
 
     #[must_use]
+    /// Returns whether the configured backend is managed externally.
     pub const fn externally_managed(&self) -> bool {
         self.externally_managed
     }
@@ -515,6 +587,12 @@ pub struct ProjectLlmTierInput {
 }
 
 impl ProjectLlmTierInput {
+    /// Creates a validated project LLM tier input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `endpoint` is unsafe/invalid or `model` is empty,
+    /// oversized, or contains control characters.
     pub fn new(
         tier: ProjectLlmTier,
         endpoint: impl Into<String>,
@@ -539,6 +617,12 @@ impl ProjectLlmTierInput {
         })
     }
 
+    /// Returns the claude bridge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `tier` is not chat-capable or `model` violates its
+    /// non-empty, byte-length, or control-character contract.
     pub fn claude_bridge(
         tier: ProjectLlmTier,
         model: impl Into<String>,
@@ -561,6 +645,12 @@ impl ProjectLlmTierInput {
         })
     }
 
+    /// Returns the anthropic API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `tier` is not chat-capable or `model` violates its
+    /// non-empty, byte-length, or control-character contract.
     pub fn anthropic_api(
         tier: ProjectLlmTier,
         model: impl Into<String>,
@@ -592,6 +682,12 @@ impl ProjectLlmTierInput {
         self.tier
     }
 
+    /// Sets the API key environment and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for the credential-free Claude bridge or if the value
+    /// is not a valid bounded environment-variable name.
     pub fn with_api_key_env(
         mut self,
         value: impl Into<String>,
@@ -607,12 +703,18 @@ impl ProjectLlmTierInput {
     }
 
     #[must_use]
+    /// Returns a copy with all resolved credential material removed.
     pub fn without_credentials(mut self) -> Self {
         self.api_key_env = None;
         self.replace_credentials = true;
         self
     }
 
+    /// Sets the timeout milliseconds and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `timeout_ms` is zero or exceeds the project-tier maximum.
     pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Result<Self, ProjectLlmConfigError> {
         if timeout_ms == 0 || timeout_ms > MAXIMUM_TIMEOUT_MS {
             return Err(ProjectLlmConfigError::InvalidTier);
@@ -621,6 +723,11 @@ impl ProjectLlmTierInput {
         Ok(self)
     }
 
+    /// Sets the concurrency and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `concurrency` is zero or exceeds the project-tier maximum.
     pub fn with_concurrency(mut self, concurrency: u16) -> Result<Self, ProjectLlmConfigError> {
         if concurrency == 0 || concurrency > MAXIMUM_CONCURRENCY {
             return Err(ProjectLlmConfigError::InvalidTier);
@@ -629,6 +736,12 @@ impl ProjectLlmTierInput {
         Ok(self)
     }
 
+    /// Sets the ask model and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tier is not chat-capable or `ask_model` violates
+    /// its non-empty, byte-length, or control-character contract.
     pub fn with_ask_model(
         mut self,
         ask_model: impl Into<String>,
@@ -640,6 +753,12 @@ impl ProjectLlmTierInput {
         Ok(self)
     }
 
+    /// Sets the summary batch size and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tier is not chat-capable or the batch size is
+    /// zero or above the summary batching maximum.
     pub fn with_summary_batch_size(
         mut self,
         summary_batch_size: u16,
@@ -652,6 +771,12 @@ impl ProjectLlmTierInput {
         Ok(self)
     }
 
+    /// Sets the claude bin and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the provider is Claude bridge, or if the binary
+    /// name/path is empty, oversized, or contains control characters.
     pub fn with_claude_bin(
         mut self,
         claude_bin: impl Into<String>,
@@ -680,24 +805,36 @@ fn validate_chat_tier(tier: ProjectLlmTier) -> Result<(), ProjectLlmConfigError>
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+/// Errors produced while processing project LLM config.
 pub enum ProjectLlmConfigError {
     #[error("Cartograph project configuration path is unavailable")]
+    /// The requested project could not be opened safely.
     ProjectUnavailable,
     #[error("Cartograph project configuration is too large")]
+    /// The host configuration exceeds the safe rewrite byte ceiling.
     ConfigTooLarge,
     #[error("Cartograph project configuration is invalid")]
+    /// Configuration is malformed or violates a required bound.
     InvalidConfig,
     #[error("Cartograph project LLM tier is invalid")]
+    /// The requested model tier is not valid for this provider.
     InvalidTier,
     #[error("Cartograph project LLM credential environment variable is unavailable")]
+    /// The configured credential reference could not be resolved privately.
     CredentialUnavailable,
     #[error("Cartograph project configuration cannot be written safely")]
+    /// The bounded output could not be written atomically.
     WriteFailed,
     #[error("Cartograph project configuration changed concurrently")]
+    /// The host configuration changed during the atomic rewrite.
     ConcurrentModification,
 }
 
 /// Load one tier, retaining v1's ask/classify-to-summarize fallback.
+/// # Errors
+///
+/// Returns an error if the project/config path is unsafe/unreadable/oversized,
+/// JSON or the selected/fallback tier is malformed, or credential lookup fails.
 pub fn load_project_llm_tier(
     project_root: &Path,
     tier: ProjectLlmTier,
@@ -707,6 +844,10 @@ pub fn load_project_llm_tier(
 
 /// Load only the named tier without ask/local/classify fallback. Diagnostics
 /// use this to distinguish a deliberate split tier from summarize fallback.
+/// # Errors
+///
+/// Returns an error if the project/config path is unsafe/unreadable/oversized,
+/// JSON or the exact tier is malformed, or credential lookup fails.
 pub fn load_exact_project_llm_tier(
     project_root: &Path,
     tier: ProjectLlmTier,
@@ -716,6 +857,10 @@ pub fn load_exact_project_llm_tier(
 
 /// Read the v1-compatible project-wide source-file ceiling without conflating
 /// an absent setting with an invalid configuration file.
+/// # Errors
+///
+/// Returns an error if project source configuration is unsafe, unreadable,
+/// oversized, malformed, or contains an out-of-range file-size value.
 pub fn load_project_max_file_size(
     project_root: &Path,
 ) -> Result<Option<usize>, ProjectLlmConfigError> {
@@ -723,6 +868,10 @@ pub fn load_project_max_file_size(
 }
 
 /// Read the summary candidate floor and eager budget from the shared v1 config.
+/// # Errors
+///
+/// Returns an error if config access/JSON shape is invalid or summary enable,
+/// eager-limit, line-floor, kind-override, or depth settings violate bounds.
 pub fn load_project_summary_settings(
     project_root: &Path,
 ) -> Result<ProjectSummarySettings, ProjectLlmConfigError> {
@@ -795,10 +944,18 @@ fn parse_summary_eager_limit(
     if value < 0.0 {
         return Ok(ProjectSummaryEagerLimit::Uncapped);
     }
-    if value > MAXIMUM_SUMMARY_EAGER_LIMIT as f64 {
+    let maximum = MAXIMUM_SUMMARY_EAGER_LIMIT
+        .to_f64()
+        .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+    if value > maximum {
         return Err(ProjectLlmConfigError::InvalidConfig);
     }
-    Ok(ProjectSummaryEagerLimit::Bounded(value.ceil() as u64))
+    let bounded = value
+        .ceil()
+        .to_u64()
+        .filter(|bounded| *bounded <= MAXIMUM_SUMMARY_EAGER_LIMIT)
+        .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+    Ok(ProjectSummaryEagerLimit::Bounded(bounded))
 }
 
 fn parse_summary_line_floor(value: &Value) -> Result<u32, ProjectLlmConfigError> {
@@ -810,10 +967,18 @@ fn parse_summary_line_floor(value: &Value) -> Result<u32, ProjectLlmConfigError>
                 && *value <= f64::from(MAXIMUM_SUMMARY_MINIMUM_BODY_LINES)
         })
         .ok_or(ProjectLlmConfigError::InvalidConfig)?;
-    Ok(value.ceil() as u32)
+    value
+        .ceil()
+        .to_u32()
+        .filter(|bounded| *bounded <= MAXIMUM_SUMMARY_MINIMUM_BODY_LINES)
+        .ok_or(ProjectLlmConfigError::InvalidConfig)
 }
 
 /// Read bounded v1-compatible source discovery settings without exposing LLM credentials.
+/// # Errors
+///
+/// Returns an error if config access/JSON shape is invalid or file-size,
+/// language, include/exclude, nested-repository, or allow-list settings are malformed.
 pub fn load_project_source_settings(
     project_root: &Path,
 ) -> Result<ProjectSourceSettings, ProjectLlmConfigError> {
@@ -888,26 +1053,41 @@ fn parse_project_source_settings(
         .map(parse_project_globs)
         .transpose()?
         .unwrap_or_default();
+    let mut features = SourceFeatureFlags::default();
+    for (feature, enabled) in [
+        (SourceFeature::ExtractDocstrings, extract_docstrings),
+        (SourceFeature::TrackCallSites, track_call_sites),
+        (SourceFeature::IndexSubmodules, index_submodules),
+        (
+            SourceFeature::IndexEmbeddedRepositories,
+            index_embedded_repositories,
+        ),
+        (SourceFeature::Centrality, enable_centrality),
+        (SourceFeature::Betweenness, enable_betweenness),
+        (SourceFeature::Churn, enable_churn),
+        (SourceFeature::CoChange, enable_co_change),
+        (SourceFeature::Biomarkers, enable_biomarkers),
+        (SourceFeature::IssueHistory, enable_issue_history),
+        (SourceFeature::ConfigReferences, enable_config_refs),
+        (SourceFeature::SqlReferences, enable_sql_refs),
+        (
+            SourceFeature::BuildContextReferences,
+            enable_build_context_refs,
+        ),
+        (SourceFeature::StringImports, enable_string_imports),
+        (
+            SourceFeature::DuplicateCodePartialClones,
+            duplicate_code_partial_clones,
+        ),
+    ] {
+        features.set(feature, enabled);
+    }
     Ok(ProjectSourceSettings {
         maximum_file_bytes,
         languages,
         includes,
         excludes,
-        extract_docstrings,
-        track_call_sites,
-        index_submodules,
-        index_embedded_repositories,
-        enable_centrality,
-        enable_betweenness,
-        enable_churn,
-        enable_co_change,
-        enable_biomarkers,
-        enable_issue_history,
-        enable_config_refs,
-        enable_sql_refs,
-        enable_build_context_refs,
-        enable_string_imports,
-        duplicate_code_partial_clones,
+        features,
         duplicate_code_allowlist,
     })
 }
@@ -973,6 +1153,10 @@ fn optional_config_bool(
 
 /// Atomically preserve the rest of `.cartograph/config.json` while updating
 /// the v1-compatible project-wide source-file ceiling.
+/// # Errors
+///
+/// Returns an error if `max_file_size` is out of range, existing config is
+/// unsafe/malformed/oversized, or the private atomic rewrite cannot complete.
 pub fn write_project_max_file_size(
     project_root: &Path,
     max_file_size: usize,
@@ -1032,6 +1216,10 @@ fn load_project_llm_tier_with_fallback(
 }
 
 /// Atomically update one or more tier blocks while preserving non-LLM config.
+/// # Errors
+///
+/// Returns an error if tier mutations are invalid/empty, existing config is
+/// unsafe/malformed/oversized, or the locked private atomic rewrite fails.
 pub fn write_project_llm_tiers(
     project_root: &Path,
     inputs: &[ProjectLlmTierInput],
@@ -1043,6 +1231,10 @@ pub fn write_project_llm_tiers(
 /// when the current process proves that the selected environment variable
 /// contains the exact same secret. The update is one atomic config write and
 /// reports no secret material.
+/// # Errors
+///
+/// Returns an error if overrides/config are invalid, an environment value is
+/// absent or differs from the inline secret, or guarded atomic rewrite detects a race.
 pub fn migrate_project_inline_credentials(
     project_root: &Path,
     environment_overrides: &[(ProjectLlmTier, String)],
@@ -1220,6 +1412,10 @@ const fn credential_migration_tiers() -> [ProjectLlmTier; 6] {
 }
 
 /// Atomically update configured tiers and explicitly disable incompatible ones.
+/// # Errors
+///
+/// Returns an error if no mutation is requested, tier sets/config objects are
+/// invalid, or the private locked size-bounded atomic rewrite fails.
 pub fn write_project_llm_configuration(
     project_root: &Path,
     inputs: &[ProjectLlmTierInput],
@@ -1281,6 +1477,10 @@ pub fn write_project_llm_configuration(
 }
 
 /// Change only one configured tier's bounded client concurrency.
+/// # Errors
+///
+/// Returns an error if `concurrency` is out of range, the exact configured tier
+/// is missing/malformed, or the private atomic rewrite fails.
 pub fn tune_project_llm_tier(
     project_root: &Path,
     tier: ProjectLlmTier,
@@ -1306,6 +1506,10 @@ pub fn tune_project_llm_tier(
 }
 
 /// Probe a validated endpoint without credentials, redirects, or unbounded reads.
+/// # Errors
+///
+/// Returns an error if endpoint/timeout validation fails, no TLS provider can
+/// be installed, or the redirect-free bounded HTTP client cannot be built.
 pub async fn probe_openai_compatible_endpoint(
     endpoint: &str,
     timeout: std::time::Duration,
@@ -1328,9 +1532,8 @@ pub async fn probe_openai_compatible_endpoint(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| ProjectLlmConfigError::InvalidTier)?;
-    let response = match client.get(models_url).send().await {
-        Ok(response) => response,
-        Err(_) => return Ok(unreachable_probe()),
+    let Ok(response) = client.get(models_url).send().await else {
+        return Ok(unreachable_probe());
     };
     if response.status() != StatusCode::OK {
         return Ok(reachable_incompatible_probe());
@@ -1450,6 +1653,7 @@ struct TierCredentials {
     source: ProjectLlmCredentialSource,
 }
 
+#[derive(Clone, Copy)]
 struct CredentialResolution<'input> {
     value: &'input Map<String, Value>,
     explicit_api_key_env: Option<&'input str>,
@@ -1835,11 +2039,10 @@ fn write_config_value_guarded(
     let directory = root.join(CONFIG_DIRECTORY);
     match fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir(&directory).map_err(|_| ProjectLlmConfigError::WriteFailed)?;
         }
-        Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
+        Ok(_) | Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
     }
     let _lock = acquire_config_write_lock(&directory)?;
     let path = directory.join(CONFIG_FILE);
@@ -1878,9 +2081,8 @@ fn acquire_config_write_lock(directory: &Path) -> Result<ConfigWriteLock, Projec
     let path = directory.join(CONFIG_LOCK_FILE);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
+        Ok(_) | Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
     }
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -1965,8 +2167,10 @@ mod tests {
             "fixture-chat",
         )
         .and_then(|input| input.with_concurrency(3))
-        .map(ProjectLlmTierInput::without_credentials)
-        .unwrap_or_else(|error| panic!("tier input failed: {error}"));
+        .map_or_else(
+            |error| panic!("tier input failed: {error}"),
+            ProjectLlmTierInput::without_credentials,
+        );
         assert_eq!(input.tier(), ProjectLlmTier::Summarize);
         write_project_llm_tiers(root.path(), &[input])
             .unwrap_or_else(|error| panic!("tier write failed: {error}"));

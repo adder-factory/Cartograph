@@ -16,6 +16,10 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl CartographDatabase {
     /// Create or repair the exact model-specific cosine HNSW expression index.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, model identity/state does
+    /// not match, or the model-specific index cannot be inspected/rebuilt/committed.
     pub async fn ensure_embedding_model_hnsw(
         &self,
         selector: &EmbeddingModelSelector,
@@ -37,6 +41,10 @@ impl CartographDatabase {
     }
 
     /// Inspect the deterministic index without creating or repairing it.
+    /// # Errors
+    ///
+    /// Returns an error if the model is missing/inactive/mismatched or its
+    /// deterministic HNSW catalog state cannot be queried or decoded.
     pub async fn embedding_model_hnsw_status(
         &self,
         selector: &EmbeddingModelSelector,
@@ -117,7 +125,7 @@ pub(crate) async fn read_hnsw_status(
 ) -> Result<EmbeddingHnswStatus, SemanticStorageError> {
     let index_name = model_index_name(selector);
     let row = query(
-        r#"SELECT indexes.indisvalid, indexes.indisready, indexes.indnkeyatts,
+        r"SELECT indexes.indisvalid, indexes.indisready, indexes.indnkeyatts,
                   methods.amname,
                   pg_get_indexdef(indexes.indexrelid) AS definition,
                   pg_get_expr(indexes.indpred, indexes.indrelid) AS predicate
@@ -132,7 +140,7 @@ pub(crate) async fn read_hnsw_status(
                 ON methods.oid = index_relations.relam
             WHERE namespaces.nspname = $1
               AND index_relations.relname = $2
-              AND tables.relname = 'document_embeddings'"#,
+              AND tables.relname = 'document_embeddings'",
     )
     .bind(schema.as_str())
     .bind(&index_name)

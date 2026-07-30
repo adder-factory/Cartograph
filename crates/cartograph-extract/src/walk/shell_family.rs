@@ -355,6 +355,7 @@ fn visit_powershell_declaration(
     }
 }
 
+#[derive(Clone, Copy)]
 struct PowerShellScope<'tree> {
     node: Node<'tree>,
     depth: usize,
@@ -409,6 +410,7 @@ fn visit_powershell_field(
     )
 }
 
+#[derive(Clone, Copy)]
 struct PowerShellLeaf<'tree> {
     node: Node<'tree>,
     name_kind: &'static str,
@@ -538,8 +540,7 @@ fn emit_import(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: false,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(false, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -578,8 +579,7 @@ fn visit_scoped_symbol(
         body_node: input.body.or(Some(input.node)),
         declaration_only: false,
         signature: input.signature,
-        exported: false,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(false, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -648,8 +648,7 @@ fn emit_named_leaf(
         body_node: None,
         declaration_only: false,
         signature: input.signature,
-        exported: input.exported,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(input.exported, false),
         async_symbol: false,
         static_member: false,
         visibility: None,

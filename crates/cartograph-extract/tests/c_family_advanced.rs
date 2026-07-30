@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
 use cartograph_extract::{
     ExtractError, ExtractedFile, ExtractedSymbol, NativeExtractor, SourceLimits, SourceSnapshot,
@@ -9,12 +13,12 @@ const SOURCE_LIMIT: usize = 1024 * 1024;
 fn namespace_qualified_free_function_definitions_remain_functions() {
     let extracted = extract(
         "src/api.cpp",
-        r#"namespace api {
+        r"namespace api {
 int ping();
 }
 
 int api::ping() { return dispatch(); }
-"#,
+",
     );
 
     let namespace = symbol(&extracted, SymbolKind::Namespace, "api", "api");
@@ -27,7 +31,7 @@ int api::ping() { return dispatch(); }
         !pings.is_empty()
             && pings
                 .iter()
-                .filter(|candidate| !candidate.declaration_only)
+                .filter(|candidate| !candidate.implementation.declaration_only)
                 .count()
                 == 1
             && pings
@@ -38,7 +42,7 @@ int api::ping() { return dispatch(); }
     );
     let definition = pings
         .into_iter()
-        .find(|candidate| !candidate.declaration_only)
+        .find(|candidate| !candidate.implementation.declaration_only)
         .unwrap_or_else(|| {
             panic!(
                 "missing api::ping definition: {:?}",
@@ -53,7 +57,7 @@ int api::ping() { return dispatch(); }
 fn same_bare_type_names_in_namespaces_keep_out_of_class_methods_scoped() {
     let extracted = extract(
         "src/workers.cpp",
-        r#"namespace left {
+        r"namespace left {
 struct Worker { void run(); };
 }
 namespace right {
@@ -62,7 +66,7 @@ struct Worker { void run(); };
 
 void left::Worker::run() { left_hook(); }
 void right::Worker::run() { right_hook(); }
-"#,
+",
     );
 
     let left_namespace = symbol(&extracted, SymbolKind::Namespace, "left", "left");
@@ -88,25 +92,25 @@ void right::Worker::run() { right_hook(); }
 fn c_and_cpp_unions_are_real_type_containers() {
     let c = extract(
         "src/payload.c",
-        r#"union Payload {
+        r"union Payload {
   int code;
   float ratio;
 };
-"#,
+",
     );
     let payload = symbol(&c, SymbolKind::Union, "Payload", "Payload");
     let code = symbol(&c, SymbolKind::Field, "code", "Payload::code");
     let ratio = symbol(&c, SymbolKind::Field, "ratio", "Payload::ratio");
-    assert!(!payload.declaration_only);
+    assert!(!payload.implementation.declaration_only);
     assert_containment(&c, payload, code);
     assert_containment(&c, payload, ratio);
 
     let cpp = extract(
         "src/result.cpp",
-        r#"namespace wire {
+        r"namespace wire {
 union Result { int ok; int error; };
 }
-"#,
+",
     );
     let namespace = symbol(&cpp, SymbolKind::Namespace, "wire", "wire");
     let result = symbol(&cpp, SymbolKind::Union, "Result", "wire::Result");
@@ -119,10 +123,10 @@ union Result { int ok; int error; };
 fn c_family_aliases_emit_qualified_type_of_targets() {
     let extracted = extract(
         "src/aliases.cpp",
-        r#"namespace wire { struct Payload {}; }
+        r"namespace wire { struct Payload {}; }
 using PayloadAlias = wire::Payload;
 typedef wire::Payload LegacyPayload;
-"#,
+",
     );
 
     let modern = symbol(
@@ -145,11 +149,11 @@ typedef wire::Payload LegacyPayload;
 fn function_prototypes_are_declarations_but_function_pointers_are_variables() {
     let extracted = extract(
         "include/callbacks.h",
-        r#"int send_value(int value);
+        r"int send_value(int value);
 static int local_probe(int value);
 int (*callback)(int value);
 extern int (*external_callback)(int value);
-"#,
+",
     );
 
     let send = symbol(&extracted, SymbolKind::Function, "send_value", "send_value");
@@ -159,8 +163,8 @@ extern int (*external_callback)(int value);
         "local_probe",
         "local_probe",
     );
-    assert!(send.declaration_only);
-    assert!(local.declaration_only);
+    assert!(send.implementation.declaration_only);
+    assert!(local.implementation.declaration_only);
     assert_eq!(send.signature.as_deref(), Some("int (int value)"));
     assert_eq!(local.signature.as_deref(), Some("int (int value)"));
 
@@ -171,8 +175,8 @@ extern int (*external_callback)(int value);
         "external_callback",
         "external_callback",
     );
-    assert!(!callback.declaration_only);
-    assert!(!external_callback.declaration_only);
+    assert!(!callback.implementation.declaration_only);
+    assert!(!external_callback.implementation.declaration_only);
     assert!(
         extracted.symbols.iter().all(|candidate| {
             candidate.kind != SymbolKind::Function
@@ -187,11 +191,11 @@ extern int (*external_callback)(int value);
 fn forward_class_struct_and_union_declarations_are_declaration_only() {
     let cpp = extract(
         "include/forward.hpp",
-        r#"class Widget;
+        r"class Widget;
 struct Record;
 union Packet;
 namespace api { class Client; }
-"#,
+",
     );
     for forward in [
         symbol(&cpp, SymbolKind::Class, "Widget", "Widget"),
@@ -200,27 +204,35 @@ namespace api { class Client; }
         symbol(&cpp, SymbolKind::Class, "Client", "api::Client"),
     ] {
         assert!(
-            forward.declaration_only,
+            forward.implementation.declaration_only,
             "forward type was treated as a definition: {:?}",
             symbol_facts(&cpp),
         );
     }
 
     let c = extract("include/forward.h", "struct CRecord;\nunion CPacket;\n");
-    assert!(symbol(&c, SymbolKind::Struct, "CRecord", "CRecord").declaration_only);
-    assert!(symbol(&c, SymbolKind::Union, "CPacket", "CPacket").declaration_only);
+    assert!(
+        symbol(&c, SymbolKind::Struct, "CRecord", "CRecord")
+            .implementation
+            .declaration_only
+    );
+    assert!(
+        symbol(&c, SymbolKind::Union, "CPacket", "CPacket")
+            .implementation
+            .declaration_only
+    );
 }
 
 #[test]
 fn external_and_file_static_linkage_are_exposed_through_export_metadata() {
     let extracted = extract(
         "src/linkage.c",
-        r#"int external_definition(void) { return 1; }
+        r"int external_definition(void) { return 1; }
 static int internal_definition(void) { return 2; }
 int external_value;
 extern int declared_external_value;
 static int internal_value;
-"#,
+",
     );
 
     for qualified_name in [
@@ -229,7 +241,7 @@ static int internal_value;
         "declared_external_value",
     ] {
         assert!(
-            symbol_named(&extracted, qualified_name).exported,
+            symbol_named(&extracted, qualified_name).export.exported,
             "external-linkage symbol was not marked exported: {qualified_name}; facts={:?}",
             symbol_facts(&extracted),
         );
@@ -237,12 +249,12 @@ static int internal_value;
     for qualified_name in ["internal_definition", "internal_value"] {
         let candidate = symbol_named(&extracted, qualified_name);
         assert!(
-            !candidate.exported,
+            !candidate.export.exported,
             "file-static symbol was marked externally visible: {qualified_name}; facts={:?}",
             symbol_facts(&extracted),
         );
         assert!(
-            !candidate.static_member,
+            !candidate.execution.static_member,
             "file linkage must not overload class static-member metadata: {qualified_name}",
         );
     }
@@ -252,13 +264,13 @@ static int internal_value;
 fn cpp_and_cuda_new_expressions_emit_safe_instantiation_targets() {
     let cpp = extract(
         "src/build.cpp",
-        r#"namespace arena { template<typename T> class Box {}; }
+        r"namespace arena { template<typename T> class Box {}; }
 void build() {
   auto *box = new ::arena::Box<arena::Widget>();
   auto *bytes = new unsigned char[8];
   auto *count = new long;
 }
-"#,
+",
     );
     assert_eq!(
         owned_reference_names(&cpp, "build", ReferenceKind::Instantiates),
@@ -268,12 +280,12 @@ void build() {
 
     let cuda = extract(
         "kernels/allocate.cu",
-        r#"namespace device { template<typename T> struct Buffer {}; }
+        r"namespace device { template<typename T> struct Buffer {}; }
 __device__ void allocate() {
   auto *buffer = new device::Buffer<float>();
   auto *scalar = new int;
 }
-"#,
+",
     );
     assert_eq!(cuda.language, SourceLanguage::Cuda);
     assert_eq!(
@@ -287,7 +299,7 @@ __device__ void allocate() {
 fn contiguous_ordinary_and_doxygen_comments_form_exact_docs() {
     let extracted = extract(
         "src/docs.cpp",
-        r#"/* Ordinary block.
+        r"/* Ordinary block.
  * Second line.
  */
 int block_doc() { return 0; }
@@ -310,7 +322,7 @@ int ordinary_line() { return 0; }
 /** Mixed Doxygen block. */
 //! Mixed Doxygen line.
 int mixed() { return 0; }
-"#,
+",
     );
 
     assert_doc(&extracted, "block_doc", "Ordinary block.\nSecond line.");
@@ -336,7 +348,7 @@ int mixed() { return 0; }
 fn blank_lines_detach_docs_and_decorative_rules_are_not_retained() {
     let extracted = extract(
         "src/doc-boundaries.c",
-        r#"/* Stale paragraph. */
+        r"/* Stale paragraph. */
 
 /// Current heading.
 /// =================
@@ -349,7 +361,7 @@ int detached(void) { return 0; }
 
 // -----------------
 int decorative_only(void) { return 0; }
-"#,
+",
     );
 
     assert_doc(
@@ -476,7 +488,7 @@ fn implemented_symbol<'file>(
             candidate.kind == kind
                 && candidate.name == name
                 && candidate.qualified_name == qualified_name
-                && !candidate.declaration_only
+                && !candidate.implementation.declaration_only
         })
         .unwrap_or_else(|| {
             panic!(
@@ -586,9 +598,9 @@ fn symbol_facts(extracted: &ExtractedFile) -> Vec<String> {
                 candidate.kind.as_str(),
                 candidate.name,
                 candidate.qualified_name,
-                candidate.declaration_only,
-                candidate.exported,
-                candidate.static_member,
+                candidate.implementation.declaration_only,
+                candidate.export.exported,
+                candidate.execution.static_member,
                 candidate.docstring,
             )
         })

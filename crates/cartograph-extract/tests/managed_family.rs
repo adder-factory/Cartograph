@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind, Visibility};
@@ -32,7 +36,7 @@ fn java_preserves_the_v1_oracle_and_adds_package_and_reference_semantics() {
         "com.acme.orders::OrderService",
     );
     assert_eq!(service.visibility, Some(Visibility::Public));
-    assert!(service.exported);
+    assert!(service.export.exported);
     assert_containment(&extracted, package, service);
     assert_reference_owned_by(&extracted, service, "Deprecated", ReferenceKind::Decorates);
     assert_reference_owned_by(&extracted, service, "BaseService", ReferenceKind::Extends);
@@ -50,7 +54,7 @@ fn java_preserves_the_v1_oracle_and_adds_package_and_reference_semantics() {
         Some("Repository repository")
     );
     assert_eq!(repository.visibility, Some(Visibility::Private));
-    assert!(!repository.static_member);
+    assert!(!repository.execution.static_member);
     assert_reference_owned_by(&extracted, repository, "Repository", ReferenceKind::TypeOf);
 
     let kind = symbol(
@@ -60,7 +64,7 @@ fn java_preserves_the_v1_oracle_and_adds_package_and_reference_semantics() {
         "com.acme.orders::OrderService::KIND",
     );
     assert_eq!(kind.signature.as_deref(), Some("String KIND"));
-    assert!(kind.static_member);
+    assert!(kind.execution.static_member);
 
     let constructor = symbol_with_signature(
         &extracted,
@@ -116,7 +120,7 @@ fn java_preserves_the_v1_oracle_and_adds_package_and_reference_semantics() {
         "com.acme.orders::OrderService::add",
         "int (int left, int right)",
     );
-    assert!(add.static_member);
+    assert!(add.execution.static_member);
     assert_eq!(add.visibility, Some(Visibility::Public));
     assert!(!format!("{extracted:?}").contains("sk_live_java_secret"));
 }
@@ -163,7 +167,7 @@ public class Overloads {
         "handle",
         "com.acme.types::Handler::handle",
     );
-    assert!(handle.declaration_only);
+    assert!(handle.implementation.declaration_only);
     assert_eq!(handle.visibility, Some(Visibility::Public));
     let version = symbol(
         &extracted,
@@ -171,7 +175,7 @@ public class Overloads {
         "VERSION",
         "com.acme.types::Handler::VERSION",
     );
-    assert!(version.static_member);
+    assert!(version.execution.static_member);
     assert_eq!(version.visibility, Some(Visibility::Public));
     assert_eq!(version.signature.as_deref(), Some("String VERSION"));
     assert!(!format!("{extracted:?}").contains("sk_live_interface_secret"));
@@ -294,7 +298,7 @@ fn csharp_preserves_the_v1_oracle_and_adds_namespace_and_reference_semantics() {
         "Acme.Orders::OrderService::GetOrderAsync",
         "Task<Order> (string id)",
     );
-    assert!(get.async_symbol);
+    assert!(get.execution.async_symbol);
     assert_eq!(
         get.docstring.as_deref(),
         Some("<summary>Gets an order.</summary>")
@@ -323,7 +327,7 @@ fn csharp_preserves_the_v1_oracle_and_adds_namespace_and_reference_semantics() {
 fn csharp_extracts_interfaces_records_structs_enums_and_overloads() {
     let extracted = extract(
         "src/Types.cs",
-        r#"namespace Acme.Types
+        r"namespace Acme.Types
 {
     public interface IHandler : IDisposable
     {
@@ -341,7 +345,7 @@ fn csharp_extracts_interfaces_records_structs_enums_and_overloads() {
         public void Run(int value) {}
     }
 }
-"#,
+",
     );
 
     let handler = symbol(
@@ -358,6 +362,7 @@ fn csharp_extracts_interfaces_records_structs_enums_and_overloads() {
             "Handle",
             "Acme.Types::IHandler::Handle",
         )
+        .implementation
         .declaration_only
     );
 
@@ -493,11 +498,11 @@ fn managed_import_keywords_require_token_boundaries() {
 fn csharp_ambiguous_class_bases_remain_typed_for_resolution() {
     let extracted = extract(
         "src/Bases.cs",
-        r#"class IPhone {}
+        r"class IPhone {}
 interface Disposable {}
 class Device : IPhone, Disposable {}
 class MissingDevice : MissingBase {}
-"#,
+",
     );
     let device = symbol(&extracted, SymbolKind::Class, "Device", "Device");
     assert_reference_owned_by(&extracted, device, "IPhone", ReferenceKind::Inherits);
@@ -821,10 +826,10 @@ fn symbol_facts(extracted: &ExtractedFile) -> Vec<String> {
                 symbol.name,
                 symbol.qualified_name,
                 symbol.visibility,
-                symbol.declaration_only,
-                symbol.exported,
-                symbol.async_symbol,
-                symbol.static_member,
+                symbol.implementation.declaration_only,
+                symbol.export.exported,
+                symbol.execution.async_symbol,
+                symbol.execution.static_member,
                 symbol.signature,
             )
         })
@@ -873,10 +878,10 @@ fn canonical_facts(extracted: &ExtractedFile) -> Vec<String> {
             symbol.signature.as_deref().unwrap_or_default(),
             symbol.docstring.as_deref().unwrap_or_default(),
             symbol.body_search_text,
-            symbol.declaration_only,
-            symbol.exported,
-            symbol.async_symbol,
-            symbol.static_member,
+            symbol.implementation.declaration_only,
+            symbol.export.exported,
+            symbol.execution.async_symbol,
+            symbol.execution.static_member,
             symbol.visibility,
         )
     }));

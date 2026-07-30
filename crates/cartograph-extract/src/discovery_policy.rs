@@ -184,6 +184,10 @@ impl std::fmt::Debug for DiscoveryPolicy {
 
 impl DiscoveryPolicy {
     /// Merge project exclusions over the immutable v1 defaults.
+    /// # Errors
+    ///
+    /// Returns an error if exclusion count/bytes exceed policy bounds or a
+    /// project/default glob is empty, NUL-containing, oversized, or invalid.
     pub fn new(
         project_excludes: &[String],
         nested_repositories: NestedRepositoryPolicy,
@@ -193,6 +197,10 @@ impl DiscoveryPolicy {
 
     /// Merge exclusions and an optional exact language allow-list. Empty
     /// preserves v1's automatic all-language behavior.
+    /// # Errors
+    ///
+    /// Returns an error if exclusion/language counts or total bytes overflow,
+    /// or an exclusion glob cannot be validated and compiled.
     pub fn new_with_languages(
         project_excludes: &[String],
         nested_repositories: NestedRepositoryPolicy,
@@ -243,12 +251,20 @@ impl DiscoveryPolicy {
     }
 
     /// Exact v1 default policy.
+    /// # Errors
+    ///
+    /// Returns an error if an immutable built-in exclusion glob cannot be
+    /// validated or compiled into the default policy.
     pub fn v1_defaults() -> Result<Self, DiscoveryPolicyError> {
         Self::new(&[], NestedRepositoryPolicy::new(true, true))
     }
 
     /// Apply an exact file include-glob allow-list. `None` retains automatic
     /// native discovery; `Some([])` intentionally admits no source files.
+    /// # Errors
+    ///
+    /// Returns an error if include count/bytes exceed policy bounds or an
+    /// include glob is empty, NUL-containing, oversized, or invalid.
     pub fn with_includes(
         mut self,
         patterns: Option<&[String]>,
@@ -292,6 +308,10 @@ impl DiscoveryPolicy {
     }
 
     /// Apply the v1 `duplicateCodeAllowlist` path globs without excluding files from indexing.
+    /// # Errors
+    ///
+    /// Returns an error if allow-list count/bytes exceed policy bounds or no
+    /// bounded glob set can be built from the supplied patterns.
     pub fn with_duplicate_code_allowlist(
         mut self,
         patterns: &[String],
@@ -407,8 +427,10 @@ impl DiscoveryPolicy {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum DiscoveryPolicyError {
     #[error("Cartograph project exclusion glob is invalid")]
+    /// The supplied search pattern is invalid or exceeds its bound.
     InvalidPattern,
     #[error("Cartograph project exclusion policy exceeds its bound")]
+    /// Input or output exceeded a documented hard limit.
     Limit,
 }
 

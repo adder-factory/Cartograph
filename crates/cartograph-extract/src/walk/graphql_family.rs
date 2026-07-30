@@ -151,6 +151,7 @@ fn emit_definition(
     }
 }
 
+#[derive(Clone, Copy)]
 struct FieldsContainerInput<'tree> {
     node: Node<'tree>,
     extension: bool,
@@ -191,8 +192,7 @@ fn emit_fields_container(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -257,8 +257,7 @@ fn emit_field(builder: &mut ExtractionBuilder<'_, '_>, node: Node<'_>) -> Result
         body_node: None,
         declaration_only: false,
         signature,
-        exported: false,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(false, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -307,8 +306,7 @@ fn emit_enum(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -354,8 +352,7 @@ fn emit_enum(
                 body_node: None,
                 declaration_only: false,
                 signature: Some(signature),
-                exported: false,
-                default_export: false,
+                export: crate::SymbolExportFlags::new(false, false),
                 async_symbol: false,
                 static_member: false,
                 visibility: None,
@@ -395,8 +392,7 @@ fn emit_union(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -449,8 +445,7 @@ fn emit_scalar(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -488,8 +483,7 @@ fn emit_directive(
         body_node: None,
         declaration_only: true,
         signature: Some(signature),
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -497,6 +491,7 @@ fn emit_directive(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct NamedRelations<'tree, 'owner> {
     node: Node<'tree>,
     container_kind: &'static str,
@@ -582,6 +577,7 @@ fn base_named_type<'tree>(
     Ok(None)
 }
 
+#[derive(Clone, Copy)]
 struct GraphqlReference<'tree, 'value> {
     owner: &'value SymbolId,
     node: Node<'tree>,
@@ -602,6 +598,7 @@ fn emit_reference(
     })
 }
 
+#[derive(Clone, Copy)]
 struct DeclarationSignature<'value> {
     extension: bool,
     keyword: &'value str,

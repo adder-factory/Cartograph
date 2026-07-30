@@ -12,7 +12,7 @@ use serde_json::{Map, Number, Value};
 
 use crate::{Cli, mcp_handler};
 
-const LOCAL_TOOL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const LOCAL_TOOL_TIMEOUT: Duration = Duration::from_mins(10);
 const PROJECT_PATH_ARGUMENT: &str = "__generated_project_path";
 const PROJECT_PATH_LONG: &str = "project-path";
 const COMPAT_ALIAS_VALUE: &str = "__compat_alias_value";
@@ -273,12 +273,12 @@ fn command_for_tool(
         } else {
             configure_argument(
                 argument,
-                ArgumentConfiguration {
+                &ArgumentConfiguration {
                     property,
                     kind,
                     positional: is_positional.is_some(),
                 },
-            )?
+            )
         };
         argument = apply_v1_short_alias(&spec.command_name, name, argument);
         command = command.arg(argument);
@@ -354,12 +354,12 @@ fn add_compatibility_positional_alias(
                 .long(long)
                 .help(format!("Compatibility alias for {property_name}."))
                 .conflicts_with(property_name),
-            ArgumentConfiguration {
+            &ArgumentConfiguration {
                 property,
                 kind,
                 positional: false,
             },
-        )?;
+        );
         if spec.command_name == "explore" {
             argument = argument.visible_alias("start");
         }
@@ -663,10 +663,7 @@ fn positional_fields(
     result
 }
 
-fn configure_argument(
-    mut argument: Arg,
-    configuration: ArgumentConfiguration<'_>,
-) -> Result<Arg, String> {
+fn configure_argument(mut argument: Arg, configuration: &ArgumentConfiguration<'_>) -> Arg {
     match configuration.kind {
         PropertyKind::Boolean => {
             argument = if configuration.property.get("default") == Some(&Value::Bool(true))
@@ -705,7 +702,7 @@ fn configure_argument(
             argument = argument.value_parser(PossibleValuesParser::new(values));
         }
     }
-    Ok(argument)
+    argument
 }
 
 struct InvocationArgumentInput<'input> {
@@ -794,15 +791,15 @@ fn invocation_argument_value(input: &InvocationArgumentInput<'_>) -> Result<Opti
 
 fn append_invocation_argument(
     arguments: &mut Map<String, Value>,
-    input: InvocationArgumentInput<'_>,
+    input: &InvocationArgumentInput<'_>,
 ) -> Result<(), String> {
-    if !invocation_argument_supplied(&input) {
+    if !invocation_argument_supplied(input) {
         return Ok(());
     }
-    if append_clear_parse_cache_argument(arguments, &input)? {
+    if append_clear_parse_cache_argument(arguments, input)? {
         return Ok(());
     }
-    if let Some(value) = invocation_argument_value(&input)? {
+    if let Some(value) = invocation_argument_value(input)? {
         arguments.insert(input.name.to_owned(), value);
     }
     Ok(())
@@ -817,8 +814,7 @@ fn invocation_from_matches(
     let positional = positional_fields(&spec.command_name, properties, &required);
     let mut project_path = matches
         .get_one::<String>(PROJECT_PATH_ARGUMENT)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     let mut arguments = Map::new();
     for (name, property) in properties {
         if name == "projectPath" {
@@ -826,7 +822,7 @@ fn invocation_from_matches(
         }
         append_invocation_argument(
             &mut arguments,
-            InvocationArgumentInput {
+            &InvocationArgumentInput {
                 spec,
                 matches,
                 required: &required,
@@ -1837,7 +1833,10 @@ mod tests {
         };
         assert_eq!(imports.arguments["pathFilter"], "src");
         assert_eq!(imports.arguments["excludeFixtures"], false);
+    }
 
+    #[test]
+    fn v1_cli_aliases_preserve_analysis_positionals_and_session_actions() {
         for (command, value, property) in [
             ("blame", "OrderService::save", "symbol"),
             ("sql", "SELECT * FROM symbols", "query"),

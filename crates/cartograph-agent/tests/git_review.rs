@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph project-runtime and agent evidence contracts.
+
+mod dependency_ownership;
+
 use std::{path::Path, process::Command};
 
 use cartograph_agent::{
@@ -72,9 +76,8 @@ async fn malformed_and_missing_refs_fail_with_distinct_redacted_errors() {
 
     let options = ReviewOptions::new("refs/heads/does-not-exist")
         .unwrap_or_else(|error| panic!("missing-ref options failed: {error}"));
-    let error = match discover_git_comparison(repository.path(), &options).await {
-        Ok(_) => panic!("missing Git ref unexpectedly resolved"),
-        Err(error) => error,
+    let Err(error) = discover_git_comparison(repository.path(), &options).await else {
+        panic!("missing Git ref unexpectedly resolved");
     };
     assert_eq!(error, ReviewError::GitRefNotFound);
     let rendered = error.to_string();
@@ -233,13 +236,15 @@ async fn structural_compare_reads_two_refs_without_checking_out_head() {
     let options = SourceCompareOptions::new("main")
         .and_then(|options| options.with_head("feature"))
         .and_then(|options| options.with_path_filter(Some("src/")))
-        .map(|options| {
-            options
-                .with_edges(true)
-                .with_findings(true)
-                .with_findings_delta(true)
-        })
-        .unwrap_or_else(|error| panic!("source compare options failed: {error}"));
+        .map_or_else(
+            |error| panic!("source compare options failed: {error}"),
+            |options| {
+                options
+                    .with_edges(true)
+                    .with_findings(true)
+                    .with_findings_delta(true)
+            },
+        );
     let report = discover_source_comparison(repository.path(), options)
         .await
         .unwrap_or_else(|error| panic!("source comparison failed: {error}"));

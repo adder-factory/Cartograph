@@ -1,4 +1,4 @@
-use cartograph_domain::{DocumentId, FileId, GenerationId, SymbolId};
+use cartograph_domain::{DocumentId, FileId, GenerationId, SymbolId, SymbolKind};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 use crate::CartographDatabase;
@@ -23,6 +23,10 @@ const MAXIMUM_RERANK_TEXT_BYTES: usize = 32 * 1_024;
 
 impl CartographDatabase {
     /// Execute current-generation cosine Top-K only after every semantic readiness proof passes.
+    /// # Errors
+    ///
+    /// Returns an error if semantic readiness or the expected-generation fence
+    /// fails, or the dimension-fixed cosine query/result decoding cannot complete.
     pub async fn vector_top_k(
         &self,
         request: VectorSearchRequest,
@@ -119,6 +123,13 @@ async fn execute_exact_vector_search(
                   documents.file_id::text, documents.symbol_id::text,
                   documents.path, documents.language, documents.document_kind,
                   documents.qualified_name,
+                  (
+                      SELECT symbols.symbol_kind
+                      FROM {schema}."symbols" AS symbols
+                      WHERE symbols.project_id = documents.project_id
+                        AND symbols.generation_id = documents.generation_id
+                        AND symbols.symbol_id = documents.symbol_id
+                  ) AS symbol_kind,
                   left(documents.code, $5) AS rerank_code,
                   left(documents.natural_text, $6) AS rerank_natural_text,
                   (current_embeddings.embedding
@@ -170,6 +181,13 @@ async fn execute_vector_search(
                   documents.file_id::text, documents.symbol_id::text,
                   documents.path, documents.language, documents.document_kind,
                   documents.qualified_name,
+                  (
+                      SELECT symbols.symbol_kind
+                      FROM {schema}."symbols" AS symbols
+                      WHERE symbols.project_id = documents.project_id
+                        AND symbols.generation_id = documents.generation_id
+                        AND symbols.symbol_id = documents.symbol_id
+                  ) AS symbol_kind,
                   left(documents.code, $5) AS rerank_code,
                   left(documents.natural_text, $6) AS rerank_natural_text,
                   nearest.distance
@@ -241,6 +259,11 @@ pub(crate) fn decode_hit(
         language: read_string(row, "language")?,
         document_kind: parse_document_kind(&read_string(row, "document_kind")?)?,
         qualified_name: read_string(row, "qualified_name")?,
+        symbol_kind: row
+            .try_get::<Option<String>, _>("symbol_kind")
+            .map_err(|_| corrupt("symbol_kind"))?
+            .map(|value| SymbolKind::from_stable_str(&value).ok_or_else(|| corrupt("symbol_kind")))
+            .transpose()?,
         distance,
         rerank_text: None,
     })

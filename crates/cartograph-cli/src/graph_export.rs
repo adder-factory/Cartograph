@@ -7,13 +7,14 @@ use std::{
 
 use cartograph_db::{
     CartographDatabase, InterchangeEdge, InterchangeSnapshot, InterchangeSnapshotRequest,
+    InterchangeSymbol,
 };
 use cartograph_domain::ProjectId;
 use clap::ValueEnum;
 use serde::Serialize;
 
 const DEFAULT_MAXIMUM_ROWS: u64 = 5_000_000;
-const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_mins(10);
 
 pub(super) const DEFAULT_NODE_LIMIT: u16 = 1_000;
 const MAXIMUM_NODE_LIMIT: u16 = 50_000;
@@ -312,8 +313,36 @@ fn build_snapshot(input: GraphSnapshotInput) -> GraphExportSnapshot {
         })
         .map(export_edge)
         .collect::<Vec<_>>();
+    let (nodes, exported_files) = export_nodes(filtered, &files);
+    GraphExportSnapshot {
+        format_version: 1,
+        generation_id: raw.generation_id.as_str().to_owned(),
+        filters: GraphExportFilters {
+            kinds,
+            edge_kinds,
+            languages,
+            file_prefix,
+        },
+        stats: GraphExportStats {
+            total_nodes,
+            total_edges,
+            exported_nodes: nodes.len(),
+            exported_edges: edges.len(),
+            exported_files: exported_files.len(),
+            truncated_nodes,
+        },
+        nodes,
+        edges,
+        files: exported_files,
+    }
+}
+
+fn export_nodes(
+    symbols: Vec<InterchangeSymbol>,
+    files: &BTreeMap<&str, (&String, &String)>,
+) -> (Vec<GraphExportNode>, Vec<GraphExportFile>) {
     let mut file_counts = BTreeMap::<String, (String, usize)>::new();
-    let nodes = filtered
+    let nodes = symbols
         .into_iter()
         .filter_map(|symbol| {
             let (path, language) = files.get(symbol.file_id.as_str())?;
@@ -342,27 +371,7 @@ fn build_snapshot(input: GraphSnapshotInput) -> GraphExportSnapshot {
             node_count,
         })
         .collect::<Vec<_>>();
-    GraphExportSnapshot {
-        format_version: 1,
-        generation_id: raw.generation_id.as_str().to_owned(),
-        filters: GraphExportFilters {
-            kinds,
-            edge_kinds,
-            languages,
-            file_prefix,
-        },
-        stats: GraphExportStats {
-            total_nodes,
-            total_edges,
-            exported_nodes: nodes.len(),
-            exported_edges: edges.len(),
-            exported_files: exported_files.len(),
-            truncated_nodes,
-        },
-        nodes,
-        edges,
-        files: exported_files,
-    }
+    (nodes, exported_files)
 }
 
 fn export_edge(edge: InterchangeEdge) -> GraphExportEdge {

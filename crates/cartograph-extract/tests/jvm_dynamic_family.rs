@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind, Visibility};
@@ -12,7 +16,7 @@ const SCALA_ORACLE: &str = include_str!("fixtures/v1_1_33/container.scala");
 const GROOVY_ORACLE: &str = include_str!("fixtures/v1_1_33/greeter.groovy");
 
 #[test]
-fn kotlin_preserves_the_v1_oracle_and_adds_jvm_reference_semantics() {
+fn kotlin_preserves_v1_type_structure_and_adds_jvm_reference_semantics() {
     let extracted = extract("src/main/kotlin/com/example/Repo.kt", KOTLIN_ORACLE);
     assert_eq!(extracted.language, SourceLanguage::Kotlin);
 
@@ -96,6 +100,11 @@ fn kotlin_preserves_the_v1_oracle_and_adds_jvm_reference_semantics() {
         "val computed: Result",
     );
     assert_reference_owned_by(&extracted, computed, "load", ReferenceKind::Calls);
+}
+
+#[test]
+fn kotlin_preserves_v1_callable_import_and_span_semantics() {
+    let extracted = extract("src/main/kotlin/com/example/Repo.kt", KOTLIN_ORACLE);
     symbol_with_signature(
         &extracted,
         SymbolKind::Method,
@@ -109,7 +118,7 @@ fn kotlin_preserves_the_v1_oracle_and_adds_jvm_reference_semantics() {
         "com.example::Repo::run",
         "(value: String): Result",
     );
-    assert!(run.async_symbol);
+    assert!(run.execution.async_symbol);
     assert_reference_owned_by(&extracted, run, "Result", ReferenceKind::Returns);
     assert_reference_owned_by(&extracted, run, "userbo.toLogin2", ReferenceKind::Calls);
     assert_reference_owned_by(&extracted, run, "service.go", ReferenceKind::Calls);
@@ -289,7 +298,7 @@ fn groovy_preserves_the_v1_oracle_for_classes_fields_functions_imports_and_calls
         "demo::Salutation::greet",
         "String (String other)",
     );
-    assert!(declared_greet.declaration_only);
+    assert!(declared_greet.implementation.declaration_only);
     assert_containment(&extracted, package, salutation);
     let greeter = symbol(&extracted, SymbolKind::Class, "Greeter", "demo::Greeter");
     assert_containment(&extracted, package, greeter);
@@ -687,10 +696,10 @@ fn symbol_facts(extracted: &ExtractedFile) -> Vec<String> {
                 symbol.name,
                 symbol.qualified_name,
                 symbol.visibility,
-                symbol.declaration_only,
-                symbol.exported,
-                symbol.async_symbol,
-                symbol.static_member,
+                symbol.implementation.declaration_only,
+                symbol.export.exported,
+                symbol.execution.async_symbol,
+                symbol.execution.static_member,
                 symbol.signature,
                 symbol.docstring,
             )
@@ -740,10 +749,10 @@ fn canonical_facts(extracted: &ExtractedFile) -> Vec<String> {
             symbol.signature.as_deref().unwrap_or_default(),
             symbol.docstring.as_deref().unwrap_or_default(),
             symbol.body_search_text,
-            symbol.declaration_only,
-            symbol.exported,
-            symbol.async_symbol,
-            symbol.static_member,
+            symbol.implementation.declaration_only,
+            symbol.export.exported,
+            symbol.execution.async_symbol,
+            symbol.execution.static_member,
             symbol.visibility,
         )
     }));

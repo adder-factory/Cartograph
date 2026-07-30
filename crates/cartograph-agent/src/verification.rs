@@ -36,6 +36,11 @@ impl ProjectRuntime {
     }
 
     /// Build a bounded review and command plan without executing repository code.
+    /// # Errors
+    ///
+    /// Returns an error when `base_ref` or `max_changed_files` is invalid, the
+    /// checkout/ref or bounded Git output is unavailable, project freshness
+    /// cannot be established, or deterministic review evidence cannot be read.
     pub async fn verification_plan(
         &self,
         base_ref: &str,

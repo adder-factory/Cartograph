@@ -45,13 +45,14 @@ docker run --rm --pull never \
   --env HOME=/tmp/cartograph-home \
   --env CARGO_HOME=/tmp/cartograph-cargo \
   --env RUSTUP_HOME=/usr/local/rustup \
+  --env CARGO_TARGET_DIR=/tmp/cartograph-target \
   --env CARTOGRAPH_RELEASE_TARGET="$TARGET" \
   --env CARTOGRAPH_RELEASE_ASSET_TARGET="$ASSET_TARGET" \
   --env CARTOGRAPH_RELEASE_MACHINE="$EXPECTED_MACHINE" \
   "$BUILD_IMAGE" \
   bash -c '
     set -euo pipefail
-    mkdir -p "$HOME" "$CARGO_HOME"
+    mkdir -p "$HOME" "$CARGO_HOME" "$CARGO_TARGET_DIR"
     machine="$(uname -m)"
     if [[ "$machine" != "$CARTOGRAPH_RELEASE_MACHINE" ]]; then
       echo "release container architecture mismatch: expected $CARTOGRAPH_RELEASE_MACHINE, got $machine" >&2

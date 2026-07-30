@@ -75,6 +75,13 @@ impl WorkingTreeOverlayRequest {
 
 impl ProjectRuntime {
     /// Search changed and untracked supported source without mixing it into the durable generation.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] for an empty, oversized, or
+    /// NUL-containing task; [`ProjectError::RequestCancelled`] when cancellation
+    /// wins; or a retrieval error when bounded overlay evidence cannot be formed.
+    /// Git or individual source-read failures otherwise return explicit
+    /// unavailable/unreadable evidence rather than failing the request.
     pub async fn working_tree_overlay(
         &self,
         request: WorkingTreeOverlayRequest,
@@ -224,15 +231,12 @@ fn scan_live_sources(input: OverlayScanRequest) -> Result<OverlayScan, ProjectEr
         let maximum = remaining.min(OVERLAY_MAXIMUM_FILE_BYTES);
         let limits = SourceLimits::new(maximum).map_err(|_| ProjectError::InvalidOptions)?;
         considered_file_count += 1;
-        let snapshot = match source_root.read_with_cancellation(
+        let Ok(snapshot) = source_root.read_with_cancellation(
             &candidate.path,
             SourceReadOptions::new(limits, || cancellation.is_cancelled()),
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
-                unreadable_file_count += 1;
-                continue;
-            }
+        ) else {
+            unreadable_file_count += 1;
+            continue;
         };
         retained_bytes = retained_bytes.saturating_add(snapshot.source().len());
         if let Some(evidence) = match_source(&snapshot, candidate.change_kind, &terms)? {

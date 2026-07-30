@@ -41,11 +41,11 @@ impl CentralityFilter {
 pub enum QualifiedSort {
     /// Preserve lexical relevance, then deterministic declaration order.
     Relevance,
-    /// Rank directed PageRank descending, with unranked symbols last.
+    /// Rank directed `PageRank` descending, with unranked symbols last.
     Centrality,
 }
 
-/// Structured filters plus the remaining ParadeDB free-text query.
+/// Structured filters plus the remaining `ParadeDB` free-text query.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParsedQualifiedQuery {
     text: String,
@@ -157,7 +157,12 @@ pub fn parse_qualified_query(raw: &str) -> ParsedQualifiedQuery {
             text.push(token);
         }
     }
-    parsed.text = text.join(" ").trim().to_owned();
+    let mut normalized_text = text.join(" ");
+    let leading_whitespace = normalized_text.len() - normalized_text.trim_start().len();
+    let trimmed_length = normalized_text.trim().len();
+    normalized_text.truncate(leading_whitespace + trimmed_length);
+    normalized_text.drain(..leading_whitespace);
+    parsed.text = normalized_text;
     parsed
 }
 

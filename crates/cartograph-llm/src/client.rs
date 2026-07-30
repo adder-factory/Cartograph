@@ -29,6 +29,10 @@ impl std::fmt::Debug for OpenAiEmbeddingClient {
 
 impl OpenAiEmbeddingClient {
     /// Build a redirect-free rustls client with explicit connect/request limits.
+    /// # Errors
+    ///
+    /// Returns an error if no TLS crypto provider can be installed or the
+    /// redirect-free bounded embedding HTTP client cannot be built.
     pub fn new(settings: EmbeddingSettings) -> Result<Self, EmbeddingError> {
         crate::ensure_tls_crypto_provider().map_err(|_| EmbeddingError::ClientUnavailable)?;
         let client = reqwest::Client::builder()
@@ -68,6 +72,10 @@ impl OpenAiEmbeddingClient {
     }
 
     /// Embed a bounded non-empty batch and restore response rows to input order.
+    /// # Errors
+    ///
+    /// Returns an error if batch/text/header bounds fail, the endpoint rejects
+    /// or is unavailable, or response bytes/JSON/indices/vectors violate the contract.
     pub async fn embed(&self, inputs: &[String]) -> Result<EmbeddingBatch, EmbeddingError> {
         validate_inputs(inputs, &self.settings)?;
         let request = EmbeddingRequest {
@@ -307,8 +315,7 @@ mod tests {
     #[tokio::test]
     async fn declared_oversized_response_is_rejected_before_body_read() {
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            OVERSIZED_RESPONSE_BYTES
+            "HTTP/1.1 200 OK\r\nContent-Length: {OVERSIZED_RESPONSE_BYTES}\r\nConnection: close\r\n\r\n"
         );
         let (endpoint, request) = spawn_http_fixture(response);
         let settings = EmbeddingSettings::new(&endpoint, "fixture-model", None)

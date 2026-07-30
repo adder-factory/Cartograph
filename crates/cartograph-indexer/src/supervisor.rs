@@ -127,12 +127,12 @@ impl IndexerSupervisor {
     ///
     /// A `true` result is linearized against the publication gate and guarantees
     /// that this run will not subsequently start publication.
+    #[must_use]
     pub fn cancel(&self) -> bool {
         let accepted = self
             .lifecycle
             .lock()
-            .map(|mut lifecycle| lifecycle.request_external_cancellation())
-            .unwrap_or(false);
+            .is_ok_and(|mut lifecycle| lifecycle.request_external_cancellation());
         if accepted {
             self.cancellation.send_replace(true);
         }
@@ -140,6 +140,10 @@ impl IndexerSupervisor {
     }
 
     /// Acquire the lease, monitor work, enforce deadlines, and clean up exactly once.
+    /// # Errors
+    ///
+    /// Returns an error if request/lease acquisition fails, work stalls or
+    /// times out, a child fails, publication loses its fence, or cleanup fails.
     pub async fn run<Work, WorkFuture>(
         &self,
         request: SupervisorRequest,
@@ -323,12 +327,9 @@ impl RunCoordinator<'_> {
             tasks: tasks.clone(),
             prepares: prepares.clone(),
         });
-        let lease = match operation.lease.take() {
-            Some(lease) => lease,
-            None => {
-                self.progress.mark_failed().await;
-                return Err(SupervisorError::LifecycleUnavailable);
-            }
+        let Some(lease) = operation.lease.take() else {
+            self.progress.mark_failed().await;
+            return Err(SupervisorError::LifecycleUnavailable);
         };
         let outcome = WorkMonitor {
             database: self.database.clone(),
@@ -344,17 +345,15 @@ impl RunCoordinator<'_> {
         .await;
         let (outcome, lease) = outcome;
         operation.lease = lease;
-        let reap_deadline = operation.budget.request_deadline(
+        let reap_deadline = OperationBudget::request_deadline(
             match &outcome {
                 MonitorOutcome::Cancelled(CancelledWork {
-                    reason: CancellationReason::LeaseLost
-                        | CancellationReason::LeaseHeartbeatFailed,
+                    reason: CancellationReason::LeaseLost | CancellationReason::LeaseHeartbeatFailed,
                     ..
                 }) => self.config.deadlines.heartbeat_request,
                 _ => self.config.deadlines.cancellation_grace,
             },
-            operation.budget.final_deadline
-                - self.config.deadlines.database_finish_reserve(),
+            operation.budget.final_deadline - self.config.deadlines.database_finish_reserve(),
         );
         let reap = tasks.close_abort_and_reap(reap_deadline).await;
         let prepare = prepares
@@ -543,19 +542,16 @@ impl DurableCoordinator<'_> {
         let mut retries = 0_u8;
         let mut publication = self.spawn_publication(ready, operation.fence.clone());
         loop {
-            let deadline = match operation
-                .budget
-                .database_deadline(self.config, operation.budget.durable_ceiling(self.config))
-            {
-                Ok(deadline) => deadline,
-                Err(_) => {
-                    self.finish_and_reap_durable(
-                        publication,
-                        DurableReap::new(operation.budget, "publish-generation"),
-                    )
-                    .await?;
-                    return Err(ambiguous("publish-generation"));
-                }
+            let Ok(deadline) = OperationBudget::database_deadline(
+                self.config,
+                operation.budget.durable_ceiling(self.config),
+            ) else {
+                self.finish_and_reap_durable(
+                    publication,
+                    DurableReap::new(operation.budget, "publish-generation"),
+                )
+                .await?;
+                return Err(ambiguous("publish-generation"));
             };
             let pending = match classify_publication_poll(
                 timeout_at(deadline, &mut publication).await,
@@ -588,7 +584,7 @@ impl DurableCoordinator<'_> {
                     .await?;
                     return Ok(current);
                 }
-                PublicationDecision::Wait => continue,
+                PublicationDecision::Wait => {}
                 PublicationDecision::Retry(recovered) => {
                     self.reap_if_active(
                         PendingDurable::new(publication, pending.task_active),
@@ -637,18 +633,17 @@ impl DurableCoordinator<'_> {
         let mut retries = 0_u8;
         let mut cleanup = self.spawn_cleanup(operation.fence.clone());
         loop {
-            let deadline =
-                match budget.database_deadline(self.config, budget.durable_ceiling(self.config)) {
-                    Ok(deadline) => deadline,
-                    Err(_) => {
-                        self.finish_and_reap_durable(
-                            cleanup,
-                            DurableReap::new(operation.budget, "cleanup-generation"),
-                        )
-                        .await?;
-                        return Err(ambiguous("cleanup-generation"));
-                    }
-                };
+            let Ok(deadline) = OperationBudget::database_deadline(
+                self.config,
+                budget.durable_ceiling(self.config),
+            ) else {
+                self.finish_and_reap_durable(
+                    cleanup,
+                    DurableReap::new(operation.budget, "cleanup-generation"),
+                )
+                .await?;
+                return Err(ambiguous("cleanup-generation"));
+            };
             let pending = match classify_cleanup_poll(
                 timeout_at(deadline, &mut cleanup).await,
                 retries == 0,
@@ -680,7 +675,7 @@ impl DurableCoordinator<'_> {
                     .await?;
                     return Ok(());
                 }
-                CleanupDecision::Wait => continue,
+                CleanupDecision::Wait => {}
                 CleanupDecision::Retry => {
                     self.reap_if_active(
                         PendingDurable::new(cleanup, pending.task_active),
@@ -723,7 +718,7 @@ impl DurableCoordinator<'_> {
         mut handle: tokio::task::JoinHandle<T>,
         context: DurableReap,
     ) -> Result<(), SupervisorError> {
-        let deadline = context.budget.request_deadline(
+        let deadline = OperationBudget::request_deadline(
             self.config.deadlines.heartbeat_request,
             context.budget.final_deadline,
         );
@@ -734,15 +729,14 @@ impl DurableCoordinator<'_> {
                 operation: context.operation,
             });
         }
-        match timeout_at(deadline, &mut handle).await {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                handle.abort();
-                let _ = handle.await;
-                Err(SupervisorError::UnreapedDurableOperation {
-                    operation: context.operation,
-                })
-            }
+        if timeout_at(deadline, &mut handle).await.is_ok() {
+            Ok(())
+        } else {
+            handle.abort();
+            let _ = handle.await;
+            Err(SupervisorError::UnreapedDurableOperation {
+                operation: context.operation,
+            })
         }
     }
 
@@ -809,7 +803,7 @@ impl DurableCoordinator<'_> {
     ) -> Result<OperationReconciliation, SupervisorError> {
         let budget = owned.budget;
         let deadline =
-            budget.database_deadline(self.config, budget.durable_ceiling(self.config))?;
+            OperationBudget::database_deadline(self.config, budget.durable_ceiling(self.config))?;
         let database = self.database.clone();
         let fence = owned.fence.clone();
         let statement_timeout = self.config.deadlines.statement_timeout();
@@ -836,21 +830,17 @@ impl DurableCoordinator<'_> {
     ) -> Result<ProjectLease, SupervisorError> {
         let mut acquisition = self.spawn_acquisition(attempt);
         loop {
-            let deadline = match context
-                .budget
-                .database_deadline(self.config, context.budget.work_deadline)
-            {
-                Ok(deadline) => deadline,
-                Err(_) => {
-                    self.finish_and_reap_durable(
-                        acquisition,
-                        DurableReap::new(context.budget, "acquire"),
-                    )
-                    .await?;
-                    return self
-                        .resolve_acquisition(&context, ambiguous("acquire"))
-                        .await;
-                }
+            let Ok(deadline) =
+                OperationBudget::database_deadline(self.config, context.budget.work_deadline)
+            else {
+                self.finish_and_reap_durable(
+                    acquisition,
+                    DurableReap::new(context.budget, "acquire"),
+                )
+                .await?;
+                return self
+                    .resolve_acquisition(&context, ambiguous("acquire"))
+                    .await;
             };
             let polled = tokio::select! {
                 biased;
@@ -945,9 +935,8 @@ impl DurableCoordinator<'_> {
         &self,
         context: &AcquisitionContext<'_>,
     ) -> Result<Option<ProjectLease>, SupervisorError> {
-        let deadline = context
-            .budget
-            .database_deadline(self.config, context.budget.final_deadline)?;
+        let deadline =
+            OperationBudget::database_deadline(self.config, context.budget.final_deadline)?;
         let database = self.database.clone();
         let probe = context.probe.clone();
         let statement_timeout = self.config.deadlines.statement_timeout();
@@ -1047,7 +1036,7 @@ impl Drop for SupervisorRunGuard {
         let Some(mut handle) = self.handle.take() else {
             return;
         };
-        self.supervisor.cancel();
+        let _cancellation_was_new = self.supervisor.cancel();
         let reap_timeout = self.reap_timeout;
         // The caller can no longer await cleanup, so retain one bounded reaper
         // on the spawning runtime even if this guard is dropped from another thread.
@@ -1280,11 +1269,9 @@ impl WorkMonitor<'_> {
     where
         WorkFuture: Future<Output = Result<ReadyGeneration, PipelineFailure>>,
     {
-        let selected = self
-            .lifecycle
-            .lock()
-            .map(|mut lifecycle| lifecycle.select_cancellation(reason))
-            .unwrap_or(reason);
+        let selected = self.lifecycle.lock().map_or(reason, |mut lifecycle| {
+            lifecycle.select_cancellation(reason)
+        });
         self.progress.mark_cancelling(selected).await;
         self.cancellation.send_replace(true);
         if selected.is_authority_uncertain() {
@@ -1295,9 +1282,10 @@ impl WorkMonitor<'_> {
         }
         let cleanup_reserve = self.config.deadlines.database_finish_reserve();
         let grace_ceiling = self.budget.final_deadline - cleanup_reserve;
-        let grace_deadline = self
-            .budget
-            .request_deadline(self.config.deadlines.cancellation_grace, grace_ceiling);
+        let grace_deadline = OperationBudget::request_deadline(
+            self.config.deadlines.cancellation_grace,
+            grace_ceiling,
+        );
         let completed = timeout_at(grace_deadline, work).await.is_ok();
         MonitorOutcome::Cancelled(CancelledWork {
             reason: selected,
@@ -1332,7 +1320,7 @@ async fn run_bounded_heartbeat(
         operation,
         mut lease,
     } = request;
-    let request_deadline = budget.database_deadline(config, ceiling)?;
+    let request_deadline = OperationBudget::database_deadline(config, ceiling)?;
     let mut task = tokio::spawn(async move {
         let statement_timeout = config.deadlines.statement_timeout();
         let mut attempts_remaining =
@@ -1368,8 +1356,10 @@ async fn run_bounded_heartbeat(
         }),
         Ok(Err(_)) => Err(ambiguous(operation)),
         Err(_) => {
-            let reap_deadline =
-                budget.request_deadline(config.deadlines.heartbeat_request, budget.final_deadline);
+            let reap_deadline = OperationBudget::request_deadline(
+                config.deadlines.heartbeat_request,
+                budget.final_deadline,
+            );
             match timeout_at(reap_deadline, &mut task).await {
                 Ok(Ok((lease, result))) => Ok(HeartbeatAttempt {
                     lease,
@@ -1402,19 +1392,21 @@ impl OperationBudget {
         }
     }
 
-    fn request_deadline(self, maximum: Duration, ceiling: Instant) -> Instant {
+    fn request_deadline(maximum: Duration, ceiling: Instant) -> Instant {
         (Instant::now() + maximum).min(ceiling)
     }
 
     fn database_deadline(
-        self,
         config: SupervisorConfig,
         ceiling: Instant,
     ) -> Result<Instant, SupervisorError> {
         if Instant::now() >= ceiling {
             Err(SupervisorError::OperationBudgetExhausted)
         } else {
-            Ok(self.request_deadline(config.deadlines.heartbeat_request, ceiling))
+            Ok(Self::request_deadline(
+                config.deadlines.heartbeat_request,
+                ceiling,
+            ))
         }
     }
 
@@ -1450,11 +1442,11 @@ impl LifecycleGate {
     }
 
     fn start(&mut self) -> Result<(), SupervisorError> {
-        if self.phase != LifecyclePhase::Queued {
-            Err(SupervisorError::AlreadyStarted)
-        } else {
+        if self.phase == LifecyclePhase::Queued {
             self.phase = LifecyclePhase::Running;
             Ok(())
+        } else {
+            Err(SupervisorError::AlreadyStarted)
         }
     }
 

@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, fmt, time::Duration};
 
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, FileId, GenerationId, ModelId, ProjectId, SymbolId,
+    SymbolKind,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -15,7 +16,7 @@ const MAXIMUM_PENDING_DOCUMENTS: u16 = 128;
 pub(crate) const MAXIMUM_PENDING_BYTES: u64 = 16 * 1_024 * 1_024;
 const MAXIMUM_VECTOR_RESULTS: u16 = 100;
 const MAXIMUM_SIMILAR_SYMBOL_RESULTS: u16 = 50;
-const MAXIMUM_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const MAXIMUM_STATEMENT_TIMEOUT: Duration = Duration::from_mins(30);
 
 /// Whether vectors are retained as emitted or must already have unit L2 norm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -103,6 +104,10 @@ pub struct EmbeddingModelRegistrationInput {
 
 impl EmbeddingModelRegistration {
     /// Validate non-secret model metadata and the pgvector HNSW dimension ceiling.
+    /// # Errors
+    ///
+    /// Returns an error if provider/model text is empty, oversized, or
+    /// NUL-containing, or `dimension` is zero/above the HNSW ceiling.
     pub fn new(input: EmbeddingModelRegistrationInput) -> Result<Self, SemanticStorageError> {
         let provider = bounded_text(input.provider, "provider", MAXIMUM_PROVIDER_BYTES)?;
         let model_name = bounded_text(input.model_name, "model_name", MAXIMUM_MODEL_NAME_BYTES)?;
@@ -303,6 +308,10 @@ pub struct PendingEmbeddingPageInput {
 
 impl PendingEmbeddingPageRequest {
     /// Validate page cardinality, retained source bytes, and database deadline.
+    /// # Errors
+    ///
+    /// Returns an error if document/retained-byte bounds or the statement
+    /// deadline are zero or exceed their semantic paging maxima.
     pub fn new(input: PendingEmbeddingPageInput) -> Result<Self, SemanticStorageError> {
         if input.maximum_documents == 0 || input.maximum_documents > MAXIMUM_PENDING_DOCUMENTS {
             return Err(invalid("maximum_documents"));
@@ -322,6 +331,9 @@ impl PendingEmbeddingPageRequest {
     }
 
     /// Resume only the exact generation named by a prior page.
+    /// # Errors
+    ///
+    /// Returns an error if the cursor's last row identity is zero.
     pub fn with_cursor(
         mut self,
         cursor: EmbeddingPageCursor,
@@ -433,6 +445,10 @@ pub struct EmbeddingUpsertRow {
 
 impl EmbeddingUpsertRow {
     /// Validate one finite, nonzero, HNSW-compatible vector.
+    /// # Errors
+    ///
+    /// Returns an error if the vector is empty, oversized, all-zero, or
+    /// contains a non-finite component.
     pub fn new(
         document_id: DocumentId,
         source_digest: ContentDigest,
@@ -483,6 +499,10 @@ pub struct EmbeddingBatchUpsertInput {
 
 impl EmbeddingBatchUpsertRequest {
     /// Validate batch count, distinct identities, vector dimensions, memory, and deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the batch is empty/oversized, has duplicate
+    /// documents, wrong dimensions/too many values, or an invalid deadline.
     pub fn new(mut input: EmbeddingBatchUpsertInput) -> Result<Self, SemanticStorageError> {
         let rows = &mut input.rows;
         if rows.is_empty() || rows.len() > MAXIMUM_EMBEDDING_BATCH {
@@ -575,6 +595,10 @@ pub struct SemanticReadinessRequest {
 
 impl SemanticReadinessRequest {
     /// Bind an exact project/model pair to a database deadline.
+    /// # Errors
+    ///
+    /// Returns an error if `statement_timeout` is zero or exceeds the semantic
+    /// operation deadline maximum.
     pub fn new(
         project_id: ProjectId,
         model: EmbeddingModelSelector,
@@ -679,6 +703,10 @@ pub struct VectorSearchInput {
 
 impl VectorSearchRequest {
     /// Validate query vector, model dimension, result cap, and database deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the vector is invalid/wrong-dimensional, result
+    /// limit is out of bounds, or the statement deadline is invalid.
     pub fn new(input: VectorSearchInput) -> Result<Self, SemanticStorageError> {
         validate_vector(&input.vector)?;
         if input.vector.len() != usize::from(input.model.dimension)
@@ -710,6 +738,8 @@ pub struct VectorSearchHit {
     pub(crate) language: String,
     pub(crate) document_kind: DocumentKind,
     pub(crate) qualified_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) symbol_kind: Option<SymbolKind>,
     pub(crate) distance: f64,
     #[serde(skip)]
     pub(crate) rerank_text: Option<String>,
@@ -727,6 +757,7 @@ impl fmt::Debug for VectorSearchHit {
             .field("language", &self.language)
             .field("document_kind", &self.document_kind)
             .field("qualified_name", &self.qualified_name)
+            .field("symbol_kind", &self.symbol_kind)
             .field("distance", &self.distance)
             .field(
                 "rerank_text_bytes",
@@ -770,6 +801,10 @@ pub struct SimilarSymbolsRequest {
 
 impl SimilarSymbolsRequest {
     /// Validate score, result, and deadline bounds before database work.
+    /// # Errors
+    ///
+    /// Returns an error if result/score/deadline bounds are invalid or the
+    /// minimum score is non-finite/outside zero to one.
     pub fn new(input: SimilarSymbolsInput) -> Result<Self, SemanticStorageError> {
         if input.limit == 0
             || input.limit > MAXIMUM_SIMILAR_SYMBOL_RESULTS
@@ -923,6 +958,12 @@ impl VectorSearchHit {
         &self.qualified_name
     }
 
+    /// Exact extracted symbol category when retained in current search metadata.
+    #[must_use]
+    pub const fn symbol_kind(&self) -> Option<SymbolKind> {
+        self.symbol_kind
+    }
+
     /// Bounded current-generation text reserved for an optional reranker call.
     ///
     /// This source-bearing field is deliberately omitted from serialization.
@@ -947,6 +988,10 @@ pub struct RetireEmbeddingModelRequest {
 
 impl RetireEmbeddingModelRequest {
     /// Require distinct exact model identities and a bounded audit transaction.
+    /// # Errors
+    ///
+    /// Returns an error if retiring and replacement model IDs are identical or
+    /// the audit deadline is invalid.
     pub fn new(
         retiring: EmbeddingModelSelector,
         replacement: EmbeddingModelSelector,
@@ -969,7 +1014,10 @@ impl RetireEmbeddingModelRequest {
 pub enum SemanticStorageError {
     /// One caller-controlled field violated its fixed bound/domain.
     #[error("invalid {field} in Cartograph semantic storage request")]
-    InvalidInput { field: &'static str },
+    InvalidInput {
+        /// Caller-controlled field that violated its documented bound.
+        field: &'static str,
+    },
     /// The model UUID or fingerprint is already registered with different metadata.
     #[error("embedding model identity conflicts with the existing registry")]
     ModelConflict,
@@ -1008,13 +1056,22 @@ pub enum SemanticStorageError {
     DocumentTooLarge,
     /// Top-K was attempted without all required readiness evidence.
     #[error("semantic retrieval is not ready: {state:?}")]
-    NotReady { state: SemanticReadinessState },
+    NotReady {
+        /// Exact readiness state that blocked semantic retrieval.
+        state: SemanticReadinessState,
+    },
     /// A stored identity, enum, count, or score violated the schema contract.
     #[error("Cartograph semantic storage violates the {field} domain contract")]
-    CorruptStoredValue { field: &'static str },
+    CorruptStoredValue {
+        /// Stored field whose value violated the semantic storage contract.
+        field: &'static str,
+    },
     /// Driver details are redacted because they may contain deployment/source data.
     #[error("Cartograph PostgreSQL semantic operation failed during {operation}")]
-    DatabaseOperation { operation: &'static str },
+    DatabaseOperation {
+        /// Bounded operation label identifying the failed PostgreSQL phase.
+        operation: &'static str,
+    },
 }
 
 pub(crate) fn validate_timeout(timeout: Duration) -> Result<(), SemanticStorageError> {
@@ -1044,11 +1101,15 @@ fn validate_vector(vector: &[f32]) -> Result<(), SemanticStorageError> {
 }
 
 fn bounded_text(
-    value: String,
+    mut value: String,
     field: &'static str,
     maximum: usize,
 ) -> Result<String, SemanticStorageError> {
-    let value = value.trim().to_owned();
+    value.truncate(value.trim_end().len());
+    let leading_whitespace = value.len().saturating_sub(value.trim_start().len());
+    if leading_whitespace > 0 {
+        value.drain(..leading_whitespace);
+    }
     if value.is_empty()
         || value.len() > maximum
         || value.contains('\0')
@@ -1160,6 +1221,7 @@ mod tests {
             language: "rust".to_owned(),
             document_kind: DocumentKind::Symbol,
             qualified_name: "private_candidate".to_owned(),
+            symbol_kind: Some(SymbolKind::Function),
             distance: 0.25,
             rerank_text: Some(source_text.to_owned()),
         };

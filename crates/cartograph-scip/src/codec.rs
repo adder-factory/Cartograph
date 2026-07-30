@@ -4,7 +4,7 @@ use crate::model::{
     CARTOGRAPH_EDGES_FIELD, CartographScipEdge, MAXIMUM_DOCUMENTS, MAXIMUM_OCCURRENCES,
     MAXIMUM_RELATIONSHIPS, MAXIMUM_SCIP_BYTES, MAXIMUM_STRING_BYTES, MAXIMUM_SYMBOLS,
     POSITION_ENCODING_UTF8, ScipDocument, ScipError, ScipIndex, ScipOccurrence, ScipRelationship,
-    ScipSymbolInformation, TEXT_ENCODING_UTF8,
+    ScipRelationshipRoles, ScipSymbolInformation, TEXT_ENCODING_UTF8,
 };
 
 const WIRE_VARINT: u8 = 0;
@@ -155,6 +155,12 @@ impl Writer {
     }
 }
 
+/// Encodes a validated SCIP index into bounded protobuf bytes.
+///
+/// # Errors
+///
+/// Returns an error if index/document/symbol/occurrence cardinality exceeds
+/// SCIP bounds or a string, range, integer, or protobuf message cannot be encoded.
 pub fn encode_scip_index(index: &ScipIndex) -> Result<Vec<u8>, ScipError> {
     validate_cardinality(index)?;
     let mut writer = Writer::new();
@@ -206,16 +212,16 @@ fn encode_symbol(writer: &mut Writer, symbol: &ScipSymbolInformation) -> Result<
     for relationship in &symbol.relationships {
         writer.message(SYMBOL_RELATIONSHIPS, |writer| {
             writer.string(RELATIONSHIP_SYMBOL, &relationship.symbol)?;
-            if relationship.is_reference {
+            if relationship.roles.reference() {
                 writer.bool(RELATIONSHIP_REFERENCE, true)?;
             }
-            if relationship.is_implementation {
+            if relationship.roles.implementation() {
                 writer.bool(RELATIONSHIP_IMPLEMENTATION, true)?;
             }
-            if relationship.is_type_definition {
+            if relationship.roles.type_definition() {
                 writer.bool(RELATIONSHIP_TYPE_DEFINITION, true)?;
             }
-            if relationship.is_definition {
+            if relationship.roles.definition() {
                 writer.bool(RELATIONSHIP_DEFINITION, true)?;
             }
             Ok(())
@@ -242,6 +248,12 @@ fn encode_symbol(writer: &mut Writer, symbol: &ScipSymbolInformation) -> Result<
     Ok(())
 }
 
+/// Decodes bounded protobuf bytes into a validated SCIP index.
+///
+/// # Errors
+///
+/// Returns an error if bytes are empty/oversized/malformed, text encoding is
+/// unsupported, or decoded document/symbol/occurrence/relationship bounds overflow.
 pub fn decode_scip_index(bytes: &[u8]) -> Result<ScipIndex, ScipError> {
     if bytes.is_empty() || bytes.len() > MAXIMUM_SCIP_BYTES {
         return Err(ScipError::LimitExceeded);
@@ -347,10 +359,11 @@ fn decode_symbol(message: &Message<'_>) -> Result<ScipSymbolInformation, ScipErr
 fn decode_relationship(message: &Message<'_>) -> Result<ScipRelationship, ScipError> {
     Ok(ScipRelationship {
         symbol: string(message, RELATIONSHIP_SYMBOL)?,
-        is_reference: uint32(message, RELATIONSHIP_REFERENCE)? != 0,
-        is_implementation: uint32(message, RELATIONSHIP_IMPLEMENTATION)? != 0,
-        is_type_definition: uint32(message, RELATIONSHIP_TYPE_DEFINITION)? != 0,
-        is_definition: uint32(message, RELATIONSHIP_DEFINITION)? != 0,
+        roles: ScipRelationshipRoles::default()
+            .with_reference(uint32(message, RELATIONSHIP_REFERENCE)? != 0)
+            .with_implementation(uint32(message, RELATIONSHIP_IMPLEMENTATION)? != 0)
+            .with_type_definition(uint32(message, RELATIONSHIP_TYPE_DEFINITION)? != 0)
+            .with_definition(uint32(message, RELATIONSHIP_DEFINITION)? != 0),
     })
 }
 

@@ -1,3 +1,5 @@
+//! Golden protocol coverage for bounded MCP transport and tool contracts.
+
 use std::{error::Error, io, sync::Arc, time::Duration};
 
 use cartograph_mcp::{
@@ -7,6 +9,7 @@ use cartograph_mcp::{
     ToolProfile, ToolProfiles, ToolResult,
 };
 use cartograph_search::test_support::exact_reference_context_packet;
+use serde as _;
 use serde_json::{Value, json};
 use tokio::{
     io::{
@@ -126,7 +129,7 @@ impl ToolHandler for FixtureHandler {
         ]
     }
 
-    fn call<'a>(&'a self, call: ToolCall, context: ToolCallContext) -> BoxToolFuture<'a> {
+    fn call(&self, call: ToolCall, context: ToolCallContext) -> BoxToolFuture<'_> {
         Box::pin(async move {
             match call.name.as_str() {
                 "cartograph_echo" => match call.arguments.get("message").and_then(Value::as_str) {
@@ -165,7 +168,7 @@ struct Connection {
 }
 
 impl Connection {
-    async fn open(server: ProtocolServer) -> Self {
+    fn open(server: ProtocolServer) -> Self {
         let (client, server_stream) = duplex(128 * 1_024);
         let (client_reader, client_writer) = split(client);
         let (server_reader, server_writer) = split(server_stream);
@@ -249,7 +252,7 @@ async fn initialize_initialized_and_ping_match_the_golden_wire_contract() -> Tes
         ServerLimits::default(),
         FixtureHandler::new(),
     )?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
     connection.send(&initialize_request(1)).await?;
 
     let line = connection.read_line().await?;
@@ -299,7 +302,7 @@ async fn initialize_advertises_only_explicit_validated_server_instructions() -> 
     )
     .with_instructions(INSTRUCTIONS)?;
     let server = ProtocolServer::new(config, FixtureHandler::new())?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
     connection.send(&initialize_request(1)).await?;
     let response = connection.read_value().await?;
     assert_eq!(response["result"]["instructions"], INSTRUCTIONS);
@@ -392,7 +395,7 @@ async fn tool_transport_preserves_typed_reference_evidence_and_multiplicity() ->
         ServerLimits::default(),
         FixtureHandler::new(),
     )?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
     connection.initialize().await?;
     connection
         .send(&json!({
@@ -440,7 +443,7 @@ async fn envelope_params_unknown_methods_and_unknown_tools_are_stable_and_redact
         ServerLimits::default(),
         FixtureHandler::new(),
     )?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
 
     connection.send_raw("{not-json}").await?;
     assert_error(
@@ -543,7 +546,7 @@ async fn cancellation_aborts_and_reaps_an_inflight_tool_call() -> TestResult {
     let handler = FixtureHandler::new();
     let observer = handler.clone();
     let server = test_server(ToolProfile::Core, ServerLimits::default(), handler)?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
     connection.initialize().await?;
     connection
         .send(&json!({
@@ -579,7 +582,7 @@ async fn hard_request_deadline_aborts_and_reaps_noncompleting_work() -> TestResu
         ServerLimitsInput::new(1_024, 4_096, 4).with_request_deadline(Duration::from_millis(25)),
     )?;
     let server = test_server(ToolProfile::Core, limits, FixtureHandler::new())?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
     connection.initialize().await?;
     connection
         .send(&json!({
@@ -606,7 +609,7 @@ async fn inflight_capacity_and_duplicate_ids_are_bounded_without_locking_cancell
         ServerLimitsInput::new(1_024, 4_096, 1).with_request_deadline(Duration::from_secs(1)),
     )?;
     let server = test_server(ToolProfile::Core, limits, handler)?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
     connection.initialize().await?;
     connection
         .send(&json!({
@@ -665,7 +668,7 @@ async fn input_and_output_byte_limits_fail_closed_without_killing_the_session() 
         ServerLimitsInput::new(256, 4_096, 4).with_request_deadline(Duration::from_secs(1)),
     )?;
     let input_server = test_server(ToolProfile::Core, input_limits, FixtureHandler::new())?;
-    let mut input_connection = Connection::open(input_server).await;
+    let mut input_connection = Connection::open(input_server);
     input_connection.send_raw(&"x".repeat(300)).await?;
     let oversized_input = input_connection.read_value().await?;
     assert_eq!(oversized_input["id"], Value::Null);
@@ -684,7 +687,7 @@ async fn input_and_output_byte_limits_fail_closed_without_killing_the_session() 
         ServerLimitsInput::new(1_024, 512, 4).with_request_deadline(Duration::from_secs(1)),
     )?;
     let output_server = test_server(ToolProfile::Core, output_limits, FixtureHandler::new())?;
-    let mut output_connection = Connection::open(output_server).await;
+    let mut output_connection = Connection::open(output_server);
     output_connection.initialize().await?;
     output_connection
         .send(&json!({
@@ -780,7 +783,7 @@ async fn writer_failure_cancels_and_reaps_active_calls_before_returning() -> Tes
 
 #[test]
 fn public_configuration_and_schema_boundaries_reject_invalid_contracts() {
-    for instructions in ["".to_owned(), "   \n".to_owned(), "bad\0value".to_owned()] {
+    for instructions in [String::new(), "   \n".to_owned(), "bad\0value".to_owned()] {
         assert_eq!(
             ServerConfig::default()
                 .with_instructions(instructions)
@@ -815,7 +818,7 @@ fn public_configuration_and_schema_boundaries_reject_invalid_contracts() {
     assert_eq!(
         ServerLimits::new(
             ServerLimitsInput::new(1_024, 4_096, 1)
-                .with_request_deadline(Duration::from_secs(600) + Duration::from_nanos(1),),
+                .with_request_deadline(Duration::from_mins(10) + Duration::from_nanos(1),),
         ),
         Err(ConfigError::InvalidRequestDeadline)
     );
@@ -892,7 +895,7 @@ fn initialize_request(id: i64) -> Value {
 
 async fn tools_list_line(profile: ToolProfile) -> Result<String, Box<dyn Error + Send + Sync>> {
     let server = test_server(profile, ServerLimits::default(), FixtureHandler::new())?;
-    let mut connection = Connection::open(server).await;
+    let mut connection = Connection::open(server);
     connection.initialize().await?;
     connection
         .send(&json!({"jsonrpc": "2.0", "id": 11, "method": "tools/list"}))

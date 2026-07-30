@@ -294,6 +294,7 @@ struct ImportState<'state, Cancel> {
     cancelled: &'state mut Cancel,
 }
 
+#[derive(Clone, Copy)]
 struct SymbolBuildLookups<'lookup> {
     file_symbol_by_id: &'lookup BTreeMap<FileId, SymbolId>,
     native_candidates: &'lookup NativeSymbolCandidates,
@@ -306,6 +307,7 @@ struct ScipSymbolContext<'context, 'document> {
     source_id: &'context SymbolId,
 }
 
+#[derive(Clone, Copy)]
 struct ScipOccurrenceContext<'context, 'document> {
     prepared: &'context PreparedDocument<'document>,
     occurrence: &'context ScipOccurrence,
@@ -401,6 +403,10 @@ fn invalid_edge_provenance(edge: &EdgeInput) -> bool {
 }
 
 /// Replace native facts only for matching project files covered by one bounded SCIP index.
+/// # Errors
+///
+/// Returns an error if the artifact/row cap is invalid, SCIP decoding fails,
+/// source bytes are missing/mismatched, or overlay identities/ranges conflict.
 pub fn apply_scip_overlay<ReadSource>(
     input: ScipOverlayRequest<'_>,
     read_source: ReadSource,
@@ -412,6 +418,10 @@ where
 }
 
 /// Apply a SCIP overlay while cooperatively polling between bounded records.
+/// # Errors
+///
+/// Returns an error on cancellation or if artifact/row bounds, decoding,
+/// source verification, symbol relationships, ranges, or native reconciliation fail.
 pub fn apply_scip_overlay_with_cancellation<ReadSource, Cancel>(
     input: ScipOverlayRequest<'_>,
     mut read_source: ReadSource,
@@ -492,7 +502,7 @@ where
             file_symbol_by_id: &file_symbol_by_id,
         },
         &mut imported,
-    )?;
+    );
     Ok(imported.report)
 }
 
@@ -533,7 +543,7 @@ where
             skipped = checked_increment(skipped)?;
             continue;
         }
-        let line_starts = source_line_starts(&source_bytes)?;
+        let line_starts = source_line_starts(&source_bytes);
         prepared.push(PreparedDocument {
             document,
             path,
@@ -610,6 +620,7 @@ where
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct ScipSymbolBuild<'context, 'document, 'lookup> {
     prepared: &'context PreparedDocument<'document>,
     lookups: &'context SymbolBuildLookups<'lookup>,
@@ -720,10 +731,8 @@ fn persist_scip_symbol(imported: &mut ImportAccumulator, input: ScipSymbolPersis
         end_line: input.span.end_line,
         structural_digest: structural_digest(&input.key, input.kind, &input.span),
         visibility: None,
-        exported: false,
-        default_export: false,
-        async_symbol: false,
-        static_member: false,
+        export: cartograph_domain::SymbolExportFlags::default(),
+        execution: cartograph_domain::SymbolExecutionFlags::default(),
         declaration_only: false,
         betweenness_ppb: None,
         pagerank_ppb: None,
@@ -944,17 +953,17 @@ fn add_reference_occurrence(
     Ok(())
 }
 
-fn apply_replacement(
-    input: ReplacementInput<'_, '_>,
-    imported: &mut ImportAccumulator,
-) -> Result<(), ScipError> {
-    let covered = input
-        .prepared
+fn apply_replacement(input: ReplacementInput<'_, '_>, imported: &mut ImportAccumulator) {
+    let ReplacementInput {
+        facts,
+        prepared,
+        file_symbol_by_id,
+    } = input;
+    let covered = prepared
         .iter()
         .map(|document| document.file_id.clone())
         .collect::<BTreeSet<_>>();
-    let removed = input
-        .facts
+    let removed = facts
         .symbols
         .iter()
         .filter(|symbol| {
@@ -967,21 +976,17 @@ fn apply_replacement(
         .iter()
         .map(|symbol| symbol.symbol_id.clone())
         .collect::<BTreeSet<_>>();
-    let file_symbol_ids = input
-        .file_symbol_by_id
-        .values()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let file_symbol_ids = file_symbol_by_id.values().cloned().collect::<BTreeSet<_>>();
     let retained_targets = imported_ids
         .iter()
         .cloned()
         .chain(file_symbol_ids.iter().cloned())
         .collect::<BTreeSet<_>>();
 
-    input.facts.symbols.retain(|symbol| {
+    facts.symbols.retain(|symbol| {
         !covered.contains(&symbol.file_id) || symbol.symbol_kind == SymbolKind::File.as_str()
     });
-    input.facts.documents.retain(|document| {
+    facts.documents.retain(|document| {
         document
             .file_id
             .as_ref()
@@ -991,7 +996,7 @@ fn apply_replacement(
                 .as_ref()
                 .is_some_and(|symbol_id| file_symbol_ids.contains(symbol_id))
     });
-    input.facts.references.retain_mut(|reference| {
+    facts.references.retain_mut(|reference| {
         if covered.contains(&reference.file_id) {
             return false;
         }
@@ -1002,11 +1007,14 @@ fn apply_replacement(
         {
             reference.target_symbol_id = None;
             reference.confidence = 0.0;
-            reference.resolution_provenance = SCIP_UNRESOLVED_PROVENANCE.to_owned();
+            reference.resolution_provenance.clear();
+            reference
+                .resolution_provenance
+                .push_str(SCIP_UNRESOLVED_PROVENANCE);
         }
         true
     });
-    input.facts.edges.retain(|edge| {
+    facts.edges.retain(|edge| {
         !removed.contains(&edge.source_symbol_id)
             && (!removed.contains(&edge.target_symbol_id)
                 || retained_targets.contains(&edge.target_symbol_id))
@@ -1016,14 +1024,12 @@ fn apply_replacement(
     imported.report.replaced_native_symbols = usize_to_u64(removed.len());
     imported.report.imported_symbols = usize_to_u64(imported.symbols.len());
     imported.report.imported_references = usize_to_u64(imported.references.len());
-    input.facts.symbols.append(&mut imported.symbols);
-    input.facts.documents.append(&mut imported.documents);
-    input.facts.references.append(&mut imported.references);
-    input
-        .facts
+    facts.symbols.append(&mut imported.symbols);
+    facts.documents.append(&mut imported.documents);
+    facts.references.append(&mut imported.references);
+    facts
         .edges
         .extend(std::mem::take(&mut imported.edges).into_values());
-    Ok(())
 }
 
 fn definition_occurrences(prepared: &PreparedDocument<'_>) -> BTreeMap<String, ScipOccurrence> {
@@ -1091,14 +1097,14 @@ fn scip_range_to_span(range: &[u32], source: &[u8], line_starts: &[usize]) -> Op
     })
 }
 
-fn source_line_starts(source: &[u8]) -> Result<Vec<usize>, ScipError> {
+fn source_line_starts(source: &[u8]) -> Vec<usize> {
     let mut starts = vec![0];
     for (index, byte) in source.iter().enumerate() {
         if *byte == b'\n' && index + 1 < source.len() {
             starts.push(index + 1);
         }
     }
-    Ok(starts)
+    starts
 }
 
 fn line_column_to_byte(lines: SourceLines<'_>, line: u32, column: u32) -> Option<usize> {
@@ -1186,8 +1192,7 @@ fn symbol_kind(symbol: &ScipSymbolInformation) -> SymbolKind {
                     .last()
                     .map(|descriptor| descriptor.suffix)
             })
-            .map(suffix_to_symbol_kind)
-            .unwrap_or(SymbolKind::Variable)
+            .map_or(SymbolKind::Variable, suffix_to_symbol_kind)
     })
 }
 
@@ -1222,7 +1227,7 @@ fn relationship_edge_kind(
     source_kind: Option<SymbolKind>,
     target_kind: Option<SymbolKind>,
 ) -> Option<EdgeKind> {
-    if relationship.is_implementation {
+    if relationship.roles.implementation() {
         match (source_kind, target_kind) {
             (
                 Some(SymbolKind::Class | SymbolKind::Struct),
@@ -1230,9 +1235,9 @@ fn relationship_edge_kind(
             ) => Some(EdgeKind::Implements),
             _ => Some(EdgeKind::Extends),
         }
-    } else if relationship.is_type_definition {
+    } else if relationship.roles.type_definition() {
         Some(EdgeKind::TypeOf)
-    } else if relationship.is_reference || relationship.is_definition {
+    } else if relationship.roles.reference() || relationship.roles.definition() {
         Some(EdgeKind::References)
     } else {
         None
@@ -1372,6 +1377,13 @@ mod tests {
 
     use super::*;
 
+    fn assert_confidence(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= f32::EPSILON,
+            "confidence mismatch: expected {expected}, got {actual}"
+        );
+    }
+
     fn native_facts(source: &[u8]) -> GenerationFacts {
         let file_id = FileId::from_uuid_v8([1; 16]);
         let file_symbol = SymbolId::from_uuid_v8([2; 16]);
@@ -1396,10 +1408,8 @@ mod tests {
                 end_line: 2,
                 structural_digest: ContentDigest::from_bytes(*blake3::hash(source).as_bytes()),
                 visibility: None,
-                exported: false,
-                default_export: false,
-                async_symbol: false,
-                static_member: false,
+                export: cartograph_domain::SymbolExportFlags::default(),
+                execution: cartograph_domain::SymbolExecutionFlags::default(),
                 declaration_only: false,
                 betweenness_ppb: None,
                 pagerank_ppb: None,
@@ -1424,8 +1434,8 @@ mod tests {
     fn cartograph_round_trip_preserves_exact_call_kind_and_site_count() {
         let source = b"fn caller() { callee(); }\nfn callee() {}\n".to_vec();
         let file_id = FileId::from_uuid_v8([1; 16]);
-        let caller = SymbolId::from_uuid_v8([4; 16]);
-        let callee = SymbolId::from_uuid_v8([5; 16]);
+        let source_symbol = SymbolId::from_uuid_v8([4; 16]);
+        let target_symbol = SymbolId::from_uuid_v8([5; 16]);
         let snapshot = cartograph_db::InterchangeSnapshot {
             generation_id: GenerationId::from_uuid_v8([6; 16]),
             files: vec![cartograph_db::InterchangeFile {
@@ -1437,7 +1447,7 @@ mod tests {
             }],
             symbols: vec![
                 cartograph_db::InterchangeSymbol {
-                    symbol_id: caller.clone(),
+                    symbol_id: source_symbol.clone(),
                     file_id: file_id.clone(),
                     symbol_kind: "function".to_owned(),
                     qualified_name: "caller".to_owned(),
@@ -1450,7 +1460,7 @@ mod tests {
                     end_line: 1,
                 },
                 cartograph_db::InterchangeSymbol {
-                    symbol_id: callee.clone(),
+                    symbol_id: target_symbol.clone(),
                     file_id,
                     symbol_kind: "function".to_owned(),
                     qualified_name: "callee".to_owned(),
@@ -1464,8 +1474,8 @@ mod tests {
                 },
             ],
             edges: vec![cartograph_db::InterchangeEdge {
-                source_symbol_id: caller,
-                target_symbol_id: callee,
+                source_symbol_id: source_symbol,
+                target_symbol_id: target_symbol,
                 edge_kind: "calls".to_owned(),
                 confidence: 0.9,
                 provenance: "native-exact-project".to_owned(),
@@ -1494,7 +1504,7 @@ mod tests {
             .iter()
             .find(|edge| edge.kind == EdgeKind::Calls && edge.site_count == 7)
             .unwrap_or_else(|| panic!("exact imported call edge was not retained"));
-        assert_eq!(imported_edge.confidence, 0.9);
+        assert_confidence(imported_edge.confidence, 0.9);
         assert_eq!(
             imported_edge.provenance,
             "scip-overlay:native-exact-project"

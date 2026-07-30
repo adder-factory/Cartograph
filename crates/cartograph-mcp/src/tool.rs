@@ -21,7 +21,7 @@ pub trait ToolHandler: Send + Sync + 'static {
     fn tools(&self) -> Vec<ToolDefinition>;
 
     /// Execute one already envelope-validated call.
-    fn call<'a>(&'a self, call: ToolCall, context: ToolCallContext) -> BoxToolFuture<'a>;
+    fn call(&self, call: ToolCall, context: ToolCallContext) -> BoxToolFuture<'_>;
 
     /// Cancel and reconcile adapter-owned background work before connection exit.
     fn shutdown(&self) -> BoxShutdownFuture<'_> {
@@ -80,6 +80,11 @@ impl ToolDefinitionInput {
 
 impl ToolDefinition {
     /// Validate and construct a tool contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolContractError`] when the name, description, input schema,
+    /// or profile membership violates the public tool contract.
     pub fn new(input: ToolDefinitionInput) -> Result<Self, ToolContractError> {
         let ToolDefinitionInput {
             name,
@@ -107,6 +112,11 @@ impl ToolDefinition {
     }
 
     /// Attach a compact human-facing title.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolContractError::InvalidDescription`] when the title is empty
+    /// or exceeds 256 bytes.
     pub fn with_title(mut self, title: impl Into<String>) -> Result<Self, ToolContractError> {
         let title = title.into();
         if title.is_empty() || title.len() > 256 {
@@ -172,12 +182,16 @@ impl ToolDefinition {
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolAnnotations {
+    /// Whether the tool promises not to mutate its environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only_hint: Option<bool>,
+    /// Whether the tool may perform a destructive operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destructive_hint: Option<bool>,
+    /// Whether repeated calls with the same arguments have the same effect.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotent_hint: Option<bool>,
+    /// Whether the tool can interact with entities outside the local system.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_world_hint: Option<bool>,
 }
@@ -306,7 +320,7 @@ impl ToolResult {
         self.is_error
     }
 
-    pub(crate) fn from_error(error: ToolError) -> Self {
+    pub(crate) fn from_error(error: &ToolError) -> Self {
         let mut metadata = BTreeMap::new();
         metadata.insert("code".to_owned(), error.code().as_str().to_owned());
         Self {

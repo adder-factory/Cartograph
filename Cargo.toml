@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.9"
+version = "2.10.0"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Adder Factory"]
@@ -69,7 +69,9 @@ clap = { version = "4.6.4", features = ["derive", "string"] }
 getrandom = "0.4.3"
 ignore = "0.4.31"
 libc = "0.2.183"
+memchr = "=2.8.3"
 notify = "=8.2.0"
+num-traits = "=0.2.19"
 futures-util = "=0.3.33"
 globset = "0.4.19"
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
@@ -117,17 +119,26 @@ tree-sitter-typescript = "=0.23.2"
 url = "2.5.8"
 
 [workspace.lints.rust]
+warnings = { level = "deny", priority = -2 }
+future_incompatible = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+missing_docs = "deny"
+unused_crate_dependencies = "deny"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-correctness = { level = "deny", priority = -1 }
-suspicious = { level = "deny", priority = -1 }
-perf = { level = "deny", priority = -1 }
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 
 [profile.release]
 codegen-units = 1
 lto = "thin"
+overflow-checks = true
 panic = "abort"
 strip = "symbols"

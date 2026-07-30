@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_db::{
-    CurrentGenerationLookup, CurrentSourceRangeLookup, CurrentSymbolRecord, RenameReferenceSite,
-    SourceLineRange, StorageError,
+    CurrentGenerationLookup, CurrentSourceRangeLookup, CurrentSymbolRecord, ProjectSnapshot,
+    RenameReferenceSite, SourceLineRange, StorageError,
 };
 use cartograph_domain::{ContentDigest, NormalizedPath, ProjectId, SourceManifestDigestBuilder};
 use cartograph_extract::{
     DiscoveredSource, SourceDiscoveryOptions, SourceReadOptions, SourceRoot, SourceSnapshot,
 };
 use futures_util::{StreamExt, stream};
+use memchr::memchr_iter;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -30,6 +31,12 @@ pub struct RenamePlanOptions {
 }
 
 impl RenamePlanOptions {
+    /// Creates validated rename-planning limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenamePlanError::InvalidOptions`] when `reference_limit` is
+    /// zero or excessive, or `mention_limit` exceeds its response ceiling.
     pub const fn new(reference_limit: u16, mention_limit: u16) -> Result<Self, RenamePlanError> {
         if reference_limit == 0
             || reference_limit > MAXIMUM_RENAME_SITES
@@ -47,9 +54,13 @@ impl RenamePlanOptions {
 
 /// Exact symbol, project, bounds, and cancellation scope for one rename plan.
 pub struct RenamePlanRequest {
+    /// Stable project ID for this record.
     pub project_id: ProjectId,
+    /// Definition for this record.
     pub definition: CurrentSymbolRecord,
+    /// Options for this record.
     pub options: RenamePlanOptions,
+    /// Cancellation for this record.
     pub cancellation: ProjectCancellation,
 }
 
@@ -101,19 +112,29 @@ pub struct RenamePlan {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum RenamePlanError {
     #[error("rename plan options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("rename graph evidence is unavailable")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
     #[error("rename source evidence is unavailable")]
+    /// Required source evidence could not be read safely.
     SourceUnavailable,
     #[error("source or generation changed during rename planning")]
+    /// Live source no longer matches the generation or digest fence.
     SourceChanged,
     #[error("rename planning was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
 }
 
 impl ProjectRuntime {
     /// Build a fresh exact-reference plus textual-mention plan without editing files.
+    /// # Errors
+    ///
+    /// Returns an error when the definition does not belong to the fenced
+    /// current generation, graph or live source evidence is unavailable,
+    /// source/generation identity changes, or cancellation wins.
     pub async fn plan_rename(
         &self,
         input: RenamePlanRequest,
@@ -130,15 +151,7 @@ impl ProjectRuntime {
             .await
             .map_err(|_| RenamePlanError::StorageUnavailable)?
             .ok_or(RenamePlanError::SourceChanged)?;
-        let current = before
-            .current
-            .as_ref()
-            .ok_or(RenamePlanError::SourceChanged)?;
-        if before.project_id != project_id || definition.generation_id() != &current.generation_id {
-            return Err(RenamePlanError::SourceChanged);
-        }
-        let generation_id = current.generation_id.clone();
-        let expected_revision = current.source_revision.clone();
+        let generation_fence = rename_generation(&before, &project_id, &definition)?;
         let references = self
             .database()
             .current_rename_reference_evidence(&project_id, definition.symbol_id())
@@ -180,14 +193,14 @@ impl ProjectRuntime {
             .scan_source(None, cancellation.clone())
             .await
             .map_err(|_| RenamePlanError::SourceUnavailable)?;
-        if observed.digest.as_str() != expected_revision {
+        if observed.digest.as_str() != generation_fence.source_revision {
             return Err(RenamePlanError::SourceChanged);
         }
         scan.source_revision = observed.digest;
         let mentions = attach_enclosing_symbols(EnclosingSymbolRequest {
             runtime: self,
-            project_id: &project_id,
-            generation_id: &generation_id,
+            project_id: &generation_fence.project_id,
+            generation_id: &generation_fence.generation_id,
             mentions: scan.mentions,
             cancellation: cancellation.clone(),
         })
@@ -197,14 +210,7 @@ impl ProjectRuntime {
             .project_snapshot_by_root(self.root_identity())
             .await
             .map_err(|_| RenamePlanError::StorageUnavailable)?;
-        let unchanged = after.as_ref().is_some_and(|snapshot| {
-            snapshot.project_id == project_id
-                && snapshot.current.as_ref().is_some_and(|current| {
-                    current.generation_id == generation_id
-                        && current.source_revision == expected_revision
-                })
-        });
-        if !unchanged {
+        if !rename_snapshot_matches(after.as_ref(), &generation_fence) {
             return Err(RenamePlanError::SourceChanged);
         }
         let mut exact_references = scan.references;
@@ -222,6 +228,44 @@ impl ProjectRuntime {
             edits_applied: false,
         })
     }
+}
+
+struct RenameGenerationFence {
+    project_id: ProjectId,
+    generation_id: cartograph_domain::GenerationId,
+    source_revision: String,
+}
+
+fn rename_snapshot_matches(
+    snapshot: Option<&ProjectSnapshot>,
+    fence: &RenameGenerationFence,
+) -> bool {
+    snapshot.is_some_and(|snapshot| {
+        snapshot.project_id == fence.project_id
+            && snapshot.current.as_ref().is_some_and(|current| {
+                current.generation_id == fence.generation_id
+                    && current.source_revision == fence.source_revision
+            })
+    })
+}
+
+fn rename_generation(
+    snapshot: &ProjectSnapshot,
+    project_id: &ProjectId,
+    definition: &CurrentSymbolRecord,
+) -> Result<RenameGenerationFence, RenamePlanError> {
+    let current = snapshot
+        .current
+        .as_ref()
+        .ok_or(RenamePlanError::SourceChanged)?;
+    if snapshot.project_id != *project_id || definition.generation_id() != &current.generation_id {
+        return Err(RenamePlanError::SourceChanged);
+    }
+    Ok(RenameGenerationFence {
+        project_id: project_id.clone(),
+        generation_id: current.generation_id.clone(),
+        source_revision: current.source_revision.clone(),
+    })
 }
 
 struct RenameSourceScan {
@@ -351,6 +395,7 @@ impl RenameScanAccumulator {
     }
 }
 
+#[derive(Clone, Copy)]
 struct RenameFileScan<'source> {
     file: &'source DiscoveredSource,
     snapshot: &'source SourceSnapshot,
@@ -481,7 +526,7 @@ async fn attach_enclosing_symbols(
                         ENCLOSING_LOOKUP_LIMIT,
                     ))
                     .await
-                    .map_err(map_storage_error)?;
+                    .map_err(|error| map_storage_error(&error))?;
                 let enclosing = symbols
                     .iter()
                     .filter(|symbol| {
@@ -546,7 +591,7 @@ fn one_based_line(source: &str, start: usize) -> Result<u32, RenamePlanError> {
         .as_bytes()
         .get(..start)
         .ok_or(RenamePlanError::SourceChanged)?;
-    u32::try_from(prefix.iter().filter(|byte| **byte == b'\n').count())
+    u32::try_from(memchr_iter(b'\n', prefix).count())
         .ok()
         .and_then(|line| line.checked_add(1))
         .ok_or(RenamePlanError::SourceUnavailable)
@@ -561,7 +606,7 @@ fn bounded_text(value: &str, maximum: usize) -> String {
     }
 }
 
-fn map_storage_error(error: StorageError) -> RenamePlanError {
+fn map_storage_error(error: &StorageError) -> RenamePlanError {
     match error {
         StorageError::CurrentGenerationChanged => RenamePlanError::SourceChanged,
         _ => RenamePlanError::StorageUnavailable,

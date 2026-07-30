@@ -33,7 +33,7 @@ pub enum PipelineStage {
     Copy,
     /// Build relational/derived graph state.
     RelationalMerge,
-    /// Maintain the ParadeDB BM25 index.
+    /// Maintain the `ParadeDB` BM25 index.
     Bm25,
     /// Generate and persist model-scoped vectors.
     Vector,
@@ -380,6 +380,10 @@ pub struct ProgressReporter {
 
 impl ProgressReporter {
     /// Enter the next strictly ordered stage and reset the progress watchdog.
+    /// # Errors
+    ///
+    /// Returns an error if `stage` is supervisor-owned, progress is inactive,
+    /// or the requested stage repeats/regresses the current stage.
     pub async fn begin_stage(&self, stage: PipelineStage) -> Result<(), ProgressError> {
         if stage == PipelineStage::Publish {
             return Err(ProgressError::SupervisorOwnedStage);
@@ -388,6 +392,10 @@ impl ProgressReporter {
     }
 
     /// Add nonzero monotonic item/byte progress and reset the watchdog.
+    /// # Errors
+    ///
+    /// Returns an error if both increments are zero, progress is inactive, or
+    /// monotonic item/byte counters overflow.
     pub async fn advance(&self, items: u64, bytes: u64) -> Result<(), ProgressError> {
         self.shared.advance(items, bytes).await
     }
@@ -473,6 +481,10 @@ impl SupervisorContext {
     /// Publication and cleanup authority are deliberately absent from this
     /// context; only the supervisor lifecycle gate can perform terminal
     /// generation transitions.
+    /// # Errors
+    ///
+    /// Returns an error if the lease fence is lost, canonical facts fail
+    /// storage validation, or transactional COPY/ready transition fails.
     pub async fn prepare_generation(
         &self,
         contents: GenerationContents,
@@ -485,6 +497,10 @@ impl SupervisorContext {
     /// The future must return a stage-scoped [`crate::PipelineFailure`]. The
     /// supervisor records that outcome independently of this result handle, so
     /// dropping a failed child cannot permit publication.
+    /// # Errors
+    ///
+    /// Returns an error if the task scope is poisoned/closed or the explicit
+    /// byte reservation exceeds bounded task capacity.
     pub fn spawn<T, Work>(
         &self,
         reserved_bytes: u64,

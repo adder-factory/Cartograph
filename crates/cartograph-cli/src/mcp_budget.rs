@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use cartograph_mcp::{ToolDefinition, ToolProfile};
+use num_traits::ToPrimitive as _;
 use serde::Serialize;
 
 const TOKEN_CHARACTER_ESTIMATE: usize = 4;
@@ -109,7 +110,9 @@ pub(super) fn measure(input: McpBudgetInput<'_>) -> Result<McpBudgetReport, Stri
                 share_of_tools_list: if tools_list_chars == 0 {
                     0.0
                 } else {
-                    chars as f64 / tools_list_chars as f64 * 100.0
+                    chars.to_f64().unwrap_or(f64::MAX)
+                        / tools_list_chars.to_f64().unwrap_or(f64::MAX)
+                        * 100.0
                 },
             }
         })

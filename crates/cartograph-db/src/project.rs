@@ -52,17 +52,24 @@ const DIRECT_PROJECT_TABLES: &[&str] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectPurgeReport {
+    /// Number of generations removed.
     pub generations_removed: u64,
+    /// Number of search relations removed.
     pub search_relations_removed: u64,
+    /// Number of cascade rows removed.
     pub cascade_rows_removed: u64,
 }
 
 /// Hard bounds and exact project identity for one destructive purge transaction.
 #[derive(Clone, Copy, Debug)]
 pub struct ProjectPurgeRequest<'a> {
+    /// Stable project ID for this record.
     pub project_id: &'a ProjectId,
+    /// Maximum number of generations permitted by this request.
     pub maximum_generations: u16,
+    /// Maximum number of cascade rows permitted by this request.
     pub maximum_cascade_rows: u64,
+    /// Statement timeout for this record.
     pub statement_timeout: Duration,
 }
 
@@ -70,19 +77,35 @@ pub struct ProjectPurgeRequest<'a> {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProjectPurgeError {
     #[error("invalid Cartograph project purge bounds")]
+    /// Supplied bounds are zero, inconsistent, or exceed the hard ceiling.
     InvalidBounds,
     #[error("Cartograph project does not exist")]
+    /// No durable project matches the supplied identity.
     ProjectNotFound,
     #[error("Cartograph project has {count} unexpired operation leases")]
-    LiveLeases { count: u64 },
+    /// Unexpired project leases still protect the requested data.
+    LiveLeases {
+        /// Number of unexpired leases that still protect the project.
+        count: u64,
+    },
     #[error("Cartograph project purge exceeds its generation bound")]
+    /// Generation-scoped facts exceed a declared validation ceiling.
     GenerationBoundExceeded,
     #[error("Cartograph project purge exceeds its row bound")]
+    /// The result exceeded its declared row ceiling.
     RowBoundExceeded,
     #[error("Cartograph project purge found corrupt stored {field}")]
-    CorruptStoredValue { field: &'static str },
+    /// A stored row violates its durable typed contract.
+    CorruptStoredValue {
+        /// Stored field whose value violated the purge contract.
+        field: &'static str,
+    },
     #[error("Cartograph PostgreSQL project purge failed during {operation}")]
-    DatabaseOperation { operation: &'static str },
+    /// PostgreSQL could not complete the named operation.
+    DatabaseOperation {
+        /// Bounded operation label identifying the failed PostgreSQL phase.
+        operation: &'static str,
+    },
 }
 
 /// Exact row counts for the atomically published generation.
@@ -96,7 +119,7 @@ pub struct GenerationCounts {
     pub edges: i64,
     /// Resolved and unresolved source references in the generation.
     pub references: i64,
-    /// File and symbol documents available to ParadeDB.
+    /// File and symbol documents available to `ParadeDB`.
     pub documents: i64,
 }
 
@@ -161,6 +184,10 @@ pub struct ProjectSnapshot {
 
 impl CartographDatabase {
     /// Resolve one privacy-preserving root identity without creating project state.
+    /// # Errors
+    ///
+    /// Returns an error if `root_identity` is empty/oversized or project,
+    /// generation, count, and storage-summary fields cannot be queried or decoded.
     pub async fn project_snapshot_by_root(
         &self,
         root_identity: &str,
@@ -212,6 +239,10 @@ impl CartographDatabase {
     }
 
     /// Count all retained generation states and estimate their dominant physical bytes.
+    /// # Errors
+    ///
+    /// Returns an error if generation-state counts/physical bytes cannot be
+    /// queried, are negative, or overflow the retained-byte estimate.
     pub async fn generation_storage_summary(
         &self,
         project_id: &ProjectId,
@@ -270,6 +301,10 @@ impl CartographDatabase {
     ///
     /// The caller supplies hard work bounds. A live operation lease always
     /// blocks deletion; expired leases are removed by the project cascade.
+    /// # Errors
+    ///
+    /// Returns an error if work/deadline bounds are invalid, a live lease or
+    /// catalog mismatch blocks deletion, or bounded relation/project cleanup fails.
     pub async fn purge_project(
         &self,
         input: ProjectPurgeRequest<'_>,

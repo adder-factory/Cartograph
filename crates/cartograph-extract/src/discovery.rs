@@ -71,6 +71,10 @@ pub struct DiscoveryLimits {
 
 impl DiscoveryLimits {
     /// Validate maximum file count and retained manifest bytes.
+    /// # Errors
+    ///
+    /// Returns an error if either file-count or retained-path-byte bound is
+    /// zero or exceeds its configured discovery maximum.
     pub const fn new(
         max_files: usize,
         max_retained_path_bytes: u64,
@@ -126,6 +130,10 @@ impl<Cancel> SourceDiscoveryOptions<Cancel> {
 
 impl SourceRoot {
     /// Discover supported native sources under Git-compatible ignore rules.
+    /// # Errors
+    ///
+    /// Returns an error if directory/ignore traversal fails, a path escapes the
+    /// root, or file/retained-manifest bounds are exceeded.
     pub fn discover(
         &self,
         limits: DiscoveryLimits,
@@ -134,6 +142,10 @@ impl SourceRoot {
     }
 
     /// Walk without following symlinks while polling cancellation between entries.
+    /// # Errors
+    ///
+    /// Returns an error on cancellation, unsafe/unreadable traversal, root
+    /// escape, or exceeded file/retained-manifest bounds.
     pub fn discover_with_cancellation<Cancel>(
         &self,
         options: SourceDiscoveryOptions<Cancel>,
@@ -225,6 +237,7 @@ struct SourceCollector<'a> {
     retained_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
 struct WalkRequest<'a> {
     root: &'a Path,
     prefix: Option<&'a NormalizedPath>,
@@ -266,7 +279,7 @@ impl<'a> SourceCollector<'a> {
             .standard_filters(true)
             .hidden(false)
             .follow_links(false)
-            .sort_by_file_name(|left, right| left.cmp(right))
+            .sort_by_file_name(std::cmp::Ord::cmp)
             .filter_entry(move |entry| filter.includes(entry));
         for entry in builder.build() {
             if cancelled() {
@@ -370,6 +383,7 @@ struct NestedRepository {
     kind: NestedRepositoryKind,
 }
 
+#[derive(Clone, Copy)]
 struct NestedRepositoryScan<'a> {
     root: &'a Path,
     policy: &'a DiscoveryPolicy,
@@ -508,7 +522,7 @@ fn git_tracked_paths<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    let mut child = match Command::new("git")
+    let Ok(mut child) = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(["ls-files", "-z", "--cached"])
@@ -516,9 +530,8 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return Ok(None),
+    else {
+        return Ok(None);
     };
     let Some(mut stdout) = child.stdout.take() else {
         let _ = child.kill();
@@ -526,7 +539,7 @@ where
         return Ok(None);
     };
     let mut output = Vec::new();
-    let mut chunk = [0_u8; 64 * 1024];
+    let mut chunk = vec![0_u8; 64 * 1024];
     loop {
         if cancelled() {
             let _ = child.kill();
@@ -747,7 +760,7 @@ mod tests {
         };
         let docs = directory.path().join("docs");
         assert!(fs::create_dir(&docs).is_ok());
-        for index in 0..(DISCOVERY_FILES + 1) {
+        for index in 0..=DISCOVERY_FILES {
             assert!(fs::write(docs.join(format!("note-{index:02}.md")), "plain prose\n").is_ok());
         }
         assert!(

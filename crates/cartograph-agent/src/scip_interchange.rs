@@ -22,8 +22,8 @@ use crate::{
     ProjectCancellation, ProjectError, ProjectRuntime, SCIP_OVERLAY_RELATIVE_PATH, source_limits,
 };
 
-const DEFAULT_INTERCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-const MAXIMUM_INTERCHANGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_INTERCHANGE_TIMEOUT: Duration = Duration::from_mins(2);
+const MAXIMUM_INTERCHANGE_TIMEOUT: Duration = Duration::from_mins(30);
 const MAXIMUM_INTERCHANGE_ROWS: u64 = 5_000_000;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const DEFAULT_PACKAGE_VERSION: &str = "workspace";
@@ -38,6 +38,10 @@ pub struct ScipExportRequest {
 
 impl ScipExportRequest {
     /// Restrict output to one project-relative regular artifact path.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `output` is not a safe
+    /// project-relative artifact path or `maximum_rows` is zero or excessive.
     pub fn new(output: &str, maximum_rows: u64) -> Result<Self, ProjectError> {
         let output = artifact_path(output)?;
         if maximum_rows == 0 || maximum_rows > MAXIMUM_INTERCHANGE_ROWS {
@@ -51,6 +55,10 @@ impl ScipExportRequest {
     }
 
     /// Override the complete repeatable-read and source-export timeout.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `timeout` is zero or
+    /// exceeds the maximum interchange operation duration.
     pub fn with_timeout(mut self, timeout: Duration) -> Result<Self, ProjectError> {
         if timeout.is_zero() || timeout > MAXIMUM_INTERCHANGE_TIMEOUT {
             return Err(ProjectError::InvalidOptions);
@@ -70,6 +78,10 @@ pub struct ScipImportLimits {
 
 impl ScipImportLimits {
     /// Validate the complete bounded import envelope before any artifact is opened.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when the byte or row ceiling is
+    /// zero or excessive, or `workers` is outside the supported indexing range.
     pub fn new(
         maximum_bytes: usize,
         maximum_rows: usize,
@@ -102,6 +114,10 @@ pub struct ScipImportRequest {
 
 impl ScipImportRequest {
     /// Bound the project-relative input, protobuf bytes/rows, and index workers.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::InvalidOptions`] when `input` is not a safe
+    /// project-relative regular-artifact path.
     pub fn new(input: &str, limits: ScipImportLimits) -> Result<Self, ProjectError> {
         let input = artifact_path(input)?;
         Ok(Self {
@@ -177,6 +193,7 @@ struct ScipImportRead<'input> {
     cancellation: ProjectCancellation,
 }
 
+#[derive(Clone, Copy)]
 struct RelativeReadRequest<'input> {
     root: &'input Path,
     relative: &'input NormalizedPath,
@@ -185,6 +202,11 @@ struct RelativeReadRequest<'input> {
 
 impl ProjectRuntime {
     /// Export the exact fresh PostgreSQL graph to a project-local SCIP artifact.
+    /// # Errors
+    ///
+    /// Returns an error when the current generation is absent or stale, the
+    /// repeatable-read graph exceeds its bounds or is unavailable, the output
+    /// artifact cannot be written atomically, or cancellation wins.
     pub async fn export_scip_with_cancellation(
         &self,
         request: ScipExportRequest,
@@ -237,6 +259,11 @@ impl ProjectRuntime {
     }
 
     /// Atomically install a validated SCIP artifact, force an index, and roll back on failure.
+    /// # Errors
+    ///
+    /// Returns an error when the input is missing, unsafe, oversized, or invalid
+    /// SCIP; overlay installation or rollback fails; forced indexing fails; the
+    /// installed digest changes; or cancellation wins.
     pub async fn import_scip_with_cancellation(
         &self,
         request: ScipImportRequest,
@@ -280,9 +307,7 @@ impl ProjectRuntime {
         let options = IndexOptions::default()
             .with_force(true)
             .with_max_workers(request.workers)?;
-        let index = self
-            .index_with_cancellation(options, cancellation.clone())
-            .await;
+        let index = Box::pin(self.index_with_cancellation(options, cancellation.clone())).await;
         let index = match index {
             Ok(index) => index,
             Err(error) => {
@@ -534,7 +559,7 @@ fn read_optional_bounded(
     bytes
         .try_reserve_exact(expected)
         .map_err(|_| ProjectError::ScipOverlayInvalid)?;
-    let mut buffer = [0_u8; READ_BUFFER_BYTES];
+    let mut buffer = vec![0_u8; READ_BUFFER_BYTES];
     while bytes.len() < expected {
         if cancelled() {
             return Err(ProjectError::RequestCancelled);
@@ -610,11 +635,10 @@ fn ensure_overlay_directory(root: &Path) -> Result<PathBuf, ProjectError> {
         current.push(component);
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => return Err(ProjectError::ScipOverlayInvalid),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir(&current).map_err(|_| ProjectError::ScipOverlayInvalid)?;
             }
-            Err(_) => return Err(ProjectError::ScipOverlayInvalid),
+            Ok(_) | Err(_) => return Err(ProjectError::ScipOverlayInvalid),
         }
     }
     let canonical =
@@ -625,13 +649,16 @@ fn ensure_overlay_directory(root: &Path) -> Result<PathBuf, ProjectError> {
     Ok(canonical)
 }
 
-fn sync_parent(_parent: &Path) -> Result<(), ProjectError> {
-    #[cfg(unix)]
-    {
-        File::open(_parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| ProjectError::ScipOverlayInvalid)?;
-    }
+#[cfg(unix)]
+fn sync_parent(parent: &Path) -> Result<(), ProjectError> {
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| ProjectError::ScipOverlayInvalid)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+const fn sync_parent(_parent: &Path) -> Result<(), ProjectError> {
     Ok(())
 }
 
@@ -639,7 +666,7 @@ fn package_name(root: &Path) -> String {
     root.file_name()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty() && !value.contains('\0'))
-        .map_or_else(|| "project".to_owned(), |value| value.to_owned())
+        .map_or_else(|| "project".to_owned(), std::borrow::ToOwned::to_owned)
 }
 
 fn artifact_path(raw: &str) -> Result<NormalizedPath, ProjectError> {

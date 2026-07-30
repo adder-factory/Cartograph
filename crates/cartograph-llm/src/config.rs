@@ -70,6 +70,10 @@ impl std::fmt::Debug for EmbeddingSettings {
 impl EmbeddingSettings {
     /// Load optional embedding configuration. A completely absent endpoint/model
     /// means deterministic mode; a partial configuration fails closed.
+    /// # Errors
+    ///
+    /// Returns an error for non-Unicode/partial endpoint-model configuration,
+    /// invalid model/key text, or malformed/out-of-range numeric limits.
     pub fn try_from_env() -> Result<Option<Self>, EmbeddingError> {
         let endpoint = optional_env(EMBEDDING_ENDPOINT_ENV)?;
         let model = optional_env(EMBEDDING_MODEL_ENV)?;
@@ -109,6 +113,10 @@ impl EmbeddingSettings {
     }
 
     /// Prefer the explicit process environment, then load project embedding config.
+    /// # Errors
+    ///
+    /// Returns an error if environment settings are invalid or the project
+    /// embedding tier is unreadable, unsupported, or violates transport bounds.
     pub fn try_from_project(project_root: &Path) -> Result<Option<Self>, EmbeddingError> {
         if let Some(settings) = Self::try_from_env()? {
             return Ok(Some(settings));
@@ -130,6 +138,10 @@ impl EmbeddingSettings {
     }
 
     /// Validate an explicit endpoint/model/key boundary with production defaults.
+    /// # Errors
+    ///
+    /// Returns an error if the endpoint is not permitted HTTPS/loopback HTTP,
+    /// or model/API-key text is empty, oversized, or contains control characters.
     pub fn new(
         endpoint: &str,
         model: impl Into<String>,

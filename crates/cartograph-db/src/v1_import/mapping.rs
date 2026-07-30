@@ -40,6 +40,7 @@ pub(super) struct ReferenceSite {
     pub(super) column: Option<u32>,
 }
 
+#[derive(Clone, Copy)]
 struct ReferenceAnchorInput<'a> {
     file: &'a SourceFile,
     owner_span: (usize, usize),
@@ -254,10 +255,14 @@ fn map_symbol_fact(
                 ),
                 None => None,
             },
-            exported: node.is_exported,
-            default_export: node.is_default_export,
-            async_symbol: node.is_async,
-            static_member: node.is_static,
+            export: cartograph_domain::SymbolExportFlags::new(
+                node.export.exported,
+                node.export.default_export,
+            ),
+            execution: cartograph_domain::SymbolExecutionFlags {
+                async_symbol: node.execution.async_symbol,
+                static_member: node.execution.static_member,
+            },
             declaration_only: false,
             betweenness_ppb: None,
             pagerank_ppb: None,
@@ -276,15 +281,15 @@ fn map_symbol_fact(
             code,
             natural_text: node.docstring.clone().unwrap_or_default(),
             metadata: serde_json::json!({
-                "async": node.is_async,
+                "async": node.execution.async_symbol,
                 "body_search_truncated": false,
                 "declaration_only": false,
-                "default_export": node.is_default_export,
-                "exported": node.is_exported,
+                "default_export": node.export.default_export,
+                "exported": node.export.exported,
                 "legacy_body_search_omitted": true,
                 "legacy_body_search_omission_reason": "privacy_unproven",
                 "name": node.name,
-                "static": node.is_static,
+                "static": node.execution.static_member,
                 "visibility": node.visibility,
             }),
         },
@@ -873,6 +878,8 @@ fn v1_symbol_body<'a>(
     file: &'a SourceFile,
     node: &SourceNode,
 ) -> Result<Cow<'a, str>, V1PostgresImportError> {
+    const TRUNCATION_SUFFIX: &str = "\n// ... (truncated)";
+
     if node.start_line == 0 || node.end_line < node.start_line {
         return Err(invalid_source("body_hash_span"));
     }
@@ -909,7 +916,6 @@ fn v1_symbol_body<'a>(
     if utf16_prefix.len() <= V1_MAX_BODY_UTF16_UNITS {
         return Ok(Cow::Borrowed(body));
     }
-    const TRUNCATION_SUFFIX: &str = "\n// ... (truncated)";
     let mut prefix = String::new();
     prefix
         .try_reserve_exact(
@@ -1361,10 +1367,8 @@ mod tests {
             signature: None,
             body_hash: String::new(),
             visibility: None,
-            is_exported: false,
-            is_default_export: false,
-            is_async: false,
-            is_static: false,
+            export: cartograph_domain::SymbolExportFlags::default(),
+            execution: cartograph_domain::SymbolExecutionFlags::default(),
         }
     }
 }

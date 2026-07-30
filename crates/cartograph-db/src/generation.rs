@@ -469,13 +469,13 @@ struct CopyAndValidateInput<'a> {
 /// Cloneable observer for the exact PostgreSQL COPY-stream duration.
 #[derive(Default)]
 struct PrepareGenerationMetricsInner {
-    copy_nanos: AtomicU64,
-    files_copy_nanos: AtomicU64,
-    symbols_copy_nanos: AtomicU64,
-    edges_copy_nanos: AtomicU64,
-    references_copy_nanos: AtomicU64,
-    documents_copy_nanos: AtomicU64,
-    relation_validation_nanos: AtomicU64,
+    copy: AtomicU64,
+    files_copy: AtomicU64,
+    symbols_copy: AtomicU64,
+    edges_copy: AtomicU64,
+    references_copy: AtomicU64,
+    documents_copy: AtomicU64,
+    relation_validation: AtomicU64,
 }
 
 /// Shareable observer for one generation's COPY and relation-validation durations.
@@ -487,13 +487,13 @@ pub struct PrepareGenerationMetrics {
 /// Point-in-time prepare metrics retained after the generation contents move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrepareGenerationMetricsSnapshot {
-    copy_duration: Duration,
-    files_copy_duration: Duration,
-    symbols_copy_duration: Duration,
-    edges_copy_duration: Duration,
-    references_copy_duration: Duration,
-    documents_copy_duration: Duration,
-    relation_validation_duration: Duration,
+    copy: Duration,
+    files_copy: Duration,
+    symbols_copy: Duration,
+    edges_copy: Duration,
+    references_copy: Duration,
+    documents_copy: Duration,
+    relation_validation: Duration,
 }
 
 impl PrepareGenerationMetrics {
@@ -507,28 +507,28 @@ impl PrepareGenerationMetrics {
     #[must_use]
     pub fn snapshot(&self) -> PrepareGenerationMetricsSnapshot {
         PrepareGenerationMetricsSnapshot {
-            copy_duration: observed_duration(&self.inner.copy_nanos),
-            files_copy_duration: observed_duration(&self.inner.files_copy_nanos),
-            symbols_copy_duration: observed_duration(&self.inner.symbols_copy_nanos),
-            edges_copy_duration: observed_duration(&self.inner.edges_copy_nanos),
-            references_copy_duration: observed_duration(&self.inner.references_copy_nanos),
-            documents_copy_duration: observed_duration(&self.inner.documents_copy_nanos),
-            relation_validation_duration: observed_duration(&self.inner.relation_validation_nanos),
+            copy: observed_duration(&self.inner.copy),
+            files_copy: observed_duration(&self.inner.files_copy),
+            symbols_copy: observed_duration(&self.inner.symbols_copy),
+            edges_copy: observed_duration(&self.inner.edges_copy),
+            references_copy: observed_duration(&self.inner.references_copy),
+            documents_copy: observed_duration(&self.inner.documents_copy),
+            relation_validation: observed_duration(&self.inner.relation_validation),
         }
     }
 
     fn record_copy(&self, duration: Duration, tables: CopyTableDurations) {
-        store_duration(&self.inner.copy_nanos, duration);
-        store_duration(&self.inner.files_copy_nanos, tables.files);
-        store_duration(&self.inner.symbols_copy_nanos, tables.symbols);
-        store_duration(&self.inner.edges_copy_nanos, tables.edges);
-        store_duration(&self.inner.references_copy_nanos, tables.references);
-        store_duration(&self.inner.documents_copy_nanos, tables.documents);
-        store_duration(&self.inner.relation_validation_nanos, Duration::ZERO);
+        store_duration(&self.inner.copy, duration);
+        store_duration(&self.inner.files_copy, tables.files);
+        store_duration(&self.inner.symbols_copy, tables.symbols);
+        store_duration(&self.inner.edges_copy, tables.edges);
+        store_duration(&self.inner.references_copy, tables.references);
+        store_duration(&self.inner.documents_copy, tables.documents);
+        store_duration(&self.inner.relation_validation, Duration::ZERO);
     }
 
     fn record_relation_validation(&self, duration: Duration) {
-        store_duration(&self.inner.relation_validation_nanos, duration);
+        store_duration(&self.inner.relation_validation, duration);
     }
 }
 
@@ -545,43 +545,43 @@ impl PrepareGenerationMetricsSnapshot {
     /// Wall-clock duration spent streaming files, symbols, edges, references, and documents.
     #[must_use]
     pub const fn copy_duration(self) -> Duration {
-        self.copy_duration
+        self.copy
     }
 
     /// Wall-clock duration of the files COPY statement.
     #[must_use]
     pub const fn files_copy_duration(self) -> Duration {
-        self.files_copy_duration
+        self.files_copy
     }
 
     /// Wall-clock duration of the symbols COPY statement.
     #[must_use]
     pub const fn symbols_copy_duration(self) -> Duration {
-        self.symbols_copy_duration
+        self.symbols_copy
     }
 
     /// Wall-clock duration of the edges COPY statement.
     #[must_use]
     pub const fn edges_copy_duration(self) -> Duration {
-        self.edges_copy_duration
+        self.edges_copy
     }
 
     /// Wall-clock duration of the references COPY statement.
     #[must_use]
     pub const fn references_copy_duration(self) -> Duration {
-        self.references_copy_duration
+        self.references_copy
     }
 
     /// Wall-clock duration of the search-documents COPY statement, including BM25 maintenance.
     #[must_use]
     pub const fn documents_copy_duration(self) -> Duration {
-        self.documents_copy_duration
+        self.documents_copy
     }
 
     /// Wall-clock duration of the set-based PostgreSQL relation-integrity check.
     #[must_use]
     pub const fn relation_validation_duration(self) -> Duration {
-        self.relation_validation_duration
+        self.relation_validation
     }
 }
 
@@ -703,6 +703,10 @@ impl GenerationContents {
 
 impl CartographDatabase {
     /// Create or refresh a stable project row and return its branded identity.
+    /// # Errors
+    ///
+    /// Returns an error if the root identity is empty/oversized, PostgreSQL
+    /// cannot upsert the project, or the returned project UUID is malformed.
     pub async fn register_project(&self, input: NewProject) -> Result<ProjectId, StorageError> {
         validate_bounded_text(
             &input.root_identity,
@@ -728,6 +732,10 @@ impl CartographDatabase {
     }
 
     /// Start an immutable generation in staging state.
+    /// # Errors
+    ///
+    /// Returns an error if source revision or worker count is invalid, the
+    /// project does not exist, or the reserved staging row cannot be created/decoded.
     pub async fn begin_generation(
         &self,
         input: NewGeneration,
@@ -784,6 +792,10 @@ impl CartographDatabase {
     /// project advisory lock serializes the check with lease acquisition, while
     /// the exact generation predicate keeps current, ready, and terminal state
     /// immutable. The boolean is true only when this call changed the row.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, the advisory lock fails,
+    /// or PostgreSQL cannot prove and terminalize the exact unleased staging row.
     pub async fn fail_unleased_staging_generation_bounded(
         &self,
         request: GenerationRecoveryRequest<'_>,
@@ -853,6 +865,10 @@ impl CartographDatabase {
 
     /// Deterministically reduce and atomically COPY all fact tables before
     /// moving the consumed generation token to `ready`.
+    /// # Errors
+    ///
+    /// Returns an error with the staging token if the lease fence is stale,
+    /// facts/metrics fail validation, COPY fails, or ready publication cannot commit.
     pub async fn prepare_generation(
         &self,
         contents: GenerationContents,
@@ -863,6 +879,10 @@ impl CartographDatabase {
     }
 
     /// Validate, COPY, and mark ready under a PostgreSQL-side statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error with the staging token if the deadline/fence is
+    /// invalid or bounded validation, COPY, derived-index setup, or commit fails.
     pub async fn prepare_generation_bounded(
         &self,
         contents: GenerationContents,
@@ -890,14 +910,11 @@ impl CartographDatabase {
         }
         let content_digest = facts.digest.clone();
         let digest_version = facts.digest_version;
-        let mut transaction = match self.pool.begin().await {
-            Ok(transaction) => transaction,
-            Err(_) => {
-                return Err(PrepareGenerationError {
-                    generation,
-                    error: database_error("prepare-begin"),
-                });
-            }
+        let Ok(mut transaction) = self.pool.begin().await else {
+            return Err(PrepareGenerationError {
+                generation,
+                error: database_error("prepare-begin"),
+            });
         };
         if let Some(statement_timeout) = mutation.statement_timeout
             && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
@@ -945,6 +962,10 @@ impl CartographDatabase {
 
     /// Atomically supersede the previous current generation and publish the
     /// consumed ready token under a project-scoped advisory lock.
+    /// # Errors
+    ///
+    /// Returns an error with the ready token if the lease is stale, state is no
+    /// longer ready, another writer publishes first, or the transaction fails.
     pub async fn publish_generation(
         &self,
         generation: ReadyGeneration,
@@ -956,6 +977,10 @@ impl CartographDatabase {
 
     /// Publish under a PostgreSQL-side statement deadline so a dropped client
     /// future cannot leave a lock-waiting backend statement behind.
+    /// # Errors
+    ///
+    /// Returns an error with the ready token if the deadline/fence is invalid,
+    /// publication loses its state race, or the atomic pointer update cannot commit.
     pub async fn publish_generation_bounded(
         &self,
         generation: ReadyGeneration,
@@ -969,14 +994,11 @@ impl CartographDatabase {
         generation: ReadyGeneration,
         mutation: LeaseMutationOptions<'_>,
     ) -> Result<CurrentGeneration, PublishGenerationError> {
-        let mut transaction = match self.pool.begin().await {
-            Ok(transaction) => transaction,
-            Err(_) => {
-                return Err(PublishGenerationError {
-                    generation,
-                    error: database_error("publish-begin"),
-                });
-            }
+        let Ok(mut transaction) = self.pool.begin().await else {
+            return Err(PublishGenerationError {
+                generation,
+                error: database_error("publish-begin"),
+            });
         };
         if let Some(statement_timeout) = mutation.statement_timeout
             && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
@@ -1023,6 +1045,10 @@ impl CartographDatabase {
     /// Rehydrate a staging or ready type-state token after a process restart or
     /// an ambiguous connection failure. Published and terminal states are not
     /// recoverable through this mutation surface.
+    /// # Errors
+    ///
+    /// Returns an error if the generation identity cannot be read/decoded or
+    /// durable state violates the recoverable staging-or-ready contract.
     pub async fn recover_generation(
         &self,
         request: GenerationRecoveryRequest<'_>,
@@ -1031,6 +1057,10 @@ impl CartographDatabase {
     }
 
     /// Rehydrate one generation under a PostgreSQL-side statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, the generation row cannot
+    /// be read, or its state/identity is not recoverable.
     pub async fn recover_generation_bounded(
         &self,
         request: GenerationRecoveryRequest<'_>,
@@ -1164,6 +1194,10 @@ impl CartographDatabase {
 
     /// Mark a recovered staging or ready generation terminally failed without
     /// affecting the project's visible current generation.
+    /// # Errors
+    ///
+    /// Returns an error with the recoverable token if its lease fence is stale,
+    /// state changed, or the terminal transition cannot commit.
     pub async fn fail_generation(
         &self,
         generation: RecoverableGeneration,
@@ -1176,14 +1210,11 @@ impl CartographDatabase {
                 error: StorageError::LeaseFenceLost,
             });
         }
-        let mut transaction = match self.pool.begin().await {
-            Ok(transaction) => transaction,
-            Err(_) => {
-                return Err(FailGenerationError {
-                    generation,
-                    error: database_error("fail-begin"),
-                });
-            }
+        let Ok(mut transaction) = self.pool.begin().await else {
+            return Err(FailGenerationError {
+                generation,
+                error: database_error("fail-begin"),
+            });
         };
         let result = fail_transaction(
             &mut transaction,
@@ -1222,6 +1253,10 @@ impl CartographDatabase {
     ///
     /// This operation is idempotent for an already-failed generation that still
     /// carries the same live token, which permits bounded timeout reconciliation.
+    /// # Errors
+    ///
+    /// Returns an error if the exact generation lease is stale/malformed or
+    /// the idempotent fail-and-release transaction cannot commit.
     pub async fn fail_generation_and_release(
         &self,
         fence: &LeaseFence,
@@ -1231,6 +1266,10 @@ impl CartographDatabase {
     }
 
     /// Fail and release under a PostgreSQL-side statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline or exact generation lease is invalid,
+    /// or the bounded fail-and-release transaction cannot commit.
     pub async fn fail_generation_and_release_bounded(
         &self,
         mutation: TerminalGenerationMutation<'_>,
@@ -1272,6 +1311,10 @@ impl CartographDatabase {
     }
 
     /// Reconcile generation and exact-token lease state in one PostgreSQL statement.
+    /// # Errors
+    ///
+    /// Returns an error if the fence lacks a generation identity or PostgreSQL
+    /// cannot atomically read/decode its generation and exact-token lease state.
     pub async fn reconcile_operation(
         &self,
         fence: &LeaseFence,
@@ -1280,6 +1323,10 @@ impl CartographDatabase {
     }
 
     /// Reconcile generation and lease state under a PostgreSQL statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline/fence shape is invalid or bounded
+    /// reconciliation cannot read, decode, and commit exact durable state.
     pub async fn reconcile_operation_bounded(
         &self,
         fence: &LeaseFence,
@@ -1327,6 +1374,10 @@ impl CartographDatabase {
     }
 
     /// Read the durable state for diagnostics and invariant tests.
+    /// # Errors
+    ///
+    /// Returns an error if PostgreSQL cannot read the addressed generation or
+    /// its stored state is not a recognized generation state.
     pub async fn generation_state(
         &self,
         project_id: &ProjectId,
@@ -1632,7 +1683,7 @@ async fn analyze_copied_relations(
 ) -> Result<(), StorageError> {
     let quoted_schema = crate::database::quoted_schema(schema);
     for (relation, columns) in COPIED_RELATION_PLANNER_COLUMNS {
-        let statement = format!(r#"ANALYZE {quoted_schema}."{relation}" ({columns})"#,);
+        let statement = format!(r#"ANALYZE {quoted_schema}."{relation}" ({columns})"#);
         audited_query(statement)
             .execute(&mut *connection)
             .await
@@ -1895,40 +1946,8 @@ async fn carry_forward_unchanged_generation_evidence(
     let project_id = generation.project_id().as_str();
     let generation_id = generation.generation_id().as_str();
 
-    let embeddings = format!(
-        r#"INSERT INTO {quoted_schema}."document_embeddings" (
-                project_id, generation_id, document_id, model_id,
-                source_digest, embedding, created_at, updated_at
-            )
-            SELECT previous_embeddings.project_id, CAST($2 AS uuid),
-                   next_documents.document_id, previous_embeddings.model_id,
-                   previous_embeddings.source_digest, previous_embeddings.embedding,
-                   previous_embeddings.created_at, clock_timestamp()
-            FROM {quoted_schema}."projects" AS projects
-            JOIN {quoted_schema}."document_embeddings" AS previous_embeddings
-              ON previous_embeddings.project_id = projects.project_id
-             AND previous_embeddings.generation_id = projects.current_generation_id
-            JOIN {quoted_schema}."search_documents" AS previous_documents
-              ON previous_documents.project_id = previous_embeddings.project_id
-             AND previous_documents.generation_id = previous_embeddings.generation_id
-             AND previous_documents.document_id = previous_embeddings.document_id
-            JOIN {quoted_schema}."search_documents" AS next_documents
-              ON next_documents.project_id = previous_documents.project_id
-             AND next_documents.generation_id = CAST($2 AS uuid)
-             AND next_documents.document_id = previous_documents.document_id
-             AND next_documents.path = previous_documents.path
-             AND next_documents.language = previous_documents.language
-             AND next_documents.document_kind = previous_documents.document_kind
-             AND next_documents.qualified_name = previous_documents.qualified_name
-             AND next_documents.code = previous_documents.code
-             AND next_documents.natural_text = previous_documents.natural_text
-            JOIN {quoted_schema}."embedding_models" AS models
-              ON models.model_id = previous_embeddings.model_id
-             AND models.state = 'active'
-            WHERE projects.project_id = CAST($1 AS uuid)
-              AND projects.current_generation_id IS NOT NULL
-            ON CONFLICT (project_id, generation_id, document_id, model_id) DO NOTHING"#,
-    );
+    let embeddings = include_str!("sql/generation_carry_embeddings.sql")
+        .replace("{quoted_schema}", quoted_schema);
     audited_query(embeddings)
         .bind(project_id)
         .bind(generation_id)
@@ -1936,33 +1955,8 @@ async fn carry_forward_unchanged_generation_evidence(
         .await
         .map_err(|_| database_error("prepare-carry-embeddings"))?;
 
-    let coverage = format!(
-        r#"INSERT INTO {quoted_schema}."symbol_coverage" (
-                project_id, generation_id, source_id, symbol_id,
-                lines_found, lines_hit, functions_found, functions_hit, updated_at
-            )
-            SELECT previous_coverage.project_id, CAST($2 AS uuid),
-                   previous_coverage.source_id, next_symbols.symbol_id,
-                   previous_coverage.lines_found, previous_coverage.lines_hit,
-                   previous_coverage.functions_found, previous_coverage.functions_hit,
-                   clock_timestamp()
-            FROM {quoted_schema}."projects" AS projects
-            JOIN {quoted_schema}."symbol_coverage" AS previous_coverage
-              ON previous_coverage.project_id = projects.project_id
-             AND previous_coverage.generation_id = projects.current_generation_id
-            JOIN {quoted_schema}."symbols" AS previous_symbols
-              ON previous_symbols.project_id = previous_coverage.project_id
-             AND previous_symbols.generation_id = previous_coverage.generation_id
-             AND previous_symbols.symbol_id = previous_coverage.symbol_id
-            JOIN {quoted_schema}."symbols" AS next_symbols
-              ON next_symbols.project_id = previous_symbols.project_id
-             AND next_symbols.generation_id = CAST($2 AS uuid)
-             AND next_symbols.symbol_id = previous_symbols.symbol_id
-             AND next_symbols.structural_digest = previous_symbols.structural_digest
-            WHERE projects.project_id = CAST($1 AS uuid)
-              AND projects.current_generation_id IS NOT NULL
-            ON CONFLICT (project_id, generation_id, source_id, symbol_id) DO NOTHING"#,
-    );
+    let coverage =
+        include_str!("sql/generation_carry_coverage.sql").replace("{quoted_schema}", quoted_schema);
     audited_query(coverage)
         .bind(project_id)
         .bind(generation_id)
@@ -1974,28 +1968,8 @@ async fn carry_forward_unchanged_generation_evidence(
     // identical. Partial carry-forward would preserve stale ranks after a
     // neighbor changed; omitting the build metadata intentionally makes reads
     // fall back to authoritative live pgvector search instead.
-    let similarity_edges = format!(
-        r#"INSERT INTO {quoted_schema}."symbol_similarity_edges" (
-                project_id, generation_id, model_id, source_symbol_id,
-                target_symbol_id, score, neighbor_rank, built_at
-            )
-            SELECT edges.project_id, CAST($2 AS uuid), edges.model_id,
-                   edges.source_symbol_id, edges.target_symbol_id,
-                   edges.score, edges.neighbor_rank, edges.built_at
-            FROM {quoted_schema}."projects" AS projects
-            JOIN {quoted_schema}."index_generations" AS previous
-              ON previous.project_id = projects.project_id
-             AND previous.generation_id = projects.current_generation_id
-            JOIN {quoted_schema}."symbol_similarity_edges" AS edges
-              ON edges.project_id = previous.project_id
-             AND edges.generation_id = previous.generation_id
-            WHERE projects.project_id = CAST($1 AS uuid)
-              AND previous.content_digest = $3
-              AND previous.content_digest_version = $4
-            ON CONFLICT (
-                project_id, generation_id, model_id, source_symbol_id, target_symbol_id
-            ) DO NOTHING"#,
-    );
+    let similarity_edges = include_str!("sql/generation_carry_similarity_edges.sql")
+        .replace("{quoted_schema}", quoted_schema);
     audited_query(similarity_edges)
         .bind(project_id)
         .bind(generation_id)
@@ -2004,26 +1978,8 @@ async fn carry_forward_unchanged_generation_evidence(
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("prepare-carry-similarity-edges"))?;
-    let similarity_builds = format!(
-        r#"INSERT INTO {quoted_schema}."symbol_similarity_builds" (
-                project_id, generation_id, model_id, neighbors_per_symbol,
-                minimum_score, source_symbols, edges_written, built_at
-            )
-            SELECT builds.project_id, CAST($2 AS uuid), builds.model_id,
-                   builds.neighbors_per_symbol, builds.minimum_score,
-                   builds.source_symbols, builds.edges_written, builds.built_at
-            FROM {quoted_schema}."projects" AS projects
-            JOIN {quoted_schema}."index_generations" AS previous
-              ON previous.project_id = projects.project_id
-             AND previous.generation_id = projects.current_generation_id
-            JOIN {quoted_schema}."symbol_similarity_builds" AS builds
-              ON builds.project_id = previous.project_id
-             AND builds.generation_id = previous.generation_id
-            WHERE projects.project_id = CAST($1 AS uuid)
-              AND previous.content_digest = $3
-              AND previous.content_digest_version = $4
-            ON CONFLICT (project_id, generation_id, model_id) DO NOTHING"#,
-    );
+    let similarity_builds = include_str!("sql/generation_carry_similarity_builds.sql")
+        .replace("{quoted_schema}", quoted_schema);
     audited_query(similarity_builds)
         .bind(project_id)
         .bind(generation_id)
@@ -2339,12 +2295,12 @@ async fn validate_generation_state(
         .await
         .map_err(|_| database_error(operation))?
         .ok_or(StorageError::GenerationNotFound)?;
-    validate_generation_state_row(&row, requirement)
+    validate_generation_state_row(&row, &requirement)
 }
 
 fn validate_generation_state_row(
     row: &PgRow,
-    requirement: GenerationStateRequirement<'_>,
+    requirement: &GenerationStateRequirement<'_>,
 ) -> Result<(), StorageError> {
     let actual = row
         .try_get::<String, _>(0)

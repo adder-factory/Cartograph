@@ -81,15 +81,15 @@ pub fn symbol_signature_is_search_safe(kind: SymbolKind, signature: &str) -> boo
         return false;
     }
     match kind {
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Component => {
-            callable_signature_is_literal_free(signature)
-        }
+        SymbolKind::Function
+        | SymbolKind::Method
+        | SymbolKind::Component
+        | SymbolKind::Field
+        | SymbolKind::Property
+        | SymbolKind::Parameter => callable_signature_is_literal_free(signature),
         SymbolKind::Variable | SymbolKind::Constant => signature
             .strip_prefix('=')
             .is_some_and(|value| declaration_value_is_search_safe(value.trim())),
-        SymbolKind::Field | SymbolKind::Property | SymbolKind::Parameter => {
-            callable_signature_is_literal_free(signature)
-        }
         SymbolKind::TypeAlias => signature
             .split_once('=')
             .is_some_and(|(declaration, value)| {
@@ -309,6 +309,7 @@ macro_rules! source_languages {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         pub enum SourceLanguage {
             $(
+                #[doc = concat!("The `", $stable, "` source language.")]
                 #[serde(rename = $stable)]
                 $variant,
             )+
@@ -695,19 +696,19 @@ fn path_specific_language(path: &str) -> Option<SourceLanguage> {
                 .then_some("localization/")
         });
     let localization_xml = localization_marker.is_some_and(|marker| {
-        normalized.ends_with(".xml") && component_after(&normalized, marker).is_some()
+        has_extension(&normalized, "xml") && component_after(&normalized, marker).is_some()
     });
     if localization_xml || is_bg3_resource_xml_path(&normalized) {
         return Some(SourceLanguage::Bg3Resource);
     }
     if (normalized.contains("/stats/generated/") || normalized.starts_with("stats/generated/"))
-        && normalized.ends_with(".txt")
+        && has_extension(&normalized, "txt")
     {
         return Some(SourceLanguage::Bg3Stats);
     }
     if (normalized.contains("/story/rawfiles/goals/")
         || normalized.starts_with("story/rawfiles/goals/"))
-        && normalized.ends_with(".txt")
+        && has_extension(&normalized, "txt")
     {
         return Some(SourceLanguage::Osiris);
     }
@@ -721,7 +722,7 @@ fn component_after<'a>(path: &'a str, marker: &str) -> Option<&'a str> {
 }
 
 fn is_bg3_resource_xml_path(path: &str) -> bool {
-    if !path.ends_with(".xml") {
+    if !has_extension(path, "xml") {
         return false;
     }
     ["/public/", "public/", "/mods/", "mods/"]
@@ -734,6 +735,11 @@ fn is_bg3_resource_xml_path(path: &str) -> bool {
             };
             matches_position && component_after(path, marker).is_some()
         })
+}
+
+fn has_extension(path: &str, expected: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case(expected))
 }
 
 fn is_play_routes_file(path: &str) -> bool {
@@ -979,6 +985,11 @@ pub struct NormalizedPath(String);
 
 impl NormalizedPath {
     /// Normalize a relative path while rejecting absolute and parent-escaping forms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidNormalizedPath`] when `raw` is empty, absolute,
+    /// parent-escaping, contains a NUL byte, or exceeds the path bound.
     pub fn parse(raw: &str) -> Result<Self, InvalidNormalizedPath> {
         if raw.is_empty()
             || raw.len() > MAX_NORMALIZED_PATH_BYTES
@@ -1076,6 +1087,10 @@ struct SourcePositionValue {
 
 impl SourcePosition {
     /// Validate a byte location with a one-based line and zero-based byte column.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidSourceSpan`] when `line` is zero.
     pub const fn new(byte: u64, line: u32, column: u32) -> Result<Self, InvalidSourceSpan> {
         if line == 0 {
             return Err(InvalidSourceSpan);
@@ -1108,6 +1123,11 @@ struct SourceSpanValue {
 
 impl SourceSpan {
     /// Validate ordered start/end positions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidSourceSpan`] when the range is empty, reversed, or its
+    /// line and column ordering contradicts its byte ordering.
     pub const fn new(
         start: SourcePosition,
         end: SourcePosition,
@@ -1314,6 +1334,50 @@ impl SymbolKind {
             .into_iter()
             .find(|kind| kind.as_str() == value)
     }
+}
+
+/// Implementation-presence and test-ownership flags shared by extraction and storage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolImplementationFlags {
+    /// Whether this declaration has no implementation body, such as an overload signature.
+    pub declaration_only: bool,
+    /// Whether this declaration is owned by an inline test scope or test attribute.
+    pub test_symbol: bool,
+}
+
+/// Module export flags shared by extraction and storage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolExportFlags {
+    /// Whether the containing module explicitly exports the declaration.
+    pub exported: bool,
+    /// Whether the declaration is the containing module's default export.
+    pub default_export: bool,
+}
+
+impl SymbolExportFlags {
+    /// Construct explicit named/default export state.
+    #[must_use]
+    pub const fn new(exported: bool, default_export: bool) -> Self {
+        Self {
+            exported,
+            default_export,
+        }
+    }
+
+    /// Construct named-export state with no default export.
+    #[must_use]
+    pub const fn named(exported: bool) -> Self {
+        Self::new(exported, false)
+    }
+}
+
+/// Execution modifiers shared by extraction and storage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolExecutionFlags {
+    /// Whether the declaration carries its language's async modifier.
+    pub async_symbol: bool,
+    /// Whether the declaration is a static class or type member.
+    pub static_member: bool,
 }
 
 /// Language-level declaration visibility.
@@ -1626,6 +1690,10 @@ mod tests {
                 "C text was over-classified: {c}"
             );
         }
+    }
+
+    #[test]
+    fn templating_and_salesforce_overrides_are_unambiguous() {
         assert_eq!(
             SourceLanguage::detect("classes/Widget.cls", None),
             Some(SourceLanguage::Apex)
@@ -1709,7 +1777,10 @@ mod tests {
             ),
             Some(SourceLanguage::Liquid)
         );
+    }
 
+    #[test]
+    fn framework_paths_and_content_detection_are_bounded() {
         assert_eq!(
             SourceLanguage::detect("game/Stats/Generated/Data/items.txt", None),
             Some(SourceLanguage::Bg3Stats)

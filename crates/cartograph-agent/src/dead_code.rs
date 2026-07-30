@@ -30,6 +30,12 @@ pub struct DeadCodeJudgeOptions {
 }
 
 impl DeadCodeJudgeOptions {
+    /// Creates validated dead-code evaluation limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeadCodeJudgeError::InvalidOptions`] when
+    /// `maximum_candidates` is zero or exceeds the candidate ceiling.
     pub const fn new(maximum_candidates: u16) -> Result<Self, DeadCodeJudgeError> {
         if maximum_candidates == 0 || maximum_candidates > MAXIMUM_CANDIDATES {
             return Err(DeadCodeJudgeError::InvalidOptions);
@@ -40,6 +46,12 @@ impl DeadCodeJudgeOptions {
         })
     }
 
+    /// Sets the batch size and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeadCodeJudgeError::InvalidOptions`] when `batch_size` is zero
+    /// or exceeds the per-request candidate ceiling.
     pub const fn with_batch_size(mut self, batch_size: u8) -> Result<Self, DeadCodeJudgeError> {
         if batch_size == 0 || batch_size > MAXIMUM_BATCH_SIZE {
             return Err(DeadCodeJudgeError::InvalidOptions);
@@ -53,8 +65,11 @@ impl DeadCodeJudgeOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeadCodeVerdict {
+    /// Represents the dead dead code verdict.
     Dead,
+    /// Represents the uncertain dead code verdict.
     Uncertain,
+    /// Represents the live dead code verdict.
     Live,
 }
 
@@ -71,16 +86,19 @@ pub struct DeadCodeJudgement {
 
 impl DeadCodeJudgement {
     #[must_use]
+    /// Returns the verdict.
     pub const fn verdict(&self) -> DeadCodeVerdict {
         self.verdict
     }
 
     #[must_use]
+    /// Returns the confidence.
     pub const fn confidence(&self) -> f64 {
         self.confidence
     }
 
     #[must_use]
+    /// Returns the candidate.
     pub fn candidate(&self) -> &DeadCodeCandidate {
         &self.candidate
     }
@@ -103,33 +121,48 @@ pub struct DeadCodeJudgeReport {
 
 impl DeadCodeJudgeReport {
     #[must_use]
+    /// Returns the results.
     pub fn results(&self) -> &[DeadCodeJudgement] {
         &self.results
     }
 
     #[must_use]
+    /// Consumes this value and returns its results.
     pub fn into_results(self) -> Vec<DeadCodeJudgement> {
         self.results
     }
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+/// Errors produced while processing dead code judge.
 pub enum DeadCodeJudgeError {
     #[error("dead-code judge options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("dead-code judge was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
 }
 
 /// Client, candidates, bounds, and cancellation scope for one dead-code judgement.
 pub struct DeadCodeJudgeRequest<'a> {
+    /// Client for this record.
     pub client: &'a OpenAiChatClient,
+    /// Bounded candidates included in this result.
     pub candidates: Vec<DeadCodeCandidate>,
+    /// Options for this record.
     pub options: DeadCodeJudgeOptions,
+    /// Cancellation for this record.
     pub cancellation: ProjectCancellation,
 }
 
 /// Judge already-filtered graph candidates in deterministic, bounded batches.
+/// # Errors
+///
+/// Returns [`DeadCodeJudgeError::InvalidOptions`] for an invalid candidate or
+/// batch bound and [`DeadCodeJudgeError::Cancelled`] when cancellation is
+/// observed between batches. Model and endpoint failures become explicit
+/// uncertain judgements rather than operation errors.
 pub async fn judge_dead_code_candidates(
     input: DeadCodeJudgeRequest<'_>,
 ) -> Result<DeadCodeJudgeReport, DeadCodeJudgeError> {

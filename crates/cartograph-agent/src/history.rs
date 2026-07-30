@@ -10,6 +10,7 @@ use cartograph_db::{
 };
 use cartograph_domain::{NormalizedPath, ProjectId};
 use cartograph_llm::load_project_source_settings;
+use num_traits::ToPrimitive;
 use thiserror::Error;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
 const DEFAULT_MAX_COMMITS: u32 = 20_000;
 const MAX_HISTORY_COMMITS: u32 = 50_000;
 const MAX_GIT_HISTORY_BYTES: usize = 128 * 1_048_576;
-const GIT_HISTORY_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const GIT_HISTORY_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_FILES_PER_COCHANGE_COMMIT: usize = 512;
 const MAX_COCHANGE_PAIRS: usize = 2_000_000;
 const COMMIT_MARKER: &[u8] = b"CARTOGRAPH_COMMIT";
@@ -44,6 +45,12 @@ impl Default for HistoryIndexOptions {
 }
 
 impl HistoryIndexOptions {
+    /// Sets the max commits and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryIndexError::InvalidOptions`] when `value` is zero or
+    /// exceeds the bounded commit-history ceiling.
     pub const fn with_max_commits(mut self, value: u32) -> Result<Self, HistoryIndexError> {
         if value == 0 || value > MAX_HISTORY_COMMITS {
             return Err(HistoryIndexError::InvalidOptions);
@@ -57,25 +64,38 @@ impl HistoryIndexOptions {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum HistoryIndexError {
     #[error("history indexing options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("history indexing requires a Git repository with HEAD")]
+    /// The project root is not inside the required Git repository.
     NotGitRepository,
     #[error("Git history is unavailable or exceeded its runtime bound")]
+    /// The bounded Git subprocess could not be executed.
     GitUnavailable,
     #[error("Git history output is malformed or exceeded its byte bound")]
+    /// Git returned output that violates the bounded parser contract.
     GitOutputInvalid,
     #[error("history indexing exceeded its deterministic relation bound")]
+    /// Derived relationships exceeded their declared ceiling.
     RelationLimit,
     #[error("history indexing was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
     #[error("history persistence failed")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
     #[error("Git churn and co-change analysis are disabled by project configuration")]
+    /// Project configuration explicitly disables this derivation.
     DisabledByProjectConfig,
 }
 
 impl ProjectRuntime {
     /// Mine bounded HEAD history and atomically persist churn/co-change evidence.
+    /// # Errors
+    ///
+    /// Returns an error when project configuration is invalid or disables both
+    /// history channels, the checkout lacks readable bounded Git history,
+    /// derived relation limits are exceeded, cancellation wins, or persistence fails.
     pub async fn refresh_git_history(
         &self,
         project_id: ProjectId,
@@ -175,7 +195,10 @@ impl ProjectRuntime {
                     .and_then(|value| value.checked_sub(shared))
                     .filter(|value| *value > 0)
                     .ok_or(HistoryIndexError::RelationLimit)?;
-                let confidence = (shared as f64 / union as f64) as f32;
+                let confidence = (shared.to_f64().ok_or(HistoryIndexError::RelationLimit)?
+                    / union.to_f64().ok_or(HistoryIndexError::RelationLimit)?)
+                .to_f32()
+                .ok_or(HistoryIndexError::RelationLimit)?;
                 FileCochangeFact::new(
                     path_a,
                     path_b,
@@ -259,6 +282,7 @@ struct HistoryScan {
     oversized_commits_skipped: u64,
 }
 
+#[derive(Clone, Copy)]
 struct CommitMetadata {
     unix_seconds: u64,
     author_key: [u8; 16],
@@ -367,6 +391,7 @@ fn parse_git_log(
     Ok(history.finish(truncated))
 }
 
+#[derive(Clone, Copy)]
 struct ParsedNumstat<'a> {
     insertions: u64,
     deletions: u64,

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use cartograph_domain::{
-    ContentDigest, FileId, GenerationId, NormalizedPath, ProjectId, SourceLanguage, SymbolId,
-    Visibility,
+    ContentDigest, FileId, GenerationId, NormalizedPath, ProjectId, SourceLanguage,
+    SymbolExecutionFlags, SymbolExportFlags, SymbolId, Visibility,
 };
 use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -161,10 +161,10 @@ pub struct CurrentSymbolRecord {
     start_line: u32,
     end_line: u32,
     visibility: Option<Visibility>,
-    exported: bool,
-    default_export: bool,
-    async_symbol: bool,
-    static_member: bool,
+    #[serde(flatten)]
+    export: SymbolExportFlags,
+    #[serde(flatten)]
+    execution: SymbolExecutionFlags,
     declaration_only: bool,
 }
 
@@ -238,25 +238,25 @@ impl CurrentSymbolRecord {
     /// Whether the declaration is exported from its module or package.
     #[must_use]
     pub const fn exported(&self) -> bool {
-        self.exported
+        self.export.exported
     }
 
     /// Whether the declaration is the module's default export.
     #[must_use]
     pub const fn default_export(&self) -> bool {
-        self.default_export
+        self.export.default_export
     }
 
     /// Whether the declaration is asynchronous.
     #[must_use]
     pub const fn async_symbol(&self) -> bool {
-        self.async_symbol
+        self.execution.async_symbol
     }
 
     /// Whether the declaration is a static member.
     #[must_use]
     pub const fn static_member(&self) -> bool {
-        self.static_member
+        self.execution.static_member
     }
 
     /// Whether the declaration lacks an implementation body.
@@ -792,6 +792,10 @@ impl CurrentGraphEdge {
 
 impl CartographDatabase {
     /// Resolve the current generation pointer without observing staging rows.
+    /// # Errors
+    ///
+    /// Returns an error if the bounded current-pointer transaction fails or
+    /// its generation identity/sequence cannot be decoded.
     pub async fn current_generation_record(
         &self,
         project_id: &ProjectId,
@@ -801,6 +805,10 @@ impl CartographDatabase {
     }
 
     /// Resolve the current generation pointer under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, the read-only transaction
+    /// fails, or the current generation row is malformed.
     pub async fn current_generation_record_bounded(
         &self,
         project_id: &ProjectId,
@@ -827,6 +835,10 @@ impl CartographDatabase {
     }
 
     /// Resolve one exact canonical path in the current generation.
+    /// # Errors
+    ///
+    /// Returns an error if the expected generation is not current or the exact
+    /// path record cannot be queried or decoded.
     pub async fn exact_current_file_by_path(
         &self,
         request: CurrentFileLookup<'_>,
@@ -836,6 +848,10 @@ impl CartographDatabase {
     }
 
     /// Resolve one exact current path under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, the generation fence
+    /// fails, or the exact file row is malformed.
     pub async fn exact_current_file_by_path_bounded(
         &self,
         request: CurrentFileLookup<'_>,
@@ -871,6 +887,10 @@ impl CartographDatabase {
     }
 
     /// List a bounded, path-ordered file inventory from the current generation.
+    /// # Errors
+    ///
+    /// Returns an error if inventory bounds are invalid, the expected
+    /// generation is not current, or a filtered file row cannot be decoded.
     pub async fn current_files(
         &self,
         request: CurrentFilesLookup<'_>,
@@ -880,6 +900,10 @@ impl CartographDatabase {
     }
 
     /// List current files under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the explicit deadline or file limit is invalid, the
+    /// generation fence fails, or PostgreSQL returns a malformed file row.
     pub async fn current_files_bounded(
         &self,
         request: CurrentFilesLookup<'_>,
@@ -928,6 +952,10 @@ impl CartographDatabase {
     }
 
     /// Resolve an exact qualified declaration name in the current generation.
+    /// # Errors
+    ///
+    /// Returns an error if exact text/limit validation fails, the generation
+    /// is no longer current, or a matching symbol record is malformed.
     pub async fn exact_current_symbols_by_name(
         &self,
         request: ExactTextLookup<'_>,
@@ -937,6 +965,10 @@ impl CartographDatabase {
     }
 
     /// Resolve an exact declaration name under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline, exact text, or limit is invalid, the
+    /// generation fence fails, or a symbol row cannot be decoded.
     pub async fn exact_current_symbols_by_name_bounded(
         &self,
         request: ExactTextLookup<'_>,
@@ -958,6 +990,10 @@ impl CartographDatabase {
     }
 
     /// Resolve symbols owned by one exact current-generation file.
+    /// # Errors
+    ///
+    /// Returns an error if the symbol limit is invalid, the generation fence
+    /// fails, or the file's symbol records cannot be queried or decoded.
     pub async fn current_symbols_by_file(
         &self,
         request: CurrentFileSymbolsLookup<'_>,
@@ -967,6 +1003,10 @@ impl CartographDatabase {
     }
 
     /// Resolve one file's symbols under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline or symbol limit is invalid, the
+    /// generation is not current, or a file-owned symbol row is malformed.
     pub async fn current_symbols_by_file_bounded(
         &self,
         request: CurrentFileSymbolsLookup<'_>,
@@ -995,6 +1035,10 @@ impl CartographDatabase {
     }
 
     /// Resolve symbols whose indexed ranges overlap one exact source range.
+    /// # Errors
+    ///
+    /// Returns an error if the source range/result bound is invalid, the
+    /// generation fence fails, or an overlapping symbol cannot be decoded.
     pub async fn current_symbols_at_range(
         &self,
         request: CurrentSourceRangeLookup<'_>,
@@ -1004,6 +1048,10 @@ impl CartographDatabase {
     }
 
     /// Resolve overlapping symbols under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline, line range, or result limit is
+    /// invalid, the generation is stale, or an overlapping row is malformed.
     pub async fn current_symbols_at_range_bounded(
         &self,
         request: CurrentSourceRangeLookup<'_>,
@@ -1058,6 +1106,10 @@ impl CartographDatabase {
     }
 
     /// Hydrate a bounded set of symbol identities from only the current generation.
+    /// # Errors
+    ///
+    /// Returns an error if the symbol set exceeds its bound, the expected
+    /// generation is not current, or a hydrated symbol row is malformed.
     pub async fn current_symbols_by_ids(
         &self,
         request: CurrentSymbolSetLookup<'_>,
@@ -1067,6 +1119,10 @@ impl CartographDatabase {
     }
 
     /// Hydrate a bounded symbol set under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline or symbol-set bound is invalid, the
+    /// generation fence fails, or an identified symbol cannot be decoded.
     pub async fn current_symbols_by_ids_bounded(
         &self,
         request: CurrentSymbolSetLookup<'_>,
@@ -1104,6 +1160,10 @@ impl CartographDatabase {
     }
 
     /// Discover one bounded top-of-stack category from typed current-generation facts.
+    /// # Errors
+    ///
+    /// Returns an error if the category limit is invalid, the generation fence
+    /// fails, or typed entry-point evidence cannot be queried or decoded.
     pub async fn current_entry_points(
         &self,
         request: CurrentEntryPointsLookup<'_>,
@@ -1113,6 +1173,10 @@ impl CartographDatabase {
     }
 
     /// Discover one entry-point category under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline or category limit is invalid, the
+    /// generation is stale, or an entry-point record violates its contract.
     pub async fn current_entry_points_bounded(
         &self,
         request: CurrentEntryPointsLookup<'_>,
@@ -1159,6 +1223,10 @@ impl CartographDatabase {
     }
 
     /// Resolve exact reference text, including unresolved evidence, in the current generation.
+    /// # Errors
+    ///
+    /// Returns an error if exact text/limit validation fails, the generation
+    /// fence fails, or matching reference evidence cannot be decoded.
     pub async fn exact_current_references_by_name(
         &self,
         request: ExactTextLookup<'_>,
@@ -1168,6 +1236,10 @@ impl CartographDatabase {
     }
 
     /// Resolve exact reference evidence under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline, exact text, or result limit is
+    /// invalid, the generation is stale, or a reference row is malformed.
     pub async fn exact_current_references_by_name_bounded(
         &self,
         request: ExactTextLookup<'_>,
@@ -1190,6 +1262,10 @@ impl CartographDatabase {
 
     /// Read a bounded incoming or outgoing structural frontier from only the
     /// current generation. Callers own breadth/depth policy.
+    /// # Errors
+    ///
+    /// Returns an error if the frontier/result bounds are invalid, the
+    /// generation fence fails, or a structural edge cannot be decoded.
     pub async fn current_graph_edges(
         &self,
         request: CurrentGraphLookup<'_>,
@@ -1199,6 +1275,10 @@ impl CartographDatabase {
     }
 
     /// Read a bounded graph frontier under an explicit PostgreSQL deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline, frontier, or edge limit is invalid,
+    /// the generation is stale, or a graph row is malformed.
     pub async fn current_graph_edges_bounded(
         &self,
         request: CurrentGraphLookup<'_>,
@@ -1456,17 +1536,17 @@ fn symbol_select(schema: &str, predicate: &str) -> String {
 }
 
 fn entry_point_sql(schema: &str, bucket: EntryPointBucket) -> String {
-    let production_path = r#"NOT (
+    let production_path = r"NOT (
         files.normalized_path ~* '(^|/)(__tests__|__mocks__|tests?|specs?|integration|testing|testlib|fixtures?|test-beds?)(/|$)'
         OR files.normalized_path ~* '(\.test\.|\.spec\.|_test\.|_spec\.)[a-z0-9]+$'
         OR files.normalized_path ~ '([A-Za-z](Test|Tests|TestCase|Spec))\.[a-z0-9]+$'
         OR files.normalized_path ~* '(^|/)(test[-_][^/]*|test|mocks?|fixtures?)\.[a-z0-9]+$'
-    )"#;
-    let cli_path = r#"files.normalized_path ~* '(^|/)(bin|cli|commands?)/'"#;
-    let exportable = r#"symbols.symbol_kind IN (
+    )";
+    let cli_path = r"files.normalized_path ~* '(^|/)(bin|cli|commands?)/'";
+    let exportable = r"symbols.symbol_kind IN (
         'function', 'method', 'class', 'struct', 'interface', 'trait', 'enum',
         'type_alias', 'constant', 'variable', 'module', 'namespace', 'component', 'resource'
-    )"#;
+    )";
     let predicate = match bucket {
         EntryPointBucket::Routes => format!(
             "symbols.symbol_kind = 'route' AND lower(symbols.simple_name) NOT LIKE 'cmd %' AND {production_path}"
@@ -1593,10 +1673,14 @@ pub(crate) fn decode_symbol(
         start_line: read_u32(row, SYMBOL_START_LINE_COLUMN, "start_line")?,
         end_line: read_u32(row, SYMBOL_END_LINE_COLUMN, "end_line")?,
         visibility: parse_optional_visibility(row, SYMBOL_VISIBILITY_COLUMN)?,
-        exported: read_bool(row, SYMBOL_EXPORTED_COLUMN, "exported")?,
-        default_export: read_bool(row, SYMBOL_DEFAULT_EXPORT_COLUMN, "default_export")?,
-        async_symbol: read_bool(row, SYMBOL_ASYNC_COLUMN, "async_symbol")?,
-        static_member: read_bool(row, SYMBOL_STATIC_COLUMN, "static_member")?,
+        export: SymbolExportFlags::new(
+            read_bool(row, SYMBOL_EXPORTED_COLUMN, "exported")?,
+            read_bool(row, SYMBOL_DEFAULT_EXPORT_COLUMN, "default_export")?,
+        ),
+        execution: SymbolExecutionFlags {
+            async_symbol: read_bool(row, SYMBOL_ASYNC_COLUMN, "async_symbol")?,
+            static_member: read_bool(row, SYMBOL_STATIC_COLUMN, "static_member")?,
+        },
         declaration_only: read_bool(row, SYMBOL_DECLARATION_ONLY_COLUMN, "declaration_only")?,
     })
 }

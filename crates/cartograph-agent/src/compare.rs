@@ -55,6 +55,7 @@ impl CompareFindingThreshold {
     }
 }
 
+#[derive(Clone, Copy)]
 struct SourceFindingInput<'symbol> {
     symbol: &'symbol ExtractedSymbol,
     finding: &'static str,
@@ -69,14 +70,28 @@ pub struct SourceCompareOptions {
     head_ref: Option<String>,
     path_filter: Option<String>,
     max_changed_files: u16,
-    include_findings: bool,
-    findings_delta: bool,
-    include_edges: bool,
+    findings: SourceFindingPolicy,
+    delta: SourceDeltaPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceFindingPolicy {
+    include: bool,
+    delta: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceDeltaPolicy {
+    edges: bool,
     suppress_line_range_only: bool,
 }
 
 impl SourceCompareOptions {
     /// Compare the worktree against one safe, resolvable base ref.
+    /// # Errors
+    ///
+    /// Returns [`SourceCompareError::InvalidOptions`] when `base_ref` is not a
+    /// bounded, syntactically safe Git reference.
     pub fn new(base_ref: impl Into<String>) -> Result<Self, SourceCompareError> {
         let base_ref = base_ref.into();
         if !valid_git_ref(&base_ref) {
@@ -87,14 +102,22 @@ impl SourceCompareOptions {
             head_ref: None,
             path_filter: None,
             max_changed_files: DEFAULT_MAX_CHANGED_FILES,
-            include_findings: false,
-            findings_delta: false,
-            include_edges: false,
-            suppress_line_range_only: true,
+            findings: SourceFindingPolicy {
+                include: false,
+                delta: false,
+            },
+            delta: SourceDeltaPolicy {
+                edges: false,
+                suppress_line_range_only: true,
+            },
         })
     }
 
     /// Switch to direct base-to-head ref comparison with two-dot semantics.
+    /// # Errors
+    ///
+    /// Returns [`SourceCompareError::InvalidOptions`] when `head_ref` is not a
+    /// bounded, syntactically safe Git reference.
     pub fn with_head(mut self, head_ref: impl Into<String>) -> Result<Self, SourceCompareError> {
         let head_ref = head_ref.into();
         if !valid_git_ref(&head_ref) {
@@ -105,6 +128,10 @@ impl SourceCompareOptions {
     }
 
     /// Restrict changed paths to one canonical project-relative prefix.
+    /// # Errors
+    ///
+    /// Returns [`SourceCompareError::InvalidOptions`] when the filter is empty,
+    /// oversized, absolute, contains NUL, or contains a parent-directory segment.
     pub fn with_path_filter(
         mut self,
         path_filter: Option<&str>,
@@ -126,6 +153,10 @@ impl SourceCompareOptions {
     }
 
     /// Bound structurally analyzed paths while preserving the complete changed count.
+    /// # Errors
+    ///
+    /// Returns [`SourceCompareError::InvalidOptions`] when `limit` is zero or
+    /// exceeds the maximum structurally analyzed file count.
     pub fn with_max_changed_files(mut self, limit: u16) -> Result<Self, SourceCompareError> {
         if limit == 0 || limit > MAX_CHANGED_FILES {
             return Err(SourceCompareError::InvalidOptions);
@@ -137,28 +168,28 @@ impl SourceCompareOptions {
     /// Attach in-memory per-file findings to added and modified symbols.
     #[must_use]
     pub fn with_findings(mut self, include: bool) -> Self {
-        self.include_findings = include;
+        self.findings.include = include;
         self
     }
 
     /// Compute introduced, cleared, and carried per-file findings.
     #[must_use]
     pub fn with_findings_delta(mut self, include: bool) -> Self {
-        self.findings_delta = include;
+        self.findings.delta = include;
         self
     }
 
     /// Compute source-local structural reference and containment edge deltas.
     #[must_use]
     pub fn with_edges(mut self, include: bool) -> Self {
-        self.include_edges = include;
+        self.delta.edges = include;
         self
     }
 
     /// Collapse modifications caused only by line-number movement.
     #[must_use]
     pub fn with_line_range_suppression(mut self, suppress: bool) -> Self {
-        self.suppress_line_range_only = suppress;
+        self.delta.suppress_line_range_only = suppress;
         self
     }
 }
@@ -272,16 +303,22 @@ impl SourceCompareReport {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum SourceCompareError {
     #[error("source comparison options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("source comparison requires a Git worktree")]
+    /// The project root is not inside the required Git repository.
     NotGitRepository,
     #[error("one or more source comparison refs were not found")]
+    /// Git could not resolve the requested comparison reference.
     RefNotFound,
     #[error("Git source comparison is unavailable")]
+    /// The bounded Git subprocess could not be executed.
     GitUnavailable,
     #[error("source comparison output is invalid or exceeds its bound")]
+    /// A subprocess returned output that violates its bounded schema.
     InvalidOutput,
     #[error("source comparison was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
 }
 
@@ -289,6 +326,11 @@ impl ProjectRuntime {
     /// Compare source structure directly from immutable Git blobs or the live
     /// worktree. The persisted index is deliberately not used for the delta,
     /// so stale generations cannot poison end-of-task review.
+    /// # Errors
+    ///
+    /// Returns an error when the project is not a readable Git worktree, a ref
+    /// cannot be resolved, bounded Git output is unavailable or invalid, or the
+    /// caller cancels the comparison.
     pub async fn compare_sources(
         &self,
         options: SourceCompareOptions,
@@ -299,6 +341,11 @@ impl ProjectRuntime {
 }
 
 /// Compare an explicit Git worktree without requiring database connectivity.
+/// # Errors
+///
+/// Returns an error when `root` is not a readable Git worktree, a ref cannot be
+/// resolved, bounded Git output is unavailable or invalid, or comparison work
+/// is cancelled.
 pub async fn discover_source_comparison(
     root: impl AsRef<Path>,
     options: SourceCompareOptions,
@@ -372,26 +419,7 @@ pub(crate) async fn compare_sources_at(
         .try_collect::<Vec<_>>()
         .await?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    let files_analyzed = files
-        .iter()
-        .filter(|file| file.skip_reason.is_none())
-        .count();
-    let files_skipped = files.len().saturating_sub(files_analyzed);
-    let symbols_added = sum_lengths(files.iter().map(|file| file.added.len()));
-    let symbols_removed = sum_lengths(files.iter().map(|file| file.removed.len()));
-    let symbols_modified = sum_lengths(files.iter().map(|file| file.modified.len()));
-    let edges_added = sum_lengths(files.iter().map(|file| file.edges_added.len()));
-    let edges_removed = sum_lengths(files.iter().map(|file| file.edges_removed.len()));
-    let findings_introduced = sum_lengths(files.iter().filter_map(|file| {
-        file.findings_delta
-            .as_ref()
-            .map(|delta| delta.introduced.len())
-    }));
-    let findings_cleared = sum_lengths(files.iter().filter_map(|file| {
-        file.findings_delta
-            .as_ref()
-            .map(|delta| delta.cleared.len())
-    }));
+    let counts = source_comparison_counts(&files);
     let comparison = options.head_ref.as_ref().map_or_else(
         || options.base_ref.clone(),
         |head| {
@@ -412,18 +440,57 @@ pub(crate) async fn compare_sources_at(
         path_filter: options.path_filter,
         changed_before_filter,
         changed_after_filter,
-        files_analyzed: u64::try_from(files_analyzed).unwrap_or(u64::MAX),
-        files_skipped: u64::try_from(files_skipped).unwrap_or(u64::MAX),
+        files_analyzed: counts.files_analyzed,
+        files_skipped: counts.files_skipped,
         changed_files_truncated,
-        symbols_added,
-        symbols_removed,
-        symbols_modified,
-        edges_added,
-        edges_removed,
-        findings_introduced,
-        findings_cleared,
+        symbols_added: counts.symbols_added,
+        symbols_removed: counts.symbols_removed,
+        symbols_modified: counts.symbols_modified,
+        edges_added: counts.edges_added,
+        edges_removed: counts.edges_removed,
+        findings_introduced: counts.findings_introduced,
+        findings_cleared: counts.findings_cleared,
         files,
     })
+}
+
+struct SourceComparisonCounts {
+    files_analyzed: u64,
+    files_skipped: u64,
+    symbols_added: u64,
+    symbols_removed: u64,
+    symbols_modified: u64,
+    edges_added: u64,
+    edges_removed: u64,
+    findings_introduced: u64,
+    findings_cleared: u64,
+}
+
+fn source_comparison_counts(files: &[SourceFileDelta]) -> SourceComparisonCounts {
+    let files_analyzed = files
+        .iter()
+        .filter(|file| file.skip_reason.is_none())
+        .count();
+    SourceComparisonCounts {
+        files_analyzed: u64::try_from(files_analyzed).unwrap_or(u64::MAX),
+        files_skipped: u64::try_from(files.len().saturating_sub(files_analyzed))
+            .unwrap_or(u64::MAX),
+        symbols_added: sum_lengths(files.iter().map(|file| file.added.len())),
+        symbols_removed: sum_lengths(files.iter().map(|file| file.removed.len())),
+        symbols_modified: sum_lengths(files.iter().map(|file| file.modified.len())),
+        edges_added: sum_lengths(files.iter().map(|file| file.edges_added.len())),
+        edges_removed: sum_lengths(files.iter().map(|file| file.edges_removed.len())),
+        findings_introduced: sum_lengths(files.iter().filter_map(|file| {
+            file.findings_delta
+                .as_ref()
+                .map(|delta| delta.introduced.len())
+        })),
+        findings_cleared: sum_lengths(files.iter().filter_map(|file| {
+            file.findings_delta
+                .as_ref()
+                .map(|delta| delta.cleared.len())
+        })),
+    }
 }
 
 async fn resolve_commit(root: &Path, reference: &str) -> Result<String, SourceCompareError> {
@@ -620,10 +687,10 @@ fn compare_one_file(
     let symbol_diff = diff_symbols(SymbolDiffInput {
         baseline: baseline.as_ref(),
         current: current.as_ref(),
-        include_findings: options.include_findings,
-        suppress_line_range_only: options.suppress_line_range_only,
+        include_findings: options.findings.include,
+        suppress_line_range_only: options.delta.suppress_line_range_only,
     });
-    let findings_delta = options.findings_delta.then(|| {
+    let findings_delta = options.findings.delta.then(|| {
         diff_findings(
             baseline
                 .as_ref()
@@ -633,7 +700,7 @@ fn compare_one_file(
                 .map_or(&[][..], |file| file.symbols.as_slice()),
         )
     });
-    let (edges_added, edges_removed) = if options.include_edges {
+    let (edges_added, edges_removed) = if options.delta.edges {
         diff_edges(baseline.as_ref(), current.as_ref())
     } else {
         (Vec::new(), Vec::new())
@@ -708,6 +775,7 @@ struct SymbolDiff {
     line_range_only_count: u64,
 }
 
+#[derive(Clone, Copy)]
 struct SymbolDiffInput<'a> {
     baseline: Option<&'a ExtractedFile>,
     current: Option<&'a ExtractedFile>,
@@ -749,6 +817,7 @@ fn diff_symbols(input: SymbolDiffInput<'_>) -> SymbolDiff {
     diff
 }
 
+#[derive(Clone, Copy)]
 struct SymbolPairInput<'symbol> {
     before: Option<&'symbol ExtractedSymbol>,
     after: Option<&'symbol ExtractedSymbol>,
@@ -813,19 +882,19 @@ fn modification_reasons(before: &ExtractedSymbol, after: &ExtractedSymbol) -> Ve
     {
         reasons.push("line_range_changed");
     }
-    if before.async_symbol != after.async_symbol {
+    if before.execution.async_symbol != after.execution.async_symbol {
         reasons.push("async_modifier_changed");
     }
-    if before.static_member != after.static_member {
+    if before.execution.static_member != after.execution.static_member {
         reasons.push("static_modifier_changed");
     }
-    if before.exported != after.exported || before.default_export != after.default_export {
+    if before.export != after.export {
         reasons.push("export_visibility_changed");
     }
     if before.visibility != after.visibility {
         reasons.push("declaration_visibility_changed");
     }
-    if before.declaration_only != after.declaration_only {
+    if before.implementation.declaration_only != after.implementation.declaration_only {
         reasons.push("implementation_presence_changed");
     }
     reasons

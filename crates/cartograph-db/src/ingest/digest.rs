@@ -1,7 +1,9 @@
 use blake3::Hasher;
 use cartograph_domain::ContentDigest;
 
-use super::model::ValidatedFactTables;
+use super::model::{
+    CanonicalSearchDocument, EdgeInput, FileInput, ReferenceInput, SymbolInput, ValidatedFactTables,
+};
 
 const DIGEST_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v4";
 
@@ -13,8 +15,28 @@ where
     Cancel: FnMut() -> bool,
 {
     let mut digest = CanonicalDigest::new();
-    digest.section("files", facts.files.len());
-    for file in &facts.files {
+    digest_files(&mut digest, &facts.files, &mut cancelled)?;
+    digest_symbols(&mut digest, &facts.symbols, &mut cancelled)?;
+    digest_edges(&mut digest, &facts.edges, &mut cancelled)?;
+    digest_references(&mut digest, &facts.references, &mut cancelled)?;
+    digest_documents(&mut digest, &facts.documents, &mut cancelled)?;
+    if cancelled() {
+        Err(())
+    } else {
+        Ok(digest.finish())
+    }
+}
+
+fn digest_files<Cancel>(
+    digest: &mut CanonicalDigest,
+    files: &[FileInput],
+    cancelled: &mut Cancel,
+) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+{
+    digest.section("files", files.len());
+    for file in files {
         if cancelled() {
             return Err(());
         }
@@ -25,8 +47,19 @@ where
         digest.u64(file.byte_size);
         digest.text(file.parse_status.as_str());
     }
-    digest.section("symbols", facts.symbols.len());
-    for symbol in &facts.symbols {
+    Ok(())
+}
+
+fn digest_symbols<Cancel>(
+    digest: &mut CanonicalDigest,
+    symbols: &[SymbolInput],
+    cancelled: &mut Cancel,
+) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+{
+    digest.section("symbols", symbols.len());
+    for symbol in symbols {
         if cancelled() {
             return Err(());
         }
@@ -40,15 +73,26 @@ where
         digest.u32(symbol.start_line);
         digest.u32(symbol.end_line);
         digest.text(symbol.structural_digest.as_str());
-        digest.optional_text(symbol.visibility.map(|visibility| visibility.as_str()));
-        digest.boolean(symbol.exported);
-        digest.boolean(symbol.default_export);
-        digest.boolean(symbol.async_symbol);
-        digest.boolean(symbol.static_member);
+        digest.optional_text(symbol.visibility.map(cartograph_domain::Visibility::as_str));
+        digest.boolean(symbol.export.exported);
+        digest.boolean(symbol.export.default_export);
+        digest.boolean(symbol.execution.async_symbol);
+        digest.boolean(symbol.execution.static_member);
         digest.boolean(symbol.declaration_only);
     }
-    digest.section("edges", facts.edges.len());
-    for edge in &facts.edges {
+    Ok(())
+}
+
+fn digest_edges<Cancel>(
+    digest: &mut CanonicalDigest,
+    edges: &[EdgeInput],
+    cancelled: &mut Cancel,
+) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+{
+    digest.section("edges", edges.len());
+    for edge in edges {
         if cancelled() {
             return Err(());
         }
@@ -59,14 +103,35 @@ where
         digest.text(&edge.provenance);
         digest.u32(edge.site_count);
     }
-    digest.section("references", facts.references.len());
-    for reference in &facts.references {
+    Ok(())
+}
+
+fn digest_references<Cancel>(
+    digest: &mut CanonicalDigest,
+    references: &[ReferenceInput],
+    cancelled: &mut Cancel,
+) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+{
+    digest.section("references", references.len());
+    for reference in references {
         if cancelled() {
             return Err(());
         }
         digest.text(reference.file_id.as_str());
-        digest.optional_text(reference.owner_symbol_id.as_ref().map(|id| id.as_str()));
-        digest.optional_text(reference.target_symbol_id.as_ref().map(|id| id.as_str()));
+        digest.optional_text(
+            reference
+                .owner_symbol_id
+                .as_ref()
+                .map(cartograph_domain::SymbolId::as_str),
+        );
+        digest.optional_text(
+            reference
+                .target_symbol_id
+                .as_ref()
+                .map(cartograph_domain::SymbolId::as_str),
+        );
         digest.text(&reference.reference_name);
         digest.text(&reference.reference_kind);
         digest.u64(reference.start_byte);
@@ -76,14 +141,35 @@ where
         digest.u32(reference.site_count);
         digest.text(reference.span_precision.as_str());
     }
-    digest.section("search_documents", facts.documents.len());
-    for document in &facts.documents {
+    Ok(())
+}
+
+fn digest_documents<Cancel>(
+    digest: &mut CanonicalDigest,
+    documents: &[CanonicalSearchDocument],
+    cancelled: &mut Cancel,
+) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+{
+    digest.section("search_documents", documents.len());
+    for document in documents {
         if cancelled() {
             return Err(());
         }
         digest.text(document.document_id.as_str());
-        digest.optional_text(document.file_id.as_ref().map(|id| id.as_str()));
-        digest.optional_text(document.symbol_id.as_ref().map(|id| id.as_str()));
+        digest.optional_text(
+            document
+                .file_id
+                .as_ref()
+                .map(cartograph_domain::FileId::as_str),
+        );
+        digest.optional_text(
+            document
+                .symbol_id
+                .as_ref()
+                .map(cartograph_domain::SymbolId::as_str),
+        );
         digest.text(&document.path);
         digest.text(&document.language);
         digest.text(document.kind.as_str());
@@ -92,11 +178,7 @@ where
         digest.text(&document.natural_text);
         digest.text(&document.metadata_json);
     }
-    if cancelled() {
-        Err(())
-    } else {
-        Ok(digest.finish())
-    }
+    Ok(())
 }
 
 struct CanonicalDigest {

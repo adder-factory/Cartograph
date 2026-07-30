@@ -1,5 +1,6 @@
 use std::fmt;
 
+use num_traits::ToPrimitive as _;
 use serde::{
     Deserialize, Deserializer,
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
@@ -232,7 +233,7 @@ pub(super) fn parse_legacy_edge_metadata(
     let numeric_confidence = parsed
         .confidence
         .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-        .map(|value| value as f32);
+        .and_then(|value| value.to_f32());
     let parsed_site_count = parsed
         .site_count
         .and_then(|value| u32::try_from(value).ok())
@@ -634,11 +635,17 @@ impl<'de> Visitor<'de> for OptionalF64Visitor {
     }
 
     fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(OptionalF64(Some(value as f64)))
+        let exact = value
+            .to_f64()
+            .filter(|converted| converted.to_u64() == Some(value));
+        Ok(OptionalF64(exact))
     }
 
     fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(OptionalF64(Some(value as f64)))
+        let exact = value
+            .to_f64()
+            .filter(|converted| converted.to_i64() == Some(value));
+        Ok(OptionalF64(exact))
     }
 
     fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {

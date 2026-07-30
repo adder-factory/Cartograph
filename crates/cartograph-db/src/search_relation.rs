@@ -308,7 +308,7 @@ async fn verify_relation(
         return Err(StorageError::SearchRelationUnavailable);
     }
     let catalog = query(
-        r#"SELECT indexes.indisvalid, indexes.indisready, methods.amname,
+        r"SELECT indexes.indisvalid, indexes.indisready, methods.amname,
                   indexes.indrelid = tables.oid AS correct_table
             FROM pg_catalog.pg_namespace AS namespaces
             INNER JOIN pg_catalog.pg_class AS tables
@@ -320,7 +320,7 @@ async fn verify_relation(
               ON indexes.indexrelid = index_relations.oid
             INNER JOIN pg_catalog.pg_am AS methods
               ON methods.oid = index_relations.relam
-            WHERE namespaces.nspname = $1"#,
+            WHERE namespaces.nspname = $1",
     )
     .bind(input.schema.as_str())
     .bind(&relation.table_name)
@@ -490,69 +490,16 @@ impl CartographDatabase {
             .await
             .map_err(|_| database_error("search-relation-maintenance-scan"))?;
         let mut report = SearchRelationMaintenanceReport::default();
-        for row in rows {
-            let project = ProjectId::parse(
-                &row.try_get::<String, _>("project_id")
-                    .map_err(|_| corrupt("project_id"))?,
-            )
-            .map_err(|_| corrupt("project_id"))?;
-            let generation = GenerationId::parse(
-                &row.try_get::<String, _>("generation_id")
-                    .map_err(|_| corrupt("generation_id"))?,
-            )
-            .map_err(|_| corrupt("generation_id"))?;
-            let digest = ContentDigest::parse(
-                &row.try_get::<String, _>("content_digest")
-                    .map_err(|_| corrupt("content_digest"))?,
-            )
-            .map_err(|_| corrupt("content_digest"))?;
-            let mut transaction = self
-                .pool
-                .begin()
-                .await
-                .map_err(|_| database_error("search-relation-maintenance-begin"))?;
-            if let Some(timeout) = statement_timeout
-                && crate::database::set_local_statement_timeout(&mut transaction, timeout)
-                    .await
-                    .is_err()
-            {
-                let _ = transaction.rollback().await;
-                return Err(database_error("search-relation-maintenance-timeout"));
+        {
+            let mut execution = SearchRepairExecution {
+                database: self,
+                statement_timeout,
+                report: &mut report,
+            };
+            for row in rows {
+                let target = decode_search_repair_target(&row)?;
+                execution.maintain(&target).await?;
             }
-            match require_generation_search_relation(
-                &mut transaction,
-                &self.schema,
-                CurrentGenerationLookup::new(&project, &generation),
-            )
-            .await
-            {
-                Ok(_) => report.verified += 1,
-                Err(StorageError::SearchRelationUnavailable) => {
-                    if report.rebuilt >= 64 {
-                        transaction
-                            .rollback()
-                            .await
-                            .map_err(|_| database_error("search-relation-maintenance-rollback"))?;
-                        return Err(database_error("search-relation-maintenance-limit"));
-                    }
-                    rebuild_generation_search_relation(
-                        &mut transaction,
-                        GenerationSearchBuild {
-                            schema: &self.schema,
-                            project_id: &project,
-                            generation_id: &generation,
-                            content_digest: &digest,
-                        },
-                    )
-                    .await?;
-                    report.rebuilt += 1;
-                }
-                Err(error) => return Err(error),
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(|_| database_error("search-relation-maintenance-commit"))?;
         }
         report.orphans_removed = self
             .remove_orphan_generation_search_relations(statement_timeout)
@@ -620,6 +567,93 @@ impl CartographDatabase {
             removed += 1;
         }
         Ok(removed)
+    }
+}
+
+struct SearchRepairTarget {
+    project: ProjectId,
+    generation: GenerationId,
+    digest: ContentDigest,
+}
+
+struct SearchRepairExecution<'database, 'report> {
+    database: &'database CartographDatabase,
+    statement_timeout: Option<Duration>,
+    report: &'report mut SearchRelationMaintenanceReport,
+}
+
+fn decode_search_repair_target(
+    row: &sqlx_postgres::PgRow,
+) -> Result<SearchRepairTarget, StorageError> {
+    Ok(SearchRepairTarget {
+        project: ProjectId::parse(
+            &row.try_get::<String, _>("project_id")
+                .map_err(|_| corrupt("project_id"))?,
+        )
+        .map_err(|_| corrupt("project_id"))?,
+        generation: GenerationId::parse(
+            &row.try_get::<String, _>("generation_id")
+                .map_err(|_| corrupt("generation_id"))?,
+        )
+        .map_err(|_| corrupt("generation_id"))?,
+        digest: ContentDigest::parse(
+            &row.try_get::<String, _>("content_digest")
+                .map_err(|_| corrupt("content_digest"))?,
+        )
+        .map_err(|_| corrupt("content_digest"))?,
+    })
+}
+
+impl SearchRepairExecution<'_, '_> {
+    async fn maintain(&mut self, target: &SearchRepairTarget) -> Result<(), StorageError> {
+        let mut transaction = self
+            .database
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("search-relation-maintenance-begin"))?;
+        if let Some(timeout) = self.statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, timeout)
+                .await
+                .is_err()
+        {
+            let _ = transaction.rollback().await;
+            return Err(database_error("search-relation-maintenance-timeout"));
+        }
+        match require_generation_search_relation(
+            &mut transaction,
+            &self.database.schema,
+            CurrentGenerationLookup::new(&target.project, &target.generation),
+        )
+        .await
+        {
+            Ok(_) => self.report.verified = self.report.verified.saturating_add(1),
+            Err(StorageError::SearchRelationUnavailable) => {
+                if self.report.rebuilt >= 64 {
+                    transaction
+                        .rollback()
+                        .await
+                        .map_err(|_| database_error("search-relation-maintenance-rollback"))?;
+                    return Err(database_error("search-relation-maintenance-limit"));
+                }
+                rebuild_generation_search_relation(
+                    &mut transaction,
+                    GenerationSearchBuild {
+                        schema: &self.database.schema,
+                        project_id: &target.project,
+                        generation_id: &target.generation,
+                        content_digest: &target.digest,
+                    },
+                )
+                .await?;
+                self.report.rebuilt = self.report.rebuilt.saturating_add(1);
+            }
+            Err(error) => return Err(error),
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("search-relation-maintenance-commit"))
     }
 }
 

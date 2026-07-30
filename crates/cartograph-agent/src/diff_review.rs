@@ -58,6 +58,10 @@ impl Default for DiffReviewOptions {
 
 impl DiffReviewOptions {
     /// Bound retained changed-file metadata.
+    /// # Errors
+    ///
+    /// Returns [`DiffReviewError::InvalidOptions`] when `value` is zero or
+    /// exceeds the retained changed-file ceiling.
     pub const fn with_max_changed_files(mut self, value: u16) -> Result<Self, DiffReviewError> {
         if value == 0 || value > MAX_CHANGED_FILES {
             return Err(DiffReviewError::InvalidOptions);
@@ -67,6 +71,10 @@ impl DiffReviewOptions {
     }
 
     /// Bound immediate incoming call evidence per hunk-overlapping symbol. Zero disables it.
+    /// # Errors
+    ///
+    /// Returns [`DiffReviewError::InvalidOptions`] when `value` exceeds the
+    /// per-symbol caller ceiling. Zero is accepted and disables this evidence.
     pub const fn with_callers_per_symbol(mut self, value: u16) -> Result<Self, DiffReviewError> {
         if value > MAX_CALLERS_CALLEES_PER_SYMBOL {
             return Err(DiffReviewError::InvalidOptions);
@@ -76,6 +84,10 @@ impl DiffReviewOptions {
     }
 
     /// Bound immediate outgoing call evidence per hunk-overlapping symbol. Zero disables it.
+    /// # Errors
+    ///
+    /// Returns [`DiffReviewError::InvalidOptions`] when `value` exceeds the
+    /// per-symbol callee ceiling. Zero is accepted and disables this evidence.
     pub const fn with_callees_per_symbol(mut self, value: u16) -> Result<Self, DiffReviewError> {
         if value > MAX_CALLERS_CALLEES_PER_SYMBOL {
             return Err(DiffReviewError::InvalidOptions);
@@ -85,6 +97,10 @@ impl DiffReviewOptions {
     }
 
     /// Bound historical partners surfaced for each changed file. Zero disables the lens.
+    /// # Errors
+    ///
+    /// Returns [`DiffReviewError::InvalidOptions`] when `value` exceeds the
+    /// per-file warning ceiling. Zero is accepted and disables the lens.
     pub const fn with_cochange_warnings_per_file(
         mut self,
         value: u16,
@@ -97,6 +113,10 @@ impl DiffReviewOptions {
     }
 
     /// Set the pairwise Jaccard floor used by the co-change lens.
+    /// # Errors
+    ///
+    /// Returns [`DiffReviewError::InvalidOptions`] when `value` is non-finite
+    /// or outside the inclusive probability range `0.0..=1.0`.
     pub const fn with_minimum_cochange_jaccard(
         mut self,
         value: f32,
@@ -109,6 +129,10 @@ impl DiffReviewOptions {
     }
 
     /// Suppress co-change noise for diffs below this added-plus-removed-line magnitude.
+    /// # Errors
+    ///
+    /// Returns [`DiffReviewError::InvalidOptions`] when `value` exceeds the
+    /// maximum accepted added-plus-removed-line magnitude.
     pub const fn with_minimum_diff_magnitude(
         mut self,
         value: u32,
@@ -137,6 +161,7 @@ pub struct DiffReviewInput<'review> {
 
 impl<'review> DiffReviewInput<'review> {
     #[must_use]
+    /// Creates a validated diff review input.
     pub const fn new(
         diff: &'review str,
         options: DiffReviewOptions,
@@ -177,9 +202,13 @@ pub enum DiffReviewError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffFileKind {
+    /// File introduced by the compared revision.
     Added,
+    /// Existing file whose contents changed.
     Modified,
+    /// File removed by the compared revision.
     Deleted,
+    /// File moved or renamed by the compared revision.
     Renamed,
 }
 
@@ -491,6 +520,11 @@ impl UnifiedDiffParser {
 
 impl crate::ProjectRuntime {
     /// Review caller-supplied unified-diff text without persisting its source body.
+    /// # Errors
+    ///
+    /// Returns an error when the diff is oversized, malformed, or contains an
+    /// unsafe path; project freshness cannot be established; bounded graph or
+    /// range evidence is unavailable; or cancellation wins.
     pub async fn review_diff_with_cancellation(
         &self,
         input: DiffReviewInput<'_>,
@@ -589,16 +623,15 @@ impl crate::ProjectRuntime {
                 .cochange_warnings_per_file
                 .saturating_mul(3)
                 .max(1);
-            let partners = match self
+            let Ok(partners) = self
                 .database
                 .current_file_cochanges(
                     FileCochangeQuery::new(input.project_id, &file.path, query_limit)
                         .with_minimum_commits(2),
                 )
                 .await
-            {
-                Ok(partners) => partners,
-                Err(_) => return Ok((warnings, false)),
+            else {
+                return Ok((warnings, false));
             };
             let mut retained = 0_u16;
             for partner in partners {
@@ -633,6 +666,7 @@ struct HunkContextRequest<'request> {
     cancellation: &'request ProjectCancellation,
 }
 
+#[derive(Clone, Copy)]
 struct HunkRangeInput<'hunk> {
     file: &'hunk UnifiedDiffFile,
     hunk: &'hunk UnifiedDiffHunk,
@@ -754,27 +788,27 @@ async fn collect_hunk_context(
 async fn collect_symbol_graph_context(
     input: SymbolGraphContextInput<'_>,
 ) -> Result<DiffSymbolContext, DiffReviewError> {
-    let callers = traverse_calls(CallTraversalInput {
+    let incoming_calls = traverse_calls(CallTraversalInput {
         retriever: input.retriever,
         project_id: input.project_id,
         symbol_id: input.symbol.symbol_id(),
         limit: input.options.callers_per_symbol,
         incoming: true,
     });
-    let callees = traverse_calls(CallTraversalInput {
+    let outgoing_calls = traverse_calls(CallTraversalInput {
         retriever: input.retriever,
         project_id: input.project_id,
         symbol_id: input.symbol.symbol_id(),
         limit: input.options.callees_per_symbol,
         incoming: false,
     });
-    let (callers, callees) = tokio::try_join!(callers, callees)?;
+    let (incoming_result, outgoing_result) = tokio::try_join!(incoming_calls, outgoing_calls)?;
     Ok(DiffSymbolContext {
         symbol: input.symbol,
-        callers: callers.0,
-        callees: callees.0,
-        callers_truncated: callers.1,
-        callees_truncated: callees.1,
+        callers: incoming_result.0,
+        callees: outgoing_result.0,
+        callers_truncated: incoming_result.1,
+        callees_truncated: outgoing_result.1,
     })
 }
 
@@ -825,6 +859,11 @@ const fn map_project_error(error: ProjectError) -> DiffReviewError {
 }
 
 /// Parse bounded Git/GitHub unified-diff text without retaining source body lines.
+/// # Errors
+///
+/// Returns [`DiffReviewError::DiffTooLarge`] for input above one megabyte,
+/// [`DiffReviewError::InvalidOptions`] for an invalid file bound, or
+/// [`DiffReviewError::InvalidDiff`] for malformed headers, coordinates, or paths.
 pub fn parse_unified_diff(
     diff: &str,
     max_changed_files: u16,
@@ -843,40 +882,44 @@ pub fn parse_unified_diff(
 }
 
 fn finalize_pending(input: PendingFinalizeInput<'_>) -> Result<(), DiffReviewError> {
-    if !input.pending.has_metadata() {
+    let PendingFinalizeInput {
+        files,
+        pending,
+        max_changed_files,
+        files_truncated,
+        hunks_truncated,
+    } = input;
+    if !pending.has_metadata() {
         return Ok(());
     }
-    let old_path = input.pending.old_path.clone();
-    let new_path = input.pending.new_path.clone();
-    let kind = input
-        .pending
-        .kind_hint
-        .unwrap_or(match (&old_path, &new_path) {
-            (None, Some(_)) => DiffFileKind::Added,
-            (Some(_), None) => DiffFileKind::Deleted,
-            (Some(old), Some(new)) if old != new => DiffFileKind::Renamed,
-            (Some(_), Some(_)) => DiffFileKind::Modified,
-            (None, None) => return Err(DiffReviewError::InvalidDiff),
-        });
+    let old_path = pending.old_path.clone();
+    let new_path = pending.new_path.clone();
+    let kind = pending.kind_hint.unwrap_or(match (&old_path, &new_path) {
+        (None, Some(_)) => DiffFileKind::Added,
+        (Some(_), None) => DiffFileKind::Deleted,
+        (Some(old), Some(new)) if old != new => DiffFileKind::Renamed,
+        (Some(_), Some(_)) => DiffFileKind::Modified,
+        (None, None) => return Err(DiffReviewError::InvalidDiff),
+    });
     let path = match kind {
         DiffFileKind::Deleted => old_path.clone(),
         _ => new_path.clone().or_else(|| old_path.clone()),
     }
     .ok_or(DiffReviewError::InvalidDiff)?;
-    *input.hunks_truncated |= input.pending.hunks_truncated;
-    if input.files.len() < usize::from(input.max_changed_files) {
-        input.files.push(UnifiedDiffFile {
+    *hunks_truncated |= pending.hunks_truncated;
+    if files.len() < usize::from(max_changed_files) {
+        files.push(UnifiedDiffFile {
             path,
             old_path: old_path.filter(|old| new_path.as_ref() != Some(old)),
             kind,
-            binary: input.pending.binary,
-            hunks: std::mem::take(&mut input.pending.hunks),
-            hunks_truncated: input.pending.hunks_truncated,
+            binary: pending.binary,
+            hunks: std::mem::take(&mut pending.hunks),
+            hunks_truncated: pending.hunks_truncated,
         });
     } else {
-        *input.files_truncated = true;
+        *files_truncated = true;
     }
-    *input.pending = PendingDiffFile::default();
+    *pending = PendingDiffFile::default();
     Ok(())
 }
 
@@ -1013,7 +1056,7 @@ mod tests {
 
     #[test]
     fn parses_add_modify_delete_rename_and_exact_body_magnitude() {
-        let diff = r#"diff --git a/src/old.rs b/src/new.rs
+        let diff = r"diff --git a/src/old.rs b/src/new.rs
 similarity index 80%
 rename from src/old.rs
 rename to src/new.rs
@@ -1036,7 +1079,7 @@ deleted file mode 100644
 +++ /dev/null
 @@ -1 +0,0 @@
 -deleted
-"#;
+";
         let parsed = parse_unified_diff(diff, 10)
             .unwrap_or_else(|error| panic!("diff parse failed: {error}"));
         assert_eq!(parsed.files().len(), 3);

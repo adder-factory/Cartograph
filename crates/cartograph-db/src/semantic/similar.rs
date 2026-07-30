@@ -19,6 +19,10 @@ use super::{
 
 impl CartographDatabase {
     /// Find current symbol neighbors from the source symbol's stored pgvector embedding.
+    /// # Errors
+    ///
+    /// Returns an error if the source symbol/model/vector is unavailable or
+    /// ambiguous, the generation is stale, or bounded neighbor retrieval fails.
     pub async fn similar_current_symbols(
         &self,
         request: SimilarSymbolsRequest,
@@ -163,10 +167,17 @@ async fn query_materialized_neighbors(
     }
     let sql = format!(
         r#"SELECT documents.generation_id::text, documents.document_id::text,
-                   documents.file_id::text, documents.symbol_id::text,
-                   documents.path, documents.language, documents.document_kind,
-                   documents.qualified_name,
-                   (1.0 - edges.score)::float8 AS distance,
+	                   documents.file_id::text, documents.symbol_id::text,
+	                   documents.path, documents.language, documents.document_kind,
+	                   documents.qualified_name,
+	                   (
+	                       SELECT symbols.symbol_kind
+	                       FROM {schema}."symbols" AS symbols
+	                       WHERE symbols.project_id = documents.project_id
+	                         AND symbols.generation_id = documents.generation_id
+	                         AND symbols.symbol_id = documents.symbol_id
+	                   ) AS symbol_kind,
+	                   (1.0 - edges.score)::float8 AS distance,
                    edges.score
             FROM {schema}."symbol_similarity_edges" AS edges
             INNER JOIN {schema}."search_documents" AS documents
@@ -193,17 +204,21 @@ async fn query_materialized_neighbors(
         .await
         .map_err(|_| database_error("similar-symbols-cache-query"))?;
     rows.iter()
-        .map(|row| {
-            let score = row
-                .try_get::<f64, _>("score")
-                .map_err(|_| SemanticStorageError::CorruptStoredValue { field: "score" })?;
-            if !score.is_finite() || !(0.0..=1.0).contains(&score) {
-                return Err(SemanticStorageError::CorruptStoredValue { field: "score" });
-            }
-            Ok(SimilarSymbolHit::new(decode_hit(row)?, score))
-        })
+        .map(decode_materialized_hit)
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn decode_materialized_hit(
+    row: &sqlx_postgres::PgRow,
+) -> Result<SimilarSymbolHit, SemanticStorageError> {
+    let score = row
+        .try_get::<f64, _>("score")
+        .map_err(|_| SemanticStorageError::CorruptStoredValue { field: "score" })?;
+    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+        return Err(SemanticStorageError::CorruptStoredValue { field: "score" });
+    }
+    Ok(SimilarSymbolHit::new(decode_hit(row)?, score))
 }
 
 async fn resolve_model(
@@ -358,9 +373,17 @@ async fn query_neighbors(
                 LIMIT $8
             )
             SELECT documents.generation_id::text, documents.document_id::text,
-                   documents.file_id::text, documents.symbol_id::text,
-                   documents.path, documents.language, documents.document_kind,
-                   documents.qualified_name, nearest.distance
+	                   documents.file_id::text, documents.symbol_id::text,
+	                   documents.path, documents.language, documents.document_kind,
+	                   documents.qualified_name,
+	                   (
+	                       SELECT symbols.symbol_kind
+	                       FROM {schema}."symbols" AS symbols
+	                       WHERE symbols.project_id = documents.project_id
+	                         AND symbols.generation_id = documents.generation_id
+	                         AND symbols.symbol_id = documents.symbol_id
+	                   ) AS symbol_kind,
+	                   nearest.distance
             FROM nearest
             INNER JOIN {schema}."search_documents" AS documents
               ON documents.project_id = nearest.project_id

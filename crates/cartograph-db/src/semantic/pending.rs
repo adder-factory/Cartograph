@@ -16,6 +16,10 @@ use super::{
 
 impl CartographDatabase {
     /// Page current-generation documents missing one exact active model vector.
+    /// # Errors
+    ///
+    /// Returns an error if the model/generation/cursor is stale or missing, or
+    /// bounded pending text cannot be queried/decoded within document/byte caps.
     pub async fn pending_current_embedding_documents(
         &self,
         request: PendingEmbeddingPageRequest,

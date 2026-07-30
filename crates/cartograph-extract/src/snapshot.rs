@@ -15,6 +15,9 @@ pub struct SourceLimits {
 
 impl SourceLimits {
     /// Require a nonzero source bound no larger than the hard parser ceiling.
+    /// # Errors
+    ///
+    /// Returns an error if `max_source_bytes` is zero or above the parser hard ceiling.
     pub const fn new(max_source_bytes: usize) -> Result<Self, SourceLimitsError> {
         if max_source_bytes == 0 || max_source_bytes > MAX_CONFIGURED_SOURCE_BYTES {
             return Err(SourceLimitsError);
@@ -57,6 +60,7 @@ struct ValidatedSourcePath {
     byte_size: u64,
 }
 
+#[derive(Clone, Copy)]
 struct SnapshotBytes<'a> {
     raw_path: &'a str,
     bytes: &'a [u8],
@@ -89,6 +93,10 @@ impl StreamedSource {
 
 impl SourceSnapshot {
     /// Validate path, extension, size, and UTF-8 before any parser is invoked.
+    /// # Errors
+    ///
+    /// Returns an error for an invalid/unsupported normalized path, oversized
+    /// or non-UTF-8 bytes, line-count overflow, or bounded allocation failure.
     pub fn from_bytes(
         raw_path: &str,
         bytes: &[u8],
@@ -105,6 +113,10 @@ impl SourceSnapshot {
     /// This bypasses only the native-indexable registry filter; path normalization, exact size,
     /// UTF-8, hashing, and the canonical v1 path/content classifier remain enforced. Production
     /// discovery and indexing must use [`Self::from_bytes`].
+    /// # Errors
+    ///
+    /// Returns an error for an invalid or unimplemented known-language path,
+    /// oversized/non-UTF-8 bytes, line-count overflow, or allocation failure.
     pub fn from_bytes_for_capability_validation(
         raw_path: &str,
         bytes: &[u8],
@@ -336,10 +348,13 @@ fn is_test_filename(language: SourceLanguage, filename: &str) -> bool {
         SourceLanguage::TypeScript
         | SourceLanguage::Tsx
         | SourceLanguage::JavaScript
-        | SourceLanguage::Jsx => stem.ends_with(".test") || stem.ends_with(".spec"),
-        SourceLanguage::Python => stem.starts_with("test_") || stem.ends_with("_test"),
+        | SourceLanguage::Jsx => stem
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| matches!(suffix, "test" | "spec")),
+        SourceLanguage::Python | SourceLanguage::Rust => {
+            stem.starts_with("test_") || stem.ends_with("_test")
+        }
         SourceLanguage::Go => stem.ends_with("_test"),
-        SourceLanguage::Rust => stem.starts_with("test_") || stem.ends_with("_test"),
         SourceLanguage::Ruby => stem.ends_with("_spec") || stem.ends_with("_test"),
         SourceLanguage::Java
         | SourceLanguage::Kotlin

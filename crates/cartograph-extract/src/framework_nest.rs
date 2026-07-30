@@ -63,8 +63,7 @@ pub(crate) fn scan(
         }
         let controller_path = controller
             .as_ref()
-            .map(decorator_static_argument)
-            .unwrap_or(StaticArgument::Empty);
+            .map_or(StaticArgument::Empty, decorator_static_argument);
         scan_class_methods(
             builder,
             source,
@@ -83,6 +82,7 @@ pub(crate) fn scan(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct ClassRouteContext<'source> {
     class_name: &'source str,
     body_start: usize,
@@ -166,6 +166,7 @@ fn scan_class_methods(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct HttpRouteInput<'input, 'source> {
     context: &'input ClassRouteContext<'source>,
     decorator: &'input Decorator<'source>,
@@ -217,6 +218,7 @@ fn add_http_route(
     })
 }
 
+#[derive(Clone, Copy)]
 struct NamedRouteInput<'input, 'source> {
     context: &'input ClassRouteContext<'source>,
     decorator: &'input Decorator<'source>,
@@ -242,8 +244,9 @@ fn add_named_route(
     let (start, end) = decorator
         .literal
         .as_ref()
-        .map(|literal| (literal.start, literal.end))
-        .unwrap_or((method.name_start, method.name_end));
+        .map_or((method.name_start, method.name_end), |literal| {
+            (literal.start, literal.end)
+        });
     let name = if value.is_empty() {
         label.to_owned()
     } else {
@@ -345,6 +348,7 @@ fn decorator_static_argument<'source>(decorator: &Decorator<'source>) -> StaticA
     }
 }
 
+#[derive(Clone, Copy)]
 struct Decorator<'source> {
     name: &'source str,
     argument: &'source str,
@@ -352,6 +356,7 @@ struct Decorator<'source> {
     end: usize,
 }
 
+#[derive(Clone, Copy)]
 struct Quoted<'source> {
     value: &'source str,
     start: usize,
@@ -406,11 +411,7 @@ fn consecutive_decorators(
     Ok((decorators, cursor))
 }
 
-fn parse_decorator<'source>(
-    source: &'source str,
-    source_offset: usize,
-    start: usize,
-) -> Option<Decorator<'source>> {
+fn parse_decorator(source: &str, source_offset: usize, start: usize) -> Option<Decorator<'_>> {
     let (name_end, name) = identifier_at(source, start + 1)?;
     let open = skip_ascii_whitespace(source, name_end);
     if source.as_bytes().get(open) != Some(&b'(') {
@@ -466,11 +467,7 @@ struct Method<'source> {
     body_end: Option<usize>,
 }
 
-fn method_after_decorators<'source>(
-    source: &'source str,
-    start: usize,
-    class_end: usize,
-) -> Option<Method<'source>> {
+fn method_after_decorators(source: &str, start: usize, class_end: usize) -> Option<Method<'_>> {
     let limit = class_end.min(start.saturating_add(MAX_DECORATOR_SCAN_BYTES));
     let mut cursor = start;
     while cursor < limit {

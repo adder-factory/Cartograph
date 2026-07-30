@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::{ProjectLlmTier, load_project_llm_tier};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 const MAXIMUM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAXIMUM_QUERY_BYTES: usize = 128 * 1024;
 const MAXIMUM_DOCUMENTS: usize = 128;
@@ -42,6 +42,10 @@ impl std::fmt::Debug for RerankSettings {
 impl RerankSettings {
     /// Load the optional project reranker. An absent block keeps reciprocal-rank
     /// fusion enabled without adding a model dependency.
+    /// # Errors
+    ///
+    /// Returns an error if the project tier is invalid/unreadable or its
+    /// endpoint cannot be normalized to a valid rerank URL.
     pub fn try_from_project(project_root: &Path) -> Result<Option<Self>, RerankError> {
         let Some(config) = load_project_llm_tier(project_root, ProjectLlmTier::Reranker)
             .map_err(|_| RerankError::InvalidConfiguration)?
@@ -58,8 +62,7 @@ impl RerankSettings {
         endpoint.set_path(&format!("{base}/v1/rerank"));
         let timeout = config
             .timeout_ms()
-            .map(Duration::from_millis)
-            .unwrap_or(DEFAULT_TIMEOUT);
+            .map_or(DEFAULT_TIMEOUT, Duration::from_millis);
         Ok(Some(Self {
             endpoint,
             model: config.model().to_owned(),
@@ -85,11 +88,13 @@ pub struct RerankBatch {
 
 impl RerankBatch {
     #[must_use]
+    /// Returns the model.
     pub fn model(&self) -> &str {
         &self.model
     }
 
     #[must_use]
+    /// Returns the scores.
     pub fn scores(&self) -> &[f32] {
         &self.scores
     }
@@ -103,6 +108,12 @@ pub struct OpenAiRerankClient {
 }
 
 impl OpenAiRerankClient {
+    /// Creates a client after validating its transport configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no TLS crypto provider can be installed or the
+    /// redirect-free bounded rerank HTTP client cannot be built.
     pub fn new(settings: RerankSettings) -> Result<Self, RerankError> {
         crate::ensure_tls_crypto_provider().map_err(|_| RerankError::ClientUnavailable)?;
         let client = reqwest::Client::builder()
@@ -123,6 +134,10 @@ impl OpenAiRerankClient {
 
     /// Score candidates and restore the response's rank-sorted rows to exact
     /// input order. Malformed, duplicate, or missing rows fail closed.
+    /// # Errors
+    ///
+    /// Returns an error if query/document/header bounds fail, the endpoint
+    /// rejects/times out, or response bytes/JSON/indices/scores are malformed.
     pub async fn rerank(
         &self,
         query: &str,
@@ -183,20 +198,28 @@ struct RerankRow {
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+/// Errors produced while processing rerank.
 pub enum RerankError {
     #[error("Cartograph reranker configuration is invalid")]
+    /// Configuration violates a required provider or resource contract.
     InvalidConfiguration,
     #[error("Cartograph reranker request exceeds configured bounds")]
+    /// The request exceeded its declared size or item ceiling.
     RequestLimit,
     #[error("Cartograph reranker HTTP client is unavailable")]
+    /// A safe bounded HTTP client could not be constructed.
     ClientUnavailable,
     #[error("Cartograph reranker endpoint is unavailable")]
+    /// The configured endpoint could not complete the bounded request.
     EndpointUnavailable,
     #[error("Cartograph reranker endpoint rejected the request")]
+    /// The configured backend rejected the bounded request.
     BackendRejected,
     #[error("Cartograph reranker response exceeds configured bounds")]
+    /// The response exceeded its declared size or item ceiling.
     ResponseLimit,
     #[error("Cartograph reranker endpoint returned an invalid response")]
+    /// The backend response violates the expected bounded schema.
     InvalidResponse,
 }
 
@@ -282,7 +305,7 @@ fn normalize_scores(scores: &[f32]) -> Vec<f32> {
     }
     let minimum = scores.iter().copied().fold(f32::INFINITY, f32::min);
     let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if minimum == maximum {
+    if minimum.total_cmp(&maximum).is_eq() {
         return vec![1.0; scores.len()];
     }
     scores

@@ -10,7 +10,7 @@ use std::fs::OpenOptions;
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::NamedTempFile;
 
-use super::ManagedDatabaseError;
+use super::{ManagedDatabaseError, push_lower_hex_byte};
 
 const DATABASE_USER: &str = "cartograph";
 const DATABASE_NAME: &str = "cartograph";
@@ -176,7 +176,7 @@ impl DatabaseCredentials {
         getrandom::fill(&mut random).map_err(|_| ManagedDatabaseError::CredentialRandom)?;
         let mut credential = String::with_capacity(GENERATED_CREDENTIAL_BYTES * 2);
         for byte in random {
-            credential.push_str(&format!("{byte:02x}"));
+            push_lower_hex_byte(&mut credential, byte);
         }
         Ok(Self {
             value: SecretString::from(credential),
@@ -202,10 +202,10 @@ impl DatabaseCredentials {
         let mut url = url::Url::parse("postgresql://127.0.0.1")
             .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
         url.set_username(DATABASE_USER)
-            .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
+            .map_err(|()| ManagedDatabaseError::CredentialFormat)?;
         set_url_credential(&mut url, self.value.expose_secret())?;
         url.set_port(Some(port))
-            .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
+            .map_err(|()| ManagedDatabaseError::CredentialFormat)?;
         url.set_path(DATABASE_NAME);
         Ok(SecretString::from(url.to_string()))
     }
@@ -217,7 +217,7 @@ impl DatabaseCredentials {
 
 fn set_url_credential(url: &mut url::Url, credential: &str) -> Result<(), ManagedDatabaseError> {
     url.set_password(Some(credential))
-        .map_err(|_| ManagedDatabaseError::CredentialFormat)
+        .map_err(|()| ManagedDatabaseError::CredentialFormat)
 }
 
 fn reject_symlink(path: &Path) -> Result<(), ManagedDatabaseError> {
@@ -459,9 +459,8 @@ mod tests {
 
     #[cfg(unix)]
     fn assert_private_store_modes(store: &CredentialStore) {
-        let parent = match store.path().parent() {
-            Some(parent) => parent,
-            None => panic!("credential path has no parent"),
+        let Some(parent) = store.path().parent() else {
+            panic!("credential path has no parent");
         };
 
         assert_eq!(test_mode(store.path()) & OTHER_ACCESS_MODE_MASK, 0);

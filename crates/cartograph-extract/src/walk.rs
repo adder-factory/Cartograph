@@ -9,7 +9,7 @@ use tree_sitter::Node;
 use crate::{
     Containment, DiagnosticCode, ExtractError, ExtractedFile, ExtractedImportBinding,
     ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, ExtractionStrategy, LanguageSpec,
-    SourceSnapshot,
+    SourceSnapshot, SymbolExecutionFlags, SymbolExportFlags, SymbolImplementationFlags,
     budget::{
         ExtractionBudget, containment_budget_bytes, diagnostic_budget_bytes,
         import_binding_budget_bytes, reference_budget_bytes, symbol_budget_bytes,
@@ -74,6 +74,7 @@ impl<const MAXIMUM_DEPTH: usize> AstVisitBudget<MAXIMUM_DEPTH> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct WalkInput<'tree> {
     root: Node<'tree>,
     parse_status: FileParseStatus,
@@ -313,8 +314,7 @@ struct PendingSymbol<'tree> {
     body_node: Option<Node<'tree>>,
     declaration_only: bool,
     signature: Option<String>,
-    exported: bool,
-    default_export: bool,
+    export: SymbolExportFlags,
     async_symbol: bool,
     static_member: bool,
     visibility: Option<Visibility>,
@@ -331,8 +331,7 @@ impl<'tree> PendingSymbol<'tree> {
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: true,
-            default_export: false,
+            export: SymbolExportFlags::named(true),
             async_symbol: false,
             static_member: false,
             visibility: None,
@@ -369,6 +368,7 @@ fn safe_assignment_signature(
     Ok(Some(signature))
 }
 
+#[derive(Clone, Copy)]
 struct JoinedSignature<'text> {
     left: &'text str,
     separator: char,
@@ -428,11 +428,7 @@ impl SingleChildUnwrap {
     }
 }
 
-fn unwrap_single_child<'tree>(
-    node: Node<'tree>,
-    depth: usize,
-    rule: SingleChildUnwrap,
-) -> Option<Node<'tree>> {
+fn unwrap_single_child(node: Node<'_>, depth: usize, rule: SingleChildUnwrap) -> Option<Node<'_>> {
     if depth > 8 {
         return None;
     }
@@ -646,7 +642,11 @@ fn visit_javascript_usage(
             }
         }
         "new_expression" => {
-            references::capture_invocation(builder, node, references::InvocationKind::Construction)?
+            references::capture_invocation(
+                builder,
+                node,
+                references::InvocationKind::Construction,
+            )?;
         }
         "jsx_opening_element" | "jsx_self_closing_element" => {
             references::capture_jsx_reference(builder, node)?;
@@ -720,7 +720,7 @@ fn visit_destructured_javascript_binding(
     } else {
         SymbolKind::Variable
     };
-    builder.emit_javascript_binding_tree(input.name_node, kind)?;
+    emit_javascript_binding_tree(builder, input.name_node, kind)?;
     if let Some(value_node) = input.value {
         builder.visit(value_node, input.binding.depth.saturating_add(1))?;
     }
@@ -734,7 +734,7 @@ fn visit_javascript_binding_value(
     builder.owners.push(input.id.clone());
     builder.qualifiers.push(input.name.to_owned());
     if let Some(callable_node) = input.callable {
-        builder.emit_javascript_callable_parameters(callable_node)?;
+        emit_javascript_callable_parameters(builder, callable_node)?;
     }
     let visit_node = input
         .callable
@@ -786,8 +786,7 @@ fn visit_javascript_binding(
         body_node: value,
         declaration_only: false,
         signature: javascript_binding_signature(builder, callable, value)?,
-        exported,
-        default_export,
+        export: SymbolExportFlags::new(exported, default_export),
         async_symbol: callable.is_some_and(|entry| has_child_kind(entry, "async")),
         static_member: false,
         visibility: None,
@@ -923,8 +922,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported,
-            default_export,
+            export: SymbolExportFlags::new(exported, default_export),
             async_symbol: false,
             static_member: false,
             visibility: visibility(node, self.context.source()),
@@ -976,8 +974,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             body_node: body,
             declaration_only: body.is_none(),
             signature: self.context.callable_signature(node)?,
-            exported,
-            default_export,
+            export: SymbolExportFlags::new(exported, default_export),
             async_symbol: has_child_kind(node, "async"),
             static_member: has_child_kind(node, "static"),
             visibility: visibility(node, self.context.source()),
@@ -986,7 +983,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         references::capture_callable_types(self, node, &id)?;
         self.owners.push(id);
         self.qualifiers.push(name);
-        self.emit_javascript_callable_parameters(node)?;
+        emit_javascript_callable_parameters(self, node)?;
         if let Some(body) = body {
             self.visit(body, depth.saturating_add(1))?;
         }
@@ -1013,76 +1010,30 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         Ok(())
     }
 
-    fn emit_javascript_callable_parameters(
-        &mut self,
-        callable: Node<'_>,
-    ) -> Result<(), ExtractError> {
-        let parameters = callable
-            .child_by_field_name("parameters")
-            .or_else(|| callable.child_by_field_name("parameter"));
-        if let Some(parameters) = parameters {
-            self.emit_javascript_binding_tree(parameters, SymbolKind::Parameter)?;
-        }
-        Ok(())
-    }
-
-    fn emit_javascript_binding_tree(
-        &mut self,
-        node: Node<'_>,
-        kind: SymbolKind,
-    ) -> Result<(), ExtractError> {
-        self.context.ensure_active()?;
-        match node.kind() {
-            "identifier" | "shorthand_property_identifier_pattern" => {
-                let name = self.context.owned_text(node)?;
-                self.emit_symbol(PendingSymbol {
-                    kind,
-                    name,
-                    span_node: node,
-                    structural_node: node,
-                    doc_anchor: node,
-                    body_node: None,
-                    declaration_only: false,
-                    signature: None,
-                    exported: false,
-                    default_export: false,
-                    async_symbol: false,
-                    static_member: false,
-                    visibility: None,
-                })?;
-            }
-            "required_parameter" | "optional_parameter" => {
-                if let Some(binding) = node
-                    .child_by_field_name("name")
-                    .or_else(|| node.child_by_field_name("pattern"))
-                {
-                    self.emit_javascript_binding_tree(binding, kind)?;
-                }
-            }
-            "pair_pattern" => {
-                if let Some(value) = node.child_by_field_name("value") {
-                    self.emit_javascript_binding_tree(value, kind)?;
-                }
-            }
-            "assignment_pattern" | "object_assignment_pattern" => {
-                if let Some(left) = node.child_by_field_name("left") {
-                    self.emit_javascript_binding_tree(left, kind)?;
-                }
-            }
-            "formal_parameters" | "object_pattern" | "array_pattern" | "rest_pattern" => {
-                for child in named_children(node) {
-                    self.emit_javascript_binding_tree(child, kind)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     fn emit_symbol(&mut self, pending: PendingSymbol<'_>) -> Result<SymbolId, ExtractError> {
         self.context.ensure_active()?;
         let qualified_name = self.qualified_name(&pending.name)?;
         let id = self.identities.next(pending.kind, &qualified_name)?;
+        self.reserve_parent_containment(&id)?;
+        let symbol = self.extracted_symbol(pending, &id, qualified_name)?;
+        self.context.budget.reserve_fact(
+            symbol_budget_bytes(&symbol),
+            [
+                symbol.id.as_str(),
+                symbol.name.as_str(),
+                symbol.qualified_name.as_str(),
+                symbol.signature.as_deref().unwrap_or_default(),
+                symbol.docstring.as_deref().unwrap_or_default(),
+                symbol.body_search_text.as_str(),
+                symbol.structural_digest.as_str(),
+                symbol.clone_shape_digest.as_str(),
+            ],
+        )?;
+        self.facts.symbols.push(symbol);
+        Ok(id)
+    }
+
+    fn reserve_parent_containment(&mut self, id: &SymbolId) -> Result<(), ExtractError> {
         if let Some(parent) = self.owners.last() {
             let containment = Containment {
                 parent: parent.clone(),
@@ -1094,6 +1045,15 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             )?;
             self.facts.containments.push(containment);
         }
+        Ok(())
+    }
+
+    fn extracted_symbol(
+        &mut self,
+        pending: PendingSymbol<'_>,
+        id: &SymbolId,
+        qualified_name: String,
+    ) -> Result<ExtractedSymbol, ExtractError> {
         let span = span_for(pending.span_node)?;
         let docstring = self.context.jsdoc(pending.doc_anchor)?;
         let body_search = match pending.body_node {
@@ -1139,7 +1099,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         let top_level = self.owners.is_empty();
         let explicit_export = top_level && self.explicit_exports.contains(&pending.name);
         let explicit_default = top_level && self.explicit_default_exports.contains(&pending.name);
-        let symbol = ExtractedSymbol {
+        Ok(ExtractedSymbol {
             id: id.clone(),
             kind: pending.kind,
             name: pending.name,
@@ -1150,36 +1110,27 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             body_search_text: body_search.text,
             body_search_truncated: body_search.truncated,
             health,
-            declaration_only: pending.declaration_only,
-            test_symbol: rust_symbol_is_test_owned(
-                self.context.snapshot.language(),
-                pending.structural_node,
-                self.context.snapshot.source(),
-            )?,
-            exported: pending.exported || explicit_export || explicit_default,
-            default_export: pending.default_export || explicit_default,
-            async_symbol: pending.async_symbol,
-            static_member: pending.static_member,
+            implementation: SymbolImplementationFlags {
+                declaration_only: pending.declaration_only,
+                test_symbol: rust_symbol_is_test_owned(
+                    self.context.snapshot.language(),
+                    pending.structural_node,
+                    self.context.snapshot.source(),
+                )?,
+            },
+            export: SymbolExportFlags::new(
+                pending.export.exported || explicit_export || explicit_default,
+                pending.export.default_export || explicit_default,
+            ),
+            execution: SymbolExecutionFlags {
+                async_symbol: pending.async_symbol,
+                static_member: pending.static_member,
+            },
             visibility: pending.visibility,
             structural_digest,
             clone_shape_digest,
             clone_token_profile,
-        };
-        self.context.budget.reserve_fact(
-            symbol_budget_bytes(&symbol),
-            [
-                symbol.id.as_str(),
-                symbol.name.as_str(),
-                symbol.qualified_name.as_str(),
-                symbol.signature.as_deref().unwrap_or_default(),
-                symbol.docstring.as_deref().unwrap_or_default(),
-                symbol.body_search_text.as_str(),
-                symbol.structural_digest.as_str(),
-                symbol.clone_shape_digest.as_str(),
-            ],
-        )?;
-        self.facts.symbols.push(symbol);
-        Ok(id)
+        })
     }
 
     fn emit_reference(&mut self, reference: ExtractedReference) -> Result<(), ExtractError> {
@@ -1232,6 +1183,71 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         qualified.push_str(name);
         Ok(qualified)
     }
+}
+
+fn emit_javascript_callable_parameters(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    callable: Node<'_>,
+) -> Result<(), ExtractError> {
+    let parameters = callable
+        .child_by_field_name("parameters")
+        .or_else(|| callable.child_by_field_name("parameter"));
+    if let Some(parameters) = parameters {
+        emit_javascript_binding_tree(builder, parameters, SymbolKind::Parameter)?;
+    }
+    Ok(())
+}
+
+fn emit_javascript_binding_tree(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    kind: SymbolKind,
+) -> Result<(), ExtractError> {
+    builder.context.ensure_active()?;
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            let name = builder.context.owned_text(node)?;
+            builder.emit_symbol(PendingSymbol {
+                kind,
+                name,
+                span_node: node,
+                structural_node: node,
+                doc_anchor: node,
+                body_node: None,
+                declaration_only: false,
+                signature: None,
+                export: crate::SymbolExportFlags::new(false, false),
+                async_symbol: false,
+                static_member: false,
+                visibility: None,
+            })?;
+        }
+        "required_parameter" | "optional_parameter" => {
+            if let Some(binding) = node
+                .child_by_field_name("name")
+                .or_else(|| node.child_by_field_name("pattern"))
+            {
+                emit_javascript_binding_tree(builder, binding, kind)?;
+            }
+        }
+        "pair_pattern" => {
+            if let Some(value) = node.child_by_field_name("value") {
+                emit_javascript_binding_tree(builder, value, kind)?;
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                emit_javascript_binding_tree(builder, left, kind)?;
+            }
+        }
+        "formal_parameters" | "object_pattern" | "array_pattern" | "rest_pattern" => {
+            for child in named_children(node) {
+                emit_javascript_binding_tree(builder, child, kind)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 impl<'source, 'cancel> ExtractionContext<'source, 'cancel> {

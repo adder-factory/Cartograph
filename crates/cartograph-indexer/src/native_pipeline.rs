@@ -14,8 +14,8 @@ use cartograph_db::{
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, NormalizedPath, ProjectId,
-    ReferenceKind, SourceLanguage, SourceSpan, SymbolId, SymbolKind, Visibility,
-    symbol_signature_is_search_safe,
+    ReferenceKind, SourceLanguage, SourceSpan, SymbolExecutionFlags, SymbolExportFlags, SymbolId,
+    SymbolImplementationFlags, SymbolKind, Visibility, symbol_signature_is_search_safe,
 };
 use cartograph_extract::{
     CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX, DiscoveredSource,
@@ -44,8 +44,8 @@ use crate::{
 };
 
 const MAX_PIPELINE_RETAINED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-const MAX_STAGE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_CLEANUP_GRACE: Duration = Duration::from_secs(60);
+const MAX_STAGE_TIMEOUT: Duration = Duration::from_hours(24);
+const MAX_CLEANUP_GRACE: Duration = Duration::from_mins(1);
 const DOCUMENT_ID_DOMAIN: &[u8] = b"cartograph-v2-native-document-v1";
 const MYBATIS_BRIDGE_PROVENANCE: &str = "framework-mybatis-qualified";
 const NATIVE_MODULE_BRIDGE_PROVENANCE: &str = "framework-native-module-impl";
@@ -203,6 +203,10 @@ pub struct NativeRetainedLimits {
 
 impl NativeRetainedLimits {
     /// Validate both project-retained memory ceilings.
+    /// # Errors
+    ///
+    /// Returns an error if either retained-memory ceiling is zero or exceeds
+    /// the native pipeline hard maximum.
     pub fn new(
         max_manifest_bytes: u64,
         max_generation_bytes: u64,
@@ -241,6 +245,10 @@ pub struct NativePipelineParallelism {
 
 impl NativePipelineParallelism {
     /// Validate both active-worker plus queue windows.
+    /// # Errors
+    ///
+    /// Returns an error if either worker count is zero or its active-plus-queued
+    /// window overflows the bounded stage capacity.
     pub fn new(
         read_capacity: StageCapacity,
         parse_capacity: StageCapacity,
@@ -264,6 +272,10 @@ pub struct NativePipelineDeadlines {
 
 impl NativePipelineDeadlines {
     /// Validate independent work, stage, and cleanup durations.
+    /// # Errors
+    ///
+    /// Returns an error if any duration is zero or a stage/item timeout or
+    /// cleanup grace exceeds its independent hard maximum.
     pub fn new(
         item_timeout: Duration,
         stage_timeout: Duration,
@@ -292,24 +304,56 @@ pub struct NativePipelineConfig {
     limits: NativePipelineLimits,
     parallelism: NativePipelineParallelism,
     deadlines: NativePipelineDeadlines,
-    compute_page_rank: bool,
-    compute_betweenness: bool,
-    retain_docstrings: bool,
-    retain_call_sites: bool,
-    partial_clones_wider_band: bool,
+    evidence: NativeEvidencePolicy,
+    clones: NativeClonePolicy,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct NativeEvidencePolicy {
-    compute_page_rank: bool,
-    compute_betweenness: bool,
-    retain_docstrings: bool,
-    retain_call_sites: bool,
+    centrality: NativeCentralityPolicy,
+    retention: NativeRetentionPolicy,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
+struct NativeCentralityPolicy {
+    page_rank: bool,
+    betweenness: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeRetentionPolicy {
+    docstrings: bool,
+    call_sites: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct NativeClonePolicy {
     wider_partial_band: bool,
+}
+
+impl NativeEvidencePolicy {
+    const FULL: Self = Self {
+        centrality: NativeCentralityPolicy {
+            page_rank: true,
+            betweenness: true,
+        },
+        retention: NativeRetentionPolicy {
+            docstrings: true,
+            call_sites: true,
+        },
+    };
+
+    #[cfg(test)]
+    const STRUCTURAL: Self = Self {
+        centrality: NativeCentralityPolicy {
+            page_rank: true,
+            betweenness: true,
+        },
+        retention: NativeRetentionPolicy {
+            docstrings: false,
+            call_sites: false,
+        },
+    };
 }
 
 /// Bounded SCIP protobuf bytes applied as a persistent per-file overlay.
@@ -332,6 +376,10 @@ impl fmt::Debug for ScipOverlayInput {
 
 impl ScipOverlayInput {
     /// Validate the artifact and decoded-row ceiling before stage admission.
+    /// # Errors
+    ///
+    /// Returns an error if the SCIP artifact is empty/oversized or
+    /// `maximum_rows` is zero or above the overlay row ceiling.
     pub fn new(bytes: Vec<u8>, maximum_rows: usize) -> Result<Self, NativePipelineConfigError> {
         if bytes.is_empty()
             || bytes.len() > MAXIMUM_SCIP_OVERLAY_BYTES
@@ -379,46 +427,45 @@ impl NativePipelineConfig {
             limits,
             parallelism,
             deadlines,
-            compute_page_rank: true,
-            compute_betweenness: true,
-            retain_docstrings: true,
-            retain_call_sites: true,
-            partial_clones_wider_band: false,
+            evidence: NativeEvidencePolicy::FULL,
+            clones: NativeClonePolicy {
+                wider_partial_band: false,
+            },
         }
     }
 
-    /// Retain the v1 `enableCentrality` contract for native PageRank.
+    /// Retain the v1 `enableCentrality` contract for native `PageRank`.
     #[must_use]
     pub const fn with_page_rank(mut self, enabled: bool) -> Self {
-        self.compute_page_rank = enabled;
+        self.evidence.centrality.page_rank = enabled;
         self
     }
 
     /// Retain the v1 `enableBetweenness` override for bounded native Brandes.
     #[must_use]
     pub const fn with_betweenness(mut self, enabled: bool) -> Self {
-        self.compute_betweenness = enabled;
+        self.evidence.centrality.betweenness = enabled;
         self
     }
 
     /// Retain or omit extracted documentation text while preserving symbols.
     #[must_use]
     pub const fn with_docstrings(mut self, enabled: bool) -> Self {
-        self.retain_docstrings = enabled;
+        self.evidence.retention.docstrings = enabled;
         self
     }
 
     /// Retain exact/coarse reference sites while preserving aggregated graph edges.
     #[must_use]
     pub const fn with_call_sites(mut self, enabled: bool) -> Self {
-        self.retain_call_sites = enabled;
+        self.evidence.retention.call_sites = enabled;
         self
     }
 
     /// Add the opt-in v1 0.80 Type-3 clone band below the always-on 0.95 band.
     #[must_use]
     pub const fn with_partial_clones(mut self, enabled: bool) -> Self {
-        self.partial_clones_wider_band = enabled;
+        self.clones.wider_partial_band = enabled;
         self
     }
 
@@ -431,18 +478,11 @@ impl NativePipelineConfig {
     }
 
     const fn evidence_policy(self) -> NativeEvidencePolicy {
-        NativeEvidencePolicy {
-            compute_page_rank: self.compute_page_rank,
-            compute_betweenness: self.compute_betweenness,
-            retain_docstrings: self.retain_docstrings,
-            retain_call_sites: self.retain_call_sites,
-        }
+        self.evidence
     }
 
     const fn clone_policy(self) -> NativeClonePolicy {
-        NativeClonePolicy {
-            wider_partial_band: self.partial_clones_wider_band,
-        }
+        self.clones
     }
 }
 
@@ -493,41 +533,49 @@ pub struct NativeParseCacheReport {
 
 impl NativeParseCacheReport {
     #[must_use]
+    /// Returns the hits.
     pub const fn hits(self) -> u64 {
         self.hits
     }
 
     #[must_use]
+    /// Returns the misses.
     pub const fn misses(self) -> u64 {
         self.misses
     }
 
     #[must_use]
+    /// Returns the bypassed.
     pub const fn bypassed(self) -> u64 {
         self.bypassed
     }
 
     #[must_use]
+    /// Returns the parsed files.
     pub const fn parsed_files(self) -> u64 {
         self.parsed_files
     }
 
     #[must_use]
+    /// Returns the writes.
     pub const fn writes(self) -> u64 {
         self.writes
     }
 
     #[must_use]
+    /// Returns the corruptions.
     pub const fn corruptions(self) -> u64 {
         self.corruptions
     }
 
     #[must_use]
+    /// Reads the errors from the authoritative store.
     pub const fn read_errors(self) -> u64 {
         self.read_errors
     }
 
     #[must_use]
+    /// Persists the errors in the authoritative store.
     pub const fn write_errors(self) -> u64 {
         self.write_errors
     }
@@ -719,6 +767,10 @@ impl NativeGenerationBuild {
 /// reopens each file under its exact observed size and rejects content drift, and ordered parse
 /// output is moved into a separately bounded project fact accumulator before the worker
 /// reservation is acknowledged.
+/// # Errors
+///
+/// Returns an error if runtime/config validation, discovery, bounded source
+/// reading, extraction, resolution, validation, or stage cleanup fails.
 pub async fn build_native_generation(
     runner: &StageRunner,
     source_root: SourceRoot,
@@ -732,6 +784,10 @@ pub async fn build_native_generation(
 }
 
 /// Build native facts and reconcile an optional persistent SCIP overlay before reduction.
+/// # Errors
+///
+/// Returns an error if native construction fails or the optional SCIP overlay
+/// is invalid, inconsistent with source facts, cancelled, or oversized.
 pub async fn build_native_generation_with_scip(
     runner: &StageRunner,
     request: NativeGenerationBuild,
@@ -744,6 +800,10 @@ pub async fn build_native_generation_with_scip(
 /// Cache hits replace only the per-file parser invocation. Every build still assembles all files,
 /// reruns project-wide resolution, validates the complete canonical generation, and publishes it
 /// atomically, so incremental speed never weakens graph completeness.
+/// # Errors
+///
+/// Returns an error if runtime/config validation or any discovery, cache,
+/// read, parse, SCIP, resolve, memory-model, validation, or cleanup stage fails.
 pub async fn build_native_generation_with_scip_and_cache(
     runner: &StageRunner,
     request: NativeGenerationBuild,
@@ -1038,7 +1098,7 @@ async fn parse_manifest_entry_with_cache(
             match cache.database.load_native_parse_cache(key).await {
                 Ok(Some(record)) => {
                     if let Some(file) = decode_cached_file(&manifest, &record) {
-                        revalidate_manifest(source_root, &manifest, cancellation.clone())?;
+                        revalidate_manifest(source_root, &manifest, &cancellation)?;
                         metrics.hits = 1;
                         return Ok(ParsedManifestEntry {
                             file,
@@ -1066,7 +1126,7 @@ async fn parse_manifest_entry_with_cache(
     metrics.parsed_files = 1;
     let parse_cancellation = cancellation.clone();
     let file = block_in_place(move || {
-        parse_manifest_entry(source_root, manifest, || parse_cancellation.is_cancelled())
+        parse_manifest_entry(source_root, &manifest, || parse_cancellation.is_cancelled())
     })?;
     if cancellation.is_cancelled() {
         return Err(StageItemFailure);
@@ -1109,7 +1169,7 @@ fn decode_cached_file(
 fn revalidate_manifest(
     source_root: &SourceRoot,
     manifest: &SourceManifestEntry,
-    cancellation: StageCancellation,
+    cancellation: &StageCancellation,
 ) -> Result<(), StageItemFailure> {
     let exact_limits =
         exact_source_limits(manifest.byte_size, exact_limit_ceiling(manifest.byte_size)?)?;
@@ -1247,7 +1307,7 @@ async fn run_scip_overlay_stage(
                             high_water_bytes,
                             evidence_policy,
                         },
-                        cancellation,
+                        &cancellation,
                     )
                 })
             }
@@ -1280,7 +1340,7 @@ struct ScipOverlayExecution {
 
 fn apply_scip_overlay_work(
     execution: ScipOverlayExecution,
-    cancellation: crate::StageCancellation,
+    cancellation: &crate::StageCancellation,
 ) -> Result<ScipOverlayStageOutput, StageItemFailure> {
     let ScipOverlayExecution {
         work,
@@ -1308,15 +1368,15 @@ fn apply_scip_overlay_work(
         || overlay_cancellation.is_cancelled(),
     )
     .map_err(|_| StageItemFailure)?;
-    if evidence_policy.compute_page_rank {
+    if evidence_policy.centrality.page_rank {
         apply_page_rank(&mut facts, || cancellation.is_cancelled())
             .map_err(|_| StageItemFailure)?;
     }
-    if evidence_policy.compute_betweenness {
+    if evidence_policy.centrality.betweenness {
         apply_sampled_betweenness(&mut facts, || cancellation.is_cancelled())
             .map_err(|_| StageItemFailure)?;
     }
-    if !evidence_policy.retain_call_sites {
+    if !evidence_policy.retention.call_sites {
         facts.references.clear();
     }
     let measurement = facts
@@ -1551,7 +1611,7 @@ where
 
 fn parse_manifest_entry<Cancel>(
     source_root: &SourceRoot,
-    manifest: SourceManifestEntry,
+    manifest: &SourceManifestEntry,
     mut cancelled: Cancel,
 ) -> Result<ExtractedFile, StageItemFailure>
 where
@@ -1806,12 +1866,9 @@ fn normalize_native_symbol(
         body_search_text,
         body_search_truncated,
         health,
-        declaration_only,
-        test_symbol,
-        exported,
-        default_export,
-        async_symbol,
-        static_member,
+        implementation,
+        export,
+        execution,
         visibility,
         structural_digest,
         clone_shape_digest,
@@ -1834,11 +1891,9 @@ fn normalize_native_symbol(
             end_line: span.end_line(),
             structural_digest,
             visibility,
-            exported,
-            default_export,
-            async_symbol,
-            static_member,
-            declaration_only,
+            export,
+            execution,
+            declaration_only: implementation.declaration_only,
             betweenness_ppb: None,
             pagerank_ppb: None,
         },
@@ -1848,12 +1903,9 @@ fn normalize_native_symbol(
         body_search_text,
         body_search_truncated,
         health,
-        declaration_only,
-        test_symbol,
-        exported,
-        default_export,
-        async_symbol,
-        static_member,
+        implementation,
+        export,
+        execution,
         visibility,
         clone_shape_digest,
         clone_token_profile,
@@ -1877,12 +1929,9 @@ struct NativeSymbolFacts {
     body_search_text: String,
     body_search_truncated: bool,
     health: cartograph_extract::SymbolHealthMetrics,
-    declaration_only: bool,
-    test_symbol: bool,
-    exported: bool,
-    default_export: bool,
-    async_symbol: bool,
-    static_member: bool,
+    implementation: SymbolImplementationFlags,
+    export: SymbolExportFlags,
+    execution: SymbolExecutionFlags,
     visibility: Option<Visibility>,
     clone_shape_digest: ContentDigest,
     clone_token_profile: Option<CloneTokenProfile>,
@@ -1936,8 +1985,8 @@ struct ResolutionCandidate {
     signature: String,
     kind: SymbolKind,
     visibility: Option<Visibility>,
-    exported: bool,
-    declaration_only: bool,
+    implementation: SymbolImplementationFlags,
+    export: SymbolExportFlags,
     top_level: bool,
     augmentation: bool,
 }
@@ -2151,6 +2200,7 @@ struct GoMethodCollection<'context, 'index, Cancel> {
     cancelled: &'context mut Cancel,
 }
 
+#[derive(Clone, Copy)]
 struct GoOwnerQuery<'context, 'index> {
     file: &'context ResolutionFileContext,
     receiver_name: &'context str,
@@ -2176,6 +2226,7 @@ struct GoStructImplementation<'context, 'index> {
     struct_id: &'context SymbolId,
 }
 
+#[derive(Clone, Copy)]
 struct GoMethodScopeQuery<'context, 'index> {
     index: &'index ResolutionIndex,
     structure: &'context GoContainerMethods<'index>,
@@ -2254,8 +2305,8 @@ where
     Ok((containers, owner_lookup))
 }
 
-fn collect_go_container_candidate<'index>(
-    input: GoContainerCandidate<'_, 'index>,
+fn collect_go_container_candidate(
+    input: GoContainerCandidate<'_, '_>,
 ) -> Result<(), StageItemFailure> {
     let GoContainerCandidate {
         index,
@@ -2309,8 +2360,8 @@ fn is_go_container_candidate(key: &str, candidate: &ResolutionCandidate) -> bool
         && matches!(candidate.kind, SymbolKind::Struct | SymbolKind::Interface)
 }
 
-fn attach_go_methods<'index, Cancel>(
-    input: GoMethodCollection<'_, 'index, Cancel>,
+fn attach_go_methods<Cancel>(
+    input: GoMethodCollection<'_, '_, Cancel>,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
@@ -2638,10 +2689,7 @@ fn canonical_go_signature(signature: &str) -> Option<String> {
     let close = matching_group_end(signature, 0, GroupDelimiters::PARENTHESES)?;
     let parameters = signature.get(1..close)?;
     let remainder = signature.get(close.saturating_add(1)..)?.trim();
-    let returns = remainder
-        .strip_prefix(':')
-        .map(str::trim)
-        .unwrap_or(remainder);
+    let returns = remainder.strip_prefix(':').map_or(remainder, str::trim);
     let parameter_types = canonical_go_parameter_list(parameters)?;
     let return_types = if returns.is_empty() {
         Vec::new()
@@ -2839,6 +2887,7 @@ struct VisibleExportQuery<'context, Cancel> {
     cancelled: &'context mut Cancel,
 }
 
+#[derive(Clone, Copy)]
 struct TestEdgeInput<'context> {
     source_symbol_id: &'context SymbolId,
     target_symbol_id: &'context SymbolId,
@@ -3405,7 +3454,10 @@ fn resolve_package_test_import<'index>(
 }
 
 fn rust_integration_crate_root(path: &str) -> Result<Option<String>, StageItemFailure> {
-    if !path.ends_with(".rs") {
+    if !std::path::Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+    {
         return Ok(None);
     }
     let components = path.split('/').collect::<Vec<_>>();
@@ -3768,7 +3820,7 @@ where
     }
     let working_limit = maximum_bytes.checked_mul(3).ok_or(StageItemFailure)?;
     let mut budget = ResolveBudget::new(extracted.retained_bytes, working_limit)?;
-    if !evidence_policy.retain_docstrings {
+    if !evidence_policy.retention.docstrings {
         for file in &mut extracted.files {
             for symbol in &mut file.symbols {
                 symbol.docstring = None;
@@ -3827,13 +3879,13 @@ where
         budget: &mut budget,
         cancelled: &mut cancelled,
     })?;
-    if evidence_policy.compute_page_rank {
+    if evidence_policy.centrality.page_rank {
         apply_page_rank(&mut facts, &mut cancelled).map_err(|_| StageItemFailure)?;
     }
-    if evidence_policy.compute_betweenness {
+    if evidence_policy.centrality.betweenness {
         apply_sampled_betweenness(&mut facts, &mut cancelled).map_err(|_| StageItemFailure)?;
     }
-    if !evidence_policy.retain_call_sites {
+    if !evidence_policy.retention.call_sites {
         facts.references.clear();
     }
     let measurement = facts
@@ -4408,6 +4460,7 @@ struct FrameworkCandidateMutation<'context, Cancel> {
     cancelled: &'context mut Cancel,
 }
 
+#[derive(Clone, Copy)]
 struct FrameworkEdgeInput<'context> {
     source: &'context ResolutionCandidate,
     target: &'context ResolutionCandidate,
@@ -4445,6 +4498,7 @@ struct TurboTargetTierQuery<'context, 'candidate, Cancel> {
     cancelled: &'context mut Cancel,
 }
 
+#[derive(Clone, Copy)]
 struct TaggedCandidateQuery<'context, 'candidate> {
     index: &'context ResolutionIndex,
     candidates: &'candidate [ResolutionCandidate],
@@ -4748,6 +4802,7 @@ where
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct ManifestResourceTargets<'candidate> {
     source: &'candidate ResolutionCandidate,
     qualified_name: &'candidate str,
@@ -4957,9 +5012,9 @@ fn drupal_tag_role(candidate: &ResolutionCandidate) -> Option<(bool, &str)> {
     None
 }
 
-fn unique_drupal_service<'candidate, Cancel>(
-    input: DrupalServiceQuery<'candidate, Cancel>,
-) -> Result<Option<&'candidate ResolutionCandidate>, StageItemFailure>
+fn unique_drupal_service<Cancel>(
+    input: DrupalServiceQuery<'_, Cancel>,
+) -> Result<Option<&ResolutionCandidate>, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
@@ -5177,6 +5232,7 @@ fn normalized_framework_contains(value: &str, needle: &str) -> bool {
     false
 }
 
+#[derive(Clone, Copy)]
 struct TaggedBridgeRule {
     source_tag: &'static str,
     target_tags: &'static [&'static str],
@@ -5288,6 +5344,7 @@ fn append_framework_edge(
     )
 }
 
+#[derive(Clone, Copy)]
 struct DerivedEdgeInput<'symbol> {
     source_symbol_id: &'symbol SymbolId,
     target_symbol_id: &'symbol SymbolId,
@@ -5369,28 +5426,30 @@ fn index_resolution_file_metadata<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    if (input.cancelled)() {
+    let ResolutionIndexFileInput {
+        index,
+        file,
+        budget,
+        cancelled,
+    } = input;
+    if cancelled() {
         return Err(StageItemFailure);
     }
-    index_file_symbol(
-        &mut input.index.file_symbols,
-        &input.file.file,
-        input.budget,
-    )?;
+    index_file_symbol(&mut index.file_symbols, &file.file, budget)?;
     index_module_path(
-        &mut input.index.modules,
+        &mut index.modules,
         ModuleFileIndexInput {
-            file: &input.file.file,
-            package: native_package_name(input.file),
+            file: &file.file,
+            package: native_package_name(file),
         },
-        input.budget,
+        budget,
     )?;
-    index_test_file_evidence(&mut input.index.test_files, input.file, input.budget)?;
-    for containment in &input.file.containments {
-        if (input.cancelled)() {
+    index_test_file_evidence(&mut index.test_files, file, budget)?;
+    for containment in &file.containments {
+        if cancelled() {
             return Err(StageItemFailure);
         }
-        insert_parent(&mut input.index.parents, containment, input.budget)?;
+        insert_parent(&mut index.parents, containment, budget)?;
     }
     Ok(())
 }
@@ -5401,69 +5460,75 @@ fn index_resolution_file_symbols<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    if (input.cancelled)() {
+    let ResolutionIndexFileInput {
+        index,
+        file,
+        budget,
+        cancelled,
+    } = input;
+    if cancelled() {
         return Err(StageItemFailure);
     }
-    for symbol in &input.file.symbols {
-        if (input.cancelled)() {
+    for symbol in &file.symbols {
+        if cancelled() {
             return Err(StageItemFailure);
         }
         if symbol.input.symbol_kind == "import" {
             continue;
         }
-        let parent_symbol_id = input.index.parents.get(&symbol.input.symbol_id).cloned();
+        let parent_symbol_id = index.parents.get(&symbol.input.symbol_id).cloned();
         push_candidate(
-            &mut input.index.candidates,
+            &mut index.candidates,
             ResolutionCandidateInsertion {
                 key: &symbol.name,
                 symbol,
                 parent_symbol_id: parent_symbol_id.as_ref(),
             },
-            input.budget,
+            budget,
         )?;
         if symbol.input.qualified_name != symbol.name {
             push_candidate(
-                &mut input.index.candidates,
+                &mut index.candidates,
                 ResolutionCandidateInsertion {
                     key: &symbol.input.qualified_name,
                     symbol,
                     parent_symbol_id: parent_symbol_id.as_ref(),
                 },
-                input.budget,
+                budget,
             )?;
         }
-        if let Some(alias) = framework_resolution_alias(symbol, &input.file.file.language)
+        if let Some(alias) = framework_resolution_alias(symbol, &file.file.language)
             && alias != symbol.name
             && alias != symbol.input.qualified_name
         {
             push_candidate(
-                &mut input.index.candidates,
+                &mut index.candidates,
                 ResolutionCandidateInsertion {
                     key: alias,
                     symbol,
                     parent_symbol_id: parent_symbol_id.as_ref(),
                 },
-                input.budget,
+                budget,
             )?;
         }
-        if symbol.default_export {
+        if symbol.export.default_export {
             push_default_export(
-                &mut input.index.default_exports,
+                &mut index.default_exports,
                 DefaultExportInsertion {
                     symbol,
                     parent_symbol_id: parent_symbol_id.as_ref(),
                 },
-                input.budget,
+                budget,
             )?;
         }
-        if symbol.exported
+        if symbol.export.exported
             && parent_symbol_id.is_none()
             && symbol.input.qualified_name == symbol.name
         {
-            index_project_export(&mut input.index.exports, symbol, input.budget)?;
+            index_project_export(&mut index.exports, symbol, budget)?;
         }
     }
-    index_project_reexports(input.index, input.file, input.budget)
+    index_project_reexports(index, file, budget)
 }
 
 fn index_project_export(
@@ -5471,7 +5536,7 @@ fn index_project_export(
     symbol: &NativeSymbolFacts,
     budget: &mut ResolveBudget,
 ) -> Result<(), StageItemFailure> {
-    let public_name = if symbol.default_export {
+    let public_name = if symbol.export.default_export {
         "default"
     } else {
         symbol.name.as_str()
@@ -5508,7 +5573,7 @@ fn index_project_export(
         try_clone_text(public_name)?,
         Some(ProjectExport {
             symbol_id: symbol.input.symbol_id.clone(),
-            default_export: symbol.default_export,
+            default_export: symbol.export.default_export,
         }),
     );
     Ok(())
@@ -5709,7 +5774,7 @@ struct FileContainmentInput<'file> {
     containments: Vec<Containment>,
 }
 
-impl<'a> ResolutionOutput<'a> {
+impl ResolutionOutput<'_> {
     fn append_file<Cancel>(
         &mut self,
         file: NativeFileFacts,
@@ -5816,10 +5881,8 @@ impl<'a> ResolutionOutput<'a> {
             end_line: input.line_count,
             structural_digest: input.file.content_hash.clone(),
             visibility: None,
-            exported: false,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
+            export: SymbolExportFlags::default(),
+            execution: SymbolExecutionFlags::default(),
             declaration_only: false,
             betweenness_ppb: None,
             pagerank_ppb: None,
@@ -5983,7 +6046,7 @@ impl<'a> ResolutionOutput<'a> {
             symbol_id: Some(symbol_id),
             path: try_clone_text(&identity.path)?,
             language: try_clone_text(&identity.language)?,
-            kind: if symbol.test_symbol {
+            kind: if symbol.implementation.test_symbol {
                 DocumentKind::Test
             } else {
                 document_kind_for_path(&identity.path, DocumentKind::Symbol)
@@ -5993,15 +6056,15 @@ impl<'a> ResolutionOutput<'a> {
             natural_text: symbol.docstring.unwrap_or_default(),
             metadata: json!({
                 "name": symbol.name,
-                "async": symbol.async_symbol,
+                "async": symbol.execution.async_symbol,
                 "body_search_truncated": symbol.body_search_truncated,
                 "clone_shape_digest": symbol.clone_shape_digest.as_str(),
                 "duplicate_detection_enabled": symbol.duplicate_detection_enabled,
                 "partial_clone": partial_clone,
-                "declaration_only": symbol.declaration_only,
-                "test_symbol": symbol.test_symbol,
-                "default_export": symbol.default_export,
-                "exported": symbol.exported,
+                "declaration_only": symbol.implementation.declaration_only,
+                "test_symbol": symbol.implementation.test_symbol,
+                "default_export": symbol.export.default_export,
+                "exported": symbol.export.exported,
                 "health": {
                     "code_lines": symbol.health.code_lines,
                     "parameter_count": symbol.health.parameter_count,
@@ -6032,7 +6095,7 @@ impl<'a> ResolutionOutput<'a> {
                     "empty_body": symbol.health.empty_body,
                 },
                 "name": symbol.name,
-                "static": symbol.static_member,
+                "static": symbol.execution.static_member,
                 "visibility": symbol.visibility.map(Visibility::as_str),
             }),
         });
@@ -6104,12 +6167,14 @@ fn sum_lengths(
     })
 }
 
+#[derive(Clone, Copy)]
 struct ResolutionCandidateInsertion<'a> {
     key: &'a str,
     symbol: &'a NativeSymbolFacts,
     parent_symbol_id: Option<&'a SymbolId>,
 }
 
+#[derive(Clone, Copy)]
 struct ModulePathInsertion<'a> {
     key: &'a str,
     file_id: &'a FileId,
@@ -6127,6 +6192,7 @@ struct ModuleStemInput<'a> {
     stem: &'a str,
 }
 
+#[derive(Clone, Copy)]
 struct DefaultExportInsertion<'a> {
     symbol: &'a NativeSymbolFacts,
     parent_symbol_id: Option<&'a SymbolId>,
@@ -6330,8 +6396,8 @@ fn push_candidate(
         signature: try_clone_text(&symbol.input.signature)?,
         kind: symbol.kind,
         visibility: symbol.visibility,
-        exported: symbol.exported,
-        declaration_only: symbol.declaration_only,
+        implementation: symbol.implementation,
+        export: symbol.export,
         top_level: symbol.input.qualified_name == symbol.name,
         augmentation: symbol.augmentation,
     });
@@ -6377,8 +6443,8 @@ fn push_default_export(
         signature: try_clone_text(&symbol.input.signature)?,
         kind: symbol.kind,
         visibility: symbol.visibility,
-        exported: symbol.exported,
-        declaration_only: symbol.declaration_only,
+        implementation: symbol.implementation,
+        export: symbol.export,
         top_level: symbol.input.qualified_name == symbol.name,
         augmentation: symbol.augmentation,
     });
@@ -6397,6 +6463,7 @@ struct ResolutionRequest<'a> {
     span: SourceSpan,
 }
 
+#[derive(Clone, Copy)]
 struct ProjectCandidateInput<'a> {
     modules: &'a ModulePathIndex,
     source: &'a ResolutionFileContext,
@@ -6431,6 +6498,7 @@ struct FrameworkSelection<'context, 'request, 'candidate, Cancel> {
     cancelled: &'context mut Cancel,
 }
 
+#[derive(Clone, Copy)]
 struct FrameworkCandidateInput<'context> {
     modules: &'context ModulePathIndex,
     source: &'context ResolutionFileContext,
@@ -6438,6 +6506,7 @@ struct FrameworkCandidateInput<'context> {
     candidate: &'context ResolutionCandidate,
 }
 
+#[derive(Clone, Copy)]
 struct PhpRouteCandidateInput<'context> {
     source: &'context ResolutionFileContext,
     target: &'context ResolutionFileContext,
@@ -6458,17 +6527,20 @@ enum ImportReferenceSite {
     Usage,
 }
 
+#[derive(Clone, Copy)]
 struct ImportResolutionRequest<'a, 'b> {
     reference: &'a ResolutionRequest<'b>,
     site: ImportReferenceSite,
 }
 
+#[derive(Clone, Copy)]
 struct ModuleResolutionRequest<'a> {
     importing_path: &'a str,
     specifier: &'a str,
     importing_language: &'a str,
 }
 
+#[derive(Clone, Copy)]
 struct RustQualifiedModuleQuery<'context, 'request> {
     index: &'context ResolutionIndex,
     request: &'context ResolutionRequest<'request>,
@@ -6477,6 +6549,7 @@ struct RustQualifiedModuleQuery<'context, 'request> {
     allow_unique_project_reexport: bool,
 }
 
+#[derive(Clone, Copy)]
 struct RustCandidateVisibility<'context> {
     index: &'context ResolutionIndex,
     candidate: &'context ResolutionCandidate,
@@ -6484,18 +6557,21 @@ struct RustCandidateVisibility<'context> {
     source_path: &'context str,
 }
 
+#[derive(Clone, Copy)]
 struct IncludeImplementationQuery<'context, 'request> {
     index: &'context ResolutionIndex,
     request: &'context ResolutionRequest<'request>,
     declaration: &'context ResolutionCandidate,
 }
 
+#[derive(Clone, Copy)]
 struct RustNamespaceImportQuery<'context, 'request> {
     index: &'context ResolutionIndex,
     reference: &'context ResolutionRequest<'request>,
     binding: &'context ExtractedImportBinding,
 }
 
+#[derive(Clone, Copy)]
 struct ImportCandidatesQuery<'context> {
     index: &'context ResolutionIndex,
     binding: &'context ExtractedImportBinding,
@@ -6763,10 +6839,7 @@ fn rust_explicit_external_path(request: &ResolutionRequest<'_>) -> bool {
         return false;
     };
     !matches!(root, "crate" | "self" | "super" | "Self")
-        && root
-            .as_bytes()
-            .first()
-            .is_some_and(|first| first.is_ascii_lowercase())
+        && root.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
 }
 
 fn javascript_intrinsic_reference(request: &ResolutionRequest<'_>) -> bool {
@@ -7065,7 +7138,10 @@ fn rust_module_candidate_visible(input: RustCandidateVisibility<'_>) -> bool {
         return false;
     };
     let private_parent_visible = rust_parent_module_contains(source_path, &target.path);
-    if !candidate.exported && candidate.kind != SymbolKind::EnumMember && !private_parent_visible {
+    if !candidate.export.exported
+        && candidate.kind != SymbolKind::EnumMember
+        && !private_parent_visible
+    {
         return false;
     }
     if candidate.parent_symbol_id.is_none() && candidate.top_level {
@@ -7080,7 +7156,7 @@ fn rust_module_candidate_visible(input: RustCandidateVisibility<'_>) -> bool {
     index.candidates.get(parent_name).is_some_and(|parents| {
         parents.iter().any(|parent| {
             parent.file_id == candidate.file_id
-                && (parent.exported || private_parent_visible)
+                && (parent.export.exported || private_parent_visible)
                 && parent.top_level
                 && candidate
                     .parent_symbol_id
@@ -7280,7 +7356,12 @@ where
             return Err(StageItemFailure);
         }
         match binding.kind {
-            ImportBindingKind::IncludeSystem => {}
+            ImportBindingKind::IncludeSystem
+            | ImportBindingKind::Default
+            | ImportBindingKind::Named
+            | ImportBindingKind::Namespace
+            | ImportBindingKind::ReExportAll
+            | ImportBindingKind::ReExportNamespace => {}
             ImportBindingKind::IncludeQuoted => {
                 let Some(file_id) = resolve_quoted_include_file(index, request, binding) else {
                     continue;
@@ -7303,17 +7384,12 @@ where
                     included_candidate = Some(candidate);
                 }
             }
-            ImportBindingKind::Default
-            | ImportBindingKind::Named
-            | ImportBindingKind::Namespace
-            | ImportBindingKind::ReExportAll
-            | ImportBindingKind::ReExportNamespace => {}
         }
     }
     let Some(declaration) = included_candidate else {
         return Ok(ImportResolution::NotBound);
     };
-    let target = if declaration.declaration_only {
+    let target = if declaration.implementation.declaration_only {
         unique_include_implementation(
             IncludeImplementationQuery {
                 index,
@@ -7354,8 +7430,8 @@ where
         candidates,
         |candidate| {
             candidate.symbol_id != declaration.symbol_id
-                && !candidate.declaration_only
-                && candidate.exported
+                && !candidate.implementation.declaration_only
+                && candidate.export.exported
                 && candidate.kind == declaration.kind
                 && candidate.qualified_name == declaration.qualified_name
                 && candidate.signature == declaration.signature
@@ -7373,7 +7449,7 @@ where
 }
 
 fn c_candidate_is_externally_visible(candidate: &ResolutionCandidate) -> bool {
-    candidate.exported && matches!(candidate.visibility, None | Some(Visibility::Public))
+    candidate.export.exported && matches!(candidate.visibility, None | Some(Visibility::Public))
 }
 
 fn resolve_quoted_include_file<'a>(
@@ -7438,7 +7514,7 @@ where
             candidates,
             |candidate| {
                 &candidate.file_id == module_file_id
-                    && candidate.exported
+                    && candidate.export.exported
                     && reference_kind_candidate(reference.kind, candidate)
                     && (reference.language != SourceLanguage::Rust.as_str()
                         || rust_module_candidate_visible(RustCandidateVisibility {
@@ -7688,9 +7764,7 @@ fn missing_import_module_resolution(
     }
 }
 
-fn import_resolution_candidates<'index>(
-    query: ImportCandidatesQuery<'index>,
-) -> &'index [ResolutionCandidate] {
+fn import_resolution_candidates(query: ImportCandidatesQuery<'_>) -> &[ResolutionCandidate] {
     let ImportCandidatesQuery {
         index,
         binding,
@@ -8475,7 +8549,7 @@ fn project_candidate_externally_visible(
     target: &ResolutionFileContext,
     framework_bridge: bool,
 ) -> bool {
-    input.candidate.exported
+    input.candidate.export.exported
         || input.candidate.visibility == Some(Visibility::Public)
         || rust_private_parent_visible(input, target)
         || (framework_bridge && input.candidate.visibility != Some(Visibility::Private))
@@ -8564,6 +8638,7 @@ const FRAMEWORK_SCORE_PHP_MODEL: u8 = 75;
 const FRAMEWORK_SCORE_MODEL: u8 = 70;
 const FRAMEWORK_SCORE_PASCAL_FALLBACK: u8 = 10;
 
+#[derive(Clone, Copy)]
 struct FrameworkConventionInput<'a> {
     reference_name: &'a str,
     source: &'a ResolutionFileContext,
@@ -9273,7 +9348,7 @@ where
         }
         total = total.saturating_add(1);
         sole = Some(candidate);
-        if !candidate.declaration_only {
+        if !candidate.implementation.declaration_only {
             implementations = implementations.saturating_add(1);
             implementation = Some(candidate);
         }
@@ -9613,24 +9688,32 @@ mod tests {
     const INNER_CANCEL_AFTER_POLLS: u64 = 8;
     const TEST_FILE_ID_BYTE: u8 = 0x21;
     const TEST_SYMBOL_ID_BYTE: u8 = 0x42;
+    const CONFIDENCE_TOLERANCE: f32 = 1.0e-6;
+
+    fn confidence_matches(actual: f32, expected: f32) -> bool {
+        (actual - expected).abs() <= CONFIDENCE_TOLERANCE
+    }
+
+    fn assert_confidence(actual: f32, expected: f32) {
+        assert!(
+            confidence_matches(actual, expected),
+            "confidence mismatch: expected {expected}, got {actual}"
+        );
+    }
+
+    fn append_fixture_text(output: &mut String, arguments: std::fmt::Arguments<'_>) {
+        output
+            .write_fmt(arguments)
+            .unwrap_or_else(|error| panic!("could not construct source fixture: {error}"));
+    }
 
     fn test_source_root() -> SourceRoot {
         SourceRoot::open(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
             .unwrap_or_else(|error| panic!("test source root failed: {error}"))
     }
 
-    const FULL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy {
-        compute_page_rank: true,
-        compute_betweenness: true,
-        retain_docstrings: true,
-        retain_call_sites: true,
-    };
-    const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy {
-        compute_page_rank: true,
-        compute_betweenness: true,
-        retain_docstrings: false,
-        retain_call_sites: false,
-    };
+    const FULL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::FULL;
+    const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
         "4548bf7735dc9a9b00579bd5f325b5bd3e1c835d6008fd83a83d4129280e490b";
@@ -10350,8 +10433,10 @@ mod tests {
                 .files()
                 .iter()
                 .find(|file| file.normalized_path == path)
-                .map(|file| &file.file_id)
-                .unwrap_or_else(|| panic!("missing module resolver file {path}"));
+                .map_or_else(
+                    || panic!("missing module resolver file {path}"),
+                    |file| &file.file_id,
+                );
             let mut symbols = self.facts.symbols().iter().filter(|symbol| {
                 &symbol.file_id == file_id && symbol.qualified_name == qualified_name
             });
@@ -10394,8 +10479,10 @@ mod tests {
                 .files()
                 .iter()
                 .find(|file| file.normalized_path == path)
-                .map(|file| &file.file_id)
-                .unwrap_or_else(|| panic!("missing import declaration file {path}"));
+                .map_or_else(
+                    || panic!("missing import declaration file {path}"),
+                    |file| &file.file_id,
+                );
             let file_symbol_id = self
                 .facts
                 .symbols()
@@ -10403,8 +10490,10 @@ mod tests {
                 .find(|symbol| {
                     &symbol.file_id == file_id && symbol.symbol_kind == SymbolKind::File.as_str()
                 })
-                .map(|symbol| &symbol.symbol_id)
-                .unwrap_or_else(|| panic!("missing file graph symbol {path}"));
+                .map_or_else(
+                    || panic!("missing file graph symbol {path}"),
+                    |symbol| &symbol.symbol_id,
+                );
             let mut references = self.facts.references().iter().filter(|reference| {
                 &reference.file_id == file_id
                     && reference.owner_symbol_id.as_ref() == Some(file_symbol_id)
@@ -10632,17 +10721,10 @@ mod tests {
         assert_eq!(generation.facts().files()[0].normalized_path, "small.ts");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn persistent_scip_overlay_replaces_covered_graph_with_exact_typed_edges() {
-        let directory =
-            tempdir().unwrap_or_else(|error| panic!("could not create SCIP fixture: {error}"));
-        assert!(fs::create_dir(directory.path().join(".git")).is_ok());
-        assert!(fs::create_dir(directory.path().join("src")).is_ok());
-        let source = "fn caller() { callee(); }\nfn callee() {}\n";
-        assert!(fs::write(directory.path().join("src/main.rs"), source).is_ok());
-        let caller_symbol = "cartograph cartograph demo 1 `src/main.rs`/caller().";
-        let callee_symbol = "cartograph cartograph demo 1 `src/main.rs`/callee().";
-        let bytes = encode_scip_index(&ScipIndex {
+    fn exact_scip_overlay_fixture() -> Vec<u8> {
+        let source_scip_symbol = "cartograph cartograph demo 1 `src/main.rs`/caller().";
+        let target_scip_symbol = "cartograph cartograph demo 1 `src/main.rs`/callee().";
+        encode_scip_index(&ScipIndex {
             tool_name: "cartograph".to_owned(),
             tool_version: "2.0.0".to_owned(),
             project_root: "cartograph://demo".to_owned(),
@@ -10652,33 +10734,33 @@ mod tests {
                 occurrences: vec![
                     ScipOccurrence {
                         range: vec![0, 0, 25],
-                        symbol: caller_symbol.to_owned(),
+                        symbol: source_scip_symbol.to_owned(),
                         symbol_roles: SYMBOL_ROLE_DEFINITION,
                         enclosing_range: vec![0, 0, 25],
                     },
                     ScipOccurrence {
                         range: vec![0, 14, 20],
-                        symbol: callee_symbol.to_owned(),
+                        symbol: target_scip_symbol.to_owned(),
                         symbol_roles: 0,
                         enclosing_range: vec![0, 0, 25],
                     },
                     ScipOccurrence {
                         range: vec![1, 0, 14],
-                        symbol: callee_symbol.to_owned(),
+                        symbol: target_scip_symbol.to_owned(),
                         symbol_roles: SYMBOL_ROLE_DEFINITION,
                         enclosing_range: vec![1, 0, 14],
                     },
                 ],
                 symbols: vec![
                     ScipSymbolInformation {
-                        symbol: caller_symbol.to_owned(),
+                        symbol: source_scip_symbol.to_owned(),
                         display_name: "caller".to_owned(),
                         kind: 17,
                         documentation: vec!["Entry point".to_owned()],
                         relationships: Vec::new(),
                         enclosing_symbol: String::new(),
                         cartograph_edges: vec![CartographScipEdge {
-                            target_symbol: callee_symbol.to_owned(),
+                            target_symbol: target_scip_symbol.to_owned(),
                             edge_kind: "calls".to_owned(),
                             site_count: 9,
                             provenance: "scip-fixture".to_owned(),
@@ -10686,7 +10768,7 @@ mod tests {
                         }],
                     },
                     ScipSymbolInformation {
-                        symbol: callee_symbol.to_owned(),
+                        symbol: target_scip_symbol.to_owned(),
                         display_name: "callee".to_owned(),
                         kind: 17,
                         documentation: Vec::new(),
@@ -10697,8 +10779,18 @@ mod tests {
                 ],
             }],
         })
-        .unwrap_or_else(|error| panic!("SCIP fixture encode failed: {error}"));
-        let overlay = ScipOverlayInput::new(bytes, 100)
+        .unwrap_or_else(|error| panic!("SCIP fixture encode failed: {error}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn persistent_scip_overlay_replaces_covered_graph_with_exact_typed_edges() {
+        let directory =
+            tempdir().unwrap_or_else(|error| panic!("could not create SCIP fixture: {error}"));
+        assert!(fs::create_dir(directory.path().join(".git")).is_ok());
+        assert!(fs::create_dir(directory.path().join("src")).is_ok());
+        let source = "fn caller() { callee(); }\nfn callee() {}\n";
+        assert!(fs::write(directory.path().join("src/main.rs"), source).is_ok());
+        let overlay = ScipOverlayInput::new(exact_scip_overlay_fixture(), 100)
             .unwrap_or_else(|error| panic!("SCIP overlay config failed: {error}"));
         let (runner, tasks, cancellation) = test_stage_runner(8, TEST_SCOPE_BYTES).await;
         let source_root = SourceRoot::open(directory.path())
@@ -10722,23 +10814,27 @@ mod tests {
             .unwrap_or_else(|| panic!("SCIP report was missing"));
         assert_eq!(report.covered_documents(), 1);
         assert_eq!(report.exact_typed_edges(), 1);
-        let caller = generation
+        let source_id = generation
             .facts()
             .symbols()
             .iter()
             .find(|symbol| symbol.qualified_name == "caller")
-            .map(|symbol| &symbol.symbol_id)
-            .unwrap_or_else(|| panic!("SCIP caller was missing"));
-        let callee = generation
+            .map_or_else(
+                || panic!("SCIP caller was missing"),
+                |symbol| &symbol.symbol_id,
+            );
+        let target_id = generation
             .facts()
             .symbols()
             .iter()
             .find(|symbol| symbol.qualified_name == "callee")
-            .map(|symbol| &symbol.symbol_id)
-            .unwrap_or_else(|| panic!("SCIP callee was missing"));
+            .map_or_else(
+                || panic!("SCIP callee was missing"),
+                |symbol| &symbol.symbol_id,
+            );
         assert!(generation.facts().edges().iter().any(|edge| {
-            &edge.source_symbol_id == caller
-                && &edge.target_symbol_id == callee
+            &edge.source_symbol_id == source_id
+                && &edge.target_symbol_id == target_id
                 && edge.kind == EdgeKind::Calls
                 && edge.site_count == 9
                 && edge.provenance == "scip-overlay:scip-fixture"
@@ -11230,42 +11326,76 @@ mod tests {
         assert_eq!(reference.resolution_provenance, UNRESOLVED_PROVENANCE);
     }
 
+    const NATIVE_FRAMEWORK_BRIDGE_FIXTURES: [(&str, &str); 8] = [
+        (
+            "src/native.ts",
+            "import { NativeModules, TurboModuleRegistry } from 'react-native';\nimport { requireNativeModule } from 'expo-modules-core';\nNativeModules.Geolocation.getCurrentPosition();\nNativeModules.Scanner.startScan();\nconst Haptics = requireNativeModule('ExpoHaptics');\nHaptics.notificationAsync();\nNativeModules.DeviceInfo.getConstants();\nNativeModules.Geolocation.addListener('ignored');\nTurboModuleRegistry.getEnforcing<Spec>('DeviceInfo');\n",
+        ),
+        (
+            "src/NativeDeviceInfo.ts",
+            "interface Spec extends TurboModule {\n  getConstants(): { model: string };\n}\nexport default TurboModuleRegistry.getEnforcing<Spec>('DeviceInfo');\n",
+        ),
+        (
+            "src/FooNativeComponent.ts",
+            "import codegenNativeComponent from 'react-native/Libraries/Utilities/codegenNativeComponent';\ninterface NativeProps { color?: string; }\nexport default codegenNativeComponent<NativeProps>('Foo');\n",
+        ),
+        (
+            "ios/RCTGeolocation.m",
+            "@implementation RCTGeolocation\nRCT_EXPORT_MODULE(Geolocation)\nRCT_EXPORT_METHOD(getCurrentPosition:(RCTResponseSenderBlock)callback) {}\nRCT_EXPORT_METHOD(addListener:(NSString *)name) {}\n@end\n",
+        ),
+        (
+            "ios/RCTDeviceInfo.m",
+            "@implementation RCTDeviceInfo\nRCT_EXPORT_MODULE(DeviceInfo)\n- (NSDictionary *)getConstants { return @{}; }\n@end\n",
+        ),
+        (
+            "ios/RCTFooViewManager.m",
+            "@interface RCTFooViewManager : RCTViewManager\n@end\n@implementation RCTFooViewManager\nRCT_EXPORT_VIEW_PROPERTY(color, NSString)\n@end\n",
+        ),
+        (
+            "android/ScannerModule.kt",
+            "class ScannerModule {\n  @ReactMethod\n  fun startScan() {}\n}\n",
+        ),
+        (
+            "ios/HapticsModule.swift",
+            "import ExpoModulesCore\npublic class HapticsModule: Module {\n  public func definition() -> ModuleDefinition {\n    Name(\"ExpoHaptics\")\n    AsyncFunction(\"notificationAsync\") { }\n  }\n}\n",
+        ),
+    ];
+
+    fn assert_ambiguous_native_bridge_abstains() {
+        let ambiguous = build_capability_generation(
+            &[
+                (
+                    "src/native.ts",
+                    "import { NativeModules } from 'react-native';\nNativeModules.Scanner.startScan();\n",
+                ),
+                (
+                    "android/FirstScannerModule.kt",
+                    "class FirstScannerModule { @ReactMethod fun startScan() {} }\n",
+                ),
+                (
+                    "android/SecondScannerModule.kt",
+                    "class SecondScannerModule { @ReactMethod fun startScan() {} }\n",
+                ),
+            ],
+            false,
+        );
+        let start_scan = ambiguous
+            .references()
+            .iter()
+            .find(|reference| reference.reference_name == "startScan")
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing ambiguous native call: {:?}",
+                    ambiguous.references()
+                )
+            });
+        assert!(start_scan.target_symbol_id.is_none());
+        assert_eq!(start_scan.resolution_provenance, UNRESOLVED_PROVENANCE);
+    }
+
     #[test]
     fn native_framework_bridges_resolve_only_explicit_unique_exports() {
-        let fixtures = [
-            (
-                "src/native.ts",
-                "import { NativeModules, TurboModuleRegistry } from 'react-native';\nimport { requireNativeModule } from 'expo-modules-core';\nNativeModules.Geolocation.getCurrentPosition();\nNativeModules.Scanner.startScan();\nconst Haptics = requireNativeModule('ExpoHaptics');\nHaptics.notificationAsync();\nNativeModules.DeviceInfo.getConstants();\nNativeModules.Geolocation.addListener('ignored');\nTurboModuleRegistry.getEnforcing<Spec>('DeviceInfo');\n",
-            ),
-            (
-                "src/NativeDeviceInfo.ts",
-                "interface Spec extends TurboModule {\n  getConstants(): { model: string };\n}\nexport default TurboModuleRegistry.getEnforcing<Spec>('DeviceInfo');\n",
-            ),
-            (
-                "src/FooNativeComponent.ts",
-                "import codegenNativeComponent from 'react-native/Libraries/Utilities/codegenNativeComponent';\ninterface NativeProps { color?: string; }\nexport default codegenNativeComponent<NativeProps>('Foo');\n",
-            ),
-            (
-                "ios/RCTGeolocation.m",
-                "@implementation RCTGeolocation\nRCT_EXPORT_MODULE(Geolocation)\nRCT_EXPORT_METHOD(getCurrentPosition:(RCTResponseSenderBlock)callback) {}\nRCT_EXPORT_METHOD(addListener:(NSString *)name) {}\n@end\n",
-            ),
-            (
-                "ios/RCTDeviceInfo.m",
-                "@implementation RCTDeviceInfo\nRCT_EXPORT_MODULE(DeviceInfo)\n- (NSDictionary *)getConstants { return @{}; }\n@end\n",
-            ),
-            (
-                "ios/RCTFooViewManager.m",
-                "@interface RCTFooViewManager : RCTViewManager\n@end\n@implementation RCTFooViewManager\nRCT_EXPORT_VIEW_PROPERTY(color, NSString)\n@end\n",
-            ),
-            (
-                "android/ScannerModule.kt",
-                "class ScannerModule {\n  @ReactMethod\n  fun startScan() {}\n}\n",
-            ),
-            (
-                "ios/HapticsModule.swift",
-                "import ExpoModulesCore\npublic class HapticsModule: Module {\n  public func definition() -> ModuleDefinition {\n    Name(\"ExpoHaptics\")\n    AsyncFunction(\"notificationAsync\") { }\n  }\n}\n",
-            ),
-        ];
+        let fixtures = NATIVE_FRAMEWORK_BRIDGE_FIXTURES;
         let forward = build_capability_generation(&fixtures, false);
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
@@ -11341,35 +11471,7 @@ mod tests {
                 && edge.provenance == FABRIC_NATIVE_BRIDGE_PROVENANCE
         }));
 
-        let ambiguous = build_capability_generation(
-            &[
-                (
-                    "src/native.ts",
-                    "import { NativeModules } from 'react-native';\nNativeModules.Scanner.startScan();\n",
-                ),
-                (
-                    "android/FirstScannerModule.kt",
-                    "class FirstScannerModule { @ReactMethod fun startScan() {} }\n",
-                ),
-                (
-                    "android/SecondScannerModule.kt",
-                    "class SecondScannerModule { @ReactMethod fun startScan() {} }\n",
-                ),
-            ],
-            false,
-        );
-        let start_scan = ambiguous
-            .references()
-            .iter()
-            .find(|reference| reference.reference_name == "startScan")
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing ambiguous native call: {:?}",
-                    ambiguous.references()
-                )
-            });
-        assert!(start_scan.target_symbol_id.is_none());
-        assert_eq!(start_scan.resolution_provenance, UNRESOLVED_PROVENANCE);
+        assert_ambiguous_native_bridge_abstains();
     }
 
     #[test]
@@ -11724,8 +11826,10 @@ mod tests {
                 .files()
                 .iter()
                 .find(|file| file.normalized_path == path)
-                .map(|file| &file.file_id)
-                .unwrap_or_else(|| panic!("missing PHP route fixture {path}"));
+                .map_or_else(
+                    || panic!("missing PHP route fixture {path}"),
+                    |file| &file.file_id,
+                );
             assert!(
                 forward.references().iter().any(|reference| {
                     &reference.file_id == file_id
@@ -11840,7 +11944,7 @@ mod tests {
             dispatch_reference.target_symbol_id.as_ref(),
             Some(&handler.symbol_id)
         );
-        assert_eq!(dispatch_reference.confidence, DYNAMIC_DISPATCH_CONFIDENCE);
+        assert_confidence(dispatch_reference.confidence, DYNAMIC_DISPATCH_CONFIDENCE);
         assert!(forward.edges().iter().any(|edge| {
             edge.source_symbol_id == source_file.symbol_id
                 && edge.target_symbol_id == handler.symbol_id
@@ -12054,98 +12158,102 @@ mod tests {
         }
     }
 
+    const TEST_SUBJECT_FIXTURES: [(&str, &str); 13] = [
+        ("src/math.ts", "export function add() { return 2; }\n"),
+        (
+            "src/math.test.ts",
+            "import { add } from './math.js'; test('adds', () => add());\n",
+        ),
+        (
+            "tests/feature.ts",
+            "import { add } from '../src/math.js'; test('feature', () => add());\n",
+        ),
+        ("src/sync/index.ts", "export function sync() {}\n"),
+        (
+            "__tests__/sync.test.ts",
+            "import { sync } from '../src/sync/index.js'; test('syncs', sync);\n",
+        ),
+        ("src/worker.py", "def work():\n    return True\n"),
+        (
+            "tests/test_worker.py",
+            "from src.worker import work\ndef test_work():\n    assert work()\n",
+        ),
+        ("src/parser.rs", "pub fn parse() {}\n"),
+        (
+            "src/parser_test.rs",
+            "use crate::parser::parse;\n#[test]\nfn parses() { parse(); }\n",
+        ),
+        (
+            "crates/core/src/lib.rs",
+            "pub fn run() {}\n#[cfg(test)]\nmod tests { #[test] fn runs() { super::run(); } }\n",
+        ),
+        (
+            "crates/core/tests/api.rs",
+            "use core::run;\n#[test]\nfn api_runs() { run(); }\n",
+        ),
+        (
+            "src/main/java/com/acme/Service.java",
+            "package com.acme; public class Service { public void run() {} }\n",
+        ),
+        (
+            "src/test/java/com/acme/ServiceTest.java",
+            "package com.acme; public class ServiceTest { void verifies() { new Service().run(); } }\n",
+        ),
+    ];
+
+    const EXPECTED_TEST_SUBJECT_EDGES: [(&str, &str, &str, f32); 7] = [
+        (
+            "src/math.test.ts",
+            "src/math.ts",
+            TEST_CONVENTION_PROVENANCE,
+            TEST_CONVENTION_CONFIDENCE,
+        ),
+        (
+            "tests/feature.ts",
+            "src/math.ts",
+            TEST_IMPORT_PROVENANCE,
+            TEST_IMPORT_CONFIDENCE,
+        ),
+        (
+            "__tests__/sync.test.ts",
+            "src/sync/index.ts",
+            TEST_CONVENTION_PROVENANCE,
+            TEST_CONVENTION_CONFIDENCE,
+        ),
+        (
+            "tests/test_worker.py",
+            "src/worker.py",
+            TEST_CONVENTION_PROVENANCE,
+            TEST_CONVENTION_CONFIDENCE,
+        ),
+        (
+            "src/parser_test.rs",
+            "src/parser.rs",
+            TEST_CONVENTION_PROVENANCE,
+            TEST_CONVENTION_CONFIDENCE,
+        ),
+        (
+            "crates/core/tests/api.rs",
+            "crates/core/src/lib.rs",
+            RUST_INTEGRATION_TEST_PROVENANCE,
+            EXTRACTED_EDGE_CONFIDENCE,
+        ),
+        (
+            "src/test/java/com/acme/ServiceTest.java",
+            "src/main/java/com/acme/Service.java",
+            TEST_CONVENTION_PROVENANCE,
+            TEST_CONVENTION_CONFIDENCE,
+        ),
+    ];
+
     #[test]
     fn test_subject_edges_cover_conventions_imports_jvm_and_rust_native_patterns() {
-        let fixtures = [
-            ("src/math.ts", "export function add() { return 2; }\n"),
-            (
-                "src/math.test.ts",
-                "import { add } from './math.js'; test('adds', () => add());\n",
-            ),
-            (
-                "tests/feature.ts",
-                "import { add } from '../src/math.js'; test('feature', () => add());\n",
-            ),
-            ("src/sync/index.ts", "export function sync() {}\n"),
-            (
-                "__tests__/sync.test.ts",
-                "import { sync } from '../src/sync/index.js'; test('syncs', sync);\n",
-            ),
-            ("src/worker.py", "def work():\n    return True\n"),
-            (
-                "tests/test_worker.py",
-                "from src.worker import work\ndef test_work():\n    assert work()\n",
-            ),
-            ("src/parser.rs", "pub fn parse() {}\n"),
-            (
-                "src/parser_test.rs",
-                "use crate::parser::parse;\n#[test]\nfn parses() { parse(); }\n",
-            ),
-            (
-                "crates/core/src/lib.rs",
-                "pub fn run() {}\n#[cfg(test)]\nmod tests { #[test] fn runs() { super::run(); } }\n",
-            ),
-            (
-                "crates/core/tests/api.rs",
-                "use core::run;\n#[test]\nfn api_runs() { run(); }\n",
-            ),
-            (
-                "src/main/java/com/acme/Service.java",
-                "package com.acme; public class Service { public void run() {} }\n",
-            ),
-            (
-                "src/test/java/com/acme/ServiceTest.java",
-                "package com.acme; public class ServiceTest { void verifies() { new Service().run(); } }\n",
-            ),
-        ];
+        let fixtures = TEST_SUBJECT_FIXTURES;
         let forward = build_capability_generation(&fixtures, false);
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
 
-        for (test_path, subject_path, provenance, confidence) in [
-            (
-                "src/math.test.ts",
-                "src/math.ts",
-                TEST_CONVENTION_PROVENANCE,
-                TEST_CONVENTION_CONFIDENCE,
-            ),
-            (
-                "tests/feature.ts",
-                "src/math.ts",
-                TEST_IMPORT_PROVENANCE,
-                TEST_IMPORT_CONFIDENCE,
-            ),
-            (
-                "__tests__/sync.test.ts",
-                "src/sync/index.ts",
-                TEST_CONVENTION_PROVENANCE,
-                TEST_CONVENTION_CONFIDENCE,
-            ),
-            (
-                "tests/test_worker.py",
-                "src/worker.py",
-                TEST_CONVENTION_PROVENANCE,
-                TEST_CONVENTION_CONFIDENCE,
-            ),
-            (
-                "src/parser_test.rs",
-                "src/parser.rs",
-                TEST_CONVENTION_PROVENANCE,
-                TEST_CONVENTION_CONFIDENCE,
-            ),
-            (
-                "crates/core/tests/api.rs",
-                "crates/core/src/lib.rs",
-                RUST_INTEGRATION_TEST_PROVENANCE,
-                EXTRACTED_EDGE_CONFIDENCE,
-            ),
-            (
-                "src/test/java/com/acme/ServiceTest.java",
-                "src/main/java/com/acme/Service.java",
-                TEST_CONVENTION_PROVENANCE,
-                TEST_CONVENTION_CONFIDENCE,
-            ),
-        ] {
+        for (test_path, subject_path, provenance, confidence) in EXPECTED_TEST_SUBJECT_EDGES {
             let test = capability_file_symbol(&forward, test_path);
             let subject = capability_file_symbol(&forward, subject_path);
             assert!(
@@ -12154,7 +12262,7 @@ mod tests {
                         && edge.target_symbol_id == subject.symbol_id
                         && edge.kind == EdgeKind::Tests
                         && edge.provenance == provenance
-                        && edge.confidence == confidence
+                        && confidence_matches(edge.confidence, confidence)
                 }),
                 "missing test edge {test_path} -> {subject_path}: {:?}",
                 forward
@@ -12486,18 +12594,20 @@ mod tests {
         }));
     }
 
+    const SQL_CROSS_LANGUAGE_FIXTURES: [(&str, &str); 2] = [
+        (
+            "db/schema.sql",
+            "CREATE TABLE public.users (id BIGINT PRIMARY KEY);\nCREATE TABLE reporting.orders (id BIGINT PRIMARY KEY, user_id BIGINT REFERENCES public.users(id));\nCREATE VIEW reporting.active_orders AS SELECT o.id FROM reporting.orders o JOIN public.users u ON u.id = o.user_id;\nCREATE FUNCTION reporting.find_users() RETURNS BIGINT AS 'SELECT * FROM public.users' LANGUAGE SQL;\n",
+        ),
+        (
+            "src/repository.ts",
+            "export function loadOrders() { db.query('SELECT * FROM public.users JOIN reporting.orders ON reporting.orders.user_id = public.users.id'); db.exec('UPDATE reporting.orders SET id = id'); db.exec('CREATE TABLE audit_missing(id int)'); }\n",
+        ),
+    ];
+
     #[test]
     fn sql_schema_and_static_application_queries_form_operation_aware_cross_language_edges() {
-        let fixtures = [
-            (
-                "db/schema.sql",
-                "CREATE TABLE public.users (id BIGINT PRIMARY KEY);\nCREATE TABLE reporting.orders (id BIGINT PRIMARY KEY, user_id BIGINT REFERENCES public.users(id));\nCREATE VIEW reporting.active_orders AS SELECT o.id FROM reporting.orders o JOIN public.users u ON u.id = o.user_id;\nCREATE FUNCTION reporting.find_users() RETURNS BIGINT AS 'SELECT * FROM public.users' LANGUAGE SQL;\n",
-            ),
-            (
-                "src/repository.ts",
-                "export function loadOrders() { db.query('SELECT * FROM public.users JOIN reporting.orders ON reporting.orders.user_id = public.users.id'); db.exec('UPDATE reporting.orders SET id = id'); db.exec('CREATE TABLE audit_missing(id int)'); }\n",
-            ),
-        ];
+        let fixtures = SQL_CROSS_LANGUAGE_FIXTURES;
         let forward = build_capability_generation(&fixtures, false);
         let reversed = build_capability_generation(&fixtures, true);
         assert_eq!(forward.digest(), reversed.digest());
@@ -12548,7 +12658,7 @@ mod tests {
                     )
                 });
             assert_eq!(reference.target_symbol_id.as_ref(), Some(&target.symbol_id));
-            assert_eq!(reference.confidence, EMBEDDED_SQL_CONFIDENCE);
+            assert_confidence(reference.confidence, EMBEDDED_SQL_CONFIDENCE);
             assert!(forward.edges().iter().any(|edge| {
                 edge.source_symbol_id == owner.symbol_id
                     && edge.target_symbol_id == target.symbol_id
@@ -12710,8 +12820,10 @@ mod tests {
                 .files()
                 .iter()
                 .find(|file| file.normalized_path == self.path)
-                .map(|file| &file.file_id)
-                .unwrap_or_else(|| panic!("missing capability file {}", self.path));
+                .map_or_else(
+                    || panic!("missing capability file {}", self.path),
+                    |file| &file.file_id,
+                );
             capability_symbol_by(self.facts, file_id, |symbol| {
                 symbol.qualified_name == qualified_name && symbol.symbol_kind == kind.as_str()
             })
@@ -12723,8 +12835,10 @@ mod tests {
                 .files()
                 .iter()
                 .find(|file| file.normalized_path == self.path)
-                .map(|file| &file.file_id)
-                .unwrap_or_else(|| panic!("missing capability file {}", self.path));
+                .map_or_else(
+                    || panic!("missing capability file {}", self.path),
+                    |file| &file.file_id,
+                );
             capability_symbol_by(self.facts, file_id, |symbol| {
                 symbol.qualified_name.contains(qualified_fragment)
                     && symbol.qualified_name.ends_with(&format!("::{name}"))
@@ -12828,14 +12942,15 @@ mod tests {
         .unwrap_or_else(|_| panic!("capability resolution exceeded its declared budget"));
         let validation_limits = generation_validation_limits(maximum_bytes)
             .unwrap_or_else(|error| panic!("capability validation limits failed: {error}"));
-        validate_generation_facts(facts, validation_limits, || false)
-            .map(|(facts, _)| facts)
-            .unwrap_or_else(|error| panic!("capability canonicalization failed: {error}"))
+        validate_generation_facts(facts, validation_limits, || false).map_or_else(
+            |error| panic!("capability canonicalization failed: {error}"),
+            |(facts, _)| facts,
+        )
     }
 
     #[test]
     fn native_clone_analysis_retains_always_on_partial_peer_evidence() {
-        let left = r#"export function calculate(input: number, limit: number): number {
+        let left = r"export function calculate(input: number, limit: number): number {
   log(input);
   const total = input + 1;
   if (total > limit) {
@@ -12848,8 +12963,8 @@ mod tests {
 
   return total;
 }
-"#;
-        let right = r#"export function calculate(input: number, limit: number): number {
+";
+        let right = r"export function calculate(input: number, limit: number): number {
   const total = input + 1;
   if (total > limit) {
     save(total);
@@ -12862,7 +12977,7 @@ mod tests {
 
   return total;
 }
-"#;
+";
         let facts =
             build_capability_generation(&[("src/left.ts", left), ("src/right.ts", right)], false);
         let documents = facts
@@ -12888,17 +13003,25 @@ mod tests {
 
     #[test]
     fn wider_partial_clone_band_adds_only_the_opt_in_080_to_095_evidence() {
-        let common_statements = (0..40)
-            .map(|index| format!("  shared_{index}(input);\n"))
-            .collect::<String>();
+        let mut common_statements = String::new();
+        for index in 0..40 {
+            append_fixture_text(
+                &mut common_statements,
+                format_args!("  shared_{index}(input);\n"),
+            );
+        }
         let mut divergent_statements = String::new();
         for index in 0..40 {
             if index < 4 {
-                divergent_statements.push_str(&format!(
-                    "  if (input > {index}) {{ alternate_{index}(input); }}\n"
-                ));
+                append_fixture_text(
+                    &mut divergent_statements,
+                    format_args!("  if (input > {index}) {{ alternate_{index}(input); }}\n"),
+                );
             } else {
-                divergent_statements.push_str(&format!("  shared_{index}(input);\n"));
+                append_fixture_text(
+                    &mut divergent_statements,
+                    format_args!("  shared_{index}(input);\n"),
+                );
             }
         }
         let left = format!(
@@ -12948,8 +13071,10 @@ mod tests {
             .files()
             .iter()
             .find(|file| file.normalized_path == path)
-            .map(|file| &file.file_id)
-            .unwrap_or_else(|| panic!("missing capability file {path}"));
+            .map_or_else(
+                || panic!("missing capability file {path}"),
+                |file| &file.file_id,
+            );
         capability_symbol_by(facts, file_id, |symbol| {
             symbol.symbol_kind == SymbolKind::File.as_str()
         })
@@ -12964,8 +13089,10 @@ mod tests {
             .files()
             .iter()
             .find(|file| file.normalized_path == path)
-            .map(|file| &file.file_id)
-            .unwrap_or_else(|| panic!("missing capability file {path}"));
+            .map_or_else(
+                || panic!("missing capability file {path}"),
+                |file| &file.file_id,
+            );
         capability_symbol_by(facts, file_id, |symbol| {
             symbol.qualified_name == qualified_name
         })
@@ -12980,8 +13107,10 @@ mod tests {
             .files()
             .iter()
             .find(|file| file.normalized_path == path)
-            .map(|file| &file.file_id)
-            .unwrap_or_else(|| panic!("missing capability file {path}"));
+            .map_or_else(
+                || panic!("missing capability file {path}"),
+                |file| &file.file_id,
+            );
         facts
             .references()
             .iter()
@@ -13415,18 +13544,12 @@ mod tests {
                      export class A {{ log(): void {{}} }}\n\
                      export class B {{ log(): void {{}} }}\n\
                      export function local(): void {{ console.log('x'); }}\n\
-                     export const credentials = {{ token: '{}' }};\n\
-                     export function scalar(token = '{}'): void {{}}\n\
-                     export function destructured({{ token = '{}' }} = {{}}): void {{}}\n\
-                     export const arrow = (token = '{}'): void => {{}};\n\
-                     export class Client {{ method(token = '{}'): void {{}} }}\n\
-                     export function Component({{ token = '{}' }} = {{}}): null {{ return null; }}\n",
-                    INITIALIZER_SECRET,
-                    SCALAR_DEFAULT_SECRET,
-                    DESTRUCTURED_DEFAULT_SECRET,
-                    ARROW_DEFAULT_SECRET,
-                    METHOD_DEFAULT_SECRET,
-                    COMPONENT_DEFAULT_SECRET,
+                     export const credentials = {{ token: '{INITIALIZER_SECRET}' }};\n\
+                     export function scalar(token = '{SCALAR_DEFAULT_SECRET}'): void {{}}\n\
+                     export function destructured({{ token = '{DESTRUCTURED_DEFAULT_SECRET}' }} = {{}}): void {{}}\n\
+                     export const arrow = (token = '{ARROW_DEFAULT_SECRET}'): void => {{}};\n\
+                     export class Client {{ method(token = '{METHOD_DEFAULT_SECRET}'): void {{}} }}\n\
+                     export function Component({{ token = '{COMPONENT_DEFAULT_SECRET}' }} = {{}}): null {{ return null; }}\n",
                 ),
             )
             .is_ok()
@@ -13488,9 +13611,13 @@ mod tests {
             .join("/");
         let path = format!("{directory}/many.ts");
         assert!(path.len() > MINIMUM_LONG_PATH_BYTES);
-        let source = (0..MANY_SYMBOL_COUNT)
-            .map(|index| format!("export function symbol_{index}(): void {{}}\n"))
-            .collect::<String>();
+        let mut source = String::new();
+        for index in 0..MANY_SYMBOL_COUNT {
+            append_fixture_text(
+                &mut source,
+                format_args!("export function symbol_{index}(): void {{}}\n"),
+            );
+        }
         let limits = SourceLimits::new(TEST_SOURCE_BYTES)
             .unwrap_or_else(|error| panic!("source limits were invalid: {error}"));
         let snapshot =
@@ -13557,9 +13684,13 @@ mod tests {
 
     #[test]
     fn resolve_polls_cancellation_between_candidate_symbols() {
-        let source = (0..CANCELLATION_SYMBOL_COUNT)
-            .map(|index| format!("export class Symbol{index} {{}}\n"))
-            .collect::<String>();
+        let mut source = String::new();
+        for index in 0..CANCELLATION_SYMBOL_COUNT {
+            append_fixture_text(
+                &mut source,
+                format_args!("export class Symbol{index} {{}}\n"),
+            );
+        }
         let limits = SourceLimits::new(TEST_SOURCE_BYTES)
             .unwrap_or_else(|error| panic!("source limits were invalid: {error}"));
         let snapshot =
@@ -13610,8 +13741,8 @@ mod tests {
                     signature: String::new(),
                     kind: SymbolKind::Function,
                     visibility: None,
-                    exported: true,
-                    declaration_only: false,
+                    implementation: SymbolImplementationFlags::default(),
+                    export: SymbolExportFlags::named(true),
                     top_level: true,
                     augmentation: false,
                 }
@@ -13629,9 +13760,10 @@ mod tests {
 
     #[test]
     fn unresolved_reference_edge_capacity_is_part_of_the_retained_proof() {
-        let calls = (0..256)
-            .map(|index| format!("missing_{index}();"))
-            .collect::<String>();
+        let mut calls = String::new();
+        for index in 0..256 {
+            append_fixture_text(&mut calls, format_args!("missing_{index}();"));
+        }
         let source = format!("export function owner(): void {{ {calls} }}\n");
         let limits = SourceLimits::new(TEST_SOURCE_BYTES)
             .unwrap_or_else(|error| panic!("source limits were invalid: {error}"));

@@ -17,12 +17,19 @@ const AUDIT_MODEL_INDEXES_COLUMN: usize = 6;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingStorageAudit {
+    /// Number of active models.
     pub active_models: u64,
+    /// Number of retired models.
     pub retired_models: u64,
+    /// Number of current documents.
     pub current_documents: u64,
+    /// Number of current embeddings.
     pub current_embeddings: u64,
+    /// Number of historical embeddings.
     pub historical_embeddings: u64,
+    /// Number of retired model embeddings.
     pub retired_model_embeddings: u64,
+    /// Number of model indexes.
     pub model_indexes: u64,
 }
 
@@ -30,14 +37,22 @@ pub struct EmbeddingStorageAudit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetiredEmbeddingCleanupReport {
+    /// Whether the operation reports changes without applying them.
     pub dry_run: bool,
+    /// Number of candidate embeddings.
     pub candidate_embeddings: u64,
+    /// Number of deleted embeddings.
     pub deleted_embeddings: u64,
+    /// Number of dropped model indexes.
     pub dropped_model_indexes: u64,
 }
 
 impl CartographDatabase {
     /// Audit semantic storage without requiring the configured HTTP endpoint.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid or semantic model/document/
+    /// vector counts and allocated bytes cannot be queried or decoded.
     pub async fn embedding_storage_audit(
         &self,
         project_id: &ProjectId,
@@ -109,6 +124,10 @@ impl CartographDatabase {
 
     /// Delete only vectors owned by explicitly retired models. Active-model
     /// and historical-generation vectors are never candidates.
+    /// # Errors
+    ///
+    /// Returns an error if the deadline is invalid, retired-vector counts are
+    /// malformed, or the optional transactional deletion cannot complete.
     pub async fn cleanup_retired_embeddings(
         &self,
         project_id: &ProjectId,
@@ -172,6 +191,37 @@ impl CartographDatabase {
             .fetch_all(&mut *transaction)
             .await
             .map_err(|_| database_error("embedding-cleanup-models"))?;
+        let dropped = RetiredModelIndexCleanup {
+            connection: &mut transaction,
+            schema_name: self.schema.as_str(),
+            quoted_schema: &schema,
+        }
+        .drop_all(model_rows)
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("embedding-cleanup-commit"))?;
+        Ok(RetiredEmbeddingCleanupReport {
+            dry_run: false,
+            candidate_embeddings: candidates,
+            deleted_embeddings: deleted,
+            dropped_model_indexes: dropped,
+        })
+    }
+}
+
+struct RetiredModelIndexCleanup<'connection> {
+    connection: &'connection mut sqlx_postgres::PgConnection,
+    schema_name: &'connection str,
+    quoted_schema: &'connection str,
+}
+
+impl RetiredModelIndexCleanup<'_> {
+    async fn drop_all(
+        &mut self,
+        model_rows: Vec<sqlx_postgres::PgRow>,
+    ) -> Result<u64, SemanticStorageError> {
         let mut dropped = 0_u64;
         for row in model_rows {
             let model_id = row
@@ -184,38 +234,29 @@ impl CartographDatabase {
                 "document_embeddings_model_{}_hnsw",
                 model_id.replace('-', "")
             );
-            let drop_sql = format!(r#"DROP INDEX IF EXISTS {schema}."{index}""#);
+            let drop_sql = format!(r#"DROP INDEX IF EXISTS {}."{index}""#, self.quoted_schema);
             let existed = query(
-                r#"SELECT EXISTS (
+                r"SELECT EXISTS (
                     SELECT 1 FROM pg_catalog.pg_class AS indexes
                     JOIN pg_catalog.pg_namespace AS namespaces
                       ON namespaces.oid = indexes.relnamespace
                     WHERE namespaces.nspname = $1 AND indexes.relname = $2
-                )"#,
+                )",
             )
-            .bind(self.schema.as_str())
+            .bind(self.schema_name)
             .bind(&index)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut *self.connection)
             .await
             .ok()
             .and_then(|row| row.try_get::<bool, _>(0).ok())
             .unwrap_or(false);
             query(AssertSqlSafe(drop_sql))
-                .execute(&mut *transaction)
+                .execute(&mut *self.connection)
                 .await
                 .map_err(|_| database_error("embedding-cleanup-drop-index"))?;
             dropped = dropped.saturating_add(u64::from(existed));
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| database_error("embedding-cleanup-commit"))?;
-        Ok(RetiredEmbeddingCleanupReport {
-            dry_run: false,
-            candidate_embeddings: candidates,
-            deleted_embeddings: deleted,
-            dropped_model_indexes: dropped,
-        })
+        Ok(dropped)
     }
 }
 

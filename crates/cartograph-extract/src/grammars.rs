@@ -8,62 +8,119 @@ use tree_sitter::Language;
 /// language's structural/custom extractor and black-box corpus pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeGrammar {
+    /// Represents the abap native grammar.
     Abap,
+    /// Represents the apex native grammar.
     Apex,
+    /// Represents the ark ts native grammar.
     ArkTs,
+    /// Represents the astro native grammar.
     Astro,
+    /// Represents the bash native grammar.
     Bash,
+    /// Represents the c native grammar.
     C,
+    /// Represents the clojure native grammar.
     Clojure,
+    /// Represents the common lisp native grammar.
     CommonLisp,
+    /// Represents the cpp native grammar.
     Cpp,
+    /// Represents the csharp native grammar.
     CSharp,
+    /// Represents the css native grammar.
     Css,
+    /// Represents the cuda native grammar.
     Cuda,
+    /// Represents the dart native grammar.
     Dart,
+    /// Represents the elixir native grammar.
     Elixir,
+    /// Represents the embedded template native grammar.
     EmbeddedTemplate,
+    /// Represents the fish native grammar.
     Fish,
+    /// Represents the fsharp native grammar.
     FSharp,
+    /// Represents the glsl native grammar.
     Glsl,
+    /// Represents the go native grammar.
     Go,
+    /// Represents the graph ql native grammar.
     GraphQl,
+    /// Represents the groovy native grammar.
     Groovy,
+    /// Represents the haskell native grammar.
     Haskell,
+    /// Represents the hcl native grammar.
     Hcl,
+    /// Represents the hlsl native grammar.
     Hlsl,
+    /// Represents the html native grammar.
     Html,
+    /// Represents the java native grammar.
     Java,
+    /// Represents the java script native grammar.
     JavaScript,
+    /// Represents the js doc native grammar.
     JsDoc,
+    /// Represents the JSON native grammar.
     Json,
+    /// Represents the julia native grammar.
     Julia,
+    /// Represents the kotlin native grammar.
     Kotlin,
+    /// Represents the lean native grammar.
     Lean,
+    /// Represents the lua native grammar.
     Lua,
+    /// Represents the luau native grammar.
     Luau,
+    /// Represents the nix native grammar.
     Nix,
+    /// Represents the objective c native grammar.
     ObjectiveC,
+    /// Represents the ocaml native grammar.
     Ocaml,
+    /// Represents the ocaml interface native grammar.
     OcamlInterface,
+    /// Represents the pascal native grammar.
     Pascal,
+    /// Represents the php native grammar.
     Php,
+    /// Represents the power shell native grammar.
     PowerShell,
+    /// Represents the prisma native grammar.
     Prisma,
+    /// Represents the python native grammar.
     Python,
+    /// Represents the r native grammar.
     R,
+    /// Represents the regex native grammar.
     Regex,
+    /// Represents the re script native grammar.
     ReScript,
+    /// Represents the ruby native grammar.
     Ruby,
+    /// Represents the rust native grammar.
     Rust,
+    /// Represents the scala native grammar.
     Scala,
+    /// Represents the solidity native grammar.
     Solidity,
+    /// Represents the SQL native grammar.
     Sql,
+    /// Represents the swift native grammar.
     Swift,
+    /// Represents the tsx native grammar.
     Tsx,
+    /// Represents the type script native grammar.
     TypeScript,
+    /// Represents the visual basic native grammar.
     VisualBasic,
+    /// Represents the verilog native grammar.
     Verilog,
+    /// Represents the yaml native grammar.
     Yaml,
 }
 

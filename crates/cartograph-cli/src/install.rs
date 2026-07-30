@@ -1,7 +1,8 @@
 mod jsonc;
 
 use std::{
-    env, fs,
+    env,
+    fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -30,7 +31,7 @@ const PERMISSIONS: [&str; 7] = [
     "mcp__cartograph__cartograph_at_range",
     "mcp__cartograph__cartograph_status",
 ];
-const INSTRUCTIONS: &str = r#"<!-- CARTOGRAPH_START -->
+const INSTRUCTIONS: &str = r"<!-- CARTOGRAPH_START -->
 ## Cartograph
 
 Cartograph v2 is this workspace's native Rust code-intelligence MCP server. Its
@@ -48,7 +49,7 @@ control path; a CLI result does not prove an already-open host restarted MCP.
 If Cartograph is not initialized, ask before running `cartograph db start`,
 `cartograph doctor`, and `cartograph index`. Never print or commit a PostgreSQL
 URL. Use the narrowest MCP profile that supports the task.
-<!-- CARTOGRAPH_END -->"#;
+<!-- CARTOGRAPH_END -->";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -338,8 +339,8 @@ pub(crate) struct InstallRequest {
 }
 
 impl InstallRequest {
-    pub(crate) fn new(input: InstallRequestInput<'_>) -> Result<Self, InstallError> {
-        let InstallRequestInput {
+    pub(crate) fn new(input: &InstallRequestInput<'_>) -> Result<Self, InstallError> {
+        let &InstallRequestInput {
             project_root,
             executable,
             target,
@@ -374,8 +375,8 @@ impl InstallRequest {
     }
 
     #[cfg(test)]
-    fn new_for_test(input: TestInstallRequest<'_>) -> Result<Self, InstallError> {
-        let mut request = Self::new(InstallRequestInput {
+    fn new_for_test(input: &TestInstallRequest<'_>) -> Result<Self, InstallError> {
+        let mut request = Self::new(&InstallRequestInput {
             project_root: input.project_root,
             executable: input.executable,
             target: input.target,
@@ -392,7 +393,7 @@ impl InstallRequest {
         let Ok(config) = self.config_location() else {
             return false;
         };
-        config.path.exists() || config.path.parent().is_some_and(|parent| parent.exists())
+        config.path.exists() || config.path.parent().is_some_and(std::path::Path::exists)
     }
 
     pub(crate) const fn with_managed_database_port(mut self, port: u16) -> Self {
@@ -429,25 +430,25 @@ impl InstallRequest {
             InstallTarget::Codebuddy => Ok(self.codebuddy_location()),
             InstallTarget::Copilot if self.local() => Ok(self.copilot_local_location()),
             InstallTarget::Copilot => Ok(self.dynamic_config_location(
-                self.env_root("COPILOT_HOME", ".copilot")?,
+                &self.env_root("COPILOT_HOME", ".copilot")?,
                 "mcp-config.json",
             )),
             InstallTarget::Zed => {
-                Ok(self.dynamic_config_location(self.xdg_root()?, "zed/settings.json"))
+                Ok(self.dynamic_config_location(&self.xdg_root()?, "zed/settings.json"))
             }
             InstallTarget::Opencode => {
-                Ok(self.dynamic_config_location(self.xdg_root()?, "opencode/opencode.json"))
+                Ok(self.dynamic_config_location(&self.xdg_root()?, "opencode/opencode.json"))
             }
             InstallTarget::Hermes => Ok(self
-                .dynamic_config_location(self.env_root("HERMES_HOME", ".hermes")?, "config.yaml")),
+                .dynamic_config_location(&self.env_root("HERMES_HOME", ".hermes")?, "config.yaml")),
             InstallTarget::Antigravity => Ok(self.antigravity_location()),
             InstallTarget::Rovo => self.rovo_location(),
             InstallTarget::Kimi => Ok(self.dynamic_config_location(
-                self.env_root("KIMI_CODE_HOME", ".kimi-code")?,
+                &self.env_root("KIMI_CODE_HOME", ".kimi-code")?,
                 "mcp.json",
             )),
             InstallTarget::Pi => Ok(self.dynamic_config_location(
-                self.env_root("PI_CODING_AGENT_DIR", ".pi/agent")?,
+                &self.env_root("PI_CODING_AGENT_DIR", ".pi/agent")?,
                 "mcp.json",
             )),
             _ => Err(InstallError::InvalidConfig),
@@ -465,13 +466,13 @@ impl InstallRequest {
         Some(config_under(root, rule.suffix))
     }
 
-    fn dynamic_config_location(&self, root: PathBuf, suffix: &str) -> ConfigLocation {
+    fn dynamic_config_location(&self, root: &Path, suffix: &str) -> ConfigLocation {
         let allowed_root = if root.starts_with(&self.home) {
             self.home.clone()
         } else if root.starts_with(&self.project_root) {
             self.project_root.clone()
         } else {
-            root.clone()
+            root.to_path_buf()
         };
         ConfigLocation {
             path: root.join(suffix),
@@ -763,7 +764,7 @@ pub(crate) fn print_config(request: &InstallRequest) -> Result<String, InstallEr
         }
         InstallTarget::Claude if request.local() => {
             let project = path_text(&request.project_root)?;
-            pretty_json(json!({
+            pretty_json(&json!({
                 "projects": { (project): { "mcpServers": { "cartograph": entry(request)? } } }
             }))?
         }
@@ -781,7 +782,7 @@ pub(crate) fn print_config(request: &InstallRequest) -> Result<String, InstallEr
                 wrapper.to_owned(),
                 Value::Object(Map::from_iter([("cartograph".to_owned(), entry(request)?)])),
             );
-            pretty_json(Value::Object(root))?
+            pretty_json(&Value::Object(root))?
         }
     };
     Ok(format!("# Add to {}\n\n{body}", location.path.display()))
@@ -899,7 +900,7 @@ fn install_json(
         return Ok(file_report(&config.path, InstallAction::Unchanged));
     }
     servers.insert("cartograph".to_owned(), desired);
-    let rendered = pretty_json(Value::Object(root))?;
+    let rendered = pretty_json(&Value::Object(root))?;
     let action = if prior.is_some() {
         InstallAction::Updated
     } else {
@@ -940,7 +941,7 @@ fn uninstall_json(
     if !removed {
         return Ok(file_report(&config.path, InstallAction::NotFound));
     }
-    let rendered = pretty_json(Value::Object(root))?;
+    let rendered = pretty_json(&Value::Object(root))?;
     write_private_config(config, rendered.as_bytes())?;
     Ok(file_report(&config.path, InstallAction::Removed))
 }
@@ -1015,7 +1016,7 @@ fn install_claude(
         return Ok(file_report(&config.path, InstallAction::Unchanged));
     }
     servers.insert("cartograph".to_owned(), desired);
-    let rendered = pretty_json(Value::Object(root))?;
+    let rendered = pretty_json(&Value::Object(root))?;
     let action = if prior.is_some() {
         InstallAction::Updated
     } else {
@@ -1110,9 +1111,9 @@ fn install_hermes(
     {
         return Ok(file_report(&config.path, InstallAction::Unchanged));
     }
-    let without_server = remove_yaml_top_child(&prior, "mcp_servers", "cartograph")?;
+    let without_server = remove_yaml_top_child(&prior, "mcp_servers", "cartograph");
     let with_server = append_yaml_child(&without_server, "mcp_servers", &desired_server);
-    let without_tool = remove_yaml_list_item(&with_server, HERMES_TOOLSET)?;
+    let without_tool = remove_yaml_list_item(&with_server, HERMES_TOOLSET);
     let rendered = append_yaml_list_item(&without_tool, HERMES_TOOLSET);
     if rendered == prior {
         return Ok(file_report(&config.path, InstallAction::Unchanged));
@@ -1130,8 +1131,8 @@ fn uninstall_hermes(config: &ConfigLocation) -> Result<InstallFileReport, Instal
     let Some(prior) = read_optional_config(&config.path)? else {
         return Ok(file_report(&config.path, InstallAction::NotFound));
     };
-    let without_server = remove_yaml_top_child(&prior, "mcp_servers", "cartograph")?;
-    let rendered = remove_yaml_list_item(&without_server, HERMES_TOOLSET)?;
+    let without_server = remove_yaml_top_child(&prior, "mcp_servers", "cartograph");
+    let rendered = remove_yaml_list_item(&without_server, HERMES_TOOLSET);
     if rendered == prior {
         return Ok(file_report(&config.path, InstallAction::NotFound));
     }
@@ -1153,16 +1154,16 @@ fn render_hermes_server(request: &InstallRequest) -> String {
     )
 }
 
-fn remove_yaml_top_child(text: &str, parent: &str, child: &str) -> Result<String, InstallError> {
+fn remove_yaml_top_child(text: &str, parent: &str, child: &str) -> String {
     let lines = normalized_lines(text);
     let Some((parent_start, parent_end)) = yaml_top_range(&lines, parent) else {
-        return Ok(ensure_trailing_newline(text));
+        return ensure_trailing_newline(text);
     };
     let prefix = format!("  {child}:");
     let Some(child_start) =
         (parent_start + 1..parent_end).find(|index| lines[*index].trim_end() == prefix)
     else {
-        return Ok(ensure_trailing_newline(text));
+        return ensure_trailing_newline(text);
     };
     let child_end = (child_start + 1..parent_end)
         .find(|index| {
@@ -1172,7 +1173,7 @@ fn remove_yaml_top_child(text: &str, parent: &str, child: &str) -> Result<String
         .unwrap_or(parent_end);
     let mut retained = lines;
     retained.drain(child_start..child_end);
-    Ok(join_lines(retained))
+    join_lines(retained)
 }
 
 fn append_yaml_child(text: &str, parent: &str, child_block: &str) -> String {
@@ -1203,7 +1204,7 @@ const HERMES_TOOLSET: YamlListItem<'static> = YamlListItem {
     item: "mcp-cartograph",
 };
 
-fn remove_yaml_list_item(text: &str, input: YamlListItem<'_>) -> Result<String, InstallError> {
+fn remove_yaml_list_item(text: &str, input: YamlListItem<'_>) -> String {
     let YamlListItem {
         parent,
         child,
@@ -1211,13 +1212,13 @@ fn remove_yaml_list_item(text: &str, input: YamlListItem<'_>) -> Result<String, 
     } = input;
     let mut lines = normalized_lines(text);
     let Some((parent_start, parent_end)) = yaml_top_range(&lines, parent) else {
-        return Ok(ensure_trailing_newline(text));
+        return ensure_trailing_newline(text);
     };
     let child_line = format!("  {child}:");
     let Some(child_start) =
         (parent_start + 1..parent_end).find(|index| lines[*index].trim_end() == child_line)
     else {
-        return Ok(ensure_trailing_newline(text));
+        return ensure_trailing_newline(text);
     };
     let child_end = (child_start + 1..parent_end)
         .find(|index| {
@@ -1232,7 +1233,7 @@ fn remove_yaml_list_item(text: &str, input: YamlListItem<'_>) -> Result<String, 
     lines.retain_with_index(|index, line| {
         !(index > child_start && index < child_end && line.trim() == expected)
     });
-    Ok(join_lines(lines))
+    join_lines(lines)
 }
 
 fn append_yaml_list_item(text: &str, input: YamlListItem<'_>) -> String {
@@ -1306,7 +1307,7 @@ fn normalized_lines(text: &str) -> Vec<String> {
 }
 
 fn join_lines(mut lines: Vec<String>) -> String {
-    while lines.last().is_some_and(|line| line.is_empty()) {
+    while lines.last().is_some_and(std::string::String::is_empty) {
         lines.pop();
     }
     if lines.is_empty() {
@@ -1317,7 +1318,7 @@ fn join_lines(mut lines: Vec<String>) -> String {
 }
 
 fn yaml_quote(value: &str) -> String {
-    format!("{:?}", value)
+    format!("{value:?}")
 }
 
 fn install_claude_artifacts(
@@ -1325,7 +1326,7 @@ fn install_claude_artifacts(
 ) -> Result<Vec<InstallFileReport>, InstallError> {
     let mut files = Vec::new();
     if request.permissions {
-        files.push(upsert_permissions(request, claude_settings_path(request)?)?);
+        files.push(upsert_permissions(request, claude_settings_path(request))?);
     }
     files.push(write_marked(
         request,
@@ -1450,7 +1451,7 @@ fn uninstall_artifacts(request: &InstallRequest) -> Result<Vec<InstallFileReport
     let mut files = Vec::new();
     match request.target {
         InstallTarget::Claude => {
-            files.push(remove_permissions(request, claude_settings_path(request)?)?);
+            files.push(remove_permissions(request, claude_settings_path(request))?);
             files.push(remove_marked(request, claude_instructions_path(request))?);
             files.push(remove_owned(request, claude_skill_path(request))?);
         }
@@ -1513,12 +1514,12 @@ fn uninstall_artifacts(request: &InstallRequest) -> Result<Vec<InstallFileReport
     Ok(files)
 }
 
-fn claude_settings_path(request: &InstallRequest) -> Result<PathBuf, InstallError> {
-    Ok(if request.local() {
+fn claude_settings_path(request: &InstallRequest) -> PathBuf {
+    if request.local() {
         request.project_root.join(".claude/settings.local.json")
     } else {
         request.home.join(".claude/settings.json")
-    })
+    }
 }
 
 fn claude_instructions_path(request: &InstallRequest) -> PathBuf {
@@ -1543,8 +1544,9 @@ fn upsert_permissions(
     request: &InstallRequest,
     path: PathBuf,
 ) -> Result<InstallFileReport, InstallError> {
-    let config = artifact_location(request, path.clone())?;
-    let prior = read_optional_config(&path)?;
+    let config = artifact_location(request, path)?;
+    let path = &config.path;
+    let prior = read_optional_config(path)?;
     let mut root = parse_json_object(prior.as_deref())?;
     let permissions = object_field(&mut root, "permissions")?;
     let allow = permissions
@@ -1561,24 +1563,26 @@ fn upsert_permissions(
         }
     }
     if prior.is_some() && before == *allow {
-        return Ok(file_report(&path, InstallAction::Unchanged));
+        return Ok(file_report(path, InstallAction::Unchanged));
     }
-    let rendered = pretty_json(Value::Object(root))?;
+    let rendered = pretty_json(&Value::Object(root))?;
     let action = if prior.is_some() {
         InstallAction::Updated
     } else {
         InstallAction::Created
     };
     write_private_config(&config, rendered.as_bytes())?;
-    Ok(file_report(&path, action))
+    Ok(file_report(path, action))
 }
 
 fn remove_permissions(
     request: &InstallRequest,
     path: PathBuf,
 ) -> Result<InstallFileReport, InstallError> {
-    let Some(prior) = read_optional_config(&path)? else {
-        return Ok(file_report(&path, InstallAction::NotFound));
+    let config = artifact_location(request, path)?;
+    let path = &config.path;
+    let Some(prior) = read_optional_config(path)? else {
+        return Ok(file_report(path, InstallAction::NotFound));
     };
     let mut root = parse_json_object(Some(&prior))?;
     let Some(allow) = root
@@ -1587,7 +1591,7 @@ fn remove_permissions(
         .and_then(|permissions| permissions.get_mut("allow"))
         .and_then(Value::as_array_mut)
     else {
-        return Ok(file_report(&path, InstallAction::NotFound));
+        return Ok(file_report(path, InstallAction::NotFound));
     };
     let before = allow.len();
     allow.retain(|value| {
@@ -1596,12 +1600,11 @@ fn remove_permissions(
             .is_none_or(|permission| !permission.starts_with("mcp__cartograph__"))
     });
     if before == allow.len() {
-        return Ok(file_report(&path, InstallAction::NotFound));
+        return Ok(file_report(path, InstallAction::NotFound));
     }
-    let config = artifact_location(request, path.clone())?;
-    let rendered = pretty_json(Value::Object(root))?;
+    let rendered = pretty_json(&Value::Object(root))?;
     write_private_config(&config, rendered.as_bytes())?;
-    Ok(file_report(&path, InstallAction::Removed))
+    Ok(file_report(path, InstallAction::Removed))
 }
 
 fn write_marked(
@@ -1609,15 +1612,16 @@ fn write_marked(
     path: PathBuf,
     prefix: Option<&str>,
 ) -> Result<InstallFileReport, InstallError> {
-    let prior = read_optional_config(&path)?;
+    let config = artifact_location(request, path)?;
+    let path = &config.path;
+    let prior = read_optional_config(path)?;
     let rendered = replace_marked(prior.as_deref().unwrap_or_default(), INSTRUCTIONS, prefix)?;
     if prior.as_deref() == Some(rendered.as_str()) {
-        return Ok(file_report(&path, InstallAction::Unchanged));
+        return Ok(file_report(path, InstallAction::Unchanged));
     }
-    let config = artifact_location(request, path.clone())?;
     write_guidance(&config, rendered.as_bytes())?;
     Ok(file_report(
-        &path,
+        path,
         if prior.is_some() {
             InstallAction::Updated
         } else {
@@ -1630,11 +1634,13 @@ fn remove_marked(
     request: &InstallRequest,
     path: PathBuf,
 ) -> Result<InstallFileReport, InstallError> {
-    let Some(prior) = read_optional_config(&path)? else {
-        return Ok(file_report(&path, InstallAction::NotFound));
+    let config = artifact_location(request, path)?;
+    let path = &config.path;
+    let Some(prior) = read_optional_config(path)? else {
+        return Ok(file_report(path, InstallAction::NotFound));
     };
     let Some(start) = prior.find(SECTION_START) else {
-        return Ok(file_report(&path, InstallAction::NotFound));
+        return Ok(file_report(path, InstallAction::NotFound));
     };
     let Some(relative_end) = prior[start..].find(SECTION_END) else {
         return Err(InstallError::InvalidConfig);
@@ -1647,9 +1653,8 @@ fn remove_marked(
     if !rendered.is_empty() {
         rendered.push('\n');
     }
-    let config = artifact_location(request, path.clone())?;
     write_guidance(&config, rendered.as_bytes())?;
-    Ok(file_report(&path, InstallAction::Removed))
+    Ok(file_report(path, InstallAction::Removed))
 }
 
 fn replace_marked(prior: &str, body: &str, prefix: Option<&str>) -> Result<String, InstallError> {
@@ -1684,18 +1689,19 @@ fn write_owned(
     path: PathBuf,
     body: &str,
 ) -> Result<InstallFileReport, InstallError> {
-    let prior = read_optional_config(&path)?;
+    let config = artifact_location(request, path)?;
+    let path = &config.path;
+    let prior = read_optional_config(path)?;
     let mut rendered = body.to_owned();
     if !rendered.ends_with('\n') {
         rendered.push('\n');
     }
     if prior.as_deref() == Some(rendered.as_str()) {
-        return Ok(file_report(&path, InstallAction::Unchanged));
+        return Ok(file_report(path, InstallAction::Unchanged));
     }
-    let config = artifact_location(request, path.clone())?;
     write_guidance(&config, rendered.as_bytes())?;
     Ok(file_report(
-        &path,
+        path,
         if prior.is_some() {
             InstallAction::Updated
         } else {
@@ -1708,21 +1714,22 @@ fn remove_owned(
     request: &InstallRequest,
     path: PathBuf,
 ) -> Result<InstallFileReport, InstallError> {
-    let metadata = match fs::symlink_metadata(&path) {
+    let config = artifact_location(request, path)?;
+    let path = &config.path;
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(file_report(&path, InstallAction::NotFound));
+            return Ok(file_report(path, InstallAction::NotFound));
         }
         Err(_) => return Err(InstallError::ReadConfig),
     };
     if !metadata.file_type().is_file() {
         return Err(InstallError::UnsafeConfig);
     }
-    let config = artifact_location(request, path.clone())?;
-    let parent = safe_config_parent(&path, &config.allowed_root)?;
-    fs::remove_file(&path).map_err(|_| InstallError::WriteConfig)?;
+    let parent = safe_config_parent(path, &config.allowed_root)?;
+    fs::remove_file(path).map_err(|_| InstallError::WriteConfig)?;
     sync_parent(parent)?;
-    Ok(file_report(&path, InstallAction::Removed))
+    Ok(file_report(path, InstallAction::Removed))
 }
 
 fn artifact_location(
@@ -1784,7 +1791,7 @@ fn ensure_project_config_ignored(
         rendered.push_str(&pattern);
         rendered.push('\n');
     }
-    write_atomic(AtomicWrite {
+    write_atomic(&AtomicWrite {
         path: &path,
         contents: rendered.as_bytes(),
         allowed_root: &request.project_root,
@@ -1897,8 +1904,8 @@ fn object_field<'a>(
         .ok_or(InstallError::InvalidConfig)
 }
 
-fn pretty_json(value: Value) -> Result<String, InstallError> {
-    serde_json::to_string_pretty(&value)
+fn pretty_json(value: &Value) -> Result<String, InstallError> {
+    serde_json::to_string_pretty(value)
         .map(|rendered| format!("{rendered}\n"))
         .map_err(|_| InstallError::InvalidConfig)
 }
@@ -1918,7 +1925,7 @@ fn read_optional_config(path: &Path) -> Result<Option<String>, InstallError> {
 }
 
 fn write_private_config(config: &ConfigLocation, contents: &[u8]) -> Result<(), InstallError> {
-    write_atomic(AtomicWrite {
+    write_atomic(&AtomicWrite {
         path: &config.path,
         contents,
         allowed_root: &config.allowed_root,
@@ -1927,7 +1934,7 @@ fn write_private_config(config: &ConfigLocation, contents: &[u8]) -> Result<(), 
 }
 
 fn write_guidance(config: &ConfigLocation, contents: &[u8]) -> Result<(), InstallError> {
-    write_atomic(AtomicWrite {
+    write_atomic(&AtomicWrite {
         path: &config.path,
         contents,
         allowed_root: &config.allowed_root,
@@ -1942,12 +1949,12 @@ struct AtomicWrite<'input> {
     unix_mode: u32,
 }
 
-fn write_atomic(input: AtomicWrite<'_>) -> Result<(), InstallError> {
-    let AtomicWrite {
+fn write_atomic(input: &AtomicWrite<'_>) -> Result<(), InstallError> {
+    let &AtomicWrite {
         path,
         contents,
         allowed_root,
-        unix_mode: _unix_mode,
+        unix_mode,
     } = input;
     if u64::try_from(contents.len()).unwrap_or(u64::MAX) > MAX_CONFIG_BYTES {
         return Err(InstallError::UnsafeConfig);
@@ -1960,18 +1967,24 @@ fn write_atomic(input: AtomicWrite<'_>) -> Result<(), InstallError> {
     }
     let mut file =
         tempfile::NamedTempFile::new_in(parent).map_err(|_| InstallError::WriteConfig)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.as_file()
-            .set_permissions(fs::Permissions::from_mode(_unix_mode))
-            .map_err(|_| InstallError::WriteConfig)?;
-    }
+    set_atomic_permissions(file.as_file(), unix_mode)?;
     file.write_all(contents)
         .and_then(|()| file.as_file().sync_all())
         .map_err(|_| InstallError::WriteConfig)?;
     file.persist(path).map_err(|_| InstallError::WriteConfig)?;
     sync_parent(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_atomic_permissions(file: &File, unix_mode: u32) -> Result<(), InstallError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(fs::Permissions::from_mode(unix_mode))
+        .map_err(|_| InstallError::WriteConfig)
+}
+
+#[cfg(not(unix))]
+const fn set_atomic_permissions(_file: &File, _unix_mode: u32) -> Result<(), InstallError> {
     Ok(())
 }
 
@@ -2082,7 +2095,7 @@ mod tests {
         target: InstallTarget,
         location: InstallLocation,
     ) -> InstallRequest {
-        InstallRequest::new_for_test(TestInstallRequest {
+        InstallRequest::new_for_test(&TestInstallRequest {
             project_root: project,
             executable,
             target,

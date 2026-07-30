@@ -25,6 +25,9 @@ pub struct FileSurfaceQuery {
 
 impl FileSurfaceQuery {
     /// Build a bounded inventory query.
+    /// # Errors
+    ///
+    /// Returns an error if `limit` is zero or exceeds the file-surface row cap.
     pub fn new(limit: u16) -> Result<Self, StorageError> {
         validate_limit(limit, MAX_FILE_ROWS, "file_surface_limit")?;
         Ok(Self {
@@ -50,6 +53,10 @@ impl FileSurfaceQuery {
     }
 
     /// Apply an anchored PostgreSQL regular expression generated from a bounded glob.
+    /// # Errors
+    ///
+    /// Returns an error if the optional expression is empty, contains a NUL
+    /// byte, or exceeds the path-regex byte bound.
     pub fn with_path_regex(mut self, regex: Option<&str>) -> Result<Self, StorageError> {
         if regex.is_some_and(|value| {
             value.is_empty() || value.len() > MAX_PATH_REGEX_BYTES || value.contains('\0')
@@ -76,21 +83,25 @@ pub struct FileSurfaceRow {
 
 impl FileSurfaceRow {
     #[must_use]
+    /// Returns the path.
     pub fn path(&self) -> &str {
         &self.path
     }
 
     #[must_use]
+    /// Returns the language.
     pub fn language(&self) -> &str {
         &self.language
     }
 
     #[must_use]
+    /// Returns the byte size.
     pub const fn byte_size(&self) -> u64 {
         self.byte_size
     }
 
     #[must_use]
+    /// Returns the symbol count.
     pub const fn symbol_count(&self) -> u64 {
         self.symbol_count
     }
@@ -139,16 +150,19 @@ pub struct FileAggregateResult {
 
 impl FileAggregateResult {
     #[must_use]
+    /// Returns the languages.
     pub fn languages(&self) -> &[FileLanguageAggregate] {
         &self.languages
     }
 
     #[must_use]
+    /// Returns the directories.
     pub fn directories(&self) -> &[FileDirectoryAggregate] {
         &self.directories
     }
 
     #[must_use]
+    /// Returns whether additional matching directories were omitted.
     pub const fn directories_truncated(&self) -> bool {
         self.directories_truncated
     }
@@ -156,26 +170,31 @@ impl FileAggregateResult {
 
 impl FileSurfaceResult {
     #[must_use]
+    /// Returns the files.
     pub fn files(&self) -> &[FileSurfaceRow] {
         &self.files
     }
 
     #[must_use]
+    /// Returns the total files.
     pub const fn total_files(&self) -> u64 {
         self.total_files
     }
 
     #[must_use]
+    /// Returns the total bytes.
     pub const fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
 
     #[must_use]
+    /// Returns the total symbols.
     pub const fn total_symbols(&self) -> u64 {
         self.total_symbols
     }
 
     #[must_use]
+    /// Whether the file limit omitted additional matching rows.
     pub const fn truncated(&self) -> bool {
         self.truncated
     }
@@ -185,9 +204,12 @@ impl FileSurfaceResult {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileDependencyDirection {
+    /// Return files referenced by the anchor file.
     Dependencies,
+    /// Return files that reference the anchor file.
     Dependents,
     #[default]
+    /// Return both dependencies and dependents.
     Both,
 }
 
@@ -210,6 +232,12 @@ pub struct FileDependencyQuery {
 }
 
 impl FileDependencyQuery {
+    /// Creates a validated file dependency query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `per_direction_limit` is zero or exceeds the
+    /// bounded adjacent-file row maximum.
     pub fn new(path: NormalizedPath, per_direction_limit: u16) -> Result<Self, StorageError> {
         validate_limit(
             per_direction_limit,
@@ -224,6 +252,7 @@ impl FileDependencyQuery {
     }
 
     #[must_use]
+    /// Sets the direction and returns the updated value.
     pub const fn with_direction(mut self, direction: FileDependencyDirection) -> Self {
         self.direction = direction;
         self
@@ -253,6 +282,7 @@ pub struct FileDependencyResult {
 
 impl FileDependencyResult {
     #[must_use]
+    /// Returns the rows.
     pub fn rows(&self) -> &[FileDependencyRow] {
         &self.rows
     }
@@ -260,6 +290,10 @@ impl FileDependencyResult {
 
 impl CartographDatabase {
     /// Return a file inventory whose directory/language/glob filters precede LIMIT.
+    /// # Errors
+    ///
+    /// Returns an error if the row limit is invalid or filtered current-file
+    /// records and their structural counts cannot be queried or decoded.
     pub async fn current_file_surface(
         &self,
         project_id: &ProjectId,
@@ -344,6 +378,10 @@ impl CartographDatabase {
     }
 
     /// Aggregate the complete filtered file set before any directory output cap.
+    /// # Errors
+    ///
+    /// Returns an error if `directory_limit` is invalid or the complete
+    /// filtered aggregate cannot be queried, bounded, or decoded.
     pub async fn current_file_aggregates(
         &self,
         project_id: &ProjectId,
@@ -352,76 +390,7 @@ impl CartographDatabase {
     ) -> Result<FileAggregateResult, StorageError> {
         validate_limit(directory_limit, MAX_FILE_ROWS, "file_aggregate_limit")?;
         let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"WITH current AS (
-                    SELECT current_generation_id AS generation_id
-                    FROM {schema}."projects"
-                    WHERE project_id = CAST($1 AS uuid)
-                ), selected AS (
-                    SELECT files.normalized_path, files.language, files.byte_size,
-                           COUNT(symbols.symbol_id) FILTER (
-                               WHERE symbols.symbol_kind <> 'file'
-                           )::bigint AS symbol_count
-                    FROM {schema}."files" AS files
-                    JOIN current ON current.generation_id = files.generation_id
-                    LEFT JOIN {schema}."symbols" AS symbols
-                      ON symbols.project_id = files.project_id
-                     AND symbols.generation_id = files.generation_id
-                     AND symbols.file_id = files.file_id
-                    WHERE files.project_id = CAST($1 AS uuid)
-                      AND ($2::text IS NULL
-                           OR files.normalized_path = $2
-                           OR LEFT(files.normalized_path, LENGTH($2) + 1) = $2 || '/')
-                      AND ($3::text IS NULL OR files.language = $3)
-                      AND ($4::text IS NULL OR files.normalized_path ~ $4)
-                    GROUP BY files.file_id, files.normalized_path, files.language,
-                             files.byte_size
-                ), language_rollup AS (
-                    SELECT language AS key, COUNT(*)::bigint AS files,
-                           SUM(symbol_count)::bigint AS symbols,
-                           SUM(byte_size)::bigint AS bytes
-                    FROM selected
-                    GROUP BY language
-                ), path_parts AS (
-                    SELECT selected.*,
-                           regexp_split_to_array(selected.normalized_path, '/') AS parts
-                    FROM selected
-                ), directory_membership AS (
-                    SELECT path_parts.normalized_path, path_parts.symbol_count,
-                           path_parts.byte_size,
-                           CASE
-                             WHEN array_length(parts, 1) = 1 THEN '.'
-                             ELSE array_to_string(parts[1:depth], '/')
-                           END AS directory
-                    FROM path_parts
-                    CROSS JOIN LATERAL generate_series(
-                        1,
-                        GREATEST(array_length(parts, 1) - 1, 1)
-                    ) AS levels(depth)
-                ), directory_rollup AS (
-                    SELECT directory AS key, COUNT(*)::bigint AS files,
-                           SUM(symbol_count)::bigint AS symbols,
-                           SUM(byte_size)::bigint AS bytes
-                    FROM directory_membership
-                    GROUP BY directory
-                ), aggregates AS (
-                    SELECT 'language'::text AS kind, key, files, symbols, bytes,
-                           COUNT(*) OVER ()::bigint AS kind_total,
-                           ROW_NUMBER() OVER (ORDER BY files DESC, key) AS kind_rank
-                    FROM language_rollup
-                    UNION ALL
-                    SELECT 'directory'::text AS kind, key, files, symbols, bytes,
-                           COUNT(*) OVER ()::bigint AS kind_total,
-                           ROW_NUMBER() OVER (ORDER BY key) AS kind_rank
-                    FROM directory_rollup
-                )
-                SELECT kind, key, files, symbols, bytes, kind_total
-                FROM aggregates
-                WHERE kind = 'language' OR kind_rank <= $5
-                ORDER BY CASE kind WHEN 'language' THEN 0 ELSE 1 END,
-                         CASE WHEN kind = 'language' THEN files END DESC,
-                         key"#,
-        );
+        let statement = include_str!("sql/file_aggregates.sql").replace("{schema}", &schema);
         let rows = self
             .file_rows(
                 statement,
@@ -469,6 +438,10 @@ impl CartographDatabase {
     }
 
     /// Aggregate cross-file structural edges with independent direction caps.
+    /// # Errors
+    ///
+    /// Returns an error if the per-direction bound is invalid or current
+    /// cross-file edges cannot be queried, aggregated, or decoded.
     pub async fn current_file_dependencies(
         &self,
         project_id: &ProjectId,
@@ -480,86 +453,7 @@ impl CartographDatabase {
             "file_dependency_limit",
         )?;
         let schema = quoted_schema(&self.schema);
-        let statement = format!(
-            r#"WITH current AS (
-                    SELECT current_generation_id AS generation_id
-                    FROM {schema}."projects"
-                    WHERE project_id = CAST($1 AS uuid)
-                ), anchor AS (
-                    SELECT files.file_id
-                    FROM {schema}."files" AS files
-                    JOIN current ON current.generation_id = files.generation_id
-                    WHERE files.project_id = CAST($1 AS uuid)
-                      AND files.normalized_path = $2
-                ), links AS (
-                    SELECT 'dependencies'::text AS direction,
-                           target_files.normalized_path AS path,
-                           target_files.language,
-                           COUNT(*)::bigint AS edge_count,
-                           SUM(edges.site_count)::bigint AS site_count,
-                           array_agg(DISTINCT edges.edge_kind ORDER BY edges.edge_kind) AS edge_kinds
-                    FROM {schema}."edges" AS edges
-                    JOIN current ON current.generation_id = edges.generation_id
-                    JOIN {schema}."symbols" AS source
-                      ON source.project_id = edges.project_id
-                     AND source.generation_id = edges.generation_id
-                     AND source.symbol_id = edges.source_symbol_id
-                    JOIN anchor ON anchor.file_id = source.file_id
-                    JOIN {schema}."symbols" AS target
-                      ON target.project_id = edges.project_id
-                     AND target.generation_id = edges.generation_id
-                     AND target.symbol_id = edges.target_symbol_id
-                    JOIN {schema}."files" AS target_files
-                      ON target_files.project_id = target.project_id
-                     AND target_files.generation_id = target.generation_id
-                     AND target_files.file_id = target.file_id
-                    WHERE edges.project_id = CAST($1 AS uuid)
-                      AND source.file_id <> target.file_id
-                      AND edges.edge_kind <> 'contains'
-                    GROUP BY target_files.normalized_path, target_files.language
-                    UNION ALL
-                    SELECT 'dependents'::text AS direction,
-                           source_files.normalized_path AS path,
-                           source_files.language,
-                           COUNT(*)::bigint AS edge_count,
-                           SUM(edges.site_count)::bigint AS site_count,
-                           array_agg(DISTINCT edges.edge_kind ORDER BY edges.edge_kind) AS edge_kinds
-                    FROM {schema}."edges" AS edges
-                    JOIN current ON current.generation_id = edges.generation_id
-                    JOIN {schema}."symbols" AS target
-                      ON target.project_id = edges.project_id
-                     AND target.generation_id = edges.generation_id
-                     AND target.symbol_id = edges.target_symbol_id
-                    JOIN anchor ON anchor.file_id = target.file_id
-                    JOIN {schema}."symbols" AS source
-                      ON source.project_id = edges.project_id
-                     AND source.generation_id = edges.generation_id
-                     AND source.symbol_id = edges.source_symbol_id
-                    JOIN {schema}."files" AS source_files
-                      ON source_files.project_id = source.project_id
-                     AND source_files.generation_id = source.generation_id
-                     AND source_files.file_id = source.file_id
-                    WHERE edges.project_id = CAST($1 AS uuid)
-                      AND source.file_id <> target.file_id
-                      AND edges.edge_kind <> 'contains'
-                    GROUP BY source_files.normalized_path, source_files.language
-                ), ranked AS (
-                    SELECT links.*,
-                           COUNT(*) OVER (PARTITION BY direction)::bigint AS direction_total,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY direction
-                               ORDER BY site_count DESC, edge_count DESC, path
-                           ) AS direction_rank
-                    FROM links
-                    WHERE $3::text = 'both' OR direction = $3
-                )
-                SELECT direction, path, language, edge_count, site_count,
-                       edge_kinds, direction_total
-                FROM ranked
-                WHERE direction_rank <= $4
-                ORDER BY CASE direction WHEN 'dependencies' THEN 0 ELSE 1 END,
-                         direction_rank, path"#,
-        );
+        let statement = include_str!("sql/file_dependencies.sql").replace("{schema}", &schema);
         let rows = self
             .file_rows(
                 statement,

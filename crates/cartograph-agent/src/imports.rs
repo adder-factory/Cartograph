@@ -10,6 +10,7 @@ use cartograph_domain::{ContentDigest, ProjectId, SourceLanguage, SourceManifest
 use cartograph_extract::{
     DiscoveredSource, SourceDiscoveryOptions, SourceLimits, SourceReadOptions, SourceRoot,
 };
+use memchr::memchr_iter;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -40,18 +41,23 @@ const JS_TO_TS_REWRITES: &[(&str, &[&str])] = &[
 #[serde(rename_all = "snake_case")]
 pub enum ImportAuditSource {
     #[default]
+    /// Represents the static import audit source.
     Static,
+    /// Represents the literal import audit source.
     Literal,
+    /// Represents the all import audit source.
     All,
 }
 
 impl ImportAuditSource {
     #[must_use]
+    /// Returns whether AST-confirmed static imports are included.
     pub const fn includes_static(self) -> bool {
         matches!(self, Self::Static | Self::All)
     }
 
     #[must_use]
+    /// Returns whether import-shaped string literals are included.
     pub const fn includes_literal(self) -> bool {
         matches!(self, Self::Literal | Self::All)
     }
@@ -61,10 +67,15 @@ impl ImportAuditSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportAuditTarget {
+    /// Represents the file import audit target.
     File,
+    /// Represents the directory import audit target.
     Directory,
+    /// Represents the bare import audit target.
     Bare,
+    /// Represents the unresolvable import audit target.
     Unresolvable,
+    /// Represents the literal import audit target.
     Literal,
 }
 
@@ -72,7 +83,9 @@ pub enum ImportAuditTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportOrigin {
+    /// Represents the static import origin.
     Static,
+    /// Represents the literal import origin.
     Literal,
 }
 
@@ -90,6 +103,12 @@ pub struct ImportAuditOptions {
 }
 
 impl ImportAuditOptions {
+    /// Creates validated import-audit limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImportAuditError::InvalidOptions`] when `limit` is zero or
+    /// exceeds the maximum returned import count.
     pub fn new(limit: usize) -> Result<Self, ImportAuditError> {
         if limit == 0 || limit > MAXIMUM_IMPORT_RESULTS {
             return Err(ImportAuditError::InvalidOptions);
@@ -107,40 +126,57 @@ impl ImportAuditOptions {
     }
 
     #[must_use]
+    /// Sets the source and returns the updated value.
     pub const fn with_source(mut self, source: ImportAuditSource) -> Self {
         self.source = source;
         self
     }
 
     #[must_use]
+    /// Sets the target and returns the updated value.
     pub const fn with_target(mut self, target: Option<ImportAuditTarget>) -> Self {
         self.target = target;
         self
     }
 
     #[must_use]
+    /// Sets the extension missing and returns the updated value.
     pub const fn with_extension_missing(mut self, value: Option<bool>) -> Self {
         self.extension_missing = value;
         self
     }
 
     #[must_use]
+    /// Sets the dynamic and returns the updated value.
     pub const fn with_dynamic(mut self, value: Option<bool>) -> Self {
         self.dynamic = value;
         self
     }
 
+    /// Sets the path filter and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImportAuditError::InvalidOptions`] when the filter is empty,
+    /// oversized, contains NUL, is absolute, or contains a parent segment.
     pub fn with_path_filter(mut self, value: Option<&str>) -> Result<Self, ImportAuditError> {
         self.path_filter = value.map(validate_path_filter).transpose()?;
         Ok(self)
     }
 
+    /// Sets the language and returns the updated value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImportAuditError::InvalidOptions`] when the language filter is
+    /// empty, oversized, contains NUL, or is not a known source-language label.
     pub fn with_language(mut self, value: Option<&str>) -> Result<Self, ImportAuditError> {
         self.language = value.map(validate_language_filter).transpose()?;
         Ok(self)
     }
 
     #[must_use]
+    /// Sets the exclude fixtures and returns the updated value.
     pub const fn with_exclude_fixtures(mut self, value: bool) -> Self {
         self.exclude_fixtures = value;
         self
@@ -186,26 +222,31 @@ pub struct ImportHit {
 
 impl ImportHit {
     #[must_use]
+    /// Returns the symbol ID.
     pub fn symbol_id(&self) -> Option<&str> {
         self.symbol_id.as_deref()
     }
 
     #[must_use]
+    /// Returns the file.
     pub fn file(&self) -> &str {
         &self.file
     }
 
     #[must_use]
+    /// Returns the line.
     pub const fn line(&self) -> u32 {
         self.line
     }
 
     #[must_use]
+    /// Returns the specifier.
     pub fn specifier(&self) -> &str {
         &self.specifier
     }
 
     #[must_use]
+    /// Returns the target path.
     pub fn target_path(&self) -> Option<&str> {
         self.target_path.as_deref()
     }
@@ -234,6 +275,7 @@ pub struct ImportAuditRequest {
 
 impl ImportAuditRequest {
     #[must_use]
+    /// Creates a validated import audit request.
     pub const fn new(
         project_id: ProjectId,
         options: ImportAuditOptions,
@@ -251,21 +293,32 @@ impl ImportAuditRequest {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ImportAuditError {
     #[error("import audit options are invalid")]
+    /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
     #[error("current import evidence is unavailable")]
+    /// The required durable storage operation could not complete.
     StorageUnavailable,
     #[error("the complete current source corpus could not be audited")]
+    /// Required source evidence could not be read safely.
     SourceUnavailable,
     #[error("the source or published generation changed during the import audit")]
+    /// Live source no longer matches the generation or digest fence.
     SourceChanged,
     #[error("the import audit exceeded its explicit evidence bound")]
+    /// Admitted evidence exceeded its declared item ceiling.
     EvidenceLimit,
     #[error("the import audit was cancelled")]
+    /// The caller requested cancellation before the bounded operation completed.
     Cancelled,
 }
 
 impl ProjectRuntime {
     /// Audit every bounded current-generation import before applying response filters.
+    /// # Errors
+    ///
+    /// Returns an error when current import storage or complete live source is
+    /// unavailable, evidence exceeds its ceiling, source/generation identity
+    /// changes during the audit, or cancellation wins.
     pub async fn audit_imports(
         &self,
         request: ImportAuditRequest,
@@ -422,12 +475,13 @@ struct PreparedImportCorpus<'corpus> {
     source_filter: ImportAuditSource,
 }
 
+#[derive(Clone, Copy)]
 struct StaticHitInput<'hit> {
     known_paths: &'hit BTreeSet<String>,
     go_module: Option<&'hit str>,
     aliases: Option<&'hit TsAliases>,
     snapshot: &'hit cartograph_extract::SourceSnapshot,
-    import: ImportInsight,
+    import: &'hit ImportInsight,
 }
 
 #[derive(Clone, Copy)]
@@ -529,7 +583,7 @@ where
                         go_module: go_module.as_deref(),
                         aliases: aliases.as_ref(),
                         snapshot: &snapshot,
-                        import,
+                        import: &import,
                     })?,
                 )?;
             }
@@ -694,6 +748,7 @@ enum CIncludeStyle {
     Angled,
 }
 
+#[derive(Clone, Copy)]
 struct ClassifyRequest<'a> {
     known_paths: &'a BTreeSet<String>,
     importing_path: &'a str,
@@ -1326,13 +1381,8 @@ impl<'a> LiteralScanner<'a> {
     fn advance(&mut self, amount: usize) {
         let end = self.index.saturating_add(amount).min(self.bytes.len());
         self.line = self.line.saturating_add(
-            u32::try_from(
-                self.bytes[self.index..end]
-                    .iter()
-                    .filter(|byte| **byte == b'\n')
-                    .count(),
-            )
-            .unwrap_or(u32::MAX),
+            u32::try_from(memchr_iter(b'\n', &self.bytes[self.index..end]).count())
+                .unwrap_or(u32::MAX),
         );
         self.index = end;
     }
@@ -1399,7 +1449,7 @@ fn one_based_line(source: &str, start: usize) -> Result<u32, ImportAuditError> {
         .as_bytes()
         .get(..start)
         .ok_or(ImportAuditError::SourceChanged)?;
-    let newlines = prefix.iter().filter(|byte| **byte == b'\n').count();
+    let newlines = memchr_iter(b'\n', prefix).count();
     u32::try_from(newlines)
         .ok()
         .and_then(|line| line.checked_add(1))
@@ -1489,7 +1539,10 @@ mod tests {
             classify("./missing").target,
             ImportAuditTarget::Unresolvable
         );
-        assert!(classify("./typed.js").target_path.as_deref() == Some("src/typed.ts"));
+        assert_eq!(
+            classify("./typed.js").target_path.as_deref(),
+            Some("src/typed.ts")
+        );
     }
 
     #[test]

@@ -13,8 +13,10 @@ const MAXIMUM_SCHEMAS_PER_PREFIX: usize = 128;
 /// A schema prefix could not be registered or cleaned safely.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum TestSchemaCleanupError {
+    /// The requested schema prefix is not a bounded PostgreSQL identifier.
     #[error("test schema prefix is invalid")]
     InvalidPrefix,
+    /// Connecting, enumerating, or dropping the requested test schemas failed.
     #[error("test schema cleanup failed")]
     CleanupFailed,
 }
@@ -39,6 +41,11 @@ impl std::fmt::Debug for TestSchemaGuard {
 
 impl TestSchemaGuard {
     /// Arm cleanup for the exact schema and names beginning with `schema_`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TestSchemaCleanupError::InvalidPrefix`] when the supplied
+    /// schema is not a bounded safe prefix.
     pub fn new(
         database_url: impl Into<String>,
         schema: impl Into<String>,
@@ -54,6 +61,11 @@ impl TestSchemaGuard {
     }
 
     /// Clean now and disarm the drop fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TestSchemaCleanupError::CleanupFailed`] when the guard is
+    /// already disarmed or the database cleanup cannot complete.
     pub async fn cleanup(mut self) -> Result<(), TestSchemaCleanupError> {
         let (database_url, prefix) = self.take().ok_or(TestSchemaCleanupError::CleanupFailed)?;
         cleanup_schemas(&database_url, &prefix).await

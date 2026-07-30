@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::RetrievalPreference;
+
 const ERROR_TERMS: &[&str] = &[
     "bug",
     "crash",
@@ -11,7 +13,6 @@ const ERROR_TERMS: &[&str] = &[
     "failing",
     "failure",
     "panic",
-    "regression",
     "stuck",
 ];
 const TEST_TERMS: &[&str] = &["test", "tests", "coverage", "verify", "verification"];
@@ -47,13 +48,21 @@ const TRACE_TERMS: &[&str] = &[
     "trace",
     "used",
     "uses",
+    "work",
+    "working",
+    "works",
 ];
 const CHANGE_TERMS: &[&str] = &[
+    "add",
     "change",
+    "correct",
     "edit",
     "fix",
     "implement",
+    "improve",
     "modify",
+    "optimize",
+    "reduce",
     "refactor",
     "remove",
     "rename",
@@ -72,6 +81,21 @@ const SYMBOL_TERMS: &[&str] = &[
     "symbol",
     "type",
     "where",
+];
+const NON_DEFINITION_TERMS: &[&str] = &[
+    "argument",
+    "arguments",
+    "field",
+    "fields",
+    "import",
+    "imported",
+    "imports",
+    "parameter",
+    "parameters",
+    "properties",
+    "property",
+    "variable",
+    "variables",
 ];
 
 /// Deterministic coding-task category used to select retrieval and graph policy.
@@ -106,28 +130,77 @@ pub enum ContextGraphDirection {
     Both,
 }
 
-const INTENT_ROUTES: &[(TaskIntent, &[&str])] = &[
-    (TaskIntent::ErrorDiagnosis, ERROR_TERMS),
-    (TaskIntent::TestSelection, TEST_TERMS),
-    (TaskIntent::DocumentationLookup, DOCUMENTATION_TERMS),
-    (TaskIntent::ArchitectureSurvey, ARCHITECTURE_TERMS),
-    (TaskIntent::ImplementationTrace, TRACE_TERMS),
-    (TaskIntent::ChangePlanning, CHANGE_TERMS),
-    (TaskIntent::SymbolLookup, SYMBOL_TERMS),
-];
-
 impl TaskIntent {
     /// Classify bounded natural-language task text without an LLM or external state.
     #[must_use]
     pub fn classify(task: &str) -> Self {
         let normalized = normalize(task);
+        let normalized = normalized.trim();
         let tokens = normalized.split_ascii_whitespace().collect::<Vec<_>>();
-        for (intent, terms) in INTENT_ROUTES {
-            if contains_term(&tokens, terms) {
-                return *intent;
-            }
+        if contains_term(&tokens, ERROR_TERMS) {
+            return Self::ErrorDiagnosis;
+        }
+        if asks_for_tests(&tokens) {
+            return Self::TestSelection;
+        }
+        if contains_term(&tokens, DOCUMENTATION_TERMS) {
+            return Self::DocumentationLookup;
+        }
+        if contains_term(&tokens, ARCHITECTURE_TERMS) {
+            return Self::ArchitectureSurvey;
+        }
+        if is_implementation_question(normalized) {
+            return Self::ImplementationTrace;
+        }
+        if contains_term(&tokens, TRACE_TERMS) {
+            return Self::ImplementationTrace;
+        }
+        if contains_term(&tokens, CHANGE_TERMS) {
+            return Self::ChangePlanning;
+        }
+        if contains_term(&tokens, SYMBOL_TERMS) {
+            return Self::SymbolLookup;
+        }
+        if contains_term(&tokens, TEST_TERMS) {
+            return Self::TestSelection;
+        }
+        if contains_term(&tokens, &["regression"]) {
+            return Self::ErrorDiagnosis;
         }
         Self::ChangePlanning
+    }
+
+    /// Select a deterministic result preference while honoring explicit auxiliary-code tasks.
+    #[must_use]
+    pub fn retrieval_preference(self, task: &str) -> RetrievalPreference {
+        let normalized = normalize(task);
+        let tokens = normalized.split_ascii_whitespace().collect::<Vec<_>>();
+        let explicitly_auxiliary = contains_term(
+            &tokens,
+            &[
+                "bench",
+                "benches",
+                "benchmark",
+                "benchmarks",
+                "example",
+                "examples",
+                "fixture",
+                "fixtures",
+                "test",
+                "tests",
+            ],
+        ) || contains_term(&tokens, NON_DEFINITION_TERMS);
+        if explicitly_auxiliary {
+            return RetrievalPreference::Neutral;
+        }
+        match self {
+            Self::SymbolLookup
+            | Self::ImplementationTrace
+            | Self::ChangePlanning
+            | Self::ErrorDiagnosis
+            | Self::ArchitectureSurvey => RetrievalPreference::ProductionDefinitions,
+            Self::TestSelection | Self::DocumentationLookup => RetrievalPreference::Neutral,
+        }
     }
 }
 
@@ -153,17 +226,17 @@ fn trace_direction(task: &str) -> ContextGraphDirection {
         || normalized.contains(" that call ");
     let passive_usage =
         contains_term(&tokens, &["where"]) && contains_term(&tokens, &["called", "used"]);
-    let has_callers = contains_term(&tokens, &["caller", "callers"])
+    let includes_incoming = contains_term(&tokens, &["caller", "callers"])
         || normalized.contains("used by")
         || normalized.contains("called by")
         || calls_target
         || passive_usage;
-    let has_callees = contains_term(&tokens, &["callee", "callees", "uses"])
+    let includes_outgoing = contains_term(&tokens, &["callee", "callees", "uses"])
         || (contains_term(&tokens, &["calls"]) && !calls_target);
-    match (has_callers, has_callees) {
+    match (includes_incoming, includes_outgoing) {
         (true, true) => ContextGraphDirection::Both,
         (true, false) => ContextGraphDirection::Callers,
-        (false, true) | (false, false) => ContextGraphDirection::Callees,
+        (false, true | false) => ContextGraphDirection::Callees,
     }
 }
 
@@ -171,6 +244,18 @@ fn contains_term(tokens: &[&str], candidates: &[&str]) -> bool {
     tokens
         .iter()
         .any(|token| candidates.iter().any(|candidate| token == candidate))
+}
+
+fn asks_for_tests(tokens: &[&str]) -> bool {
+    tokens.windows(2).any(|pair| {
+        matches!(pair[0], "which" | "what" | "select") && matches!(pair[1], "test" | "tests")
+    })
+}
+
+fn is_implementation_question(task: &str) -> bool {
+    ["how are ", "how does ", "how is "]
+        .iter()
+        .any(|prefix| task.starts_with(prefix))
 }
 
 fn normalize(task: &str) -> String {
@@ -236,6 +321,70 @@ mod tests {
         assert_eq!(
             TaskIntent::classify("improve the thing"),
             TaskIntent::ChangePlanning
+        );
+    }
+
+    #[test]
+    fn implementation_questions_and_change_regressions_do_not_route_as_failures() {
+        for task in [
+            "How are generation-local BM25 tables checked before a search runs?",
+            "How does freshness decide whether a live checkout matches the current generation?",
+        ] {
+            assert_eq!(
+                TaskIntent::classify(task),
+                TaskIntent::ImplementationTrace,
+                "task: {task}",
+            );
+        }
+        assert_eq!(
+            TaskIntent::classify(
+                "Improve retrieval quality with regression coverage and compact low-token output",
+            ),
+            TaskIntent::ChangePlanning,
+        );
+        assert_eq!(
+            TaskIntent::classify("diagnose the retrieval regression"),
+            TaskIntent::ErrorDiagnosis,
+        );
+        assert_eq!(
+            TaskIntent::classify("How do retries work?"),
+            TaskIntent::ImplementationTrace,
+        );
+        assert_eq!(
+            TaskIntent::classify("How do I improve retry handling?"),
+            TaskIntent::ChangePlanning,
+        );
+        assert_eq!(
+            TaskIntent::ImplementationTrace.retrieval_preference(
+                "How are generation-local BM25 tables checked before a search runs?",
+            ),
+            RetrievalPreference::ProductionDefinitions,
+        );
+        assert_eq!(
+            TaskIntent::ChangePlanning.retrieval_preference("change the parser test fixture"),
+            RetrievalPreference::Neutral,
+        );
+        assert_eq!(
+            TaskIntent::SymbolLookup.retrieval_preference(
+                "Where does similar_current_symbols decode semantic neighbors?",
+            ),
+            RetrievalPreference::ProductionDefinitions,
+        );
+        for task in [
+            "find the request parameter",
+            "locate the imported symbol",
+            "where is this struct field",
+        ] {
+            assert_eq!(
+                TaskIntent::SymbolLookup.retrieval_preference(task),
+                RetrievalPreference::Neutral,
+                "task: {task}",
+            );
+        }
+        assert_eq!(
+            TaskIntent::ErrorDiagnosis
+                .retrieval_preference("diagnose semantic neighbor decoding failure"),
+            RetrievalPreference::ProductionDefinitions,
         );
     }
 

@@ -20,6 +20,10 @@ use super::{
 
 impl CartographDatabase {
     /// Revalidate exact current document text and atomically upsert one bounded vector batch.
+    /// # Errors
+    ///
+    /// Returns an error if model/generation/source digests no longer match, a
+    /// document is missing, or the bounded vector batch cannot commit atomically.
     pub async fn upsert_current_document_embeddings(
         &self,
         request: EmbeddingBatchUpsertRequest,

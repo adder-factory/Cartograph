@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, mem::size_of, thread};
 
 use cartograph_domain::{EdgeKind, GenerationId, ProjectId, SymbolId};
+use num_traits::ToPrimitive as _;
 use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use thiserror::Error;
@@ -36,13 +37,17 @@ pub struct BetweennessReport {
     pub workers: usize,
 }
 
-/// Fixed-size evidence describing one deterministic PageRank computation.
+/// Fixed-size evidence describing one deterministic `PageRank` computation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageRankReport {
+    /// Number of nodes scored.
     pub nodes_scored: usize,
+    /// Number of edges considered.
     pub edges_considered: usize,
+    /// Number of iterations.
     pub iterations: usize,
+    /// Number of workers.
     pub workers: usize,
 }
 
@@ -55,15 +60,23 @@ pub enum BetweennessError {
     /// One scoped native worker panicked instead of returning its accumulator.
     #[error("sampled Brandes betweenness worker failed")]
     WorkerFailed,
+    /// A graph dimension or normalized score could not be represented safely.
+    #[error("sampled Brandes betweenness numeric conversion failed")]
+    NumericOverflow,
 }
 
-/// A bounded PageRank computation could not produce trustworthy scores.
+/// A bounded `PageRank` computation could not produce trustworthy scores.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum PageRankError {
+    /// The caller cancelled the bounded computation.
     #[error("PageRank computation was cancelled")]
     Cancelled,
+    /// One scoped native worker panicked.
     #[error("PageRank worker failed")]
     WorkerFailed,
+    /// A graph dimension or normalized score could not be represented safely.
+    #[error("PageRank numeric conversion failed")]
+    NumericOverflow,
 }
 
 /// One persisted structural-bridge score fenced to an immutable generation.
@@ -81,7 +94,9 @@ pub struct SymbolBetweennessScore {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolPageRankScore {
+    /// Stable symbol ID for this record.
     pub symbol_id: SymbolId,
+    /// Optional score, when available.
     pub score: Option<f64>,
 }
 
@@ -116,6 +131,10 @@ impl CentralityRecord for SymbolPageRankScore {
 impl CartographDatabase {
     /// Read persisted sampled Brandes scores for a small exact symbol set under
     /// the project's current-generation fence.
+    /// # Errors
+    ///
+    /// Returns an error if the symbol set exceeds its bound, the expected
+    /// generation is no longer current, or score rows cannot be read or decoded.
     pub async fn current_symbol_betweenness(
         &self,
         project_id: &ProjectId,
@@ -126,7 +145,11 @@ impl CartographDatabase {
             .await
     }
 
-    /// Read persisted PageRank scores for a small exact current-generation symbol set.
+    /// Read persisted `PageRank` scores for a small exact current-generation symbol set.
+    /// # Errors
+    ///
+    /// Returns an error if the symbol set exceeds its bound, the expected
+    /// generation is no longer current, or score rows cannot be read or decoded.
     pub async fn current_symbol_pagerank(
         &self,
         project_id: &ProjectId,
@@ -206,10 +229,14 @@ impl CartographDatabase {
     }
 }
 
-/// Compute directed PageRank over calls and references and attach a
+/// Compute directed `PageRank` over calls and references and attach a
 /// generation-local score to every symbol. Target scoring is parallelized only
 /// beyond the measured 500k-edge crossover; each target retains a stable
 /// in-edge summation order, so worker scheduling cannot change the result.
+/// # Errors
+///
+/// Returns an error if cancellation is requested, a numeric conversion
+/// overflows, or a bounded worker fails or panics.
 pub fn apply_page_rank<Cancel>(
     facts: &mut GenerationFacts,
     mut cancelled: Cancel,
@@ -232,8 +259,9 @@ where
     }
     let workers = page_rank_worker_count(node_count, graph.sources.len());
     let partitions = page_rank_partitions(&graph, workers);
-    let mut scores = vec![1.0 / node_count as f64; node_count];
-    let baseline = (1.0 - PAGERANK_DAMPING) / node_count as f64;
+    let node_count_f64 = node_count.to_f64().ok_or(PageRankError::NumericOverflow)?;
+    let mut scores = vec![1.0 / node_count_f64; node_count];
+    let baseline = (1.0 - PAGERANK_DAMPING) / node_count_f64;
     for _ in 0..PAGERANK_ITERATIONS {
         if cancelled() {
             return Err(PageRankError::Cancelled);
@@ -243,8 +271,8 @@ where
             .iter()
             .map(|index| scores[*index])
             .sum::<f64>();
-        let uniform = baseline + (PAGERANK_DAMPING * dangling_sum / node_count as f64);
-        scores = page_rank_step(PageRankStep {
+        let uniform = baseline + (PAGERANK_DAMPING * dangling_sum / node_count_f64);
+        scores = page_rank_step(&PageRankStep {
             graph: &graph,
             partitions: &partitions,
             scores: &scores,
@@ -256,7 +284,12 @@ where
     }
     for (symbol, score) in facts.symbols.iter_mut().zip(scores) {
         let normalized = score.clamp(0.0, 1.0);
-        symbol.pagerank_ppb = Some((normalized * SCORE_PARTS_PER_BILLION).round() as u32);
+        symbol.pagerank_ppb = Some(
+            (normalized * SCORE_PARTS_PER_BILLION)
+                .round()
+                .to_u32()
+                .ok_or(PageRankError::NumericOverflow)?,
+        );
     }
     Ok(PageRankReport {
         nodes_scored: node_count,
@@ -328,14 +361,22 @@ impl PageRankGraph {
         }
     }
 
-    fn target_score(&self, target: usize, scores: &[f64], uniform: f64) -> f64 {
+    fn target_score(
+        &self,
+        target: usize,
+        scores: &[f64],
+        uniform: f64,
+    ) -> Result<f64, PageRankError> {
         let incoming = (self.in_offsets[target]..self.in_offsets[target + 1])
             .map(|offset| {
                 let source = self.sources[offset];
-                scores[source] / self.out_degree[source] as f64
+                self.out_degree[source]
+                    .to_f64()
+                    .map(|degree| scores[source] / degree)
+                    .ok_or(PageRankError::NumericOverflow)
             })
-            .sum::<f64>();
-        uniform + PAGERANK_DAMPING * incoming
+            .sum::<Result<f64, PageRankError>>()?;
+        Ok(uniform + PAGERANK_DAMPING * incoming)
     }
 }
 
@@ -380,24 +421,22 @@ fn page_rank_partitions(graph: &PageRankGraph, workers: usize) -> Vec<Vec<usize>
     partitions
 }
 
-struct PageRankStep<'a> {
-    graph: &'a PageRankGraph,
-    partitions: &'a [Vec<usize>],
-    scores: &'a [f64],
+struct PageRankStep<'graph> {
+    graph: &'graph PageRankGraph,
+    partitions: &'graph [Vec<usize>],
+    scores: &'graph [f64],
     uniform: f64,
 }
 
-fn page_rank_step(input: PageRankStep<'_>) -> Result<Vec<f64>, PageRankError> {
-    let PageRankStep {
-        graph,
-        partitions,
-        scores,
-        uniform,
-    } = input;
+fn page_rank_step(step: &PageRankStep<'_>) -> Result<Vec<f64>, PageRankError> {
+    let graph = step.graph;
+    let partitions = step.partitions;
+    let scores = step.scores;
+    let uniform = step.uniform;
     if partitions.len() == 1 {
-        return Ok((0..graph.out_degree.len())
+        return (0..graph.out_degree.len())
             .map(|target| graph.target_score(target, scores, uniform))
-            .collect());
+            .collect();
     }
     thread::scope(|scope| {
         let handles = partitions
@@ -407,13 +446,13 @@ fn page_rank_step(input: PageRankStep<'_>) -> Result<Vec<f64>, PageRankError> {
                     targets
                         .iter()
                         .map(|target| graph.target_score(*target, scores, uniform))
-                        .collect::<Vec<_>>()
+                        .collect::<Result<Vec<_>, PageRankError>>()
                 })
             })
             .collect::<Vec<_>>();
         let mut next = vec![0.0; graph.out_degree.len()];
         for (targets, handle) in partitions.iter().zip(handles) {
-            let values = handle.join().map_err(|_| PageRankError::WorkerFailed)?;
+            let values = handle.join().map_err(|_| PageRankError::WorkerFailed)??;
             for (target, value) in targets.iter().zip(values) {
                 next[*target] = value;
             }
@@ -429,6 +468,10 @@ fn page_rank_step(input: PageRankStep<'_>) -> Result<Vec<f64>, PageRankError> {
 /// centrality graph. Source sampling is deterministic and independent worker
 /// accumulators are reduced in shard order, so a generation never races on
 /// shared floating-point state.
+/// # Errors
+///
+/// Returns an error if cancellation is requested, graph-size arithmetic
+/// overflows, or a bounded worker fails or panics.
 pub fn apply_sampled_betweenness<Cancel>(
     facts: &mut GenerationFacts,
     mut cancelled: Cancel,
@@ -463,12 +506,23 @@ where
     let scale = if exact {
         1.0
     } else {
-        node_count as f64 / sample_count as f64
+        node_count
+            .to_f64()
+            .zip(sample_count.to_f64())
+            .map(|(nodes, samples)| nodes / samples)
+            .ok_or(BetweennessError::NumericOverflow)?
     };
-    let divisor = ((node_count - 1) * (node_count - 2)) as f64;
+    let divisor = (node_count - 1)
+        .to_f64()
+        .zip((node_count - 2).to_f64())
+        .map(|(left, right)| left * right)
+        .ok_or(BetweennessError::NumericOverflow)?;
     for (symbol, raw_score) in facts.symbols.iter_mut().zip(scores) {
         let normalized = ((raw_score * scale) / divisor).clamp(0.0, 1.0);
-        let ppb = (normalized * SCORE_PARTS_PER_BILLION).round() as u32;
+        let ppb = (normalized * SCORE_PARTS_PER_BILLION)
+            .round()
+            .to_u32()
+            .ok_or(BetweennessError::NumericOverflow)?;
         symbol.betweenness_ppb = Some(ppb);
     }
     Ok(BetweennessReport {
@@ -660,7 +714,13 @@ fn sampled_sources(node_count: usize, requested: usize, seed: u32) -> Vec<usize>
     let mut rng = Mulberry32(seed);
     for index in 0..requested {
         let remaining = node_count - index;
-        let selected = index + ((rng.next_unit() * remaining as f64).floor() as usize);
+        let remaining_u64 = u64::try_from(remaining).unwrap_or(u64::MAX);
+        let scaled = u128::from(rng.next_u32()) * u128::from(remaining_u64);
+        let offset_u64 = u64::try_from(scaled >> u32::BITS).unwrap_or(u64::MAX);
+        let offset = usize::try_from(offset_u64)
+            .unwrap_or(remaining.saturating_sub(1))
+            .min(remaining.saturating_sub(1));
+        let selected = index + offset;
         permutation.swap(index, selected.min(node_count - 1));
     }
     permutation.truncate(requested);
@@ -670,14 +730,14 @@ fn sampled_sources(node_count: usize, requested: usize, seed: u32) -> Vec<usize>
 struct Mulberry32(u32);
 
 impl Mulberry32 {
-    fn next_unit(&mut self) -> f64 {
+    fn next_u32(&mut self) -> u32 {
         self.0 = self.0.wrapping_add(MULBERRY_INCREMENT);
         let mut value = self.0;
         value = (value ^ (value >> MULBERRY_FIRST_SHIFT)).wrapping_mul(value | 1);
         value ^= value.wrapping_add(
             (value ^ (value >> MULBERRY_MIX_SHIFT)).wrapping_mul(value | MULBERRY_MIX_MULTIPLIER),
         );
-        f64::from(value ^ (value >> MULBERRY_FINAL_SHIFT)) / (f64::from(u32::MAX) + 1.0)
+        value ^ (value >> MULBERRY_FINAL_SHIFT)
     }
 }
 
@@ -776,22 +836,26 @@ mod tests {
     }
 
     fn symbol(index: usize) -> SymbolInput {
+        let index_u8 = u8::try_from(index)
+            .unwrap_or_else(|error| panic!("test symbol index exceeded u8: {error}"));
+        let index_u32 = u32::try_from(index)
+            .unwrap_or_else(|error| panic!("test symbol index exceeded u32: {error}"));
+        let index_u64 = u64::try_from(index)
+            .unwrap_or_else(|error| panic!("test symbol index exceeded u64: {error}"));
         SymbolInput {
-            symbol_id: SymbolId::from_uuid_v8(id_bytes(index as u8)),
-            file_id: FileId::from_uuid_v8(id_bytes(20 + index as u8)),
+            symbol_id: SymbolId::from_uuid_v8(id_bytes(index_u8)),
+            file_id: FileId::from_uuid_v8(id_bytes(20_u8.saturating_add(index_u8))),
             symbol_kind: "function".to_owned(),
             qualified_name: format!("symbol_{index}"),
             signature: String::new(),
-            start_byte: index as u64,
-            end_byte: index as u64 + 1,
-            start_line: index as u32 + 1,
-            end_line: index as u32 + 1,
-            structural_digest: ContentDigest::from_bytes([index as u8; 32]),
+            start_byte: index_u64,
+            end_byte: index_u64.saturating_add(1),
+            start_line: index_u32.saturating_add(1),
+            end_line: index_u32.saturating_add(1),
+            structural_digest: ContentDigest::from_bytes([index_u8; 32]),
             visibility: None,
-            exported: false,
-            default_export: false,
-            async_symbol: false,
-            static_member: false,
+            export: cartograph_domain::SymbolExportFlags::default(),
+            execution: cartograph_domain::SymbolExecutionFlags::default(),
             declaration_only: false,
             betweenness_ppb: None,
             pagerank_ppb: None,

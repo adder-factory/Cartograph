@@ -82,6 +82,7 @@ struct MacroFunctionInput<'tree> {
     parsed_name: DeclaratorName<'tree>,
 }
 
+#[derive(Clone, Copy)]
 struct ScopeSymbolInput<'scope> {
     name: &'scope str,
     qualified_name: &'scope str,
@@ -103,7 +104,7 @@ pub(super) fn visit_declaration(
         "preproc_def" => visit_macro_constant(builder, node)?,
         "function_definition" => visit_function(builder, node, depth)?,
         "namespace_definition" => visit_namespace(builder, node, depth)?,
-        "access_specifier" => visit_access_specifier(builder, node)?,
+        "access_specifier" => visit_access_specifier(builder, node),
         "type_definition" => visit_type_definition(builder, node, depth)?,
         "alias_declaration" => visit_alias(builder, node)?,
         "enumerator" => visit_named_leaf(builder, node, SymbolKind::EnumMember)?,
@@ -256,8 +257,7 @@ fn visit_include(
         body_node: None,
         declaration_only: false,
         signature: Some(signature),
-        exported: false,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(false, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -306,8 +306,7 @@ fn visit_macro_constant(
         body_node: None,
         declaration_only: false,
         signature,
-        exported: false,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(false, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -515,8 +514,7 @@ fn visit_function(
         body_node: body,
         declaration_only: body.is_none(),
         signature,
-        exported: has_external_linkage(builder, node),
-        default_export: false,
+        export: crate::SymbolExportFlags::named(has_external_linkage(builder, node)),
         async_symbol: false,
         static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
             && declaration_has_storage(builder, node, "static"),
@@ -628,8 +626,7 @@ fn visit_namespace(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: true,
-        default_export: false,
+        export: crate::SymbolExportFlags::new(true, false),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -672,8 +669,7 @@ fn visit_alias(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: has_external_linkage(builder, node),
-        default_export: false,
+        export: crate::SymbolExportFlags::named(has_external_linkage(builder, node)),
         async_symbol: false,
         static_member: false,
         visibility: cxx_visibility(builder),
@@ -710,8 +706,7 @@ fn visit_named_container(
         body_node: None,
         declaration_only: body.is_none(),
         signature: None,
-        exported: has_external_linkage(builder, input.node),
-        default_export: false,
+        export: crate::SymbolExportFlags::named(has_external_linkage(builder, input.node)),
         async_symbol: false,
         static_member: false,
         visibility: cxx_visibility(builder),
@@ -787,8 +782,7 @@ fn visit_type_definition(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: has_external_linkage(builder, node),
-        default_export: false,
+        export: crate::SymbolExportFlags::named(has_external_linkage(builder, node)),
         async_symbol: false,
         static_member: false,
         visibility: None,
@@ -844,8 +838,7 @@ fn visit_named_leaf(
         body_node: None,
         declaration_only: false,
         signature: None,
-        exported: has_external_linkage(builder, node),
-        default_export: false,
+        export: crate::SymbolExportFlags::named(has_external_linkage(builder, node)),
         async_symbol: false,
         static_member: false,
         visibility: cxx_visibility(builder),
@@ -901,8 +894,7 @@ fn visit_declarator_symbols(
             body_node: None,
             declaration_only: false,
             signature: None,
-            exported: has_external_linkage(builder, input.node),
-            default_export: false,
+            export: crate::SymbolExportFlags::named(has_external_linkage(builder, input.node)),
             async_symbol: false,
             static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
                 && declaration_has_storage(builder, input.node, "static"),
@@ -991,8 +983,7 @@ fn visit_function_prototype(
         body_node: None,
         declaration_only: true,
         signature: c_callable_signature(builder, input.node, input.declarator)?,
-        exported: has_external_linkage(builder, input.node),
-        default_export: false,
+        export: crate::SymbolExportFlags::named(has_external_linkage(builder, input.node)),
         async_symbol: false,
         static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
             && declaration_has_storage(builder, input.node, "static"),
@@ -1397,25 +1388,22 @@ fn register_scope_symbol(
             .insert(key, Some((input.id.clone(), input.kind)));
     }
     if input.qualified_name != input.name {
-        match builder.native_scope_symbols.get_mut(input.name) {
-            Some(slot) => {
-                if slot
-                    .as_ref()
-                    .is_some_and(|(candidate, _)| candidate != input.id)
-                {
-                    *slot = None;
-                }
+        if let Some(slot) = builder.native_scope_symbols.get_mut(input.name) {
+            if slot
+                .as_ref()
+                .is_some_and(|(candidate, _)| candidate != input.id)
+            {
+                *slot = None;
             }
-            None => {
-                builder
-                    .native_scope_symbols
-                    .try_reserve(1)
-                    .map_err(|_| ExtractError::OutputLimit)?;
-                let key = builder.context.copy_text(input.name)?;
-                builder
-                    .native_scope_symbols
-                    .insert(key, Some((input.id.clone(), input.kind)));
-            }
+        } else {
+            builder
+                .native_scope_symbols
+                .try_reserve(1)
+                .map_err(|_| ExtractError::OutputLimit)?;
+            let key = builder.context.copy_text(input.name)?;
+            builder
+                .native_scope_symbols
+                .insert(key, Some((input.id.clone(), input.kind)));
         }
     }
     Ok(())
@@ -1469,12 +1457,9 @@ fn is_control_keyword(name: &str) -> bool {
     ) || name.starts_with("namespace")
 }
 
-fn visit_access_specifier(
-    builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-) -> Result<(), ExtractError> {
+fn visit_access_specifier(builder: &mut ExtractionBuilder<'_, '_>, node: Node<'_>) {
     if builder.context.snapshot.language() != SourceLanguage::Cpp {
-        return Ok(());
+        return;
     }
     let visibility = match builder.context.text(node).trim().trim_end_matches(':') {
         "public" => Some(Visibility::Public),
@@ -1487,7 +1472,6 @@ fn visit_access_specifier(
     {
         *slot = visibility;
     }
-    Ok(())
 }
 
 fn cxx_visibility(builder: &ExtractionBuilder<'_, '_>) -> Option<Visibility> {

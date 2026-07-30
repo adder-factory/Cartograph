@@ -1,3 +1,7 @@
+//! Integration coverage for Cartograph native extraction contracts.
+
+mod dependency_ownership;
+
 use std::collections::BTreeMap;
 
 use cartograph_domain::{FileParseStatus, SourceLanguage};
