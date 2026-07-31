@@ -6,6 +6,7 @@ use cartograph_db::{
     EmbeddingNormalization, EmbeddingPageCursor, EmbeddingUpsertRow, PendingEmbeddingDocument,
     PendingEmbeddingPage, PendingEmbeddingPageInput, PendingEmbeddingPageRequest,
     RegisteredEmbeddingModel, SemanticReadinessReport, SemanticReadinessRequest,
+    SemanticStorageError,
 };
 use cartograph_domain::{GenerationId, ProjectId};
 use cartograph_llm::{EmbeddingModelIdentity, EmbeddingSettings, OpenAiEmbeddingClient};
@@ -355,7 +356,12 @@ impl ProjectRuntime {
             result = self.database().ensure_embedding_model_hnsw(
                 sweep.registered.selector(),
                 SEMANTIC_STATEMENT_TIMEOUT,
-            ) => result.map_err(|_| ProjectError::EmbeddingOperationFailed)?,
+            ) => result.map_err(|error| match error {
+                SemanticStorageError::HnswCreateSharedMemoryUnavailable => {
+                    ProjectError::HnswCreateSharedMemoryUnavailable
+                }
+                _ => ProjectError::EmbeddingOperationFailed,
+            })?,
         };
         let request = SemanticReadinessRequest::new(
             sweep.project_id.clone(),

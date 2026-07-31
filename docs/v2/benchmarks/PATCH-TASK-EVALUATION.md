@@ -1,9 +1,9 @@
 # V2 native patch-task evaluation
 
-Status: locked v1.1.33 parity gate and intended `v2.1.0` candidate evidence;
+Status: locked v1.1.33 parity gate and intended `v2.1.1` candidate evidence;
 an exact corrected-tree gate is required before release
 
-Measured: 2026-07-30
+Measured: 2026-07-31
 
 ## Result
 
@@ -13,7 +13,7 @@ impact, and affected-test evidence meet the frozen v1.1.33 patch-task floors.
 The gate does not invoke Bun, TypeScript, an LLM, an embedding service, or a
 SQLite library/database.
 
-| Metric | Frozen v1.1.33 requirement | Native v2.1.0 candidate result |
+| Metric | Frozen v1.1.33 requirement | Native v2.1.1 candidate result |
 | --- | ---: | ---: |
 | Hit@5 | 1.0000 | 1.0000 |
 | MRR | 1.0000 | 1.0000 |

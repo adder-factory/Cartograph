@@ -7,13 +7,14 @@ use std::{
 };
 
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
-use cartograph_db::{CartographDatabase, DEFAULT_MANAGED_DATABASE_PORT, ManagedDatabase};
+use cartograph_db::{CartographDatabase, ManagedDatabase};
 use cartograph_llm::{
     ChatMessageRequest, ChatSettings, EmbeddingSettings, InstallModelsOptions, OpenAiChatClient,
     OpenAiEmbeddingClient, OpenAiRerankClient, ProjectCredentialMigrationReport,
-    ProjectCredentialMigrationStatus, ProjectLlmTier, ProjectLlmTierInput, RerankSettings,
-    install_recommended_models, load_exact_project_llm_tier, migrate_project_inline_credentials,
-    probe_openai_compatible_endpoint, write_project_llm_configuration,
+    ProjectCredentialMigrationStatus, ProjectLlmCredentialWriteEntry, ProjectLlmTier,
+    ProjectLlmTierInput, RerankSettings, install_recommended_models, load_exact_project_llm_tier,
+    migrate_project_inline_credentials, probe_openai_compatible_endpoint,
+    write_project_llm_configuration, write_project_llm_configuration_with_report,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -64,9 +65,8 @@ pub(super) struct SetupArguments {
     /// Custom provider model identifier.
     #[arg(long)]
     model: Option<String>,
-    /// Environment-variable name containing the provider credential.
-    #[arg(long)]
-    api_key_env: Option<String>,
+    #[command(flatten)]
+    credentials: SetupCredentialArguments,
     /// Omit the 7B ask tier and reranker from local presets.
     #[arg(long)]
     minimal: bool,
@@ -76,6 +76,16 @@ pub(super) struct SetupArguments {
     /// Print structured JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SetupCredentialArguments {
+    /// Environment-variable name containing the provider credential.
+    #[arg(long)]
+    api_key_env: Option<String>,
+    /// Remove existing credentials; mutually exclusive with --api-key-env.
+    #[arg(long, conflicts_with = "api_key_env")]
+    clear_credentials: bool,
 }
 
 #[derive(Debug, Args)]
@@ -214,6 +224,7 @@ struct SetupReport {
     detected: Vec<DetectedEndpoint>,
     configured_tiers: Vec<ProjectLlmTier>,
     cleared_tiers: Vec<ProjectLlmTier>,
+    credential_actions: Vec<ProjectLlmCredentialWriteEntry>,
     next_steps: Vec<String>,
 }
 
@@ -551,16 +562,20 @@ async fn run_setup(arguments: SetupArguments) -> Result<ExitCode, String> {
     };
     let (inputs, cleared) = setup_inputs(&arguments, preset)?;
     let applied = preset != SetupPreset::Skip;
-    if applied {
-        write_project_llm_configuration(&arguments.path, &inputs, &cleared)
-            .map_err(|error| error.to_string())?;
-    }
+    let credential_actions = if applied {
+        write_project_llm_configuration_with_report(&arguments.path, &inputs, &cleared)
+            .map_err(|error| error.to_string())?
+            .credential_actions
+    } else {
+        Vec::new()
+    };
     let report = SetupReport {
         applied,
         preset,
         detected,
         configured_tiers: inputs.iter().map(ProjectLlmTierInput::tier).collect(),
         cleared_tiers: cleared,
+        credential_actions,
         next_steps: if applied {
             vec![
                 "Start or restart the configured provider processes.".to_owned(),
@@ -620,9 +635,13 @@ fn reject_custom_fields(arguments: &SetupArguments) -> Result<(), String> {
     if arguments.tier.is_some()
         || arguments.endpoint.is_some()
         || arguments.model.is_some()
-        || arguments.api_key_env.is_some()
+        || arguments.credentials.api_key_env.is_some()
+        || arguments.credentials.clear_credentials
     {
-        Err("--tier, --endpoint, --model, and --api-key-env require --preset custom".to_owned())
+        Err(
+            "--tier, --endpoint, --model, --api-key-env, and --clear-credentials require --preset custom"
+                .to_owned(),
+        )
     } else {
         Ok(())
     }
@@ -678,10 +697,15 @@ fn custom_inputs(
         .ok_or_else(|| "--preset custom requires --model".to_owned())?;
     let mut input = ProjectLlmTierInput::new(tier.into(), endpoint, model)
         .map_err(|error| error.to_string())?;
-    if let Some(name) = &arguments.api_key_env {
+    if arguments.credentials.clear_credentials && arguments.credentials.api_key_env.is_some() {
+        return Err("--clear-credentials conflicts with --api-key-env".to_owned());
+    }
+    if let Some(name) = &arguments.credentials.api_key_env {
         input = input
             .with_api_key_env(name)
             .map_err(|error| error.to_string())?;
+    } else if arguments.credentials.clear_credentials {
+        input = input.without_credentials();
     }
     Ok((vec![input], Vec::new()))
 }
@@ -691,6 +715,9 @@ fn cloud_openai_inputs(
 ) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
     if arguments.minimal {
         return Err("--minimal applies only to local model presets".to_owned());
+    }
+    if arguments.credentials.clear_credentials {
+        return Err("--clear-credentials requires --preset custom".to_owned());
     }
     let tier = arguments
         .tier
@@ -706,7 +733,13 @@ fn cloud_openai_inputs(
     )
     .map_err(|error| error.to_string())?;
     input = input
-        .with_api_key_env(arguments.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY"))
+        .with_api_key_env(
+            arguments
+                .credentials
+                .api_key_env
+                .as_deref()
+                .unwrap_or("OPENAI_API_KEY"),
+        )
         .map_err(|error| error.to_string())?;
     Ok((vec![input], Vec::new()))
 }
@@ -714,12 +747,7 @@ fn cloud_openai_inputs(
 fn hybrid_claude_inputs(
     arguments: &SetupArguments,
 ) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
-    if arguments.minimal
-        || arguments.tier.is_some()
-        || arguments.endpoint.is_some()
-        || arguments.model.is_some()
-        || arguments.api_key_env.is_some()
-    {
+    if hybrid_claude_has_custom_fields(arguments) {
         return Err(
             "hybrid-claude-bridge uses its bounded default tiers and accepts no custom tier fields"
                 .to_owned(),
@@ -744,6 +772,18 @@ fn hybrid_claude_inputs(
     Ok((inputs, vec![ProjectLlmTier::Reranker]))
 }
 
+fn hybrid_claude_has_custom_fields(arguments: &SetupArguments) -> bool {
+    [
+        arguments.minimal,
+        arguments.tier.is_some(),
+        arguments.endpoint.is_some(),
+        arguments.model.is_some(),
+        arguments.credentials.api_key_env.is_some(),
+        arguments.credentials.clear_credentials,
+    ]
+    .contains(&true)
+}
+
 fn hybrid_anthropic_inputs(
     arguments: &SetupArguments,
 ) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
@@ -751,6 +791,7 @@ fn hybrid_anthropic_inputs(
         || arguments.tier.is_some()
         || arguments.endpoint.is_some()
         || arguments.model.is_some()
+        || arguments.credentials.clear_credentials
     {
         return Err(
             "hybrid-anthropic-api uses its bounded default chat tiers; only --api-key-env may override credential lookup"
@@ -760,7 +801,7 @@ fn hybrid_anthropic_inputs(
     let make = |tier, model| -> Result<ProjectLlmTierInput, String> {
         let mut input =
             ProjectLlmTierInput::anthropic_api(tier, model).map_err(|error| error.to_string())?;
-        if let Some(name) = &arguments.api_key_env {
+        if let Some(name) = &arguments.credentials.api_key_env {
             input = input
                 .with_api_key_env(name)
                 .map_err(|error| error.to_string())?;
@@ -1215,7 +1256,8 @@ async fn prepare_install_database(
             doctor_settings: Some(settings),
         });
     }
-    let report = ManagedDatabase::new(project, DEFAULT_MANAGED_DATABASE_PORT)
+    let port = crate::resolve_managed_database_port(project, None).await?;
+    let report = ManagedDatabase::new(project, port)
         .map_err(|error| error.to_string())?
         .lifecycle()
         .start()
@@ -1483,7 +1525,10 @@ mod tests {
             tier: None,
             endpoint: None,
             model: None,
-            api_key_env: None,
+            credentials: SetupCredentialArguments {
+                api_key_env: None,
+                clear_credentials: false,
+            },
             minimal: false,
             yes: false,
             json: false,
@@ -1555,7 +1600,10 @@ mod tests {
             tier: None,
             endpoint: None,
             model: None,
-            api_key_env: None,
+            credentials: SetupCredentialArguments {
+                api_key_env: None,
+                clear_credentials: false,
+            },
             minimal: false,
             yes: false,
             json: false,
@@ -1638,7 +1686,7 @@ mod tests {
         arguments.tier = Some(LlmTierArgument::Chat);
         arguments.endpoint = Some(OPENAI_V1_ENDPOINT.to_owned());
         arguments.model = Some("gpt-fixture".to_owned());
-        arguments.api_key_env = Some("OPENAI_FIXTURE_KEY".to_owned());
+        arguments.credentials.api_key_env = Some("OPENAI_FIXTURE_KEY".to_owned());
         let (custom, cleared) = setup_inputs(&arguments, SetupPreset::Custom)
             .unwrap_or_else(|error| panic!("custom preset failed: {error}"));
         assert_eq!(custom.len(), 1);
@@ -1657,7 +1705,15 @@ mod tests {
         arguments.model = None;
         assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
         arguments.model = Some("text-embedding-3-small".to_owned());
-        arguments.api_key_env = None;
+        arguments.credentials.api_key_env = None;
+        arguments.credentials.clear_credentials = true;
+        let (credential_free, _) = setup_inputs(&arguments, SetupPreset::Custom)
+            .unwrap_or_else(|error| panic!("credential clear input failed: {error}"));
+        assert_eq!(credential_free.len(), 1);
+        arguments.credentials.api_key_env = Some("OPENAI_FIXTURE_KEY".to_owned());
+        assert!(setup_inputs(&arguments, SetupPreset::Custom).is_err());
+        arguments.credentials.api_key_env = None;
+        arguments.credentials.clear_credentials = false;
         let (cloud, _) = setup_inputs(&arguments, SetupPreset::CloudOpenAi)
             .unwrap_or_else(|error| panic!("cloud preset failed: {error}"));
         assert_eq!(cloud[0].tier(), ProjectLlmTier::Embedding);

@@ -105,6 +105,7 @@ use crate::host::{
 use cartograph_db::{AgentArtifactRecord, AgentArtifactState};
 
 const STATUS_TOOL: &str = "cartograph_status";
+const STATUS_STORAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTEXT_TOOL: &str = "cartograph_context";
 const COMPARE_TO_REF_TOOL: &str = "cartograph_compare_to_ref";
 const DIGEST_TOOL: &str = "cartograph_digest";
@@ -1664,6 +1665,7 @@ struct IndexedStatusRequest {
     status: ProjectStatus,
     project_id: ProjectId,
     cancellation: ProjectCancellation,
+    database_storage: Value,
 }
 
 #[derive(Clone, Copy)]
@@ -1672,6 +1674,7 @@ struct UnindexedStatusRequest<'context> {
     source_settings: &'context ProjectSourceSettings,
     auto_sync: &'context AutoSyncStatus,
     status: &'context ProjectStatus,
+    database_storage: &'context Value,
 }
 
 struct StatusFeatureEvidence {
@@ -1972,6 +1975,7 @@ struct ProjectRuntimeCacheState {
     runtimes: BTreeMap<PathBuf, CachedProjectRuntime>,
     order: VecDeque<PathBuf>,
     auto_sync_enabled: bool,
+    startup_reconciliation_enabled: bool,
 }
 
 struct CachedProjectRuntime {
@@ -2017,6 +2021,7 @@ impl ProjectRuntimeCache {
             )]),
             order: VecDeque::from([default_root.clone()]),
             auto_sync_enabled: false,
+            startup_reconciliation_enabled: false,
         };
         Self {
             state: Mutex::new(state),
@@ -2049,7 +2054,7 @@ impl ProjectRuntimeCache {
         let runtime = if self.shared_database || shared_project_exists {
             shared_runtime
         } else {
-            match crate::resolve_database_settings(&root) {
+            match crate::resolve_database_settings(&root).await {
                 Ok(settings) => ProjectRuntime::connect(&root, &settings)
                     .await
                     .map_err(|_| ProjectRouteError::RuntimeUnavailable)?,
@@ -2061,7 +2066,9 @@ impl ProjectRuntimeCache {
             let state = self.state.lock().await;
             state
                 .auto_sync_enabled
-                .then(|| ProjectAutoSync::start(runtime.clone()))
+                .then(|| {
+                    ProjectAutoSync::start(runtime.clone(), state.startup_reconciliation_enabled)
+                })
                 .transpose()
                 .map_err(|_| ProjectRouteError::RuntimeUnavailable)?
         };
@@ -2092,7 +2099,10 @@ impl ProjectRuntimeCache {
         Ok(runtime)
     }
 
-    async fn enable_auto_sync(&self) -> Result<(), AutoSyncError> {
+    async fn enable_auto_sync(
+        &self,
+        startup_reconciliation_enabled: bool,
+    ) -> Result<(), AutoSyncError> {
         let mut state = self.state.lock().await;
         if state.auto_sync_enabled {
             return Ok(());
@@ -2100,7 +2110,10 @@ impl ProjectRuntimeCache {
         let mut started = Vec::new();
         for (root, entry) in &state.runtimes {
             if entry.auto_sync.is_none() {
-                started.push((root.clone(), ProjectAutoSync::start(entry.runtime.clone())?));
+                started.push((
+                    root.clone(),
+                    ProjectAutoSync::start(entry.runtime.clone(), startup_reconciliation_enabled)?,
+                ));
             }
         }
         for (root, auto_sync) in started {
@@ -2109,6 +2122,7 @@ impl ProjectRuntimeCache {
             }
         }
         state.auto_sync_enabled = true;
+        state.startup_reconciliation_enabled = startup_reconciliation_enabled;
         Ok(())
     }
 
@@ -2413,6 +2427,7 @@ enum AdminJobFailure {
     SourceUnavailable,
     EmbeddingConfigurationUnavailable,
     EmbeddingUnavailable,
+    HnswCreateSharedMemoryUnavailable,
     InvalidOptions,
     OperationFailed,
 }
@@ -2685,6 +2700,9 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
             AdminJobFailure::EmbeddingConfigurationUnavailable
         }
         ProjectError::EmbeddingOperationFailed => AdminJobFailure::EmbeddingUnavailable,
+        ProjectError::HnswCreateSharedMemoryUnavailable => {
+            AdminJobFailure::HnswCreateSharedMemoryUnavailable
+        }
         ProjectError::InvalidOptions | ProjectError::ScipOverlayInvalid => {
             AdminJobFailure::InvalidOptions
         }
@@ -3613,8 +3631,12 @@ impl CartographMcpHandler {
 /// Start native recursive watchers for the default and every lazily routed project.
 pub(crate) async fn enable_handler_auto_sync(
     handler: &CartographMcpHandler,
+    startup_reconciliation_enabled: bool,
 ) -> Result<(), AutoSyncError> {
-    handler.project_cache.enable_auto_sync().await
+    handler
+        .project_cache
+        .enable_auto_sync(startup_reconciliation_enabled)
+        .await
 }
 
 impl CoreTools<'_> {
@@ -4957,7 +4979,7 @@ async fn host_diagnostics(
             .runtime
             .project_root_for_host_operations()
             .to_path_buf();
-        tokio::task::spawn_blocking(move || detect_install_targets(&project_root, location))
+        tokio::task::spawn_blocking(move || detect_install_targets(&project_root, location, None))
             .await
             .map_err(|_| ToolError::internal())?
     } else {
@@ -11221,34 +11243,7 @@ impl AdminLifecycleTools<'_> {
         let job = Box::pin(self.admin_jobs.start(AdminJobRequest {
             action,
             cancellation,
-            operation: async move {
-                let project_id = runtime.register_agent_state_project().await?;
-                let lease = runtime
-                    .database()
-                    .acquire_lease(LeaseRequest::new(
-                        LeaseTarget::new(project_id, ProjectOperation::Migration, None),
-                        admin_lease_owner(),
-                        ADMIN_MAINTENANCE_LEASE,
-                    ))
-                    .await
-                    .map_err(|_| ProjectError::IndexFailed)?;
-                let fence = lease.fence();
-                let cleanup = run_cancellable_admin_maintenance(
-                    &operation_cancellation,
-                    runtime
-                        .database()
-                        .cleanup_generations(GenerationRetentionRequest::new(
-                            policy,
-                            &fence,
-                            ADMIN_MAINTENANCE_TIMEOUT,
-                        )),
-                )
-                .await;
-                let release = runtime.database().release_lease(&lease).await;
-                let report = cleanup?;
-                release.map_err(|_| ProjectError::IndexFailed)?;
-                serde_json::to_value(report).map_err(|_| ProjectError::IndexFailed)
-            },
+            operation: run_generation_prune_operation(runtime, operation_cancellation, policy),
         }))
         .await?;
         json_result(&job)
@@ -11693,6 +11688,39 @@ impl AdminAnalysisTools<'_> {
             .await?;
         json_result(&job)
     }
+}
+
+async fn run_generation_prune_operation(
+    runtime: Arc<ProjectRuntime>,
+    cancellation: ProjectCancellation,
+    policy: GenerationRetentionPolicy,
+) -> Result<Value, ProjectError> {
+    let project_id = runtime.register_agent_state_project().await?;
+    let lease = runtime
+        .database()
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project_id, ProjectOperation::Migration, None),
+            admin_lease_owner(),
+            ADMIN_MAINTENANCE_LEASE,
+        ))
+        .await
+        .map_err(|_| ProjectError::IndexFailed)?;
+    let fence = lease.fence();
+    let cleanup = run_cancellable_admin_maintenance(
+        &cancellation,
+        runtime
+            .database()
+            .cleanup_generations(GenerationRetentionRequest::new(
+                policy,
+                &fence,
+                ADMIN_MAINTENANCE_TIMEOUT,
+            )),
+    )
+    .await;
+    let release = runtime.database().release_lease(&lease).await;
+    let report = cleanup?;
+    release.map_err(|_| ProjectError::IndexFailed)?;
+    serde_json::to_value(report).map_err(|_| ProjectError::IndexFailed)
 }
 
 async fn run_cancellable_admin_maintenance<Output, Error>(
@@ -14136,6 +14164,7 @@ fn status_not_indexed_result(request: UnindexedStatusRequest<'_>) -> Result<Tool
     json_result(&json!({
         "version": env!("CARGO_PKG_VERSION"),
         "storage": "postgresql_paradedb_pgvector",
+        "databaseStorage": request.database_storage,
         "autoSync": request.auto_sync,
         "project": request.status,
         "featureReadiness": {
@@ -14186,6 +14215,7 @@ async fn indexed_status_result(
     json_result(&json!({
         "version": env!("CARGO_PKG_VERSION"),
         "storage": "postgresql_paradedb_pgvector",
+        "databaseStorage": request.database_storage,
         "autoSync": request.auto_sync,
         "project": request.status,
         "inventory": features.inventory,
@@ -14255,8 +14285,12 @@ async fn load_status_features(
     }
     let inventory =
         serde_json::to_value(inventory.map_err(internal_error)?).map_err(internal_error)?;
-    let languages = serde_json::to_value(aggregates.map_err(internal_error)?.languages())
-        .map_err(internal_error)?;
+    let languages = serde_json::to_value(
+        aggregates
+            .map_err(|error| status_storage_error(&error))?
+            .languages(),
+    )
+    .map_err(internal_error)?;
     let readiness = json!({
         "state": "indexed",
         "centrality": {
@@ -14279,6 +14313,36 @@ async fn load_status_features(
         readiness,
         layer_findings,
     })
+}
+
+async fn status_database_storage(handler: &CartographMcpHandler) -> Value {
+    match handler
+        .runtime
+        .database()
+        .storage_totals(STATUS_STORAGE_TIMEOUT)
+        .await
+    {
+        Ok(totals) => json!({
+            "state": "ready",
+            "databaseBytes": totals.database_bytes,
+            "schemaBytes": totals.schema_bytes,
+            "heapBytes": totals.heap_bytes,
+            "indexBytes": totals.index_bytes,
+            "btreeIndexBytes": totals.btree_index_bytes,
+            "toastBytes": totals.toast_bytes,
+            "detailCommand": "cartograph db usage --project-path <path>"
+        }),
+        Err(StorageError::StatementTimeout { .. }) => json!({
+            "state": "unavailable",
+            "reason": "timeout",
+            "detailCommand": "cartograph db usage --project-path <path>"
+        }),
+        Err(_) => json!({
+            "state": "unavailable",
+            "reason": "database_error",
+            "detailCommand": "cartograph db usage --project-path <path>"
+        }),
+    }
 }
 
 async fn load_status_rollups(request: StatusRollupRequest<'_>) -> Result<Value, ToolError> {
@@ -14360,11 +14424,13 @@ async fn status_tool(
     let summary_policy =
         project_summary_policy(handler.runtime.project_root_for_host_operations())?;
     let auto_sync = CoreTools(handler).auto_sync_status().await;
-    let status = handler
-        .runtime
-        .status_with_cancellation(cancellation.clone())
-        .await
-        .map_err(project_error)?;
+    let (status, database_storage) = tokio::join!(
+        handler
+            .runtime
+            .status_with_cancellation(cancellation.clone()),
+        status_database_storage(handler),
+    );
+    let status = status.map_err(project_error)?;
     let project_id = status.snapshot.as_ref().and_then(|snapshot| {
         snapshot
             .current
@@ -14377,6 +14443,7 @@ async fn status_tool(
             source_settings: &source_settings,
             auto_sync: &auto_sync,
             status: &status,
+            database_storage: &database_storage,
         });
     };
 
@@ -14390,6 +14457,7 @@ async fn status_tool(
             status,
             project_id,
             cancellation,
+            database_storage,
         },
     ))
     .await
@@ -21471,6 +21539,12 @@ fn qualified_find_qualifiers(
 }
 
 fn qualified_find_query(input: QualifiedFindQueryInput<'_>) -> QualifiedSymbolQuery<'_> {
+    let request = qualified_find_filter_query(input);
+    let request = qualified_find_relationship_query(request, input.parsed);
+    qualified_find_ordering_query(request, input.parsed)
+}
+
+fn qualified_find_filter_query(input: QualifiedFindQueryInput<'_>) -> QualifiedSymbolQuery<'_> {
     let QualifiedFindQueryInput {
         project_id,
         generation_id,
@@ -21478,7 +21552,7 @@ fn qualified_find_query(input: QualifiedFindQueryInput<'_>) -> QualifiedSymbolQu
         filters,
         qualifiers,
     } = input;
-    let mut request = QualifiedSymbolQuery::new(
+    QualifiedSymbolQuery::new(
         CurrentGenerationLookup::new(project_id, generation_id),
         parsed.text(),
         filters.limit,
@@ -21489,10 +21563,23 @@ fn qualified_find_query(input: QualifiedFindQueryInput<'_>) -> QualifiedSymbolQu
     .with_path_filters(parsed.path_filters())
     .with_name_filters(parsed.name_filters())
     .with_signature_filters(parsed.signature_filters())
-    .with_callers_of(parsed.callers_of())
-    .with_callees_of(parsed.callees_of())
-    .with_depends_on(parsed.depends_on())
-    .with_scan_all(parsed.sort().is_some());
+}
+
+fn qualified_find_relationship_query<'context>(
+    request: QualifiedSymbolQuery<'context>,
+    parsed: &'context ParsedQualifiedQuery,
+) -> QualifiedSymbolQuery<'context> {
+    request
+        .with_callers_of(parsed.callers_of())
+        .with_callees_of(parsed.callees_of())
+        .with_depends_on(parsed.depends_on())
+        .with_scan_all(parsed.sort().is_some())
+}
+
+fn qualified_find_ordering_query<'context>(
+    mut request: QualifiedSymbolQuery<'context>,
+    parsed: &ParsedQualifiedQuery,
+) -> QualifiedSymbolQuery<'context> {
     if let Some(centrality) = parsed.centrality() {
         request = request.with_centrality(
             qualified_centrality_comparator(centrality.comparator()),
@@ -22603,6 +22690,16 @@ fn internal_error<T>(_error: T) -> ToolError {
     ToolError::internal()
 }
 
+fn status_storage_error(error: &StorageError) -> ToolError {
+    match error {
+        StorageError::StatementTimeout { .. } => safe_error(
+            ToolErrorCode::Timeout,
+            "Cartograph status database aggregates exceeded their bounded statement timeout; run `cartograph db usage --project-path <path>` and inspect the online compaction plan before retrying",
+        ),
+        _ => ToolError::internal(),
+    }
+}
+
 fn chat_error(error: ChatError) -> ToolError {
     match error {
         ChatError::IncompleteConfiguration | ChatError::InvalidConfiguration { .. } => safe_error(
@@ -22968,6 +23065,10 @@ fn project_error(error: ProjectError) -> ToolError {
         ProjectError::EmbeddingOperationFailed => safe_error(
             ToolErrorCode::Unavailable,
             "Cartograph semantic embedding operation is unavailable",
+        ),
+        ProjectError::HnswCreateSharedMemoryUnavailable => safe_error(
+            ToolErrorCode::Unavailable,
+            "HNSW creation could not allocate shared memory; existing vectors remain resumable after `cartograph db backup` and the confirmed managed database upgrade",
         ),
         ProjectError::RetrievalOperationFailed => safe_error(
             ToolErrorCode::Unavailable,
@@ -25354,6 +25455,7 @@ pub fn root() -> u32 {
         )
         .unwrap_or_else(|error| panic!("post-index sync write failed: {error}"));
         Box::pin(verify_incremental_sync_enrichment(&handler)).await;
+        Box::pin(verify_generation_prune(&handler)).await;
 
         drop(handler);
         drop(runtime);
@@ -25468,6 +25570,37 @@ pub fn root() -> u32 {
             sync_report["enrichment"]["classification"]["state"],
             "succeeded"
         );
+    }
+
+    async fn verify_generation_prune(handler: &CartographMcpHandler) {
+        AdminLifecycleTools(handler)
+            .start_generation_prune_job(
+                AdminAction::PruneGenerations,
+                &Map::from_iter([
+                    ("keepSuperseded".to_owned(), json!(0)),
+                    ("maximumDeletions".to_owned(), json!(1)),
+                    ("confirm".to_owned(), json!(true)),
+                ]),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("generation prune job failed to start: {error}"));
+        let started = handler
+            .admin_jobs
+            .status(None)
+            .await
+            .unwrap_or_else(|error| panic!("generation prune status failed: {error}"));
+        let terminal = wait_for_admin_status(
+            &handler.admin_jobs,
+            started.job_id,
+            AdminJobStatus::Succeeded,
+        )
+        .await;
+        let report = terminal
+            .report
+            .unwrap_or_else(|| panic!("generation prune report was missing"));
+        assert_eq!(report["current_preserved"], 1);
+        assert_eq!(report["superseded_removed"], 1);
+        assert_eq!(report["superseded_preserved"], 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -25968,7 +26101,7 @@ pub fn target(value: u32) -> u32 {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
-    async fn protocol_records_resumes_and_replays_named_sessions() {
+    async fn protocol_handshake_precedes_startup_reconciliation_and_sessions_remain_durable() {
         let url = env::var("CARTOGRAPH_TEST_DATABASE_URL")
             .unwrap_or_else(|_| panic!("live project test database is not configured"));
         let nanos = SystemTime::now()
@@ -25991,6 +26124,8 @@ pub fn target(value: u32) -> u32 {
         );
         let handler = CartographMcpHandler::new(runtime.clone())
             .unwrap_or_else(|error| panic!("session handler failed: {error}"));
+        let auto_sync = crate::auto_sync::ProjectAutoSync::start(runtime.clone(), true)
+            .unwrap_or_else(|error| panic!("startup reconciliation failed: {error}"));
         let server = ProtocolServer::new(
             ServerConfig::new(
                 ServerMetadata::cartograph(),
@@ -26027,6 +26162,7 @@ pub fn target(value: u32) -> u32 {
             .unwrap_or_else(|error| panic!("protocol server failed: {error}"));
         Box::pin(verify_durable_session(&runtime, &session_id)).await;
 
+        drop(auto_sync);
         if let Ok(runtime) = Arc::try_unwrap(runtime) {
             runtime.close().await;
         }
@@ -26046,7 +26182,7 @@ pub fn target(value: u32) -> u32 {
         reader: &mut BufReader<ReadHalf<tokio::io::DuplexStream>>,
         writer: &mut WriteHalf<tokio::io::DuplexStream>,
     ) -> String {
-        let initialized = protocol_request(
+        let initialized = protocol_request_with_timeout(
             reader,
             writer,
             json!({
@@ -26059,6 +26195,7 @@ pub fn target(value: u32) -> u32 {
                     "clientInfo": {"name": "cartograph-live-test", "version": "1"}
                 }
             }),
+            Duration::from_secs(1),
         )
         .await;
         assert_eq!(
@@ -26395,9 +26532,18 @@ pub fn target(value: u32) -> u32 {
         writer: &mut WriteHalf<tokio::io::DuplexStream>,
         request: Value,
     ) -> Value {
+        protocol_request_with_timeout(reader, writer, request, Duration::from_secs(10)).await
+    }
+
+    async fn protocol_request_with_timeout(
+        reader: &mut BufReader<ReadHalf<tokio::io::DuplexStream>>,
+        writer: &mut WriteHalf<tokio::io::DuplexStream>,
+        request: Value,
+        response_timeout: Duration,
+    ) -> Value {
         protocol_notification(writer, request).await;
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        tokio::time::timeout(response_timeout, reader.read_line(&mut line))
             .await
             .unwrap_or_else(|_| panic!("protocol response timed out"))
             .unwrap_or_else(|error| panic!("protocol response read failed: {error}"));
@@ -26472,6 +26618,17 @@ pub fn target(value: u32) -> u32 {
         let terminal = wait_for_admin_status(&jobs, started.job_id, AdminJobStatus::Failed).await;
         assert_eq!(terminal.status, AdminJobStatus::Failed);
         assert_eq!(terminal.failure, Some(AdminJobFailure::OperationFailed));
+    }
+
+    #[test]
+    fn status_statement_timeout_has_a_stable_public_code_and_remediation() {
+        let error = status_storage_error(&StorageError::StatementTimeout {
+            operation: "file-aggregates",
+        });
+
+        assert_eq!(error.code(), ToolErrorCode::Timeout);
+        assert!(error.wire_message().contains("bounded statement timeout"));
+        assert!(error.wire_message().contains("cartograph db usage"));
     }
 
     #[test]

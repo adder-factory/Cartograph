@@ -50,11 +50,12 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V5 fences framework, resolver, and test-ownership semantics:
-after an upgrade from an older contract, unchanged source remains stale until a
-normal index publishes current-contract facts. This contract check stays
-separate from the source-manifest digest so v1 import still compares exact
-checkout bytes rather than a binary-specific identity.
+contract. Contract V6 fences framework, resolver, test-ownership, and Rust Cargo
+workspace crate/re-export semantics: after an upgrade from an older contract,
+unchanged source remains stale until a normal index publishes current-contract
+facts. This contract check stays separate from the source-manifest digest so v1
+import still compares exact checkout bytes rather than a binary-specific
+identity.
 
 ## Parsing and facts
 
@@ -99,6 +100,9 @@ Implemented language-level behavior includes:
 - lexical/containment-aware local references;
 - Rust/Python/Go and the remaining production families' declaration and
   call/member reference shapes;
+- Cargo-workspace Rust crate roots, public inline-module paths, and named
+  `pub use` facades, with package-scoped cross-crate resolution that preserves
+  private-module and ambiguous-package boundaries;
 - component/template, Salesforce markup, MyBatis, VB6, properties, Liquid, and
   BG3/Osiris domain semantics;
 - bounded npm/Composer/Cargo package and workspace manifest facts, including

@@ -31,7 +31,8 @@ const SUMMARY_PRIORITY_QUEUE_SCHEMA_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION: i64 = 22;
 const STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION: i64 = 23;
-const LATEST_SCHEMA_VERSION: i64 = STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION;
+const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION: i64 = 24;
+const LATEST_SCHEMA_VERSION: i64 = RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
@@ -1034,7 +1035,16 @@ const STORAGE_LIFECYCLE_HARDENING_SCHEMA: Migration = Migration {
     ],
 };
 
-const MIGRATIONS: [&Migration; 23] = [
+const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA: Migration = Migration {
+    version: RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION,
+    name: "rust_workspace_crate_resolution_digest_v6",
+    statements: &[r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6))"#],
+};
+
+const MIGRATIONS: [&Migration; 24] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1058,6 +1068,7 @@ const MIGRATIONS: [&Migration; 23] = [
     &DETERMINISTIC_COCHANGE_ORDER_SCHEMA,
     &NATIVE_INDEX_DIGEST_V5_SCHEMA,
     &STORAGE_LIFECYCLE_HARDENING_SCHEMA,
+    &RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1454,7 +1465,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 23] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 24] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1478,9 +1489,10 @@ mod tests {
         DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION,
         NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION,
         STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION,
+        RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 23] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 24] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1573,6 +1585,10 @@ mod tests {
             23,
             "273e9a9d09aa4d15926c0d5f8d935d99857e0976e1dd3ee7a9638604f0fa36da",
         ),
+        (
+            24,
+            "aa6f62e612975ad71d5f3d44d7636f958f6b13c64bb8f0a795e150ed2105f9cd",
+        ),
     ];
 
     #[test]
@@ -1618,7 +1634,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION
+            RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION
         );
     }
 

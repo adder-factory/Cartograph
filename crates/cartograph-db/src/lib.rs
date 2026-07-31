@@ -123,12 +123,12 @@ pub use leases::{
     LeaseRequest, LeaseStatus, LeaseTarget, ProjectLease,
 };
 pub use managed::{
-    DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedBackupReport,
-    ManagedContainerState, ManagedDatabase, ManagedDatabaseArchives, ManagedDatabaseError,
-    ManagedDatabaseLifecycle, ManagedDatabaseMaintenance, ManagedDatabaseStatus,
-    ManagedDerivedIndexAvailability, ManagedDerivedIndexHealth, ManagedDestructiveConfirmation,
-    ManagedDestructiveOperation, ManagedRemoveReport, ManagedRestoreReport, ManagedStartReport,
-    ManagedUpgradeReport,
+    DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, MANAGED_DATABASE_SHARED_MEMORY_BYTES,
+    ManagedBackupReport, ManagedContainerState, ManagedDatabase, ManagedDatabaseArchives,
+    ManagedDatabaseError, ManagedDatabaseLifecycle, ManagedDatabaseMaintenance,
+    ManagedDatabaseStatus, ManagedDerivedIndexAvailability, ManagedDerivedIndexHealth,
+    ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedRemoveReport,
+    ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
 };
 pub use migrations::{MigrationError, MigrationReport};
 pub use parse_cache::{
@@ -181,7 +181,7 @@ use sqlx_core::{pool::PoolOptions, query::query};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgSslMode, Postgres};
 pub use storage::{
     GenerationDeduplicationAssessment, IndexStorageUsage, ParseCacheStorageUsage,
-    StorageUsageReport, StorageWarning, TableStorageUsage,
+    StorageTotalsReport, StorageUsageReport, StorageWarning, TableStorageUsage,
 };
 pub use summary_priority::{
     SummaryPriorityEnqueueReport, SummaryPriorityFailure, SummaryPriorityQueueStats,

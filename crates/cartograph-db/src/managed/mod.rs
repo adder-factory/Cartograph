@@ -24,6 +24,8 @@ pub const MANAGED_DATABASE_IMAGE: &str = concat!(
 );
 /// Default loopback port for the first managed Cartograph database.
 pub const DEFAULT_MANAGED_DATABASE_PORT: u16 = 55_432;
+/// Deliberate Docker shared-memory allocation for bounded HNSW maintenance.
+pub const MANAGED_DATABASE_SHARED_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const DEFAULT_MAINTENANCE_TIMEOUT: Duration = Duration::from_mins(15);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -121,6 +123,10 @@ pub struct ManagedDatabaseStatus {
     pub port: u16,
     /// Whether the running/stopped container uses the supported image digest.
     pub image_matches: bool,
+    /// Docker shared-memory bytes, absent when no managed container exists.
+    pub shared_memory_bytes: Option<u64>,
+    /// Whether shared memory satisfies Cartograph's bounded HNSW build requirement.
+    pub hnsw_shared_memory_ready: bool,
 }
 
 /// Result of a successful idempotent managed start.
@@ -558,6 +564,8 @@ impl ManagedDatabaseLifecycle<'_> {
                 state: ManagedContainerState::Missing,
                 port: self.database.port,
                 image_matches: false,
+                shared_memory_bytes: None,
+                hnsw_shared_memory_ready: false,
             });
         };
         validate_owned_container(&self.database.identity, &inspection, false)?;
@@ -568,6 +576,9 @@ impl ManagedDatabaseLifecycle<'_> {
             state: container_state(&inspection),
             port,
             image_matches: inspection.image == MANAGED_DATABASE_IMAGE,
+            shared_memory_bytes: Some(inspection.shared_memory_bytes),
+            hnsw_shared_memory_ready: inspection.shared_memory_bytes
+                >= MANAGED_DATABASE_SHARED_MEMORY_BYTES,
         })
     }
 
@@ -870,6 +881,11 @@ fn validate_owned_container(
     if require_supported_image && inspection.image != MANAGED_DATABASE_IMAGE {
         return Err(ManagedDatabaseError::UnsupportedManagedImage);
     }
+    if require_supported_image
+        && inspection.shared_memory_bytes < MANAGED_DATABASE_SHARED_MEMORY_BYTES
+    {
+        return Err(ManagedDatabaseError::InsufficientManagedSharedMemory);
+    }
     Ok(())
 }
 
@@ -1033,6 +1049,11 @@ pub enum ManagedDatabaseError {
     /// Existing owned container uses another image and needs an explicit upgrade.
     #[error("managed database image differs from the supported digest; run the upgrade workflow")]
     UnsupportedManagedImage,
+    /// The owned container predates the deliberate HNSW shared-memory allocation.
+    #[error(
+        "managed database shared memory is below the bounded HNSW requirement; run the confirmed managed database upgrade"
+    )]
+    InsufficientManagedSharedMemory,
     /// Owned labels are insufficient without the exact persistent data mount.
     #[error("managed database container does not use the expected owned data volume")]
     InvalidManagedStorageMount,
@@ -1256,6 +1277,7 @@ mod tests {
             image: MANAGED_DATABASE_IMAGE.to_owned(),
             host_ip: "127.0.0.1".to_owned(),
             host_port: "55432".to_owned(),
+            shared_memory_bytes: MANAGED_DATABASE_SHARED_MEMORY_BYTES,
             data_mount: None,
         };
 
@@ -1612,6 +1634,11 @@ mod tests {
         assert_eq!(status.state, ManagedContainerState::Healthy);
         assert_eq!(status.port, database.port);
         assert!(status.image_matches);
+        assert_eq!(
+            status.shared_memory_bytes,
+            Some(MANAGED_DATABASE_SHARED_MEMORY_BYTES)
+        );
+        assert!(status.hnsw_shared_memory_ready);
         assert_container_metadata_uses_password_file(database);
 
         let available_storage = match database.lifecycle().available_storage_bytes().await {

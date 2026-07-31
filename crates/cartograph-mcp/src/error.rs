@@ -105,6 +105,8 @@ pub enum ToolErrorCode {
     NotReady,
     /// A required service is unavailable.
     Unavailable,
+    /// A bounded operation exceeded its published deadline.
+    Timeout,
     /// An internal failure whose details must remain redacted.
     Internal,
 }
@@ -119,6 +121,7 @@ impl ToolErrorCode {
             Self::Conflict => "conflict",
             Self::NotReady => "not_ready",
             Self::Unavailable => "unavailable",
+            Self::Timeout => "timeout",
             Self::Internal => "tool_failed",
         }
     }

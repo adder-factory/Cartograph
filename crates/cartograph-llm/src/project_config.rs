@@ -401,6 +401,40 @@ pub enum ProjectLlmCredentialSource {
     InlineLegacy,
 }
 
+/// Secret-free outcome for one configured tier credential mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLlmCredentialWriteAction {
+    /// No credential existed and no credential mutation was needed.
+    Unchanged,
+    /// An existing credential was retained because the provider origin did not change.
+    Preserved,
+    /// The caller explicitly removed every credential reference.
+    ClearedExplicitly,
+    /// Cartograph removed credentials because the provider endpoint origin changed.
+    ClearedOriginChange,
+    /// The caller replaced any previous credential with an environment reference.
+    EnvironmentReferenceSet,
+}
+
+/// One tier's secret-free credential mutation result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLlmCredentialWriteEntry {
+    /// Tier whose configuration was updated.
+    pub tier: ProjectLlmTier,
+    /// Credential action applied without exposing credential material.
+    pub action: ProjectLlmCredentialWriteAction,
+}
+
+/// Atomic project LLM configuration write report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLlmWriteReport {
+    /// One entry for every configured tier mutation.
+    pub credential_actions: Vec<ProjectLlmCredentialWriteEntry>,
+}
+
 /// Secret-safe outcome for one legacy inline credential migration candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -569,8 +603,16 @@ impl ProjectLlmTierConfig {
     }
 }
 
-/// Validated config mutation. Credentials are preserved unless explicitly
-/// cleared or replaced with an environment-variable reference.
+#[derive(Clone, Debug)]
+enum ProjectLlmCredentialIntent {
+    Preserve,
+    Clear,
+    Environment(String),
+}
+
+/// Validated config mutation. Credentials are preserved only while the
+/// provider endpoint origin is unchanged, unless explicitly cleared or
+/// replaced with an environment-variable reference.
 #[derive(Clone, Debug)]
 pub struct ProjectLlmTierInput {
     tier: ProjectLlmTier,
@@ -578,8 +620,7 @@ pub struct ProjectLlmTierInput {
     endpoint: String,
     model: String,
     ask_model: Option<String>,
-    api_key_env: Option<String>,
-    replace_credentials: bool,
+    credential_intent: ProjectLlmCredentialIntent,
     timeout_ms: Option<u64>,
     concurrency: Option<u16>,
     summary_batch_size: Option<u16>,
@@ -608,8 +649,7 @@ impl ProjectLlmTierInput {
             endpoint,
             model,
             ask_model: None,
-            api_key_env: None,
-            replace_credentials: false,
+            credential_intent: ProjectLlmCredentialIntent::Preserve,
             timeout_ms: None,
             concurrency: None,
             summary_batch_size: None,
@@ -636,8 +676,7 @@ impl ProjectLlmTierInput {
             endpoint: CLAUDE_BRIDGE_ENDPOINT.to_owned(),
             model,
             ask_model: None,
-            api_key_env: None,
-            replace_credentials: true,
+            credential_intent: ProjectLlmCredentialIntent::Clear,
             timeout_ms: None,
             concurrency: None,
             summary_batch_size: None,
@@ -664,8 +703,9 @@ impl ProjectLlmTierInput {
             endpoint: ANTHROPIC_CLOUD_ENDPOINT.to_owned(),
             model,
             ask_model: None,
-            api_key_env: Some("ANTHROPIC_API_KEY".to_owned()),
-            replace_credentials: true,
+            credential_intent: ProjectLlmCredentialIntent::Environment(
+                "ANTHROPIC_API_KEY".to_owned(),
+            ),
             timeout_ms: None,
             concurrency: None,
             summary_batch_size: None,
@@ -697,16 +737,14 @@ impl ProjectLlmTierInput {
         }
         let value = value.into();
         validate_env_name(&value)?;
-        self.api_key_env = Some(value);
-        self.replace_credentials = true;
+        self.credential_intent = ProjectLlmCredentialIntent::Environment(value);
         Ok(self)
     }
 
     #[must_use]
     /// Returns a copy with all resolved credential material removed.
     pub fn without_credentials(mut self) -> Self {
-        self.api_key_env = None;
-        self.replace_credentials = true;
+        self.credential_intent = ProjectLlmCredentialIntent::Clear;
         self
     }
 
@@ -1421,6 +1459,19 @@ pub fn write_project_llm_configuration(
     inputs: &[ProjectLlmTierInput],
     cleared: &[ProjectLlmTier],
 ) -> Result<(), ProjectLlmConfigError> {
+    write_project_llm_configuration_with_report(project_root, inputs, cleared).map(|_| ())
+}
+
+/// Atomically update configured tiers and return secret-free credential actions.
+/// # Errors
+///
+/// Returns an error if no mutation is requested, tier sets/config objects are
+/// invalid, or the private locked size-bounded atomic rewrite fails.
+pub fn write_project_llm_configuration_with_report(
+    project_root: &Path,
+    inputs: &[ProjectLlmTierInput],
+    cleared: &[ProjectLlmTier],
+) -> Result<ProjectLlmWriteReport, ProjectLlmConfigError> {
     if inputs.is_empty() && cleared.is_empty() {
         return Err(ProjectLlmConfigError::InvalidTier);
     }
@@ -1430,50 +1481,133 @@ pub fn write_project_llm_configuration(
         .ok_or(ProjectLlmConfigError::InvalidConfig)?;
     let llm = object_field(root, "llm")?;
     llm.insert("enabled".to_owned(), Value::Bool(true));
+    let mut credential_actions = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let tier = object_field(llm, input.tier.config_key())?;
-        tier.insert(
-            "provider".to_owned(),
-            Value::String(input.provider.as_str().to_owned()),
-        );
-        if input.provider == ProjectLlmProvider::ClaudeBridge {
-            tier.remove("endpoint");
-        } else {
-            tier.insert("endpoint".to_owned(), Value::String(input.endpoint.clone()));
-        }
-        tier.insert("model".to_owned(), Value::String(input.model.clone()));
-        if let Some(ask_model) = &input.ask_model {
-            tier.insert("askModel".to_owned(), Value::String(ask_model.clone()));
-        }
-        if let Some(timeout_ms) = input.timeout_ms {
-            tier.insert("timeoutMs".to_owned(), Value::from(timeout_ms));
-        }
-        if let Some(concurrency) = input.concurrency {
-            tier.insert("concurrency".to_owned(), Value::from(concurrency));
-        }
-        if let Some(summary_batch_size) = input.summary_batch_size {
-            tier.insert(
-                "summaryBatchSize".to_owned(),
-                Value::from(summary_batch_size),
-            );
-        }
-        if let Some(claude_bin) = &input.claude_bin {
-            tier.insert("claudeBin".to_owned(), Value::String(claude_bin.clone()));
-        } else if input.provider != ProjectLlmProvider::ClaudeBridge {
-            tier.remove("claudeBin");
-        }
-        if input.replace_credentials {
-            tier.remove("apiKey");
-            tier.remove("apiKeyEnv");
-            if let Some(api_key_env) = &input.api_key_env {
-                tier.insert("apiKeyEnv".to_owned(), Value::String(api_key_env.clone()));
-            }
-        }
+        credential_actions.push(update_project_llm_tier(llm, input)?);
     }
     for tier in cleared {
         llm.insert(tier.config_key().to_owned(), Value::Null);
     }
-    write_config_value(project_root, &Value::Object(root.clone()))
+    write_config_value(project_root, &Value::Object(root.clone()))?;
+    Ok(ProjectLlmWriteReport { credential_actions })
+}
+
+fn update_project_llm_tier(
+    llm: &mut Map<String, Value>,
+    input: &ProjectLlmTierInput,
+) -> Result<ProjectLlmCredentialWriteEntry, ProjectLlmConfigError> {
+    let tier = object_field(llm, input.tier.config_key())?;
+    let action = apply_credential_intent(tier, input);
+    tier.insert(
+        "provider".to_owned(),
+        Value::String(input.provider.as_str().to_owned()),
+    );
+    if input.provider == ProjectLlmProvider::ClaudeBridge {
+        tier.remove("endpoint");
+    } else {
+        tier.insert("endpoint".to_owned(), Value::String(input.endpoint.clone()));
+    }
+    tier.insert("model".to_owned(), Value::String(input.model.clone()));
+    if let Some(ask_model) = &input.ask_model {
+        tier.insert("askModel".to_owned(), Value::String(ask_model.clone()));
+    }
+    if let Some(timeout_ms) = input.timeout_ms {
+        tier.insert("timeoutMs".to_owned(), Value::from(timeout_ms));
+    }
+    if let Some(concurrency) = input.concurrency {
+        tier.insert("concurrency".to_owned(), Value::from(concurrency));
+    }
+    if let Some(summary_batch_size) = input.summary_batch_size {
+        tier.insert(
+            "summaryBatchSize".to_owned(),
+            Value::from(summary_batch_size),
+        );
+    }
+    if let Some(claude_bin) = &input.claude_bin {
+        tier.insert("claudeBin".to_owned(), Value::String(claude_bin.clone()));
+    } else if input.provider != ProjectLlmProvider::ClaudeBridge {
+        tier.remove("claudeBin");
+    }
+    Ok(ProjectLlmCredentialWriteEntry {
+        tier: input.tier,
+        action,
+    })
+}
+
+fn apply_credential_intent(
+    tier: &mut Map<String, Value>,
+    input: &ProjectLlmTierInput,
+) -> ProjectLlmCredentialWriteAction {
+    let had_credentials = tier.contains_key("apiKey") || tier.contains_key("apiKeyEnv");
+    match &input.credential_intent {
+        ProjectLlmCredentialIntent::Clear => {
+            tier.remove("apiKey");
+            tier.remove("apiKeyEnv");
+            ProjectLlmCredentialWriteAction::ClearedExplicitly
+        }
+        ProjectLlmCredentialIntent::Environment(environment) => {
+            tier.remove("apiKey");
+            tier.insert("apiKeyEnv".to_owned(), Value::String(environment.clone()));
+            ProjectLlmCredentialWriteAction::EnvironmentReferenceSet
+        }
+        ProjectLlmCredentialIntent::Preserve
+            if had_credentials && credential_origin_changed(tier, input) =>
+        {
+            tier.remove("apiKey");
+            tier.remove("apiKeyEnv");
+            ProjectLlmCredentialWriteAction::ClearedOriginChange
+        }
+        ProjectLlmCredentialIntent::Preserve if had_credentials => {
+            ProjectLlmCredentialWriteAction::Preserved
+        }
+        ProjectLlmCredentialIntent::Preserve => ProjectLlmCredentialWriteAction::Unchanged,
+    }
+}
+
+fn credential_origin_changed(configured: &Map<String, Value>, input: &ProjectLlmTierInput) -> bool {
+    configured_credential_origin(configured)
+        .zip(credential_origin(input.provider, &input.endpoint))
+        .is_none_or(|(configured, requested)| configured != requested)
+}
+
+fn configured_credential_origin(
+    configured: &Map<String, Value>,
+) -> Option<(ProjectLlmProvider, String)> {
+    let provider = configured
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(ProjectLlmProvider::parse)?;
+    let endpoint = match provider {
+        ProjectLlmProvider::OpenAiCompat => configured
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .unwrap_or(OPENAI_CLOUD_ENDPOINT),
+        ProjectLlmProvider::AnthropicApi => configured
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .unwrap_or(ANTHROPIC_CLOUD_ENDPOINT),
+        ProjectLlmProvider::ClaudeBridge => CLAUDE_BRIDGE_ENDPOINT,
+    };
+    credential_origin(provider, endpoint)
+}
+
+fn credential_origin(
+    provider: ProjectLlmProvider,
+    endpoint: &str,
+) -> Option<(ProjectLlmProvider, String)> {
+    if provider == ProjectLlmProvider::ClaudeBridge {
+        return Some((provider, CLAUDE_BRIDGE_ENDPOINT.to_owned()));
+    }
+    let endpoint = Url::parse(endpoint).ok()?;
+    let host = endpoint
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let port = endpoint.port_or_known_default()?;
+    Some((
+        provider,
+        format!("{}://{host}:{port}", endpoint.scheme().to_ascii_lowercase()),
+    ))
 }
 
 /// Change only one configured tier's bounded client concurrency.
@@ -2182,6 +2316,74 @@ mod tests {
             .unwrap_or_else(|| panic!("config missing"));
         assert_eq!(value["languages"], json!(["rust"]));
         assert!(value["llm"]["summarizeLlm"].get("apiKey").is_none());
+    }
+
+    #[test]
+    fn endpoint_origin_changes_clear_credentials_while_same_origin_updates_preserve_them() {
+        let changed = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("origin-change tempdir failed: {error}"));
+        fs::create_dir(changed.path().join(CONFIG_DIRECTORY))
+            .unwrap_or_else(|error| panic!("origin-change state failed: {error}"));
+        fs::write(
+            changed.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
+            r#"{"version":2,"llm":{"enabled":true,"embeddingLlm":{"provider":"openai-compat","endpoint":"https://example.test/v1","model":"remote","apiKey":"fixture-secret"}}}"#,
+        )
+        .unwrap_or_else(|error| panic!("origin-change fixture failed: {error}"));
+        let input = ProjectLlmTierInput::new(
+            ProjectLlmTier::Embedding,
+            "http://127.0.0.1:9999/v1",
+            "local",
+        )
+        .unwrap_or_else(|error| panic!("origin-change input failed: {error}"));
+        let report = write_project_llm_configuration_with_report(changed.path(), &[input], &[])
+            .unwrap_or_else(|error| panic!("origin-change write failed: {error}"));
+        assert_eq!(
+            report.credential_actions,
+            vec![ProjectLlmCredentialWriteEntry {
+                tier: ProjectLlmTier::Embedding,
+                action: ProjectLlmCredentialWriteAction::ClearedOriginChange,
+            }]
+        );
+        let changed_value = read_config_value(changed.path())
+            .unwrap_or_else(|error| panic!("origin-change read failed: {error}"))
+            .unwrap_or_else(|| panic!("origin-change config missing"));
+        assert!(changed_value["llm"]["embeddingLlm"].get("apiKey").is_none());
+        assert!(
+            changed_value["llm"]["embeddingLlm"]
+                .get("apiKeyEnv")
+                .is_none()
+        );
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap_or_else(|error| panic!("origin-change report failed: {error}"))
+                .contains("fixture-secret")
+        );
+
+        let same = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("same-origin tempdir failed: {error}"));
+        fs::create_dir(same.path().join(CONFIG_DIRECTORY))
+            .unwrap_or_else(|error| panic!("same-origin state failed: {error}"));
+        fs::write(
+            same.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
+            r#"{"version":2,"llm":{"enabled":true,"embeddingLlm":{"provider":"openai-compat","endpoint":"https://example.test/v1","model":"old","apiKey":"fixture-secret"}}}"#,
+        )
+        .unwrap_or_else(|error| panic!("same-origin fixture failed: {error}"));
+        let input =
+            ProjectLlmTierInput::new(ProjectLlmTier::Embedding, "https://example.test/v2", "new")
+                .unwrap_or_else(|error| panic!("same-origin input failed: {error}"));
+        let report = write_project_llm_configuration_with_report(same.path(), &[input], &[])
+            .unwrap_or_else(|error| panic!("same-origin write failed: {error}"));
+        assert_eq!(
+            report.credential_actions[0].action,
+            ProjectLlmCredentialWriteAction::Preserved
+        );
+        let same_value = read_config_value(same.path())
+            .unwrap_or_else(|error| panic!("same-origin read failed: {error}"))
+            .unwrap_or_else(|| panic!("same-origin config missing"));
+        assert_eq!(
+            same_value["llm"]["embeddingLlm"]["apiKey"],
+            Value::String("fixture-secret".to_owned())
+        );
     }
 
     #[test]

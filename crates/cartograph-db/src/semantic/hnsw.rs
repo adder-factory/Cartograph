@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use cartograph_config::DatabaseSchema;
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{error::Error as SqlxError, query::query, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::PgConnection;
 
 use crate::CartographDatabase;
@@ -98,6 +98,10 @@ async fn ensure_hnsw_transaction(
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("hnsw-drop"))?;
+    query("SELECT set_config('max_parallel_maintenance_workers', '0', true)")
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("hnsw-serial-maintenance"))?;
     let model_id = selector.model_id().as_str();
     let dimension = selector.dimension();
     let create_sql = format!(
@@ -109,7 +113,7 @@ async fn ensure_hnsw_transaction(
     query(AssertSqlSafe(create_sql))
         .execute(&mut *connection)
         .await
-        .map_err(|_| database_error("hnsw-create"))?;
+        .map_err(|error| hnsw_create_error(&error))?;
     let status = read_hnsw_status(connection, &database.schema, selector).await?;
     if status.ready {
         Ok(status)
@@ -178,6 +182,27 @@ fn model_index_name(selector: &EmbeddingModelSelector) -> String {
     format!("document_embeddings_model_{compact}_hnsw")
 }
 
+fn hnsw_create_error(error: &SqlxError) -> SemanticStorageError {
+    let shared_memory_unavailable = match error {
+        SqlxError::Database(database) => {
+            hnsw_shared_memory_unavailable(database.code().as_deref(), database.message())
+        }
+        _ => false,
+    };
+    if shared_memory_unavailable {
+        SemanticStorageError::HnswCreateSharedMemoryUnavailable
+    } else {
+        database_error("hnsw-create")
+    }
+}
+
+fn hnsw_shared_memory_unavailable(code: Option<&str>, message: &str) -> bool {
+    code == Some("53100")
+        && message
+            .to_ascii_lowercase()
+            .contains("shared memory segment")
+}
+
 #[cfg(test)]
 mod tests {
     use cartograph_domain::{ContentDigest, ModelId};
@@ -201,5 +226,21 @@ mod tests {
             name.bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         );
+    }
+
+    #[test]
+    fn hnsw_shared_memory_failures_have_a_stable_specific_phase() {
+        assert!(hnsw_shared_memory_unavailable(
+            Some("53100"),
+            "could not resize shared memory segment: No space left on device"
+        ));
+        assert!(!hnsw_shared_memory_unavailable(
+            Some("53100"),
+            "could not extend file: No space left on device"
+        ));
+        assert!(!hnsw_shared_memory_unavailable(
+            Some("53200"),
+            "could not resize shared memory segment"
+        ));
     }
 }

@@ -45,7 +45,7 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         .migrate()
         .await
         .unwrap_or_else(|error| panic!("storage migration failed: {error}"));
-    assert_eq!(migration.current_version, 23);
+    assert_eq!(migration.current_version, 24);
     assert_virtual_payload_accounting_and_autovacuum(&pool, &schema).await;
 
     let project = database
@@ -164,6 +164,16 @@ async fn assert_parse_cache_and_ready_retention(
     assert!(!before.deduplication.mutation_supported);
     assert!(before.schema_bytes > 0);
     assert!(before.index_bytes > 0);
+    let totals = database
+        .storage_totals(STATEMENT_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("compact storage totals failed: {error}"));
+    assert_eq!(totals.database_bytes, before.database_bytes);
+    assert_eq!(totals.schema_bytes, before.schema_bytes);
+    assert_eq!(totals.heap_bytes, before.heap_bytes);
+    assert_eq!(totals.index_bytes, before.index_bytes);
+    assert_eq!(totals.btree_index_bytes, before.btree_index_bytes);
+    assert_eq!(totals.toast_bytes, before.toast_bytes);
 
     let cache_report = database
         .cleanup_native_parse_cache(NativeParseCacheRetentionRequest {

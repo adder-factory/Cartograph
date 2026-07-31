@@ -10,10 +10,15 @@ mod unix {
         os::unix::fs::PermissionsExt as _,
         path::{Path, PathBuf},
         process::{Command, Output, Stdio},
+        thread,
+        time::Duration,
     };
 
     use serde_json::Value;
     use tempfile::{TempDir, tempdir};
+
+    const LOG_READY_ATTEMPTS: usize = 100;
+    const LOG_READY_INTERVAL: Duration = Duration::from_millis(20);
 
     struct ManagedProcessGuard {
         pid: Option<u32>,
@@ -227,19 +232,7 @@ mod unix {
         assert_eq!(status["rows"][0]["pidAlive"], true);
         assert_eq!(status["rows"][0]["configDrift"], true);
 
-        let logs = run_backend(
-            fixture.path(),
-            &[
-                "logs",
-                &fixture.project,
-                "--tier",
-                "summarize",
-                "--lines",
-                "10",
-            ],
-        );
-        assert_success(&logs, "logs");
-        assert!(String::from_utf8_lossy(&logs.stdout).contains("fixture backend started"));
+        wait_for_backend_log(fixture, "fixture backend started");
 
         let duplicate = run_backend(
             fixture.path(),
@@ -257,6 +250,35 @@ mod unix {
             duplicate["skipped"][0]["reason"]
                 .as_str()
                 .is_some_and(|reason| reason.contains("already running as pid"))
+        );
+    }
+
+    fn wait_for_backend_log(fixture: &BackendFixture, expected: &str) {
+        let mut last = None;
+        for _ in 0..LOG_READY_ATTEMPTS {
+            let logs = run_backend(
+                fixture.path(),
+                &[
+                    "logs",
+                    &fixture.project,
+                    "--tier",
+                    "summarize",
+                    "--lines",
+                    "10",
+                ],
+            );
+            assert_success(&logs, "logs");
+            if String::from_utf8_lossy(&logs.stdout).contains(expected) {
+                return;
+            }
+            last = Some(logs);
+            thread::sleep(LOG_READY_INTERVAL);
+        }
+        let output = last.unwrap_or_else(|| panic!("backend log readiness loop did not execute"));
+        panic!(
+            "backend log did not contain its startup marker: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

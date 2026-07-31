@@ -48,6 +48,12 @@ Restart the host. An open session is not assumed to hot-register a replaced MCP
 server. CLI success proves the native/database control path, not the old MCP
 transport.
 
+`cartograph upgrade --project-path /absolute/path/to/project --json` audits
+local and global Codex/Claude/Cursor registrations and emits a `repinCommand`
+for each stale absolute binary. If MCP startup reports managed-image or HNSW
+shared-memory incompatibility, run `doctor`, create the named fresh backup, and
+use the exact confirmed `db upgrade` command before restarting the host.
+
 ## Index is stale
 
 `status.fresh` is true only when the complete supported-source manifest matches

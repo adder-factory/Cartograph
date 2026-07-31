@@ -97,13 +97,28 @@ pub(crate) fn extract(
     }
     let mut builder = ExtractionBuilder::new(snapshot, cancelled)?;
     if strategy != ExtractionStrategy::ParserOnly {
-        module_system::collect_explicit_exports(&mut builder, input.root)?;
-        builder.visit(input.root, 0)?;
-        dynamic_dispatch::enrich(&mut builder, input.root)?;
-        schema::enrich(&mut builder, input.root)?;
-        embedded_sql::enrich(&mut builder, input.root)?;
-        value_references::enrich(&mut builder, input.root)?;
+        enrich_extraction(&mut builder, input.root)?;
     }
+    let diagnostics = collect_extraction_diagnostics(&mut builder, input)?;
+    finish_extraction(builder, input, diagnostics)
+}
+
+fn enrich_extraction(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    root: Node<'_>,
+) -> Result<(), ExtractError> {
+    module_system::collect_explicit_exports(builder, root)?;
+    builder.visit(root, 0)?;
+    dynamic_dispatch::enrich(builder, root)?;
+    schema::enrich(builder, root)?;
+    embedded_sql::enrich(builder, root)?;
+    value_references::enrich(builder, root)
+}
+
+fn collect_extraction_diagnostics(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: WalkInput<'_>,
+) -> Result<Vec<ExtractionDiagnostic>, ExtractError> {
     let diagnostics = if input.parse_status == FileParseStatus::Partial {
         let diagnostics = collect_diagnostics(input.root, builder.context.cancelled)?;
         if diagnostics.is_empty() {
@@ -123,6 +138,15 @@ pub(crate) fn extract(
             .budget
             .reserve_fact(diagnostic_budget_bytes(), std::iter::empty())?;
     }
+    Ok(diagnostics)
+}
+
+fn finish_extraction(
+    mut builder: ExtractionBuilder<'_, '_>,
+    input: WalkInput<'_>,
+    diagnostics: Vec<ExtractionDiagnostic>,
+) -> Result<ExtractedFile, ExtractError> {
+    let snapshot = builder.context.snapshot;
     let output_limit = builder.context.budget.output_limit();
     let has_inline_tests = has_inline_tests(&mut builder, input.root)?;
     let file = ExtractedFile {

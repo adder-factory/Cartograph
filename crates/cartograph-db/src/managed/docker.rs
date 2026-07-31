@@ -7,7 +7,7 @@ use tokio::{process::Command, time::timeout};
 
 use crate::capabilities::{MANAGED_PGVECTOR_VERSION, SUPPORTED_PG_SEARCH_VERSION};
 
-use super::{ManagedDatabaseError, ManagedResourceIdentity};
+use super::{MANAGED_DATABASE_SHARED_MEMORY_BYTES, ManagedDatabaseError, ManagedResourceIdentity};
 
 const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DOCKER_IMAGE_PULL_TIMEOUT: Duration = Duration::from_mins(15);
@@ -36,6 +36,7 @@ const INSPECT_TEMPLATE: &str = concat!(
     "{{with index .HostConfig.PortBindings \"5432/tcp\"}}",
     "{{(index . 0).HostIp}}\t{{(index . 0).HostPort}}",
     "{{else}}none\tnone{{end}}\t",
+    "{{.HostConfig.ShmSize}}\t",
     "{{json .Mounts}}"
 );
 const VOLUME_INSPECT_TEMPLATE: &str = concat!(
@@ -72,6 +73,7 @@ pub(super) struct ContainerInspection {
     pub(super) image: String,
     pub(super) host_ip: String,
     pub(super) host_port: String,
+    pub(super) shared_memory_bytes: u64,
     pub(super) data_mount: Option<ContainerMountInspection>,
 }
 
@@ -994,6 +996,8 @@ fn create_container_arguments(spec: &ContainerCreateSpec<'_>) -> Vec<OsString> {
         format!("POSTGRES_PASSWORD_FILE={CONTAINER_PASSWORD_PATH}"),
         "--publish".to_owned(),
         format!("127.0.0.1:{}:5432", spec.port),
+        "--shm-size".to_owned(),
+        MANAGED_DATABASE_SHARED_MEMORY_BYTES.to_string(),
         "--mount".to_owned(),
         format!(
             "type=volume,source={},target={DATABASE_DATA_PATH}/",
@@ -1041,6 +1045,7 @@ fn parse_container_inspection(value: &str) -> Result<ContainerInspection, Manage
         image,
         host_ip,
         host_port,
+        shared_memory_bytes,
         mounts,
     ] = fields.as_slice()
     else {
@@ -1048,6 +1053,9 @@ fn parse_container_inspection(value: &str) -> Result<ContainerInspection, Manage
     };
     let mounts: Vec<ContainerMountInspection> =
         serde_json::from_str(mounts).map_err(|_| ManagedDatabaseError::DockerResponse)?;
+    let shared_memory_bytes = shared_memory_bytes
+        .parse::<u64>()
+        .map_err(|_| ManagedDatabaseError::DockerResponse)?;
     let mut data_mounts = mounts
         .into_iter()
         .filter(|mount| mount.destination.trim_end_matches('/') == DATABASE_DATA_PATH);
@@ -1063,6 +1071,7 @@ fn parse_container_inspection(value: &str) -> Result<ContainerInspection, Manage
         image: (*image).to_owned(),
         host_ip: (*host_ip).to_owned(),
         host_port: (*host_port).to_owned(),
+        shared_memory_bytes,
         data_mount,
     })
 }
@@ -1131,6 +1140,12 @@ mod tests {
         let rendered: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
 
         assert!(rendered.iter().any(|arg| arg == "127.0.0.1:55432:5432"));
+        assert!(rendered.iter().any(|arg| arg == "--shm-size"));
+        assert!(
+            rendered
+                .iter()
+                .any(|arg| arg == &MANAGED_DATABASE_SHARED_MEMORY_BYTES.to_string())
+        );
         assert!(
             rendered
                 .iter()
@@ -1159,7 +1174,7 @@ mod tests {
     #[test]
     fn inspection_parser_preserves_owner_state_health_and_image() {
         let parsed = parse_container_inspection(
-            "true\t0123456789abcdef\trunning\thealthy\tparadedb/example@sha256:digest\t127.0.0.1\t55432\t[{\"Type\":\"volume\",\"Name\":\"cartograph-v2-0123456789abcdef-data\",\"Destination\":\"/var/lib/postgresql\",\"RW\":true}]",
+            "true\t0123456789abcdef\trunning\thealthy\tparadedb/example@sha256:digest\t127.0.0.1\t55432\t268435456\t[{\"Type\":\"volume\",\"Name\":\"cartograph-v2-0123456789abcdef-data\",\"Destination\":\"/var/lib/postgresql\",\"RW\":true}]",
         );
         let parsed = match parsed {
             Ok(parsed) => parsed,
@@ -1173,6 +1188,7 @@ mod tests {
         assert_eq!(parsed.image, "paradedb/example@sha256:digest");
         assert_eq!(parsed.host_ip, "127.0.0.1");
         assert_eq!(parsed.host_port, "55432");
+        assert_eq!(parsed.shared_memory_bytes, 268_435_456);
         assert!(has_expected_data_mount(&parsed, &identity()));
     }
 

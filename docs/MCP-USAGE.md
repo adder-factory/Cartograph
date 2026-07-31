@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-07-30 (`v2.1.0`).
+Last release audit: 2026-07-31 (`v2.1.1`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -46,6 +46,13 @@ external PostgreSQL through `CARTOGRAPH_DATABASE_URL`.
 Restart the host after installation. An already-open host is not assumed to
 hot-reload an upgraded MCP process.
 
+Before serving, managed mode checks the owned image and HNSW shared-memory
+allocation. An incompatible container fails with exact backup and confirmed
+upgrade commands. Source catch-up starts through the native watcher after the
+stdio server is ready, so `initialize` and `tools/list` do not wait for a full
+index; `autoSync` in `cartograph_status` exposes attempts, publications, no-ops,
+and errors. `--no-startup-sync` suppresses only the initial reconciliation.
+
 ## Profiles
 
 - `coding`: lean retrieval, source, graph, test-selection, and review loop;
@@ -65,7 +72,7 @@ for all 35 wire contracts and their CLI families.
 
 | Tool | Purpose |
 | --- | --- |
-| `cartograph_status` | Current generation, row counts, and complete supported-source freshness |
+| `cartograph_status` | Current generation, row counts, compact database/schema storage, complete supported-source freshness, and auto-sync state |
 | `cartograph_context` | Intent-aware exact/BM25/hybrid packet, typed primary edit candidates, graph evidence, affected tests, trust, and live overlay |
 | `cartograph_find` | Exact name/path/reference or BM25/hybrid candidates |
 | `cartograph_files` | Bounded current-generation file inventory filtered by directory or language |

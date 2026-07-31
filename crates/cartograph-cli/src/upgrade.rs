@@ -14,6 +14,8 @@ use sha2::{Digest as _, Sha256};
 use tempfile::{NamedTempFile, TempPath};
 use tokio::process::Command;
 
+use crate::host::{DiagnosticLocation, InstallTargetDetection, detect_install_targets};
+
 const REMOTE: &str = "https://github.com/adder-factory/cartograph.git";
 const RELEASE_BASE: &str = "https://github.com/adder-factory/cartograph/releases/download";
 const RELEASES_URL: &str = "https://github.com/adder-factory/cartograph/releases";
@@ -38,6 +40,7 @@ pub(super) struct UpgradeReport {
     applied: bool,
     message: String,
     next_steps: Vec<String>,
+    registrations: Vec<InstallTargetDetection>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -46,12 +49,50 @@ struct InstalledBinary {
     launcher_warning: Option<String>,
 }
 
+struct UpdatedReportInput<'project> {
+    current_version: String,
+    latest_version: String,
+    installed: InstalledBinary,
+    project_path: &'project Path,
+}
+
+struct UnknownReportInput<'reason> {
+    current_version: String,
+    apply: bool,
+    reason: &'reason str,
+    registrations: Vec<InstallTargetDetection>,
+}
+
 pub(super) fn render(report: &UpgradeReport) -> String {
     let mut output = format!("{}\n", report.message);
     for step in &report.next_steps {
         output.push_str("- ");
         output.push_str(step);
         output.push('\n');
+    }
+    let configured = report
+        .registrations
+        .iter()
+        .filter(|registration| registration.cartograph_configured)
+        .collect::<Vec<_>>();
+    if !configured.is_empty() {
+        output.push_str("MCP registration audit:\n");
+        for registration in configured {
+            output.push_str("- ");
+            output.push_str(registration.target);
+            output.push(' ');
+            output.push_str(registration.location);
+            output.push_str(": ");
+            output.push_str(registration.command_state);
+            output.push_str(" (");
+            output.push_str(registration.config_path);
+            output.push_str(")\n");
+            if let Some(command) = registration.repin_command.as_deref() {
+                output.push_str("  Repin: ");
+                output.push_str(command);
+                output.push('\n');
+            }
+        }
     }
     output
 }
@@ -90,17 +131,38 @@ impl PartialOrd for Version {
     }
 }
 
-pub(super) async fn run_upgrade(apply: bool) -> UpgradeReport {
+pub(super) async fn run_upgrade(apply: bool, project_path: &Path) -> UpgradeReport {
     let current_text = env!("CARGO_PKG_VERSION").to_owned();
+    let current_executable = env::current_exe()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok());
+    let registrations = registration_audit(project_path, current_executable.as_deref());
     let Some(current) = parse_version(&current_text) else {
-        return report_unknown(current_text, apply, "running version is not valid semver");
+        return report_unknown(UnknownReportInput {
+            current_version: current_text,
+            apply,
+            reason: "running version is not valid semver",
+            registrations,
+        });
     };
     let latest_text = match latest_version().await {
         Ok(version) => version,
-        Err(message) => return report_unknown(current_text, apply, &message),
+        Err(message) => {
+            return report_unknown(UnknownReportInput {
+                current_version: current_text,
+                apply,
+                reason: &message,
+                registrations,
+            });
+        }
     };
     let Some(latest) = parse_version(&latest_text) else {
-        return report_unknown(current_text, apply, "published version is not valid semver");
+        return report_unknown(UnknownReportInput {
+            current_version: current_text,
+            apply,
+            reason: "published version is not valid semver",
+            registrations,
+        });
     };
     if current >= latest {
         return UpgradeReport {
@@ -110,7 +172,8 @@ pub(super) async fn run_upgrade(apply: bool) -> UpgradeReport {
             apply_requested: apply,
             applied: false,
             message: format!("Cartograph {current_text} is current."),
-            next_steps: vec!["No update action is needed.".to_owned()],
+            next_steps: registration_next_steps(&registrations),
+            registrations,
         };
     }
     if !apply {
@@ -126,10 +189,16 @@ pub(super) async fn run_upgrade(apply: bool) -> UpgradeReport {
                     .to_owned(),
                 "Restart MCP clients after updating so they stop using the old process.".to_owned(),
             ],
+            registrations,
         };
     }
     match apply_release(&latest_text).await {
-        Ok(installed) => report_updated(current_text, latest_text, installed),
+        Ok(installed) => report_updated(UpdatedReportInput {
+            current_version: current_text,
+            latest_version: latest_text,
+            installed,
+            project_path,
+        }),
         Err(message) => UpgradeReport {
             status: "blocked",
             current_version: current_text,
@@ -142,19 +211,23 @@ pub(super) async fn run_upgrade(apply: bool) -> UpgradeReport {
                     .to_owned(),
                 "Verify the checksum before replacing the current executable.".to_owned(),
             ],
+            registrations,
         },
     }
 }
 
-fn report_updated(
-    current_version: String,
-    latest_version: String,
-    installed: InstalledBinary,
-) -> UpgradeReport {
+fn report_updated(input: UpdatedReportInput<'_>) -> UpgradeReport {
+    let UpdatedReportInput {
+        current_version,
+        latest_version,
+        installed,
+        project_path,
+    } = input;
     let InstalledBinary {
         path,
         launcher_warning,
     } = installed;
+    let registrations = registration_audit(project_path, Some(&path));
     let mut next_steps = Vec::with_capacity(4);
     if let Some(warning) = launcher_warning {
         next_steps.push(format!(
@@ -162,9 +235,11 @@ fn report_updated(
         ));
     }
     next_steps.extend([
-        "Re-run `cartograph install` in registered projects to repin MCP hosts.".to_owned(),
+        "Run the reported repin command for every stale MCP registration.".to_owned(),
+        "Run `cartograph doctor <path>`; if the owned managed image is incompatible, create a fresh backup and use the confirmed `cartograph db upgrade` workflow before restarting hosts.".to_owned(),
         "Restart MCP clients so every connection uses the new binary.".to_owned(),
         "Run `cartograph --version` from a new process to verify the update.".to_owned(),
+        "After restart, prove `initialize`, `tools/list`, `cartograph_status`, and one real Cartograph query on the fresh transport.".to_owned(),
     ]);
     let message = format!(
         "Installed the checksum-verified Cartograph {latest_version} binary at {}.",
@@ -178,18 +253,54 @@ fn report_updated(
         applied: true,
         message,
         next_steps,
+        registrations,
     }
 }
 
-fn report_unknown(current: String, apply: bool, reason: &str) -> UpgradeReport {
+fn report_unknown(input: UnknownReportInput<'_>) -> UpgradeReport {
+    let UnknownReportInput {
+        current_version,
+        apply,
+        reason,
+        registrations,
+    } = input;
     UpgradeReport {
         status: "unknown",
-        current_version: current,
+        current_version,
         latest_version: None,
         apply_requested: apply,
         applied: false,
         message: format!("Could not resolve the latest Cartograph release: {reason}."),
         next_steps: vec![format!("Check {RELEASES_URL} manually.")],
+        registrations,
+    }
+}
+
+fn registration_audit(
+    project_path: &Path,
+    selected_executable: Option<&Path>,
+) -> Vec<InstallTargetDetection> {
+    let project_path =
+        fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf());
+    detect_install_targets(&project_path, DiagnosticLocation::Both, selected_executable)
+}
+
+fn registration_next_steps(registrations: &[InstallTargetDetection]) -> Vec<String> {
+    if registrations
+        .iter()
+        .any(|registration| registration.command_state == "stale_absolute")
+    {
+        vec!["Run each reported repin command, then restart that MCP host.".to_owned()]
+    } else if registrations
+        .iter()
+        .any(|registration| registration.cartograph_configured)
+    {
+        vec![
+            "No native update action is needed; configured MCP registrations are audited below."
+                .to_owned(),
+        ]
+    } else {
+        vec!["No configured MCP registrations were discovered for this project.".to_owned()]
     }
 }
 
@@ -759,20 +870,26 @@ mod tests {
 
     #[test]
     fn report_and_semver_failures_remain_actionable_without_claiming_success() {
-        let report = report_unknown("2.0.0".to_owned(), true, "fixture lookup failed");
+        let report = report_unknown(UnknownReportInput {
+            current_version: "2.0.0".to_owned(),
+            apply: true,
+            reason: "fixture lookup failed",
+            registrations: Vec::new(),
+        });
         assert!(!succeeded(&report));
         let rendered = render(&report);
         assert!(rendered.contains("fixture lookup failed"));
         assert!(rendered.contains(RELEASES_URL));
 
-        let report = report_updated(
-            "2.0.7".to_owned(),
-            "2.0.8".to_owned(),
-            InstalledBinary {
+        let report = report_updated(UpdatedReportInput {
+            current_version: "2.0.7".to_owned(),
+            latest_version: "2.0.8".to_owned(),
+            installed: InstalledBinary {
                 path: PathBuf::from("/fixture/versions/v2.0.8/bin/cartograph"),
                 launcher_warning: Some("fixture launcher migration failed".to_owned()),
             },
-        );
+            project_path: Path::new("/fixture/project"),
+        });
         assert!(succeeded(&report));
         assert!(report.applied);
         assert_eq!(report.status, "updated");
@@ -792,6 +909,39 @@ mod tests {
         assert!(parse("2.0.0-alpha.2") > parse("2.0.0-alpha.1"));
         assert!(parse("2.0.0-alpha.1") > parse("2.0.0-alpha"));
         assert!(ASSET_NAME.is_ok());
+    }
+
+    #[test]
+    fn registration_audit_rendering_keeps_stale_repins_explicit() {
+        let registration = InstallTargetDetection {
+            target: "codex",
+            location: "local",
+            config_present: true,
+            config_valid: true,
+            cartograph_configured: true,
+            config_path: ".codex/config.toml",
+            command_state: "stale_absolute",
+            repin_command: Some(
+                "cartograph install --yes --target codex --location local --project-path <path>"
+                    .to_owned(),
+            ),
+        };
+        let report = UpgradeReport {
+            status: "current",
+            current_version: "2.1.0".to_owned(),
+            latest_version: Some("2.1.0".to_owned()),
+            apply_requested: false,
+            applied: false,
+            message: "Cartograph 2.1.0 is current.".to_owned(),
+            next_steps: registration_next_steps(std::slice::from_ref(&registration)),
+            registrations: vec![registration],
+        };
+        let rendered = render(&report);
+        assert!(rendered.contains("MCP registration audit"));
+        assert!(rendered.contains("stale_absolute"));
+        assert!(rendered.contains("Repin: cartograph install"));
+        assert!(rendered.contains("restart that MCP host"));
+        assert!(registration_next_steps(&[])[0].contains("No configured MCP registrations"));
     }
 
     #[test]

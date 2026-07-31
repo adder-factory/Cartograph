@@ -107,7 +107,10 @@ cartograph install --yes --target cursor --location local --project-path .
 If the default managed database port is occupied, pass the selected port to
 both `db start --port <PORT>` and `install --managed-database-port <PORT>`.
 The installer writes that non-secret loopback port into the portable `serve`
-arguments for the selected host.
+arguments for the selected host. Direct project commands discover an existing
+project-owned container's published port when neither the flag nor
+`CARTOGRAPH_MANAGED_DATABASE_PORT` is set; an explicit wrong port fails with
+the discovered port instead of a generic connection error.
 
 Restart the agent host after registration or a binary upgrade.
 
@@ -290,7 +293,9 @@ Restore, upgrade, derived-index rebuild, removal, import, and prune can replace
 or delete state. They require the exact confirmation phrase shown by command
 help and are never implied by a diagnostic request.
 
-`db usage` separates schema heap/index/TOAST, generation, and parse-cache
+Default `status` output includes compact database/schema/index/TOAST byte
+totals. `db usage` remains the detailed bounded report and separates schema
+heap/index/TOAST, generation, and parse-cache
 allocations. Parse-cache evidence distinguishes uncompressed logical payload,
 live compressed storage, whole-schema allocation, and physical overhead so a
 high-water TOAST file cannot masquerade as live cache data. `db compact` plans bounded one-at-a-time concurrent B-tree rebuilds

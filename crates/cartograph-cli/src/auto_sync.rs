@@ -37,7 +37,10 @@ pub(crate) struct ProjectAutoSync {
 }
 
 impl ProjectAutoSync {
-    pub(crate) fn start(runtime: Arc<ProjectRuntime>) -> Result<Self, AutoSyncError> {
+    pub(crate) fn start(
+        runtime: Arc<ProjectRuntime>,
+        startup_reconciliation_enabled: bool,
+    ) -> Result<Self, AutoSyncError> {
         let root = runtime.project_root_for_host_operations().to_path_buf();
         let (events, receiver) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
         let (cancellation, cancellation_receiver) = watch::channel(false);
@@ -59,6 +62,7 @@ impl ProjectAutoSync {
             cancellation: cancellation_receiver,
             debounce: debounce_from_env(),
             state: task_state,
+            startup_reconciliation_enabled,
         }));
         Ok(Self {
             watcher,
@@ -216,6 +220,7 @@ struct AutoSyncTask {
     cancellation: watch::Receiver<bool>,
     debounce: Duration,
     state: Arc<AutoSyncState>,
+    startup_reconciliation_enabled: bool,
 }
 
 async fn run_auto_sync(input: AutoSyncTask) {
@@ -225,13 +230,14 @@ async fn run_auto_sync(input: AutoSyncTask) {
         mut cancellation,
         debounce,
         state,
+        startup_reconciliation_enabled,
     } = input;
     let mut reconciliation = tokio::time::interval(RECONCILIATION_INTERVAL);
     reconciliation.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reconciliation.tick().await;
     let startup_reconciliation = tokio::time::sleep(STARTUP_RECONCILIATION_DELAY);
     tokio::pin!(startup_reconciliation);
-    let mut startup_reconciliation_pending = true;
+    let mut startup_reconciliation_pending = startup_reconciliation_enabled;
     loop {
         tokio::select! {
             biased;
@@ -472,7 +478,7 @@ mod tests {
             .index(IndexOptions::default().with_history_refresh(false))
             .await
             .unwrap_or_else(|error| panic!("watcher initial index failed: {error}"));
-        let watcher = ProjectAutoSync::start(runtime.clone())
+        let watcher = ProjectAutoSync::start(runtime.clone(), true)
             .unwrap_or_else(|error| panic!("watcher start failed: {error}"));
         std::fs::write(&source, "pub fn value() -> u32 { 2 }\n")
             .unwrap_or_else(|error| panic!("watcher edit failed: {error}"));

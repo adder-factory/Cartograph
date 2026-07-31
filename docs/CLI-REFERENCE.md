@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-07-30 (`v2.1.0`).
+Last release audit: 2026-07-31 (`v2.1.1`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -57,7 +57,7 @@ function/class categories.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.0 top-level command advertised
+This inventory contains every non-hidden v2.1.1 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -107,6 +107,13 @@ configuration. For a non-default managed port, the installer also pins the
 non-secret loopback port in the portable server arguments. Restart the host
 after a configuration or binary change.
 
+`cartograph upgrade --project-path <PATH>` audits Codex, Claude, and Cursor
+registrations in both local and global locations against the selected native
+executable. JSON reports a secret/path-safe `commandState`; stale absolute pins
+include an explicit `repinCommand`. After repinning, restart the host and prove
+`initialize`, `tools/list`, `cartograph_status`, and one real query on the new
+transport.
+
 ## Database lifecycle
 
 ```text
@@ -135,11 +142,20 @@ managed mode always verifies filesystem headroom and rejects an operator
 override, while external PostgreSQL requires `--available-headroom-bytes`. See
 [PostgreSQL operations](STORAGE-BACKENDS.md).
 
+Without an explicit `--port` or `CARTOGRAPH_MANAGED_DATABASE_PORT`, managed
+commands inspect the deterministic project-owned container and reuse its actual
+loopback port before falling back to `55432`. New/replaced containers reserve
+256 MiB of Docker shared memory; `doctor` fails an older 64 MiB container and
+requires backup plus the confirmed managed upgrade before HNSW maintenance.
+`status` includes compact allocated database/schema totals while `db usage`
+retains the relation, cache, generation, and maintenance detail.
+
 ## LLM credentials and local backend state
 
 ```text
 cartograph llm migrate-credentials [PROJECT] [--tier-env TIER=ENV]
   [--apply --confirm migrate-inline-credentials]
+cartograph llm setup custom [--api-key-env ENV | --clear-credentials]
 cartograph backend cleanup [PROJECT] [--minimum-age-hours 24]
   [--apply --confirm cleanup-backend-junk]
 ```
@@ -147,7 +163,10 @@ cartograph backend cleanup [PROJECT] [--minimum-age-hours 24]
 Both commands are dry-run-first, bounded, and emit secret-free JSON. Credential
 migration requires an exact environment-value match, serializes Cartograph
 writers with a private lock, and aborts if the config bytes changed after the
-proof was made. Backend cleanup considers only generated-name rotated logs and
+proof was made. Custom setup clears retained credentials automatically when the
+provider/endpoint origin changes; `--clear-credentials` is the explicit
+same-origin removal path and conflicts with `--api-key-env`. Backend cleanup
+considers only generated-name rotated logs and
 invalid current-version PID state; it preserves current logs, valid or active
 processes, and state written by an unsupported newer/older format. Cleanup JSON
 exposes only validated project-relative entry names and stable path-free reason

@@ -232,6 +232,31 @@ fn rust_extracts_grouped_module_bindings_with_full_paths_and_aliases() {
 }
 
 #[test]
+fn rust_extracts_public_use_facades_as_named_reexports() {
+    let file = extract(
+        "src/lib.rs",
+        r"
+pub mod conv;
+pub mod nn {
+    pub use crate::conv::{conv2d, Conv2d as Layer};
+}
+",
+    );
+
+    for (module_specifier, imported_name, public_name) in [
+        ("crate::conv::conv2d", "conv2d", "nn::conv2d"),
+        ("crate::conv::Conv2d", "Conv2d", "nn::Layer"),
+    ] {
+        assert!(file.import_bindings.iter().any(|binding| {
+            binding.kind == ImportBindingKind::ReExportNamed
+                && binding.module_specifier == module_specifier
+                && binding.imported_name == imported_name
+                && binding.local_name == public_name
+        }));
+    }
+}
+
+#[test]
 fn rust_extracts_receiver_and_macro_calls_with_resolution_hints() {
     let file = extract("src/native.rs", GROUPED_RUST_BINDINGS);
     let receiver_call = file

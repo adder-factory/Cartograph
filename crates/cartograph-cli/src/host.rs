@@ -251,12 +251,15 @@ pub(crate) enum DiagnosticLocation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InstallTargetDetection {
-    target: &'static str,
-    location: &'static str,
-    config_present: bool,
-    config_valid: bool,
-    cartograph_configured: bool,
-    config_path: &'static str,
+    pub(crate) target: &'static str,
+    pub(crate) location: &'static str,
+    pub(crate) config_present: bool,
+    pub(crate) config_valid: bool,
+    pub(crate) cartograph_configured: bool,
+    pub(crate) config_path: &'static str,
+    pub(crate) command_state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) repin_command: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -290,6 +293,7 @@ impl<'path> HostConfigTarget<'path> {
 pub(crate) fn detect_install_targets(
     project_root: &Path,
     location: DiagnosticLocation,
+    selected_executable: Option<&Path>,
 ) -> Vec<InstallTargetDetection> {
     let home = host_home();
     let mut detections = Vec::new();
@@ -297,30 +301,39 @@ pub(crate) fn detect_install_targets(
         location,
         DiagnosticLocation::Local | DiagnosticLocation::Both
     ) {
-        detections.push(detect_toml(&HostConfigTarget::local(
-            "codex",
-            &project_root.join(".codex/config.toml"),
-            ".codex/config.toml",
-        )));
-        detections.push(detect_json(&JsonHostConfigTarget {
-            config: HostConfigTarget::local(
-                "cursor",
-                &project_root.join(".cursor/mcp.json"),
-                ".cursor/mcp.json",
+        detections.push(detect_toml(
+            &HostConfigTarget::local(
+                "codex",
+                &project_root.join(".codex/config.toml"),
+                ".codex/config.toml",
             ),
-            mode: JsonDetection::TopLevel,
-            project_root,
-        }));
-        if let Some(home) = home.as_ref() {
-            detections.push(detect_json(&JsonHostConfigTarget {
+            selected_executable,
+        ));
+        detections.push(detect_json(
+            &JsonHostConfigTarget {
                 config: HostConfigTarget::local(
-                    "claude",
-                    &home.join(".claude.json"),
-                    "~/.claude.json (project entry)",
+                    "cursor",
+                    &project_root.join(".cursor/mcp.json"),
+                    ".cursor/mcp.json",
                 ),
-                mode: JsonDetection::ClaudeProject,
+                mode: JsonDetection::TopLevel,
                 project_root,
-            }));
+            },
+            selected_executable,
+        ));
+        if let Some(home) = home.as_ref() {
+            detections.push(detect_json(
+                &JsonHostConfigTarget {
+                    config: HostConfigTarget::local(
+                        "claude",
+                        &home.join(".claude.json"),
+                        "~/.claude.json (project entry)",
+                    ),
+                    mode: JsonDetection::ClaudeProject,
+                    project_root,
+                },
+                selected_executable,
+            ));
         }
     }
     if matches!(
@@ -328,29 +341,38 @@ pub(crate) fn detect_install_targets(
         DiagnosticLocation::Global | DiagnosticLocation::Both
     ) && let Some(home) = home.as_ref()
     {
-        detections.push(detect_toml(&HostConfigTarget::global(
-            "codex",
-            &home.join(".codex/config.toml"),
-            "~/.codex/config.toml",
-        )));
-        detections.push(detect_json(&JsonHostConfigTarget {
-            config: HostConfigTarget::global(
-                "cursor",
-                &home.join(".cursor/mcp.json"),
-                "~/.cursor/mcp.json",
+        detections.push(detect_toml(
+            &HostConfigTarget::global(
+                "codex",
+                &home.join(".codex/config.toml"),
+                "~/.codex/config.toml",
             ),
-            mode: JsonDetection::TopLevel,
-            project_root,
-        }));
-        detections.push(detect_json(&JsonHostConfigTarget {
-            config: HostConfigTarget::global(
-                "claude",
-                &home.join(".claude.json"),
-                "~/.claude.json",
-            ),
-            mode: JsonDetection::TopLevel,
-            project_root,
-        }));
+            selected_executable,
+        ));
+        detections.push(detect_json(
+            &JsonHostConfigTarget {
+                config: HostConfigTarget::global(
+                    "cursor",
+                    &home.join(".cursor/mcp.json"),
+                    "~/.cursor/mcp.json",
+                ),
+                mode: JsonDetection::TopLevel,
+                project_root,
+            },
+            selected_executable,
+        ));
+        detections.push(detect_json(
+            &JsonHostConfigTarget {
+                config: HostConfigTarget::global(
+                    "claude",
+                    &home.join(".claude.json"),
+                    "~/.claude.json",
+                ),
+                mode: JsonDetection::TopLevel,
+                project_root,
+            },
+            selected_executable,
+        ));
     }
     detections
 }
@@ -371,7 +393,10 @@ fn bounded_text(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
-fn detect_toml(config: &HostConfigTarget<'_>) -> InstallTargetDetection {
+fn detect_toml(
+    config: &HostConfigTarget<'_>,
+    selected_executable: Option<&Path>,
+) -> InstallTargetDetection {
     let HostConfigTarget {
         target,
         location,
@@ -382,19 +407,32 @@ fn detect_toml(config: &HostConfigTarget<'_>) -> InstallTargetDetection {
     let parsed = text
         .as_deref()
         .and_then(|text| text.parse::<DocumentMut>().ok());
-    InstallTargetDetection {
-        target,
-        location,
-        config_present: text.is_some(),
-        config_valid: parsed.is_some(),
-        cartograph_configured: parsed.as_ref().is_some_and(|document| {
+    let configured_command = parsed.as_ref().and_then(|document| {
+        document
+            .get("mcp_servers")
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|servers| servers.get("cartograph"))
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|cartograph| cartograph.get("command"))
+            .and_then(toml_edit::Item::as_str)
+    });
+    let cartograph_configured = configured_command.is_some()
+        || parsed.as_ref().is_some_and(|document| {
             document
                 .get("mcp_servers")
                 .and_then(toml_edit::Item::as_table)
                 .is_some_and(|servers| servers.contains_key("cartograph"))
-        }),
+        });
+    registration_detection(&RegistrationDetectionInput {
+        target,
+        location,
+        config_present: text.is_some(),
+        config_valid: parsed.is_some(),
+        cartograph_configured,
         config_path,
-    }
+        configured_command,
+        selected_executable,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -410,7 +448,10 @@ struct JsonHostConfigTarget<'path> {
     project_root: &'path Path,
 }
 
-fn detect_json(config: &JsonHostConfigTarget<'_>) -> InstallTargetDetection {
+fn detect_json(
+    config: &JsonHostConfigTarget<'_>,
+    selected_executable: Option<&Path>,
+) -> InstallTargetDetection {
     let JsonHostConfigTarget {
         config:
             HostConfigTarget {
@@ -427,24 +468,86 @@ fn detect_json(config: &JsonHostConfigTarget<'_>) -> InstallTargetDetection {
         .as_deref()
         .and_then(|text| serde_json::from_str::<Value>(text).ok());
     let project_key = project_root.to_str();
-    let configured = parsed.as_ref().is_some_and(|value| match mode {
-        JsonDetection::TopLevel => value.pointer("/mcpServers/cartograph").is_some(),
-        JsonDetection::ClaudeProject => project_key.is_some_and(|key| {
+    let configured_value = parsed.as_ref().and_then(|value| match mode {
+        JsonDetection::TopLevel => value.pointer("/mcpServers/cartograph"),
+        JsonDetection::ClaudeProject => project_key.and_then(|key| {
             value
                 .get("projects")
                 .and_then(Value::as_object)
                 .and_then(|projects| projects.get(key))
                 .and_then(|project| project.pointer("/mcpServers/cartograph"))
-                .is_some()
         }),
     });
-    InstallTargetDetection {
+    let configured_command = configured_value
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("command"))
+        .and_then(Value::as_str);
+    registration_detection(&RegistrationDetectionInput {
         target,
         location,
         config_present: text.is_some(),
         config_valid: parsed.is_some(),
-        cartograph_configured: configured,
+        cartograph_configured: configured_value.is_some(),
         config_path,
+        configured_command,
+        selected_executable,
+    })
+}
+
+struct RegistrationDetectionInput<'input> {
+    target: &'static str,
+    location: &'static str,
+    config_present: bool,
+    config_valid: bool,
+    cartograph_configured: bool,
+    config_path: &'static str,
+    configured_command: Option<&'input str>,
+    selected_executable: Option<&'input Path>,
+}
+
+fn registration_detection(input: &RegistrationDetectionInput<'_>) -> InstallTargetDetection {
+    let command_state = registration_command_state(input);
+    let repin_command = (command_state == "stale_absolute").then(|| {
+        format!(
+            "cartograph install --yes --target {} --location {} --project-path <path>",
+            input.target, input.location
+        )
+    });
+    InstallTargetDetection {
+        target: input.target,
+        location: input.location,
+        config_present: input.config_present,
+        config_valid: input.config_valid,
+        cartograph_configured: input.cartograph_configured,
+        config_path: input.config_path,
+        command_state,
+        repin_command,
+    }
+}
+
+fn registration_command_state(input: &RegistrationDetectionInput<'_>) -> &'static str {
+    if !input.config_valid {
+        return "unavailable";
+    }
+    if !input.cartograph_configured {
+        return "not_configured";
+    }
+    let Some(command) = input.configured_command else {
+        return "missing_command";
+    };
+    let command_path = Path::new(command);
+    if !command_path.is_absolute() {
+        return "path_lookup";
+    }
+    let Some(selected) = input.selected_executable else {
+        return "absolute_unchecked";
+    };
+    let configured = fs::canonicalize(command_path).unwrap_or_else(|_| command_path.to_path_buf());
+    let selected = fs::canonicalize(selected).unwrap_or_else(|_| selected.to_path_buf());
+    if configured == selected {
+        "current_absolute"
+    } else {
+        "stale_absolute"
     }
 }
 
@@ -536,22 +639,20 @@ mod tests {
     fn host_config_detection_distinguishes_missing_invalid_and_configured_targets() {
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let codex = root.path().join("config.toml");
-        let missing = detect_toml(&HostConfigTarget::local(
-            "codex",
-            &codex,
-            ".codex/config.toml",
-        ));
+        let missing = detect_toml(
+            &HostConfigTarget::local("codex", &codex, ".codex/config.toml"),
+            None,
+        );
         assert!(!missing.config_present);
         assert!(!missing.config_valid);
         assert!(!missing.cartograph_configured);
 
         fs::write(&codex, "not = [valid")
             .unwrap_or_else(|error| panic!("invalid TOML fixture failed: {error}"));
-        let invalid = detect_toml(&HostConfigTarget::local(
-            "codex",
-            &codex,
-            ".codex/config.toml",
-        ));
+        let invalid = detect_toml(
+            &HostConfigTarget::local("codex", &codex, ".codex/config.toml"),
+            None,
+        );
         assert!(invalid.config_present);
         assert!(!invalid.config_valid);
         assert!(!invalid.cartograph_configured);
@@ -561,13 +662,14 @@ mod tests {
             "[mcp_servers.cartograph]\ncommand = '/usr/local/bin/cartograph'\n",
         )
         .unwrap_or_else(|error| panic!("valid TOML fixture failed: {error}"));
-        let configured = detect_toml(&HostConfigTarget::local(
-            "codex",
-            &codex,
-            ".codex/config.toml",
-        ));
+        let configured = detect_toml(
+            &HostConfigTarget::local("codex", &codex, ".codex/config.toml"),
+            Some(&codex),
+        );
         assert!(configured.config_valid);
         assert!(configured.cartograph_configured);
+        assert_eq!(configured.command_state, "stale_absolute");
+        assert!(configured.repin_command.is_some());
         assert!(bounded_text(&codex).is_some());
 
         let cursor = root.path().join("mcp.json");
@@ -576,11 +678,14 @@ mod tests {
             br#"{"mcpServers":{"cartograph":{"command":"cartograph"}}}"#,
         )
         .unwrap_or_else(|error| panic!("cursor fixture failed: {error}"));
-        let cursor_detection = detect_json(&JsonHostConfigTarget {
-            config: HostConfigTarget::local("cursor", &cursor, ".cursor/mcp.json"),
-            mode: JsonDetection::TopLevel,
-            project_root: root.path(),
-        });
+        let cursor_detection = detect_json(
+            &JsonHostConfigTarget {
+                config: HostConfigTarget::local("cursor", &cursor, ".cursor/mcp.json"),
+                mode: JsonDetection::TopLevel,
+                project_root: root.path(),
+            },
+            None,
+        );
         assert!(cursor_detection.config_present);
         assert!(cursor_detection.config_valid);
         assert!(cursor_detection.cartograph_configured);
@@ -599,11 +704,18 @@ mod tests {
             .unwrap_or_else(|error| panic!("Claude fixture encode failed: {error}")),
         )
         .unwrap_or_else(|error| panic!("Claude fixture failed: {error}"));
-        let claude_detection = detect_json(&JsonHostConfigTarget {
-            config: HostConfigTarget::local("claude", &claude, "~/.claude.json (project entry)"),
-            mode: JsonDetection::ClaudeProject,
-            project_root: root.path(),
-        });
+        let claude_detection = detect_json(
+            &JsonHostConfigTarget {
+                config: HostConfigTarget::local(
+                    "claude",
+                    &claude,
+                    "~/.claude.json (project entry)",
+                ),
+                mode: JsonDetection::ClaudeProject,
+                project_root: root.path(),
+            },
+            None,
+        );
         assert!(claude_detection.config_valid);
         assert!(claude_detection.cartograph_configured);
 

@@ -66,8 +66,12 @@ const LEASE_WAIT_INTERVAL: Duration = Duration::from_millis(20);
 const NONCOOPERATIVE_WORK_DURATION: Duration = Duration::from_secs(2);
 const SHORT_CANCELLATION_GRACE: Duration = Duration::from_millis(150);
 const CANCELLING_OBSERVATION_DELAY: Duration = Duration::from_millis(40);
-const DEADLINE_TEST_TIMEOUT: Duration = Duration::from_millis(900);
-const DEADLINE_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(50);
+// Keep one complete heartbeat request-and-reap horizon between acquisition and
+// the active-work deadline so this test isolates operation cancellation even
+// under LLVM coverage instrumentation.
+const DEADLINE_TEST_TIMEOUT: Duration = Duration::from_millis(1_400);
+const DEADLINE_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(400);
+const DEADLINE_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(100);
 const DEADLINE_PROGRESS_TIMEOUT: Duration = Duration::from_millis(300);
 const DEADLINE_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 const DEADLINE_COPY_TIMEOUT: Duration = Duration::from_millis(50);
@@ -110,8 +114,13 @@ const ABORT_RESULT_BOUND: Duration = Duration::from_secs(2);
 const BLOCKED_PUBLICATION_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const BLOCKED_PUBLICATION_COPY_TIMEOUT: Duration = Duration::from_millis(500);
 const BLOCKED_PUBLICATION_RESULT_BOUND: Duration = Duration::from_secs(3);
-const COPY_CANCEL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+// Acquisition and test-observer setup have their own coverage-safe horizon;
+// cancellation after the blocked COPY is observed remains capped separately
+// by `ABORT_RESULT_BOUND`.
+const COPY_CANCEL_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const COPY_CANCEL_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(500);
 const COPY_CANCEL_GRACE: Duration = Duration::from_millis(20);
+const COPY_CANCEL_NONCOOPERATIVE_TAIL: Duration = Duration::from_millis(100);
 const COPY_CANCEL_TIMEOUT: Duration = Duration::from_millis(200);
 const LONG_COPY_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const LONG_COPY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -509,6 +518,42 @@ const NATIVE_CUSTOM_FAMILY_FIXTURES: [(&str, &str, &str, &str); NATIVE_CUSTOM_FA
 ];
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+struct CopyStartGate {
+    ready: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+struct CopyStartControl {
+    ready: oneshot::Receiver<()>,
+    release: oneshot::Sender<()>,
+}
+
+fn copy_start_barrier() -> (CopyStartGate, CopyStartControl) {
+    let (ready_sender, ready_receiver) = oneshot::channel();
+    let (release_sender, release_receiver) = oneshot::channel();
+    (
+        CopyStartGate {
+            ready: ready_sender,
+            release: release_receiver,
+        },
+        CopyStartControl {
+            ready: ready_receiver,
+            release: release_sender,
+        },
+    )
+}
+
+impl CopyStartGate {
+    async fn wait(self) -> Result<(), PipelineFailure> {
+        self.ready
+            .send(())
+            .map_err(|()| PipelineFailure::new(PipelineStage::Copy))?;
+        self.release
+            .await
+            .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+    }
+}
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
@@ -1452,6 +1497,7 @@ async fn requested_cancellation_reaps_inflight_copy_before_external_unlock() {
     let supervisor = IndexerSupervisor::new(fixture.database.clone(), copy_cancel_config());
     let runner = supervisor.clone();
     let request_target = target.clone();
+    let (copy_gate, copy_control) = copy_start_barrier();
     let handle = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
@@ -1460,7 +1506,8 @@ async fn requested_cancellation_reaps_inflight_copy_before_external_unlock() {
                     .begin_stage(PipelineStage::Copy)
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
-                context
+                copy_gate.wait().await?;
+                let prepared = context
                     .prepare_generation(GenerationContents::new(
                         staged,
                         canonical(GenerationFacts {
@@ -1468,12 +1515,26 @@ async fn requested_cancellation_reaps_inflight_copy_before_external_unlock() {
                             ..GenerationFacts::default()
                         }),
                     ))
-                    .await
-                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+                    .await;
+                tokio::time::sleep(COPY_CANCEL_NONCOOPERATIVE_TAIL).await;
+                prepared.map_err(|_| PipelineFailure::new(PipelineStage::Copy))
             })
             .await
     });
-    wait_for_schema_lock(&fixture.pool, &fixture.schema, "search_documents").await;
+    wait_for_lease(&fixture.database, &target).await;
+    if let Err(error) = release_copy_and_wait_for_schema_lock(
+        copy_control,
+        &supervisor,
+        &fixture.pool,
+        &fixture.schema,
+    )
+    .await
+    {
+        let outcome = handle
+            .await
+            .unwrap_or_else(|join_error| panic!("COPY supervisor task failed: {join_error}"));
+        panic!("{error}; supervisor outcome: {outcome:?}");
+    }
     assert!(supervisor.cancel());
     let joined = tokio::time::timeout(ABORT_RESULT_BOUND, handle)
         .await
@@ -1525,6 +1586,7 @@ async fn aborting_public_run_reaps_inflight_copy_before_external_unlock() {
     let supervisor = IndexerSupervisor::new(fixture.database.clone(), copy_cancel_config());
     let runner = supervisor.clone();
     let request_target = target.clone();
+    let (copy_gate, copy_control) = copy_start_barrier();
     let outer = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
@@ -1533,7 +1595,8 @@ async fn aborting_public_run_reaps_inflight_copy_before_external_unlock() {
                     .begin_stage(PipelineStage::Copy)
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
-                context
+                copy_gate.wait().await?;
+                let prepared = context
                     .prepare_generation(GenerationContents::new(
                         staged,
                         canonical(GenerationFacts {
@@ -1541,12 +1604,26 @@ async fn aborting_public_run_reaps_inflight_copy_before_external_unlock() {
                             ..GenerationFacts::default()
                         }),
                     ))
-                    .await
-                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+                    .await;
+                tokio::time::sleep(COPY_CANCEL_NONCOOPERATIVE_TAIL).await;
+                prepared.map_err(|_| PipelineFailure::new(PipelineStage::Copy))
             })
             .await
     });
-    wait_for_schema_lock(&fixture.pool, &fixture.schema, "search_documents").await;
+    wait_for_lease(&fixture.database, &target).await;
+    if let Err(error) = release_copy_and_wait_for_schema_lock(
+        copy_control,
+        &supervisor,
+        &fixture.pool,
+        &fixture.schema,
+    )
+    .await
+    {
+        let outcome = outer
+            .await
+            .unwrap_or_else(|join_error| panic!("COPY supervisor task failed: {join_error}"));
+        panic!("{error}; supervisor outcome: {outcome:?}");
+    }
     outer.abort();
     assert!(matches!(outer.await, Err(error) if error.is_cancelled()));
     wait_for_supervisor_state(&supervisor, SupervisorState::Wedged).await;
@@ -1586,6 +1663,7 @@ async fn dropping_polled_run_outside_runtime_reaps_inflight_copy() {
     let supervisor = IndexerSupervisor::new(fixture.database.clone(), copy_cancel_config());
     let runner = supervisor.clone();
     let request_target = target.clone();
+    let (copy_gate, copy_control) = copy_start_barrier();
     let mut run = Box::pin(async move {
         runner
             .run(request(request_target), move |context| async move {
@@ -1594,7 +1672,8 @@ async fn dropping_polled_run_outside_runtime_reaps_inflight_copy() {
                     .begin_stage(PipelineStage::Copy)
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
-                context
+                copy_gate.wait().await?;
+                let prepared = context
                     .prepare_generation(GenerationContents::new(
                         staged,
                         canonical(GenerationFacts {
@@ -1602,8 +1681,9 @@ async fn dropping_polled_run_outside_runtime_reaps_inflight_copy() {
                             ..GenerationFacts::default()
                         }),
                     ))
-                    .await
-                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+                    .await;
+                tokio::time::sleep(COPY_CANCEL_NONCOOPERATIVE_TAIL).await;
+                prepared.map_err(|_| PipelineFailure::new(PipelineStage::Copy))
             })
             .await
     });
@@ -1612,7 +1692,18 @@ async fn dropping_polled_run_outside_runtime_reaps_inflight_copy() {
         Poll::Ready(())
     })
     .await;
-    wait_for_schema_lock(&fixture.pool, &fixture.schema, "search_documents").await;
+    wait_for_lease(&fixture.database, &target).await;
+    if let Err(error) = release_copy_and_wait_for_schema_lock(
+        copy_control,
+        &supervisor,
+        &fixture.pool,
+        &fixture.schema,
+    )
+    .await
+    {
+        let outcome = run.await;
+        panic!("{error}; supervisor outcome: {outcome:?}");
+    }
     let dropper = std::thread::spawn(move || drop(run));
     assert!(dropper.join().is_ok());
     wait_for_supervisor_state(&supervisor, SupervisorState::Wedged).await;
@@ -2488,7 +2579,7 @@ fn stalled_config() -> SupervisorConfig {
 
 fn deadline_config() -> SupervisorConfig {
     SupervisorConfig::new(DEADLINE_TEST_TIMEOUT)
-        .with_heartbeat_interval(STANDARD_HEARTBEAT_INTERVAL)
+        .with_heartbeat_interval(DEADLINE_HEARTBEAT_INTERVAL)
         .with_heartbeat_timeout(DEADLINE_HEARTBEAT_TIMEOUT)
         .with_progress_timeout(DEADLINE_PROGRESS_TIMEOUT)
         .with_cancellation_grace(DEADLINE_CANCELLATION_GRACE)
@@ -2552,7 +2643,7 @@ fn blocked_publication_config() -> SupervisorConfig {
 fn copy_cancel_config() -> SupervisorConfig {
     SupervisorConfig::new(COPY_CANCEL_OPERATION_TIMEOUT)
         .with_heartbeat_interval(ABORT_HEARTBEAT_INTERVAL)
-        .with_heartbeat_timeout(ABORT_HEARTBEAT_TIMEOUT)
+        .with_heartbeat_timeout(COPY_CANCEL_HEARTBEAT_TIMEOUT)
         .with_progress_timeout(ABORT_PROGRESS_TIMEOUT)
         .with_cancellation_grace(COPY_CANCEL_GRACE)
         .with_copy_timeout(COPY_CANCEL_TIMEOUT)
@@ -2719,6 +2810,44 @@ async fn wait_for_schema_lock(pool: &sqlx_postgres::PgPool, schema: &str, relati
     panic!("database operation did not reach the expected lock wait");
 }
 
+async fn release_copy_and_wait_for_schema_lock(
+    control: CopyStartControl,
+    supervisor: &IndexerSupervisor,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+) -> Result<(), String> {
+    let ready = tokio::time::timeout(ABORT_RESULT_BOUND, control.ready).await;
+    match ready {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            return Err(format!(
+                "COPY dropped its start barrier before database work; supervisor state: {:?}",
+                supervisor.status().await.state()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "COPY did not reach its start barrier: {error}; supervisor state: {:?}",
+                supervisor.status().await.state()
+            ));
+        }
+    }
+    let observer_pool = pool.clone();
+    let observer_schema = schema.to_owned();
+    let observer = tokio::spawn(async move {
+        wait_for_schema_lock(&observer_pool, &observer_schema, "search_documents").await;
+    });
+    tokio::task::yield_now().await;
+    control
+        .release
+        .send(())
+        .unwrap_or_else(|()| panic!("COPY dropped its release barrier before database work"));
+    observer
+        .await
+        .map_err(|error| format!("COPY lock observer failed: {error}"))?;
+    Ok(())
+}
+
 async fn wait_for_query_absent(pool: &sqlx_postgres::PgPool, schema: &str, query_fragment: &str) {
     let schema_pattern = format!("%{schema}%");
     for _ in 0..LEASE_WAIT_ATTEMPTS {
@@ -2808,7 +2937,11 @@ async fn wait_for_supervisor_state(supervisor: &IndexerSupervisor, expected: Sup
         }
         tokio::time::sleep(LEASE_WAIT_INTERVAL).await;
     }
-    panic!("supervisor did not reach its expected terminal state");
+    let actual = supervisor.status().await.state();
+    assert_eq!(
+        actual, expected,
+        "supervisor did not reach its expected terminal state"
+    );
 }
 
 async fn install_one_shot_publish_delay(fixture: &DatabaseFixture) {
@@ -3012,13 +3145,26 @@ async fn assert_generation_state(
     generation: &GenerationId,
     expected: GenerationState,
 ) {
-    assert!(matches!(
-        fixture
-            .database
-            .generation_state(&fixture.project, generation)
-            .await,
-        Ok(Some(state)) if state == expected
-    ));
+    for _ in 0..LEASE_WAIT_ATTEMPTS {
+        if matches!(
+            fixture
+                .database
+                .generation_state(&fixture.project, generation)
+                .await,
+            Ok(Some(state)) if state == expected
+        ) {
+            return;
+        }
+        tokio::time::sleep(LEASE_WAIT_INTERVAL).await;
+    }
+    let actual = fixture
+        .database
+        .generation_state(&fixture.project, generation)
+        .await;
+    assert!(
+        matches!(&actual, Ok(Some(state)) if *state == expected),
+        "generation did not reach {expected:?}: {actual:?}"
+    );
 }
 
 async fn fail_recoverable_generation(fixture: &DatabaseFixture, generation: &GenerationId) {

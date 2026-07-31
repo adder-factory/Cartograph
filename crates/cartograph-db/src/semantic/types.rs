@@ -1060,6 +1060,9 @@ pub enum SemanticStorageError {
         /// Exact readiness state that blocked semantic retrieval.
         state: SemanticReadinessState,
     },
+    /// PostgreSQL could not allocate the shared-memory segment for HNSW creation.
+    #[error("Cartograph PostgreSQL HNSW creation failed because shared memory is unavailable")]
+    HnswCreateSharedMemoryUnavailable,
     /// A stored identity, enum, count, or score violated the schema contract.
     #[error("Cartograph semantic storage violates the {field} domain contract")]
     CorruptStoredValue {

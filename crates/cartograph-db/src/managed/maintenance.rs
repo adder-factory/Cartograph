@@ -401,7 +401,9 @@ impl ManagedDatabaseMaintenance<'_> {
         }
         validate_configured_port(self.database.port, &inspection)?;
         let credentials = self.database.credentials.load()?;
-        if inspection.image == super::MANAGED_DATABASE_IMAGE {
+        if inspection.image == super::MANAGED_DATABASE_IMAGE
+            && inspection.shared_memory_bytes >= super::MANAGED_DATABASE_SHARED_MEMORY_BYTES
+        {
             let initialized = self
                 .initialize_supported_existing(&inspection, &credentials)
                 .await?;

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use cartograph_config::DatabaseSchema;
 use cartograph_domain::{GenerationId, ProjectId};
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{error::Error as SqlxError, query::query, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::{PgArguments, PgConnection, PgPool, PgRow, Postgres};
 use thiserror::Error;
 
@@ -54,6 +54,12 @@ pub enum StorageError {
     /// contain query data or deployment details.
     #[error("Cartograph PostgreSQL operation failed during {operation}")]
     DatabaseOperation {
+        /// Stable operation identifier.
+        operation: &'static str,
+    },
+    /// A bounded read exceeded its transaction-local PostgreSQL statement timeout.
+    #[error("Cartograph PostgreSQL operation timed out during {operation}")]
+    StatementTimeout {
         /// Stable operation identifier.
         operation: &'static str,
     },
@@ -235,9 +241,20 @@ where
     let rows = bind(query(AssertSqlSafe(statement)))
         .fetch_all(&mut *transaction)
         .await
-        .map_err(|_| database_error())?;
+        .map_err(|error| classify_read_error(&error, operation))?;
     transaction.commit().await.map_err(|_| database_error())?;
     Ok(rows)
+}
+
+fn classify_read_error(error: &SqlxError, operation: &'static str) -> StorageError {
+    if matches!(
+        error,
+        SqlxError::Database(database) if database.code().as_deref() == Some("57014")
+    ) {
+        StorageError::StatementTimeout { operation }
+    } else {
+        StorageError::DatabaseOperation { operation }
+    }
 }
 
 pub(crate) fn read_stored_string(

@@ -245,6 +245,8 @@ pub enum ImportBindingKind {
     ReExportAll,
     /// `export * as Local from './module'`, retaining the exported namespace owner.
     ReExportNamespace,
+    /// Rust `pub use path::Name`, retaining its public facade path and exact source path.
+    ReExportNamed,
     /// C-family `#include "project/header.h"` resolved against project files.
     IncludeQuoted,
     /// C-family `#include <system/header.h>` retained but never guessed as a project file.

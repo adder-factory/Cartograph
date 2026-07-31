@@ -31,7 +31,9 @@ cartograph doctor .
 
 The native lifecycle creates a project-owned container and volume, generates a
 private local credential, binds PostgreSQL to loopback, and pulls the pinned
-upstream ParadeDB image. It refuses a remote Docker context, foreign resources
+upstream ParadeDB image. New and upgraded containers reserve 256 MiB of shared
+memory and HNSW creation disables parallel maintenance workers so vector-index
+construction stays bounded. It refuses a remote Docker context, foreign resources
 with colliding names, wrong labels/mounts, a public bind, and an unproved
 database capability.
 
@@ -65,6 +67,9 @@ discards the old container. ParadeDB 0.25.0 retains the legacy `bm25` access
 method, so existing derived indexes remain valid and queryable; Cartograph
 creates replacement/new generation indexes with the current `paradedb` access
 method and accepts both catalog names during this upgrade boundary.
+It also replaces a same-image legacy container when its shared-memory allocation
+is below the current HNSW requirement. `doctor` reports that condition before
+embedding work reaches index creation.
 
 Restore, upgrade, derived-index rebuild, and removal replace or delete state and
 require the exact confirmation phrase shown by `cartograph db <command> --help`.
@@ -275,7 +280,9 @@ retention.
 Status and doctor expose generation-state counts plus a conservative retained
 byte lower bound (source bytes plus physical generation search tables/indexes).
 That lower bound deliberately excludes shared fact-table heaps and B-trees,
-embeddings, and reusable dead space; use `db usage` for physical totals.
+embeddings, and reusable dead space. Routine `status` also includes compact
+whole-database and schema heap/index/TOAST totals; use `db usage` for the full
+relation/cache/generation report.
 Inspect the report and request another explicit batch if automatic cleanup does
 not drain an existing backlog.
 

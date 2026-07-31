@@ -526,6 +526,9 @@ enum Command {
         /// Output structured JSON.
         #[arg(short = 'j', long)]
         json: bool,
+        /// Existing project whose local and global MCP registrations should be audited.
+        #[arg(long, default_value = ".")]
+        project_path: PathBuf,
     },
     /// Configure Cartograph for one or more coding-agent hosts.
     Install {
@@ -675,8 +678,8 @@ struct DatabaseStartArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port for PostgreSQL.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
     /// Maximum seconds to wait for managed database readiness.
     #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(1..=600))]
     wait_seconds: u64,
@@ -691,8 +694,8 @@ struct DatabaseStatusArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port used by the managed database.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
     /// Output format for humans or automation.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
@@ -704,8 +707,8 @@ struct DatabaseStopArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port used by the managed database.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -714,8 +717,8 @@ struct DatabaseLogsArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port used by the managed database.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
     /// Maximum number of log lines.
     #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=10000))]
     tail: u16,
@@ -729,8 +732,8 @@ struct DatabaseBackupArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port used by the managed database.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
     /// Output format for humans or automation.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
@@ -747,8 +750,8 @@ struct DatabaseRestoreArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port used by the managed database.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
     /// Output format for humans or automation.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
@@ -763,8 +766,8 @@ struct DatabaseDestructiveArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port used by the managed database.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
     /// Output format for humans or automation.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
@@ -782,8 +785,8 @@ struct DatabaseDerivedIndexArguments {
     #[arg(long, default_value = ".")]
     project_path: PathBuf,
     /// Loopback host port used by the managed database.
-    #[arg(long, default_value_t = DEFAULT_MANAGED_DATABASE_PORT, value_parser = clap::value_parser!(u16).range(1..=65535))]
-    port: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    port: Option<u16>,
     /// Output format for humans or automation.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
@@ -919,6 +922,15 @@ struct FindArguments {
     by: FindBy,
     limit: u16,
     allow_stale: bool,
+    format: OutputFormat,
+}
+
+struct FindCommandContext<'runtime, 'retrieval> {
+    runtime: &'runtime ProjectRuntime,
+    retrieval: &'retrieval DeterministicRetriever,
+    project_id: ProjectId,
+    freshness: IndexFreshness,
+    limit: u16,
     format: OutputFormat,
 }
 
@@ -1594,6 +1606,11 @@ async fn run_runtime_operator_command(command: Command) -> Result<ExitCode, Stri
             .await
         }
         Command::Db { command } => run_database_command(command).await,
+        Command::Upgrade {
+            apply,
+            json,
+            project_path,
+        } => run_upgrade_command(apply, json, project_path).await,
         command => run_auxiliary_operator_command(command).await,
     }
 }
@@ -1693,7 +1710,6 @@ async fn run_auxiliary_operator_command(command: Command) -> Result<ExitCode, St
             Ok(ExitCode::SUCCESS)
         }
         Command::Llm { command } => llm_commands::run(command).await,
-        Command::Upgrade { apply, json } => run_upgrade_command(apply, json).await,
         _ => Err("internal operator command routing failed".to_owned()),
     }
 }
@@ -1810,8 +1826,12 @@ fn run_mcp_budget_command(input: &McpBudgetCommandInput) -> Result<ExitCode, Str
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_upgrade_command(apply: bool, json: bool) -> Result<ExitCode, String> {
-    let report = upgrade::run_upgrade(apply).await;
+async fn run_upgrade_command(
+    apply: bool,
+    json: bool,
+    project_path: PathBuf,
+) -> Result<ExitCode, String> {
+    let report = upgrade::run_upgrade(apply, &project_path).await;
     if json {
         println!(
             "{}",
@@ -1841,57 +1861,103 @@ async fn run_find(arguments: FindArguments) -> Result<ExitCode, String> {
     let (project_id, freshness) = current_project(&runtime).await?;
     require_freshness(freshness, allow_stale)?;
     let retrieval = DeterministicRetriever::new(runtime.database().clone());
-    match by {
-        FindBy::Auto | FindBy::Hybrid => {
-            let mode = if matches!(by, FindBy::Hybrid) {
-                SearchMode::Hybrid
-            } else {
-                SearchMode::Auto
-            };
-            let options = RetrievalOptions::new(mode, limit).map_err(|error| error.to_string())?;
-            let result = runtime
-                .search(RetrievalRequest::new(project_id, query, options))
-                .await
-                .map_err(|error| error.to_string())?;
-            print_fresh_evidence(freshness, &result, format)?;
+    let result = {
+        let context = FindCommandContext {
+            runtime: &runtime,
+            retrieval: &retrieval,
+            project_id,
+            freshness,
+            limit,
+            format,
+        };
+        match by {
+            FindBy::Auto | FindBy::Hybrid => run_semantic_find(&context, by, query).await,
+            FindBy::Name | FindBy::Path | FindBy::Reference => {
+                run_exact_find(&context, by, &query).await
+            }
+            FindBy::Bm25 => run_bm25_find(&context, query).await,
         }
+    };
+    runtime.close().await;
+    result?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_semantic_find(
+    context: &FindCommandContext<'_, '_>,
+    by: FindBy,
+    query: String,
+) -> Result<(), String> {
+    let mode = if matches!(by, FindBy::Hybrid) {
+        SearchMode::Hybrid
+    } else {
+        SearchMode::Auto
+    };
+    let options = RetrievalOptions::new(mode, context.limit).map_err(|error| error.to_string())?;
+    let result = context
+        .runtime
+        .search(RetrievalRequest::new(
+            context.project_id.clone(),
+            query,
+            options,
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    print_fresh_evidence(context.freshness, &result, context.format)
+}
+
+async fn run_exact_find(
+    context: &FindCommandContext<'_, '_>,
+    by: FindBy,
+    query: &str,
+) -> Result<(), String> {
+    match by {
         FindBy::Name => {
-            let query = ExactTextQuery::new(&query, limit).map_err(|error| error.to_string())?;
-            let result = retrieval
-                .exact_name(&project_id, query)
+            let query =
+                ExactTextQuery::new(query, context.limit).map_err(|error| error.to_string())?;
+            let result = context
+                .retrieval
+                .exact_name(&context.project_id, query)
                 .await
                 .map_err(|error| error.to_string())?;
-            print_fresh_evidence(freshness, &result, format)?;
+            print_fresh_evidence(context.freshness, &result, context.format)
         }
         FindBy::Path => {
-            let path = NormalizedPath::parse(&query)
+            let path = NormalizedPath::parse(query)
                 .map_err(|_| "source path must be project-relative".to_owned())?;
-            let query = ExactPathQuery::new(&path, limit).map_err(|error| error.to_string())?;
-            let result = retrieval
-                .exact_path(&project_id, query)
+            let query =
+                ExactPathQuery::new(&path, context.limit).map_err(|error| error.to_string())?;
+            let result = context
+                .retrieval
+                .exact_path(&context.project_id, query)
                 .await
                 .map_err(|error| error.to_string())?;
-            print_fresh_evidence(freshness, &result, format)?;
+            print_fresh_evidence(context.freshness, &result, context.format)
         }
         FindBy::Reference => {
-            let query = ExactTextQuery::new(&query, limit).map_err(|error| error.to_string())?;
-            let result = retrieval
-                .exact_reference(&project_id, query)
+            let query =
+                ExactTextQuery::new(query, context.limit).map_err(|error| error.to_string())?;
+            let result = context
+                .retrieval
+                .exact_reference(&context.project_id, query)
                 .await
                 .map_err(|error| error.to_string())?;
-            print_fresh_evidence(freshness, &result, format)?;
+            print_fresh_evidence(context.freshness, &result, context.format)
         }
-        FindBy::Bm25 => {
-            let query = LexicalQuery::new(query, limit).map_err(|error| error.to_string())?;
-            let result = retrieval
-                .bm25(project_id, query)
-                .await
-                .map_err(|error| error.to_string())?;
-            print_fresh_evidence(freshness, &result, format)?;
+        FindBy::Auto | FindBy::Bm25 | FindBy::Hybrid => {
+            Err("exact find received a non-exact mode".to_owned())
         }
     }
-    runtime.close().await;
-    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_bm25_find(context: &FindCommandContext<'_, '_>, query: String) -> Result<(), String> {
+    let query = LexicalQuery::new(query, context.limit).map_err(|error| error.to_string())?;
+    let result = context
+        .retrieval
+        .bm25(context.project_id.clone(), query)
+        .await
+        .map_err(|error| error.to_string())?;
+    print_fresh_evidence(context.freshness, &result, context.format)
 }
 
 async fn run_files(arguments: FilesArguments) -> Result<ExitCode, String> {
@@ -2311,49 +2377,86 @@ async fn run_review(arguments: ReviewArguments) -> Result<ExitCode, String> {
 }
 
 async fn open_runtime(project_path: &PathBuf) -> Result<ProjectRuntime, String> {
-    let settings = resolve_database_settings(project_path)?;
+    let settings = resolve_database_settings(project_path).await?;
     ProjectRuntime::connect(project_path, &settings)
         .await
         .map_err(|error| error.to_string())
 }
 
-fn resolve_database_settings(project_path: &PathBuf) -> Result<DatabaseSettings, String> {
-    resolve_database_settings_with_port(project_path, None)
+async fn resolve_database_settings(project_path: &PathBuf) -> Result<DatabaseSettings, String> {
+    resolve_database_settings_with_port(project_path, None).await
 }
 
-fn resolve_database_settings_with_port(
+async fn resolve_database_settings_with_port(
     project_path: &PathBuf,
     managed_database_port: Option<u16>,
 ) -> Result<DatabaseSettings, String> {
     if env::var_os(DATABASE_URL_ENV).is_some() {
         return DatabaseSettings::from_env().map_err(|error| error.to_string());
     }
-    let port = resolve_managed_database_port(managed_database_port)?;
+    let port = resolve_managed_database_port(project_path, managed_database_port).await?;
     ManagedDatabase::new(project_path, port)
         .and_then(|database| database.connection_settings())
         .map_err(|error| format!("{error}; run `cartograph db start --project-path <path>` first"))
 }
 
-fn resolve_managed_database_port(explicit: Option<u16>) -> Result<u16, String> {
+async fn resolve_managed_database_port(
+    project_path: &Path,
+    explicit: Option<u16>,
+) -> Result<u16, String> {
+    let selected = configured_managed_database_port(explicit)?;
+    let probe_port = selected.unwrap_or(DEFAULT_MANAGED_DATABASE_PORT);
+    let probe =
+        ManagedDatabase::new(project_path, probe_port).map_err(|error| error.to_string())?;
+    let status = probe
+        .lifecycle()
+        .status()
+        .await
+        .map_err(|error| {
+            format!(
+                "could not discover this project's managed database port: {error}; set {MANAGED_DATABASE_PORT_ENV} or pass an explicit managed database port"
+            )
+        })?;
+    reconcile_managed_database_port(
+        selected,
+        (status.state != ManagedContainerState::Missing).then_some(status.port),
+    )
+}
+
+fn configured_managed_database_port(explicit: Option<u16>) -> Result<Option<u16>, String> {
     if let Some(port) = explicit {
-        return (port > 0).then_some(port).ok_or_else(|| {
+        return (port > 0).then_some(Some(port)).ok_or_else(|| {
             "managed database port must be an integer between 1 and 65535".to_owned()
         });
     }
-    let port = match env::var(MANAGED_DATABASE_PORT_ENV) {
+    match env::var(MANAGED_DATABASE_PORT_ENV) {
         Ok(raw) => raw
             .parse::<u16>()
             .ok()
             .filter(|value| *value > 0)
+            .map(Some)
             .ok_or_else(|| {
                 format!("{MANAGED_DATABASE_PORT_ENV} must be an integer between 1 and 65535")
             }),
-        Err(env::VarError::NotPresent) => Ok(DEFAULT_MANAGED_DATABASE_PORT),
+        Err(env::VarError::NotPresent) => Ok(None),
         Err(env::VarError::NotUnicode(_)) => Err(format!(
             "{MANAGED_DATABASE_PORT_ENV} must be an integer between 1 and 65535"
         )),
-    }?;
-    Ok(port)
+    }
+}
+
+fn reconcile_managed_database_port(
+    configured: Option<u16>,
+    discovered: Option<u16>,
+) -> Result<u16, String> {
+    match (configured, discovered) {
+        (Some(configured), Some(discovered)) if configured != discovered => Err(format!(
+            "managed database publishes loopback port {discovered}, not selected port {configured}; remove the explicit port override or set {MANAGED_DATABASE_PORT_ENV}={discovered}"
+        )),
+        (Some(configured), _) => Ok(configured),
+        (None, Some(discovered)) => Ok(discovered),
+        (None, None) => Ok(DEFAULT_MANAGED_DATABASE_PORT),
+    }
 }
 
 async fn current_project(runtime: &ProjectRuntime) -> Result<(ProjectId, IndexFreshness), String> {
@@ -2489,6 +2592,13 @@ struct AgentInstallContext {
     format: OutputFormat,
 }
 
+struct ManagedDatabasePortInstallInput<'project> {
+    project_path: &'project Path,
+    configured_port: Option<u16>,
+    location: AgentInstallLocation,
+    remove: bool,
+}
+
 impl AgentInstallContext {
     fn request(&self, target: InstallTarget) -> Result<InstallRequest, String> {
         let request = InstallRequest::new(&InstallRequestInput {
@@ -2547,9 +2657,7 @@ impl AgentInstallContext {
         if env::var_os(DATABASE_URL_ENV).is_none() {
             run_database_start(DatabaseStartArguments {
                 project_path: self.project_path.clone(),
-                port: self
-                    .managed_database_port
-                    .unwrap_or(DEFAULT_MANAGED_DATABASE_PORT),
+                port: self.managed_database_port,
                 wait_seconds: 90,
                 format: self.format,
             })
@@ -2607,14 +2715,13 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
     let executable = env::current_exe()
         .map_err(|_| "could not resolve the current Cartograph executable".to_owned())?;
     let location = AgentInstallLocation::from(location);
-    let managed_database_port = if !remove
-        && location == AgentInstallLocation::Local
-        && env::var_os(DATABASE_URL_ENV).is_none()
-    {
-        Some(resolve_managed_database_port(managed_database_port)?)
-    } else {
-        None
-    };
+    let managed_database_port = install_managed_database_port(ManagedDatabasePortInstallInput {
+        project_path: &project_path,
+        configured_port: managed_database_port,
+        location,
+        remove,
+    })
+    .await?;
     let context = AgentInstallContext {
         project_path,
         executable,
@@ -2651,6 +2758,24 @@ async fn run_agent_install(arguments: AgentInstallArguments) -> Result<ExitCode,
         context.install_hooks();
     }
     Ok(ExitCode::SUCCESS)
+}
+
+async fn install_managed_database_port(
+    input: ManagedDatabasePortInstallInput<'_>,
+) -> Result<Option<u16>, String> {
+    let ManagedDatabasePortInstallInput {
+        project_path,
+        configured_port,
+        location,
+        remove,
+    } = input;
+    if remove || location != AgentInstallLocation::Local || env::var_os(DATABASE_URL_ENV).is_some()
+    {
+        return Ok(None);
+    }
+    resolve_managed_database_port(project_path, configured_port)
+        .await
+        .map(Some)
 }
 
 fn resolve_install_targets(
@@ -2807,18 +2932,16 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
     let managed_database_port = if env::var_os(DATABASE_URL_ENV).is_some() {
         managed_database_port.unwrap_or(DEFAULT_MANAGED_DATABASE_PORT)
     } else {
-        resolve_managed_database_port(managed_database_port)?
+        resolve_managed_database_port(&project_path, managed_database_port).await?
     };
-    let settings = resolve_database_settings_with_port(&project_path, Some(managed_database_port))?;
+    if env::var_os(DATABASE_URL_ENV).is_none() {
+        preflight_mcp_managed_database(&project_path, managed_database_port).await?;
+    }
+    let settings =
+        resolve_database_settings_with_port(&project_path, Some(managed_database_port)).await?;
     let runtime = ProjectRuntime::connect(&project_path, &settings)
         .await
         .map_err(|error| error.to_string())?;
-    if !no_startup_sync {
-        runtime
-            .index(IndexOptions::default())
-            .await
-            .map_err(|error| format!("MCP startup sync failed: {error}"))?;
-    }
     let runtime = Arc::new(runtime);
     let handler = CartographMcpHandler::new(runtime)
         .map_err(|error| error.to_string())?
@@ -2835,7 +2958,7 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
             },
             managed_database_port,
         );
-    mcp_handler::enable_handler_auto_sync(&handler)
+    mcp_handler::enable_handler_auto_sync(&handler, !no_startup_sync)
         .await
         .map_err(|error| error.to_string())?;
     let definitions =
@@ -2867,6 +2990,42 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
     Ok(ExitCode::SUCCESS)
 }
 
+async fn preflight_mcp_managed_database(project_path: &Path, port: u16) -> Result<(), String> {
+    let database = ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())?;
+    let status = database
+        .lifecycle()
+        .status()
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(error) = managed_mcp_preflight_error(&status) {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+fn managed_mcp_preflight_error(status: &ManagedDatabaseStatus) -> Option<String> {
+    if status.state == ManagedContainerState::Missing {
+        return Some(
+            "managed database is missing; run `cartograph db start --project-path <path>` before starting MCP"
+                .to_owned(),
+        );
+    }
+    if status.image_matches && status.hnsw_shared_memory_ready {
+        return (status.state != ManagedContainerState::Healthy).then(|| {
+            format!(
+                "managed database is {}; run `cartograph db start --project-path <path> --port {}` and require doctor to pass before starting MCP",
+                managed_state_label(status.state),
+                status.port
+            )
+        });
+    }
+    Some(format!(
+        "managed database compatibility preflight failed; run `cartograph doctor <path>`, create a fresh backup with `cartograph db backup ./cartograph-pre-upgrade.backup --project-path <path> --port {}`, then run `cartograph db upgrade --project-path <path> --port {} --confirm upgrade-managed-database`; restart the MCP host only after doctor passes",
+        status.port, status.port
+    ))
+}
+
 async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
     let IndexArguments {
         project_path,
@@ -2875,7 +3034,8 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
         format,
         managed_database_port,
     } = arguments;
-    let settings = resolve_database_settings_with_port(&project_path, managed_database_port)?;
+    let settings =
+        resolve_database_settings_with_port(&project_path, managed_database_port).await?;
     let runtime = ProjectRuntime::connect(&project_path, &settings)
         .await
         .map_err(|error| error.to_string())?;
@@ -3044,6 +3204,7 @@ fn render_status_text(value: &Value) {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     println!("Cartograph {version} — {storage}");
+    render_database_storage(value);
     let current = value
         .pointer("/project/snapshot/current")
         .filter(|current| current.is_object());
@@ -3076,33 +3237,7 @@ fn render_status_text(value: &Value) {
         .pointer("/project/snapshot/generation_storage")
         .and_then(Value::as_object)
     {
-        let staging = status_count(generations, "staging");
-        let ready = status_count(generations, "ready");
-        let current = status_count(generations, "current");
-        let superseded = status_count(generations, "superseded");
-        let failed = status_count(generations, "failed");
-        let retained_bytes = status_count(generations, "estimated_retained_bytes");
-        let generation_storage = GenerationStorageSummary {
-            staging,
-            ready,
-            current,
-            superseded,
-            failed,
-            estimated_retained_bytes: retained_bytes,
-            ..GenerationStorageSummary::default()
-        };
-        println!(
-            "Retained generations: {staging} staging, {ready} ready, {current} current, \
-             {superseded} superseded, {failed} failed; source plus generation-local BM25 \
-             lower bound {}",
-            render_byte_count(retained_bytes)
-        );
-        if generation_storage_needs_attention(generation_storage) {
-            println!(
-                "WARNING: generation retention needs attention; run `cartograph index` to trigger \
-                 automatic bounded cleanup, then inspect `cartograph db prune --help` if the backlog remains."
-            );
-        }
+        render_generation_storage(generations);
     }
     if let Some(state) = value
         .pointer("/featureReadiness/state")
@@ -3122,6 +3257,77 @@ fn render_status_text(value: &Value) {
         println!("Inline rollups: {hotspots} hotspots, {biomarkers} biomarkers");
     }
     println!("Graph queries: retained; browser visualizer: intentionally removed");
+}
+
+fn render_database_storage(value: &Value) {
+    match value
+        .pointer("/databaseStorage/state")
+        .and_then(Value::as_str)
+    {
+        Some("ready") => {
+            let database_bytes = value
+                .pointer("/databaseStorage/databaseBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let schema_bytes = value
+                .pointer("/databaseStorage/schemaBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let index_bytes = value
+                .pointer("/databaseStorage/indexBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let toast_bytes = value
+                .pointer("/databaseStorage/toastBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            println!(
+                "Database storage: {} database, {} Cartograph schema ({} indexes, {} TOAST); details: `cartograph db usage --project-path <path>`",
+                render_byte_count(database_bytes),
+                render_byte_count(schema_bytes),
+                render_byte_count(index_bytes),
+                render_byte_count(toast_bytes),
+            );
+        }
+        Some("unavailable") => println!(
+            "Database storage: unavailable ({}) — run `cartograph db usage --project-path <path>` for the detailed report",
+            value
+                .pointer("/databaseStorage/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("database_error")
+        ),
+        _ => {}
+    }
+}
+
+fn render_generation_storage(generations: &Map<String, Value>) {
+    let staging = status_count(generations, "staging");
+    let ready = status_count(generations, "ready");
+    let current = status_count(generations, "current");
+    let superseded = status_count(generations, "superseded");
+    let failed = status_count(generations, "failed");
+    let retained_bytes = status_count(generations, "estimated_retained_bytes");
+    let generation_storage = GenerationStorageSummary {
+        staging,
+        ready,
+        current,
+        superseded,
+        failed,
+        estimated_retained_bytes: retained_bytes,
+        ..GenerationStorageSummary::default()
+    };
+    println!(
+        "Retained generations: {staging} staging, {ready} ready, {current} current, \
+         {superseded} superseded, {failed} failed; source plus generation-local BM25 \
+         lower bound {}",
+        render_byte_count(retained_bytes)
+    );
+    if generation_storage_needs_attention(generation_storage) {
+        println!(
+            "WARNING: generation retention needs attention; run `cartograph index` to trigger \
+             automatic bounded cleanup, then inspect `cartograph db prune --help` if the backlog remains."
+        );
+    }
 }
 
 fn status_count(values: &Map<String, Value>, field: &str) -> u64 {
@@ -3257,8 +3463,8 @@ async fn run_database_maintenance_command(command: DatabaseCommand) -> Result<Ex
 }
 
 async fn run_database_start(arguments: DatabaseStartArguments) -> Result<ExitCode, String> {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?
+    let database = managed_database_for_project(&arguments.project_path, arguments.port)
+        .await?
         .with_startup_timeout(Duration::from_secs(arguments.wait_seconds));
     let report = database
         .lifecycle()
@@ -3270,8 +3476,7 @@ async fn run_database_start(arguments: DatabaseStartArguments) -> Result<ExitCod
 }
 
 async fn run_database_status(arguments: DatabaseStatusArguments) -> Result<ExitCode, String> {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?;
+    let database = managed_database_for_project(&arguments.project_path, arguments.port).await?;
     let status = database
         .lifecycle()
         .status()
@@ -3282,8 +3487,7 @@ async fn run_database_status(arguments: DatabaseStatusArguments) -> Result<ExitC
 }
 
 async fn run_database_stop(arguments: DatabaseStopArguments) -> Result<ExitCode, String> {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?;
+    let database = managed_database_for_project(&arguments.project_path, arguments.port).await?;
     let stopped = database
         .lifecycle()
         .stop()
@@ -3301,8 +3505,7 @@ async fn run_database_stop(arguments: DatabaseStopArguments) -> Result<ExitCode,
 }
 
 async fn run_database_logs(arguments: DatabaseLogsArguments) -> Result<ExitCode, String> {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?;
+    let database = managed_database_for_project(&arguments.project_path, arguments.port).await?;
     let logs = database
         .lifecycle()
         .logs(arguments.tail)
@@ -3313,8 +3516,7 @@ async fn run_database_logs(arguments: DatabaseLogsArguments) -> Result<ExitCode,
 }
 
 async fn run_database_backup(arguments: DatabaseBackupArguments) -> Result<ExitCode, String> {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?;
+    let database = managed_database_for_project(&arguments.project_path, arguments.port).await?;
     let report = database
         .archives()
         .backup(arguments.destination)
@@ -3325,8 +3527,7 @@ async fn run_database_backup(arguments: DatabaseBackupArguments) -> Result<ExitC
 }
 
 async fn run_database_restore(arguments: DatabaseRestoreArguments) -> Result<ExitCode, String> {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?;
+    let database = managed_database_for_project(&arguments.project_path, arguments.port).await?;
     let confirmation = database
         .confirm_destructive_operation(ManagedDestructiveOperation::Restore, &arguments.confirm)
         .map_err(|error| error.to_string())?;
@@ -3341,7 +3542,7 @@ async fn run_database_restore(arguments: DatabaseRestoreArguments) -> Result<Exi
 
 async fn run_database_remove(arguments: DatabaseDestructiveArguments) -> Result<ExitCode, String> {
     let (database, confirmation, format) =
-        prepare_database_destruction(arguments, ManagedDestructiveOperation::Remove)?;
+        prepare_database_destruction(arguments, ManagedDestructiveOperation::Remove).await?;
     let report = database
         .maintenance()
         .remove(confirmation)
@@ -3353,7 +3554,7 @@ async fn run_database_remove(arguments: DatabaseDestructiveArguments) -> Result<
 
 async fn run_database_upgrade(arguments: DatabaseDestructiveArguments) -> Result<ExitCode, String> {
     let (database, confirmation, format) =
-        prepare_database_destruction(arguments, ManagedDestructiveOperation::Upgrade)?;
+        prepare_database_destruction(arguments, ManagedDestructiveOperation::Upgrade).await?;
     let report = database
         .maintenance()
         .upgrade(confirmation)
@@ -3363,7 +3564,7 @@ async fn run_database_upgrade(arguments: DatabaseDestructiveArguments) -> Result
     Ok(ExitCode::SUCCESS)
 }
 
-fn prepare_database_destruction(
+async fn prepare_database_destruction(
     arguments: DatabaseDestructiveArguments,
     operation: ManagedDestructiveOperation,
 ) -> Result<
@@ -3374,8 +3575,7 @@ fn prepare_database_destruction(
     ),
     String,
 > {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?;
+    let database = managed_database_for_project(&arguments.project_path, arguments.port).await?;
     let confirmation = database
         .confirm_destructive_operation(operation, &arguments.confirm)
         .map_err(|error| error.to_string())?;
@@ -3383,8 +3583,7 @@ fn prepare_database_destruction(
 }
 
 async fn run_derived_index(arguments: DatabaseDerivedIndexArguments) -> Result<ExitCode, String> {
-    let database = ManagedDatabase::new(arguments.project_path, arguments.port)
-        .map_err(|error| error.to_string())?;
+    let database = managed_database_for_project(&arguments.project_path, arguments.port).await?;
     if arguments.rebuild {
         rebuild_derived_index(&database, arguments.confirm, arguments.format).await?;
     } else {
@@ -3396,6 +3595,14 @@ async fn run_derived_index(arguments: DatabaseDerivedIndexArguments) -> Result<E
         print_serialized(&report, arguments.format)?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+async fn managed_database_for_project(
+    project_path: &Path,
+    explicit_port: Option<u16>,
+) -> Result<ManagedDatabase, String> {
+    let port = resolve_managed_database_port(project_path, explicit_port).await?;
+    ManagedDatabase::new(project_path, port).map_err(|error| error.to_string())
 }
 
 async fn rebuild_derived_index(
@@ -3458,7 +3665,7 @@ async fn run_v1_postgres_import(arguments: V1ImportArguments) -> Result<ExitCode
     );
     let source = V1PostgresSource::new(source_schema, source_checkout, source_revision);
     let request = V1PostgresImportRequest::new(source, execution, limits);
-    let settings = resolve_database_settings(&project_path)?;
+    let settings = resolve_database_settings(&project_path).await?;
     let pool = cartograph_db::connect(&settings)
         .await
         .map_err(|error| error.to_string())?;
@@ -3571,7 +3778,7 @@ async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<Exi
             compaction_headroom_authority(external_database, arguments.available_headroom_bytes)
         })
         .transpose()?;
-    let settings = resolve_database_settings(&arguments.project_path)?;
+    let settings = resolve_database_settings(&arguments.project_path).await?;
     let pool = cartograph_db::connect(&settings)
         .await
         .map_err(|error| error.to_string())?;
@@ -3583,7 +3790,7 @@ async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<Exi
     let result = if arguments.apply {
         let headroom = match headroom_authority {
             Some(CompactionHeadroomAuthority::Managed) => {
-                let port = resolve_managed_database_port(None)?;
+                let port = resolve_managed_database_port(&arguments.project_path, None).await?;
                 ManagedDatabase::new(&arguments.project_path, port)
                     .map_err(|error| error.to_string())?
                     .lifecycle()
@@ -3635,7 +3842,7 @@ fn compaction_headroom_authority(
 }
 
 async fn open_current_read_only_runtime(project_path: &PathBuf) -> Result<ProjectRuntime, String> {
-    let settings = resolve_database_settings(project_path)?;
+    let settings = resolve_database_settings(project_path).await?;
     let runtime = ProjectRuntime::connect_read_only(project_path, &settings)
         .await
         .map_err(|error| error.to_string())?;
@@ -3735,7 +3942,7 @@ fn print_managed_status(
                 .map_err(|_| "could not serialize the managed database status".to_owned())?
         ),
         OutputFormat::Text => println!(
-            "Managed database: {} ({}, loopback port {}, image {})",
+            "Managed database: {} ({}, loopback port {}, image {}, HNSW shared memory {})",
             managed_state_label(status.state),
             status.container_name,
             status.port,
@@ -3743,6 +3950,11 @@ fn print_managed_status(
                 "supported"
             } else {
                 "absent or different"
+            },
+            if status.hnsw_shared_memory_ready {
+                "ready"
+            } else {
+                "upgrade required"
             }
         ),
     }
@@ -3849,7 +4061,7 @@ async fn apply_managed_database_doctor_fix(
     fixes_applied: &mut Vec<String>,
     checks: &mut Vec<DoctorCheck>,
 ) {
-    match ManagedDatabase::new(project_path, DEFAULT_MANAGED_DATABASE_PORT) {
+    match managed_database_for_project(project_path, None).await {
         Ok(database) => match database.lifecycle().start().await {
             Ok(report) => fixes_applied.push(format!(
                 "managed PostgreSQL is ready; {} migration(s) applied",
@@ -3863,7 +4075,7 @@ async fn apply_managed_database_doctor_fix(
         },
         Err(error) => checks.push(doctor_fail(
             "database-fix",
-            error.to_string(),
+            error,
             "Run `cartograph db start --project-path <path>`.".to_owned(),
         )),
     }
@@ -4031,34 +4243,19 @@ fn check_or_fix_project_state(input: &mut ProjectStateCheckInput<'_>) -> Result<
 }
 
 async fn check_managed_database(project_path: &Path, checks: &mut Vec<DoctorCheck>) {
-    let database = match ManagedDatabase::new(project_path, DEFAULT_MANAGED_DATABASE_PORT) {
+    let database = match managed_database_for_project(project_path, None).await {
         Ok(database) => database,
         Err(error) => {
             checks.push(doctor_fail(
                 "managed-database",
-                error.to_string(),
+                error,
                 "Run `cartograph db start --project-path <path>`.".to_owned(),
             ));
             return;
         }
     };
     match database.lifecycle().status().await {
-        Ok(status) if status.state == ManagedContainerState::Healthy && status.image_matches => {
-            checks.push(doctor_pass(
-                "managed-database",
-                "The project-owned PostgreSQL container is healthy and uses the pinned image.",
-            ));
-        }
-        Ok(status) => checks.push(doctor_fail(
-            "managed-database",
-            format!(
-                "Managed database state is {} and pinned-image match is {}.",
-                managed_state_label(status.state),
-                status.image_matches
-            ),
-            "Run `cartograph db start`; use `cartograph db upgrade` for an owned older image."
-                .to_owned(),
-        )),
+        Ok(status) => check_managed_database_status(&status, checks),
         Err(error) => checks.push(doctor_fail(
             "managed-database",
             error.to_string(),
@@ -4067,15 +4264,53 @@ async fn check_managed_database(project_path: &Path, checks: &mut Vec<DoctorChec
     }
 }
 
+fn check_managed_database_status(status: &ManagedDatabaseStatus, checks: &mut Vec<DoctorCheck>) {
+    if status.state == ManagedContainerState::Healthy && status.image_matches {
+        checks.push(doctor_pass(
+            "managed-database",
+            "The project-owned PostgreSQL container is healthy and uses the pinned image.",
+        ));
+    } else {
+        checks.push(doctor_fail(
+            "managed-database",
+            format!(
+                "Managed database state is {} and pinned-image match is {}.",
+                managed_state_label(status.state),
+                status.image_matches
+            ),
+            "Run `cartograph db start`; use `cartograph db upgrade` for an owned older image."
+                .to_owned(),
+        ));
+    }
+    checks.push(if status.hnsw_shared_memory_ready {
+        doctor_pass(
+            "managed-hnsw-shared-memory",
+            format!(
+                "Managed PostgreSQL reserves {} bytes of shared memory for bounded HNSW maintenance.",
+                status.shared_memory_bytes.unwrap_or_default()
+            ),
+        )
+    } else {
+        doctor_fail(
+            "managed-hnsw-shared-memory",
+            "Managed PostgreSQL shared memory is below the HNSW maintenance requirement."
+                .to_owned(),
+            "Create a backup, then run `cartograph db upgrade --confirm upgrade-managed-database --project-path <path>`."
+                .to_owned(),
+        )
+    });
+}
+
 async fn check_database_capabilities(
     project_path: &PathBuf,
     explicit_database_settings: Option<&DatabaseSettings>,
     checks: &mut Vec<DoctorCheck>,
 ) -> (Option<CapabilityReport>, Option<DatabaseSettings>) {
-    let settings = match explicit_database_settings
-        .cloned()
-        .map_or_else(|| resolve_database_settings(project_path), Ok)
-    {
+    let settings = match if let Some(settings) = explicit_database_settings {
+        Ok(settings.clone())
+    } else {
+        resolve_database_settings(project_path).await
+    } {
         Ok(settings) => settings,
         Err(error) => {
             checks.push(doctor_fail(
@@ -4700,6 +4935,126 @@ mod tests {
     }
 
     #[test]
+    fn doctor_rejects_managed_database_without_hnsw_shared_memory() {
+        let mut checks = Vec::new();
+        check_managed_database_status(
+            &ManagedDatabaseStatus {
+                container_name: "cartograph-v2-test".to_owned(),
+                state: ManagedContainerState::Healthy,
+                port: 55_432,
+                image_matches: true,
+                shared_memory_bytes: Some(64 * 1_024 * 1_024),
+                hnsw_shared_memory_ready: false,
+            },
+            &mut checks,
+        );
+
+        let shared_memory = checks
+            .iter()
+            .find(|check| check.id == "managed-hnsw-shared-memory")
+            .unwrap_or_else(|| panic!("managed HNSW shared-memory check was missing"));
+        assert_eq!(shared_memory.status, DoctorStatus::Fail);
+        assert!(
+            shared_memory
+                .remediation
+                .as_deref()
+                .is_some_and(|message| message.contains("upgrade-managed-database"))
+        );
+    }
+
+    #[test]
+    fn mcp_preflight_blocks_incompatible_managed_database_with_exact_recovery() {
+        let status = ManagedDatabaseStatus {
+            container_name: "cartograph-v2-test".to_owned(),
+            state: ManagedContainerState::Healthy,
+            port: 55_435,
+            image_matches: false,
+            shared_memory_bytes: Some(64 * 1_024 * 1_024),
+            hnsw_shared_memory_ready: false,
+        };
+        let error = managed_mcp_preflight_error(&status)
+            .unwrap_or_else(|| panic!("incompatible managed database passed MCP preflight"));
+
+        assert!(error.contains("cartograph db backup"));
+        assert!(error.contains("--port 55435"));
+        assert!(error.contains("--confirm upgrade-managed-database"));
+        assert!(error.contains("restart the MCP host only after doctor passes"));
+
+        let missing = ManagedDatabaseStatus {
+            container_name: "cartograph-v2-test".to_owned(),
+            state: ManagedContainerState::Missing,
+            port: 55_435,
+            image_matches: false,
+            shared_memory_bytes: None,
+            hnsw_shared_memory_ready: false,
+        };
+        assert!(
+            managed_mcp_preflight_error(&missing)
+                .is_some_and(|message| message.contains("db start"))
+        );
+        let stopped = ManagedDatabaseStatus {
+            state: ManagedContainerState::Stopped,
+            image_matches: true,
+            shared_memory_bytes: Some(cartograph_db::MANAGED_DATABASE_SHARED_MEMORY_BYTES),
+            hnsw_shared_memory_ready: true,
+            ..status.clone()
+        };
+        assert!(
+            managed_mcp_preflight_error(&stopped)
+                .is_some_and(|message| message.contains("is stopped"))
+        );
+        let healthy = ManagedDatabaseStatus {
+            state: ManagedContainerState::Healthy,
+            image_matches: true,
+            shared_memory_bytes: Some(cartograph_db::MANAGED_DATABASE_SHARED_MEMORY_BYTES),
+            hnsw_shared_memory_ready: true,
+            ..status
+        };
+        assert!(managed_mcp_preflight_error(&healthy).is_none());
+    }
+
+    #[test]
+    fn status_text_renders_compact_storage_ready_and_unavailable_states() {
+        render_status_text(&serde_json::json!({
+            "version": "2.1.0",
+            "storage": "postgresql_paradedb_pgvector",
+            "databaseStorage": {
+                "state": "ready",
+                "databaseBytes": 2 * GIBIBYTE_U64,
+                "schemaBytes": 512 * MEBIBYTE_U64,
+                "indexBytes": 256 * MEBIBYTE_U64,
+                "toastBytes": 64 * MEBIBYTE_U64
+            },
+            "project": {
+                "fresh": true,
+                "snapshot": {
+                    "current": {
+                        "generation_id": "11111111-1111-4111-8111-111111111111",
+                        "counts": {"files": 3, "symbols": 5, "edges": 8}
+                    },
+                    "generation_storage": {
+                        "staging": 0,
+                        "ready": 0,
+                        "current": 1,
+                        "superseded": 2,
+                        "failed": 0,
+                        "estimated_retained_bytes": MEBIBYTE_U64
+                    }
+                }
+            },
+            "featureReadiness": {"state": "indexed"},
+            "rollups": {"hotspots": [{"score": 1}], "biomarkers": [{"score": 1}]}
+        }));
+        render_status_text(&serde_json::json!({
+            "version": "2.1.0",
+            "storage": "postgresql_paradedb_pgvector",
+            "databaseStorage": {"state": "unavailable", "reason": "timeout"},
+            "project": {"fresh": false, "snapshot": {"current": null}},
+            "featureReadiness": {"state": "not_indexed"}
+        }));
+    }
+
+    #[test]
     fn generation_retention_warning_matches_automatic_cleanup_bounds() {
         const FOUR_GIBIBYTES: u64 = 4 * 1_024 * 1_024 * 1_024;
 
@@ -4857,16 +5212,39 @@ mod tests {
 
     #[test]
     fn managed_database_port_resolution_accepts_explicit_values_and_rejects_zero() {
-        assert_eq!(resolve_managed_database_port(Some(55_435)), Ok(55_435));
-        assert!(resolve_managed_database_port(Some(0)).is_err());
+        assert_eq!(
+            configured_managed_database_port(Some(55_435)),
+            Ok(Some(55_435))
+        );
+        assert!(configured_managed_database_port(Some(0)).is_err());
+        assert_eq!(
+            reconcile_managed_database_port(None, Some(55_435)),
+            Ok(55_435)
+        );
+        assert_eq!(
+            reconcile_managed_database_port(None, None),
+            Ok(DEFAULT_MANAGED_DATABASE_PORT)
+        );
+        let mismatch = match reconcile_managed_database_port(
+            Some(DEFAULT_MANAGED_DATABASE_PORT),
+            Some(55_435),
+        ) {
+            Ok(port) => panic!("an explicit wrong managed port resolved to {port}"),
+            Err(error) => error,
+        };
+        assert!(mismatch.contains("publishes loopback port 55435"));
+        assert!(mismatch.contains("CARTOGRAPH_MANAGED_DATABASE_PORT=55435"));
     }
 
     #[test]
     fn explicit_managed_database_port_keeps_missing_credentials_actionable() {
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("could not create managed port fixture: {error}"));
-        let result =
-            resolve_database_settings_with_port(&directory.path().to_path_buf(), Some(55_435));
+        let result = ManagedDatabase::new(directory.path(), 55_435)
+            .and_then(|database| database.connection_settings())
+            .map_err(|error| {
+                format!("{error}; run `cartograph db start --project-path <path>` first")
+            });
         let Err(error) = result else {
             panic!("missing managed credentials unexpectedly resolved");
         };
@@ -5104,10 +5482,7 @@ mod tests {
         assert!(matches!(
             database.command,
             Command::Db {
-                command: DatabaseCommand::Start(DatabaseStartArguments {
-                    port: DEFAULT_MANAGED_DATABASE_PORT,
-                    ..
-                })
+                command: DatabaseCommand::Start(DatabaseStartArguments { port: None, .. })
             }
         ));
 

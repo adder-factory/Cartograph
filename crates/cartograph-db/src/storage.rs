@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use cartograph_domain::ProjectId;
 use serde::Serialize;
-use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{error::Error as SqlxError, query::query, row::Row, sql_str::AssertSqlSafe};
 
 use crate::{
     CartographDatabase, GenerationStorageSummary, StorageError,
@@ -160,7 +160,61 @@ pub struct StorageUsageReport {
     pub warnings: Vec<StorageWarning>,
 }
 
+/// Compact allocated database/schema totals suitable for routine status output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageTotalsReport {
+    /// Allocated bytes for the current PostgreSQL database, including other schemas.
+    pub database_bytes: u64,
+    /// Allocated bytes for Cartograph tables, indexes, and TOAST in the configured schema.
+    pub schema_bytes: u64,
+    /// Heap bytes in the configured schema.
+    pub heap_bytes: u64,
+    /// All index bytes in the configured schema.
+    pub index_bytes: u64,
+    /// B-tree index bytes in the configured schema.
+    pub btree_index_bytes: u64,
+    /// TOAST and auxiliary relation bytes in the configured schema.
+    pub toast_bytes: u64,
+}
+
 impl CartographDatabase {
+    /// Read only compact database/schema totals under a bounded transaction.
+    /// # Errors
+    ///
+    /// Returns an error when the timeout is zero or PostgreSQL cannot return
+    /// allocated relation sizes within the caller's deadline.
+    pub async fn storage_totals(
+        &self,
+        statement_timeout: Duration,
+    ) -> Result<StorageTotalsReport, StorageError> {
+        if statement_timeout.is_zero() {
+            return Err(StorageError::InvalidInput {
+                field: "storage_totals",
+            });
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("storage-totals-begin"))?;
+        query("SET TRANSACTION READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| database_error("storage-totals-snapshot"))?;
+        set_local_statement_timeout(&mut transaction, statement_timeout)
+            .await
+            .map_err(|()| StorageError::InvalidInput {
+                field: "storage_totals",
+            })?;
+        let totals = load_storage_totals(&mut transaction, self).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("storage-totals-commit"))?;
+        Ok(totals)
+    }
+
     /// Inspect bounded schema storage under one repeatable transaction.
     /// # Errors
     ///
@@ -215,12 +269,12 @@ impl CartographDatabase {
             deduplication,
         });
         Ok(StorageUsageReport {
-            database_bytes: totals.database,
-            schema_bytes: totals.schema,
-            heap_bytes: totals.heap,
-            index_bytes: totals.index,
-            btree_index_bytes: totals.btree_index,
-            toast_bytes: totals.toast,
+            database_bytes: totals.database_bytes,
+            schema_bytes: totals.schema_bytes,
+            heap_bytes: totals.heap_bytes,
+            index_bytes: totals.index_bytes,
+            btree_index_bytes: totals.btree_index_bytes,
+            toast_bytes: totals.toast_bytes,
             generation_storage,
             parse_cache,
             stale_ready_generations,
@@ -234,19 +288,10 @@ impl CartographDatabase {
     }
 }
 
-struct StorageTotals {
-    database: u64,
-    schema: u64,
-    heap: u64,
-    index: u64,
-    btree_index: u64,
-    toast: u64,
-}
-
 async fn load_storage_totals(
     connection: &mut sqlx_postgres::PgConnection,
     database: &CartographDatabase,
-) -> Result<StorageTotals, StorageError> {
+) -> Result<StorageTotalsReport, StorageError> {
     let statement = r"WITH tables AS (
             SELECT classes.oid,
                    pg_relation_size(classes.oid)::bigint AS heap_bytes,
@@ -282,14 +327,14 @@ async fn load_storage_totals(
         .bind(database.schema.as_str())
         .fetch_one(connection)
         .await
-        .map_err(|_| database_error("storage-totals"))?;
-    Ok(StorageTotals {
-        database: nonnegative(&row, "database_bytes")?,
-        schema: nonnegative(&row, "schema_bytes")?,
-        heap: nonnegative(&row, "heap_bytes")?,
-        index: nonnegative(&row, "index_bytes")?,
-        btree_index: nonnegative(&row, "btree_index_bytes")?,
-        toast: nonnegative(&row, "toast_bytes")?,
+        .map_err(|error| storage_query_error(&error, "storage-totals"))?;
+    Ok(StorageTotalsReport {
+        database_bytes: nonnegative(&row, "database_bytes")?,
+        schema_bytes: nonnegative(&row, "schema_bytes")?,
+        heap_bytes: nonnegative(&row, "heap_bytes")?,
+        index_bytes: nonnegative(&row, "index_bytes")?,
+        btree_index_bytes: nonnegative(&row, "btree_index_bytes")?,
+        toast_bytes: nonnegative(&row, "toast_bytes")?,
     })
 }
 
@@ -683,6 +728,17 @@ fn stored_name(row: &sqlx_postgres::PgRow, field: &'static str) -> Result<String
 
 const fn database_error(operation: &'static str) -> StorageError {
     StorageError::DatabaseOperation { operation }
+}
+
+fn storage_query_error(error: &SqlxError, operation: &'static str) -> StorageError {
+    if matches!(
+        error,
+        SqlxError::Database(database) if database.code().as_deref() == Some("57014")
+    ) {
+        StorageError::StatementTimeout { operation }
+    } else {
+        database_error(operation)
+    }
 }
 
 const fn corrupt(field: &'static str) -> StorageError {

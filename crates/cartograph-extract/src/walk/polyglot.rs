@@ -114,12 +114,14 @@ struct RustUseTraversal<'tree, 'text> {
     node: Node<'tree>,
     prefix: &'text str,
     depth: usize,
+    re_export: bool,
 }
 
 struct RustNamespaceBinding<'tree> {
     binding_node: Node<'tree>,
     module_specifier: String,
     local_name: String,
+    re_export: bool,
 }
 
 const MAX_RUST_USE_DEPTH: usize = 64;
@@ -858,6 +860,7 @@ fn visit_rust_use(
         return Ok(());
     };
     let raw = builder.context.owned_text(argument)?;
+    let re_export = rust_visibility(builder, node) == Some(Visibility::Public);
     let wildcard_specifier = (raw.ends_with("::*") && builder.owners.is_empty())
         .then(|| builder.context.copy_text(&raw))
         .transpose()?;
@@ -869,6 +872,7 @@ fn visit_rust_use(
                 binding_node: argument,
                 module_specifier,
                 local_name: "*".to_owned(),
+                re_export,
             },
         );
     }
@@ -878,6 +882,7 @@ fn visit_rust_use(
             node: argument,
             prefix: "",
             depth: 0,
+            re_export,
         },
     )
 }
@@ -886,29 +891,25 @@ fn emit_rust_use_bindings(
     builder: &mut ExtractionBuilder<'_, '_>,
     traversal: RustUseTraversal<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let RustUseTraversal {
-        node,
-        prefix,
-        depth,
-    } = traversal;
     builder.context.ensure_active()?;
-    if depth > MAX_RUST_USE_DEPTH {
+    if traversal.depth > MAX_RUST_USE_DEPTH {
         return Err(ExtractError::NestingLimit);
     }
-    match node.kind() {
+    match traversal.node.kind() {
         "scoped_use_list" => emit_scoped_rust_use_bindings(builder, traversal),
         "use_list" => emit_rust_use_list_bindings(builder, traversal),
-        "use_as_clause" => emit_aliased_rust_use_binding(builder, node, prefix),
-        "identifier" | "scoped_identifier" => emit_rust_path_binding(builder, node, prefix),
-        "self" if !prefix.is_empty() => emit_rust_self_binding(builder, node, prefix),
-        "use_wildcard" if !prefix.is_empty() && builder.owners.is_empty() => {
-            let module_specifier = join_rust_use_path(builder, prefix, "*")?;
+        "use_as_clause" => emit_aliased_rust_use_binding(builder, traversal),
+        "identifier" | "scoped_identifier" => emit_rust_path_binding(builder, traversal),
+        "self" if !traversal.prefix.is_empty() => emit_rust_self_binding(builder, traversal),
+        "use_wildcard" if !traversal.prefix.is_empty() && builder.owners.is_empty() => {
+            let module_specifier = join_rust_use_path(builder, traversal.prefix, "*")?;
             emit_rust_namespace_binding(
                 builder,
                 RustNamespaceBinding {
-                    binding_node: node,
+                    binding_node: traversal.node,
                     module_specifier,
                     local_name: "*".to_owned(),
+                    re_export: traversal.re_export,
                 },
             )
         }
@@ -927,6 +928,7 @@ fn emit_rust_use_list_bindings(
                 node: child,
                 prefix: traversal.prefix,
                 depth: traversal.depth.saturating_add(1),
+                re_export: traversal.re_export,
             },
         )?;
     }
@@ -941,6 +943,7 @@ fn emit_scoped_rust_use_bindings(
         node,
         prefix,
         depth,
+        re_export,
     } = traversal;
     let Some(path_node) = node.child_by_field_name("path") else {
         return Ok(());
@@ -956,23 +959,23 @@ fn emit_scoped_rust_use_bindings(
             node: list,
             prefix: &scoped_prefix,
             depth: depth.saturating_add(1),
+            re_export,
         },
     )
 }
 
 fn emit_aliased_rust_use_binding(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    prefix: &str,
+    traversal: RustUseTraversal<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let Some(path_node) = node.child_by_field_name("path") else {
+    let Some(path_node) = traversal.node.child_by_field_name("path") else {
         return Ok(());
     };
-    let Some(alias_node) = node.child_by_field_name("alias") else {
+    let Some(alias_node) = traversal.node.child_by_field_name("alias") else {
         return Ok(());
     };
     let path = builder.context.owned_text(path_node)?;
-    let module_specifier = join_rust_use_path(builder, prefix, &path)?;
+    let module_specifier = join_rust_use_path(builder, traversal.prefix, &path)?;
     let local_name = builder.context.owned_text(alias_node)?;
     emit_rust_namespace_binding(
         builder,
@@ -980,43 +983,44 @@ fn emit_aliased_rust_use_binding(
             binding_node: alias_node,
             module_specifier,
             local_name,
+            re_export: traversal.re_export,
         },
     )
 }
 
 fn emit_rust_path_binding(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    prefix: &str,
+    traversal: RustUseTraversal<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let path = builder.context.owned_text(node)?;
-    let module_specifier = join_rust_use_path(builder, prefix, &path)?;
+    let path = builder.context.owned_text(traversal.node)?;
+    let module_specifier = join_rust_use_path(builder, traversal.prefix, &path)?;
     let local_name = rust_use_local_name(&module_specifier).ok_or(ExtractError::OutputLimit)?;
     let local_name = builder.context.copy_text(local_name)?;
     emit_rust_namespace_binding(
         builder,
         RustNamespaceBinding {
-            binding_node: node,
+            binding_node: traversal.node,
             module_specifier,
             local_name,
+            re_export: traversal.re_export,
         },
     )
 }
 
 fn emit_rust_self_binding(
     builder: &mut ExtractionBuilder<'_, '_>,
-    node: Node<'_>,
-    prefix: &str,
+    traversal: RustUseTraversal<'_, '_>,
 ) -> Result<(), ExtractError> {
-    let local_name = rust_use_local_name(prefix).ok_or(ExtractError::OutputLimit)?;
+    let local_name = rust_use_local_name(traversal.prefix).ok_or(ExtractError::OutputLimit)?;
     let local_name = builder.context.copy_text(local_name)?;
-    let module_specifier = builder.context.copy_text(prefix)?;
+    let module_specifier = builder.context.copy_text(traversal.prefix)?;
     emit_rust_namespace_binding(
         builder,
         RustNamespaceBinding {
-            binding_node: node,
+            binding_node: traversal.node,
             module_specifier,
             local_name,
+            re_export: traversal.re_export,
         },
     )
 }
@@ -1027,11 +1031,27 @@ fn emit_rust_namespace_binding(
 ) -> Result<(), ExtractError> {
     let span = span_for(binding.binding_node)?;
     let reference_name = builder.context.copy_text(&binding.local_name)?;
+    let imported_name = if binding.re_export {
+        let imported_name =
+            rust_use_local_name(&binding.module_specifier).ok_or(ExtractError::OutputLimit)?;
+        builder.context.copy_text(imported_name)?
+    } else {
+        "*".to_owned()
+    };
+    let local_name = if binding.re_export && binding.local_name != "*" {
+        builder.qualified_name(&binding.local_name)?
+    } else {
+        binding.local_name
+    };
     builder.emit_import_binding(ExtractedImportBinding {
-        kind: ImportBindingKind::Namespace,
+        kind: if binding.re_export {
+            ImportBindingKind::ReExportNamed
+        } else {
+            ImportBindingKind::Namespace
+        },
         module_specifier: binding.module_specifier,
-        imported_name: "*".to_owned(),
-        local_name: binding.local_name,
+        imported_name,
+        local_name,
         span,
     })?;
     if reference_name == "*" {

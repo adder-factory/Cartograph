@@ -67,6 +67,7 @@ const QUOTED_INCLUDE_PROVENANCE: &str = "native-c-quoted-include";
 const EXACT_SAME_FILE_PROVENANCE: &str = "native-exact-same-file";
 const EXACT_PROJECT_PROVENANCE: &str = "native-exact-project";
 const RUST_QUALIFIED_PATH_PROVENANCE: &str = "native-rust-qualified-path";
+const RUST_WORKSPACE_CRATE_PROVENANCE: &str = "native-rust-workspace-crate";
 const FRAMEWORK_CONVENTION_PROVENANCE: &str = "native-framework-convention";
 const DYNAMIC_DISPATCH_PROVENANCE: &str = "native-dynamic-dispatch";
 const DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE: &str = "native-dynamic-unresolved";
@@ -2004,6 +2005,18 @@ struct ProjectReExport {
     namespace: bool,
 }
 
+#[derive(Clone)]
+struct RustPackageRoot {
+    directory: String,
+    entry_file_id: FileId,
+}
+
+struct RustNamedReExport {
+    source_file_id: FileId,
+    public_name: String,
+    module_specifier: String,
+}
+
 struct TestFileEvidence {
     file_id: FileId,
     import_specifiers: Vec<String>,
@@ -2017,6 +2030,7 @@ type ModulePathMap = BTreeMap<String, Vec<FileId>>;
 type FileResolutionContextMap = BTreeMap<FileId, ResolutionFileContext>;
 type FileSymbolMap = BTreeMap<FileId, SymbolId>;
 type FileExportMap = BTreeMap<FileId, BTreeMap<String, Option<ProjectExport>>>;
+type RustPackageMap = BTreeMap<String, Option<RustPackageRoot>>;
 
 struct ResolutionFileContext {
     path: String,
@@ -2031,6 +2045,7 @@ struct ModulePathIndex {
     stem: ModulePathMap,
     directory_index: ModulePathMap,
     files: FileResolutionContextMap,
+    rust_packages: RustPackageMap,
 }
 
 #[derive(Default)]
@@ -2042,6 +2057,7 @@ struct ResolutionIndex {
     file_symbols: FileSymbolMap,
     exports: FileExportMap,
     re_exports: Vec<ProjectReExport>,
+    rust_named_re_exports: Vec<RustNamedReExport>,
     test_files: Vec<TestFileEvidence>,
 }
 
@@ -4844,6 +4860,7 @@ struct ManifestWorkspaceTag<'name> {
 #[derive(Clone, Copy)]
 struct ManifestPackageTag<'name> {
     ecosystem: &'static str,
+    name: &'name str,
     directory: &'name str,
 }
 
@@ -4875,10 +4892,11 @@ fn manifest_package_tag(qualified_name: &str) -> Option<ManifestPackageTag<'_>> 
         let Some((_, suffix)) = qualified_name.split_once(&marker) else {
             continue;
         };
-        let (_, directory) = suffix.split_once("::manifest-dir::")?;
-        if !directory.is_empty() {
+        let (name, directory) = suffix.split_once("::manifest-dir::")?;
+        if !name.is_empty() && !directory.is_empty() {
             return Some(ManifestPackageTag {
                 ecosystem,
+                name,
                 directory,
             });
         }
@@ -5402,6 +5420,12 @@ where
             cancelled,
         })?;
     }
+    index_rust_workspace_packages(RustWorkspacePackageIndexInput {
+        index: &mut index,
+        extracted,
+        budget,
+        cancelled,
+    })?;
     for file in &extracted.files {
         index_resolution_file_symbols(ResolutionIndexFileInput {
             index: &mut index,
@@ -5418,6 +5442,20 @@ struct ResolutionIndexFileInput<'index, 'file, 'budget, 'cancel, Cancel> {
     file: &'file NativeFileFacts,
     budget: &'budget mut ResolveBudget,
     cancelled: &'cancel mut Cancel,
+}
+
+struct RustWorkspacePackageIndexInput<'index, 'facts, 'budget, 'cancel, Cancel> {
+    index: &'index mut ResolutionIndex,
+    extracted: &'facts NativeFactAccumulator,
+    budget: &'budget mut ResolveBudget,
+    cancelled: &'cancel mut Cancel,
+}
+
+struct RustWorkspacePackageInsertInput<'packages, 'budget> {
+    packages: &'packages mut RustPackageMap,
+    crate_name: String,
+    root: RustPackageRoot,
+    budget: &'budget mut ResolveBudget,
 }
 
 fn index_resolution_file_metadata<Cancel>(
@@ -5452,6 +5490,112 @@ where
         insert_parent(&mut index.parents, containment, budget)?;
     }
     Ok(())
+}
+
+fn index_rust_workspace_packages<Cancel>(
+    input: RustWorkspacePackageIndexInput<'_, '_, '_, '_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let RustWorkspacePackageIndexInput {
+        index,
+        extracted,
+        budget,
+        cancelled,
+    } = input;
+    for file in &extracted.files {
+        for symbol in &file.symbols {
+            if cancelled() {
+                return Err(StageItemFailure);
+            }
+            let Some((crate_name, root)) =
+                rust_workspace_package_root(&index.modules, &symbol.input.qualified_name)?
+            else {
+                continue;
+            };
+            insert_rust_workspace_package(RustWorkspacePackageInsertInput {
+                packages: &mut index.modules.rust_packages,
+                crate_name,
+                root,
+                budget,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn rust_workspace_package_root(
+    modules: &ModulePathIndex,
+    qualified_name: &str,
+) -> Result<Option<(String, RustPackageRoot)>, StageItemFailure> {
+    let Some(package) =
+        manifest_package_tag(qualified_name).filter(|package| package.ecosystem == "cargo")
+    else {
+        return Ok(None);
+    };
+    let Some(crate_name) = rust_crate_identifier(package.name) else {
+        return Ok(None);
+    };
+    let directory = if package.directory == "." {
+        ""
+    } else {
+        package.directory
+    };
+    let entry_path = joined_path(directory, "src/lib.rs")?;
+    let ModuleFileMatch::Unique(entry_file_id) = module_file_match(
+        modules.exact.get(&entry_path),
+        &modules.files,
+        SourceLanguage::Rust.as_str(),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        crate_name,
+        RustPackageRoot {
+            directory: try_clone_text(directory)?,
+            entry_file_id: entry_file_id.clone(),
+        },
+    )))
+}
+
+fn insert_rust_workspace_package(
+    input: RustWorkspacePackageInsertInput<'_, '_>,
+) -> Result<(), StageItemFailure> {
+    let RustWorkspacePackageInsertInput {
+        packages,
+        crate_name,
+        root,
+        budget,
+    } = input;
+    if let Some(existing) = packages.get_mut(&crate_name) {
+        if existing.as_ref().is_none_or(|existing| {
+            existing.directory != root.directory || existing.entry_file_id != root.entry_file_id
+        }) {
+            *existing = None;
+        }
+        return Ok(());
+    }
+    budget.charge(
+        RESOLUTION_MAP_NODE_ALLOWANCE
+            .saturating_add(usize_to_u64(size_of::<(String, Option<RustPackageRoot>)>()))
+            .saturating_add(usize_to_u64(crate_name.len()))
+            .saturating_add(usize_to_u64(root.directory.len()))
+            .saturating_add(usize_to_u64(root.entry_file_id.as_str().len())),
+    )?;
+    packages.insert(crate_name, Some(root));
+    Ok(())
+}
+
+fn rust_crate_identifier(package_name: &str) -> Option<String> {
+    if package_name.is_empty()
+        || package_name
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    {
+        return None;
+    }
+    Some(package_name.replace('-', "_"))
 }
 
 fn index_resolution_file_symbols<Cancel>(
@@ -5585,12 +5729,32 @@ fn index_project_reexports(
     budget: &mut ResolveBudget,
 ) -> Result<(), StageItemFailure> {
     for binding in &file.import_bindings {
+        if binding.kind == ImportBindingKind::ReExportNamed {
+            budget.charge(
+                RESOLUTION_MAP_NODE_ALLOWANCE
+                    .saturating_add(usize_to_u64(size_of::<RustNamedReExport>()))
+                    .saturating_add(usize_to_u64(file.file.file_id.as_str().len()))
+                    .saturating_add(usize_to_u64(binding.local_name.len()))
+                    .saturating_add(usize_to_u64(binding.module_specifier.len())),
+            )?;
+            index
+                .rust_named_re_exports
+                .try_reserve_exact(1)
+                .map_err(|_| StageItemFailure)?;
+            index.rust_named_re_exports.push(RustNamedReExport {
+                source_file_id: file.file.file_id.clone(),
+                public_name: try_clone_text(&binding.local_name)?,
+                module_specifier: try_clone_text(&binding.module_specifier)?,
+            });
+            continue;
+        }
         let namespace = match binding.kind {
             ImportBindingKind::ReExportAll => false,
             ImportBindingKind::ReExportNamespace => true,
             ImportBindingKind::Default
             | ImportBindingKind::Named
             | ImportBindingKind::Namespace
+            | ImportBindingKind::ReExportNamed
             | ImportBindingKind::IncludeQuoted
             | ImportBindingKind::IncludeSystem => continue,
         };
@@ -7320,7 +7484,8 @@ where
             | ImportBindingKind::Named
             | ImportBindingKind::Namespace
             | ImportBindingKind::ReExportAll
-            | ImportBindingKind::ReExportNamespace => {}
+            | ImportBindingKind::ReExportNamespace
+            | ImportBindingKind::ReExportNamed => {}
         }
     }
     match matched {
@@ -7361,7 +7526,8 @@ where
             | ImportBindingKind::Named
             | ImportBindingKind::Namespace
             | ImportBindingKind::ReExportAll
-            | ImportBindingKind::ReExportNamespace => {}
+            | ImportBindingKind::ReExportNamespace
+            | ImportBindingKind::ReExportNamed => {}
             ImportBindingKind::IncludeQuoted => {
                 let Some(file_id) = resolve_quoted_include_file(index, request, binding) else {
                     continue;
@@ -7562,16 +7728,19 @@ fn resolve_rust_namespace_symbol_import<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
+    if query.reference.language != SourceLanguage::Rust.as_str()
+        || query.binding.kind != ImportBindingKind::Namespace
+    {
+        return Ok(None);
+    }
+    if let Some(target) = resolve_rust_workspace_symbol_import(query, cancelled)? {
+        return Ok(Some(target));
+    }
     let RustNamespaceImportQuery {
         index,
         reference,
         binding,
     } = query;
-    if reference.language != SourceLanguage::Rust.as_str()
-        || binding.kind != ImportBindingKind::Namespace
-    {
-        return Ok(None);
-    }
     let Some((parent_specifier, imported_leaf)) = binding.module_specifier.rsplit_once("::") else {
         return Ok(None);
     };
@@ -7634,6 +7803,154 @@ where
         )?;
     }
     Ok(candidate.map(import_binding_target))
+}
+
+fn resolve_rust_workspace_symbol_import<Cancel>(
+    query: RustNamespaceImportQuery<'_, '_>,
+    cancelled: &mut Cancel,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let RustNamespaceImportQuery {
+        index,
+        reference,
+        binding,
+    } = query;
+    let Some((crate_name, public_name)) = binding.module_specifier.split_once("::") else {
+        return Ok(None);
+    };
+    let Some(Some(package)) = index.modules.rust_packages.get(crate_name) else {
+        return Ok(None);
+    };
+    let mut re_export_target: Option<&str> = None;
+    for re_export in &index.rust_named_re_exports {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        if re_export.source_file_id != package.entry_file_id || re_export.public_name != public_name
+        {
+            continue;
+        }
+        if re_export_target.is_some_and(|existing| existing != re_export.module_specifier.as_str())
+        {
+            return Ok(None);
+        }
+        re_export_target = Some(&re_export.module_specifier);
+    }
+    if let Some(re_export_target) = re_export_target {
+        let Some(entry) = index.modules.files.get(&package.entry_file_id) else {
+            return Err(StageItemFailure);
+        };
+        let empty_bindings: &[ExtractedImportBinding] = &[];
+        let target_request = ResolutionRequest {
+            file_id: &package.entry_file_id,
+            file_path: &entry.path,
+            language: SourceLanguage::Rust.as_str(),
+            import_bindings: empty_bindings,
+            owner: None,
+            name: re_export_target,
+            dynamic_dispatch: false,
+            kind: reference.kind,
+            span: reference.span,
+        };
+        if let Some(mut target) = resolve_rust_qualified_path(index, &target_request, cancelled)?
+            && rust_reexport_target_is_public(index, &target, re_export_target)
+        {
+            target.confidence = IMPORT_BINDING_CONFIDENCE;
+            target.provenance = RUST_WORKSPACE_CRATE_PROVENANCE;
+            return Ok(Some(target));
+        }
+    }
+    let candidates = index
+        .candidates
+        .get(public_name)
+        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidate = select_candidate(
+        candidates,
+        |candidate| {
+            rust_package_contains_candidate(index, package, candidate)
+                && rust_workspace_inline_candidate_is_public(index, candidate, public_name)
+                && reference_kind_candidate(reference.kind, candidate)
+        },
+        cancelled,
+    )?;
+    Ok(candidate.map(|candidate| ResolvedTarget {
+        symbol_id: candidate.symbol_id.clone(),
+        kind: candidate.kind,
+        confidence: IMPORT_BINDING_CONFIDENCE,
+        provenance: RUST_WORKSPACE_CRATE_PROVENANCE,
+    }))
+}
+
+fn rust_package_contains_candidate(
+    index: &ResolutionIndex,
+    package: &RustPackageRoot,
+    candidate: &ResolutionCandidate,
+) -> bool {
+    let Some(file) = index.modules.files.get(&candidate.file_id) else {
+        return false;
+    };
+    if package.directory.is_empty() {
+        file.path.starts_with("src/")
+    } else {
+        file.path
+            .strip_prefix(&package.directory)
+            .is_some_and(|suffix| suffix.starts_with("/src/"))
+    }
+}
+
+fn rust_reexport_target_is_public(
+    index: &ResolutionIndex,
+    target: &ResolvedTarget,
+    source_path: &str,
+) -> bool {
+    let Some(name) = source_path.rsplit("::").next() else {
+        return false;
+    };
+    index.candidates.get(name).is_some_and(|candidates| {
+        let mut matching = candidates
+            .iter()
+            .filter(|candidate| candidate.symbol_id == target.symbol_id);
+        matching.next().is_some_and(|candidate| {
+            matching.next().is_none()
+                && (candidate.export.exported || candidate.kind == SymbolKind::EnumMember)
+        })
+    })
+}
+
+fn rust_workspace_inline_candidate_is_public(
+    index: &ResolutionIndex,
+    candidate: &ResolutionCandidate,
+    public_name: &str,
+) -> bool {
+    if candidate.qualified_name != public_name
+        || (!candidate.export.exported && candidate.kind != SymbolKind::EnumMember)
+    {
+        return false;
+    }
+    let mut qualified_name = candidate.qualified_name.as_str();
+    let mut parent_symbol_id = candidate.parent_symbol_id.as_ref();
+    while let Some((parent_name, _)) = qualified_name.rsplit_once("::") {
+        let Some(expected_parent_id) = parent_symbol_id else {
+            return false;
+        };
+        let Some(parents) = index.candidates.get(parent_name) else {
+            return false;
+        };
+        let mut matching = parents.iter().filter(|parent| {
+            parent.file_id == candidate.file_id && parent.symbol_id == *expected_parent_id
+        });
+        let Some(parent) = matching.next() else {
+            return false;
+        };
+        if matching.next().is_some() || !parent.export.exported {
+            return false;
+        }
+        parent_symbol_id = parent.parent_symbol_id.as_ref();
+        qualified_name = parent_name;
+    }
+    parent_symbol_id.is_none()
 }
 
 fn rust_imported_target_name(
@@ -7830,7 +8147,8 @@ fn runtime_binding_target_name<'a>(
         ImportBindingKind::IncludeQuoted
         | ImportBindingKind::IncludeSystem
         | ImportBindingKind::ReExportAll
-        | ImportBindingKind::ReExportNamespace => None,
+        | ImportBindingKind::ReExportNamespace
+        | ImportBindingKind::ReExportNamed => None,
     }
 }
 
@@ -13460,6 +13778,146 @@ mod tests {
             external_reference.resolution_provenance,
             RUST_EXTERNAL_UNRESOLVED_PROVENANCE
         );
+    }
+
+    #[test]
+    fn rust_workspace_crate_imports_resolve_inline_modules_and_named_reexports() {
+        let fixtures = [
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/seam\", \"crates/consumer\"]\nresolver = \"2\"\n",
+            ),
+            (
+                "crates/seam/Cargo.toml",
+                "[package]\nname = \"seam\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "crates/seam/src/conv.rs",
+                "pub struct Conv2d;\npub fn conv2d() -> Conv2d { Conv2d }\n",
+            ),
+            (
+                "crates/seam/src/lib.rs",
+                "pub mod conv;\npub mod nn { pub use crate::conv::{conv2d, Conv2d}; }\npub mod ops { pub fn causal_mask() -> usize { 0 } }\nmod hidden { pub fn secret() {} pub mod visible_inner { pub fn nested_secret() {} } }\n",
+            ),
+            (
+                "crates/consumer/Cargo.toml",
+                "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nseam = { path = \"../seam\" }\n",
+            ),
+            (
+                "crates/consumer/src/lib.rs",
+                "use seam::nn::{conv2d, Conv2d};\nuse seam::ops::causal_mask;\nuse seam::hidden::secret;\nuse seam::hidden::visible_inner::nested_secret;\npub fn build() -> Conv2d { let _ = causal_mask(); let _ = causal_mask(); conv2d() }\npub fn build_again() -> Conv2d { conv2d() }\npub fn private_boundary() { secret(); nested_secret(); }\n",
+            ),
+        ];
+        let forward = build_capability_generation(&fixtures, false);
+        let reversed = build_capability_generation(&fixtures, true);
+        assert_eq!(forward.digest(), reversed.digest());
+
+        for facts in [&forward, &reversed] {
+            let conv2d = capability_symbol(facts, "crates/seam/src/conv.rs", "conv2d");
+            let conv_type = capability_symbol(facts, "crates/seam/src/conv.rs", "Conv2d");
+            let mask = capability_symbol(facts, "crates/seam/src/lib.rs", "ops::causal_mask");
+            let consumer_file = facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == "crates/consumer/src/lib.rs")
+                .unwrap_or_else(|| panic!("consumer Rust fixture was missing"));
+            let mut matched = 0_usize;
+            for reference in facts
+                .references()
+                .iter()
+                .filter(|reference| reference.file_id == consumer_file.file_id)
+            {
+                let expected = match reference.reference_name.as_str() {
+                    "conv2d" => Some(&conv2d.symbol_id),
+                    "Conv2d" => Some(&conv_type.symbol_id),
+                    "causal_mask" => Some(&mask.symbol_id),
+                    _ => None,
+                };
+                let Some(expected) = expected else {
+                    continue;
+                };
+                matched = matched.saturating_add(1);
+                assert_eq!(reference.target_symbol_id.as_ref(), Some(expected));
+                assert_eq!(
+                    reference.resolution_provenance,
+                    RUST_WORKSPACE_CRATE_PROVENANCE
+                );
+            }
+            assert!(matched >= 9, "cross-crate reference sites were missing");
+            let private_sites = facts
+                .references()
+                .iter()
+                .filter(|reference| {
+                    reference.file_id == consumer_file.file_id
+                        && matches!(
+                            reference.reference_name.as_str(),
+                            "secret" | "nested_secret"
+                        )
+                })
+                .collect::<Vec<_>>();
+            assert!(!private_sites.is_empty());
+            assert!(private_sites.iter().all(|reference| {
+                reference.target_symbol_id.is_none()
+                    && reference.resolution_provenance == RUST_EXTERNAL_UNRESOLVED_PROVENANCE
+            }));
+        }
+    }
+
+    #[test]
+    fn rust_workspace_crate_resolution_abstains_on_duplicate_package_names() {
+        let fixtures = [
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/seam-a\", \"crates/seam-b\", \"crates/consumer\"]\nresolver = \"2\"\n",
+            ),
+            (
+                "crates/seam-a/Cargo.toml",
+                "[package]\nname = \"seam\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "crates/seam-a/src/lib.rs",
+                "pub fn public_api() -> usize { 1 }\n",
+            ),
+            (
+                "crates/seam-b/Cargo.toml",
+                "[package]\nname = \"seam\"\nversion = \"0.2.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "crates/seam-b/src/lib.rs",
+                "pub fn public_api() -> usize { 2 }\n",
+            ),
+            (
+                "crates/consumer/Cargo.toml",
+                "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nseam = { path = \"../seam-a\" }\n",
+            ),
+            (
+                "crates/consumer/src/lib.rs",
+                "use seam::public_api;\npub fn consume() -> usize { public_api() }\n",
+            ),
+        ];
+        for facts in [
+            build_capability_generation(&fixtures, false),
+            build_capability_generation(&fixtures, true),
+        ] {
+            let consumer_file = facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == "crates/consumer/src/lib.rs")
+                .unwrap_or_else(|| panic!("ambiguous consumer fixture was missing"));
+            let sites = facts
+                .references()
+                .iter()
+                .filter(|reference| {
+                    reference.file_id == consumer_file.file_id
+                        && reference.reference_name == "public_api"
+                })
+                .collect::<Vec<_>>();
+            assert!(!sites.is_empty());
+            assert!(sites.iter().all(|reference| {
+                reference.target_symbol_id.is_none()
+                    && reference.resolution_provenance == RUST_EXTERNAL_UNRESOLVED_PROVENANCE
+            }));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

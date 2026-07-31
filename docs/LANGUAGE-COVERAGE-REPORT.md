@@ -1,6 +1,6 @@
 # Native language-coverage report
 
-Last release audit: 2026-07-30 (`v2.1.0`).
+Last release audit: 2026-07-31 (`v2.1.1`).
 
 Cartograph v2 production-admits all 73 v1.1.33 language modes and all 163 v1
 extensions, plus additive Python `.pyi` and a native TOML mode: 74 modes total.

@@ -71,8 +71,9 @@ const SUMMARY_PRIORITY_QUEUE_MIGRATION_VERSION: i64 = 20;
 const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION: i64 = 22;
 const STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION: i64 = 23;
-const LATEST_MIGRATION_VERSION: i64 = STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 23] = [
+const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION: i64 = 24;
+const LATEST_MIGRATION_VERSION: i64 = RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 24] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -96,6 +97,7 @@ const EXPECTED_MIGRATIONS: [i64; 23] = [
     DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION,
     NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION,
     STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION,
+    RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -128,6 +130,8 @@ const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_CHECKSUM: &str =
     "5cbc965cc09530332f8c320c70aac3b083324a21f78fe6ed8edb23057d6af518";
 const NATIVE_INDEX_DIGEST_V5_MIGRATION_CHECKSUM: &str =
     "ac9255910ba9dcd7babba294440758ee3bdee9ed3f142b9cd8291cc3e1128edb";
+const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_CHECKSUM: &str =
+    "aa6f62e612975ad71d5f3d44d7636f958f6b13c64bb8f0a795e150ed2105f9cd";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -283,7 +287,7 @@ async fn migrations_are_idempotent_and_only_published_generations_are_searchable
     let (database, pool, schema) = open_isolated_database().await;
     assert_migration_ledger(&database).await;
     assert_deterministic_cochange_order_migration(&pool, &schema).await;
-    assert_native_index_digest_v5_migration(&pool, &schema).await;
+    assert_native_index_digest_migrations(&pool, &schema).await;
     let project = register_project(&database).await;
     let current_one = publish_initial_generation(&database, &project).await;
     let ready_older =
@@ -3579,7 +3583,7 @@ async fn assert_deterministic_cochange_order_migration(pool: &sqlx_postgres::PgP
     assert!(definition.contains("COLLATE \"C\""), "{definition}");
 }
 
-async fn assert_native_index_digest_v5_migration(pool: &sqlx_postgres::PgPool, schema: &str) {
+async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, schema: &str) {
     let ledger = format!(
         r#"SELECT checksum
             FROM "{schema}"."schema_migrations"
@@ -3591,6 +3595,21 @@ async fn assert_native_index_digest_v5_migration(pool: &sqlx_postgres::PgPool, s
         .and_then(|row| row.try_get::<String, _>("checksum"))
         .unwrap_or_else(|error| panic!("could not verify digest-v5 migration: {error}"));
     assert_eq!(checksum, NATIVE_INDEX_DIGEST_V5_MIGRATION_CHECKSUM);
+
+    let latest_ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 24"#
+    );
+    let latest_checksum = query(AssertSqlSafe(latest_ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify digest-v6 migration: {error}"));
+    assert_eq!(
+        latest_checksum,
+        RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_CHECKSUM
+    );
 
     let definition = query(
         r"SELECT pg_get_constraintdef(constraints.oid) AS definition
@@ -3607,8 +3626,11 @@ async fn assert_native_index_digest_v5_migration(pool: &sqlx_postgres::PgPool, s
     .fetch_one(pool)
     .await
     .and_then(|row| row.try_get::<String, _>("definition"))
-    .unwrap_or_else(|error| panic!("could not inspect digest-v5 constraint: {error}"));
-    assert!(definition.contains("ARRAY[1, 2, 3, 4, 5]"), "{definition}");
+    .unwrap_or_else(|error| panic!("could not inspect digest-v6 constraint: {error}"));
+    assert!(
+        definition.contains("ARRAY[1, 2, 3, 4, 5, 6]"),
+        "{definition}"
+    );
 }
 
 async fn seed_exact_lookup_scale(

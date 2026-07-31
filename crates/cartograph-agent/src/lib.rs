@@ -2198,6 +2198,11 @@ pub enum ProjectError {
     /// A bounded embedding endpoint, model, or PostgreSQL semantic operation failed.
     #[error("Cartograph embedding operation failed")]
     EmbeddingOperationFailed,
+    /// PostgreSQL could not allocate the shared-memory segment for HNSW creation.
+    #[error(
+        "Cartograph HNSW creation could not allocate shared memory; vectors remain resumable after the managed database upgrade"
+    )]
+    HnswCreateSharedMemoryUnavailable,
     /// Natural-language retrieval could not validate or assemble its bounded channels.
     #[error("Cartograph retrieval operation failed")]
     RetrievalOperationFailed,

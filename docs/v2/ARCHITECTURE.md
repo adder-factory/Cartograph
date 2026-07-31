@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-07-30 (`v2.1.0`)
+Last implementation review: 2026-07-31 (`v2.1.1`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,9 +59,11 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.5 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns twenty-three versions. Migration
-23 adds virtual parse-cache payload accounting and table-local autovacuum policy
-for high-churn generation, fact, and cache relations. Core relations:
+The append-only migration ledger currently owns twenty-four versions. Migration
+24 admits generation digest V6 for Cargo-workspace crate/re-export semantics;
+migration 23 adds virtual parse-cache payload accounting and table-local
+autovacuum policy for high-churn generation, fact, and cache relations. Core
+relations:
 
 | Relation | Purpose |
 | --- | --- |
@@ -251,7 +253,11 @@ and represented site counts.
 Embeddings are optional; pgvector capability is mandatory so the storage shape
 is predictable. A model registration fixes provider, name/fingerprint,
 dimension, and normalization. Vectors are isolated by model and generation,
-with a dimension-validated model-scoped HNSW expression index.
+with a dimension-validated model-scoped HNSW expression index. Managed
+containers reserve 256 MiB of shared memory and index creation sets
+`max_parallel_maintenance_workers=0`; an actual PostgreSQL shared-memory
+allocation failure remains a distinct resumable HNSW phase rather than a
+generic embedding failure.
 
 Before semantic Top-K, Cartograph proves the model is active, fingerprint and
 dimension match, current-generation document coverage is complete, HNSW exists,
@@ -403,7 +409,9 @@ derived BM25 relations transactionally, and reports admitted cascade rows,
 relation count, and physical relation bytes. Status and doctor expose all
 generation-state counts and a conservative retained-byte estimate.
 
-`db usage` reads a repeatable, bounded storage snapshot with schema heap/index/
+Routine status reads compact whole-database and schema heap/index/TOAST totals
+under a separate five-second bound and preserves the rest of status if those
+totals are unavailable. `db usage` reads a repeatable, bounded storage snapshot with schema heap/index/
 TOAST, cache, generation, dead-row, autovacuum, invalid-index, and deduplication
 evidence. Content-addressed fact sharing is deliberately assessment-only until
 a schema migration can preserve immutable generation identity and cascades.
