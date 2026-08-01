@@ -87,6 +87,13 @@ cartograph context 'explain the primary request flow' --project-path .
 `db start` creates project-owned, loopback-only resources and pulls the pinned
 upstream ParadeDB image. `doctor` fails closed unless PostgreSQL, pg_search,
 pgvector, preload, BM25, migrations, and code tokenization all pass.
+`doctor --json` retains `ready` as the backward-compatible hard-capability
+result and mirrors it as `capabilitiesReady`. Its separate `projectReadiness`
+object reports database, index, freshness, deterministic retrieval, optional
+semantic retrieval, on-disk registration, live MCP transport, and overall
+onboarding states. Checks that `doctor` does not perform are `not_checked`,
+never inferred from another successful layer; `nextActions` contains only
+path-safe follow-up commands.
 
 ### 3. Connect a coding agent
 
@@ -125,6 +132,9 @@ A setup is ready only after all four signals pass:
 
 A CLI request proves the executable and database path. After restarting an
 agent host, make one live MCP request as the separate transport-health check.
+Until that happens, `doctor` deliberately reports `liveTransport` as
+`not_checked`; an on-disk registration never proves which child process an
+already-running host loaded.
 
 > [!TIP]
 > Prefer agent-assisted setup? Give your coding agent the task in

@@ -45,7 +45,7 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         .migrate()
         .await
         .unwrap_or_else(|error| panic!("storage migration failed: {error}"));
-    assert_eq!(migration.current_version, 24);
+    assert_eq!(migration.current_version, 25);
     assert_virtual_payload_accounting_and_autovacuum(&pool, &schema).await;
 
     let project = database

@@ -72,8 +72,9 @@ const DETERMINISTIC_COCHANGE_ORDER_MIGRATION_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION: i64 = 22;
 const STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION: i64 = 23;
 const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION: i64 = 24;
-const LATEST_MIGRATION_VERSION: i64 = RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 24] = [
+const DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION: i64 = 25;
+const LATEST_MIGRATION_VERSION: i64 = DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 25] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -98,6 +99,7 @@ const EXPECTED_MIGRATIONS: [i64; 24] = [
     NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION,
     STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION,
     RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION,
+    DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -132,6 +134,8 @@ const NATIVE_INDEX_DIGEST_V5_MIGRATION_CHECKSUM: &str =
     "ac9255910ba9dcd7babba294440758ee3bdee9ed3f142b9cd8291cc3e1128edb";
 const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_CHECKSUM: &str =
     "aa6f62e612975ad71d5f3d44d7636f958f6b13c64bb8f0a795e150ed2105f9cd";
+const DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_CHECKSUM: &str =
+    "6e3150fef9c6e7adba0f17f66864a1b217104b813725a0e99feedb07f2d88331";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -3395,6 +3399,43 @@ async fn assert_exact_lookup_migration(pool: &sqlx_postgres::PgPool, schema: &st
     .await
     .unwrap_or_else(|error| panic!("could not inspect exact-lookup indexes: {error}"));
     assert_eq!(indexes.len(), 2);
+
+    let latest_ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 25"#
+    );
+    let latest_checksum = query(AssertSqlSafe(latest_ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify directory-import migration: {error}"));
+    assert_eq!(
+        latest_checksum,
+        DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_CHECKSUM
+    );
+
+    let expression = query(
+        r"SELECT pg_get_expr(attributes.adbin, attributes.adrelid) AS expression
+            FROM pg_catalog.pg_attribute AS columns
+            JOIN pg_catalog.pg_class AS relations
+              ON relations.oid = columns.attrelid
+            JOIN pg_catalog.pg_namespace AS namespaces
+              ON namespaces.oid = relations.relnamespace
+            JOIN pg_catalog.pg_attrdef AS attributes
+              ON attributes.adrelid = columns.attrelid
+             AND attributes.adnum = columns.attnum
+            WHERE namespaces.nspname = $1
+              AND relations.relname = 'symbols'
+              AND columns.attname = 'simple_name'",
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await
+    .and_then(|row| row.try_get::<String, _>("expression"))
+    .unwrap_or_else(|error| panic!("could not inspect simple-name expression: {error}"));
+    assert!(expression.contains("COALESCE"), "{expression}");
+    assert!(expression.contains("NULLIF"), "{expression}");
 }
 
 async fn assert_generation_search_migration(pool: &sqlx_postgres::PgPool, schema: &str) {

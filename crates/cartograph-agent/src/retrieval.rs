@@ -739,7 +739,7 @@ async fn semantic_channel(
     {
         return Err(RetrievalStageError::GenerationChanged);
     }
-    let readiness = semantic_readiness(readiness_report.state());
+    let readiness = semantic_readiness_from_database(readiness_report.state());
     if readiness != SemanticReadiness::Ready {
         return semantic_without_candidates(readiness, reranker);
     }
@@ -758,7 +758,10 @@ async fn semantic_channel(
         result = runtime.database().vector_top_k(request) => match result {
             Ok(hits) => hits,
             Err(SemanticStorageError::NotReady { state }) => {
-                return semantic_without_candidates(semantic_readiness(state), reranker);
+                return semantic_without_candidates(
+                    semantic_readiness_from_database(state),
+                    reranker,
+                );
             }
             Err(SemanticStorageError::CurrentGenerationChanged) => {
                 return Err(RetrievalStageError::GenerationChanged);
@@ -1055,7 +1058,10 @@ fn project_retrieval_error(error: RetrievalStageError) -> ProjectError {
     }
 }
 
-const fn semantic_readiness(state: SemanticReadinessState) -> SemanticReadiness {
+/// Collapse database-specific semantic readiness evidence into the retrieval policy state shared
+/// by agent and CLI callers.
+#[must_use]
+pub const fn semantic_readiness_from_database(state: SemanticReadinessState) -> SemanticReadiness {
     match state {
         SemanticReadinessState::Ready => SemanticReadiness::Ready,
         SemanticReadinessState::ModelMissing
@@ -1140,7 +1146,7 @@ mod tests {
     #[test]
     fn database_readiness_maps_to_explicit_agent_policy_states() {
         assert_eq!(
-            semantic_readiness(SemanticReadinessState::Ready),
+            semantic_readiness_from_database(SemanticReadinessState::Ready),
             SemanticReadiness::Ready
         );
         for state in [
@@ -1150,16 +1156,22 @@ mod tests {
             SemanticReadinessState::CoverageIncomplete,
             SemanticReadinessState::HnswUnavailable,
         ] {
-            assert_eq!(semantic_readiness(state), SemanticReadiness::NotIndexed);
+            assert_eq!(
+                semantic_readiness_from_database(state),
+                SemanticReadiness::NotIndexed
+            );
         }
         for state in [
             SemanticReadinessState::ModelMismatch,
             SemanticReadinessState::ModelRetired,
         ] {
-            assert_eq!(semantic_readiness(state), SemanticReadiness::Stale);
+            assert_eq!(
+                semantic_readiness_from_database(state),
+                SemanticReadiness::Stale
+            );
         }
         assert_eq!(
-            semantic_readiness(SemanticReadinessState::QueryProbeFailed),
+            semantic_readiness_from_database(SemanticReadinessState::QueryProbeFailed),
             SemanticReadiness::Unavailable
         );
     }

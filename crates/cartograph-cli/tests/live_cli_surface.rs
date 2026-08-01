@@ -47,6 +47,103 @@ fn public_cli_exercises_native_agent_backend_and_optional_llm_routes() {
     }
 }
 
+#[test]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+fn doctor_exposes_layered_readiness_before_the_first_generation() {
+    let database_url = std::env::var("CARTOGRAPH_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| panic!("live CLI database is not configured"));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let schema = format!("cg_cli_doctor_layers_{}_{}", std::process::id(), nanos);
+    let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let project_path = project.path().to_string_lossy().into_owned();
+    write_project_fixture(project.path());
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        json_success(
+            project.path(),
+            &database_url,
+            &schema,
+            &[
+                "llm",
+                "install",
+                &project_path,
+                "--no-models",
+                "--minimal",
+                "--json",
+            ],
+        );
+        let report = json_success(
+            project.path(),
+            &database_url,
+            &schema,
+            &["doctor", &project_path, "--json"],
+        );
+        assert_eq!(report["ready"], true);
+        assert_eq!(report["capabilitiesReady"], true);
+        assert_eq!(report["projectReadiness"]["database"], "ready");
+        assert_eq!(report["projectReadiness"]["index"], "not_indexed");
+        assert_eq!(report["projectReadiness"]["freshness"], "unavailable");
+        assert_eq!(
+            report["projectReadiness"]["deterministicRetrieval"],
+            "unavailable"
+        );
+        assert_eq!(report["projectReadiness"]["registration"], "not_checked");
+        assert_eq!(report["projectReadiness"]["liveTransport"], "not_checked");
+        assert_eq!(report["projectReadiness"]["overall"], "incomplete");
+        assert!(
+            report["nextActions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| {
+                    action
+                        .as_str()
+                        .is_some_and(|action| action.contains("cartograph index <path>"))
+                }))
+        );
+
+        let skipped = json_success(
+            project.path(),
+            &database_url,
+            &schema,
+            &["doctor", &project_path, "--no-project-checks", "--json"],
+        );
+        assert_eq!(skipped["projectReadiness"]["index"], "not_checked");
+        assert_eq!(skipped["projectReadiness"]["freshness"], "not_checked");
+        assert_eq!(
+            skipped["projectReadiness"]["deterministicRetrieval"],
+            "not_checked"
+        );
+        assert_eq!(
+            skipped["projectReadiness"]["semanticRetrieval"],
+            "not_checked"
+        );
+        assert_eq!(skipped["projectReadiness"]["overall"], "not_checked");
+
+        let text = success(
+            project.path(),
+            &database_url,
+            &schema,
+            &["doctor", &project_path],
+        );
+        let rendered = String::from_utf8_lossy(&text.stdout);
+        assert!(rendered.contains("Readiness layers:"));
+        assert!(rendered.contains("- overall onboarding: incomplete"));
+        assert!(rendered.contains("Next actions:"));
+
+        let encoded = serde_json::to_string(&report)
+            .unwrap_or_else(|error| panic!("doctor report encoding failed: {error}"));
+        assert!(!encoded.contains(&project_path));
+        assert!(!encoded.contains(&database_url));
+    }));
+
+    cleanup_schema(&database_url, &schema);
+    if let Err(payload) = outcome {
+        resume_unwind(payload);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LiveCliScenario<'a> {
     project: &'a tempfile::TempDir,
@@ -1122,6 +1219,13 @@ app.get("/orders/:id", (request, response) => response.send(handleOrder(request.
 "#,
     )
     .unwrap_or_else(|error| panic!("TypeScript fixture write failed: {error}"));
+    std::fs::write(root.join("src/index.ts"), "export const marker = 1;\n")
+        .unwrap_or_else(|error| panic!("TypeScript barrel fixture write failed: {error}"));
+    std::fs::write(
+        root.join("src/consumer.ts"),
+        "import { marker } from '.';\nexport const copiedMarker = marker;\n",
+    )
+    .unwrap_or_else(|error| panic!("TypeScript directory import fixture write failed: {error}"));
     std::fs::write(
         root.join("tests/server.test.ts"),
         "import { handleOrder } from '../src/server';\ntest('order', () => expect(handleOrder('42')).toBe('42'));\n",

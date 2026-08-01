@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-01 (`v2.1.2`).
+Last release audit: 2026-08-01 (`v2.1.3`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -55,9 +55,20 @@ and truncation flag. V2 includes exported constants, types, enums, traits,
 modules, components, and resources in the public surface in addition to v1's
 function/class categories.
 
+`doctor --json` separates hard capability health from completed onboarding.
+The legacy `ready` boolean and new `capabilitiesReady` boolean preserve the
+existing exit-code contract. `projectReadiness` independently reports
+`database`, `index`, `freshness`, `deterministicRetrieval`,
+`semanticRetrieval`, `registration`, `liveTransport`, and `overall` states.
+A missing generation is `not_indexed`; a published generation can be `stale`
+without being confused with absence; optional semantic configuration does not
+gate deterministic retrieval. `--no-project-checks` returns `not_checked` for
+the skipped layers. `nextActions` uses placeholders rather than absolute paths
+or database settings.
+
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.2 top-level command advertised
+This inventory contains every non-hidden v2.1.3 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 

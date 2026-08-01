@@ -17,9 +17,9 @@ use std::{
 };
 
 use cartograph_agent::{
-    EmbeddingOptions, IndexOptions, IndexReport, ProjectRuntime, RetrievalOptions,
+    EmbeddingOptions, IndexOptions, IndexReport, ProjectRuntime, ProjectStatus, RetrievalOptions,
     RetrievalRequest, ReviewOptions, ReviewReport, SourceContextOptions, SourceContextRequest,
-    WorkingTreeOverlayRequest,
+    WorkingTreeOverlayRequest, semantic_readiness_from_database,
 };
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{
@@ -27,9 +27,9 @@ use cartograph_db::{
     GenerationRetentionPolicy, GenerationRetentionRequest, GenerationStorageSummary,
     GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, ManagedContainerState,
     ManagedDatabase, ManagedDatabaseStatus, ManagedDestructiveConfirmation,
-    ManagedDestructiveOperation, ManagedStartReport, StorageCompactionPolicy,
-    StorageCompactionPolicyInput, V1PostgresImportExecution, V1PostgresImportLimits,
-    V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
+    ManagedDestructiveOperation, ManagedStartReport, SemanticReadinessState,
+    StorageCompactionPolicy, StorageCompactionPolicyInput, V1PostgresImportExecution,
+    V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
 };
 use cartograph_domain::{
     EdgeKind, ModelId, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage, SymbolId,
@@ -43,8 +43,8 @@ use cartograph_search::{
     ContextAnchor, ContextBudget, ContextRequest, ContextRequestOptions, DeterministicRetriever,
     EntryPointBucket, EntryPointsQuery, ExactPathQuery, ExactTextQuery, FileInventoryQuery,
     GraphPathRequest, GraphPathRequestInput, IndexFreshness, LexicalQuery, SearchMode,
-    SimilarRequest, SourceRangeQuery, SourceRangeQueryInput, TaskIntent, TraversalBudget,
-    TraversalRequest,
+    SemanticReadiness as RetrievalSemanticReadiness, SimilarRequest, SourceRangeQuery,
+    SourceRangeQueryInput, TaskIntent, TraversalBudget, TraversalRequest,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::{StreamExt as _, stream};
@@ -4007,10 +4007,230 @@ struct DoctorCheck {
     remediation: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DatabaseReadinessState {
+    Ready,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum IndexReadinessState {
+    Ready,
+    NotIndexed,
+    Unavailable,
+    NotChecked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FreshnessReadinessState {
+    Current,
+    Stale,
+    Unavailable,
+    NotChecked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DeterministicRetrievalReadinessState {
+    Ready,
+    Unavailable,
+    NotChecked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SemanticRetrievalReadinessState {
+    Ready,
+    NotConfigured,
+    NotIndexed,
+    Stale,
+    Unavailable,
+    NotChecked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HostVerificationReadinessState {
+    Ready,
+    NotChecked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OverallOnboardingReadinessState {
+    Ready,
+    Incomplete,
+    Blocked,
+    NotChecked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectReadiness {
+    database: DatabaseReadinessState,
+    index: IndexReadinessState,
+    freshness: FreshnessReadinessState,
+    deterministic_retrieval: DeterministicRetrievalReadinessState,
+    semantic_retrieval: SemanticRetrievalReadinessState,
+    registration: HostVerificationReadinessState,
+    live_transport: HostVerificationReadinessState,
+    overall: OverallOnboardingReadinessState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectIndexObservation {
+    index: IndexReadinessState,
+    freshness: FreshnessReadinessState,
+    deterministic_retrieval: DeterministicRetrievalReadinessState,
+}
+
+#[derive(Clone, Copy)]
+struct ProjectReadinessInput {
+    capabilities_ready: bool,
+    database: DatabaseReadinessState,
+    project_index: ProjectIndexObservation,
+    semantic_retrieval: SemanticRetrievalReadinessState,
+    project_checks_skipped: bool,
+    registration: HostVerificationReadinessState,
+    live_transport: HostVerificationReadinessState,
+}
+
+impl ProjectIndexObservation {
+    const fn not_checked() -> Self {
+        Self {
+            index: IndexReadinessState::NotChecked,
+            freshness: FreshnessReadinessState::NotChecked,
+            deterministic_retrieval: DeterministicRetrievalReadinessState::NotChecked,
+        }
+    }
+
+    const fn unavailable() -> Self {
+        Self {
+            index: IndexReadinessState::Unavailable,
+            freshness: FreshnessReadinessState::Unavailable,
+            deterministic_retrieval: DeterministicRetrievalReadinessState::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmbeddingConfigurationState {
+    Configured,
+    NotConfigured,
+    Unavailable,
+    NotChecked,
+}
+
+#[derive(Clone, Copy)]
+struct SemanticReadinessInput<'input> {
+    project_path: &'input Path,
+    settings: Option<&'input DatabaseSettings>,
+    project_index: ProjectIndexObservation,
+    configuration: EmbeddingConfigurationState,
+}
+
+#[derive(Clone, Copy)]
+struct DoctorLlmTier {
+    tier: ProjectLlmTier,
+    label: &'static str,
+    required: bool,
+    embedding: bool,
+}
+
+struct LlmDoctorContext<'input> {
+    project_path: &'input Path,
+    checks: &'input mut Vec<DoctorCheck>,
+    loopback: &'input mut BTreeMap<String, Vec<&'static str>>,
+}
+
+trait ReadinessLabel {
+    fn label(self) -> &'static str;
+}
+
+impl ReadinessLabel for DatabaseReadinessState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl ReadinessLabel for IndexReadinessState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotIndexed => "not_indexed",
+            Self::Unavailable => "unavailable",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
+impl ReadinessLabel for FreshnessReadinessState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
+impl ReadinessLabel for DeterministicRetrievalReadinessState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Unavailable => "unavailable",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
+impl ReadinessLabel for SemanticRetrievalReadinessState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotConfigured => "not_configured",
+            Self::NotIndexed => "not_indexed",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
+impl ReadinessLabel for HostVerificationReadinessState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
+impl ReadinessLabel for OverallOnboardingReadinessState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Incomplete => "incomplete",
+            Self::Blocked => "blocked",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DoctorReport {
     ready: bool,
+    capabilities_ready: bool,
+    project_readiness: ProjectReadiness,
+    next_actions: Vec<String>,
     fixes_applied: Vec<String>,
     checks: Vec<DoctorCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4110,69 +4330,146 @@ async fn apply_llm_doctor_fix(
     }
 }
 
-async fn build_doctor_report_with_settings(
-    input: DoctorReportInput<'_>,
-) -> Result<DoctorReport, String> {
-    let project_path = input
-        .project_path
+fn canonical_doctor_project_path(project_path: &Path) -> Result<PathBuf, String> {
+    let project_path = project_path
         .canonicalize()
         .map_err(|_| "doctor project path must be an existing directory".to_owned())?;
-    if !project_path.is_dir() {
-        return Err("doctor project path must be an existing directory".to_owned());
+    if project_path.is_dir() {
+        Ok(project_path)
+    } else {
+        Err("doctor project path must be an existing directory".to_owned())
     }
-    let mut fixes_applied = Vec::new();
-    let mut checks = Vec::new();
+}
 
-    check_native_executable(&mut checks);
-    if !input.skip_project_checks {
+struct DoctorPreparationInput<'input, 'settings> {
+    report: &'input DoctorReportInput<'settings>,
+    project_path: &'input Path,
+    fixes_applied: &'input mut Vec<String>,
+    checks: &'input mut Vec<DoctorCheck>,
+}
+
+async fn prepare_doctor_checks(input: DoctorPreparationInput<'_, '_>) -> Result<(), String> {
+    let DoctorPreparationInput {
+        report,
+        project_path,
+        fixes_applied,
+        checks,
+    } = input;
+    check_native_executable(checks);
+    if !report.skip_project_checks {
         check_or_fix_project_state(&mut ProjectStateCheckInput {
-            project_path: &project_path,
-            fix: input.fix,
-            fixes: &mut fixes_applied,
-            checks: &mut checks,
+            project_path,
+            fix: report.fix,
+            fixes: fixes_applied,
+            checks,
         })?;
     }
 
     let external_database =
-        input.explicit_database_settings.is_some() || env::var_os(DATABASE_URL_ENV).is_some();
-    if input.fix && !external_database {
-        apply_managed_database_doctor_fix(&project_path, &mut fixes_applied, &mut checks).await;
+        report.explicit_database_settings.is_some() || env::var_os(DATABASE_URL_ENV).is_some();
+    if report.fix && !external_database {
+        apply_managed_database_doctor_fix(project_path, fixes_applied, checks).await;
     }
-
-    if input.fix && !input.skip_project_checks {
-        apply_llm_doctor_fix(&project_path, &mut fixes_applied, &mut checks).await;
+    if report.fix && !report.skip_project_checks {
+        apply_llm_doctor_fix(project_path, fixes_applied, checks).await;
     }
 
     if external_database {
-        checks.push(doctor_pass(
-            "database-source",
-            if input.explicit_database_settings.is_some() {
-                "Using validated external PostgreSQL settings supplied to this process."
-            } else {
-                "Using validated external PostgreSQL settings from the process environment."
-            },
-        ));
+        let message = if report.explicit_database_settings.is_some() {
+            "Using validated external PostgreSQL settings supplied to this process."
+        } else {
+            "Using validated external PostgreSQL settings from the process environment."
+        };
+        checks.push(doctor_pass("database-source", message));
     } else {
-        check_managed_database(&project_path, &mut checks).await;
+        check_managed_database(project_path, checks).await;
     }
+    Ok(())
+}
+
+struct DoctorReadinessObservationInput<'input, 'settings> {
+    report: &'input DoctorReportInput<'settings>,
+    project_path: &'input Path,
+    settings: Option<&'input DatabaseSettings>,
+    checks: &'input mut Vec<DoctorCheck>,
+}
+
+async fn observe_doctor_project_readiness(
+    input: DoctorReadinessObservationInput<'_, '_>,
+) -> (ProjectIndexObservation, EmbeddingConfigurationState) {
+    let DoctorReadinessObservationInput {
+        report,
+        project_path,
+        settings,
+        checks,
+    } = input;
+    let project_index = if report.skip_project_checks {
+        ProjectIndexObservation::not_checked()
+    } else if let Some(settings) = settings {
+        check_project_index(project_path, settings, checks).await
+    } else {
+        ProjectIndexObservation::unavailable()
+    };
+    let embedding_configuration = if report.skip_project_checks {
+        EmbeddingConfigurationState::NotChecked
+    } else {
+        check_llm_configuration(project_path, checks).await
+    };
+    (project_index, embedding_configuration)
+}
+
+async fn build_doctor_report_with_settings(
+    input: DoctorReportInput<'_>,
+) -> Result<DoctorReport, String> {
+    let project_path = canonical_doctor_project_path(&input.project_path)?;
+    let mut fixes_applied = Vec::new();
+    let mut checks = Vec::new();
+    prepare_doctor_checks(DoctorPreparationInput {
+        report: &input,
+        project_path: &project_path,
+        fixes_applied: &mut fixes_applied,
+        checks: &mut checks,
+    })
+    .await?;
 
     let (database, settings) =
         check_database_capabilities(&project_path, input.explicit_database_settings, &mut checks)
             .await;
-    if !input.skip_project_checks
-        && let Some(settings) = settings.as_ref()
-    {
-        check_project_index(&project_path, settings, &mut checks).await;
-    }
-    if !input.skip_project_checks {
-        check_llm_configuration(&project_path, &mut checks).await;
-    }
+    let (project_index, embedding_configuration) =
+        observe_doctor_project_readiness(DoctorReadinessObservationInput {
+            report: &input,
+            project_path: &project_path,
+            settings: settings.as_ref(),
+            checks: &mut checks,
+        })
+        .await;
+    let semantic_retrieval = check_semantic_readiness(SemanticReadinessInput {
+        project_path: &project_path,
+        settings: settings.as_ref(),
+        project_index,
+        configuration: embedding_configuration,
+    })
+    .await;
 
-    let ready = !checks
+    let capabilities_ready = !checks
         .iter()
         .any(|check| check.status == DoctorStatus::Fail);
+    let database_readiness = database_readiness(database.as_ref(), &checks);
+    let project_readiness = build_project_readiness(ProjectReadinessInput {
+        capabilities_ready,
+        database: database_readiness,
+        project_index,
+        semantic_retrieval,
+        project_checks_skipped: input.skip_project_checks,
+        registration: HostVerificationReadinessState::NotChecked,
+        live_transport: HostVerificationReadinessState::NotChecked,
+    });
+    let next_actions = doctor_next_actions(project_readiness, input.skip_project_checks);
     Ok(DoctorReport {
-        ready,
+        ready: capabilities_ready,
+        capabilities_ready,
+        project_readiness,
+        next_actions,
         fixes_applied,
         checks,
         database,
@@ -4377,7 +4674,7 @@ async fn check_project_index(
     project_path: &Path,
     settings: &DatabaseSettings,
     checks: &mut Vec<DoctorCheck>,
-) {
+) -> ProjectIndexObservation {
     let runtime = match ProjectRuntime::connect_read_only(project_path, settings).await {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -4386,7 +4683,7 @@ async fn check_project_index(
                 error.to_string(),
                 "Run `cartograph db start` or verify the configured schema permissions.".to_owned(),
             ));
-            return;
+            return ProjectIndexObservation::unavailable();
         }
     };
     let status = runtime.status().await;
@@ -4395,7 +4692,7 @@ async fn check_project_index(
     {
         check_generation_storage(snapshot.generation_storage, checks);
     }
-    match status {
+    let observation = match status {
         Ok(status)
             if status
                 .snapshot
@@ -4408,23 +4705,231 @@ async fn check_project_index(
                 "No published graph generation exists yet.",
                 "Run `cartograph index`.".to_owned(),
             ));
+            ProjectIndexObservation {
+                index: IndexReadinessState::NotIndexed,
+                freshness: FreshnessReadinessState::Unavailable,
+                deterministic_retrieval: DeterministicRetrievalReadinessState::Unavailable,
+            }
         }
-        Ok(status) if status.fresh => checks.push(doctor_pass(
-            "project-index",
-            "The published graph generation matches the live source manifest.",
-        )),
-        Ok(_) => checks.push(doctor_warn(
-            "project-index",
-            "The published graph generation is stale relative to live source.",
-            "Run `cartograph index` or `cartograph sync-if-dirty`.".to_owned(),
-        )),
-        Err(error) => checks.push(doctor_warn(
-            "project-index",
-            "Project index status could not be determined.",
-            format!("Run `cartograph index`; status detail: {error}"),
-        )),
-    }
+        Ok(status) if status.fresh => {
+            checks.push(doctor_pass(
+                "project-index",
+                "The published graph generation matches the live source manifest.",
+            ));
+            project_index_observation(&status)
+        }
+        Ok(status) => {
+            checks.push(doctor_warn(
+                "project-index",
+                "The published graph generation is stale relative to live source.",
+                "Run `cartograph index` or `cartograph sync-if-dirty`.".to_owned(),
+            ));
+            project_index_observation(&status)
+        }
+        Err(error) => {
+            checks.push(doctor_warn(
+                "project-index",
+                "Project index status could not be determined.",
+                format!("Run `cartograph index`; status detail: {error}"),
+            ));
+            ProjectIndexObservation::unavailable()
+        }
+    };
     runtime.close().await;
+    observation
+}
+
+fn project_index_observation(status: &ProjectStatus) -> ProjectIndexObservation {
+    let indexed = status
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.current.as_ref())
+        .is_some();
+    if !indexed {
+        return ProjectIndexObservation {
+            index: IndexReadinessState::NotIndexed,
+            freshness: FreshnessReadinessState::Unavailable,
+            deterministic_retrieval: DeterministicRetrievalReadinessState::Unavailable,
+        };
+    }
+    ProjectIndexObservation {
+        index: IndexReadinessState::Ready,
+        freshness: if status.fresh {
+            FreshnessReadinessState::Current
+        } else {
+            FreshnessReadinessState::Stale
+        },
+        deterministic_retrieval: DeterministicRetrievalReadinessState::Ready,
+    }
+}
+
+fn database_readiness(
+    database: Option<&CapabilityReport>,
+    checks: &[DoctorCheck],
+) -> DatabaseReadinessState {
+    let database_failure = checks.iter().any(|check| {
+        check.status == DoctorStatus::Fail
+            && (check.id.starts_with("database-") || check.id.starts_with("managed-"))
+    });
+    if database.is_some_and(|report| report.ready) && !database_failure {
+        DatabaseReadinessState::Ready
+    } else {
+        DatabaseReadinessState::Unavailable
+    }
+}
+
+fn build_project_readiness(input: ProjectReadinessInput) -> ProjectReadiness {
+    let core_project_ready = input.database == DatabaseReadinessState::Ready
+        && input.project_index.index == IndexReadinessState::Ready
+        && input.project_index.freshness == FreshnessReadinessState::Current
+        && input.project_index.deterministic_retrieval
+            == DeterministicRetrievalReadinessState::Ready;
+    let host_ready = input.registration == HostVerificationReadinessState::Ready
+        && input.live_transport == HostVerificationReadinessState::Ready;
+    let overall = if !input.capabilities_ready {
+        OverallOnboardingReadinessState::Blocked
+    } else if input.project_checks_skipped {
+        OverallOnboardingReadinessState::NotChecked
+    } else if core_project_ready && host_ready {
+        OverallOnboardingReadinessState::Ready
+    } else {
+        OverallOnboardingReadinessState::Incomplete
+    };
+    ProjectReadiness {
+        database: input.database,
+        index: input.project_index.index,
+        freshness: input.project_index.freshness,
+        deterministic_retrieval: input.project_index.deterministic_retrieval,
+        semantic_retrieval: input.semantic_retrieval,
+        registration: input.registration,
+        live_transport: input.live_transport,
+        overall,
+    }
+}
+
+fn doctor_next_actions(readiness: ProjectReadiness, project_checks_skipped: bool) -> Vec<String> {
+    let mut actions = Vec::new();
+    if readiness.overall == OverallOnboardingReadinessState::Blocked {
+        actions.push(
+            "Resolve the failing hard requirements above, then rerun `cartograph doctor <path>`."
+                .to_owned(),
+        );
+    }
+    if project_checks_skipped {
+        actions.push(
+            "Rerun `cartograph doctor <path>` without `--no-project-checks` to inspect project readiness."
+                .to_owned(),
+        );
+    } else {
+        match readiness.index {
+            IndexReadinessState::NotIndexed => {
+                actions.push("Run `cartograph index <path>`.".to_owned());
+            }
+            IndexReadinessState::Unavailable => actions.push(
+                "Run `cartograph status <path>` and resolve its project-index error.".to_owned(),
+            ),
+            IndexReadinessState::Ready | IndexReadinessState::NotChecked => {}
+        }
+        if readiness.freshness == FreshnessReadinessState::Stale {
+            actions.push(
+                "Run `cartograph index <path>` or `cartograph sync-if-dirty <path>` to publish current source."
+                    .to_owned(),
+            );
+        }
+        if readiness.index == IndexReadinessState::Ready
+            && readiness.deterministic_retrieval != DeterministicRetrievalReadinessState::Ready
+        {
+            actions.push(
+                "Run one real deterministic `find` or `context` query and resolve any retrieval error."
+                    .to_owned(),
+            );
+        }
+        if matches!(
+            readiness.semantic_retrieval,
+            SemanticRetrievalReadinessState::NotIndexed
+                | SemanticRetrievalReadinessState::Stale
+                | SemanticRetrievalReadinessState::Unavailable
+        ) {
+            actions.push(
+                "Optional semantic retrieval: run `cartograph embedding-status <path>` and follow its generation-scoped remediation."
+                    .to_owned(),
+            );
+        }
+    }
+    if readiness.registration == HostVerificationReadinessState::NotChecked {
+        actions.push("Inspect or install the project-local MCP registration.".to_owned());
+    }
+    if readiness.live_transport == HostVerificationReadinessState::NotChecked {
+        actions.push(
+            "Restart the agent host if registration changed, then run a fresh MCP status and query probe."
+                .to_owned(),
+        );
+    }
+    actions
+}
+
+async fn check_semantic_readiness(
+    input: SemanticReadinessInput<'_>,
+) -> SemanticRetrievalReadinessState {
+    if let Some(state) = semantic_readiness_without_probe(input.configuration, input.project_index)
+    {
+        return state;
+    }
+    let Some(settings) = input.settings else {
+        return SemanticRetrievalReadinessState::Unavailable;
+    };
+    let Ok(runtime) = ProjectRuntime::connect_read_only(input.project_path, settings).await else {
+        return SemanticRetrievalReadinessState::Unavailable;
+    };
+    let status = runtime.embedding_status().await;
+    runtime.close().await;
+    status.map_or(SemanticRetrievalReadinessState::Unavailable, |report| {
+        map_semantic_readiness(report.readiness().state())
+    })
+}
+
+fn semantic_readiness_without_probe(
+    configuration: EmbeddingConfigurationState,
+    project_index: ProjectIndexObservation,
+) -> Option<SemanticRetrievalReadinessState> {
+    match configuration {
+        EmbeddingConfigurationState::NotChecked => {
+            return Some(SemanticRetrievalReadinessState::NotChecked);
+        }
+        EmbeddingConfigurationState::NotConfigured => {
+            return Some(SemanticRetrievalReadinessState::NotConfigured);
+        }
+        EmbeddingConfigurationState::Unavailable => {
+            return Some(SemanticRetrievalReadinessState::Unavailable);
+        }
+        EmbeddingConfigurationState::Configured => {}
+    }
+    match project_index.index {
+        IndexReadinessState::NotIndexed => {
+            return Some(SemanticRetrievalReadinessState::NotIndexed);
+        }
+        IndexReadinessState::Unavailable => {
+            return Some(SemanticRetrievalReadinessState::Unavailable);
+        }
+        IndexReadinessState::NotChecked => {
+            return Some(SemanticRetrievalReadinessState::NotChecked);
+        }
+        IndexReadinessState::Ready => {}
+    }
+    if project_index.freshness == FreshnessReadinessState::Stale {
+        return Some(SemanticRetrievalReadinessState::Stale);
+    }
+    None
+}
+
+const fn map_semantic_readiness(state: SemanticReadinessState) -> SemanticRetrievalReadinessState {
+    match semantic_readiness_from_database(state) {
+        RetrievalSemanticReadiness::Ready => SemanticRetrievalReadinessState::Ready,
+        RetrievalSemanticReadiness::NotConfigured => SemanticRetrievalReadinessState::NotConfigured,
+        RetrievalSemanticReadiness::NotIndexed => SemanticRetrievalReadinessState::NotIndexed,
+        RetrievalSemanticReadiness::Stale => SemanticRetrievalReadinessState::Stale,
+        RetrievalSemanticReadiness::Unavailable => SemanticRetrievalReadinessState::Unavailable,
+    }
 }
 
 fn check_generation_storage(storage: GenerationStorageSummary, checks: &mut Vec<DoctorCheck>) {
@@ -4449,67 +4954,140 @@ fn check_generation_storage(storage: GenerationStorageSummary, checks: &mut Vec<
     }
 }
 
-async fn check_llm_configuration(project_path: &Path, checks: &mut Vec<DoctorCheck>) {
+async fn check_llm_configuration(
+    project_path: &Path,
+    checks: &mut Vec<DoctorCheck>,
+) -> EmbeddingConfigurationState {
     let tiers = [
-        (ProjectLlmTier::Embedding, "embedding", true),
-        (ProjectLlmTier::Summarize, "summarize", false),
-        (ProjectLlmTier::Local, "local", false),
-        (ProjectLlmTier::Ask, "ask", false),
-        (ProjectLlmTier::Classify, "classify", false),
-        (ProjectLlmTier::Reranker, "reranker", false),
+        DoctorLlmTier {
+            tier: ProjectLlmTier::Embedding,
+            label: "embedding",
+            required: true,
+            embedding: true,
+        },
+        DoctorLlmTier {
+            tier: ProjectLlmTier::Summarize,
+            label: "summarize",
+            required: false,
+            embedding: false,
+        },
+        DoctorLlmTier {
+            tier: ProjectLlmTier::Local,
+            label: "local",
+            required: false,
+            embedding: false,
+        },
+        DoctorLlmTier {
+            tier: ProjectLlmTier::Ask,
+            label: "ask",
+            required: false,
+            embedding: false,
+        },
+        DoctorLlmTier {
+            tier: ProjectLlmTier::Classify,
+            label: "classify",
+            required: false,
+            embedding: false,
+        },
+        DoctorLlmTier {
+            tier: ProjectLlmTier::Reranker,
+            label: "reranker",
+            required: false,
+            embedding: false,
+        },
     ];
     let mut loopback = BTreeMap::<String, Vec<&'static str>>::new();
-    for (tier, label, required) in tiers {
-        let config = match load_exact_project_llm_tier(project_path, tier) {
-            Ok(Some(config)) => config,
-            Ok(None) if required => {
-                checks.push(doctor_warn(
-                    format!("llm-{label}"),
-                    format!("The {label} LLM tier is not configured; deterministic graph/BM25 retrieval remains available."),
-                    "Run `cartograph llm setup` or `cartograph llm install --minimal`.".to_owned(),
-                ));
-                continue;
-            }
-            Ok(None) => continue,
-            Err(error) => {
-                checks.push(doctor_fail(
-                    format!("llm-{label}"),
-                    error.to_string(),
-                    "Repair .cartograph/config.json with `cartograph llm setup`.".to_owned(),
-                ));
-                continue;
-            }
+    let mut embedding_configuration = EmbeddingConfigurationState::NotConfigured;
+    for tier in tiers {
+        let mut context = LlmDoctorContext {
+            project_path,
+            checks,
+            loopback: &mut loopback,
         };
-        if config.credential_source() == ProjectLlmCredentialSource::InlineLegacy {
-            checks.push(doctor_warn(
-                format!("llm-{label}-credential"),
-                "A legacy inline LLM credential is configured.",
-                "Move the credential to an environment variable and use apiKeyEnv.".to_owned(),
-            ));
-        }
-        check_local_model(label, config.model(), checks);
-        let is_loopback = Url::parse(config.endpoint())
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .is_some_and(|host| {
-                host.eq_ignore_ascii_case("localhost")
-                    || host
-                        .parse::<std::net::IpAddr>()
-                        .is_ok_and(|address| address.is_loopback())
-            });
-        if is_loopback {
-            loopback
-                .entry(config.endpoint().to_owned())
-                .or_default()
-                .push(label);
-        } else {
-            checks.push(doctor_pass(
-                format!("llm-{label}-config"),
-                format!("The {label} remote tier is valid; use `cartograph llm smoke` for an authenticated request."),
-            ));
+        if let Some(state) = check_llm_tier_configuration(&mut context, tier) {
+            embedding_configuration = state;
         }
     }
 
+    check_loopback_llm_endpoints(loopback, checks).await;
+    embedding_configuration
+}
+
+fn check_llm_tier_configuration(
+    context: &mut LlmDoctorContext<'_>,
+    tier: DoctorLlmTier,
+) -> Option<EmbeddingConfigurationState> {
+    let config = match load_exact_project_llm_tier(context.project_path, tier.tier) {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            if tier.required {
+                context.checks.push(doctor_warn(
+                    format!("llm-{}", tier.label),
+                    format!(
+                        "The {} LLM tier is not configured; deterministic graph/BM25 retrieval remains available.",
+                        tier.label
+                    ),
+                    "Run `cartograph llm setup` or `cartograph llm install --minimal`.".to_owned(),
+                ));
+            }
+            return tier
+                .embedding
+                .then_some(EmbeddingConfigurationState::NotConfigured);
+        }
+        Err(error) => {
+            context.checks.push(doctor_fail(
+                format!("llm-{}", tier.label),
+                error.to_string(),
+                "Repair .cartograph/config.json with `cartograph llm setup`.".to_owned(),
+            ));
+            return tier
+                .embedding
+                .then_some(EmbeddingConfigurationState::Unavailable);
+        }
+    };
+    if config.credential_source() == ProjectLlmCredentialSource::InlineLegacy {
+        context.checks.push(doctor_warn(
+            format!("llm-{}-credential", tier.label),
+            "A legacy inline LLM credential is configured.",
+            "Move the credential to an environment variable and use apiKeyEnv.".to_owned(),
+        ));
+    }
+    check_local_model(tier.label, config.model(), context.checks);
+    if endpoint_is_loopback(config.endpoint()) {
+        context
+            .loopback
+            .entry(config.endpoint().to_owned())
+            .or_default()
+            .push(tier.label);
+    } else {
+        context.checks.push(doctor_pass(
+            format!("llm-{}-config", tier.label),
+            format!(
+                "The {} remote tier is valid; use `cartograph llm smoke` for an authenticated request.",
+                tier.label
+            ),
+        ));
+    }
+    tier.embedding
+        .then_some(EmbeddingConfigurationState::Configured)
+}
+
+fn endpoint_is_loopback(endpoint: &str) -> bool {
+    Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
+}
+
+async fn check_loopback_llm_endpoints(
+    loopback: BTreeMap<String, Vec<&'static str>>,
+    checks: &mut Vec<DoctorCheck>,
+) {
     let probes = stream::iter(loopback)
         .map(|(endpoint, labels)| async move {
             let result = probe_openai_compatible_endpoint(&endpoint, Duration::from_secs(2)).await;
@@ -4613,8 +5191,34 @@ fn render_doctor_report(report: &DoctorReport) -> String {
             let _ = writeln!(output, "  Fix: {remediation}");
         }
     }
-    output.push_str(if report.ready {
-        "\nAll hard requirements passed. Cartograph v2 is ready; warnings identify optional or project-index gaps.\n"
+    let _ = write!(
+        output,
+        "\nReadiness layers:\n\
+         - database: {}\n\
+         - index: {}\n\
+         - freshness: {}\n\
+         - deterministic retrieval: {}\n\
+         - semantic retrieval: {}\n\
+         - registration: {}\n\
+         - live MCP transport: {}\n\
+         - overall onboarding: {}\n",
+        report.project_readiness.database.label(),
+        report.project_readiness.index.label(),
+        report.project_readiness.freshness.label(),
+        report.project_readiness.deterministic_retrieval.label(),
+        report.project_readiness.semantic_retrieval.label(),
+        report.project_readiness.registration.label(),
+        report.project_readiness.live_transport.label(),
+        report.project_readiness.overall.label(),
+    );
+    if !report.next_actions.is_empty() {
+        output.push_str("\nNext actions:\n");
+        for action in &report.next_actions {
+            let _ = writeln!(output, "- {action}");
+        }
+    }
+    output.push_str(if report.capabilities_ready {
+        "\nAll hard requirements passed. Capability readiness is ready; overall onboarding remains independently layered above.\n"
     } else {
         "\nOne or more hard requirements failed. Cartograph v2 is not ready.\n"
     });
@@ -4931,6 +5535,17 @@ mod tests {
     fn text_report_includes_actionable_failure_and_terminal_state() {
         let report = DoctorReport {
             ready: false,
+            capabilities_ready: false,
+            project_readiness: build_project_readiness(ProjectReadinessInput {
+                capabilities_ready: false,
+                database: DatabaseReadinessState::Unavailable,
+                project_index: ProjectIndexObservation::unavailable(),
+                semantic_retrieval: SemanticRetrievalReadinessState::Unavailable,
+                project_checks_skipped: false,
+                registration: HostVerificationReadinessState::NotChecked,
+                live_transport: HostVerificationReadinessState::NotChecked,
+            }),
+            next_actions: Vec::new(),
             fixes_applied: Vec::new(),
             checks: vec![DoctorCheck {
                 id: "database-postgres-18".to_owned(),
@@ -4946,6 +5561,288 @@ mod tests {
         assert!(rendered.contains("✗ database-postgres-18"));
         assert!(rendered.contains("Fix: Upgrade PostgreSQL."));
         assert!(rendered.contains("is not ready"));
+    }
+
+    #[test]
+    fn doctor_json_distinguishes_capability_success_from_incomplete_onboarding() {
+        let project_readiness = build_project_readiness(ProjectReadinessInput {
+            capabilities_ready: true,
+            database: DatabaseReadinessState::Ready,
+            project_index: ProjectIndexObservation {
+                index: IndexReadinessState::NotIndexed,
+                freshness: FreshnessReadinessState::Unavailable,
+                deterministic_retrieval: DeterministicRetrievalReadinessState::Unavailable,
+            },
+            semantic_retrieval: SemanticRetrievalReadinessState::NotIndexed,
+            project_checks_skipped: false,
+            registration: HostVerificationReadinessState::NotChecked,
+            live_transport: HostVerificationReadinessState::NotChecked,
+        });
+        let report = DoctorReport {
+            ready: true,
+            capabilities_ready: true,
+            project_readiness,
+            next_actions: doctor_next_actions(project_readiness, false),
+            fixes_applied: Vec::new(),
+            checks: vec![doctor_warn(
+                "project-index",
+                "No published graph generation exists yet.",
+                "Run `cartograph index`.".to_owned(),
+            )],
+            database: None,
+        };
+
+        let value = serde_json::to_value(&report)
+            .unwrap_or_else(|error| panic!("doctor report serialization failed: {error}"));
+
+        assert_eq!(value["ready"], true);
+        assert_eq!(value["capabilitiesReady"], true);
+        assert_eq!(value["projectReadiness"]["database"], "ready");
+        assert_eq!(value["projectReadiness"]["index"], "not_indexed");
+        assert_eq!(value["projectReadiness"]["freshness"], "unavailable");
+        assert_eq!(
+            value["projectReadiness"]["deterministicRetrieval"],
+            "unavailable"
+        );
+        assert_eq!(
+            value["projectReadiness"]["semanticRetrieval"],
+            "not_indexed"
+        );
+        assert_eq!(value["projectReadiness"]["registration"], "not_checked");
+        assert_eq!(value["projectReadiness"]["liveTransport"], "not_checked");
+        assert_eq!(value["projectReadiness"]["overall"], "incomplete");
+        assert!(
+            value["nextActions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| {
+                    action
+                        .as_str()
+                        .is_some_and(|action| action.contains("cartograph index <path>"))
+                }))
+        );
+    }
+
+    #[test]
+    fn deterministic_readiness_does_not_require_optional_semantic_configuration() {
+        let project_index = ProjectIndexObservation {
+            index: IndexReadinessState::Ready,
+            freshness: FreshnessReadinessState::Current,
+            deterministic_retrieval: DeterministicRetrievalReadinessState::Ready,
+        };
+        let complete = build_project_readiness(ProjectReadinessInput {
+            capabilities_ready: true,
+            database: DatabaseReadinessState::Ready,
+            project_index,
+            semantic_retrieval: SemanticRetrievalReadinessState::NotConfigured,
+            project_checks_skipped: false,
+            registration: HostVerificationReadinessState::Ready,
+            live_transport: HostVerificationReadinessState::Ready,
+        });
+        let skipped = build_project_readiness(ProjectReadinessInput {
+            capabilities_ready: true,
+            database: DatabaseReadinessState::Ready,
+            project_index: ProjectIndexObservation::not_checked(),
+            semantic_retrieval: SemanticRetrievalReadinessState::NotChecked,
+            project_checks_skipped: true,
+            registration: HostVerificationReadinessState::NotChecked,
+            live_transport: HostVerificationReadinessState::NotChecked,
+        });
+
+        assert_eq!(
+            complete.deterministic_retrieval,
+            DeterministicRetrievalReadinessState::Ready
+        );
+        assert_eq!(
+            complete.semantic_retrieval,
+            SemanticRetrievalReadinessState::NotConfigured
+        );
+        assert_eq!(complete.overall, OverallOnboardingReadinessState::Ready);
+        assert_eq!(skipped.index, IndexReadinessState::NotChecked);
+        assert_eq!(skipped.freshness, FreshnessReadinessState::NotChecked);
+        assert_eq!(skipped.overall, OverallOnboardingReadinessState::NotChecked);
+    }
+
+    #[test]
+    fn readiness_labels_and_semantic_mapping_cover_every_public_state() {
+        assert_eq!(DatabaseReadinessState::Ready.label(), "ready");
+        assert_eq!(DatabaseReadinessState::Unavailable.label(), "unavailable");
+
+        for (state, label) in [
+            (IndexReadinessState::Ready, "ready"),
+            (IndexReadinessState::NotIndexed, "not_indexed"),
+            (IndexReadinessState::Unavailable, "unavailable"),
+            (IndexReadinessState::NotChecked, "not_checked"),
+        ] {
+            assert_eq!(state.label(), label);
+        }
+        for (state, label) in [
+            (FreshnessReadinessState::Current, "current"),
+            (FreshnessReadinessState::Stale, "stale"),
+            (FreshnessReadinessState::Unavailable, "unavailable"),
+            (FreshnessReadinessState::NotChecked, "not_checked"),
+        ] {
+            assert_eq!(state.label(), label);
+        }
+        for (state, label) in [
+            (DeterministicRetrievalReadinessState::Ready, "ready"),
+            (
+                DeterministicRetrievalReadinessState::Unavailable,
+                "unavailable",
+            ),
+            (
+                DeterministicRetrievalReadinessState::NotChecked,
+                "not_checked",
+            ),
+        ] {
+            assert_eq!(state.label(), label);
+        }
+        for (state, label) in [
+            (SemanticRetrievalReadinessState::Ready, "ready"),
+            (
+                SemanticRetrievalReadinessState::NotConfigured,
+                "not_configured",
+            ),
+            (SemanticRetrievalReadinessState::NotIndexed, "not_indexed"),
+            (SemanticRetrievalReadinessState::Stale, "stale"),
+            (SemanticRetrievalReadinessState::Unavailable, "unavailable"),
+            (SemanticRetrievalReadinessState::NotChecked, "not_checked"),
+        ] {
+            assert_eq!(state.label(), label);
+        }
+        assert_eq!(HostVerificationReadinessState::Ready.label(), "ready");
+        assert_eq!(
+            HostVerificationReadinessState::NotChecked.label(),
+            "not_checked"
+        );
+        for (state, label) in [
+            (OverallOnboardingReadinessState::Ready, "ready"),
+            (OverallOnboardingReadinessState::Incomplete, "incomplete"),
+            (OverallOnboardingReadinessState::Blocked, "blocked"),
+            (OverallOnboardingReadinessState::NotChecked, "not_checked"),
+        ] {
+            assert_eq!(state.label(), label);
+        }
+
+        for (state, readiness) in [
+            (
+                SemanticReadinessState::Ready,
+                SemanticRetrievalReadinessState::Ready,
+            ),
+            (
+                SemanticReadinessState::ModelMissing,
+                SemanticRetrievalReadinessState::NotIndexed,
+            ),
+            (
+                SemanticReadinessState::NoCurrentGeneration,
+                SemanticRetrievalReadinessState::NotIndexed,
+            ),
+            (
+                SemanticReadinessState::NoDocuments,
+                SemanticRetrievalReadinessState::NotIndexed,
+            ),
+            (
+                SemanticReadinessState::CoverageIncomplete,
+                SemanticRetrievalReadinessState::NotIndexed,
+            ),
+            (
+                SemanticReadinessState::HnswUnavailable,
+                SemanticRetrievalReadinessState::NotIndexed,
+            ),
+            (
+                SemanticReadinessState::ModelMismatch,
+                SemanticRetrievalReadinessState::Stale,
+            ),
+            (
+                SemanticReadinessState::ModelRetired,
+                SemanticRetrievalReadinessState::Stale,
+            ),
+            (
+                SemanticReadinessState::QueryProbeFailed,
+                SemanticRetrievalReadinessState::Unavailable,
+            ),
+        ] {
+            assert_eq!(map_semantic_readiness(state), readiness);
+        }
+    }
+
+    #[test]
+    fn readiness_remediation_and_semantic_preflight_cover_degraded_states() {
+        let degraded = ProjectReadiness {
+            database: DatabaseReadinessState::Unavailable,
+            index: IndexReadinessState::Unavailable,
+            freshness: FreshnessReadinessState::Stale,
+            deterministic_retrieval: DeterministicRetrievalReadinessState::Unavailable,
+            semantic_retrieval: SemanticRetrievalReadinessState::Unavailable,
+            registration: HostVerificationReadinessState::NotChecked,
+            live_transport: HostVerificationReadinessState::NotChecked,
+            overall: OverallOnboardingReadinessState::Blocked,
+        };
+        let actions = doctor_next_actions(degraded, false);
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("hard requirements"))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("cartograph status"))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("sync-if-dirty"))
+        );
+
+        let ready_index = ProjectIndexObservation {
+            index: IndexReadinessState::Ready,
+            freshness: FreshnessReadinessState::Current,
+            deterministic_retrieval: DeterministicRetrievalReadinessState::Ready,
+        };
+        assert_eq!(
+            semantic_readiness_without_probe(EmbeddingConfigurationState::Unavailable, ready_index),
+            Some(SemanticRetrievalReadinessState::Unavailable)
+        );
+        for (index, expected) in [
+            (
+                IndexReadinessState::NotIndexed,
+                SemanticRetrievalReadinessState::NotIndexed,
+            ),
+            (
+                IndexReadinessState::Unavailable,
+                SemanticRetrievalReadinessState::Unavailable,
+            ),
+            (
+                IndexReadinessState::NotChecked,
+                SemanticRetrievalReadinessState::NotChecked,
+            ),
+        ] {
+            assert_eq!(
+                semantic_readiness_without_probe(
+                    EmbeddingConfigurationState::Configured,
+                    ProjectIndexObservation {
+                        index,
+                        freshness: FreshnessReadinessState::Unavailable,
+                        deterministic_retrieval: DeterministicRetrievalReadinessState::Unavailable,
+                    },
+                ),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            semantic_readiness_without_probe(
+                EmbeddingConfigurationState::Configured,
+                ProjectIndexObservation {
+                    freshness: FreshnessReadinessState::Stale,
+                    ..ready_index
+                },
+            ),
+            Some(SemanticRetrievalReadinessState::Stale)
+        );
+        assert_eq!(
+            semantic_readiness_without_probe(EmbeddingConfigurationState::Configured, ready_index),
+            None
+        );
     }
 
     #[test]

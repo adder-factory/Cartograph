@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-01 (`v2.1.2`).
+Last release audit: 2026-08-01 (`v2.1.3`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -45,6 +45,12 @@ external PostgreSQL through `CARTOGRAPH_DATABASE_URL`.
 
 Restart the host after installation. An already-open host is not assumed to
 hot-reload an upgraded MCP process.
+
+`cartograph doctor --json` keeps on-disk registration and live MCP transport as
+separate readiness states. The CLI does not claim either one from a successful
+database or generation check: inspect the project-local registration, restart
+the host when it changes, then make a fresh MCP status and real query call to
+prove the loaded transport.
 
 Before serving, managed mode checks the owned image and HNSW shared-memory
 allocation. An incompatible container fails with exact backup and confirmed

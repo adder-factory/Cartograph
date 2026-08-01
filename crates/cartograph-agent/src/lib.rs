@@ -119,6 +119,7 @@ pub use rename::{
 };
 pub use retrieval::{
     PreparedRetrieval, RetrievalClientRequest, RetrievalOptions, RetrievalRequest,
+    semantic_readiness_from_database,
 };
 pub use review::{
     GitChangeKind, GitChangedFile, GitComparison, ReviewError, ReviewOptions, ReviewReport,

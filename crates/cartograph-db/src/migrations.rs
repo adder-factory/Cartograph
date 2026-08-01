@@ -32,7 +32,8 @@ const DETERMINISTIC_COCHANGE_ORDER_SCHEMA_VERSION: i64 = 21;
 const NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION: i64 = 22;
 const STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION: i64 = 23;
 const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION: i64 = 24;
-const LATEST_SCHEMA_VERSION: i64 = RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION;
+const DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION: i64 = 25;
+const LATEST_SCHEMA_VERSION: i64 = DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
@@ -1044,7 +1045,22 @@ const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA: Migration = Migration {
                 CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6))"#],
 };
 
-const MIGRATIONS: [&Migration; 24] = [
+const DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA: Migration = Migration {
+    version: DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION,
+    name: "directory_import_simple_name_fallback",
+    statements: &[r#"ALTER TABLE {schema}."symbols"
+            ALTER COLUMN simple_name SET EXPRESSION AS (
+                COALESCE(
+                    NULLIF(
+                        reverse(split_part(reverse(replace(qualified_name, '::', '.')), '.', 1)),
+                        ''
+                    ),
+                    qualified_name
+                )
+            )"#],
+};
+
+const MIGRATIONS: [&Migration; 25] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1069,6 +1085,7 @@ const MIGRATIONS: [&Migration; 24] = [
     &NATIVE_INDEX_DIGEST_V5_SCHEMA,
     &STORAGE_LIFECYCLE_HARDENING_SCHEMA,
     &RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA,
+    &DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1465,7 +1482,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 24] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 25] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1490,9 +1507,10 @@ mod tests {
         NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION,
         STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION,
         RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION,
+        DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 24] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 25] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1589,6 +1607,10 @@ mod tests {
             24,
             "aa6f62e612975ad71d5f3d44d7636f958f6b13c64bb8f0a795e150ed2105f9cd",
         ),
+        (
+            25,
+            "6e3150fef9c6e7adba0f17f66864a1b217104b813725a0e99feedb07f2d88331",
+        ),
     ];
 
     #[test]
@@ -1634,7 +1656,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION
+            DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION
         );
     }
 
