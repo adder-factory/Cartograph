@@ -145,12 +145,32 @@ fn index_and_verify_storage(scenario: &LiveCliScenario<'_>) {
         schema,
         &["index", project_path, "--workers", "2", "--format", "json"],
     );
-    success(
+    let status = json_success(
         project.path(),
         database_url,
         schema,
         &["status", project_path, "--json", "--verbose"],
     );
+    let database_storage = &status["databaseStorage"];
+    assert_eq!(database_storage["state"], "ready");
+    assert!(
+        database_storage["databaseBytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    assert!(
+        database_storage["schemaBytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    for field in ["database", "schema", "heap", "index", "btreeIndex", "toast"] {
+        assert!(
+            database_storage["humanReadable"][field]
+                .as_str()
+                .is_some_and(|display| display.ends_with('B')),
+            "status omitted the human-readable {field} allocation"
+        );
+    }
     success(
         project.path(),
         database_url,

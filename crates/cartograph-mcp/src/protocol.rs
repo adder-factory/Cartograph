@@ -22,6 +22,8 @@ use crate::{
 
 /// Existing Cartograph v1 wire baseline retained for the first v2 MCP slice.
 pub const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+/// Stateless MCP revision supported alongside the legacy initialize handshake.
+pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 
 const DEFAULT_MAX_INPUT_BYTES: usize = 1_048_576;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 4_194_304;
@@ -36,6 +38,12 @@ const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_METHOD_BYTES: usize = 128;
 const MAX_METADATA_BYTES: usize = 128;
 const MAX_INSTRUCTIONS_BYTES: usize = 16 * 1_024;
+const MAX_PROTOCOL_VERSION_BYTES: usize = 32;
+const MODERN_LIST_CACHE_TTL_MILLISECONDS: u64 = 3_600_000;
+const MODERN_PROTOCOL_VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+const MODERN_CLIENT_INFO_KEY: &str = "io.modelcontextprotocol/clientInfo";
+const MODERN_CLIENT_CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
+const MODERN_SERVER_INFO_KEY: &str = "io.modelcontextprotocol/serverInfo";
 
 /// JSON-RPC request identifier accepted by MCP.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -228,23 +236,22 @@ impl ServerConfig {
         }
     }
 
-    /// Override the advertised protocol version for a future negotiated slice.
+    /// Override the legacy initialize-handshake revision.
+    ///
+    /// The stateless [`MODERN_PROTOCOL_VERSION`] remains independently
+    /// supported through per-request metadata and `server/discover`.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::InvalidProtocolVersion`] when the value is empty,
-    /// oversized, or contains characters other than digits and hyphens.
+    /// Returns [`ConfigError::InvalidProtocolVersion`] unless the value is the
+    /// explicitly supported legacy initialize revision. Modern revisions are
+    /// negotiated only through per-request metadata and `server/discover`.
     pub fn with_protocol_version(
         mut self,
         protocol_version: impl Into<String>,
     ) -> Result<Self, ConfigError> {
         let protocol_version = protocol_version.into();
-        let valid = !protocol_version.is_empty()
-            && protocol_version.len() <= 32
-            && protocol_version
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || byte == b'-');
-        if !valid {
+        if protocol_version != DEFAULT_PROTOCOL_VERSION {
             return Err(ConfigError::InvalidProtocolVersion);
         }
         self.protocol_version = protocol_version;
@@ -272,7 +279,7 @@ impl ServerConfig {
         Ok(self)
     }
 
-    /// Active advertised tool profile.
+    /// Immutable advertised/callable tool authorization ceiling.
     #[must_use]
     pub const fn profile(&self) -> ToolProfile {
         self.profile
@@ -511,11 +518,44 @@ impl ProtocolServer {
         request: InboundRequest,
         session: &mut ConnectionState,
     ) -> Result<(), ServeError> {
+        let request_era = match classify_request_era(request.params.as_ref()) {
+            Ok(request_era) => request_era,
+            Err(ModernMetadataError::Invalid) => {
+                return send_response(
+                    &session.output,
+                    invalid_params(Some(request.id), "Invalid modern request metadata"),
+                )
+                .await;
+            }
+            Err(ModernMetadataError::Unsupported(requested)) => {
+                return send_response(
+                    &session.output,
+                    JsonRpcResponse::unsupported_protocol(request.id, requested),
+                )
+                .await;
+            }
+        };
+
+        if request.method == "server/discover" {
+            return match request_era {
+                RequestEra::Modern => self.discover(request, session).await,
+                RequestEra::Legacy => {
+                    send_response(
+                        &session.output,
+                        invalid_params(Some(request.id), "Missing modern request metadata"),
+                    )
+                    .await
+                }
+            };
+        }
+
         match request.method.as_str() {
-            "initialize" => self.initialize(request, session).await,
-            "ping" => ping(request, session).await,
-            "tools/list" => self.list_tools(request, session).await,
-            "tools/call" => self.call_tool(request, session).await,
+            "initialize" if request_era == RequestEra::Legacy => {
+                self.initialize(request, session).await
+            }
+            "ping" => self.ping(request, session, request_era).await,
+            "tools/list" => self.list_tools(request, session, request_era).await,
+            "tools/call" => self.call_tool(request, session, request_era).await,
             _ => {
                 send_response(
                     &session.output,
@@ -531,6 +571,41 @@ impl ProtocolServer {
                 .await
             }
         }
+    }
+
+    async fn discover(
+        &self,
+        request: InboundRequest,
+        session: &ConnectionState,
+    ) -> Result<(), ServeError> {
+        if !modern_discover_params(request.params.as_ref()) {
+            return send_response(
+                &session.output,
+                invalid_params(Some(request.id), "Invalid server/discover parameters"),
+            )
+            .await;
+        }
+        let mut result = json!({
+            "resultType": "complete",
+            "supportedVersions": [MODERN_PROTOCOL_VERSION],
+            "capabilities": { "tools": {} },
+            "ttlMs": MODERN_LIST_CACHE_TTL_MILLISECONDS,
+            "cacheScope": "private",
+        });
+        if let Some(instructions) = &self.config.instructions
+            && let Some(object) = result.as_object_mut()
+        {
+            object.insert(
+                "instructions".to_owned(),
+                Value::String(instructions.clone()),
+            );
+        }
+        add_modern_result_metadata(&mut result, &self.config.metadata);
+        send_response(
+            &session.output,
+            JsonRpcResponse::success(request.id, result),
+        )
+        .await
     }
 
     async fn initialize(
@@ -569,7 +644,7 @@ impl ProtocolServer {
         if !valid_metadata_component(&parsed.client_info.name)
             || !valid_metadata_component(&parsed.client_info.version)
             || parsed.protocol_version.is_empty()
-            || parsed.protocol_version.len() > 32
+            || parsed.protocol_version.len() > MAX_PROTOCOL_VERSION_BYTES
         {
             return send_response(
                 &session.output,
@@ -605,12 +680,37 @@ impl ProtocolServer {
         Ok(())
     }
 
+    async fn ping(
+        &self,
+        request: InboundRequest,
+        session: &ConnectionState,
+        request_era: RequestEra,
+    ) -> Result<(), ServeError> {
+        if !valid_optional_object(request.params.as_ref()) {
+            return send_response(
+                &session.output,
+                invalid_params(Some(request.id), "Invalid ping parameters"),
+            )
+            .await;
+        }
+        let mut result = json!({});
+        if request_era == RequestEra::Modern {
+            add_modern_result(&mut result, &self.config.metadata);
+        }
+        send_response(
+            &session.output,
+            JsonRpcResponse::success(request.id, result),
+        )
+        .await
+    }
+
     async fn list_tools(
         &self,
         request: InboundRequest,
         session: &ConnectionState,
+        request_era: RequestEra,
     ) -> Result<(), ServeError> {
-        if session.phase != SessionPhase::Ready {
+        if request_era == RequestEra::Legacy && session.phase != SessionPhase::Ready {
             return send_response(&session.output, not_initialized(request.id)).await;
         }
         let Ok(cursor) = parse_cursor(request.params) else {
@@ -634,9 +734,20 @@ impl ProtocolServer {
             )
             .await;
         }
+        let mut result = json!({ "tools": self.tools.as_ref() });
+        if request_era == RequestEra::Modern
+            && let Some(object) = result.as_object_mut()
+        {
+            object.insert(
+                "ttlMs".to_owned(),
+                Value::from(MODERN_LIST_CACHE_TTL_MILLISECONDS),
+            );
+            object.insert("cacheScope".to_owned(), Value::String("private".to_owned()));
+            add_modern_result(&mut result, &self.config.metadata);
+        }
         send_response(
             &session.output,
-            JsonRpcResponse::success(request.id, json!({ "tools": self.tools.as_ref() })),
+            JsonRpcResponse::success(request.id, result),
         )
         .await
     }
@@ -645,8 +756,9 @@ impl ProtocolServer {
         &self,
         request: InboundRequest,
         session: &mut ConnectionState,
+        request_era: RequestEra,
     ) -> Result<(), ServeError> {
-        if session.phase != SessionPhase::Ready {
+        if request_era == RequestEra::Legacy && session.phase != SessionPhase::Ready {
             return send_response(&session.output, not_initialized(request.id)).await;
         }
         let Some(call) = parse_tool_call(request.params) else {
@@ -700,6 +812,8 @@ impl ProtocolServer {
             call,
             cancellation,
             deadline,
+            request_era,
+            metadata: self.config.metadata.clone(),
         });
         Ok(())
     }
@@ -710,6 +824,17 @@ enum SessionPhase {
     New,
     InitializeResponded,
     Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestEra {
+    Legacy,
+    Modern,
+}
+
+enum ModernMetadataError {
+    Invalid,
+    Unsupported(String),
 }
 
 enum ReadDirective {
@@ -815,6 +940,8 @@ struct ToolExecution {
     call: ToolCall,
     cancellation: CancellationToken,
     deadline: Instant,
+    request_era: RequestEra,
+    metadata: ServerMetadata,
 }
 
 async fn dispatch_notification(notification: InboundNotification, session: &mut ConnectionState) {
@@ -837,21 +964,6 @@ async fn dispatch_notification(notification: InboundNotification, session: &mut 
     }
 }
 
-async fn ping(request: InboundRequest, session: &ConnectionState) -> Result<(), ServeError> {
-    if !valid_optional_object(request.params.as_ref()) {
-        return send_response(
-            &session.output,
-            invalid_params(Some(request.id), "Invalid ping parameters"),
-        )
-        .await;
-    }
-    send_response(
-        &session.output,
-        JsonRpcResponse::success(request.id, json!({})),
-    )
-    .await
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InitializeParams {
@@ -865,6 +977,109 @@ struct InitializeParams {
 struct ClientInfo {
     name: String,
     version: String,
+}
+
+fn classify_request_era(params: Option<&Value>) -> Result<RequestEra, ModernMetadataError> {
+    let Some(params) = params.and_then(Value::as_object) else {
+        return Ok(RequestEra::Legacy);
+    };
+    let Some(metadata) = params.get("_meta").and_then(Value::as_object) else {
+        return if params.contains_key("_meta") {
+            Err(ModernMetadataError::Invalid)
+        } else {
+            Ok(RequestEra::Legacy)
+        };
+    };
+    let has_modern_marker = metadata.contains_key(MODERN_PROTOCOL_VERSION_KEY)
+        || metadata.contains_key(MODERN_CLIENT_INFO_KEY)
+        || metadata.contains_key(MODERN_CLIENT_CAPABILITIES_KEY);
+    if !has_modern_marker {
+        return Ok(RequestEra::Legacy);
+    }
+
+    let Some(protocol_version) = metadata
+        .get(MODERN_PROTOCOL_VERSION_KEY)
+        .and_then(Value::as_str)
+        .filter(|value| valid_protocol_version(value))
+    else {
+        return Err(ModernMetadataError::Invalid);
+    };
+    if !metadata
+        .get(MODERN_CLIENT_CAPABILITIES_KEY)
+        .is_some_and(Value::is_object)
+    {
+        return Err(ModernMetadataError::Invalid);
+    }
+    if let Some(client_info) = metadata.get(MODERN_CLIENT_INFO_KEY)
+        && !valid_client_info(client_info)
+    {
+        return Err(ModernMetadataError::Invalid);
+    }
+    if protocol_version != MODERN_PROTOCOL_VERSION {
+        return Err(ModernMetadataError::Unsupported(
+            protocol_version.to_owned(),
+        ));
+    }
+    Ok(RequestEra::Modern)
+}
+
+fn modern_discover_params(params: Option<&Value>) -> bool {
+    params
+        .and_then(Value::as_object)
+        .is_some_and(|params| params.len() == 1 && params.contains_key("_meta"))
+}
+
+fn valid_protocol_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PROTOCOL_VERSION_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_client_info(value: &Value) -> bool {
+    let Some(client_info) = value.as_object() else {
+        return false;
+    };
+    client_info
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(valid_metadata_component)
+        && client_info
+            .get("version")
+            .and_then(Value::as_str)
+            .is_some_and(valid_metadata_component)
+}
+
+fn add_modern_result(result: &mut Value, metadata: &ServerMetadata) {
+    if let Some(result) = result.as_object_mut() {
+        result.insert(
+            "resultType".to_owned(),
+            Value::String("complete".to_owned()),
+        );
+    }
+    add_modern_result_metadata(result, metadata);
+}
+
+fn add_modern_result_metadata(result: &mut Value, metadata: &ServerMetadata) {
+    let Some(result) = result.as_object_mut() else {
+        return;
+    };
+    let metadata_value = result
+        .entry("_meta".to_owned())
+        .or_insert_with(|| json!({}));
+    if !metadata_value.is_object() {
+        *metadata_value = json!({});
+    }
+    if let Some(result_metadata) = metadata_value.as_object_mut() {
+        result_metadata.insert(
+            MODERN_SERVER_INFO_KEY.to_owned(),
+            json!({
+                "name": metadata.name,
+                "version": metadata.version,
+            }),
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -909,12 +1124,25 @@ pub(crate) struct JsonRpcResponse {
 struct JsonRpcError {
     code: i64,
     message: &'static str,
-    data: ErrorData,
+    data: JsonRpcErrorData,
 }
 
 #[derive(Serialize)]
 struct ErrorData {
     code: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum JsonRpcErrorData {
+    Stable(ErrorData),
+    UnsupportedProtocol(UnsupportedProtocolData),
+}
+
+#[derive(Serialize)]
+struct UnsupportedProtocolData {
+    supported: [&'static str; 1],
+    requested: String,
 }
 
 impl JsonRpcResponse {
@@ -935,9 +1163,25 @@ impl JsonRpcResponse {
             error: Some(JsonRpcError {
                 code: error.code,
                 message: error.message,
-                data: ErrorData {
+                data: JsonRpcErrorData::Stable(ErrorData {
                     code: error.stable_code.as_str(),
-                },
+                }),
+            }),
+        }
+    }
+
+    fn unsupported_protocol(id: RequestId, requested: String) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id: Some(id),
+            result: None,
+            error: Some(JsonRpcError {
+                code: ErrorCode::UNSUPPORTED_PROTOCOL_VERSION,
+                message: "Unsupported protocol version",
+                data: JsonRpcErrorData::UnsupportedProtocol(UnsupportedProtocolData {
+                    supported: [MODERN_PROTOCOL_VERSION],
+                    requested,
+                }),
             }),
         }
     }
@@ -961,6 +1205,8 @@ async fn execute_tool(execution: ToolExecution) -> JsonRpcResponse {
         call,
         cancellation,
         deadline,
+        request_era,
+        metadata,
     } = execution;
     let context = ToolCallContext::new(cancellation.clone(), deadline);
     let mut worker = tokio::spawn(async move { handler.call(call, context).await });
@@ -998,7 +1244,12 @@ async fn execute_tool(execution: ToolExecution) -> JsonRpcResponse {
                 Err(_) => ToolResult::from_error(&crate::ToolError::internal()),
             };
             match serde_json::to_value(result) {
-                Ok(value) => JsonRpcResponse::success(id, value),
+                Ok(mut value) => {
+                    if request_era == RequestEra::Modern {
+                        add_modern_result(&mut value, &metadata);
+                    }
+                    JsonRpcResponse::success(id, value)
+                }
                 Err(_) => JsonRpcResponse::error(
                     Some(id),
                     ErrorSpec::new(

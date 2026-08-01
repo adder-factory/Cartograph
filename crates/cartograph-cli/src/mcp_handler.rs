@@ -60,6 +60,7 @@ use cartograph_db::{
     McpMacroStep, McpSessionCallsQuery, McpSessionLookup, McpSessionRecord, McpToolCallData,
     McpToolCallInput, McpToolCallRecord, McpToolCallWrite, McpTraceUsage, NewMcpMacro,
     NewMcpSession, ProjectPurgeError, ProjectPurgeRequest, SemanticStorageError, StorageError,
+    StorageTotalsReport,
 };
 use cartograph_domain::{
     ContentDigest, EdgeKind, GenerationId, ModelId, NormalizedPath, ProjectId, ProjectOperation,
@@ -96,6 +97,7 @@ use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::auto_sync::{AutoSyncError, AutoSyncStatus, ProjectAutoSync};
+use crate::byte_format::format_binary_bytes;
 use crate::host::{
     DiagnosticLocation, HostInspectionError, ProjectDiscoveryRequest, detect_install_targets,
     discover_projects,
@@ -3509,6 +3511,24 @@ fn project_llm_error(error: &ProjectLlmConfigError) -> ToolError {
         ),
         ProjectLlmConfigError::WriteFailed => ToolError::internal(),
     }
+}
+
+fn run_mcp_config_io<Output>(
+    operation: impl FnOnce() -> Result<Output, ProjectLlmConfigError>,
+) -> Result<Output, ProjectLlmConfigError> {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return operation();
+    };
+    if !matches!(
+        runtime.runtime_flavor(),
+        tokio::runtime::RuntimeFlavor::MultiThread
+    ) {
+        return Err(ProjectLlmConfigError::WriteFailed);
+    }
+    // Config writes are short and bounded but use synchronous private file
+    // locks. `block_in_place` keeps the work attached to this request while
+    // Tokio moves unrelated MCP control work off the occupied core worker.
+    tokio::task::block_in_place(operation)
 }
 
 fn install_models_error(error: InstallModelsError) -> ToolError {
@@ -9299,7 +9319,7 @@ fn configure_missing_doctor_tiers(
     if !repair.configured.is_empty() {
         inputs.retain(|input| repair.missing.contains(&input.tier()));
     }
-    match write_project_llm_configuration(repair.root, &inputs, &[]) {
+    match run_mcp_config_io(|| write_project_llm_configuration(repair.root, &inputs, &[])) {
         Ok(()) => {
             outcome.applied = true;
             outcome.actions.push(json!({
@@ -9331,7 +9351,7 @@ async fn prepare_admin_init(
     let database_settings = parse_admin_database_settings(arguments)?;
     let maximum_source_bytes = parse_admin_max_file_size(arguments)?;
     if let Some(maximum_source_bytes) = maximum_source_bytes {
-        write_project_max_file_size(&target_root.root, maximum_source_bytes)
+        run_mcp_config_io(|| write_project_max_file_size(&target_root.root, maximum_source_bytes))
             .map_err(|error| project_llm_error(&error))?;
     }
     let index_requested = optional_bool(arguments, "index")?.unwrap_or(false);
@@ -10671,7 +10691,7 @@ impl AdminCoreTools<'_> {
         }
         let root = self.runtime.project_root_for_host_operations();
         let plan = build_llm_apply_plan(arguments, preset)?;
-        write_project_llm_configuration(root, &plan.inputs, &plan.cleared)
+        run_mcp_config_io(|| write_project_llm_configuration(root, &plan.inputs, &plan.cleared))
             .map_err(|error| project_llm_error(&error))?;
         json_result(&json!({
             "applied": true,
@@ -10690,7 +10710,7 @@ impl AdminCoreTools<'_> {
             NumericBounds::new(1_u16, 1_u16, ADMIN_MAXIMUM_WORKERS),
         )?;
         let root = self.runtime.project_root_for_host_operations();
-        tune_project_llm_tier(root, tier, concurrency)
+        run_mcp_config_io(|| tune_project_llm_tier(root, tier, concurrency))
             .map_err(|error| project_llm_error(&error))?;
         json_result(&json!({
             "tier": tier,
@@ -11498,8 +11518,10 @@ impl AdminAnalysisTools<'_> {
                         } else {
                             Vec::new()
                         };
-                        write_project_llm_configuration(&project_root, &inputs, &cleared)
-                            .map_err(|_| ProjectError::InvalidOptions)?;
+                        run_mcp_config_io(|| {
+                            write_project_llm_configuration(&project_root, &inputs, &cleared)
+                        })
+                        .map_err(|_| ProjectError::InvalidOptions)?;
                     }
                     Ok(json!({
                         "report": report,
@@ -14322,16 +14344,7 @@ async fn status_database_storage(handler: &CartographMcpHandler) -> Value {
         .storage_totals(STATUS_STORAGE_TIMEOUT)
         .await
     {
-        Ok(totals) => json!({
-            "state": "ready",
-            "databaseBytes": totals.database_bytes,
-            "schemaBytes": totals.schema_bytes,
-            "heapBytes": totals.heap_bytes,
-            "indexBytes": totals.index_bytes,
-            "btreeIndexBytes": totals.btree_index_bytes,
-            "toastBytes": totals.toast_bytes,
-            "detailCommand": "cartograph db usage --project-path <path>"
-        }),
+        Ok(totals) => ready_database_storage(totals),
         Err(StorageError::StatementTimeout { .. }) => json!({
             "state": "unavailable",
             "reason": "timeout",
@@ -14343,6 +14356,27 @@ async fn status_database_storage(handler: &CartographMcpHandler) -> Value {
             "detailCommand": "cartograph db usage --project-path <path>"
         }),
     }
+}
+
+fn ready_database_storage(totals: StorageTotalsReport) -> Value {
+    json!({
+        "state": "ready",
+        "databaseBytes": totals.database_bytes,
+        "schemaBytes": totals.schema_bytes,
+        "heapBytes": totals.heap_bytes,
+        "indexBytes": totals.index_bytes,
+        "btreeIndexBytes": totals.btree_index_bytes,
+        "toastBytes": totals.toast_bytes,
+        "humanReadable": {
+            "database": format_binary_bytes(totals.database_bytes),
+            "schema": format_binary_bytes(totals.schema_bytes),
+            "heap": format_binary_bytes(totals.heap_bytes),
+            "index": format_binary_bytes(totals.index_bytes),
+            "btreeIndex": format_binary_bytes(totals.btree_index_bytes),
+            "toast": format_binary_bytes(totals.toast_bytes)
+        },
+        "detailCommand": "cartograph db usage --project-path <path>"
+    })
 }
 
 async fn load_status_rollups(request: StatusRollupRequest<'_>) -> Result<Value, ToolError> {
@@ -23168,8 +23202,8 @@ mod tests {
     use cartograph_domain::{DocumentId, DocumentKind, SymbolKind};
     use cartograph_llm::{EmbeddingSettings, OpenAiEmbeddingClient};
     use cartograph_mcp::{
-        DEFAULT_PROTOCOL_VERSION, ProtocolServer, ServerConfig, ServerLimits, ServerMetadata,
-        ToolProfile,
+        DEFAULT_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, ProtocolServer, ServerConfig,
+        ServerLimits, ServerMetadata, ToolProfile,
     };
     use sqlx_core::{query::query, sql_str::AssertSqlSafe};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
@@ -23188,12 +23222,170 @@ mod tests {
     const TEST_2024_NEW_YEAR_MILLISECONDS: u64 = 1_704_067_200_000;
     const TEST_SUB_MILLISECOND_NUMBER: f64 = 0.5;
 
+    #[test]
+    fn database_storage_status_is_human_readable_without_replacing_exact_bytes() {
+        let storage = ready_database_storage(StorageTotalsReport {
+            database_bytes: 2_175_776_447,
+            schema_bytes: 2_028_986_368,
+            heap_bytes: 951_353_344,
+            index_bytes: 993_681_408,
+            btree_index_bytes: 875_233_280,
+            toast_bytes: 83_951_616,
+        });
+
+        assert_eq!(storage["databaseBytes"], 2_175_776_447_u64);
+        assert_eq!(storage["schemaBytes"], 2_028_986_368_u64);
+        assert_eq!(storage["humanReadable"]["database"], "2.03 GiB");
+        assert_eq!(storage["humanReadable"]["schema"], "1.89 GiB");
+        assert_eq!(storage["humanReadable"]["heap"], "907.28 MiB");
+        assert_eq!(storage["humanReadable"]["index"], "947.65 MiB");
+        assert_eq!(storage["humanReadable"]["btreeIndex"], "834.69 MiB");
+        assert_eq!(storage["humanReadable"]["toast"], "80.06 MiB");
+    }
+
     struct DropFlag(Arc<AtomicBool>);
 
     impl Drop for DropFlag {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    const CONFIG_WRITE_FIXTURE_TOOL: &str = "cartograph_config_write_fixture";
+
+    #[derive(Clone)]
+    struct ConfigWriteFixtureHandler {
+        project: Arc<PathBuf>,
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl ToolHandler for ConfigWriteFixtureHandler {
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![
+                ToolDefinition::new(
+                    ToolDefinitionInput::new(
+                        CONFIG_WRITE_FIXTURE_TOOL,
+                        "Exercise one bounded project configuration write",
+                        json!({"type": "object", "additionalProperties": false}),
+                    )
+                    .with_profiles(ToolProfiles::ALL),
+                )
+                .unwrap_or_else(|error| panic!("config fixture definition failed: {error}")),
+            ]
+        }
+
+        fn call(&self, call: ToolCall, _context: ToolCallContext) -> BoxToolFuture<'_> {
+            let project = self.project.clone();
+            let started = self.started.clone();
+            Box::pin(async move {
+                if call.name != CONFIG_WRITE_FIXTURE_TOOL {
+                    return Err(ToolError::internal());
+                }
+                started.notify_one();
+                run_mcp_config_io(|| write_project_max_file_size(&project, 8 * 1024 * 1024))
+                    .map_err(|error| project_llm_error(&error))?;
+                Ok(ToolResult::text("configured"))
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn contended_config_write_does_not_stall_an_unrelated_mcp_ping() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let state = root.path().join(".cartograph");
+        std::fs::create_dir(&state).unwrap_or_else(|error| panic!("config state failed: {error}"));
+        std::fs::write(state.join("config.json"), r#"{"version":2}"#)
+            .unwrap_or_else(|error| panic!("config fixture failed: {error}"));
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(state.join("config.lock"))
+            .unwrap_or_else(|error| panic!("config lock open failed: {error}"));
+        File::lock(&lock).unwrap_or_else(|error| panic!("config lock failed: {error}"));
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let handler = ConfigWriteFixtureHandler {
+            project: Arc::new(root.path().to_path_buf()),
+            started: started.clone(),
+        };
+        let server = ProtocolServer::new(
+            ServerConfig::new(
+                ServerMetadata::cartograph(),
+                ToolProfile::Full,
+                ServerLimits::default(),
+            ),
+            handler,
+        )
+        .unwrap_or_else(|error| panic!("config fixture server failed: {error}"));
+        let (client, server_stream) = tokio::io::duplex(64 * 1_024);
+        let (client_reader, client_writer) = tokio::io::split(client);
+        let (server_reader, server_writer) = tokio::io::split(server_stream);
+        let server_task =
+            tokio::spawn(async move { server.serve(server_reader, server_writer).await });
+        let mut reader = BufReader::new(client_reader);
+        let mut writer = client_writer;
+        let metadata = json!({
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientInfo": {"name": "config-fixture", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        protocol_notification(
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "config-write",
+                "method": "tools/call",
+                "params": {
+                    "_meta": metadata,
+                    "name": CONFIG_WRITE_FIXTURE_TOOL,
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_millis(100), started.notified())
+            .await
+            .unwrap_or_else(|_| panic!("config writer blocked the only core worker before start"));
+
+        let ping = protocol_request_with_timeout(
+            &mut reader,
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "unrelated-ping",
+                "method": "ping",
+                "params": {"_meta": metadata}
+            }),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(ping["id"], "unrelated-ping");
+        assert_eq!(ping["result"]["resultType"], "complete");
+
+        File::unlock(&lock).unwrap_or_else(|error| panic!("config unlock failed: {error}"));
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+            .await
+            .unwrap_or_else(|_| panic!("config response timed out"))
+            .unwrap_or_else(|error| panic!("config response read failed: {error}"));
+        let configured: Value = serde_json::from_str(&line)
+            .unwrap_or_else(|error| panic!("config response JSON failed: {error}: {line}"));
+        assert_eq!(configured["id"], "config-write");
+        assert!(configured.get("error").is_none());
+
+        writer
+            .shutdown()
+            .await
+            .unwrap_or_else(|error| panic!("config protocol shutdown failed: {error}"));
+        server_task
+            .await
+            .unwrap_or_else(|error| panic!("config protocol join failed: {error}"))
+            .unwrap_or_else(|error| panic!("config protocol server failed: {error}"));
+        let value = std::fs::read_to_string(state.join("config.json"))
+            .unwrap_or_else(|error| panic!("config result read failed: {error}"));
+        assert!(value.contains("\"maxFileSize\": 8388608"));
     }
 
     struct NeighborEmbeddingFixture {
@@ -26182,6 +26374,8 @@ pub fn target(value: u32) -> u32 {
         reader: &mut BufReader<ReadHalf<tokio::io::DuplexStream>>,
         writer: &mut WriteHalf<tokio::io::DuplexStream>,
     ) -> String {
+        exercise_modern_protocol(reader, writer).await;
+
         let initialized = protocol_request_with_timeout(
             reader,
             writer,
@@ -26267,6 +26461,60 @@ pub fn target(value: u32) -> u32 {
                 .is_some_and(|calls| calls.len() >= 4)
         );
         session_id
+    }
+
+    async fn exercise_modern_protocol(
+        reader: &mut BufReader<ReadHalf<tokio::io::DuplexStream>>,
+        writer: &mut WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        let modern_metadata = json!({
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "cartograph-live-test",
+                "version": "1"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        let discovered = protocol_request_with_timeout(
+            reader,
+            writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "discover-modern",
+                "method": "server/discover",
+                "params": {"_meta": modern_metadata}
+            }),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(discovered["result"]["resultType"], "complete");
+        assert_eq!(
+            discovered["result"]["supportedVersions"],
+            json!([MODERN_PROTOCOL_VERSION])
+        );
+        let modern_playbook = protocol_request_with_timeout(
+            reader,
+            writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "playbook-modern",
+                "method": "tools/call",
+                "params": {
+                    "_meta": modern_metadata,
+                    "name": PLAYBOOK_TOOL,
+                    "arguments": {}
+                }
+            }),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(modern_playbook["result"]["resultType"], "complete");
+        assert!(modern_playbook["result"].get("isError").is_none());
+        assert!(
+            modern_playbook["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Cartograph coding-agent playbook"))
+        );
     }
 
     async fn verify_durable_session(runtime: &Arc<ProjectRuntime>, session_id: &str) {

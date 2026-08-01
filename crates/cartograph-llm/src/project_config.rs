@@ -4,6 +4,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use cartograph_domain::SourceLanguage;
@@ -20,6 +22,8 @@ use url::Url;
 const CONFIG_DIRECTORY: &str = ".cartograph";
 const CONFIG_FILE: &str = "config.json";
 const CONFIG_LOCK_FILE: &str = "config.lock";
+const CONFIG_LOCK_WAIT: Duration = Duration::from_millis(250);
+const CONFIG_LOCK_RETRY: Duration = Duration::from_millis(5);
 const MAXIMUM_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_MODEL_BYTES: usize = 256;
 const MAXIMUM_API_KEY_BYTES: usize = 8_192;
@@ -1202,12 +1206,14 @@ pub fn write_project_max_file_size(
     if !(1..=MAXIMUM_PROJECT_SOURCE_BYTES).contains(&max_file_size) {
         return Err(ProjectLlmConfigError::InvalidConfig);
     }
-    let mut root = read_config_value(project_root)?.unwrap_or_else(|| json!({"version": 2}));
-    let root = root
-        .as_object_mut()
-        .ok_or(ProjectLlmConfigError::InvalidConfig)?;
-    root.insert("maxFileSize".to_owned(), Value::from(max_file_size));
-    write_config_value(project_root, &Value::Object(root.clone()))
+    update_config_value(project_root, |current| {
+        let mut value = current.unwrap_or_else(|| json!({"version": 2}));
+        let root = value
+            .as_object_mut()
+            .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+        root.insert("maxFileSize".to_owned(), Value::from(max_file_size));
+        Ok((value, ()))
+    })
 }
 
 fn load_project_llm_tier_with_fallback(
@@ -1475,21 +1481,22 @@ pub fn write_project_llm_configuration_with_report(
     if inputs.is_empty() && cleared.is_empty() {
         return Err(ProjectLlmConfigError::InvalidTier);
     }
-    let mut root = read_config_value(project_root)?.unwrap_or_else(|| json!({"version": 2}));
-    let root = root
-        .as_object_mut()
-        .ok_or(ProjectLlmConfigError::InvalidConfig)?;
-    let llm = object_field(root, "llm")?;
-    llm.insert("enabled".to_owned(), Value::Bool(true));
-    let mut credential_actions = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        credential_actions.push(update_project_llm_tier(llm, input)?);
-    }
-    for tier in cleared {
-        llm.insert(tier.config_key().to_owned(), Value::Null);
-    }
-    write_config_value(project_root, &Value::Object(root.clone()))?;
-    Ok(ProjectLlmWriteReport { credential_actions })
+    update_config_value(project_root, |current| {
+        let mut value = current.unwrap_or_else(|| json!({"version": 2}));
+        let root = value
+            .as_object_mut()
+            .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+        let llm = object_field(root, "llm")?;
+        llm.insert("enabled".to_owned(), Value::Bool(true));
+        let mut credential_actions = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            credential_actions.push(update_project_llm_tier(llm, input)?);
+        }
+        for tier in cleared {
+            llm.insert(tier.config_key().to_owned(), Value::Null);
+        }
+        Ok((value, ProjectLlmWriteReport { credential_actions }))
+    })
 }
 
 fn update_project_llm_tier(
@@ -1623,20 +1630,22 @@ pub fn tune_project_llm_tier(
     if concurrency == 0 || concurrency > MAXIMUM_CONCURRENCY {
         return Err(ProjectLlmConfigError::InvalidTier);
     }
-    let mut root = read_config_value(project_root)?.ok_or(ProjectLlmConfigError::InvalidConfig)?;
-    let root_object = root
-        .as_object_mut()
-        .ok_or(ProjectLlmConfigError::InvalidConfig)?;
-    let llm = root_object
-        .get_mut("llm")
-        .and_then(Value::as_object_mut)
-        .ok_or(ProjectLlmConfigError::InvalidConfig)?;
-    let tier = llm
-        .get_mut(tier.config_key())
-        .and_then(Value::as_object_mut)
-        .ok_or(ProjectLlmConfigError::InvalidTier)?;
-    tier.insert("concurrency".to_owned(), Value::from(concurrency));
-    write_config_value(project_root, &root)
+    update_config_value(project_root, |current| {
+        let mut value = current.ok_or(ProjectLlmConfigError::InvalidConfig)?;
+        let root = value
+            .as_object_mut()
+            .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+        let llm = root
+            .get_mut("llm")
+            .and_then(Value::as_object_mut)
+            .ok_or(ProjectLlmConfigError::InvalidConfig)?;
+        let tier = llm
+            .get_mut(tier.config_key())
+            .and_then(Value::as_object_mut)
+            .ok_or(ProjectLlmConfigError::InvalidTier)?;
+        tier.insert("concurrency".to_owned(), Value::from(concurrency));
+        Ok((value, ()))
+    })
 }
 
 /// Probe a validated endpoint without credentials, redirects, or unbounded reads.
@@ -2111,7 +2120,19 @@ struct ConfigSnapshot {
 }
 
 struct ConfigWriteLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for ConfigWriteLock {
+    fn drop(&mut self) {
+        let _ = File::unlock(&self.file);
+    }
+}
+
+struct ConfigWriteTarget {
+    directory: PathBuf,
+    path: PathBuf,
+    _lock: ConfigWriteLock,
 }
 
 fn read_config_value(project_root: &Path) -> Result<Option<Value>, ProjectLlmConfigError> {
@@ -2152,8 +2173,32 @@ fn read_config_bytes(path: &Path) -> Result<Option<Vec<u8>>, ProjectLlmConfigErr
     Ok(Some(bytes))
 }
 
-fn write_config_value(project_root: &Path, value: &Value) -> Result<(), ProjectLlmConfigError> {
-    write_config_value_guarded(project_root, value, None)
+fn update_config_value<ResultValue>(
+    project_root: &Path,
+    update: impl FnOnce(Option<Value>) -> Result<(Value, ResultValue), ProjectLlmConfigError>,
+) -> Result<ResultValue, ProjectLlmConfigError> {
+    update_config_value_after_missing_observed(project_root, update, || {})
+}
+
+fn update_config_value_after_missing_observed<ResultValue>(
+    project_root: &Path,
+    update: impl FnOnce(Option<Value>) -> Result<(Value, ResultValue), ProjectLlmConfigError>,
+    observe_missing: impl FnOnce(),
+) -> Result<ResultValue, ProjectLlmConfigError> {
+    let target = acquire_config_write_target_after_missing_observed(project_root, observe_missing)?;
+    let expected = read_config_bytes(&target.path)?;
+    let current = expected
+        .as_deref()
+        .map(|bytes| {
+            serde_json::from_slice(bytes).map_err(|_| ProjectLlmConfigError::InvalidConfig)
+        })
+        .transpose()?;
+    let (value, result) = update(current)?;
+    if read_config_bytes(&target.path)? != expected {
+        return Err(ProjectLlmConfigError::ConcurrentModification);
+    }
+    write_config_value_at(&target.directory, &target.path, &value)?;
+    Ok(result)
 }
 
 fn write_config_value_if_unchanged(
@@ -2169,27 +2214,63 @@ fn write_config_value_guarded(
     value: &Value,
     expected: Option<&[u8]>,
 ) -> Result<(), ProjectLlmConfigError> {
-    let root = canonical_project_root(project_root)?;
-    let directory = root.join(CONFIG_DIRECTORY);
-    match fs::symlink_metadata(&directory) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(&directory).map_err(|_| ProjectLlmConfigError::WriteFailed)?;
-        }
-        Ok(_) | Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
-    }
-    let _lock = acquire_config_write_lock(&directory)?;
-    let path = directory.join(CONFIG_FILE);
-    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(ProjectLlmConfigError::ProjectUnavailable);
-    }
+    let target = acquire_config_write_target(project_root)?;
     if let Some(expected) = expected {
-        let current =
-            read_config_bytes(&path)?.ok_or(ProjectLlmConfigError::ConcurrentModification)?;
+        let current = read_config_bytes(&target.path)?
+            .ok_or(ProjectLlmConfigError::ConcurrentModification)?;
         if current != expected {
             return Err(ProjectLlmConfigError::ConcurrentModification);
         }
     }
+    write_config_value_at(&target.directory, &target.path, value)
+}
+
+fn acquire_config_write_target(
+    project_root: &Path,
+) -> Result<ConfigWriteTarget, ProjectLlmConfigError> {
+    acquire_config_write_target_after_missing_observed(project_root, || {})
+}
+
+fn acquire_config_write_target_after_missing_observed(
+    project_root: &Path,
+    observe_missing: impl FnOnce(),
+) -> Result<ConfigWriteTarget, ProjectLlmConfigError> {
+    let root = canonical_project_root(project_root)?;
+    let directory = root.join(CONFIG_DIRECTORY);
+    match fs::symlink_metadata(&directory) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            observe_missing();
+            match fs::create_dir(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(ProjectLlmConfigError::WriteFailed),
+            }
+        }
+        Err(_) => return Err(ProjectLlmConfigError::ProjectUnavailable),
+    }
+    if !fs::symlink_metadata(&directory)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
+        return Err(ProjectLlmConfigError::ProjectUnavailable);
+    }
+    let lock = acquire_config_write_lock(&directory)?;
+    let path = directory.join(CONFIG_FILE);
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(ProjectLlmConfigError::ProjectUnavailable);
+    }
+    Ok(ConfigWriteTarget {
+        directory,
+        path,
+        _lock: lock,
+    })
+}
+
+fn write_config_value_at(
+    directory: &Path,
+    path: &Path,
+    value: &Value,
+) -> Result<(), ProjectLlmConfigError> {
     let mut bytes =
         serde_json::to_vec_pretty(value).map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
     bytes.push(b'\n');
@@ -2197,7 +2278,7 @@ fn write_config_value_guarded(
         return Err(ProjectLlmConfigError::ConfigTooLarge);
     }
     let mut temporary =
-        NamedTempFile::new_in(&directory).map_err(|_| ProjectLlmConfigError::WriteFailed)?;
+        NamedTempFile::new_in(directory).map_err(|_| ProjectLlmConfigError::WriteFailed)?;
     #[cfg(unix)]
     set_private_permissions(temporary.as_file())?;
     temporary
@@ -2205,7 +2286,7 @@ fn write_config_value_guarded(
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|_| ProjectLlmConfigError::WriteFailed)?;
     temporary
-        .persist(&path)
+        .persist(path)
         .map_err(|_| ProjectLlmConfigError::WriteFailed)?;
     File::open(directory)
         .and_then(|directory| directory.sync_all())
@@ -2237,12 +2318,19 @@ fn acquire_config_write_lock(directory: &Path) -> Result<ConfigWriteLock, Projec
     }
     #[cfg(unix)]
     set_private_permissions(&file)?;
-    match file.try_lock() {
-        Ok(()) => Ok(ConfigWriteLock { _file: file }),
-        Err(std::fs::TryLockError::WouldBlock) => {
-            Err(ProjectLlmConfigError::ConcurrentModification)
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(ConfigWriteLock { file }),
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < CONFIG_LOCK_WAIT => {
+                let remaining = CONFIG_LOCK_WAIT.saturating_sub(started.elapsed());
+                thread::sleep(CONFIG_LOCK_RETRY.min(remaining));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(ProjectLlmConfigError::ConcurrentModification);
+            }
+            Err(_) => return Err(ProjectLlmConfigError::WriteFailed),
         }
-        Err(_) => Err(ProjectLlmConfigError::WriteFailed),
     }
 }
 
@@ -2272,6 +2360,11 @@ fn canonical_project_root(project_root: &Path) -> Result<PathBuf, ProjectLlmConf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        sync::{Arc, Barrier, mpsc},
+        thread,
+        time::Duration,
+    };
 
     const LOCAL_SUMMARY_ENDPOINT: &str = "http://localhost:8081";
     const LEGACY_INLINE_CONFIG: &str = r#"{"llm":{"summarizeLlm":{"provider":"openai-compat","endpoint":"https://example.test","model":"fixture","apiKey":"do-not-print"}}}"#;
@@ -2412,6 +2505,169 @@ mod tests {
         assert!(
             write_project_max_file_size(root.path(), MAXIMUM_PROJECT_SOURCE_BYTES + 1).is_err()
         );
+    }
+
+    #[test]
+    fn config_updates_wait_for_short_contention_and_read_after_lock() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let directory = root.path().join(CONFIG_DIRECTORY);
+        fs::create_dir(&directory)
+            .unwrap_or_else(|error| panic!("config directory failed: {error}"));
+        let path = directory.join(CONFIG_FILE);
+        fs::write(&path, r#"{"version":2,"languages":["rust"]}"#)
+            .unwrap_or_else(|error| panic!("config fixture failed: {error}"));
+        let held = acquire_config_write_lock(&directory)
+            .unwrap_or_else(|error| panic!("fixture lock failed: {error}"));
+        let project = root.path().to_path_buf();
+        let (started_tx, started_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            started_tx
+                .send(())
+                .unwrap_or_else(|error| panic!("writer start signal failed: {error}"));
+            write_project_max_file_size(&project, 8 * 1024 * 1024)
+        });
+        started_rx
+            .recv()
+            .unwrap_or_else(|error| panic!("writer start wait failed: {error}"));
+        thread::sleep(Duration::from_millis(25));
+        assert!(
+            !writer.is_finished(),
+            "a short-lived writer must wait for the config lock"
+        );
+
+        fs::write(
+            &path,
+            r#"{"version":2,"languages":["rust"],"concurrentEdit":true}"#,
+        )
+        .unwrap_or_else(|error| panic!("concurrent fixture write failed: {error}"));
+        drop(held);
+        writer
+            .join()
+            .unwrap_or_else(|_| panic!("config writer panicked"))
+            .unwrap_or_else(|error| panic!("config writer failed: {error}"));
+
+        let value = read_config_value(root.path())
+            .unwrap_or_else(|error| panic!("config reread failed: {error}"))
+            .unwrap_or_else(|| panic!("config missing"));
+        assert_eq!(value["languages"], json!(["rust"]));
+        assert_eq!(value["concurrentEdit"], true);
+        assert_eq!(value["maxFileSize"], 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn concurrent_first_config_updates_share_directory_creation_and_preserve_both_fields() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let project = Arc::new(root.path().to_path_buf());
+        let missing_barrier = Arc::new(Barrier::new(2));
+
+        let maximum_project = project.clone();
+        let maximum_barrier = missing_barrier.clone();
+        let maximum = thread::spawn(move || {
+            update_config_value_after_missing_observed(
+                &maximum_project,
+                |current| {
+                    let mut value = current.unwrap_or_else(|| json!({"version": 2}));
+                    value
+                        .as_object_mut()
+                        .ok_or(ProjectLlmConfigError::InvalidConfig)?
+                        .insert("maxFileSize".to_owned(), Value::from(8 * 1024 * 1024));
+                    Ok((value, ()))
+                },
+                || {
+                    maximum_barrier.wait();
+                },
+            )
+        });
+        let language_project = project.clone();
+        let language_barrier = missing_barrier.clone();
+        let language = thread::spawn(move || {
+            update_config_value_after_missing_observed(
+                &language_project,
+                |current| {
+                    let mut value = current.unwrap_or_else(|| json!({"version": 2}));
+                    value
+                        .as_object_mut()
+                        .ok_or(ProjectLlmConfigError::InvalidConfig)?
+                        .insert("languages".to_owned(), json!(["rust"]));
+                    Ok((value, ()))
+                },
+                || {
+                    language_barrier.wait();
+                },
+            )
+        });
+
+        maximum
+            .join()
+            .unwrap_or_else(|_| panic!("maximum writer panicked"))
+            .unwrap_or_else(|error| panic!("maximum writer failed: {error}"));
+        language
+            .join()
+            .unwrap_or_else(|_| panic!("language writer panicked"))
+            .unwrap_or_else(|error| panic!("language writer failed: {error}"));
+
+        let value = read_config_value(&project)
+            .unwrap_or_else(|error| panic!("config reread failed: {error}"))
+            .unwrap_or_else(|| panic!("config missing"));
+        assert_eq!(value["maxFileSize"], 8 * 1024 * 1024);
+        assert_eq!(value["languages"], json!(["rust"]));
+    }
+
+    #[test]
+    fn config_updates_fail_after_bounded_lock_contention() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let directory = root.path().join(CONFIG_DIRECTORY);
+        fs::create_dir(&directory)
+            .unwrap_or_else(|error| panic!("config directory failed: {error}"));
+        let _held = acquire_config_write_lock(&directory)
+            .unwrap_or_else(|error| panic!("fixture lock failed: {error}"));
+
+        let started = std::time::Instant::now();
+        let result = write_project_max_file_size(root.path(), 8 * 1024 * 1024);
+        let elapsed = started.elapsed();
+
+        assert_eq!(result, Err(ProjectLlmConfigError::ConcurrentModification));
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "config contention failed immediately after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "config contention was not bounded: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn config_updates_reject_an_uncooperative_edit_during_mutation() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let directory = root.path().join(CONFIG_DIRECTORY);
+        fs::create_dir(&directory)
+            .unwrap_or_else(|error| panic!("config directory failed: {error}"));
+        let path = directory.join(CONFIG_FILE);
+        fs::write(&path, r#"{"version":2,"languages":["rust"]}"#)
+            .unwrap_or_else(|error| panic!("config fixture failed: {error}"));
+        let observed_path = path.clone();
+
+        let result = update_config_value(root.path(), |current| {
+            fs::write(
+                &observed_path,
+                r#"{"version":2,"languages":["rust"],"externalEdit":true}"#,
+            )
+            .unwrap_or_else(|error| panic!("external edit failed: {error}"));
+            let mut value = current.ok_or(ProjectLlmConfigError::InvalidConfig)?;
+            value
+                .as_object_mut()
+                .ok_or(ProjectLlmConfigError::InvalidConfig)?
+                .insert("maxFileSize".to_owned(), Value::from(8 * 1024 * 1024));
+            Ok((value, ()))
+        });
+
+        assert_eq!(result, Err(ProjectLlmConfigError::ConcurrentModification));
+        let value = read_config_value(root.path())
+            .unwrap_or_else(|error| panic!("config reread failed: {error}"))
+            .unwrap_or_else(|| panic!("config missing"));
+        assert_eq!(value["externalEdit"], true);
+        assert!(value.get("maxFileSize").is_none());
     }
 
     #[test]

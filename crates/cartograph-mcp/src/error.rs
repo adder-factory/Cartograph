@@ -28,6 +28,8 @@ impl ErrorCode {
     pub const SERVER_BUSY: i64 = -32_013;
     /// Request was cancelled by its peer.
     pub const REQUEST_CANCELLED: i64 = -32_800;
+    /// Per-request metadata names a protocol revision this server does not implement.
+    pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32_022;
 }
 
 /// Stable machine-readable error values carried in JSON-RPC `error.data.code`.

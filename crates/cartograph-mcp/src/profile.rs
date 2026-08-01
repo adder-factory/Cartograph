@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use serde::Serialize;
 
-/// Advertised MCP tool surface selected for one connection.
+/// Immutable advertised/callable authorization ceiling for one server process.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolProfile {
@@ -84,7 +84,7 @@ impl ToolProfiles {
         Self(self.0 | other.0)
     }
 
-    /// Return whether this membership set advertises a tool in `profile`.
+    /// Return whether this membership set authorizes a tool in `profile`.
     #[must_use]
     pub const fn includes(self, profile: ToolProfile) -> bool {
         let bit = match profile {

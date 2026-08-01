@@ -1,6 +1,6 @@
 # Support Matrix
 
-Last implementation audit: 2026-07-31 (`v2.1.1`).
+Last implementation audit: 2026-08-01 (`v2.1.2`).
 
 Cartograph v2 supports all 73 v1.1.33 language modes plus native TOML: 74 modes
 total. The source of truth is `cartograph_domain::SourceLanguage::ALL`; native

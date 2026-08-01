@@ -2,7 +2,7 @@
 
 Cartograph v2 has one storage engine: PostgreSQL 18.4 or newer within major
 version 18 with ParadeDB `pg_search` 0.25.0 and pgvector 0.8.4 or newer.
-Pgvector 0.8.5 is recommended for external PostgreSQL; the managed upstream
+Pgvector 0.8.6 is recommended for external PostgreSQL; the managed upstream
 ParadeDB 0.25.0 image bundles 0.8.4. SQLite is not a backend, fallback,
 migration target, importer, feature, or test utility.
 
@@ -82,7 +82,7 @@ disabled there until private credential ACL behavior can be proved equivalent.
 ## External database
 
 The database administrator installs PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.0, and pgvector 0.8.4 or newer (0.8.5
+version 18, `pg_search` 0.25.0, and pgvector 0.8.4 or newer (0.8.6
 recommended), and creates the extensions. Supply secrets only through the
 process environment:
 
@@ -99,7 +99,7 @@ update both catalogs before running `cartograph doctor`:
 
 ```sql
 ALTER EXTENSION pg_search UPDATE TO '0.25.0';
-ALTER EXTENSION vector UPDATE TO '0.8.5';
+ALTER EXTENSION vector UPDATE TO '0.8.6';
 ```
 
 Optional bounded pool controls:

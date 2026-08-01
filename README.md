@@ -30,7 +30,7 @@ abstention instead of presenting stale or incomplete data as certainty.
 > [!IMPORTANT]
 > Cartograph v2 is PostgreSQL-only. It requires PostgreSQL 18.4 or newer within
 > major version 18, ParadeDB `pg_search` 0.25.0, and pgvector 0.8.4 or newer
-> (0.8.5 recommended for external PostgreSQL).
+> (0.8.6 recommended for external PostgreSQL).
 > There is no SQLite runtime, compatibility mode, importer, optional feature,
 > or fallback.
 
@@ -194,7 +194,12 @@ generation atomically.
 | `cartograph_admin` | Explicit index, sync, embedding, and maintenance jobs |
 
 MCP profiles are `coding`, `core`, `full`, `read-only`, and `review`. Profiles
-have deterministic tool lists; a narrower profile cannot call hidden tools.
+are immutable authorization ceilings with deterministic tool lists; a narrower
+profile cannot call hidden tools. Cartograph supports modern stateless MCP
+`2026-07-28` plus the legacy `2024-11-05` initialize path. Modern hosts should
+cache the stable complete catalog and dynamically place only task-relevant
+schemas in the model context; the server does not mutate tools per connection.
+See [MCP usage](docs/MCP-USAGE.md#modern-protocol-and-dynamic-tool-selection).
 
 ### CLI surface
 
@@ -293,8 +298,10 @@ Restore, upgrade, derived-index rebuild, removal, import, and prune can replace
 or delete state. They require the exact confirmation phrase shown by command
 help and are never implied by a diagnostic request.
 
-Default `status` output includes compact database/schema/index/TOAST byte
-totals. `db usage` remains the detailed bounded report and separates schema
+Default `status` output includes compact database/schema/heap/index/TOAST
+allocation in readable IEC units such as MiB and GiB. JSON and MCP retain the
+exact `*Bytes` integers and add a `databaseStorage.humanReadable` projection for
+display. `db usage` remains the detailed bounded report and separates schema
 heap/index/TOAST, generation, and parse-cache
 allocations. Parse-cache evidence distinguishes uncompressed logical payload,
 live compressed storage, whole-schema allocation, and physical overhead so a

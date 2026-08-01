@@ -3,8 +3,8 @@
 use std::{error::Error, io, sync::Arc, time::Duration};
 
 use cartograph_mcp::{
-    BoxToolFuture, ConfigError, ErrorCode, ProtocolServer, ServerConfig, ServerLimits,
-    ServerLimitsInput, ServerMetadata, ToolAnnotations, ToolCall, ToolCallContext,
+    BoxToolFuture, ConfigError, ErrorCode, MODERN_PROTOCOL_VERSION, ProtocolServer, ServerConfig,
+    ServerLimits, ServerLimitsInput, ServerMetadata, ToolAnnotations, ToolCall, ToolCallContext,
     ToolContractError, ToolDefinition, ToolDefinitionInput, ToolError, ToolErrorCode, ToolHandler,
     ToolProfile, ToolProfiles, ToolResult,
 };
@@ -288,6 +288,17 @@ async fn initialize_initialized_and_ping_match_the_golden_wire_contract() -> Tes
         connection.read_value().await?,
         json!({"jsonrpc": "2.0", "id": "", "result": {}})
     );
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {"_meta": {"progressToken": "legacy-progress"}}
+        }))
+        .await?;
+    let legacy_list = connection.read_value().await?;
+    assert!(legacy_list["result"].get("resultType").is_none());
+    assert_eq!(tool_names(&legacy_list).len(), 6);
     connection.finish().await
 }
 
@@ -313,6 +324,224 @@ async fn initialize_advertises_only_explicit_validated_server_instructions() -> 
             "method": "notifications/initialized"
         }))
         .await?;
+    connection.finish().await
+}
+
+#[tokio::test]
+async fn modern_discovery_and_ping_are_stateless_cacheable_and_self_describing() -> TestResult {
+    const INSTRUCTIONS: &str =
+        "Check freshness first, inspect exact evidence, and run the repository gates.";
+    let config = ServerConfig::new(
+        ServerMetadata::cartograph(),
+        ToolProfile::Core,
+        ServerLimits::default(),
+    )
+    .with_instructions(INSTRUCTIONS)?;
+    let server = ProtocolServer::new(config, FixtureHandler::new())?;
+    let mut connection = Connection::open(server);
+
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": "discover-1",
+            "method": "server/discover",
+            "params": modern_params()
+        }))
+        .await?;
+    let discovery = connection.read_value().await?;
+    assert_eq!(discovery["result"]["resultType"], "complete");
+    assert_eq!(
+        discovery["result"]["supportedVersions"],
+        json!([MODERN_PROTOCOL_VERSION])
+    );
+    assert_eq!(discovery["result"]["capabilities"], json!({"tools": {}}));
+    assert_eq!(discovery["result"]["instructions"], INSTRUCTIONS);
+    assert_eq!(discovery["result"]["ttlMs"], 3_600_000);
+    assert_eq!(discovery["result"]["cacheScope"], "private");
+    assert_eq!(
+        discovery["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "cartograph"
+    );
+
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": "ping-modern",
+            "method": "ping",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }))
+        .await?;
+    let ping = connection.read_value().await?;
+    assert_eq!(ping["result"]["resultType"], "complete");
+    assert_eq!(
+        ping["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "cartograph"
+    );
+
+    connection.send(&initialize_request(2)).await?;
+    let legacy = connection.read_value().await?;
+    assert_eq!(legacy["result"]["protocolVersion"], DEFAULT_TEST_PROTOCOL);
+    assert!(legacy["result"].get("resultType").is_none());
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .await?;
+    connection
+        .send(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}))
+        .await?;
+    assert_eq!(tool_names(&connection.read_value().await?).len(), 6);
+    connection.finish().await
+}
+
+#[tokio::test]
+async fn modern_tools_are_stable_cacheable_and_callable_without_initialize() -> TestResult {
+    let server = test_server(
+        ToolProfile::Core,
+        ServerLimits::default(),
+        FixtureHandler::new(),
+    )?;
+    let mut connection = Connection::open(server);
+
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": modern_params()
+        }))
+        .await?;
+    let first = connection.read_value().await?;
+    assert_eq!(first["result"]["resultType"], "complete");
+    assert_eq!(first["result"]["ttlMs"], 3_600_000);
+    assert_eq!(first["result"]["cacheScope"], "private");
+    assert_eq!(
+        tool_names(&first),
+        vec![
+            "cartograph_big",
+            "cartograph_context_fixture",
+            "cartograph_core",
+            "cartograph_echo",
+            "cartograph_fail",
+            "cartograph_slow",
+        ]
+    );
+
+    let mut call_params = modern_params();
+    let call_object = call_params
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("modern params were not an object"))?;
+    call_object.insert("name".to_owned(), json!("cartograph_echo"));
+    call_object.insert("arguments".to_owned(), json!({"message": "modern"}));
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": call_params
+        }))
+        .await?;
+    let called = connection.read_value().await?;
+    assert_eq!(called["result"]["resultType"], "complete");
+    assert_eq!(called["result"]["content"][0]["text"], "modern");
+    assert_eq!(
+        called["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "cartograph"
+    );
+
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+            "params": modern_params()
+        }))
+        .await?;
+    let second = connection.read_value().await?;
+    assert_eq!(first["result"]["tools"], second["result"]["tools"]);
+    assert_eq!(first["result"]["ttlMs"], second["result"]["ttlMs"]);
+    assert_eq!(
+        first["result"]["cacheScope"],
+        second["result"]["cacheScope"]
+    );
+    connection.finish().await
+}
+
+#[tokio::test]
+async fn modern_request_metadata_and_versions_fail_closed_without_legacy_fallback() -> TestResult {
+    let server = test_server(
+        ToolProfile::Core,
+        ServerLimits::default(),
+        FixtureHandler::new(),
+    )?;
+    let mut connection = Connection::open(server);
+
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION
+                }
+            }
+        }))
+        .await?;
+    assert_error(
+        &connection.read_value().await?,
+        ErrorCode::INVALID_PARAMS,
+        "invalid_params",
+    );
+
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": modern_params_for("2099-01-01")
+        }))
+        .await?;
+    let unsupported = connection.read_value().await?;
+    assert_eq!(unsupported["error"]["code"], -32_022);
+    assert_eq!(
+        unsupported["error"]["message"],
+        "Unsupported protocol version"
+    );
+    assert_eq!(unsupported["error"]["data"]["requested"], "2099-01-01");
+    assert_eq!(
+        unsupported["error"]["data"]["supported"],
+        json!([MODERN_PROTOCOL_VERSION])
+    );
+
+    connection
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "server/discover",
+            "params": {}
+        }))
+        .await?;
+    assert_error(
+        &connection.read_value().await?,
+        ErrorCode::INVALID_PARAMS,
+        "invalid_params",
+    );
+
+    connection
+        .send(&json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}))
+        .await?;
+    assert_error(
+        &connection.read_value().await?,
+        ErrorCode::SERVER_NOT_INITIALIZED,
+        "server_not_initialized",
+    );
     connection.finish().await
 }
 
@@ -798,6 +1027,18 @@ fn public_configuration_and_schema_boundaries_reject_invalid_contracts() {
         Some(ConfigError::InvalidInstructions)
     );
     assert_eq!(
+        ServerConfig::default()
+            .with_protocol_version(MODERN_PROTOCOL_VERSION)
+            .err(),
+        Some(ConfigError::InvalidProtocolVersion)
+    );
+    assert_eq!(
+        ServerConfig::default()
+            .with_protocol_version("2025-11-25")
+            .err(),
+        Some(ConfigError::InvalidProtocolVersion)
+    );
+    assert_eq!(
         ServerLimits::new(
             ServerLimitsInput::new(127, 4_096, 1).with_request_deadline(Duration::from_secs(1)),
         ),
@@ -889,6 +1130,23 @@ fn initialize_request(id: i64) -> Value {
             "protocolVersion": DEFAULT_TEST_PROTOCOL,
             "capabilities": {},
             "clientInfo": {"name": "fixture", "version": "1.0"}
+        }
+    })
+}
+
+fn modern_params() -> Value {
+    modern_params_for(MODERN_PROTOCOL_VERSION)
+}
+
+fn modern_params_for(protocol_version: &str) -> Value {
+    json!({
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": protocol_version,
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "fixture",
+                "version": "1.0"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {}
         }
     })
 }

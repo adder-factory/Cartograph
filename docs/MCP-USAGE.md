@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-07-31 (`v2.1.1`).
+Last release audit: 2026-08-01 (`v2.1.2`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -49,9 +49,10 @@ hot-reload an upgraded MCP process.
 Before serving, managed mode checks the owned image and HNSW shared-memory
 allocation. An incompatible container fails with exact backup and confirmed
 upgrade commands. Source catch-up starts through the native watcher after the
-stdio server is ready, so `initialize` and `tools/list` do not wait for a full
-index; `autoSync` in `cartograph_status` exposes attempts, publications, no-ops,
-and errors. `--no-startup-sync` suppresses only the initial reconciliation.
+stdio server is ready, so modern `server/discover`/`tools/list` and the legacy
+`initialize` handshake do not wait for a full index; `autoSync` in
+`cartograph_status` exposes attempts, publications, no-ops, and errors.
+`--no-startup-sync` suppresses only the initial reconciliation.
 
 ## Profiles
 
@@ -61,8 +62,35 @@ and errors. `--no-startup-sync` suppresses only the initial reconciliation.
 - `read-only`: retrieval without write/admin operations;
 - `review`: comparison and verification-oriented surface.
 
-Tool lists are deterministic, and a tool hidden by the selected profile cannot
-be called by name. Use the narrowest profile that supports the workflow.
+Profiles are immutable authorization ceilings for one server process. Tool
+lists are deterministic, and a tool hidden by the selected profile or an exact
+`--disable-tool` cannot be called by name. Use the narrowest ceiling that
+supports the workflow.
+
+## Modern protocol and dynamic tool selection
+
+Cartograph is a dual-era stdio server:
+
+- modern clients use MCP `2026-07-28`, begin with `server/discover`, and send
+  their protocol version and capabilities on every request;
+- existing clients may continue to use the `2024-11-05` initialize handshake;
+- modern successful results carry `resultType: "complete"` and server identity;
+- modern `tools/list` is private-cacheable for one hour and returns the same
+  deterministically ordered authorization-scoped catalog for the lifetime of
+  the process.
+
+MCP `2026-07-28` deliberately forbids changing `tools/list` per connection or
+as a side effect of another request. Cartograph therefore does not implement a
+generic hidden-tool dispatcher or a session-local activate/deactivate tool.
+Those patterns would hide the selected operation's schema and annotations from
+the host and weaken host-level confirmation policy.
+
+Dynamic selection belongs in the agent host: it can retain Cartograph's
+complete stable catalog, search the compact name/title/description metadata,
+and place only task-relevant full schemas in the model's working context. The
+profile remains the call-time authorization ceiling regardless of which schemas
+the host currently presents to the model. A host that does not support deferred
+schema loading can safely expose the complete profile catalog.
 
 ## Selected high-use tools
 
@@ -72,7 +100,7 @@ for all 35 wire contracts and their CLI families.
 
 | Tool | Purpose |
 | --- | --- |
-| `cartograph_status` | Current generation, row counts, compact database/schema storage, complete supported-source freshness, and auto-sync state |
+| `cartograph_status` | Current generation, row counts, compact database/schema storage as exact bytes plus readable IEC units, complete supported-source freshness, and auto-sync state |
 | `cartograph_context` | Intent-aware exact/BM25/hybrid packet, typed primary edit candidates, graph evidence, affected tests, trust, and live overlay |
 | `cartograph_find` | Exact name/path/reference or BM25/hybrid candidates |
 | `cartograph_files` | Bounded current-generation file inventory filtered by directory or language |
@@ -112,9 +140,9 @@ truncation. They are never relabeled as durable graph evidence.
 6. Run the project's actual formatter, linter, type, test, and security gates.
 7. Re-index only when current graph evidence is needed after source changes.
 
-The initialize handshake contains the compact version of this loop. Call
-`cartograph_playbook` for the complete on-demand guide, or run
-`cartograph guide` outside MCP.
+The modern discovery result and legacy initialize response contain the compact
+version of this loop. Call `cartograph_playbook` for the complete on-demand
+guide, or run `cartograph guide` outside MCP.
 
 Always preserve generation ID, freshness, confidence, abstention, component
 ranks, coarse reference precision, multiplicity, truncation, and overlay status
@@ -131,7 +159,9 @@ text to stdout. It enforces:
 - a hard wall-clock request deadline;
 - cancellation with worker abort/reaping;
 - stable public error codes and redacted internal failures;
-- deterministic tool/schema ordering.
+- deterministic tool/schema ordering;
+- dual-era modern per-request metadata and legacy initialization;
+- modern private TTL caching without connection-dependent tool mutation.
 
 Do not retry by removing bounds or wrapping the server with an unbounded queue.
 For long index work, use `cartograph_admin` to start a job and poll status; cancel
@@ -147,3 +177,39 @@ interchange data remain available to agents.
 If the MCP transport closes, report that limitation and use the equivalent
 native CLI as a control path. CLI success alone does not prove the host's MCP
 registration or running process was refreshed.
+
+## Modernization order
+
+The next protocol work should be delivered in this order:
+
+1. Add exact `outputSchema` contracts and validate every emitted
+   `structuredContent` payload, starting with status, find/context, review, and
+   admin job envelopes.
+2. Expose immutable-generation resources and resource links for source windows,
+   evidence packets, schemas, and durable artifacts. Resource URIs must carry
+   project/generation identity and preserve freshness and privacy boundaries.
+3. Map durable `cartograph_admin` jobs to the modern
+   `io.modelcontextprotocol/tasks` extension with bounded TTL, polling,
+   cooperative cancellation, and result retrieval; retain synchronous fallback
+   for clients that do not advertise the extension.
+4. Add rate-limited `notifications/progress` only for requests that provide a
+   progress token, with monotonic phase/total evidence and no query/source text.
+5. Add a small prompt surface for user-selected review, diagnosis, and change
+   planning workflows where host support makes prompts materially useful.
+6. Use multi-round-trip elicitation for non-secret operator choices and exact
+   destructive confirmations only when the client advertises it. Credentials,
+   tokens, and passwords must never use form elicitation.
+7. Consider Streamable HTTP, OAuth, and routing headers only for an explicitly
+   authorized remote/hosted product. Local Cartograph remains private stdio by
+   default.
+
+Do not newly build on MCP roots, client sampling, or protocol logging. They are
+deprecated in `2026-07-28`; Cartograph already has explicit project ownership,
+direct bounded LLM clients, stderr for local diagnostics, and can add
+OpenTelemetry outside the model-facing protocol when structured observability
+is needed.
+
+Protocol references: [versioning and dual-era compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning),
+[modern tools and stable catalogs](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
+[tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview), and
+[deprecated features](https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging).

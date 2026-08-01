@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-07-31 (`v2.1.1`)
+Last implementation review: 2026-08-01 (`v2.1.2`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -56,7 +56,7 @@ Before migration or normal work, Cartograph proves:
 - PostgreSQL 18.4 or newer within major version 18;
 - `pg_search` 0.25.0, expected preload state, the `paradedb` access method, and exact
   `pdb.source_code` token behavior;
-- pgvector 0.8.4 or newer, with 0.8.5 recommended for external PostgreSQL;
+- pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
 The append-only migration ledger currently owns twenty-four versions. Migration
@@ -350,10 +350,16 @@ abstention, and per-stage truncation.
 
 ## MCP and CLI boundary
 
-The MCP crate serves newline-delimited JSON-RPC over stdio with deterministic
-tool schemas/profiles, bounded input/output/concurrency, hard request deadlines,
-cancellation and worker reaping, redacted internal failures, and stable error
-codes. Product handlers call the agent/search services; transport never reaches
+The MCP crate serves newline-delimited JSON-RPC over stdio as a dual-era server.
+Modern MCP `2026-07-28` uses stateless `server/discover`, required per-request
+version/capability metadata, explicit result discriminators/server identity,
+and private TTL-cached stable tool lists. Legacy clients retain the exact
+`2024-11-05` initialize path. Deterministic profiles are immutable
+process-lifetime authorization ceilings; task-local schema selection belongs in
+the host because modern MCP forbids connection-dependent tool-list mutation.
+Both eras retain bounded input/output/concurrency, hard request deadlines,
+cancellation and worker reaping, redacted internal failures, and stable errors.
+Product handlers call the agent/search services; transport never reaches
 through to SQL or filesystem internals.
 
 The CLI exposes the same typed services plus managed database and project-local

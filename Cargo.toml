@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.1"
+version = "2.1.2"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Adder Factory"]
@@ -65,10 +65,10 @@ arborium-vb = "=2.18.1"
 arborium-verilog = "=2.18.1"
 arborium-yaml = "=2.18.1"
 blake3 = "1.8.5"
-clap = { version = "4.6.4", features = ["derive", "string"] }
+clap = { version = "4.6.5", features = ["derive", "string"] }
 getrandom = "0.4.3"
 ignore = "0.4.31"
-libc = "0.2.183"
+libc = "0.2.189"
 memchr = "=2.8.3"
 notify = "=8.2.0"
 num-traits = "=0.2.19"
@@ -79,7 +79,7 @@ regex = "1.13.1"
 rustls = { version = "=0.23.43", default-features = false, features = ["ring"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0"
+serde_json = "1.0.151"
 sha2 = "=0.11.0"
 sqlx-core = { version = "=0.9.0", default-features = false, features = [
   "_rt-tokio",
@@ -87,7 +87,7 @@ sqlx-core = { version = "=0.9.0", default-features = false, features = [
 ] }
 sqlx-postgres = { version = "=0.9.0", default-features = false }
 thiserror = "2.0.19"
-tempfile = "3.23.0"
+tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = [
   "fs",
   "io-std",

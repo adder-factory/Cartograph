@@ -29,7 +29,7 @@ pub trait ToolHandler: Send + Sync + 'static {
     }
 }
 
-/// One validated MCP tool contract plus internal profile membership.
+/// One validated MCP tool contract plus internal authorization-profile membership.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {

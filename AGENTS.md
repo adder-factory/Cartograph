@@ -37,7 +37,7 @@ Cartograph v2 is:
 - a native Rust executable;
 - PostgreSQL 18.4 or newer within major version 18;
 - code-aware BM25 through ParadeDB `pg_search` 0.25.0;
-- pgvector 0.8.4 or newer (0.8.5 recommended for external PostgreSQL; the
+- pgvector 0.8.4 or newer (0.8.6 recommended for external PostgreSQL; the
   managed ParadeDB 0.25.0 image bundles 0.8.4);
 - useful without an LLM through exact, lexical, graph, review, and test-impact
   retrieval.
@@ -167,7 +167,12 @@ Manual MCP specification:
 ```
 
 Use stdio transport. Profiles are `coding`, `core`, `full`, `read-only`, and
-`review`.
+`review`. They are process-lifetime authorization ceilings, not mutable
+task-local tool sets. Modern MCP `2026-07-28` clients use stateless
+`server/discover` and per-request metadata; legacy clients retain the
+`2024-11-05` initialize path. Hosts may dynamically defer task-irrelevant tool
+schemas, but the server's authorization-scoped `tools/list` remains stable and
+deterministic as required by modern MCP.
 
 ## Step 4 — use Cartograph while coding
 

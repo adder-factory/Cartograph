@@ -249,7 +249,7 @@ fn build_report(facts: ProbeFacts) -> CapabilityReport {
             id: "pgvector-extension",
             passed: pgvector_version_supported,
             message: extension_message("vector", pgvector_version.as_deref()),
-            remediation: "Install pgvector 0.8.4 or newer and create or update the vector extension in the Cartograph database; 0.8.5 is recommended for external PostgreSQL.",
+            remediation: "Install pgvector 0.8.4 or newer and create or update the vector extension in the Cartograph database; 0.8.6 is recommended for external PostgreSQL.",
         }),
         check(CheckInput {
             id: "pg-search-preload",
@@ -486,6 +486,7 @@ mod tests {
         assert!(matches!(extension_check, Some(check) if check.status == CheckStatus::Fail));
         assert!(pgvector_version_is_supported("0.8.4"));
         assert!(pgvector_version_is_supported("0.8.5"));
+        assert!(pgvector_version_is_supported("0.8.6"));
         assert!(pgvector_version_is_supported("0.9.0"));
         assert!(!pgvector_version_is_supported("0.8.3"));
         assert!(!pgvector_version_is_supported("0.8.4.1"));

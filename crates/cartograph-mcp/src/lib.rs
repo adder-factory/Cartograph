@@ -21,8 +21,8 @@ pub use error::{
 };
 pub use profile::{ToolProfile, ToolProfiles};
 pub use protocol::{
-    DEFAULT_PROTOCOL_VERSION, ProtocolServer, RequestId, ServerConfig, ServerLimits,
-    ServerLimitsInput, ServerMetadata,
+    DEFAULT_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, ProtocolServer, RequestId, ServerConfig,
+    ServerLimits, ServerLimitsInput, ServerMetadata,
 };
 pub use tool::{
     BoxShutdownFuture, BoxToolFuture, TextContent, ToolAnnotations, ToolCall, ToolCallContext,

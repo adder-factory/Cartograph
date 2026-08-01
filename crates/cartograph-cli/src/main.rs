@@ -62,6 +62,7 @@ use url::Url;
 
 mod auto_sync;
 mod backend;
+mod byte_format;
 mod completions;
 mod generated_cli;
 mod git_hooks;
@@ -73,6 +74,7 @@ mod mcp_budget;
 mod mcp_handler;
 mod upgrade;
 
+use byte_format::format_binary_bytes;
 use graph_export::{DEFAULT_NODE_LIMIT, GraphExportFormat, GraphExportRequest};
 
 const MANAGED_DATABASE_PORT_ENV: &str = "CARTOGRAPH_MANAGED_DATABASE_PORT";
@@ -3260,6 +3262,12 @@ fn render_status_text(value: &Value) {
 }
 
 fn render_database_storage(value: &Value) {
+    if let Some(text) = database_storage_text(value) {
+        println!("{text}");
+    }
+}
+
+fn database_storage_text(value: &Value) -> Option<String> {
     match value
         .pointer("/databaseStorage/state")
         .and_then(Value::as_str)
@@ -3273,30 +3281,40 @@ fn render_database_storage(value: &Value) {
                 .pointer("/databaseStorage/schemaBytes")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            let heap_bytes = value
+                .pointer("/databaseStorage/heapBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let index_bytes = value
                 .pointer("/databaseStorage/indexBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let btree_index_bytes = value
+                .pointer("/databaseStorage/btreeIndexBytes")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let toast_bytes = value
                 .pointer("/databaseStorage/toastBytes")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            println!(
-                "Database storage: {} database, {} Cartograph schema ({} indexes, {} TOAST); details: `cartograph db usage --project-path <path>`",
-                render_byte_count(database_bytes),
-                render_byte_count(schema_bytes),
-                render_byte_count(index_bytes),
-                render_byte_count(toast_bytes),
-            );
+            Some(format!(
+                "Database storage: {} database; {} Cartograph schema.\nSchema allocation: {} heap, {} indexes ({} B-tree), {} TOAST; details: `cartograph db usage --project-path <path>`",
+                format_binary_bytes(database_bytes),
+                format_binary_bytes(schema_bytes),
+                format_binary_bytes(heap_bytes),
+                format_binary_bytes(index_bytes),
+                format_binary_bytes(btree_index_bytes),
+                format_binary_bytes(toast_bytes),
+            ))
         }
-        Some("unavailable") => println!(
+        Some("unavailable") => Some(format!(
             "Database storage: unavailable ({}) — run `cartograph db usage --project-path <path>` for the detailed report",
             value
                 .pointer("/databaseStorage/reason")
                 .and_then(Value::as_str)
                 .unwrap_or("database_error")
-        ),
-        _ => {}
+        )),
+        _ => None,
     }
 }
 
@@ -3343,11 +3361,7 @@ const fn generation_storage_needs_attention(storage: GenerationStorageSummary) -
 }
 
 fn render_byte_count(bytes: u64) -> String {
-    if bytes >= GIBIBYTE_U64 {
-        format!("{} GiB ({} bytes)", bytes / GIBIBYTE_U64, bytes)
-    } else {
-        format!("{} MiB ({} bytes)", bytes / MEBIBYTE_U64, bytes)
-    }
+    format!("{} ({} bytes)", format_binary_bytes(bytes), bytes)
 }
 
 async fn run_embed(
@@ -5015,14 +5029,16 @@ mod tests {
 
     #[test]
     fn status_text_renders_compact_storage_ready_and_unavailable_states() {
-        render_status_text(&serde_json::json!({
+        let ready = serde_json::json!({
             "version": "2.1.0",
             "storage": "postgresql_paradedb_pgvector",
             "databaseStorage": {
                 "state": "ready",
                 "databaseBytes": 2 * GIBIBYTE_U64,
                 "schemaBytes": 512 * MEBIBYTE_U64,
+                "heapBytes": 192 * MEBIBYTE_U64,
                 "indexBytes": 256 * MEBIBYTE_U64,
+                "btreeIndexBytes": 128 * MEBIBYTE_U64,
                 "toastBytes": 64 * MEBIBYTE_U64
             },
             "project": {
@@ -5044,14 +5060,30 @@ mod tests {
             },
             "featureReadiness": {"state": "indexed"},
             "rollups": {"hotspots": [{"score": 1}], "biomarkers": [{"score": 1}]}
-        }));
-        render_status_text(&serde_json::json!({
+        });
+        assert_eq!(
+            database_storage_text(&ready).as_deref(),
+            Some(
+                "Database storage: 2 GiB database; 512 MiB Cartograph schema.\nSchema allocation: 192 MiB heap, 256 MiB indexes (128 MiB B-tree), 64 MiB TOAST; details: `cartograph db usage --project-path <path>`"
+            )
+        );
+        render_status_text(&ready);
+
+        let unavailable = serde_json::json!({
             "version": "2.1.0",
             "storage": "postgresql_paradedb_pgvector",
             "databaseStorage": {"state": "unavailable", "reason": "timeout"},
             "project": {"fresh": false, "snapshot": {"current": null}},
             "featureReadiness": {"state": "not_indexed"}
-        }));
+        });
+        assert_eq!(
+            database_storage_text(&unavailable).as_deref(),
+            Some(
+                "Database storage: unavailable (timeout) — run `cartograph db usage --project-path <path>` for the detailed report"
+            )
+        );
+        render_status_text(&unavailable);
+        assert!(database_storage_text(&Value::Null).is_none());
     }
 
     #[test]

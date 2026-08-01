@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-07-31 (`v2.1.1`).
+Last release audit: 2026-08-01 (`v2.1.2`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -57,7 +57,7 @@ function/class categories.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.1 top-level command advertised
+This inventory contains every non-hidden v2.1.2 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -107,12 +107,19 @@ configuration. For a non-default managed port, the installer also pins the
 non-secret loopback port in the portable server arguments. Restart the host
 after a configuration or binary change.
 
+The stdio server is dual-era: MCP `2026-07-28` clients use stateless
+`server/discover` and per-request metadata, while existing clients can continue
+using the `2024-11-05` initialize handshake. Profiles and exact disabled tools
+form a process-lifetime authorization ceiling. Modern `tools/list` is stable,
+deterministically ordered, and private-cacheable for one hour; task-local schema
+selection belongs in the host rather than a connection-mutating dispatcher.
+
 `cartograph upgrade --project-path <PATH>` audits Codex, Claude, and Cursor
 registrations in both local and global locations against the selected native
 executable. JSON reports a secret/path-safe `commandState`; stale absolute pins
 include an explicit `repinCommand`. After repinning, restart the host and prove
-`initialize`, `tools/list`, `cartograph_status`, and one real query on the new
-transport.
+`server/discover` (or legacy `initialize`), `tools/list`, `cartograph_status`,
+and one real query on the new transport.
 
 ## Database lifecycle
 
@@ -147,7 +154,9 @@ commands inspect the deterministic project-owned container and reuse its actual
 loopback port before falling back to `55432`. New/replaced containers reserve
 256 MiB of Docker shared memory; `doctor` fails an older 64 MiB container and
 requires backup plus the confirmed managed upgrade before HNSW maintenance.
-`status` includes compact allocated database/schema totals while `db usage`
+`status` includes compact allocated database/schema/heap/index/TOAST totals in
+readable IEC units such as MiB and GiB. Structured JSON retains exact `*Bytes`
+integers and adds `databaseStorage.humanReadable` display strings; `db usage`
 retains the relation, cache, generation, and maintenance detail.
 
 ## LLM credentials and local backend state
