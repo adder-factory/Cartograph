@@ -520,35 +520,45 @@ impl ProtocolServer {
     ) -> Result<(), ServeError> {
         let request_era = match classify_request_era(request.params.as_ref()) {
             Ok(request_era) => request_era,
-            Err(ModernMetadataError::Invalid) => {
-                return send_response(
-                    &session.output,
-                    invalid_params(Some(request.id), "Invalid modern request metadata"),
-                )
-                .await;
-            }
-            Err(ModernMetadataError::Unsupported(requested)) => {
-                return send_response(
-                    &session.output,
-                    JsonRpcResponse::unsupported_protocol(request.id, requested),
-                )
-                .await;
+            Err(error) => {
+                return send_response(&session.output, error.into_response(request.id)).await;
             }
         };
 
         if request.method == "server/discover" {
-            return match request_era {
-                RequestEra::Modern => self.discover(request, session).await,
-                RequestEra::Legacy => {
-                    send_response(
-                        &session.output,
-                        invalid_params(Some(request.id), "Missing modern request metadata"),
-                    )
-                    .await
-                }
-            };
+            return self
+                .dispatch_discovery_request(request, session, request_era)
+                .await;
         }
 
+        self.dispatch_non_discovery_request(request, session, request_era)
+            .await
+    }
+
+    async fn dispatch_discovery_request(
+        &self,
+        request: InboundRequest,
+        session: &ConnectionState,
+        request_era: RequestEra,
+    ) -> Result<(), ServeError> {
+        match request_era {
+            RequestEra::Modern => self.discover(request, session).await,
+            RequestEra::Legacy => {
+                send_response(
+                    &session.output,
+                    invalid_params(Some(request.id), "Missing modern request metadata"),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn dispatch_non_discovery_request(
+        &self,
+        request: InboundRequest,
+        session: &mut ConnectionState,
+        request_era: RequestEra,
+    ) -> Result<(), ServeError> {
         match request.method.as_str() {
             "initialize" if request_era == RequestEra::Legacy => {
                 self.initialize(request, session).await
@@ -556,20 +566,7 @@ impl ProtocolServer {
             "ping" => self.ping(request, session, request_era).await,
             "tools/list" => self.list_tools(request, session, request_era).await,
             "tools/call" => self.call_tool(request, session, request_era).await,
-            _ => {
-                send_response(
-                    &session.output,
-                    JsonRpcResponse::error(
-                        Some(request.id),
-                        ErrorSpec::new(
-                            ErrorCode::METHOD_NOT_FOUND,
-                            "Method not found",
-                            StableErrorCode::MethodNotFound,
-                        ),
-                    ),
-                )
-                .await
-            }
+            _ => send_response(&session.output, method_not_found(request.id)).await,
         }
     }
 
@@ -835,6 +832,15 @@ enum RequestEra {
 enum ModernMetadataError {
     Invalid,
     Unsupported(String),
+}
+
+impl ModernMetadataError {
+    fn into_response(self, id: RequestId) -> JsonRpcResponse {
+        match self {
+            Self::Invalid => invalid_params(Some(id), "Invalid modern request metadata"),
+            Self::Unsupported(requested) => JsonRpcResponse::unsupported_protocol(id, requested),
+        }
+    }
 }
 
 enum ReadDirective {
@@ -1349,6 +1355,17 @@ fn not_initialized(id: RequestId) -> JsonRpcResponse {
             ErrorCode::SERVER_NOT_INITIALIZED,
             "Server is not initialized",
             StableErrorCode::ServerNotInitialized,
+        ),
+    )
+}
+
+fn method_not_found(id: RequestId) -> JsonRpcResponse {
+    JsonRpcResponse::error(
+        Some(id),
+        ErrorSpec::new(
+            ErrorCode::METHOD_NOT_FOUND,
+            "Method not found",
+            StableErrorCode::MethodNotFound,
         ),
     )
 }
