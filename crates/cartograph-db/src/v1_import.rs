@@ -805,14 +805,14 @@ impl CartographDatabase {
             {
                 ImportDisposition::Complete(report) => Ok(report),
                 ImportDisposition::Active(active) => {
-                    execute_active_import(
+                    Box::pin(execute_active_import(
                         self,
                         ActiveImportInvocation {
                             request: &request,
                             active: *active,
                         },
                         &mut interrupt,
-                    )
+                    ))
                     .await
                 }
             }
