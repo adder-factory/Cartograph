@@ -28,6 +28,7 @@ const SIGNAL_CATEGORY_CLOUD: u16 = 1 << 4;
 const SIGNAL_CATEGORY_ENVIRONMENT: u16 = 1 << 5;
 const SIGNAL_CATEGORY_PERSONAL_DATA: u16 = 1 << 6;
 const SIGNAL_CATEGORY_LITERAL: u16 = 1 << 7;
+const SIGNAL_CATEGORY_EXPOSURE: u16 = 1 << 8;
 const MAX_SENSITIVE_SCORE: u16 = 100;
 const IDENTIFIER_SIGNAL_WEIGHT: u16 = 30;
 const SIGNED_CLAIM_SIGNAL_WEIGHT: u16 = 30;
@@ -39,6 +40,7 @@ const CLOUD_LITERAL_WEIGHT: u16 = 60;
 const ENVIRONMENT_SIGNAL_WEIGHT: u16 = 30;
 const PERSONAL_DATA_SIGNAL_WEIGHT: u16 = 20;
 const LONG_LITERAL_SIGNAL_WEIGHT: u16 = 20;
+const EXPOSURE_SIGNAL_WEIGHT: u16 = 20;
 const CREDENTIAL_IDENTIFIER_SUBSTRINGS: &[&str] = &[
     "api_key",
     "api-key",
@@ -68,7 +70,6 @@ const CLOUD_IDENTIFIER_SUBSTRINGS: &[&str] = &[
     "aws-access-key-id",
 ];
 const ENVIRONMENT_ACCESS_SUBSTRINGS: &[&str] = &["process.env.", "env[", "getenv("];
-const ENVIRONMENT_MATERIAL_SUBSTRINGS: &[&str] = &["secret", "token", "key", "password"];
 const PERSONAL_DATA_SUBSTRINGS: &[&str] = &[
     "ssn",
     "social_security",
@@ -78,6 +79,16 @@ const PERSONAL_DATA_SUBSTRINGS: &[&str] = &[
     "date_of_birth",
     "phone_number",
     "email_address",
+];
+const SENSITIVE_EXPOSURE_SUBSTRINGS: &[&str] = &[
+    "console.log",
+    "console.info",
+    "console.warn",
+    "console.error",
+    "logger.",
+    "log.",
+    "print(",
+    "println!",
 ];
 const INCOMPLETE_COMMENT_MARKERS: &[&str] = &["todo", "fixme", "xxx", "hack"];
 const INCOMPLETE_COMMENT_PHRASE: &str = "not implemented";
@@ -124,6 +135,20 @@ struct ParameterMetricInput<'tree, 'source> {
 struct SensitiveBodyEvidence<'source> {
     code_fields: Vec<&'source str>,
     literal_fields: Vec<&'source str>,
+    boundary: SensitiveBoundaryEvidence,
+}
+
+#[derive(Default)]
+struct SensitiveBodyScan<'source> {
+    excluded_ranges: Vec<(usize, usize)>,
+    literal_fields: Vec<&'source str>,
+    boundary: SensitiveBoundaryEvidence,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SensitiveBoundaryEvidence {
+    environment_secret: bool,
+    exposed_sensitive_material: bool,
 }
 
 #[derive(Default)]
@@ -206,7 +231,7 @@ pub(crate) fn symbol_health_metrics(
         source,
     } = input;
     let mut metrics = SymbolHealthMetrics {
-        code_lines: code_line_count(declaration, cancelled)?,
+        code_lines: code_line_count(declaration, language, cancelled)?,
         parameter_count: parameter_count(ParameterMetricInput {
             declaration,
             symbol_kind,
@@ -247,6 +272,7 @@ pub(crate) fn symbol_health_metrics(
 
 fn code_line_count(
     declaration: Node<'_>,
+    language: SourceLanguage,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<u32, ExtractError> {
     let mut cursor = declaration.walk();
@@ -255,22 +281,25 @@ fn code_line_count(
     let mut previous_row = None;
     let mut lines = 0_u32;
     let mut visited = 0_usize;
+    let mut static_jsx_by_depth = vec![false];
     loop {
         let node = cursor.node();
-        visited = visited.saturating_add(1);
-        if visited > MAX_HEALTH_AST_NODES {
-            return Err(ExtractError::OutputLimit);
-        }
-        if visited.is_multiple_of(HEALTH_POLL_STRIDE) && cancelled() {
-            return Err(ExtractError::Cancelled);
-        }
-        let comment = record_health_line(node, &mut previous_row, &mut lines);
+        poll_code_line_walk(&mut visited, cancelled)?;
+        let inherited_static_jsx = static_jsx_by_depth.get(depth).copied().unwrap_or(false);
+        let (static_jsx, child_static_jsx) =
+            jsx_line_context(language, node.kind(), inherited_static_jsx);
+        let comment = record_health_line(node, static_jsx, &mut previous_row, &mut lines);
         let descend = !comment
             && !is_opaque_string_literal(node.kind())
             && (root || !is_callable_node(node.kind()));
         root = false;
-        if descend && cursor.goto_first_child() {
-            depth = depth.saturating_add(1);
+        if descend_code_line_cursor(
+            &mut cursor,
+            &mut depth,
+            &mut static_jsx_by_depth,
+            child_static_jsx,
+            descend,
+        ) {
             continue;
         }
         if !advance_health_cursor(&mut cursor, &mut depth) {
@@ -279,9 +308,63 @@ fn code_line_count(
     }
 }
 
-fn record_health_line(node: Node<'_>, previous_row: &mut Option<usize>, lines: &mut u32) -> bool {
+fn poll_code_line_walk(
+    visited: &mut usize,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), ExtractError> {
+    *visited = visited.saturating_add(1);
+    if *visited > MAX_HEALTH_AST_NODES {
+        return Err(ExtractError::OutputLimit);
+    }
+    if visited.is_multiple_of(HEALTH_POLL_STRIDE) && cancelled() {
+        return Err(ExtractError::Cancelled);
+    }
+    Ok(())
+}
+
+fn jsx_line_context(
+    language: SourceLanguage,
+    node_kind: &str,
+    inherited_static_jsx: bool,
+) -> (bool, bool) {
+    if !is_javascript_language(language) {
+        return (false, false);
+    }
+    if node_kind == "jsx_expression" {
+        return (false, false);
+    }
+    let jsx_scaffolding = is_jsx_scaffolding_node(node_kind);
+    let static_jsx = jsx_scaffolding || inherited_static_jsx;
+    (static_jsx, static_jsx)
+}
+
+fn descend_code_line_cursor(
+    cursor: &mut TreeCursor<'_>,
+    depth: &mut usize,
+    static_jsx_by_depth: &mut Vec<bool>,
+    child_static_jsx: bool,
+    descend: bool,
+) -> bool {
+    if !descend || !cursor.goto_first_child() {
+        return false;
+    }
+    *depth = depth.saturating_add(1);
+    if let Some(static_jsx) = static_jsx_by_depth.get_mut(*depth) {
+        *static_jsx = child_static_jsx;
+    } else {
+        static_jsx_by_depth.push(child_static_jsx);
+    }
+    true
+}
+
+fn record_health_line(
+    node: Node<'_>,
+    static_jsx: bool,
+    previous_row: &mut Option<usize>,
+    lines: &mut u32,
+) -> bool {
     let comment = is_comment_node(node.kind());
-    if !comment {
+    if !comment && !static_jsx {
         let row = node.start_position().row;
         if *previous_row != Some(row) {
             *lines = lines.saturating_add(1);
@@ -289,6 +372,10 @@ fn record_health_line(node: Node<'_>, previous_row: &mut Option<usize>, lines: &
         }
     }
     comment
+}
+
+fn is_jsx_scaffolding_node(kind: &str) -> bool {
+    kind.starts_with("jsx_") && kind != "jsx_expression"
 }
 
 fn advance_health_cursor(cursor: &mut TreeCursor<'_>, depth: &mut usize) -> bool {
@@ -439,8 +526,9 @@ fn record_dynamic_sql_health(metrics: &mut SymbolHealthMetrics, input: HealthNod
         return;
     }
     let raw = text_for(input.source, input.node);
-    let interpolated_template =
-        input.node.kind() == "template_string" && raw.contains("${") && contains_sql_word(raw);
+    let interpolated_template = input.node.kind() == "template_string"
+        && raw.contains("${")
+        && contains_sql_statement_shape(raw);
     let concatenated_sql = input.node.kind() == "binary_expression"
         && children(input.node).any(|child| text_for(input.source, child).trim() == "+")
         && descendants_including_root(input.node).any(|candidate| {
@@ -448,7 +536,7 @@ fn record_dynamic_sql_health(metrics: &mut SymbolHealthMetrics, input: HealthNod
                 && candidate
                     .parent()
                     .is_none_or(|parent| !is_string_literal(parent.kind()))
-                && contains_sql_word(text_for(input.source, candidate))
+                && contains_sql_statement_shape(text_for(input.source, candidate))
         });
     if interpolated_template || concatenated_sql {
         metrics.sql_string_concatenation = 1;
@@ -777,17 +865,19 @@ fn populate_sensitive_and_documentation_metrics(
             sensitive_body_evidence(body, input.source)
         });
     code_fields.extend(evidence.code_fields);
-    let (mut score, signal_mask) = sensitive_material_score(&code_fields, &evidence.literal_fields);
+    let (mut score, signal_mask, actionable) =
+        sensitive_material_score(&code_fields, &evidence.literal_fields, evidence.boundary);
     if is_test_symbol_name(input.symbol_name) {
         score /= 2;
     }
     metrics.secrets_score = score.min(MAX_SENSITIVE_SCORE);
     metrics.secrets_signal_mask = signal_mask;
+    metrics.secrets_actionable = actionable;
     if input.symbol_kind == SymbolKind::Constant
         && let Some(docstring) = input.docstring
         && !looks_like_regex_literal(body_text)
     {
-        let doc_claims = numeric_claims(docstring);
+        let doc_claims = documented_numeric_claims(docstring);
         let value_claims = numeric_claims(body_text);
         if !doc_claims.is_empty()
             && !value_claims.is_empty()
@@ -802,27 +892,60 @@ fn sensitive_body_evidence<'source>(
     body: Node<'_>,
     source: &'source str,
 ) -> SensitiveBodyEvidence<'source> {
-    let mut excluded_ranges = Vec::new();
-    let mut literal_fields = Vec::new();
+    let SensitiveBodyScan {
+        mut excluded_ranges,
+        literal_fields,
+        boundary,
+    } = scan_sensitive_body(body, source);
+    excluded_ranges.sort_unstable();
+    let code_fields = code_fields_outside_ranges(body, source, excluded_ranges);
+    SensitiveBodyEvidence {
+        code_fields,
+        literal_fields,
+        boundary,
+    }
+}
+
+fn scan_sensitive_body<'source>(
+    body: Node<'_>,
+    source: &'source str,
+) -> SensitiveBodyScan<'source> {
+    let mut scan = SensitiveBodyScan::default();
     let mut stack = named_children(body).collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
         if is_callable_node(node.kind())
             || is_comment_node(node.kind())
             || is_presentation_only_node(node.kind())
         {
-            excluded_ranges.push((node.start_byte(), node.end_byte()));
+            scan.excluded_ranges
+                .push((node.start_byte(), node.end_byte()));
             continue;
+        }
+        let node_text = text_for(source, node);
+        if is_environment_access_boundary(node.kind()) {
+            scan.boundary.environment_secret |= text_contains_environment_secret(node_text);
+        }
+        if is_sensitive_exposure_boundary(node.kind()) {
+            scan.boundary.exposed_sensitive_material |= text_contains_sensitive_exposure(node_text);
         }
         if is_opaque_string_literal(node.kind()) {
             if let Some(literal) = source.get(node.start_byte()..node.end_byte()) {
-                literal_fields.push(literal);
+                scan.literal_fields.push(literal);
             }
-            excluded_ranges.push((node.start_byte(), node.end_byte()));
+            scan.excluded_ranges
+                .push((node.start_byte(), node.end_byte()));
             continue;
         }
         stack.extend(named_children(node));
     }
-    excluded_ranges.sort_unstable();
+    scan
+}
+
+fn code_fields_outside_ranges<'source>(
+    body: Node<'_>,
+    source: &'source str,
+    excluded_ranges: Vec<(usize, usize)>,
+) -> Vec<&'source str> {
     let mut code_fields = Vec::new();
     let mut cursor = body.start_byte();
     for (start, end) in excluded_ranges {
@@ -840,13 +963,14 @@ fn sensitive_body_evidence<'source>(
     {
         code_fields.push(code);
     }
-    SensitiveBodyEvidence {
-        code_fields,
-        literal_fields,
-    }
+    code_fields
 }
 
-fn sensitive_material_score(code_fields: &[&str], literal_fields: &[&str]) -> (u16, u16) {
+fn sensitive_material_score(
+    code_fields: &[&str],
+    literal_fields: &[&str],
+    boundary: SensitiveBoundaryEvidence,
+) -> (u16, u16, bool) {
     let mut score = SensitiveScore::default();
     add_sensitive_signal(
         &mut score,
@@ -910,34 +1034,94 @@ fn sensitive_material_score(code_fields: &[&str], literal_fields: &[&str]) -> (u
             },
         },
     );
+    let actionable_boundary =
+        add_sensitive_boundary_signals(&mut score, code_fields, literal_fields, boundary);
+    let actionable = signed_claim_literal || cloud_literal || actionable_boundary;
+    (
+        score.value.min(MAX_SENSITIVE_SCORE),
+        score.signal_mask,
+        actionable,
+    )
+}
+
+fn add_sensitive_boundary_signals(
+    score: &mut SensitiveScore,
+    code_fields: &[&str],
+    literal_fields: &[&str],
+    boundary: SensitiveBoundaryEvidence,
+) -> bool {
     add_sensitive_signal(
-        &mut score,
+        score,
         SensitiveSignal {
-            matched: fields_contain_substring(code_fields, ENVIRONMENT_ACCESS_SUBSTRINGS)
-                && fields_contain_substring(code_fields, ENVIRONMENT_MATERIAL_SUBSTRINGS),
+            matched: boundary.environment_secret,
             category: SIGNAL_CATEGORY_ENVIRONMENT,
             weight: ENVIRONMENT_SIGNAL_WEIGHT,
         },
     );
     add_sensitive_signal(
-        &mut score,
+        score,
         SensitiveSignal {
             matched: fields_contain_identifier_component(code_fields, PERSONAL_DATA_SUBSTRINGS),
             category: SIGNAL_CATEGORY_PERSONAL_DATA,
             weight: PERSONAL_DATA_SIGNAL_WEIGHT,
         },
     );
+    let long_token_literal = literal_fields
+        .iter()
+        .any(|field| contains_long_token_literal(field));
     add_sensitive_signal(
-        &mut score,
+        score,
         SensitiveSignal {
-            matched: literal_fields
-                .iter()
-                .any(|field| contains_long_token_literal(field)),
+            matched: long_token_literal,
             category: SIGNAL_CATEGORY_LITERAL,
             weight: LONG_LITERAL_SIGNAL_WEIGHT,
         },
     );
-    (score.value.min(MAX_SENSITIVE_SCORE), score.signal_mask)
+    add_sensitive_signal(
+        score,
+        SensitiveSignal {
+            matched: boundary.exposed_sensitive_material,
+            category: SIGNAL_CATEGORY_EXPOSURE,
+            weight: EXPOSURE_SIGNAL_WEIGHT,
+        },
+    );
+    boundary.environment_secret || long_token_literal || boundary.exposed_sensitive_material
+}
+
+fn is_environment_access_boundary(kind: &str) -> bool {
+    matches!(
+        kind,
+        "attribute"
+            | "call"
+            | "call_expression"
+            | "field_expression"
+            | "index_expression"
+            | "member_expression"
+            | "subscript_expression"
+    )
+}
+
+fn is_sensitive_exposure_boundary(kind: &str) -> bool {
+    matches!(kind, "call" | "call_expression" | "macro_invocation")
+}
+
+fn text_contains_environment_secret(text: &str) -> bool {
+    fields_contain_substring(&[text], ENVIRONMENT_ACCESS_SUBSTRINGS)
+        && text_contains_sensitive_material(text)
+}
+
+fn text_contains_sensitive_exposure(text: &str) -> bool {
+    fields_contain_substring(&[text], SENSITIVE_EXPOSURE_SUBSTRINGS)
+        && text_contains_sensitive_material(text)
+}
+
+fn text_contains_sensitive_material(text: &str) -> bool {
+    let field = [text];
+    contains_identifier_signal(&field)
+        || fields_contain_identifier_component(&field, LOGIN_MATERIAL_WORDS)
+        || fields_contain_identifier_component(&field, PERSONAL_DATA_SUBSTRINGS)
+        || (fields_contain_identifier_component(&field, CRYPTOGRAPHIC_OPERATION_COMPONENTS)
+            && fields_contain_identifier_component(&field, CRYPTOGRAPHIC_MATERIAL_COMPONENTS))
 }
 
 fn contains_identifier_signal(fields: &[&str]) -> bool {
@@ -1148,6 +1332,39 @@ fn numeric_claims(text: &str) -> BTreeSet<String> {
         }
     }
     claims
+}
+
+fn documented_numeric_claims(text: &str) -> BTreeSet<String> {
+    let explicit_word = [
+        "default",
+        "limit",
+        "minimum",
+        "maximum",
+        "threshold",
+        "value",
+        "count",
+        "size",
+        "capacity",
+        "timeout",
+        "retry",
+        "retries",
+    ]
+    .iter()
+    .any(|cue| count_word_ascii_case_insensitive(text, cue) > 0);
+    let explicit_phrase = [
+        "is set to",
+        "must be",
+        "equal to",
+        "equals",
+        "configured to",
+    ]
+    .iter()
+    .any(|cue| contains_ascii_case_insensitive(text, cue));
+    if explicit_word || explicit_phrase {
+        numeric_claims(text)
+    } else {
+        BTreeSet::new()
+    }
 }
 
 fn numeric_claim_is_value(text: &str, start: usize, end: usize) -> bool {
@@ -1687,10 +1904,33 @@ fn contains_security_word(raw: &str) -> bool {
     .any(|needle| contains_ascii_case_insensitive(raw, needle))
 }
 
-fn contains_sql_word(raw: &str) -> bool {
-    ["select ", "insert ", "update ", "delete "]
-        .iter()
-        .any(|needle| contains_ascii_case_insensitive(raw, needle))
+fn contains_sql_statement_shape(raw: &str) -> bool {
+    [
+        ("select", "from"),
+        ("insert", "into"),
+        ("update", "set"),
+        ("delete", "from"),
+    ]
+    .iter()
+    .any(|(statement, clause)| contains_ordered_words(raw, statement, clause))
+}
+
+fn contains_ordered_words(raw: &str, first: &str, second: &str) -> bool {
+    let mut first_seen = false;
+    for word in
+        raw.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+    {
+        if word.is_empty() {
+            continue;
+        }
+        if first_seen && word.eq_ignore_ascii_case(second) {
+            return true;
+        }
+        if word.eq_ignore_ascii_case(first) {
+            first_seen = true;
+        }
+    }
+    false
 }
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {

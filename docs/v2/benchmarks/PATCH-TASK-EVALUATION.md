@@ -1,8 +1,8 @@
 # V2 native patch-task evaluation
 
 Historical benchmark: locked v1.1.33 parity gate measured for the `v2.1.4`
-candidate. It is not relabeled as v2.1.5 evidence; each release still requires
-its own exact published-main gate.
+candidate. It is not relabeled as evidence for a later release; each release
+still requires its own exact published-main gate.
 
 Measured: 2026-08-01
 

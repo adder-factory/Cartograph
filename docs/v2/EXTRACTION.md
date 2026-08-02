@@ -50,10 +50,13 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V8 fences context-classified URL and serial-loop evidence,
-facade roles, and semantic clone compatibility; contract V7 added
-generation-scoped static numerical sites; contract V6 fenced framework,
-resolver, test-ownership, and Rust Cargo workspace crate/re-export semantics.
+contract. Contract V9 fences JSX executable-line ownership, SQL/document/secret
+health precision, Python intrinsic and receiver provenance, React lazy default
+consumers, and TypeScript `typeof` value consumers; contract V8 fenced
+context-classified URL and serial-loop evidence, facade roles, and semantic
+clone compatibility; contract V7 added generation-scoped static numerical
+sites; contract V6 fenced framework, resolver, test-ownership, and Rust Cargo
+workspace crate/re-export semantics.
 After an upgrade from an older contract, unchanged source remains stale until a
 normal index publishes current-contract facts. This contract check stays
 separate from the source-manifest digest so v1 import still compares exact

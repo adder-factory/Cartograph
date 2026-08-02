@@ -345,7 +345,17 @@ pub(super) fn capture_dynamic_import(
             node: call,
         },
     )?;
-    if let Some(member) = dynamic_import_selected_member(call) {
+    if dynamic_import_selected_member(call).is_none() && react_lazy_default_import(builder, call) {
+        let imported_name = "default".to_owned();
+        builder.emit_import_binding(ExtractedImportBinding {
+            kind: ImportBindingKind::Default,
+            module_specifier,
+            imported_name: imported_name.clone(),
+            local_name: imported_name.clone(),
+            span: span_for(call)?,
+        })?;
+        emit_imported_name_reference(builder, imported_name, call)?;
+    } else if let Some(member) = dynamic_import_selected_member(call) {
         let imported_name = builder.context.owned_unquoted_text(member)?;
         builder.emit_import_binding(ExtractedImportBinding {
             kind: ImportBindingKind::Named,
@@ -357,6 +367,46 @@ pub(super) fn capture_dynamic_import(
         emit_imported_name_reference(builder, imported_name, member)?;
     }
     Ok(true)
+}
+
+fn react_lazy_default_import(builder: &ExtractionBuilder<'_, '_>, call: Node<'_>) -> bool {
+    let mut expression = call;
+    for _ in 0..12 {
+        let Some(parent) = expression.parent() else {
+            return false;
+        };
+        if matches!(
+            parent.kind(),
+            "await_expression"
+                | "as_expression"
+                | "satisfies_expression"
+                | "type_assertion"
+                | "parenthesized_expression"
+                | "non_null_expression"
+                | "return_statement"
+                | "statement_block"
+        ) {
+            expression = parent;
+            continue;
+        }
+        if !matches!(parent.kind(), "arrow_function" | "function_expression") {
+            return false;
+        }
+        let Some(arguments) = parent.parent().filter(|node| node.kind() == "arguments") else {
+            return false;
+        };
+        let Some(lazy_call) = arguments
+            .parent()
+            .filter(|node| node.kind() == "call_expression")
+        else {
+            return false;
+        };
+        let Some(function) = lazy_call.child_by_field_name("function") else {
+            return false;
+        };
+        return matches!(builder.context.text(function).trim(), "lazy" | "React.lazy");
+    }
+    false
 }
 
 fn dynamic_import_source<'tree>(

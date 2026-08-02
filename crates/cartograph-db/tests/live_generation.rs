@@ -78,8 +78,9 @@ const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION: i64 = 24;
 const DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION: i64 = 25;
 const NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_VERSION: i64 = 26;
 const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_VERSION: i64 = 27;
-const LATEST_MIGRATION_VERSION: i64 = STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 27] = [
+const BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION: i64 = 28;
+const LATEST_MIGRATION_VERSION: i64 = BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 28] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -107,6 +108,7 @@ const EXPECTED_MIGRATIONS: [i64; 27] = [
     DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION,
     NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_VERSION,
     STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_VERSION,
+    BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -147,6 +149,8 @@ const NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_CHECKSUM: &str =
     "821c3fa10f3c60766d0a38c6dd0c747fdc273f2d10089fd6f715b347b9d47441";
 const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_CHECKSUM: &str =
     "b0e245329c8698665484bbfcdba2fdb8dee225b56162bf9591057ba7e7af05f4";
+const BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_CHECKSUM: &str =
+    "702c0fdafe0c2aa6bac5b967f373a310a4ad4ef4ecc0ff710dd0fb2e4c86a8b8";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -3764,6 +3768,21 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
         STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_CHECKSUM
     );
 
+    let precision_ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 28"#
+    );
+    let precision_checksum = query(AssertSqlSafe(precision_ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify digest-v9 migration: {error}"));
+    assert_eq!(
+        precision_checksum,
+        BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_CHECKSUM
+    );
+
     let definition = query(
         r"SELECT pg_get_constraintdef(constraints.oid) AS definition
             FROM pg_catalog.pg_constraint AS constraints
@@ -3779,9 +3798,9 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
     .fetch_one(pool)
     .await
     .and_then(|row| row.try_get::<String, _>("definition"))
-    .unwrap_or_else(|error| panic!("could not inspect digest-v8 constraint: {error}"));
+    .unwrap_or_else(|error| panic!("could not inspect digest-v9 constraint: {error}"));
     assert!(
-        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8]"),
+        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9]"),
         "{definition}"
     );
 }

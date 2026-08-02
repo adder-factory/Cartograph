@@ -20,6 +20,13 @@ pub const DYNAMIC_DISPATCH_RESOLUTION_PREFIX: &str = "cartograph.dynamic-dispatc
 #[doc(hidden)]
 pub const RUST_MACRO_RESOLUTION_PREFIX: &str = "cartograph.rust-macro::";
 
+/// Internal lookup marker for a TypeScript `typeof` query against a runtime value declaration.
+///
+/// The persisted reference remains a typed `type_of` edge. The indexer removes this marker and
+/// permits value-declaration resolution only for the marked source shape.
+#[doc(hidden)]
+pub const TYPE_QUERY_VALUE_RESOLUTION_PREFIX: &str = "cartograph.type-query-value::";
+
 /// Internal lookup marker for a static SQL-literal table reference.
 ///
 /// The suffix is `<operation>::<qualified-table>`. The persisted reference keeps only the
@@ -232,6 +239,8 @@ pub struct SymbolHealthMetrics {
     pub secrets_score: u16,
     /// Bit-set of the privacy-safe secret-signal categories contributing to the score.
     pub secrets_signal_mask: u16,
+    /// Whether literal, environment, or exposure evidence makes secret handling actionable.
+    pub secrets_actionable: bool,
     /// Count of documented numeric claims disjoint from a constant's current value.
     pub stale_doc_numbers: u16,
     /// Nested-iteration patterns with a likely accidental quadratic cost.

@@ -43,6 +43,7 @@ pub use model::{
     DiagnosticCode, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, ExtractedImportBinding,
     ExtractedNumericalSite, ExtractedReference, ExtractedSymbol, ExtractionDiagnostic,
     ImportBindingKind, RUST_MACRO_RESOLUTION_PREFIX, SymbolHealthMetrics,
+    TYPE_QUERY_VALUE_RESOLUTION_PREFIX,
 };
 pub use module_alias::substitute_module_alias;
 pub use native::{ExtractError, NativeExtractor};

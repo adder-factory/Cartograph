@@ -76,6 +76,27 @@ fn computed_dynamic_imports_never_invent_static_bindings() {
 }
 
 #[test]
+fn react_lazy_dynamic_import_retains_its_default_consumer_contract() {
+    let source = r"
+import { lazy } from 'react';
+export const Panel = lazy(() => import('./panel'));
+";
+    let first = extract("src/lazy-panel.ts", source);
+    let second = extract("src/lazy-panel.ts", source);
+    assert_eq!(first, second);
+
+    assert!(first.import_bindings.iter().any(|binding| {
+        binding.kind == ImportBindingKind::Default
+            && binding.module_specifier == "./panel"
+            && binding.imported_name == "default"
+            && binding.local_name == "default"
+    }));
+    assert!(first.references.iter().any(|reference| {
+        reference.name == "default" && reference.kind == ReferenceKind::References
+    }));
+}
+
+#[test]
 fn type_aliases_preserve_their_bounded_right_hand_side_for_agent_retrieval() {
     let extracted = extract(
         "src/types.ts",

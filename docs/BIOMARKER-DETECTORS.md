@@ -25,15 +25,18 @@ The public detector names are:
   `high_fan_out`, `unresolved_reference_pressure`.
 
 `high_fan_out` measures distinct resolved target symbols. Repeated sites to the
-same dependency and recursive self-edges do not inflate the finding. Detail
-groups dependencies into calls, modules, types, composition, data flow, and
-other edges. Cohesive functions that only assemble and return a facade of
-focused one-call delegates abstain; mixed orchestration remains actionable.
-The rule applies to executable and container symbols, not declarative constant
-tables or framework-owned convention exports.
+same dependency, recursive self-edges, and targets already owned through a
+direct `contains` edge do not inflate the finding. Calls to sibling or external
+symbols remain dependencies. Detail groups dependencies into calls, modules,
+types, composition, data flow, and other edges. Cohesive functions that only
+assemble and return a facade of focused one-call delegates abstain; mixed
+orchestration remains actionable. The rule applies to executable and container
+symbols, not declarative constant tables or framework-owned convention exports.
 `long_parameter_list` counts caller-supplied parameters, excluding an explicit
 language receiver such as Rust `self`, TypeScript's erased `this` parameter,
-and conventional Python method `self`/`cls` receivers.
+and conventional Python method `self`/`cls` receivers. Framework-owned route
+and entry-point signatures reuse the same convention classification as
+`unused_export` and abstain; an ordinary authored function remains eligible.
 
 ## Evidence contract
 
@@ -49,8 +52,28 @@ separately attributable. Do not duplicate threshold tables in another runtime.
 
 `large_method` and the size component of `brain_method` use AST-owned code
 lines. Comment blocks and opaque multiline literals count once, and nested
-callable bodies belong to their own symbols. Physical source spans remain the
-navigation and history boundary.
+callable bodies belong to their own symbols. Static JSX tags, attributes, and
+text are presentation scaffolding; embedded JSX expressions still contribute
+their executable syntax. Physical source spans remain the navigation and
+history boundary.
+
+`sql_string_concat` requires dynamic text and a statement-shaped keyword pair:
+`SELECT ... FROM`, `INSERT ... INTO`, `UPDATE ... SET`, or `DELETE ... FROM`.
+Presentation strings containing a standalone English verb do not qualify.
+
+`stale_doc` compares declaration values only with documentation that makes an
+explicit value claim through a cue such as `default`, `limit`, `threshold`, or
+an equivalent assignment phrase. Illustrative numbers without such a cue
+abstain.
+
+`secrets_handling` retains a nonzero privacy-safe evidence mask for sensitive
+identifiers and cryptographic handling, but that evidence alone is not
+actionable. Finding eligibility additionally requires literal secret material,
+an environment-secret read, or an exposure operation such as logging the
+sensitive value. Environment access and exposure must contain the sensitive
+identifier in that same AST expression boundary; unrelated identifiers and log
+calls elsewhere in the symbol do not qualify. The evidence score and actionable
+classification remain separate persisted facts.
 
 `magic_number` normalizes language numeric suffixes before applying the benign
 0/1/2 rules, so typed spellings such as Rust `0_u32` retain their numeric
@@ -78,9 +101,11 @@ decision ladder. They still add cyclomatic branches; a nested `if` inside an
 
 `unresolved_reference_pressure` counts unresolved references that could still
 denote project declarations. Expected macro-expansion, dynamic receiver,
-member-access, language-intrinsic, explicit non-local import, shell-command, and
-manifest-dependency boundaries retain distinct unresolved provenance but do not
-inflate that project-actionable metric. Static embedded-SQL table references
+member-access, language-intrinsic (including Python built-ins), explicit
+non-local import, shell-command, and manifest-dependency boundaries retain
+distinct unresolved provenance but do not inflate that project-actionable
+metric. Python receiver calls remain targetless dynamic-dispatch evidence.
+Static embedded-SQL table references
 resolve to indexed SQL declarations when possible; otherwise their typed
 read/write/DDL provenance remains an explicit external-schema boundary rather
 than project-code symbol pressure. Relative and project-local imports stay
@@ -96,7 +121,11 @@ to abstain. Declaration-only type members never enter the export finding
 population. Ambiguous targetless receiver calls conservatively count as
 potential incoming use for same-named internal methods; this avoids a
 dead-export claim when the graph cannot prove the receiver type. Framework-owned
-exports retain their convention-specific entry-point rules.
+exports retain their convention-specific entry-point rules. React `lazy(() =>
+import(...))` records a default consumer, and TypeScript `typeof` queries retain
+typed value-consumer edges. Python's implicit module visibility is not explicit
+export intent, so Python declarations currently abstain from confident
+`unused_export` findings.
 
 All biomarker detectors operate on production symbol documents. Files in a
 modeled test/fixture path and Rust declarations owned by `#[cfg(test)]`, a test

@@ -1654,6 +1654,7 @@ export async function drain(records: Record[]) {
     )
     .unwrap_or_else(|error| panic!("serial loop fixture write failed: {error}"));
     write_facade_fixture(root);
+    write_biomarker_precision_fixtures(root);
     write_cross_domain_clone_fixtures(root);
 }
 
@@ -1686,6 +1687,160 @@ fn write_facade_fixture(root: &Path) {
     }
     std::fs::write(root.join("facade.ts"), facade)
         .unwrap_or_else(|error| panic!("facade fixture write failed: {error}"));
+}
+
+fn write_biomarker_precision_fixtures(root: &Path) {
+    write_biomarker_precision_typescript_fixture(root);
+    write_biomarker_graph_and_framework_fixtures(root);
+    write_biomarker_python_fixture(root);
+    write_biomarker_import_fixtures(root);
+}
+
+fn write_biomarker_precision_typescript_fixture(root: &Path) {
+    let mut typescript = String::from(
+        "function consume(_value: string): void {}\n\
+         export function StaticMarkup({ name }: { name: string }) {\n\
+           return <section>\n",
+    );
+    for _ in 0..150 {
+        typescript.push_str("    <span>Static presentation</span>\n");
+    }
+    typescript.push_str("    <span>{name.trim()}</span>\n  </section>;\n}\n");
+    typescript.push_str("export function ImperativeLong(value: string) {\n");
+    for _ in 0..110 {
+        typescript.push_str("  consume(value);\n");
+    }
+    typescript.push_str(
+        "}\n\
+         export function DeleteLabel({ name }: { name: string }) {\n\
+           const label = `Delete ${name}`;\n\
+           return <button aria-label={label}>Delete</button>;\n\
+         }\n\
+         export function presentationUpdate(name: string) {\n\
+           const label = `Update ${name}`;\n\
+           return <span>{label}</span>;\n\
+         }\n\
+         export function dynamicSelect(id: string) {\n\
+           const query = `SELECT value FROM records WHERE id = ${id}`;\n\
+           consume(id);\n\
+           return query;\n\
+         }\n\
+         export function dynamicInsert(id: string) {\n\
+           const query = `INSERT INTO records (id) VALUES (${id})`;\n\
+           consume(id);\n\
+           return query;\n\
+         }\n\
+         export function dynamicUpdate(id: string) {\n\
+           const query = \"UPDATE records SET active = true WHERE id = \" + id;\n\
+           consume(id);\n\
+           return query;\n\
+         }\n\
+         export function dynamicDelete(id: string) {\n\
+           const query = \"DELETE FROM records WHERE id = \" + id;\n\
+           consume(id);\n\
+           return query;\n\
+         }\n\
+         /** A gap at 0 is actionable; the example shows 11 pm-7 am. */\n\
+         export const ILLUSTRATIVE_COLUMNS = 2;\n\
+         /** The default retry limit is 3. */\n\
+         export const EXPLICIT_RETRY_LIMIT = 5;\n\
+         export function safeSign(payload: string, secretKey: string) {\n\
+           return sign(payload, secretKey);\n\
+         }\n\
+         export function exposeSecret(secretKey: string) {\n\
+           console.log(secretKey);\n\
+         }\n\
+         export function ordinaryFive(a: string, b: string, c: string, d: string, e: string) {\n\
+           return [a, b, c, d, e].join(':');\n\
+         }\n\
+         export function explicitlyUnused(): string {\n\
+           return 'unused';\n\
+         }\n",
+    );
+    std::fs::write(root.join("precision.tsx"), typescript)
+        .unwrap_or_else(|error| panic!("precision TypeScript fixture write failed: {error}"));
+}
+
+fn write_biomarker_graph_and_framework_fixtures(root: &Path) {
+    let mut contained = String::from("export function containedCoordinator(value: string) {\n");
+    for index in 0..30 {
+        writeln!(
+            contained,
+            "  function localStep{index}() {{ return value; }}"
+        )
+        .unwrap_or_else(|error| panic!("contained helper formatting failed: {error}"));
+    }
+    for index in 0..30 {
+        writeln!(contained, "  localStep{index}();")
+            .unwrap_or_else(|error| panic!("contained call formatting failed: {error}"));
+    }
+    contained.push_str("  return value;\n}\n");
+    std::fs::write(root.join("contained.ts"), contained)
+        .unwrap_or_else(|error| panic!("contained fan-out fixture write failed: {error}"));
+
+    let route = root.join("app/api/precision/route.ts");
+    std::fs::create_dir_all(
+        route
+            .parent()
+            .unwrap_or_else(|| panic!("precision route fixture had no parent")),
+    )
+    .unwrap_or_else(|error| panic!("precision route parent failed: {error}"));
+    std::fs::write(
+        route,
+        "export async function GET(request: Request, context: unknown, params: unknown, signal: AbortSignal, state: unknown) {\n  return new Response(String(Boolean(request && context && params && signal && state)));\n}\n",
+    )
+    .unwrap_or_else(|error| panic!("precision route fixture write failed: {error}"));
+}
+
+fn write_biomarker_python_fixture(root: &Path) {
+    let mut python = String::from(
+        "def normalize_values(values):\n    output = []\n    for index, value in enumerate(values):\n",
+    );
+    for index in 0..8 {
+        writeln!(
+            python,
+            "        normalized_{index} = str(value).strip()\n        output.append(normalized_{index})"
+        )
+        .unwrap_or_else(|error| panic!("Python intrinsic fixture formatting failed: {error}"));
+    }
+    python.push_str(
+        "    if len(output) == 0:\n        raise RuntimeError('empty')\n    return output\n\n\
+         def missing_project_pressure(value):\n",
+    );
+    for index in 0..16 {
+        writeln!(python, "    missing_project_{index}(value)")
+            .unwrap_or_else(|error| panic!("Python unresolved fixture formatting failed: {error}"));
+    }
+    python.push_str(
+        "    return value\n\n\
+         def implicit_public():\n    return 'module-visible-without-explicit-export-intent'\n",
+    );
+    std::fs::write(root.join("precision.py"), python)
+        .unwrap_or_else(|error| panic!("precision Python fixture write failed: {error}"));
+}
+
+fn write_biomarker_import_fixtures(root: &Path) {
+    for (path, source) in [
+        (
+            "lazy-panel.tsx",
+            "export default function LazyPanel() { return <section />; }\n",
+        ),
+        (
+            "lazy-consumer.tsx",
+            "export const LoadedPanel = React.lazy(() => import('./lazy-panel'));\n",
+        ),
+        (
+            "runtime-config.ts",
+            "export const RuntimeConfig = { mode: 'safe' } as const;\n",
+        ),
+        (
+            "runtime-config-consumer.ts",
+            "import type { RuntimeConfig } from './runtime-config';\nexport type RuntimeConfigShape = typeof RuntimeConfig;\n",
+        ),
+    ] {
+        std::fs::write(root.join(path), source)
+            .unwrap_or_else(|error| panic!("precision import fixture {path} failed: {error}"));
+    }
 }
 
 fn write_cross_domain_clone_fixtures(root: &Path) {
@@ -1824,7 +1979,7 @@ async fn assert_layer_analysis(runtime: &ProjectRuntime, indexed: &IndexReport) 
     let layers = serde_json::to_value(layers)
         .unwrap_or_else(|error| panic!("layer analysis serialization failed: {error}"));
     assert_eq!(layers["configured"], true);
-    assert_eq!(layers["importsEvaluated"], 6);
+    assert_eq!(layers["importsEvaluated"], 8);
     assert_eq!(
         layers["violations"].as_array().map(Vec::len),
         Some(1),
@@ -1973,7 +2128,68 @@ fn assert_structural_finding_inventory(value: &serde_json::Value) {
     assert!(findings.iter().any(|finding| {
         finding["qualifiedName"] == "RETRY_COUNT" && finding["finding"] == "stale_doc"
     }));
+    assert_biomarker_precision_inventory(findings);
     assert_clone_class_findings(findings);
+}
+
+fn assert_biomarker_precision_inventory(findings: &[serde_json::Value]) {
+    for (detector, path, name) in [
+        ("large_method", "precision.tsx", "StaticMarkup"),
+        ("sql_string_concat", "precision.tsx", "DeleteLabel"),
+        ("sql_string_concat", "precision.tsx", "presentationUpdate"),
+        ("high_fan_out", "contained.ts", "containedCoordinator"),
+        ("long_parameter_list", "app/api/precision/route.ts", "GET"),
+        (
+            "unresolved_reference_pressure",
+            "precision.py",
+            "normalize_values",
+        ),
+        ("unused_export", "precision.py", "implicit_public"),
+        ("unused_export", "lazy-panel.tsx", "LazyPanel"),
+        ("unused_export", "runtime-config.ts", "RuntimeConfig"),
+        ("stale_doc", "precision.tsx", "ILLUSTRATIVE_COLUMNS"),
+        ("secrets_handling", "precision.tsx", "safeSign"),
+    ] {
+        assert!(
+            !has_json_finding(findings, detector, path, name),
+            "precision negative control was actionable: {detector} {path}::{name}; findings={findings:?}"
+        );
+    }
+    for (detector, path, name) in [
+        ("large_method", "precision.tsx", "ImperativeLong"),
+        ("sql_string_concat", "precision.tsx", "dynamicSelect"),
+        ("sql_string_concat", "precision.tsx", "dynamicInsert"),
+        ("sql_string_concat", "precision.tsx", "dynamicUpdate"),
+        ("sql_string_concat", "precision.tsx", "dynamicDelete"),
+        ("high_fan_out", "facade.ts", "mixedOrchestrator"),
+        ("long_parameter_list", "precision.tsx", "ordinaryFive"),
+        (
+            "unresolved_reference_pressure",
+            "precision.py",
+            "missing_project_pressure",
+        ),
+        ("unused_export", "precision.tsx", "explicitlyUnused"),
+        ("stale_doc", "precision.tsx", "EXPLICIT_RETRY_LIMIT"),
+        ("secrets_handling", "precision.tsx", "exposeSecret"),
+    ] {
+        assert!(
+            has_json_finding(findings, detector, path, name),
+            "precision positive control was hidden: {detector} {path}::{name}; findings={findings:?}"
+        );
+    }
+}
+
+fn has_json_finding(
+    findings: &[serde_json::Value],
+    detector: &str,
+    path: &str,
+    name: &str,
+) -> bool {
+    findings.iter().any(|finding| {
+        finding["finding"] == detector
+            && finding["path"] == path
+            && finding["qualifiedName"] == name
+    })
 }
 
 fn assert_contextual_detector_findings(findings: &[serde_json::Value]) {
@@ -2132,6 +2348,43 @@ async fn assert_structural_finding_queries(runtime: &ProjectRuntime, indexed: &I
     assert_eq!(stats["byFinding"]["dynamic_eval"], 1);
 }
 
+async fn assert_biomarker_precision_stats(runtime: &ProjectRuntime, indexed: &IndexReport) {
+    let stats = runtime
+        .database()
+        .current_structural_finding_stats(&indexed.project_id)
+        .await
+        .unwrap_or_else(|error| panic!("precision biomarker stats failed: {error}"));
+    let stats = serde_json::to_value(stats)
+        .unwrap_or_else(|error| panic!("precision biomarker stats serialization failed: {error}"));
+    for detector in [
+        "large_method",
+        "sql_string_concat",
+        "high_fan_out",
+        "long_parameter_list",
+        "unresolved_reference_pressure",
+        "unused_export",
+        "stale_doc",
+        "secrets_handling",
+    ] {
+        let query = StructuralFindingQuery::new(100)
+            .and_then(|query| query.with_finding(Some(detector)))
+            .map_or_else(
+                |error| panic!("precision biomarker query was invalid: {error}"),
+                |query| query.with_minimum_severity(StructuralFindingSeverity::Info),
+            );
+        let ranked_count = runtime
+            .database()
+            .count_current_structural_findings(&indexed.project_id, &query)
+            .await
+            .unwrap_or_else(|error| panic!("precision biomarker count failed: {error}"));
+        assert_eq!(
+            stats["byFinding"][detector].as_u64().unwrap_or_default(),
+            ranked_count,
+            "ranked and stats precision policy diverged for {detector}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
 async fn workspace_dependency_audit_combines_manifests_graph_scripts_and_dynamic_imports() {
@@ -2156,6 +2409,7 @@ async fn workspace_dependency_audit_combines_manifests_graph_scripts_and_dynamic
         let findings = structural_findings_json(&runtime, &indexed).await;
         assert_structural_finding_inventory(&findings);
         assert_structural_finding_queries(&runtime, &indexed).await;
+        assert_biomarker_precision_stats(&runtime, &indexed).await;
         runtime.close().await;
     }
     drop_schema(&settings, &schema).await;

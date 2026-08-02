@@ -54,6 +54,15 @@ WITH RECURSIVE current AS (
                 WHERE edges.project_id = CAST($1 AS uuid)
                   AND edges.edge_kind <> 'contains'
                   AND edges.target_symbol_id <> edges.source_symbol_id
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM {schema}."edges" AS containment
+                      WHERE containment.project_id = edges.project_id
+                        AND containment.generation_id = edges.generation_id
+                        AND containment.source_symbol_id = edges.source_symbol_id
+                        AND containment.target_symbol_id = edges.target_symbol_id
+                        AND containment.edge_kind = 'contains'
+                  )
                 GROUP BY edges.source_symbol_id
             ), unresolved AS (
                 SELECT refs.owner_symbol_id AS symbol_id,
@@ -71,6 +80,7 @@ WITH RECURSIVE current AS (
                         'native-rust-macro-unexpanded',
                         'native-external-reference',
                         'native-javascript-intrinsic',
+                        'native-python-intrinsic',
                         'native-shell-command',
                         'native-manifest-reference'
                       )
@@ -404,7 +414,7 @@ WITH RECURSIVE current AS (
                 LEFT JOIN incoming ON incoming.symbol_id = coverage.symbol_id
             ), base AS (
                 SELECT symbols.symbol_id, files.normalized_path AS path,
-                       symbols.qualified_name, symbols.symbol_kind,
+                       files.language, symbols.qualified_name, symbols.symbol_kind,
                        symbols.structural_digest,
                        documents.metadata ->> 'clone_shape_digest' AS clone_shape_digest,
                        documents.metadata #> ARRAY['partial_clone','listed_peer_symbol_ids'] AS partial_clone_listed_peer_ids,
@@ -534,6 +544,7 @@ WITH RECURSIVE current AS (
                        COALESCE((documents.metadata #>> ARRAY['health','hardcoded_url_configuration'])::double precision, 0.0) AS hardcoded_url_configuration,
                        COALESCE((documents.metadata #>> ARRAY['health','hardcoded_url_presentation_abstentions'])::double precision, 0.0) AS hardcoded_url_presentation_abstentions,
                        COALESCE((documents.metadata #>> ARRAY['health','secrets_score'])::double precision, 0.0) AS secrets_score,
+                       COALESCE((documents.metadata #>> ARRAY['health','secrets_actionable'])::boolean, false) AS secrets_actionable,
                        COALESCE((documents.metadata #>> ARRAY['health','stale_doc_numbers'])::double precision, 0.0) AS stale_doc_numbers,
                        COALESCE((documents.metadata #>> ARRAY['health','accidental_quadratic'])::double precision, 0.0) AS accidental_quadratic,
                        COALESCE((documents.metadata #>> ARRAY['health','empty_catches'])::double precision, 0.0) AS empty_catches,
@@ -775,16 +786,16 @@ WITH RECURSIVE current AS (
                       ('complex_method', 'cyclomatic', base.cyclomatic, 15.0, 15.0, 25.0, base.symbol_kind IN ('function','method','component')),
                       ('nested_complexity', 'max_nesting', base.max_nesting, 5.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component')),
                       ('complex_conditional', 'conditional_operands', base.max_conditional_operands, 6.0, 6.0, 8.0, base.symbol_kind IN ('function','method','component')),
-                      ('long_parameter_list', 'parameters', base.parameter_count, 4.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component') AND NOT base.declaration_only),
+                      ('long_parameter_list', 'parameters', base.parameter_count, 4.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component') AND NOT base.declaration_only AND NOT base.framework_convention_export),
                       ('brain_method', 'composite_risk', (base.code_lines / 100.0) * (base.cyclomatic / 10.0) * GREATEST(1.0, base.max_nesting / 3.0) * GREATEST(1.0, base.max_conditional_operands / 4.0), 5.0, 10.0, 20.0, base.symbol_kind IN ('function','method','component') AND base.code_lines >= 50 AND base.cyclomatic >= 8),
                       ('magic_number', 'occurrences', base.magic_numbers, 3.0, 5.0, 8.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
                       ('hardcoded_url', 'occurrences', base.hardcoded_urls, 1.0, 2.0, 3.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
                       ('recently_grew', 'growth_percent', base.lines::double precision * 100.0 / GREATEST(base.prior_lines, 1), 150.0, 200.0, 300.0, base.symbol_kind IN ('function','method','component') AND base.prior_lines >= 20 AND base.lines > base.prior_lines * 1.5 AND base.prior_published_at >= clock_timestamp() - interval '30 days'),
                       ('stale_doc', 'disjoint_documented_numbers', base.stale_doc_numbers, 1.0, 999.0, 999.0, base.symbol_kind = 'constant'),
-                      ('secrets_handling', 'confidence_percent', base.secrets_score, 50.0, 50.0, 70.0, base.symbol_kind IN ('function','method','component')),
+                      ('secrets_handling', 'confidence_percent', base.secrets_score, 50.0, 50.0, 70.0, base.symbol_kind IN ('function','method','component') AND base.secrets_actionable),
                       ('god_class', 'behavioral_methods', base.behavioral_methods::double precision, 15.0, 40.0, 60.0, base.symbol_kind IN ('class','struct','module') AND base.complex_methods >= 5),
                       ('feature_envy', 'foreign_field_accesses', base.feature_envy_atfd::double precision, 6.0, 12.0, 999.0, base.symbol_kind = 'method' AND base.feature_envy_fdp <= 2 AND base.local_attribute_access < (1.0 / 3.0)),
-                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.declaration_only AND NOT base.function_local AND NOT base.framework_convention_export AND NOT base.declared_external_api AND NOT base.test_source),
+                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.language <> 'python' AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.declaration_only AND NOT base.function_local AND NOT base.framework_convention_export AND NOT base.declared_external_api AND NOT base.test_source),
                       ('low_coverage', 'uncovered_percent', (1.0 - COALESCE(base.coverage_fraction, 1.0)) * 100.0, 50.0, 50.0, 80.0, base.symbol_kind IN ('function','method','component') AND base.coverage_fraction <= 0.5 AND base.centrality_percentile >= 0.9),
                       ('duplicate_code', CASE WHEN base.duplicate_copies > 1 THEN 'exact_copies' WHEN base.clone_shape_copies > 1 THEN 'normalized_shape_copies' WHEN base.partial_clone_peers > 0 THEN 'partial_clone_peers' ELSE 'semantic_clone_peers' END, CASE WHEN base.duplicate_copies > 1 THEN base.duplicate_copies WHEN base.clone_shape_copies > 1 THEN base.clone_shape_copies WHEN base.partial_clone_peers > 0 THEN base.partial_clone_peers ELSE base.semantic_clone_peers END::double precision, CASE WHEN base.duplicate_copies > 1 OR base.clone_shape_copies > 1 THEN 2.0 ELSE 1.0 END, CASE WHEN base.duplicate_copies > 1 THEN 2.0 ELSE 999.0 END, 999.0, base.symbol_kind IN ('function','method','component') AND ((base.duplicate_copies > 1 AND base.lines >= 6) OR (base.clone_shape_copies > 1 AND base.lines >= 12) OR (base.partial_clone_peers > 0 AND base.lines >= 12) OR (base.semantic_clone_peers > 0 AND base.lines >= 6)) AND CASE WHEN base.duplicate_copies > 1 THEN base.symbol_id = (SELECT peer.symbol_id FROM production_clone_symbols AS peer WHERE peer.structural_digest = base.structural_digest AND peer.end_line - peer.start_line + 1 >= 6 ORDER BY peer.symbol_id LIMIT 1) WHEN base.clone_shape_copies > 1 THEN base.symbol_id = (SELECT peer.symbol_id FROM production_clone_symbols AS peer WHERE peer.search_metadata ->> 'clone_shape_digest' = base.clone_shape_digest AND COALESCE((peer.search_metadata ->> 'near_clone_compatible')::boolean, false) ORDER BY peer.symbol_id LIMIT 1) WHEN base.partial_clone_peers > 0 THEN base.symbol_id::text = base.partial_clone_representative_symbol_id ELSE base.symbol_id = base.semantic_clone_representative_symbol_id END),
                       ('high_fan_out', 'outgoing_dependencies', base.outgoing::double precision, 25.0, 50.0, 100.0, base.symbol_kind IN ('function','method','component','class','struct','module') AND NOT base.facade_factory AND NOT base.framework_convention_export),

@@ -22,8 +22,9 @@ use cartograph_extract::{
     DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, ExtractedImportBinding,
     ExtractedNumericalSite, ExtractedReference, ImportBindingKind, NativeExtractor,
     RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits, SourceReadError,
-    SourceReadOptions, SourceRoot, is_test_source_path, native_extraction_reservation,
-    native_extractor_contract_digest, native_read_reservation, substitute_module_alias,
+    SourceReadOptions, SourceRoot, TYPE_QUERY_VALUE_RESOLUTION_PREFIX, is_test_source_path,
+    native_extraction_reservation, native_extractor_contract_digest, native_read_reservation,
+    substitute_module_alias,
 };
 use cartograph_scip::{
     ScipOverlayReport, ScipOverlayRequest, apply_scip_overlay_with_cancellation,
@@ -77,6 +78,7 @@ const RUST_INTRINSIC_UNRESOLVED_PROVENANCE: &str = "native-rust-intrinsic";
 const RUST_MACRO_UNRESOLVED_PROVENANCE: &str = "native-rust-macro-unexpanded";
 const EXTERNAL_REFERENCE_UNRESOLVED_PROVENANCE: &str = "native-external-reference";
 const JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE: &str = "native-javascript-intrinsic";
+const PYTHON_INTRINSIC_UNRESOLVED_PROVENANCE: &str = "native-python-intrinsic";
 const SHELL_COMMAND_UNRESOLVED_PROVENANCE: &str = "native-shell-command";
 const MANIFEST_REFERENCE_UNRESOLVED_PROVENANCE: &str = "native-manifest-reference";
 const EMBEDDED_SQL_READ_PROVENANCE: &str = "native-embedded-sql-read";
@@ -6677,9 +6679,14 @@ impl ResolutionOutput<'_> {
             .resolution_name
             .as_deref()
             .and_then(|name| name.strip_prefix(RUST_MACRO_RESOLUTION_PREFIX));
+        let type_query_value_name = reference
+            .resolution_name
+            .as_deref()
+            .and_then(|name| name.strip_prefix(TYPE_QUERY_VALUE_RESOLUTION_PREFIX));
         let embedded_sql = embedded_sql_lookup(reference.resolution_name.as_deref());
         let lookup_name = dynamic_dispatch_name
             .or(rust_macro_name)
+            .or(type_query_value_name)
             .or_else(|| embedded_sql.as_ref().map(|lookup| lookup.table))
             .unwrap_or_else(|| {
                 reference
@@ -6702,7 +6709,11 @@ impl ResolutionOutput<'_> {
                     owner: reference.owner.as_ref(),
                     name: lookup_name,
                     dynamic_dispatch: dynamic_dispatch_name.is_some(),
-                    kind: reference.kind,
+                    kind: if type_query_value_name.is_some() {
+                        ReferenceKind::References
+                    } else {
+                        reference.kind
+                    },
                     span: reference.span,
                 },
                 cancelled,
@@ -7498,13 +7509,11 @@ fn import_scope_unresolved_provenance(
 }
 
 fn language_unresolved_provenance(request: &ResolutionRequest<'_>) -> Option<&'static str> {
-    if javascript_family_name(request.language) {
-        if javascript_intrinsic_reference(request) {
-            return Some(JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE);
-        }
-        if request.kind == ReferenceKind::Calls && javascript_receiver_reference(request.name) {
-            return Some(DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE);
-        }
+    if let Some(provenance) = javascript_unresolved_provenance(request) {
+        return Some(provenance);
+    }
+    if let Some(provenance) = python_unresolved_provenance(request) {
+        return Some(provenance);
     }
     if shell_command_language(request.language) && request.kind == ReferenceKind::Calls {
         return Some(SHELL_COMMAND_UNRESOLVED_PROVENANCE);
@@ -7515,6 +7524,196 @@ fn language_unresolved_provenance(request: &ResolutionRequest<'_>) -> Option<&'s
         return Some(MANIFEST_REFERENCE_UNRESOLVED_PROVENANCE);
     }
     None
+}
+
+fn javascript_unresolved_provenance(request: &ResolutionRequest<'_>) -> Option<&'static str> {
+    if !javascript_family_name(request.language) {
+        return None;
+    }
+    if javascript_intrinsic_reference(request) {
+        return Some(JAVASCRIPT_INTRINSIC_UNRESOLVED_PROVENANCE);
+    }
+    (request.kind == ReferenceKind::Calls && javascript_receiver_reference(request.name))
+        .then_some(DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE)
+}
+
+fn python_unresolved_provenance(request: &ResolutionRequest<'_>) -> Option<&'static str> {
+    if request.language != SourceLanguage::Python.as_str() {
+        return None;
+    }
+    if python_intrinsic_reference(request) {
+        return Some(PYTHON_INTRINSIC_UNRESOLVED_PROVENANCE);
+    }
+    (request.kind == ReferenceKind::Calls && python_receiver_reference(request.name))
+        .then_some(DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE)
+}
+
+fn python_intrinsic_reference(request: &ResolutionRequest<'_>) -> bool {
+    !request.name.contains('.')
+        && (python_builtin_exception(request.name) || python_builtin_value(request.name))
+}
+
+fn python_builtin_exception(name: &str) -> bool {
+    matches!(
+        name,
+        "ArithmeticError"
+            | "AssertionError"
+            | "AttributeError"
+            | "BaseException"
+            | "BlockingIOError"
+            | "BrokenPipeError"
+            | "BufferError"
+            | "BytesWarning"
+            | "ChildProcessError"
+            | "ConnectionAbortedError"
+            | "ConnectionError"
+            | "ConnectionRefusedError"
+            | "ConnectionResetError"
+            | "DeprecationWarning"
+            | "EOFError"
+            | "EncodingWarning"
+            | "EnvironmentError"
+            | "Exception"
+            | "FileExistsError"
+            | "FileNotFoundError"
+            | "FloatingPointError"
+            | "FutureWarning"
+            | "GeneratorExit"
+            | "IOError"
+            | "ImportError"
+            | "ImportWarning"
+            | "IndentationError"
+            | "IndexError"
+            | "InterruptedError"
+            | "IsADirectoryError"
+            | "KeyError"
+            | "KeyboardInterrupt"
+            | "LookupError"
+            | "MemoryError"
+            | "ModuleNotFoundError"
+            | "NameError"
+            | "NotADirectoryError"
+            | "NotImplemented"
+            | "NotImplementedError"
+            | "OSError"
+            | "OverflowError"
+            | "PendingDeprecationWarning"
+            | "PermissionError"
+            | "ProcessLookupError"
+            | "RecursionError"
+            | "ReferenceError"
+            | "ResourceWarning"
+            | "RuntimeError"
+            | "RuntimeWarning"
+            | "StopAsyncIteration"
+            | "StopIteration"
+            | "SyntaxError"
+            | "SyntaxWarning"
+            | "SystemError"
+            | "SystemExit"
+            | "TabError"
+            | "TimeoutError"
+            | "TypeError"
+            | "UnboundLocalError"
+            | "UnicodeDecodeError"
+            | "UnicodeEncodeError"
+            | "UnicodeError"
+            | "UnicodeTranslateError"
+            | "UnicodeWarning"
+            | "UserWarning"
+            | "ValueError"
+            | "Warning"
+            | "ZeroDivisionError"
+    )
+}
+
+fn python_builtin_value(name: &str) -> bool {
+    matches!(
+        name,
+        "__build_class__"
+            | "__debug__"
+            | "__import__"
+            | "abs"
+            | "aiter"
+            | "all"
+            | "anext"
+            | "any"
+            | "ascii"
+            | "bin"
+            | "bool"
+            | "breakpoint"
+            | "bytearray"
+            | "bytes"
+            | "callable"
+            | "chr"
+            | "classmethod"
+            | "compile"
+            | "complex"
+            | "delattr"
+            | "dict"
+            | "dir"
+            | "divmod"
+            | "enumerate"
+            | "eval"
+            | "exec"
+            | "filter"
+            | "float"
+            | "format"
+            | "frozenset"
+            | "getattr"
+            | "globals"
+            | "hasattr"
+            | "hash"
+            | "help"
+            | "hex"
+            | "id"
+            | "input"
+            | "int"
+            | "isinstance"
+            | "issubclass"
+            | "iter"
+            | "len"
+            | "list"
+            | "locals"
+            | "map"
+            | "max"
+            | "memoryview"
+            | "min"
+            | "next"
+            | "object"
+            | "oct"
+            | "open"
+            | "ord"
+            | "pow"
+            | "print"
+            | "property"
+            | "range"
+            | "repr"
+            | "reversed"
+            | "round"
+            | "set"
+            | "setattr"
+            | "slice"
+            | "sorted"
+            | "staticmethod"
+            | "str"
+            | "sum"
+            | "super"
+            | "tuple"
+            | "type"
+            | "vars"
+            | "zip"
+    )
+}
+
+fn python_receiver_reference(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(receiver, member)| {
+        !receiver.trim().is_empty()
+            && !member.trim().is_empty()
+            && member
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    })
 }
 
 fn has_project_candidate(index: &ResolutionIndex, request: &ResolutionRequest<'_>) -> bool {
@@ -10757,21 +10956,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "59b61f108a6adf0b27afa8b7c8b653cd19e56f31b1fc38ab66fcb042188f0aa2";
+        "afe81d3c819a750ebcdf141c2eb62cdc61cd02a986188b63118e206f81d6f36e";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "5045210cf48045f8cfb4430331bc1fca725c84ade43331bd3ee1f424fecd83e1";
+        "3ec7c030beaebcfab6528900ce3e8c412b6fa1ea2dc26925b7ff3489f4c966dc";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "102b4a9004142e5ca0469c952745c2697797ecffcc92ec741fe1701aa8ed5231";
+        "50259aa96166111916d3b0fa7a031558314a8b467a304bd8ef98bb5d045d78cc";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 12;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "5f78fa17a9f0d2a275323ea738b4dc762db383ce46b50ea7a74caf667288976e";
+        "33b63d456afbfc9ce385f160eb783465d409fc39a90c3166026f376cad674db2";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (12, 40, 34, 27, 40);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -11769,7 +11968,7 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
         );
         assert_eq!(
             serial.facts().digest_version(),
-            cartograph_domain::GenerationDigestVersion::V8
+            cartograph_domain::GenerationDigestVersion::CURRENT
         );
         assert_eq!(
             serial.report().numerical_sites(),
@@ -13065,7 +13264,7 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
         let fixtures = [
             (
                 "src/service.ts",
-                "import { z } from 'zod';\nexport const RuntimeSchema = z.object({ value: z.string() });\nexport type RuntimeSchema = z.infer<typeof RuntimeSchema>;\n",
+                "import { z } from 'zod';\nexport const RuntimeSchema = z.object({ value: z.string() });\nexport type RuntimeSchema = z.infer<typeof RuntimeSchema>;\nexport const RuntimeConfig = { mode: 'safe' } as const;\n",
             ),
             (
                 "src/build.ts",
@@ -13079,11 +13278,16 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
                 "src/consumer.ts",
                 "import type { PublicRecord } from './model';\nexport function readId(value: PublicRecord): string { return value.id; }\n",
             ),
+            (
+                "src/config-consumer.ts",
+                "import type { RuntimeConfig } from './service';\nexport type RuntimeConfigShape = typeof RuntimeConfig;\n",
+            ),
         ];
         let facts = build_capability_generation(&fixtures, false);
         for (source_path, target_path, name) in [
             ("src/build.ts", "src/service.ts", "RuntimeSchema"),
             ("src/consumer.ts", "src/model.ts", "PublicRecord"),
+            ("src/config-consumer.ts", "src/service.ts", "RuntimeConfig"),
         ] {
             let source_file = facts
                 .files()
@@ -13116,6 +13320,82 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
                 facts.references()
             );
         }
+        let runtime_config = facts
+            .symbols()
+            .iter()
+            .find(|symbol| {
+                symbol.qualified_name == "RuntimeConfig"
+                    && symbol.symbol_kind == SymbolKind::Constant.as_str()
+            })
+            .unwrap_or_else(|| panic!("missing RuntimeConfig value declaration"));
+        let runtime_config_shape =
+            capability_symbol(&facts, "src/config-consumer.ts", "RuntimeConfigShape");
+        assert!(facts.references().iter().any(|reference| {
+            reference.owner_symbol_id.as_ref() == Some(&runtime_config_shape.symbol_id)
+                && reference.target_symbol_id.as_ref() == Some(&runtime_config.symbol_id)
+                && reference.reference_name == "RuntimeConfig"
+                && reference.reference_kind == ReferenceKind::TypeOf.as_str()
+                && reference.resolution_provenance == IMPORT_BINDING_PROVENANCE
+        }));
+    }
+
+    #[test]
+    fn python_intrinsics_and_receiver_calls_remain_explicit_non_project_boundaries() {
+        let fixtures = [(
+            "src/normalize.py",
+            "def normalize(values):\n    for index, value in enumerate(values):\n        text = str(value).strip()\n        values.append(text)\n    if len(values) == 0:\n        raise RuntimeError('empty')\n    return missing_project_symbol(values)\n",
+        )];
+        let forward = build_capability_generation(&fixtures, false);
+        let reversed = build_capability_generation(&fixtures, true);
+        assert_eq!(forward.digest(), reversed.digest());
+        let normalize = capability_symbol(&forward, "src/normalize.py", "normalize");
+
+        for name in ["enumerate", "str", "len", "RuntimeError"] {
+            let reference = forward
+                .references()
+                .iter()
+                .find(|reference| {
+                    reference.owner_symbol_id.as_ref() == Some(&normalize.symbol_id)
+                        && reference.reference_name == name
+                        && reference.reference_kind == ReferenceKind::Calls.as_str()
+                })
+                .unwrap_or_else(|| panic!("missing Python intrinsic reference {name}"));
+            assert!(reference.target_symbol_id.is_none(), "{name}");
+            assert_eq!(
+                reference.resolution_provenance, PYTHON_INTRINSIC_UNRESOLVED_PROVENANCE,
+                "{name}"
+            );
+        }
+        for member in ["append", "strip"] {
+            let reference = forward
+                .references()
+                .iter()
+                .find(|reference| {
+                    reference.owner_symbol_id.as_ref() == Some(&normalize.symbol_id)
+                        && reference.reference_kind == ReferenceKind::Calls.as_str()
+                        && reference
+                            .reference_name
+                            .rsplit('.')
+                            .next()
+                            .is_some_and(|name| name == member)
+                })
+                .unwrap_or_else(|| panic!("missing Python receiver reference {member}"));
+            assert!(reference.target_symbol_id.is_none(), "{member}");
+            assert_eq!(
+                reference.resolution_provenance, DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE,
+                "{member}"
+            );
+        }
+        let missing = forward
+            .references()
+            .iter()
+            .find(|reference| {
+                reference.owner_symbol_id.as_ref() == Some(&normalize.symbol_id)
+                    && reference.reference_name == "missing_project_symbol"
+            })
+            .unwrap_or_else(|| panic!("missing unresolved project-symbol control"));
+        assert!(missing.target_symbol_id.is_none());
+        assert_eq!(missing.resolution_provenance, UNRESOLVED_PROVENANCE);
     }
 
     #[test]
@@ -13182,8 +13462,12 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
             ),
             ("src/types.ts", "export interface Widget { id: string }\n"),
             (
+                "src/panel.tsx",
+                "export default function Panel() { return null; }\n",
+            ),
+            (
                 "src/consumer.ts",
-                "export async function load() { const { foo, bar: alias } = await import('./target.js'); const module = await import('./target.js'); module.qux(); const inline = import('./target.js').direct; return [foo, alias, inline]; }\ntype Loaded = import('./types.js').Widget;\n",
+                "import { lazy } from 'react';\nexport const Panel = lazy(() => import('./panel'));\nexport async function load() { const { foo, bar: alias } = await import('./target.js'); const module = await import('./target.js'); module.qux(); const inline = import('./target.js').direct; return [foo, alias, inline]; }\ntype Loaded = import('./types.js').Widget;\n",
             ),
         ];
         let forward = build_capability_generation(&fixtures, false);
@@ -13196,6 +13480,7 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
             ("src/target.ts", "qux"),
             ("src/target.ts", "direct"),
             ("src/types.ts", "Widget"),
+            ("src/panel.tsx", "Panel"),
         ] {
             let target = capability_symbol(&forward, path, name);
             assert!(

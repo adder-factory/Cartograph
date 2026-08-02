@@ -1452,7 +1452,7 @@ mod tests {
         })
         .unwrap_or_else(|error| panic!("numerical site was rejected: {error}"));
         assert_eq!(canonical.numerical_sites(), std::slice::from_ref(&site));
-        assert_eq!(canonical.digest_version(), GenerationDigestVersion::V8);
+        assert_eq!(canonical.digest_version(), GenerationDigestVersion::CURRENT);
 
         let without_site = validate_and_reduce(GenerationFacts {
             files: vec![file()],

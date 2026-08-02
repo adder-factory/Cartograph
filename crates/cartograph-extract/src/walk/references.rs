@@ -1,7 +1,10 @@
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolId};
 use tree_sitter::Node;
 
-use crate::{DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractError, ExtractedReference};
+use crate::{
+    DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractError, ExtractedReference,
+    TYPE_QUERY_VALUE_RESOLUTION_PREFIX,
+};
 
 use super::{
     ExtractionBuilder, PendingReference, module_system,
@@ -199,22 +202,69 @@ pub(super) fn capture_type_nodes(
     node: Node<'_>,
     owner: &SymbolId,
 ) -> Result<(), ExtractError> {
+    let language = builder.context.snapshot.language();
     for target in descendants_including_root(node) {
         builder.context.ensure_active()?;
-        if target.kind() != "type_identifier" {
+        let type_query_value = matches!(language, SourceLanguage::TypeScript | SourceLanguage::Tsx)
+            && target.kind() == "identifier"
+            && target
+                .parent()
+                .is_some_and(|parent| parent.kind() == "type_query")
+            && !zod_infer_type_query(builder, target);
+        if target.kind() != "type_identifier" && !type_query_value {
             continue;
         }
-        push_node_reference(
-            builder,
-            NodeReference {
+        if type_query_value {
+            let name = builder.context.owned_text(target)?;
+            let capacity = TYPE_QUERY_VALUE_RESOLUTION_PREFIX
+                .len()
+                .checked_add(name.len())
+                .ok_or(ExtractError::OutputLimit)?;
+            let mut resolution_name = String::new();
+            resolution_name
+                .try_reserve(capacity)
+                .map_err(|_| ExtractError::OutputLimit)?;
+            resolution_name.push_str(TYPE_QUERY_VALUE_RESOLUTION_PREFIX);
+            resolution_name.push_str(&name);
+            builder.emit_reference(ExtractedReference {
                 owner: Some(owner.clone()),
-                name: target,
+                name,
+                resolution_name: Some(resolution_name),
                 kind: ReferenceKind::TypeOf,
-                span: target,
-            },
-        )?;
+                span: span_for(target)?,
+            })?;
+        } else {
+            push_node_reference(
+                builder,
+                NodeReference {
+                    owner: Some(owner.clone()),
+                    name: target,
+                    kind: ReferenceKind::TypeOf,
+                    span: target,
+                },
+            )?;
+        }
     }
     Ok(())
+}
+
+fn zod_infer_type_query(builder: &ExtractionBuilder<'_, '_>, target: Node<'_>) -> bool {
+    let mut current = target.parent();
+    for _ in 0..8 {
+        let Some(node) = current else {
+            return false;
+        };
+        if matches!(node.kind(), "generic_type" | "type_arguments")
+            && builder.context.text(node).contains("z.infer")
+        {
+            return true;
+        }
+        if matches!(node.kind(), "type_alias_declaration" | "type_alias") {
+            return false;
+        }
+        current = node.parent();
+    }
+    false
 }
 
 pub(super) fn capture_invocation(

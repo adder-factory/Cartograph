@@ -850,8 +850,20 @@ export function SettingsCopy({ value }: { value: string }) {
   return <p className={`setting-${value}`}>Update settings</p>;
 }
 
+export function DeleteButton({ name }: { name: string }) {
+  return <button aria-label={`Delete ${name}`}>Delete</button>;
+}
+
 export function selectRecord(id: string) {
   return `SELECT * FROM records WHERE id = ${id}`;
+}
+
+export function insertRecord(id: string) {
+  return `INSERT INTO records (id) VALUES (${id})`;
+}
+
+export function updateRecord(id: string) {
+  return "UPDATE records SET active = true WHERE id = " + id;
 }
 
 export function deleteRecord(id: string) {
@@ -860,14 +872,19 @@ export function deleteRecord(id: string) {
 "#,
     );
 
-    for name in ["StatusPicker", "SettingsCopy"] {
+    for name in ["StatusPicker", "SettingsCopy", "DeleteButton"] {
         assert_eq!(
             symbol(&file, name).health.sql_string_concatenation,
             0,
             "presentation-only TSX triggered SQL detection for {name}"
         );
     }
-    for name in ["selectRecord", "deleteRecord"] {
+    for name in [
+        "selectRecord",
+        "insertRecord",
+        "updateRecord",
+        "deleteRecord",
+    ] {
         assert_eq!(
             symbol(&file, name).health.sql_string_concatenation,
             1,
@@ -1163,6 +1180,9 @@ fn symbol_health_retains_literal_and_sensitive_signals_without_retaining_literal
 /** Default retry count is 3. */
 export const RETRY_COUNT = 5;
 
+/** A gap at 0 is actionable; the example shows 11 pm-7 am. */
+export const COLUMNS = 2;
+
 export function authenticate(apiKey: string, password: string) {
   const endpoint = "https://api.example.com/v1";
   const weights = [3, 4, 5, 6, 8];
@@ -1181,6 +1201,7 @@ export function buildEndpoint(host: string) {
     assert!(authenticate.health.literal_bytes > 0);
     assert!(authenticate.health.secrets_score >= 70);
     assert_ne!(authenticate.health.secrets_signal_mask, 0);
+    assert!(authenticate.health.secrets_actionable);
     let build_endpoint = symbol(&file, "buildEndpoint");
     assert_eq!(build_endpoint.health.hardcoded_urls, 0);
     assert!(build_endpoint.health.literal_bytes > 0);
@@ -1189,6 +1210,7 @@ export function buildEndpoint(host: string) {
     assert_eq!(retry_count.health.stale_doc_numbers, 1);
     assert!(retry_count.signature.is_none());
     assert!(!format!("{:?}", retry_count.health).contains("RETRY_COUNT"));
+    assert_eq!(symbol(&file, "COLUMNS").health.stale_doc_numbers, 0);
 }
 
 #[test]
@@ -1199,6 +1221,35 @@ fn symbol_health_collapses_multiline_literals_for_code_line_metrics() {
     let literal_heavy = symbol(&file, "literal_heavy");
     assert!(literal_heavy.span.end_line() > 100);
     assert!(literal_heavy.health.code_lines < 10);
+}
+
+#[test]
+fn symbol_health_counts_jsx_expressions_without_static_markup_scaffolding() {
+    let mut source = String::from(
+        "export function StaticPanel({ name }: { name: string }) {\n  return (\n    <section>\n",
+    );
+    for _ in 0..150 {
+        source.push_str("      <span>Static presentation</span>\n");
+    }
+    source.push_str("      <span>{name.trim()}</span>\n    </section>\n  );\n}\n");
+    source.push_str("export function ImperativeWork(value: string) {\n");
+    for _ in 0..110 {
+        source.push_str("  consume(value);\n");
+    }
+    source.push_str("}\n");
+
+    let file = extract("src/static-panel.tsx", &source);
+    let panel = symbol(&file, "StaticPanel");
+    assert!(panel.span.end_line() > 150);
+    assert!(
+        panel.health.code_lines < 20,
+        "static JSX scaffolding inflated executable lines: {}",
+        panel.health.code_lines
+    );
+    assert!(
+        symbol(&file, "ImperativeWork").health.code_lines >= 100,
+        "imperative statements were removed from executable lines"
+    );
 }
 
 #[test]
@@ -1316,6 +1367,24 @@ export function classifyToken(token: string, parsed: { signature: string }) {
 export function signPayload(payload: string, secretKey: string) {
   return sign(payload, secretKey);
 }
+
+export function exposeSecret(secretKey: string) {
+  console.log(secretKey);
+}
+
+export function unrelatedLog(apiKeyPrefix: string) {
+  console.log("starting request");
+  return apiKeyPrefix;
+}
+
+export function unrelatedEnvironment(apiKeyPrefix: string) {
+  const runtime = process.env.NODE_ENV;
+  return `${apiKeyPrefix}:${runtime}`;
+}
+
+export function readEnvironmentSecret() {
+  return process.env.SECRET_KEY;
+}
 "#,
     );
     let vocabulary = symbol(&file, "vocabulary");
@@ -1324,7 +1393,22 @@ export function signPayload(payload: string, secretKey: string) {
     assert_eq!(symbol(&file, "unfinished").health.incomplete_markers, 2);
     assert!(symbol(&file, "literalLeak").health.secrets_score >= 60);
     assert!(symbol(&file, "classifyToken").health.secrets_score < 50);
-    assert!(symbol(&file, "signPayload").health.secrets_score >= 50);
+    let safe_handling = symbol(&file, "signPayload");
+    assert_ne!(safe_handling.health.secrets_signal_mask, 0);
+    assert!(!safe_handling.health.secrets_actionable);
+    let exposed = symbol(&file, "exposeSecret");
+    assert!(exposed.health.secrets_score >= 50);
+    assert!(exposed.health.secrets_actionable);
+    for name in ["unrelatedLog", "unrelatedEnvironment"] {
+        let unrelated = symbol(&file, name);
+        assert_ne!(unrelated.health.secrets_signal_mask, 0);
+        assert!(!unrelated.health.secrets_actionable);
+    }
+    assert!(
+        symbol(&file, "readEnvironmentSecret")
+            .health
+            .secrets_actionable
+    );
 }
 
 #[test]

@@ -690,16 +690,10 @@ fn compare_one_file(
         include_findings: options.findings.include,
         suppress_line_range_only: options.delta.suppress_line_range_only,
     });
-    let findings_delta = options.findings.delta.then(|| {
-        diff_findings(
-            baseline
-                .as_ref()
-                .map_or(&[][..], |file| file.symbols.as_slice()),
-            current
-                .as_ref()
-                .map_or(&[][..], |file| file.symbols.as_slice()),
-        )
-    });
+    let findings_delta = options
+        .findings
+        .delta
+        .then(|| diff_findings(baseline.as_ref(), current.as_ref()));
     let (edges_added, edges_removed) = if options.delta.edges {
         diff_edges(baseline.as_ref(), current.as_ref())
     } else {
@@ -790,6 +784,9 @@ fn diff_symbols(input: SymbolDiffInput<'_>) -> SymbolDiff {
         include_findings,
         suppress_line_range_only,
     } = input;
+    let Some(path) = current.or(baseline).map(|file| &file.path) else {
+        return SymbolDiff::default();
+    };
     let before = grouped_symbols(baseline.map_or(&[][..], |file| file.symbols.as_slice()));
     let after = grouped_symbols(current.map_or(&[][..], |file| file.symbols.as_slice()));
     let keys = before
@@ -808,6 +805,7 @@ fn diff_symbols(input: SymbolDiffInput<'_>) -> SymbolDiff {
                 SymbolPairInput {
                     before: before_group.get(index).copied(),
                     after: after_group.get(index).copied(),
+                    path,
                     include_findings,
                     suppress_line_range_only,
                 },
@@ -821,16 +819,20 @@ fn diff_symbols(input: SymbolDiffInput<'_>) -> SymbolDiff {
 struct SymbolPairInput<'symbol> {
     before: Option<&'symbol ExtractedSymbol>,
     after: Option<&'symbol ExtractedSymbol>,
+    path: &'symbol NormalizedPath,
     include_findings: bool,
     suppress_line_range_only: bool,
 }
 
 fn record_symbol_pair(diff: &mut SymbolDiff, input: SymbolPairInput<'_>) {
     match (input.before, input.after) {
-        (None, Some(after)) => diff
-            .added
-            .push(symbol_delta(after, &[], input.include_findings)),
-        (Some(before), None) => diff.removed.push(symbol_delta(before, &[], false)),
+        (None, Some(after)) => {
+            diff.added
+                .push(symbol_delta(after, input.path, &[], input.include_findings));
+        }
+        (Some(before), None) => diff
+            .removed
+            .push(symbol_delta(before, input.path, &[], false)),
         (Some(before), Some(after)) => {
             let reasons = modification_reasons(before, after);
             if reasons.is_empty() {
@@ -839,8 +841,12 @@ fn record_symbol_pair(diff: &mut SymbolDiff, input: SymbolPairInput<'_>) {
             if input.suppress_line_range_only && reasons == ["line_range_changed"] {
                 diff.line_range_only_count = diff.line_range_only_count.saturating_add(1);
             } else {
-                diff.modified
-                    .push(symbol_delta(after, &reasons, input.include_findings));
+                diff.modified.push(symbol_delta(
+                    after,
+                    input.path,
+                    &reasons,
+                    input.include_findings,
+                ));
             }
         }
         (None, None) => {}
@@ -902,6 +908,7 @@ fn modification_reasons(before: &ExtractedSymbol, after: &ExtractedSymbol) -> Ve
 
 fn symbol_delta(
     symbol: &ExtractedSymbol,
+    path: &NormalizedPath,
     modified_reasons: &[&'static str],
     include_findings: bool,
 ) -> SourceSymbolDelta {
@@ -914,23 +921,201 @@ fn symbol_delta(
         end_line: symbol.span.end_line(),
         modified_reasons: modified_reasons.to_vec(),
         findings: if include_findings {
-            findings_for_symbol(symbol)
+            findings_for_symbol(symbol, path)
         } else {
             Vec::new()
         },
     }
 }
 
-fn findings_for_symbol(symbol: &ExtractedSymbol) -> Vec<SourceFinding> {
-    let lines = symbol
-        .span
-        .end_line()
-        .saturating_sub(symbol.span.start_line())
-        .saturating_add(1);
+fn framework_convention_export(path: &NormalizedPath, symbol: &ExtractedSymbol) -> bool {
+    let path = path.as_str();
+    let name = qualified_leaf(&symbol.qualified_name);
+    remix_convention_export(path, name, symbol.export.default_export)
+        || next_convention_export(path, name)
+        || root_convention_export(path, name)
+}
+
+fn remix_convention_export(path: &str, name: &str, default_export: bool) -> bool {
+    if rooted_routes_path(path) && web_module_stem(path, false).is_some() && name == "Route" {
+        return true;
+    }
+    let Some(relative) = app_relative_path(path) else {
+        return false;
+    };
+    if relative.starts_with("routes/") && web_module_stem(relative, false).is_some() {
+        return default_export || remix_route_export(name);
+    }
+    if !relative.contains('/') && web_module_stem(relative, false) == Some("root") {
+        return default_export || remix_root_export(name);
+    }
+    !relative.contains('/')
+        && web_module_stem(relative, false) == Some("entry.server")
+        && (default_export || remix_entry_export(name))
+}
+
+fn next_convention_export(path: &str, name: &str) -> bool {
+    let Some(relative) = app_relative_path(path) else {
+        return false;
+    };
+    let Some(stem) = web_module_stem(relative, true) else {
+        return false;
+    };
+    if next_config_file(stem) && next_config_export(name) {
+        return true;
+    }
+    if stem == "route" && next_http_export(name) {
+        return true;
+    }
+    next_metadata_file(stem) && next_metadata_export(name)
+}
+
+fn root_convention_export(path: &str, name: &str) -> bool {
+    (matches!(path, "middleware.ts" | "middleware.js" | "middleware.mjs")
+        || matches!(
+            path,
+            "src/middleware.ts" | "src/middleware.js" | "src/middleware.mjs"
+        ))
+        && matches!(name, "middleware" | "config")
+        || (matches!(
+            path,
+            "instrumentation.ts" | "instrumentation.js" | "instrumentation.mjs"
+        ) || matches!(
+            path,
+            "src/instrumentation.ts" | "src/instrumentation.js" | "src/instrumentation.mjs"
+        )) && matches!(name, "register" | "onRequestError")
+}
+
+fn rooted_routes_path(path: &str) -> bool {
+    path.starts_with("routes/") || path.contains("/routes/")
+}
+
+fn app_relative_path(path: &str) -> Option<&str> {
+    path.strip_prefix("app/").or_else(|| {
+        path.find("/app/")
+            .map(|index| &path[index.saturating_add("/app/".len())..])
+    })
+}
+
+fn web_module_stem(path: &str, allow_mjs: bool) -> Option<&str> {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    [".tsx", ".jsx", ".ts", ".js"]
+        .into_iter()
+        .find_map(|extension| filename.strip_suffix(extension))
+        .or_else(|| allow_mjs.then(|| filename.strip_suffix(".mjs")).flatten())
+}
+
+fn qualified_leaf(qualified_name: &str) -> &str {
+    qualified_name
+        .rsplit([':', '.', '#', '/', '$'])
+        .find(|component| !component.is_empty())
+        .unwrap_or(qualified_name)
+}
+
+fn remix_route_export(name: &str) -> bool {
+    matches!(
+        name,
+        "loader"
+            | "clientLoader"
+            | "action"
+            | "clientAction"
+            | "headers"
+            | "handle"
+            | "links"
+            | "meta"
+            | "shouldRevalidate"
+            | "middleware"
+            | "clientMiddleware"
+            | "unstable_middleware"
+            | "unstable_clientMiddleware"
+            | "ErrorBoundary"
+            | "HydrateFallback"
+    )
+}
+
+fn remix_root_export(name: &str) -> bool {
+    remix_route_export(name) || name == "Layout"
+}
+
+fn remix_entry_export(name: &str) -> bool {
+    matches!(
+        name,
+        "handleRequest" | "handleDataRequest" | "handleError" | "streamTimeout"
+    )
+}
+
+fn next_config_file(stem: &str) -> bool {
+    matches!(
+        stem,
+        "page"
+            | "layout"
+            | "template"
+            | "route"
+            | "error"
+            | "global-error"
+            | "loading"
+            | "not-found"
+            | "default"
+            | "sitemap"
+            | "robots"
+            | "manifest"
+            | "icon"
+            | "apple-icon"
+            | "opengraph-image"
+            | "twitter-image"
+    )
+}
+
+fn next_config_export(name: &str) -> bool {
+    matches!(
+        name,
+        "dynamic"
+            | "dynamicParams"
+            | "revalidate"
+            | "fetchCache"
+            | "runtime"
+            | "preferredRegion"
+            | "maxDuration"
+            | "experimental_ppr"
+            | "generateStaticParams"
+            | "generateImageMetadata"
+            | "generateSitemaps"
+    )
+}
+
+fn next_http_export(name: &str) -> bool {
+    matches!(
+        name,
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    )
+}
+
+fn next_metadata_file(stem: &str) -> bool {
+    next_config_file(stem) && stem != "route"
+}
+
+fn next_metadata_export(name: &str) -> bool {
+    matches!(
+        name,
+        "metadata" | "generateMetadata" | "viewport" | "generateViewport"
+    )
+}
+
+fn findings_for_symbol(symbol: &ExtractedSymbol, path: &NormalizedPath) -> Vec<SourceFinding> {
     let health = symbol.health;
+    let parameter_metric =
+        if symbol.implementation.declaration_only || framework_convention_export(path, symbol) {
+            0.0
+        } else {
+            f64::from(health.parameter_count)
+        };
     let mut findings = Vec::new();
     for (finding, metric, thresholds) in [
-        ("large_method", f64::from(lines), LARGE_METHOD_THRESHOLDS),
+        (
+            "large_method",
+            f64::from(health.code_lines),
+            LARGE_METHOD_THRESHOLDS,
+        ),
         (
             "complex_method",
             f64::from(health.cyclomatic),
@@ -948,7 +1133,7 @@ fn findings_for_symbol(symbol: &ExtractedSymbol) -> Vec<SourceFinding> {
         ),
         (
             "long_parameter_list",
-            f64::from(health.parameter_count),
+            parameter_metric,
             LONG_PARAMETER_THRESHOLDS,
         ),
     ]
@@ -1077,7 +1262,10 @@ fn push_finding(findings: &mut Vec<SourceFinding>, input: SourceFindingInput<'_>
     });
 }
 
-fn diff_findings(before: &[ExtractedSymbol], after: &[ExtractedSymbol]) -> SourceFindingsDelta {
+fn diff_findings(
+    before: Option<&ExtractedFile>,
+    after: Option<&ExtractedFile>,
+) -> SourceFindingsDelta {
     let before = finding_map(before);
     let after = finding_map(after);
     let mut delta = SourceFindingsDelta::default();
@@ -1096,10 +1284,13 @@ fn diff_findings(before: &[ExtractedSymbol], after: &[ExtractedSymbol]) -> Sourc
     delta
 }
 
-fn finding_map(symbols: &[ExtractedSymbol]) -> BTreeMap<(String, &'static str), SourceFinding> {
-    symbols
-        .iter()
-        .flat_map(findings_for_symbol)
+fn finding_map(file: Option<&ExtractedFile>) -> BTreeMap<(String, &'static str), SourceFinding> {
+    file.into_iter()
+        .flat_map(|file| {
+            file.symbols
+                .iter()
+                .flat_map(|symbol| findings_for_symbol(symbol, &file.path))
+        })
         .map(|finding| ((finding.qualified_name.clone(), finding.finding), finding))
         .collect()
 }
@@ -1201,5 +1392,79 @@ mod tests {
         });
         assert!(shifted.modified.is_empty());
         assert_eq!(shifted.line_range_only_count, 1);
+    }
+
+    #[test]
+    fn source_findings_use_executable_lines_for_static_jsx() {
+        let mut source = String::from(
+            "export function StaticPanel({ name }: { name: string }) {\n  return <section>\n",
+        );
+        for _ in 0..150 {
+            source.push_str("    <span>Static presentation</span>\n");
+        }
+        source.push_str("    <span>{name.trim()}</span>\n  </section>;\n}\n");
+        let file = extract("src/static-panel.tsx", &source);
+        let panel = file
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "StaticPanel")
+            .unwrap_or_else(|| panic!("missing StaticPanel symbol"));
+        assert!(panel.span.end_line() > 100);
+        assert!(
+            !findings_for_symbol(panel, &file.path)
+                .iter()
+                .any(|finding| finding.finding == "large_method")
+        );
+    }
+
+    #[test]
+    fn source_findings_honor_framework_owned_parameter_conventions() {
+        let route_before = extract(
+            "app/api/precision/route.ts",
+            "export async function GET(a: string, b: string, c: string, d: string) { return a; }\n",
+        );
+        let route = extract(
+            "app/api/precision/route.ts",
+            "export async function GET(a: string, b: string, c: string, d: string, e: string) { return a; }\n",
+        );
+        let get = route
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "GET")
+            .unwrap_or_else(|| panic!("missing GET symbol"));
+        assert_eq!(get.health.parameter_count, 5);
+        assert!(
+            !findings_for_symbol(get, &route.path)
+                .iter()
+                .any(|finding| finding.finding == "long_parameter_list")
+        );
+        let route_diff = diff_symbols(SymbolDiffInput {
+            baseline: Some(&route_before),
+            current: Some(&route),
+            include_findings: true,
+            suppress_line_range_only: true,
+        });
+        assert_eq!(route_diff.modified.len(), 1);
+        assert!(
+            !route_diff.modified[0]
+                .findings
+                .iter()
+                .any(|finding| finding.finding == "long_parameter_list")
+        );
+
+        let ordinary = extract(
+            "src/precision.ts",
+            "export function processRequest(a: string, b: string, c: string, d: string, e: string) { return a; }\n",
+        );
+        let process_request = ordinary
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "processRequest")
+            .unwrap_or_else(|| panic!("missing processRequest symbol"));
+        assert!(
+            findings_for_symbol(process_request, &ordinary.path)
+                .iter()
+                .any(|finding| finding.finding == "long_parameter_list")
+        );
     }
 }
