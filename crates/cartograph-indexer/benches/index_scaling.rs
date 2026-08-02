@@ -61,12 +61,13 @@ const EXPECTED_SOURCE_DIGEST: &str =
 const EXPECTED_FIXTURE_FINGERPRINT: &str =
     "2c02e8357bee04c11d89f383c316077b8eb2228bd4262d2404cb1535885083d9";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "b6b88a0a91b17a75f670cc61694e3034a316a7d9a09756d6ceb42b8514391937";
+    "6df05ce3d3e84b1230f5a2e0fe7e886a5cbc635c70fb43b95226757eae4c9451";
 const EXPECTED_BM25_DOCUMENT_ID: &str = "30000000-0000-4000-8000-000000000001";
 const EXPECTED_FILES: i64 = 256;
 const EXPECTED_SYMBOLS: i64 = 256;
 const EXPECTED_EDGES: i64 = 255;
 const EXPECTED_REFERENCES: i64 = 255;
+const EXPECTED_NUMERICAL_SITES: i64 = 0;
 const EXPECTED_DOCUMENTS: i64 = 256;
 const WORKER_MATRIX: [u16; 5] = [1, 2, 4, 8, 16];
 const OPERATION_TIMEOUT: Duration = Duration::from_mins(1);
@@ -143,6 +144,7 @@ struct RowCounts {
     symbols: i64,
     edges: i64,
     references: i64,
+    numerical_sites: i64,
     documents: i64,
 }
 
@@ -923,6 +925,8 @@ impl DatabaseFixture {
                   WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS edges,
                 (SELECT count(*) FROM "{schema}"."references"
                   WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS references,
+                (SELECT count(*) FROM "{schema}"."numerical_sites"
+                  WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS numerical_sites,
                 (SELECT count(*) FROM "{schema}"."search_documents"
                   WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS documents"#,
             schema = self.schema
@@ -945,6 +949,9 @@ impl DatabaseFixture {
                 .map_err(|_| operation("decode-row-counts"))?,
             references: row
                 .try_get("references")
+                .map_err(|_| operation("decode-row-counts"))?,
+            numerical_sites: row
+                .try_get("numerical_sites")
                 .map_err(|_| operation("decode-row-counts"))?,
             documents: row
                 .try_get("documents")
@@ -1207,6 +1214,7 @@ const fn committed_row_counts() -> RowCounts {
         symbols: EXPECTED_SYMBOLS,
         edges: EXPECTED_EDGES,
         references: EXPECTED_REFERENCES,
+        numerical_sites: EXPECTED_NUMERICAL_SITES,
         documents: EXPECTED_DOCUMENTS,
     }
 }

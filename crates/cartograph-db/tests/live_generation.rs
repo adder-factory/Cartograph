@@ -21,14 +21,16 @@ use cartograph_db::{
     GenerationValidationLimits, GraphDirection, LeaseOwner, LeaseRequest, LeaseTarget,
     McpMacroStep, McpSessionCallsQuery, McpSessionLookup, McpToolCallData, McpToolCallInput,
     McpToolCallWrite, MigrationError, NewAgentArtifact, NewGeneration, NewMcpMacro, NewMcpSession,
-    NewProject, PrepareGenerationError, ProjectLease, PublishGenerationError, ReadOnlySqlRequest,
-    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, SearchQuery,
-    SourceLineRange, StorageError, SummaryCandidatePolicy, SymbolInput, SymbolRoleSaveInput,
-    SymbolSummarySaveInput, validate_generation_facts,
+    NewProject, NumericalSiteInput, NumericalSiteQuery, PrepareGenerationError, ProjectLease,
+    PublishGenerationError, ReadOnlySqlRequest, ReadyGeneration, RecoverableGeneration,
+    ReferenceInput, SearchDocumentInput, SearchQuery, SourceLineRange, StorageError,
+    SummaryCandidatePolicy, SymbolInput, SymbolRoleSaveInput, SymbolSummarySaveInput,
+    validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
-    GenerationState, NormalizedPath, ProjectId, ProjectOperation, SymbolId, Visibility,
+    GenerationState, NormalizedPath, NumericalSiteId, ProjectId, ProjectOperation, SymbolId,
+    Visibility,
 };
 use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -48,6 +50,7 @@ const EVIDENCE_MODEL: &str = "99999999-9999-4999-8999-999999999999";
 const RETRIEVAL_FILE: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const RETRIEVAL_TARGET: &str = "11111111-1111-4111-8111-111111111111";
 const RETRIEVAL_CALLER: &str = "22222222-2222-4222-8222-222222222222";
+const RETRIEVAL_NUMERICAL_SITE: &str = "33333333-3333-4333-8333-333333333333";
 const INITIAL_MIGRATION_VERSION: i64 = 1;
 const OPERATION_LEASES_MIGRATION_VERSION: i64 = 2;
 const COMPLETE_EDGE_KINDS_MIGRATION_VERSION: i64 = 3;
@@ -73,8 +76,9 @@ const NATIVE_INDEX_DIGEST_V5_MIGRATION_VERSION: i64 = 22;
 const STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION: i64 = 23;
 const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION: i64 = 24;
 const DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION: i64 = 25;
-const LATEST_MIGRATION_VERSION: i64 = DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 25] = [
+const NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_VERSION: i64 = 26;
+const LATEST_MIGRATION_VERSION: i64 = NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 26] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -100,6 +104,7 @@ const EXPECTED_MIGRATIONS: [i64; 25] = [
     STORAGE_LIFECYCLE_HARDENING_MIGRATION_VERSION,
     RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_VERSION,
     DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION,
+    NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -136,6 +141,8 @@ const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_CHECKSUM: &str =
     "aa6f62e612975ad71d5f3d44d7636f958f6b13c64bb8f0a795e150ed2105f9cd";
 const DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_CHECKSUM: &str =
     "6e3150fef9c6e7adba0f17f66864a1b217104b813725a0e99feedb07f2d88331";
+const NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_CHECKSUM: &str =
+    "821c3fa10f3c60766d0a38c6dd0c747fdc273f2d10089fd6f715b347b9d47441";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -361,6 +368,7 @@ async fn copied_relations_receive_planner_statistics_before_ready() {
         "symbols",
         "edges",
         "references",
+        "numerical_sites",
         "search_documents",
     ];
     disable_autoanalyze(&pool, &schema, &copied_relations).await;
@@ -455,7 +463,7 @@ async fn assert_manual_planner_statistics(
         r"SELECT relname, last_analyze IS NOT NULL, last_autoanalyze IS NULL
            FROM pg_stat_user_tables
            WHERE schemaname = $1
-             AND relname IN ('files', 'symbols', 'edges', 'references', 'search_documents')
+             AND relname IN ('files', 'symbols', 'edges', 'references', 'numerical_sites', 'search_documents')
            ORDER BY relname",
     )
     .bind(schema)
@@ -2621,6 +2629,7 @@ fn retrieval_generation_facts() -> GenerationFacts {
             byte_size: 256,
             parse_status: FileParseStatus::Parsed,
         }],
+        numerical_sites: vec![retrieval_numerical_site(&file_id, &caller_id)],
         symbols: vec![
             SymbolInput {
                 symbol_id: target_id.clone(),
@@ -2684,6 +2693,27 @@ fn retrieval_generation_facts() -> GenerationFacts {
             span_precision: cartograph_db::ReferenceSpanPrecision::Exact,
         }],
         documents: vec![search_document],
+    }
+}
+
+fn retrieval_numerical_site(file_id: &FileId, owner_symbol_id: &SymbolId) -> NumericalSiteInput {
+    NumericalSiteInput {
+        site_id: NumericalSiteId::parse(RETRIEVAL_NUMERICAL_SITE)
+            .unwrap_or_else(|error| panic!("numerical site fixture ID was invalid: {error}")),
+        file_id: file_id.clone(),
+        owner_symbol_id: Some(owner_symbol_id.clone()),
+        start_byte: 40,
+        end_byte: 57,
+        start_line: 2,
+        end_line: 2,
+        operation: "tolerance_comparison".to_owned(),
+        hazard: "absolute_only_tolerance".to_owned(),
+        precision: "f64".to_owned(),
+        expression_digest: digest(DIGEST_ONE),
+        confidence_ppm: 900_000,
+        provenance: "rust_ast_v1".to_owned(),
+        evidence_level: "heuristic".to_owned(),
+        unknowns: "relative_scale,input_range".to_owned(),
     }
 }
 
@@ -2861,6 +2891,54 @@ async fn assert_deterministic_retrieval(
         .unwrap_or_else(|error| panic!("retrieval path fixture is invalid: {error}"));
     assert_current_file_retrieval(database, project, generation_id, &path).await;
     assert_current_symbol_retrieval(database, project, generation_id, &path).await;
+    assert_current_numerical_retrieval(database, project, generation_id).await;
+}
+
+async fn assert_current_numerical_retrieval(
+    database: &CartographDatabase,
+    project: &ProjectId,
+    generation_id: &GenerationId,
+) {
+    let query = NumericalSiteQuery::new(10)
+        .and_then(|query| query.with_path_prefix(Some("src")))
+        .map(|query| query.with_owner_symbol_id(Some(parse_symbol_id(RETRIEVAL_CALLER))))
+        .and_then(|query| query.with_hazard(Some("absolute_only_tolerance")))
+        .and_then(|query| query.with_evidence_level(Some("heuristic")))
+        .map_or_else(
+            |error| panic!("numerical query fixture was invalid: {error}"),
+            |query| query.with_hazards_only(true),
+        );
+    let page = database
+        .current_numerical_sites(CurrentGenerationLookup::new(project, generation_id), &query)
+        .await
+        .unwrap_or_else(|error| panic!("current numerical-site query failed: {error}"));
+    assert_eq!(page.generation_id(), generation_id);
+    assert_eq!(page.total(), 1);
+    assert!(!page.truncated());
+    assert!(matches!(
+        page.sites(),
+        [site]
+            if site.numerical_site_id().as_str() == RETRIEVAL_NUMERICAL_SITE
+                && site.owner_symbol_id().map(SymbolId::as_str) == Some(RETRIEVAL_CALLER)
+                && site.path().as_str() == "src/json_decoder.rs"
+                && site.operation() == "tolerance_comparison"
+                && site.hazard() == "absolute_only_tolerance"
+                && site.precision() == "f64"
+                && site.evidence_level() == "heuristic"
+                && site.unknowns() == ["relative_scale", "input_range"]
+    ));
+
+    let stats = database
+        .current_numerical_site_stats(CurrentGenerationLookup::new(project, generation_id))
+        .await
+        .unwrap_or_else(|error| panic!("current numerical-site stats failed: {error}"));
+    assert_eq!(stats.generation_id(), generation_id);
+    assert_eq!(stats.total_sites(), 1);
+    assert_eq!(stats.hazard_sites(), 1);
+    assert_eq!(stats.supported_files(), 1);
+    assert_eq!(stats.analyzed_files(), 1);
+    assert_eq!(stats.unanalyzed_files(), 0);
+    assert_eq!(stats.files_with_sites(), 1);
 }
 
 async fn assert_current_file_retrieval(
@@ -3652,6 +3730,21 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
         RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_CHECKSUM
     );
 
+    let numerical_ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = 26"#
+    );
+    let numerical_checksum = query(AssertSqlSafe(numerical_ledger))
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify digest-v7 migration: {error}"));
+    assert_eq!(
+        numerical_checksum,
+        NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_CHECKSUM
+    );
+
     let definition = query(
         r"SELECT pg_get_constraintdef(constraints.oid) AS definition
             FROM pg_catalog.pg_constraint AS constraints
@@ -3667,9 +3760,9 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
     .fetch_one(pool)
     .await
     .and_then(|row| row.try_get::<String, _>("definition"))
-    .unwrap_or_else(|error| panic!("could not inspect digest-v6 constraint: {error}"));
+    .unwrap_or_else(|error| panic!("could not inspect digest-v7 constraint: {error}"));
     assert!(
-        definition.contains("ARRAY[1, 2, 3, 4, 5, 6]"),
+        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7]"),
         "{definition}"
     );
 }

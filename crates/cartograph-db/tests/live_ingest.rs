@@ -12,13 +12,13 @@ use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationContents,
     GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
-    LeaseRequest, LeaseTarget, NewGeneration, NewProject, PrepareGenerationMetrics, ProjectLease,
-    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError,
-    SymbolInput, validate_generation_facts,
+    LeaseRequest, LeaseTarget, NewGeneration, NewProject, NumericalSiteInput,
+    PrepareGenerationMetrics, ProjectLease, ReadyGeneration, RecoverableGeneration, ReferenceInput,
+    SearchDocumentInput, StorageError, SymbolInput, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
-    GenerationDigestVersion, GenerationId, ProjectId, ProjectOperation, SymbolId,
+    GenerationDigestVersion, GenerationId, NumericalSiteId, ProjectId, ProjectOperation, SymbolId,
 };
 use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -32,6 +32,7 @@ const FILE_TWO: &str = "22222222-2222-4222-8222-222222222222";
 const FILE_REJECTED: &str = "33333333-3333-4333-8333-333333333333";
 const SYMBOL_ONE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const SYMBOL_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const NUMERICAL_SITE_ONE: &str = "99999999-9999-4999-8999-999999999999";
 const DOCUMENT_ONE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const DOCUMENT_TWO: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const DOCUMENT_REJECTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -49,7 +50,7 @@ const STRUCTURAL_HASH_ONE: &str =
 const STRUCTURAL_HASH_TWO: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "78e670ffab6e4b56b3b046d32df0a40c5d0b83720f3494fd758f7e9270823280";
+    "8cb60ce956dd6da147b49905f7058af597806aa8138b4200fc5a69086c2cded0";
 const SINGLE_WORKER: u16 = 1;
 const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
@@ -94,6 +95,7 @@ async fn copy_ingestion_is_atomic_and_logically_deterministic() {
     assert_persisted_generation(&fixture, &second).await;
     assert_copy_text_round_trip(&fixture, &second).await;
     assert_reference_evidence_round_trip(&fixture, &second).await;
+    assert_numerical_evidence_round_trip(&fixture, &second).await;
     assert_ready_digest_recovery(&fixture, &first).await;
     assert_copy_chunk_and_null_boundaries(&fixture).await;
 
@@ -107,6 +109,53 @@ async fn copy_ingestion_is_atomic_and_logically_deterministic() {
     drop(fixture.database);
     drop_schema(&fixture.pool, &fixture.schema).await;
     fixture.pool.close().await;
+}
+
+async fn assert_numerical_evidence_round_trip(fixture: &DatabaseFixture, ready: &ReadyGeneration) {
+    let statement = format!(
+        r#"SELECT numerical_site_id::text, owner_symbol_id::text, operation, hazard,
+                  precision, confidence_ppm, provenance, evidence_level, unknowns
+            FROM "{}"."numerical_sites"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)"#,
+        fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(ready.generation_id().as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not inspect numerical evidence: {error}"));
+    assert_eq!(
+        row.try_get::<String, _>(0).ok().as_deref(),
+        Some(NUMERICAL_SITE_ONE)
+    );
+    assert_eq!(
+        row.try_get::<String, _>(1).ok().as_deref(),
+        Some(SYMBOL_ONE)
+    );
+    assert_eq!(
+        row.try_get::<String, _>(2).ok().as_deref(),
+        Some("tolerance_comparison")
+    );
+    assert_eq!(
+        row.try_get::<String, _>(3).ok().as_deref(),
+        Some("absolute_only_tolerance")
+    );
+    assert_eq!(row.try_get::<String, _>(4).ok().as_deref(), Some("f32"));
+    assert!(matches!(row.try_get::<i32, _>(5), Ok(900_000)));
+    assert_eq!(
+        row.try_get::<String, _>(6).ok().as_deref(),
+        Some("rust_ast_v1")
+    );
+    assert_eq!(
+        row.try_get::<String, _>(7).ok().as_deref(),
+        Some("heuristic")
+    );
+    assert_eq!(
+        row.try_get::<String, _>(8).ok().as_deref(),
+        Some("relative_scale,input_range")
+    );
 }
 
 async fn assert_reference_evidence_round_trip(fixture: &DatabaseFixture, ready: &ReadyGeneration) {
@@ -364,6 +413,7 @@ async fn prepare_generation_with_metrics(
                 snapshot.symbols_copy_duration(),
                 snapshot.edges_copy_duration(),
                 snapshot.references_copy_duration(),
+                snapshot.numerical_sites_copy_duration(),
                 snapshot.documents_copy_duration(),
             ];
             assert!(table_durations.iter().all(|duration| !duration.is_zero()));
@@ -477,12 +527,14 @@ fn generation_facts(reversed: bool) -> GenerationFacts {
     let mut symbols = vec![symbol_one(), symbol_two()];
     let edges = vec![edge()];
     let mut references = vec![reference()];
+    let mut numerical_sites = vec![numerical_site()];
     let mut documents = vec![document_one(reversed), document_two()];
     if reversed {
         files.reverse();
         symbols.reverse();
         documents.reverse();
         references.push(reference());
+        numerical_sites.push(numerical_site());
         documents.push(document_two());
     }
     GenerationFacts {
@@ -490,6 +542,7 @@ fn generation_facts(reversed: bool) -> GenerationFacts {
         symbols,
         edges,
         references,
+        numerical_sites,
         documents,
     }
 }
@@ -586,6 +639,27 @@ fn reference() -> ReferenceInput {
     }
 }
 
+fn numerical_site() -> NumericalSiteInput {
+    NumericalSiteInput {
+        site_id: NumericalSiteId::parse(NUMERICAL_SITE_ONE)
+            .unwrap_or_else(|error| panic!("fixture numerical site UUID is invalid: {error}")),
+        file_id: file_id(FILE_ONE),
+        owner_symbol_id: Some(symbol_id(SYMBOL_ONE)),
+        start_byte: 20,
+        end_byte: 32,
+        start_line: 2,
+        end_line: 2,
+        operation: "tolerance_comparison".to_owned(),
+        hazard: "absolute_only_tolerance".to_owned(),
+        precision: "f32".to_owned(),
+        expression_digest: digest(CONTENT_HASH_ONE),
+        confidence_ppm: 900_000,
+        provenance: "rust_ast_v1".to_owned(),
+        evidence_level: "heuristic".to_owned(),
+        unknowns: "relative_scale,input_range".to_owned(),
+    }
+}
+
 fn canonical(facts: GenerationFacts) -> CanonicalGenerationFacts {
     let limits = GenerationValidationLimits::new(
         TEST_VALIDATION_OUTPUT_BYTES,
@@ -652,6 +726,8 @@ async fn assert_persisted_generation(fixture: &DatabaseFixture, ready: &ReadyGen
                     WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS edges,
                 (SELECT count(*) FROM "{schema}"."references"
                     WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS refs,
+                (SELECT count(*) FROM "{schema}"."numerical_sites"
+                    WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS numerical_sites,
                 (SELECT count(*) FROM "{schema}"."search_documents"
                     WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS documents,
                 (SELECT content_digest FROM "{schema}"."index_generations"
@@ -673,6 +749,7 @@ async fn assert_persisted_generation(fixture: &DatabaseFixture, ready: &ReadyGen
     assert!(matches!(row.try_get::<i64, _>("symbols"), Ok(2)));
     assert!(matches!(row.try_get::<i64, _>("edges"), Ok(1)));
     assert!(matches!(row.try_get::<i64, _>("refs"), Ok(1)));
+    assert!(matches!(row.try_get::<i64, _>("numerical_sites"), Ok(1)));
     assert!(matches!(row.try_get::<i64, _>("documents"), Ok(2)));
     assert_eq!(
         row.try_get::<String, _>("digest").ok().as_deref(),
@@ -803,6 +880,7 @@ async fn assert_copy_failure_rolls_back(
         snapshot.symbols_copy_duration(),
         snapshot.edges_copy_duration(),
         snapshot.references_copy_duration(),
+        snapshot.numerical_sites_copy_duration(),
         snapshot.documents_copy_duration(),
     ];
     assert!(attempted_tables.iter().all(|duration| !duration.is_zero()));
@@ -855,6 +933,7 @@ fn rejected_facts() -> GenerationFacts {
         symbols: Vec::new(),
         edges: Vec::new(),
         references: Vec::new(),
+        numerical_sites: Vec::new(),
         documents: vec![SearchDocumentInput {
             document_id: document_id(DOCUMENT_REJECTED),
             file_id: Some(file_id(FILE_REJECTED)),
@@ -877,6 +956,7 @@ async fn assert_generation_is_empty(fixture: &DatabaseFixture, generation: &Gene
               + (SELECT count(*) FROM "{schema}"."symbols" WHERE generation_id = CAST($1 AS uuid))
               + (SELECT count(*) FROM "{schema}"."edges" WHERE generation_id = CAST($1 AS uuid))
               + (SELECT count(*) FROM "{schema}"."references" WHERE generation_id = CAST($1 AS uuid))
+              + (SELECT count(*) FROM "{schema}"."numerical_sites" WHERE generation_id = CAST($1 AS uuid))
               + (SELECT count(*) FROM "{schema}"."search_documents" WHERE generation_id = CAST($1 AS uuid))
                 AS fact_count"#,
         schema = fixture.schema,

@@ -11,8 +11,8 @@ use sqlx_postgres::{PgConnection, PgCopyIn};
 use crate::{StorageError, database::quoted_schema};
 
 use super::model::{
-    CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, ReferenceInput,
-    SymbolInput, ValidatedFactTables,
+    CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, NumericalSiteInput,
+    ReferenceInput, SymbolInput, ValidatedFactTables,
 };
 
 const COPY_CHUNK_BYTES: usize = 1024 * 1024;
@@ -35,6 +35,7 @@ pub(crate) struct CopyTableDurations {
     pub(crate) symbols: Duration,
     pub(crate) edges: Duration,
     pub(crate) references: Duration,
+    pub(crate) numerical_sites: Duration,
     pub(crate) documents: Duration,
 }
 
@@ -49,6 +50,7 @@ enum CopiedTable {
     Symbols,
     Edges,
     References,
+    NumericalSites,
     Documents,
 }
 
@@ -82,6 +84,7 @@ impl CopyTableDurations {
             CopiedTable::Symbols => self.symbols = duration,
             CopiedTable::Edges => self.edges = duration,
             CopiedTable::References => self.references = duration,
+            CopiedTable::NumericalSites => self.numerical_sites = duration,
             CopiedTable::Documents => self.documents = duration,
         }
     }
@@ -172,6 +175,12 @@ const REFERENCES_LAYOUT: CopyTableLayout = CopyTableLayout {
     columns: "project_id, generation_id, file_id, owner_symbol_id, target_symbol_id, reference_name, reference_kind, start_byte, end_byte, confidence, resolution_provenance, site_count, span_precision",
     operation: "copy-references",
 };
+const NUMERICAL_SITES_LAYOUT: CopyTableLayout = CopyTableLayout {
+    copied_table: CopiedTable::NumericalSites,
+    table: "numerical_sites",
+    columns: "project_id, generation_id, numerical_site_id, file_id, owner_symbol_id, start_byte, end_byte, start_line, end_line, operation, hazard, precision, expression_digest, confidence_ppm, provenance, evidence_level, unknowns",
+    operation: "copy-numerical-sites",
+};
 const DOCUMENTS_LAYOUT: CopyTableLayout = CopyTableLayout {
     copied_table: CopiedTable::Documents,
     table: "search_documents",
@@ -200,6 +209,7 @@ pub(crate) async fn copy_generation_facts(
         symbols,
         edges,
         references,
+        numerical_sites,
         documents,
     } = facts.tables;
     let mut progress = CopyGenerationProgress::new(connection, context);
@@ -221,6 +231,13 @@ pub(crate) async fn copy_generation_facts(
             references,
             REFERENCES_LAYOUT,
             encode_reference,
+        ))
+        .await;
+    progress
+        .copy(CopyTableRequest::new(
+            numerical_sites,
+            NUMERICAL_SITES_LAYOUT,
+            encode_numerical_site,
         ))
         .await;
     progress
@@ -422,6 +439,32 @@ fn encode_reference(context: &CopyGenerationContext, reference: &ReferenceInput)
     row.text(&reference.resolution_provenance);
     row.number(reference.site_count);
     row.text(reference.span_precision.as_str());
+    row.finish()
+}
+
+fn encode_numerical_site(context: &CopyGenerationContext, site: &NumericalSiteInput) -> Vec<u8> {
+    let mut row = TextRow::new();
+    row.text(context.project_id.as_str());
+    row.text(context.generation_id.as_str());
+    row.text(site.site_id.as_str());
+    row.text(site.file_id.as_str());
+    row.optional_text(
+        site.owner_symbol_id
+            .as_ref()
+            .map(cartograph_domain::SymbolId::as_str),
+    );
+    row.number(site.start_byte);
+    row.number(site.end_byte);
+    row.number(site.start_line);
+    row.number(site.end_line);
+    row.text(&site.operation);
+    row.text(&site.hazard);
+    row.text(&site.precision);
+    row.text(site.expression_digest.as_str());
+    row.number(site.confidence_ppm);
+    row.text(&site.provenance);
+    row.text(&site.evidence_level);
+    row.text(&site.unknowns);
     row.finish()
 }
 

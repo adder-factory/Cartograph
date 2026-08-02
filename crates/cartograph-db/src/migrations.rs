@@ -33,7 +33,8 @@ const NATIVE_INDEX_DIGEST_V5_SCHEMA_VERSION: i64 = 22;
 const STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION: i64 = 23;
 const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION: i64 = 24;
 const DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION: i64 = 25;
-const LATEST_SCHEMA_VERSION: i64 = DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION;
+const NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION: i64 = 26;
+const LATEST_SCHEMA_VERSION: i64 = NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
@@ -1060,7 +1061,64 @@ const DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA: Migration = Migration {
             )"#],
 };
 
-const MIGRATIONS: [&Migration; 25] = [
+const NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA: Migration = Migration {
+    version: NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION,
+    name: "generation_scoped_static_numerical_evidence_v7",
+    statements: &[
+        r#"CREATE TABLE {schema}."numerical_sites" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            numerical_site_id uuid NOT NULL,
+            file_id uuid NOT NULL,
+            owner_symbol_id uuid,
+            start_byte bigint NOT NULL CHECK (start_byte >= 0),
+            end_byte bigint NOT NULL CHECK (end_byte >= start_byte),
+            start_line integer NOT NULL CHECK (start_line >= 1),
+            end_line integer NOT NULL CHECK (end_line >= start_line),
+            operation text NOT NULL CHECK (operation ~ '^[a-z0-9_]{1,64}$'),
+            hazard text NOT NULL CHECK (hazard ~ '^[a-z0-9_]{1,64}$'),
+            precision text NOT NULL CHECK (precision ~ '^[a-z0-9_]{1,64}$'),
+            expression_digest text NOT NULL CHECK (expression_digest ~ '^[0-9a-f]{64}$'),
+            confidence_ppm integer NOT NULL CHECK (confidence_ppm BETWEEN 0 AND 1000000),
+            provenance text NOT NULL CHECK (
+                length(provenance) BETWEEN 1 AND 256
+                AND provenance ~ '^[a-z0-9_]+$'
+            ),
+            evidence_level text NOT NULL
+                CHECK (evidence_level IN ('proven', 'heuristic', 'coverage_gap')),
+            unknowns text NOT NULL DEFAULT '' CHECK (length(unknowns) <= 256),
+            PRIMARY KEY (project_id, generation_id, numerical_site_id),
+            FOREIGN KEY (project_id, generation_id, file_id)
+                REFERENCES {schema}."files"(project_id, generation_id, file_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (project_id, generation_id, owner_symbol_id)
+                REFERENCES {schema}."symbols"(project_id, generation_id, symbol_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX numerical_sites_hazard_rank_idx
+            ON {schema}."numerical_sites" (
+                project_id, generation_id, hazard, confidence_ppm DESC,
+                file_id, start_line, numerical_site_id
+            )"#,
+        r#"CREATE INDEX numerical_sites_owner_span_idx
+            ON {schema}."numerical_sites" (
+                project_id, generation_id, owner_symbol_id,
+                start_line, end_line, numerical_site_id
+            ) WHERE owner_symbol_id IS NOT NULL"#,
+        r#"ALTER TABLE {schema}."numerical_sites" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 500
+            )"#,
+        r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7))"#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 26] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1086,6 +1144,7 @@ const MIGRATIONS: [&Migration; 25] = [
     &STORAGE_LIFECYCLE_HARDENING_SCHEMA,
     &RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA,
     &DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA,
+    &NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1482,7 +1541,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 25] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 26] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1508,9 +1567,10 @@ mod tests {
         STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION,
         RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION,
         DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION,
+        NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 25] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 26] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1611,6 +1671,10 @@ mod tests {
             25,
             "6e3150fef9c6e7adba0f17f66864a1b217104b813725a0e99feedb07f2d88331",
         ),
+        (
+            26,
+            "821c3fa10f3c60766d0a38c6dd0c747fdc273f2d10089fd6f715b347b9d47441",
+        ),
     ];
 
     #[test]
@@ -1656,7 +1720,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION
+            NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION
         );
     }
 

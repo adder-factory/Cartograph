@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-01 (`v2.1.3`)
+Last implementation review: 2026-08-02 (`v2.1.4`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,7 +59,8 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns twenty-five versions. Migration
+The append-only migration ledger currently owns twenty-six versions. Migration
+26 adds immutable numerical sites and admits generation digest V7; migration
 25 preserves exact directory-import names while deriving a non-empty indexed
 simple name; migration 24 admits generation digest V6 for Cargo-workspace
 crate/re-export semantics; migration 23 adds virtual parse-cache payload
@@ -74,6 +75,7 @@ and cache relations. Core relations:
 | `symbols` | Generation-scoped declaration identity, kind, range, safe signature, visibility, export/default-export, async/static, and declaration-only semantics |
 | `edges` | Typed symbol relationship, confidence, provenance, represented site count |
 | `references` | Exact/coarse source evidence, owner/target, byte span, multiplicity |
+| `numerical_sites` | Generation-scoped static numerical operation/hazard/precision sites with exact spans, evidence level, confidence, provenance, and explicit unknowns |
 | `search_documents` | Canonical durable code/name/natural-text documents and stable document identity |
 | `generation_search_relations` | Verified catalog for immutable generation-local BM25 tables and indexes |
 | `project_operation_leases` | Observable PostgreSQL-clock ownership and fencing |
@@ -135,8 +137,19 @@ discover -> bounded read/hash -> tree-sitter parse -> typed facts
 ```
 
 Facts include deterministic IDs, exact paths/ranges, symbol/reference kinds,
-literal-free callable signatures, confidence, provenance, diagnostics, and
-multiplicity. Ambiguous references remain unresolved.
+literal-free callable signatures, privacy-safe numerical sites, confidence,
+provenance, diagnostics, and multiplicity. Ambiguous references remain
+unresolved.
+
+The numerical MVP is a separate generation-scoped evidence plane. Its
+`rust_ast_v1` analyzer covers parsed or partial Rust files and records exact
+site identity/span plus bounded operation, hazard, precision, expression
+digest, confidence, provenance, evidence level, and facts that syntax could
+not prove. It never stores the source expression or literal. Static heuristic
+evidence is not relabeled as a runtime observation or formal proof;
+`cartograph_numerical`, status, and numerical review report observation and
+formal adapters as `not_configured`. Stale V6 generations remain explicitly
+stale until an ordinary V7 index publishes numerical evidence.
 
 See [native extraction](EXTRACTION.md) and the
 [extension guide](../EXTENDING-EXTRACTORS-RESOLVERS.md).
@@ -158,14 +171,14 @@ discover -> read/hash -> parse/extract -> resolve -> optional SCIP overlay -> de
 ```
 
 Workers complete out of order; the reducer commits in input order. Canonical
-facts and five PostgreSQL COPY streams are bounded and checked. A failed search
+facts and six PostgreSQL COPY streams are bounded and checked. A failed search
 table or index build rolls back with the staging transaction and therefore
 cannot reach `ready`. Publication is atomic: it first requires the exact
 generation relation and catalog to remain valid, then one transaction swaps the
 current pointer and supersedes the prior current generation.
 
 After an actual COPY, preparation runs column-targeted `ANALYZE` only on the
-five copied relations before the generation can become ready. The relations
+six copied relations before the generation can become ready. The relations
 are visited in one deterministic order, and a contended statistics lock waits
 under the connection/prepare statement deadline instead of being silently
 skipped; timeout or query failure rolls the generation preparation back. This

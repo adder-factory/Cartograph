@@ -579,7 +579,7 @@ struct PositionalMode {
     joined_or_variadic: bool,
 }
 
-const SPECIAL_POSITIONAL_FIELDS: [(&str, &str, bool, bool); 16] = [
+const SPECIAL_POSITIONAL_FIELDS: [(&str, &str, bool, bool); 17] = [
     ("node", "symbols", false, true),
     ("context", "task", false, false),
     ("graph", "start", false, false),
@@ -592,6 +592,7 @@ const SPECIAL_POSITIONAL_FIELDS: [(&str, &str, bool, bool); 16] = [
     ("role", "role", false, false),
     ("sql", "query", false, false),
     ("coverage", "symbol", false, false),
+    ("numerical", "mode", false, false),
     ("review", "mode", false, false),
     ("ask", "question", false, false),
     ("affected", "files", false, true),
@@ -1841,6 +1842,7 @@ mod tests {
             ("blame", "OrderService::save", "symbol"),
             ("sql", "SELECT * FROM symbols", "query"),
             ("coverage", "OrderService::save", "symbol"),
+            ("numerical", "coverage", "mode"),
         ] {
             let parsed = parse_from(["cartograph", command, value]).unwrap_or_else(|error| {
                 panic!("{command} positional compatibility failed: {error}")

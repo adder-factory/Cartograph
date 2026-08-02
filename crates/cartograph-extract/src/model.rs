@@ -1,7 +1,7 @@
 use cartograph_domain::{
-    ContentDigest, FileId, FileParseStatus, NormalizedPath, ReferenceKind, SourceLanguage,
-    SourceSpan, SymbolExecutionFlags, SymbolExportFlags, SymbolId, SymbolImplementationFlags,
-    SymbolKind, Visibility,
+    ContentDigest, FileId, FileParseStatus, NormalizedPath, NumericalSiteId, ReferenceKind,
+    SourceLanguage, SourceSpan, SymbolExecutionFlags, SymbolExportFlags, SymbolId,
+    SymbolImplementationFlags, SymbolKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +51,8 @@ pub struct ExtractedFile {
     pub containments: Vec<Containment>,
     /// Source-ordered unresolved structural references.
     pub references: Vec<ExtractedReference>,
+    /// Source-ordered, privacy-safe static numerical evidence sites.
+    pub numerical_sites: Vec<ExtractedNumericalSite>,
     /// Source-ordered ES module bindings used by project-wide resolution.
     pub import_bindings: Vec<ExtractedImportBinding>,
     /// Whether this source contains an AST-confirmed inline test declaration.
@@ -61,6 +63,35 @@ pub struct ExtractedFile {
     pub test_search_truncated: bool,
     /// Bounded, credential-safe parse diagnostics.
     pub diagnostics: Vec<ExtractionDiagnostic>,
+}
+
+/// One exact source site where static syntax exposes numerical behavior or risk.
+///
+/// No source expression or literal value is retained. The structural digest and
+/// bounded categorical fields let numerical tooling find the site without
+/// conflating a static heuristic with a runtime observation.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractedNumericalSite {
+    /// Stable generation-independent identity derived from file, span, and category.
+    pub id: NumericalSiteId,
+    /// Closest extracted declaration containing the expression.
+    pub owner: Option<SymbolId>,
+    /// Exact expression source range.
+    pub span: SourceSpan,
+    /// Stable numerical operation category.
+    pub operation: String,
+    /// Stable potential-hazard category, or `none_observed`.
+    pub hazard: String,
+    /// Best statically visible precision category.
+    pub precision: String,
+    /// Source-version-fenced, privacy-safe expression identity digest.
+    pub expression_digest: ContentDigest,
+    /// Deterministic heuristic confidence in parts per million.
+    pub confidence_ppm: u32,
+    /// Extractor contract that produced this site.
+    pub provenance: String,
+    /// Stable comma-separated list of facts static analysis could not prove.
+    pub unknowns: String,
 }
 
 /// One normalized declaration emitted by a native language extractor.

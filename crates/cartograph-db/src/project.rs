@@ -22,7 +22,8 @@ const FILE_COUNT_COLUMN: usize = 6;
 const SYMBOL_COUNT_COLUMN: usize = 7;
 const EDGE_COUNT_COLUMN: usize = 8;
 const REFERENCE_COUNT_COLUMN: usize = 9;
-const DOCUMENT_COUNT_COLUMN: usize = 10;
+const NUMERICAL_SITE_COUNT_COLUMN: usize = 10;
+const DOCUMENT_COUNT_COLUMN: usize = 11;
 const PROJECT_PURGE_LOCK_NAMESPACE: &str = "cartograph-v2-project-purge";
 const PUBLICATION_LOCK_NAMESPACE: &str = "cartograph-v2-publish";
 const DIRECT_PROJECT_TABLES: &[&str] = &[
@@ -31,6 +32,7 @@ const DIRECT_PROJECT_TABLES: &[&str] = &[
     "symbols",
     "edges",
     "references",
+    "numerical_sites",
     "search_documents",
     "project_operation_leases",
     "v1_import_runs",
@@ -119,6 +121,8 @@ pub struct GenerationCounts {
     pub edges: i64,
     /// Resolved and unresolved source references in the generation.
     pub references: i64,
+    /// Privacy-safe static numerical evidence sites in the generation.
+    pub numerical_sites: i64,
     /// File and symbol documents available to `ParadeDB`.
     pub documents: i64,
 }
@@ -212,6 +216,9 @@ impl CartographDatabase {
                         WHERE rows.project_id = projects.project_id
                           AND rows.generation_id = generations.generation_id), 0)::bigint,
                     COALESCE((SELECT count(*) FROM {schema}."references" AS rows
+                        WHERE rows.project_id = projects.project_id
+                          AND rows.generation_id = generations.generation_id), 0)::bigint,
+                    COALESCE((SELECT count(*) FROM {schema}."numerical_sites" AS rows
                         WHERE rows.project_id = projects.project_id
                           AND rows.generation_id = generations.generation_id), 0)::bigint,
                     COALESCE((SELECT count(*) FROM {schema}."search_documents" AS rows
@@ -631,6 +638,11 @@ fn decode_snapshot(row: &sqlx_postgres::PgRow) -> Result<ProjectSnapshot, Storag
                 symbols: read_nonnegative(row, SYMBOL_COUNT_COLUMN, "symbols")?,
                 edges: read_nonnegative(row, EDGE_COUNT_COLUMN, "edges")?,
                 references: read_nonnegative(row, REFERENCE_COUNT_COLUMN, "references")?,
+                numerical_sites: read_nonnegative(
+                    row,
+                    NUMERICAL_SITE_COUNT_COLUMN,
+                    "numerical_sites",
+                )?,
                 documents: read_nonnegative(row, DOCUMENT_COUNT_COLUMN, "documents")?,
             },
         }),

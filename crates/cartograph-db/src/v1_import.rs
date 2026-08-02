@@ -26,7 +26,7 @@ use crate::{
     GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
     LeaseRequest, LeaseTarget, PrepareGenerationMutation, RecoverableGeneration, ReferenceInput,
     SearchDocumentInput, SymbolInput, TerminalGenerationMutation, apply_page_rank,
-    apply_sampled_betweenness, validate_generation_facts,
+    apply_sampled_betweenness,
 };
 
 mod legacy_json;
@@ -1476,7 +1476,7 @@ fn validate_import_facts(
         validation_working_bytes,
     )
     .map_err(|_| V1PostgresImportError::SourceLimit)?;
-    validate_generation_facts(raw_facts, validation_limits, || {
+    crate::ingest::validate_generation_facts_for_v1_import(raw_facts, validation_limits, || {
         Instant::now() >= validation.deadline
     })
     .map(|(facts, _)| facts)
@@ -2937,7 +2937,7 @@ async fn verify_destination(
         .map_err(|_| V1PostgresImportError::CorruptCheckpoint)?
         .ok_or(V1PostgresImportError::CorruptCheckpoint)?;
     if content_digest != verification.analysis.report.content_digest.as_str()
-        || digest_version != GenerationDigestVersion::CURRENT.database_value()
+        || digest_version != GenerationDigestVersion::V6.database_value()
     {
         return Err(V1PostgresImportError::CorruptCheckpoint);
     }

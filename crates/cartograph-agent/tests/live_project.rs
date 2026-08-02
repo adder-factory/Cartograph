@@ -2810,6 +2810,15 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
 async fn file_drift_distinguishes_content_hash_from_mtime_threshold_semantics() {
     let (schema, settings, project) = live_project_fixture("8");
+    std::fs::create_dir_all(project.path().join(".cartograph"))
+        .unwrap_or_else(|error| panic!("file-drift policy directory failed: {error}"));
+    std::fs::create_dir_all(project.path().join(".generated"))
+        .unwrap_or_else(|error| panic!("file-drift excluded fixture directory failed: {error}"));
+    std::fs::write(
+        project.path().join(".cartograph/config.json"),
+        r#"{"exclude":["**/.generated/**"]}"#,
+    )
+    .unwrap_or_else(|error| panic!("file-drift source policy failed: {error}"));
     std::fs::write(project.path().join("a.ts"), "export const a = 1;\n")
         .unwrap_or_else(|error| panic!("file-drift a fixture failed: {error}"));
     std::fs::write(project.path().join("b.ts"), "export const b = 2;\n")
@@ -2829,6 +2838,11 @@ async fn file_drift_distinguishes_content_hash_from_mtime_threshold_semantics() 
             .unwrap_or_else(|error| panic!("file-drift deletion failed: {error}"));
         std::fs::write(project.path().join("c.ts"), "export const c = 3;\n")
             .unwrap_or_else(|error| panic!("file-drift addition failed: {error}"));
+        std::fs::write(
+            project.path().join(".generated/types.ts"),
+            "export interface Generated {}\n",
+        )
+        .unwrap_or_else(|error| panic!("file-drift excluded addition failed: {error}"));
         let report = runtime
             .file_drift(FileDriftOptions::default(), ProjectCancellation::new())
             .await

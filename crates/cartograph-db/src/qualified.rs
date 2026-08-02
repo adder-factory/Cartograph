@@ -12,7 +12,6 @@ use crate::{
         CurrentGenerationLookup, begin_bounded_read, commit_bounded_read, decode_symbol,
         require_expected_current_generation,
     },
-    search_relation::require_generation_search_relation,
 };
 
 const MAXIMUM_QUERY_BYTES: usize = 1_024;
@@ -213,7 +212,7 @@ impl QualifiedSymbolHit {
         self.centrality
     }
 
-    /// `ParadeDB` score when the query retained free text.
+    /// Reserved lexical score. Exact-name identity queries do not use a tokenizer.
     #[must_use]
     pub const fn lexical_score(&self) -> Option<f64> {
         self.lexical_score
@@ -281,28 +280,14 @@ impl CartographDatabase {
         .await?;
         let schema = crate::database::quoted_schema(&self.schema);
         let has_text = !input.text.is_empty();
-        // pg_search rejects a Parade predicate OR-ed with an ordinary SQL predicate. Let the
-        // source-code tokenizer produce the bounded candidate set, then use SQL equality only
-        // in ORDER BY so an exact simple or qualified name deterministically wins that set.
+        // Exact-name mode is an identity operation. Keep its free text on ordinary bound SQL
+        // equality so prefix, substring, and tokenizer-adjacent names cannot enter the page.
         let (document_join, text_predicate, lexical_score, exact_name_rank) = if has_text {
-            let relation = require_generation_search_relation(
-                &mut transaction,
-                &self.schema,
-                CurrentGenerationLookup::new(input.project_id, input.expected_generation_id),
-            )
-            .await?;
             (
-                format!(
-                    r"INNER JOIN {} AS documents
-                           ON documents.project_id = symbols.project_id
-                          AND documents.generation_id = symbols.generation_id
-                          AND documents.symbol_id = symbols.symbol_id
-                          AND documents.document_kind = 'symbol'",
-                    relation.qualified_table(&self.schema)
-                ),
-                "AND documents.qualified_name ||| $15",
-                "pdb.score(documents.id)::double precision",
-                "(lower(symbols.simple_name) = lower($15) OR lower(symbols.qualified_name) = lower($15)) DESC,",
+                String::new(),
+                "AND (lower(symbols.simple_name) = lower($15) OR lower(symbols.qualified_name) = lower($15))",
+                "NULL::double precision",
+                "",
             )
         } else {
             (String::new(), "", "NULL::double precision", "")

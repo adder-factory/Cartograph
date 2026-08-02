@@ -1215,16 +1215,7 @@ fn framework_route_hint(language: SourceLanguage, path: &str, source: &str) -> b
         SourceLanguage::TypeScript
         | SourceLanguage::Tsx
         | SourceLanguage::JavaScript
-        | SourceLanguage::Jsx => &[
-            "express",
-            "hono",
-            "fastify",
-            "Router",
-            "Bun.serve",
-            "@nestjs",
-            "Routes",
-            "RouterModule",
-        ],
+        | SourceLanguage::Jsx => return javascript_framework_route_hint(source),
         SourceLanguage::Python => &["django", "flask", "fastapi", "APIRouter", "urlpatterns"],
         SourceLanguage::Php => &["Route::", "Symfony", "$routes", "CodeIgniter", "Drupal"],
         SourceLanguage::Ruby => &["Rails.application.routes", "resources ", "namespace "],
@@ -1248,6 +1239,45 @@ fn framework_route_hint(language: SourceLanguage, path: &str, source: &str) -> b
         _ => &[],
     };
     contains_any(source, hints)
+}
+
+fn javascript_framework_route_hint(source: &str) -> bool {
+    [
+        "express",
+        "hono",
+        "fastify",
+        "Router",
+        "Routes",
+        "RouterModule",
+    ]
+    .iter()
+    .any(|hint| contains_identifier_token(source, hint))
+        || contains_any(source, &["Bun.serve", "@nestjs"])
+}
+
+fn contains_identifier_token(source: &str, token: &str) -> bool {
+    if token.is_empty() || source.len() < token.len() {
+        return false;
+    }
+    source
+        .as_bytes()
+        .windows(token.len())
+        .enumerate()
+        .any(|(start, candidate)| {
+            candidate == token.as_bytes()
+                && start
+                    .checked_sub(1)
+                    .and_then(|index| source.as_bytes().get(index))
+                    .is_none_or(|byte| !is_framework_identifier_byte(*byte))
+                && source
+                    .as_bytes()
+                    .get(start.saturating_add(token.len()))
+                    .is_none_or(|byte| !is_framework_identifier_byte(*byte))
+        })
+}
+
+const fn is_framework_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
 fn angular_or_flutter_hint(language: SourceLanguage, source: &str) -> bool {
@@ -1359,6 +1389,10 @@ fn scan_standard_route_marker(
             cursor = after_marker;
             continue;
         }
+        if marker == ".all(" && route_marker_receiver(input.statement, marker_start) == "Promise" {
+            cursor = after_marker;
+            continue;
+        }
         let Some(quoted) = quoted_after(input.statement, after_marker) else {
             cursor = after_marker;
             continue;
@@ -1396,6 +1430,16 @@ fn scan_standard_route_marker(
         cursor = quoted.end;
     }
     Ok(())
+}
+
+fn route_marker_receiver(statement: &str, marker_start: usize) -> &str {
+    let prefix = statement.get(..marker_start).unwrap_or_default();
+    let start = prefix
+        .rfind(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '$'))
+        })
+        .map_or(0, |index| index.saturating_add(1));
+    prefix.get(start..).unwrap_or_default()
 }
 
 struct RouteMatch<'source> {

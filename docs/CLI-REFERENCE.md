@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-01 (`v2.1.3`).
+Last release audit: 2026-08-02 (`v2.1.4`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -68,7 +68,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.3 top-level command advertised
+This inventory contains every non-hidden v2.1.4 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -80,8 +80,8 @@ by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 - Code intelligence and agent state: `ask`, `blame`, `changed-since`, `context`,
   `compare-to-ref`, `digest`, `explore`, `find`, `node`, `files`,
   `entry-points`, `at-range`, `graph`, `affected`, `tests-for`, `biomarkers`,
-  `coverage`, `dead-code`, `deps`, `hotspots`, `host`, `history`, `imports`,
-  `note`, `propose-rename`, `role`, `session`, `summaries`, `sql`,
+  `numerical`, `coverage`, `dead-code`, `deps`, `hotspots`, `host`, `history`,
+  `imports`, `note`, `propose-rename`, `role`, `session`, `summaries`, `sql`,
   `trace-to-culprits`, `verify`, `review`, `playbook`, `admin`.
 - Configuration and lifecycle: `backend`, `llm`, `upgrade`, `install`,
   `uninstall`, `serve`, `db`.

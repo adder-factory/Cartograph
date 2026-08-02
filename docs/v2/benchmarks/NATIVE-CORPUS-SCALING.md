@@ -84,10 +84,12 @@ blind snapshot.
   Linux and `ps` current-RSS sampling on macOS. The report records each child's
   successful sample count and the child fails if any sample fails.
 
-Native duration covers discovery through canonical Reduce. COPY duration is the
-exact five-table stream observer and includes bounded row encoding. The report
-also records files, symbols, edges, references, and search-document COPY
-durations independently. Completed and failing-table measurements survive a
+Native duration covers discovery through canonical Reduce. The historical
+report below used the then-current five-table stream observer. The current V7
+harness observes six streams by adding `numerical_sites` (zero rows for this
+TypeScript corpus) and records files, symbols, edges, references, numerical
+sites, and search-document COPY durations independently. Completed and
+failing-table measurements survive a
 failed COPY attempt; tables never attempted remain zero. Relation-validation
 duration is the set-based database check after COPY and is deliberately outside
 the COPY duration. Supervised pipeline duration starts immediately before

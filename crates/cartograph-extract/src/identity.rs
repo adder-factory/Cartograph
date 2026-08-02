@@ -1,17 +1,38 @@
 use std::collections::HashMap;
 
-use cartograph_domain::{FileId, NormalizedPath, SymbolId, SymbolKind};
+use cartograph_domain::{
+    FileId, NormalizedPath, NumericalSiteId, SourceSpan, SymbolId, SymbolKind,
+};
 
 use crate::ExtractError;
 
 const FILE_ID_CONTEXT: &str = "cartograph.v2.file-id.2026-07-22";
 const SYMBOL_ID_CONTEXT: &str = "cartograph.v2.symbol-id.2026-07-22";
+const NUMERICAL_SITE_ID_CONTEXT: &str = "cartograph.v2.numerical-site-id.2026-08-01";
 const UUID_BYTES: usize = 16;
 
 pub(crate) fn file_id(path: &NormalizedPath) -> FileId {
     FileId::from_uuid_v8(stable_uuid_bytes(
         FILE_ID_CONTEXT,
         &[path.as_str().as_bytes()],
+    ))
+}
+
+pub(crate) fn numerical_site_id(
+    file_id: &FileId,
+    span: &SourceSpan,
+    categories: [&str; 2],
+) -> NumericalSiteId {
+    let [operation, hazard] = categories;
+    NumericalSiteId::from_uuid_v8(stable_uuid_bytes(
+        NUMERICAL_SITE_ID_CONTEXT,
+        &[
+            file_id.as_str().as_bytes(),
+            &span.start_byte().to_le_bytes(),
+            &span.end_byte().to_le_bytes(),
+            operation.as_bytes(),
+            hazard.as_bytes(),
+        ],
     ))
 }
 

@@ -8,8 +8,8 @@ use std::{
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationFacts,
     GenerationValidationLimits, GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
-    NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheWrite, ReferenceInput,
-    ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
+    NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheWrite, NumericalSiteInput,
+    ReferenceInput, ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
     apply_sampled_betweenness, validate_generation_facts,
 };
 use cartograph_domain::{
@@ -20,16 +20,16 @@ use cartograph_domain::{
 use cartograph_extract::{
     CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX, DiscoveredSource,
     DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, ExtractedImportBinding,
-    ExtractedReference, ImportBindingKind, NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX,
-    SourceDiscoveryOptions, SourceLimits, SourceReadError, SourceReadOptions, SourceRoot,
-    is_test_source_path, native_extraction_reservation, native_extractor_contract_digest,
-    native_read_reservation,
+    ExtractedNumericalSite, ExtractedReference, ImportBindingKind, NativeExtractor,
+    RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits, SourceReadError,
+    SourceReadOptions, SourceRoot, is_test_source_path, native_extraction_reservation,
+    native_extractor_contract_digest, native_read_reservation, substitute_module_alias,
 };
 use cartograph_scip::{
     ScipOverlayReport, ScipOverlayRequest, apply_scip_overlay_with_cancellation,
 };
 use globset::GlobBuilder;
-use serde_json::json;
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
     runtime::{Handle, RuntimeFlavor},
@@ -123,6 +123,10 @@ const DUPLICATE_MAXIMUM_LITERAL_RATIO_PPM: u64 = 600_000;
 const DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM: u32 = 950_000;
 const DUPLICATE_PARTIAL_WIDER_OVERLAP_PPM: u32 = 800_000;
 const MAXIMUM_LISTED_CLONE_PEERS: usize = 10;
+const MAXIMUM_TYPESCRIPT_ALIAS_CONFIGS: usize = 256;
+const MAXIMUM_TYPESCRIPT_PATH_MAPPINGS: usize = 256;
+const MAXIMUM_TYPESCRIPT_PATH_SUBSTITUTIONS: usize = 32;
+const MAXIMUM_TYPESCRIPT_PATH_TEXT_BYTES: usize = 4_096;
 const MODULE_EXTENSIONS: [&str; 18] = [
     ".d.ts", ".d.mts", ".d.cts", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs",
     ".cjs", ".vue", ".svelte", ".astro", ".rs", ".py", ".go",
@@ -508,6 +512,7 @@ pub struct NativePipelineReport {
     skipped_oversized_files: u64,
     source_bytes: u64,
     symbols: u64,
+    numerical_sites: u64,
     resolved_references: u64,
     unresolved_references: u64,
     diagnostics: u64,
@@ -618,6 +623,12 @@ impl NativePipelineReport {
         self.symbols
     }
 
+    /// Static numerical source sites emitted into the generation.
+    #[must_use]
+    pub const fn numerical_sites(self) -> u64 {
+        self.numerical_sites
+    }
+
     /// References assigned one deterministic project symbol.
     #[must_use]
     pub const fn resolved_references(self) -> u64 {
@@ -688,6 +699,7 @@ impl fmt::Debug for NativeGeneration {
             .field("symbols", &self.facts.symbols().len())
             .field("edges", &self.facts.edges().len())
             .field("references", &self.facts.references().len())
+            .field("numerical_sites", &self.facts.numerical_sites().len())
             .field("documents", &self.facts.documents().len())
             .finish()
     }
@@ -849,6 +861,7 @@ pub async fn build_native_generation_with_scip_and_cache(
     Ok(NativeGeneration {
         report: NativePipelineReport {
             symbols: usize_to_u64(facts.symbols().len()),
+            numerical_sites: usize_to_u64(facts.numerical_sites().len()),
             resolved_references: resolution.resolved,
             unresolved_references: resolution.unresolved,
             diagnostics: resolution.diagnostics,
@@ -1718,6 +1731,7 @@ struct NativeFileFacts {
     symbols: Vec<NativeSymbolFacts>,
     containments: Vec<Containment>,
     references: Vec<ExtractedReference>,
+    numerical_sites: Vec<ExtractedNumericalSite>,
     import_bindings: Vec<ExtractedImportBinding>,
     has_inline_tests: bool,
     test_search_text: String,
@@ -1737,6 +1751,7 @@ impl NativeFileFacts {
             symbols,
             containments,
             references,
+            numerical_sites,
             import_bindings,
             has_inline_tests,
             test_search_text,
@@ -1763,6 +1778,7 @@ impl NativeFileFacts {
             symbols: normalized_symbols,
             containments,
             references,
+            numerical_sites,
             import_bindings,
             has_inline_tests,
             test_search_text,
@@ -1776,6 +1792,7 @@ impl NativeFileFacts {
             .saturating_add(vector_capacity_bytes(&self.symbols))
             .saturating_add(vector_capacity_bytes(&self.containments))
             .saturating_add(vector_capacity_bytes(&self.references))
+            .saturating_add(vector_capacity_bytes(&self.numerical_sites))
             .saturating_add(vector_capacity_bytes(&self.import_bindings))
             .saturating_add(usize_to_u64(self.test_search_text.capacity()));
         for symbol in &self.symbols {
@@ -1801,6 +1818,21 @@ impl NativeFileFacts {
                         .as_ref()
                         .map_or(0, String::capacity),
                 ));
+        }
+        for site in &self.numerical_sites {
+            bytes = bytes
+                .saturating_add(usize_to_u64(site.id.as_str().len()))
+                .saturating_add(
+                    site.owner
+                        .as_ref()
+                        .map_or(0, |owner| usize_to_u64(owner.as_str().len())),
+                )
+                .saturating_add(usize_to_u64(site.operation.capacity()))
+                .saturating_add(usize_to_u64(site.hazard.capacity()))
+                .saturating_add(usize_to_u64(site.precision.capacity()))
+                .saturating_add(usize_to_u64(site.expression_digest.as_str().len()))
+                .saturating_add(usize_to_u64(site.provenance.capacity()))
+                .saturating_add(usize_to_u64(site.unknowns.capacity()));
         }
         for binding in &self.import_bindings {
             bytes = bytes
@@ -1835,6 +1867,19 @@ impl NativeFileFacts {
                 .saturating_add(usize_to_u64(reference.name.len()))
                 .saturating_add(usize_to_u64(reference.kind.as_str().len()))
                 .saturating_add(MAX_RESOLUTION_PROVENANCE_BYTES.saturating_mul(2));
+        }
+        for site in &self.numerical_sites {
+            bytes = bytes
+                .saturating_add(usize_to_u64(size_of::<NumericalSiteInput>()))
+                .saturating_add(usize_to_u64(site.id.as_str().len()))
+                .saturating_add(UUID_TEXT_BYTES.saturating_mul(2))
+                .saturating_add(usize_to_u64(site.operation.len()))
+                .saturating_add(usize_to_u64(site.hazard.len()))
+                .saturating_add(usize_to_u64(site.precision.len()))
+                .saturating_add(usize_to_u64(site.expression_digest.as_str().len()))
+                .saturating_add(usize_to_u64(site.provenance.len()))
+                .saturating_add(usize_to_u64("heuristic".len()))
+                .saturating_add(usize_to_u64(site.unknowns.len()));
         }
         for symbol in &self.symbols {
             bytes = bytes.saturating_add(anticipated_document_bytes(
@@ -2046,6 +2091,23 @@ struct ModulePathIndex {
     directory_index: ModulePathMap,
     files: FileResolutionContextMap,
     rust_packages: RustPackageMap,
+    typescript_aliases: TypeScriptAliasIndex,
+}
+
+#[derive(Default)]
+struct TypeScriptAliasIndex {
+    by_directory: BTreeMap<String, TypeScriptAliasConfig>,
+}
+
+struct TypeScriptAliasConfig {
+    base_path: String,
+    mappings: Vec<TypeScriptPathMapping>,
+    tsconfig: bool,
+}
+
+struct TypeScriptPathMapping {
+    pattern: String,
+    substitutions: Vec<String>,
 }
 
 #[derive(Default)]
@@ -3817,6 +3879,14 @@ struct PersistPartialClones<'context, Cancel> {
     cancelled: &'context mut Cancel,
 }
 
+struct DerivedResolutionEvidence<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    facts: &'context mut GenerationFacts,
+    budget: &'context mut ResolveBudget,
+    policy: NativeEvidencePolicy,
+    cancelled: &'context mut Cancel,
+}
+
 fn resolve_generation<Cancel>(
     request: ResolveGenerationRequest,
     mut cancelled: Cancel,
@@ -3852,7 +3922,14 @@ where
         },
         &mut cancelled,
     )?;
-    let index = build_resolution_index(&extracted, &mut budget, &mut cancelled)?;
+    let index = build_resolution_index(
+        &extracted,
+        ResolutionIndexContext {
+            source_root: &source_root,
+            budget: &mut budget,
+            cancelled: &mut cancelled,
+        },
+    )?;
     let diagnostics = extracted.diagnostics;
     let mut report = ResolutionReport {
         diagnostics,
@@ -3871,39 +3948,13 @@ where
             output.append_file(file, &mut cancelled)?;
         }
     }
-    append_framework_bridge_edges(ResolutionMutation {
+    append_derived_resolution_evidence(DerivedResolutionEvidence {
         index: &index,
         facts: &mut facts,
         budget: &mut budget,
+        policy: evidence_policy,
         cancelled: &mut cancelled,
     })?;
-    append_go_structural_edges(GoStructuralEdges {
-        index: &index,
-        facts: &mut facts,
-        budget: &mut budget,
-        cancelled: &mut cancelled,
-    })?;
-    append_module_reexport_edges(ResolutionMutation {
-        index: &index,
-        facts: &mut facts,
-        budget: &mut budget,
-        cancelled: &mut cancelled,
-    })?;
-    append_test_subject_edges(ResolutionMutation {
-        index: &index,
-        facts: &mut facts,
-        budget: &mut budget,
-        cancelled: &mut cancelled,
-    })?;
-    if evidence_policy.centrality.page_rank {
-        apply_page_rank(&mut facts, &mut cancelled).map_err(|_| StageItemFailure)?;
-    }
-    if evidence_policy.centrality.betweenness {
-        apply_sampled_betweenness(&mut facts, &mut cancelled).map_err(|_| StageItemFailure)?;
-    }
-    if !evidence_policy.retention.call_sites {
-        facts.references.clear();
-    }
     let measurement = facts
         .measure_retained_bytes(maximum_bytes, &mut cancelled)
         .map_err(|_| StageItemFailure)?;
@@ -3911,6 +3962,55 @@ where
     report.retained_bytes = measurement.retained_bytes();
     report.charged_high_water_bytes = budget.charged_bytes;
     Ok((facts, report))
+}
+
+fn append_derived_resolution_evidence<Cancel>(
+    input: DerivedResolutionEvidence<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let DerivedResolutionEvidence {
+        index,
+        facts,
+        budget,
+        policy,
+        cancelled,
+    } = input;
+    append_framework_bridge_edges(ResolutionMutation {
+        index,
+        facts: &mut *facts,
+        budget: &mut *budget,
+        cancelled: &mut *cancelled,
+    })?;
+    append_go_structural_edges(GoStructuralEdges {
+        index,
+        facts: &mut *facts,
+        budget: &mut *budget,
+        cancelled: &mut *cancelled,
+    })?;
+    append_module_reexport_edges(ResolutionMutation {
+        index,
+        facts: &mut *facts,
+        budget: &mut *budget,
+        cancelled: &mut *cancelled,
+    })?;
+    append_test_subject_edges(ResolutionMutation {
+        index,
+        facts: &mut *facts,
+        budget: &mut *budget,
+        cancelled: &mut *cancelled,
+    })?;
+    if policy.centrality.page_rank {
+        apply_page_rank(facts, &mut *cancelled).map_err(|_| StageItemFailure)?;
+    }
+    if policy.centrality.betweenness {
+        apply_sampled_betweenness(facts, &mut *cancelled).map_err(|_| StageItemFailure)?;
+    }
+    if !policy.retention.call_sites {
+        facts.references.clear();
+    }
+    Ok(())
 }
 
 struct CloneAnalysisCandidate {
@@ -5403,10 +5503,15 @@ fn append_derived_edge(
     Ok(())
 }
 
+struct ResolutionIndexContext<'context, Cancel> {
+    source_root: &'context SourceRoot,
+    budget: &'context mut ResolveBudget,
+    cancelled: &'context mut Cancel,
+}
+
 fn build_resolution_index<Cancel>(
     extracted: &NativeFactAccumulator,
-    budget: &mut ResolveBudget,
-    cancelled: &mut Cancel,
+    mut context: ResolutionIndexContext<'_, Cancel>,
 ) -> Result<ResolutionIndex, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
@@ -5416,25 +5521,300 @@ where
         index_resolution_file_metadata(ResolutionIndexFileInput {
             index: &mut index,
             file,
-            budget,
-            cancelled,
+            budget: context.budget,
+            cancelled: context.cancelled,
         })?;
     }
+    index_typescript_aliases(&mut index.modules, extracted, &mut context)?;
     index_rust_workspace_packages(RustWorkspacePackageIndexInput {
         index: &mut index,
         extracted,
-        budget,
-        cancelled,
+        budget: context.budget,
+        cancelled: context.cancelled,
     })?;
     for file in &extracted.files {
         index_resolution_file_symbols(ResolutionIndexFileInput {
             index: &mut index,
             file,
-            budget,
-            cancelled,
+            budget: context.budget,
+            cancelled: context.cancelled,
         })?;
     }
     Ok(index)
+}
+
+fn index_typescript_aliases<Cancel>(
+    modules: &mut ModulePathIndex,
+    extracted: &NativeFactAccumulator,
+    context: &mut ResolutionIndexContext<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    for file in &extracted.files {
+        if (context.cancelled)() {
+            return Err(StageItemFailure);
+        }
+        index_typescript_alias_file(modules, file, context)?;
+    }
+    Ok(())
+}
+
+fn index_typescript_alias_file<Cancel>(
+    modules: &mut ModulePathIndex,
+    file: &NativeFileFacts,
+    context: &mut ResolutionIndexContext<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let path = file.file.normalized_path.as_str();
+    let Some(file_name) = path.rsplit('/').next() else {
+        return Ok(());
+    };
+    let tsconfig = file_name == "tsconfig.json";
+    if file.file.language != SourceLanguage::Json.as_str()
+        || (!tsconfig && file_name != "jsconfig.json")
+    {
+        return Ok(());
+    }
+    let directory = path.rsplit_once('/').map_or("", |(directory, _)| directory);
+    if modules
+        .typescript_aliases
+        .by_directory
+        .get(directory)
+        .is_some_and(|existing| existing.tsconfig || !tsconfig)
+    {
+        return Ok(());
+    }
+    let normalized = NormalizedPath::parse(path).map_err(|_| StageItemFailure)?;
+    let limits = exact_limit_ceiling(file.file.byte_size)?;
+    let snapshot = context
+        .source_root
+        .read_with_cancellation(
+            &normalized,
+            SourceReadOptions::new(limits, &mut *context.cancelled),
+        )
+        .map_err(|_| StageItemFailure)?;
+    if snapshot.content_hash() != &file.file.content_hash
+        || snapshot.byte_size() != file.file.byte_size
+    {
+        return Err(StageItemFailure);
+    }
+    let Some(config) = parse_typescript_alias_config(snapshot.source(), directory, tsconfig)?
+    else {
+        return Ok(());
+    };
+    let replacing = modules
+        .typescript_aliases
+        .by_directory
+        .contains_key(directory);
+    if !replacing
+        && modules.typescript_aliases.by_directory.len() >= MAXIMUM_TYPESCRIPT_ALIAS_CONFIGS
+    {
+        return Err(StageItemFailure);
+    }
+    context
+        .budget
+        .charge(typescript_alias_config_bytes(directory, &config))?;
+    modules
+        .typescript_aliases
+        .by_directory
+        .insert(try_clone_text(directory)?, config);
+    Ok(())
+}
+
+fn parse_typescript_alias_config(
+    source: &str,
+    directory: &str,
+    tsconfig: bool,
+) -> Result<Option<TypeScriptAliasConfig>, StageItemFailure> {
+    let stripped = strip_typescript_config_comments(source);
+    let Ok(parsed) = serde_json::from_str::<Value>(&stripped) else {
+        return Ok(None);
+    };
+    let Some(compiler) = parsed.get("compilerOptions").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(paths) = compiler.get("paths").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    if paths.len() > MAXIMUM_TYPESCRIPT_PATH_MAPPINGS {
+        return Err(StageItemFailure);
+    }
+    let base_url = match compiler.get("baseUrl") {
+        Some(value) => value.as_str().ok_or(StageItemFailure)?,
+        None => ".",
+    };
+    let Some(base_path) = normalize_typescript_alias_base(directory, base_url) else {
+        return Ok(None);
+    };
+    let mut mappings = Vec::new();
+    mappings
+        .try_reserve_exact(paths.len())
+        .map_err(|_| StageItemFailure)?;
+    for (pattern, substitutions) in paths {
+        if let Some(mapping) = parse_typescript_path_mapping(pattern, substitutions)? {
+            mappings.push(mapping);
+        }
+    }
+    mappings.sort_unstable_by(|left, right| {
+        let left_wildcard = left.pattern.find('*');
+        let right_wildcard = right.pattern.find('*');
+        left_wildcard
+            .is_some()
+            .cmp(&right_wildcard.is_some())
+            .then_with(|| {
+                right_wildcard
+                    .unwrap_or(right.pattern.len())
+                    .cmp(&left_wildcard.unwrap_or(left.pattern.len()))
+            })
+            .then_with(|| left.pattern.cmp(&right.pattern))
+    });
+    Ok((!mappings.is_empty()).then_some(TypeScriptAliasConfig {
+        base_path,
+        mappings,
+        tsconfig,
+    }))
+}
+
+fn parse_typescript_path_mapping(
+    pattern: &str,
+    substitutions: &Value,
+) -> Result<Option<TypeScriptPathMapping>, StageItemFailure> {
+    if !valid_typescript_alias_text(pattern) {
+        return Ok(None);
+    }
+    let Some(substitutions) = substitutions.as_array() else {
+        return Ok(None);
+    };
+    if substitutions.len() > MAXIMUM_TYPESCRIPT_PATH_SUBSTITUTIONS {
+        return Err(StageItemFailure);
+    }
+    let mut retained_substitutions = Vec::new();
+    retained_substitutions
+        .try_reserve_exact(substitutions.len())
+        .map_err(|_| StageItemFailure)?;
+    for substitution in substitutions.iter().filter_map(Value::as_str) {
+        if valid_typescript_alias_substitution(substitution) {
+            retained_substitutions.push(try_clone_text(substitution)?);
+        }
+    }
+    if retained_substitutions.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(TypeScriptPathMapping {
+        pattern: try_clone_text(pattern)?,
+        substitutions: retained_substitutions,
+    }))
+}
+
+fn normalize_typescript_alias_base(directory: &str, base_url: &str) -> Option<String> {
+    if base_url.contains(['\\', '\0']) || base_url.starts_with('/') {
+        return None;
+    }
+    if matches!(base_url, "" | "." | "./") {
+        return Some(directory.to_owned());
+    }
+    let anchor = if directory.is_empty() {
+        "__cartograph_tsconfig__.json".to_owned()
+    } else {
+        format!("{directory}/__cartograph_tsconfig__.json")
+    };
+    normalize_joined_project_path(&anchor, base_url)
+}
+
+fn valid_typescript_alias_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAXIMUM_TYPESCRIPT_PATH_TEXT_BYTES
+        && !value.contains(['\\', '\0'])
+        && value.bytes().filter(|byte| *byte == b'*').count() <= 1
+}
+
+fn valid_typescript_alias_substitution(value: &str) -> bool {
+    valid_typescript_alias_text(value) && !value.starts_with('/')
+}
+
+fn typescript_alias_config_bytes(directory: &str, config: &TypeScriptAliasConfig) -> u64 {
+    let mut bytes = RESOLUTION_MAP_NODE_ALLOWANCE
+        .saturating_add(usize_to_u64(directory.len()))
+        .saturating_add(usize_to_u64(config.base_path.capacity()))
+        .saturating_add(vector_capacity_bytes(&config.mappings));
+    for mapping in &config.mappings {
+        bytes = bytes
+            .saturating_add(usize_to_u64(mapping.pattern.capacity()))
+            .saturating_add(vector_capacity_bytes(&mapping.substitutions));
+        for substitution in &mapping.substitutions {
+            bytes = bytes.saturating_add(usize_to_u64(substitution.capacity()));
+        }
+    }
+    bytes
+}
+
+fn strip_typescript_config_comments(source: &str) -> String {
+    let mut output = Vec::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut index = 0_usize;
+    let mut quoted = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if quoted {
+            (index, quoted) = copy_typescript_config_quoted_byte(bytes, index, &mut output);
+            continue;
+        }
+        if byte == b'"' {
+            quoted = true;
+            output.push(byte);
+            index += 1;
+            continue;
+        }
+        let remaining = &bytes[index..];
+        if remaining.starts_with(b"//") {
+            index = skip_typescript_line_comment(bytes, index);
+            continue;
+        }
+        if remaining.starts_with(b"/*") {
+            index = skip_typescript_block_comment(bytes, index);
+            continue;
+        }
+        output.push(byte);
+        index += 1;
+    }
+    match String::from_utf8(output) {
+        Ok(stripped) => stripped,
+        Err(_) => source.to_owned(),
+    }
+}
+
+fn copy_typescript_config_quoted_byte(
+    bytes: &[u8],
+    index: usize,
+    output: &mut Vec<u8>,
+) -> (usize, bool) {
+    let byte = bytes[index];
+    output.push(byte);
+    match (byte, bytes.get(index + 1).copied()) {
+        (b'\\', Some(escaped)) => {
+            output.push(escaped);
+            (index + 2, true)
+        }
+        (b'"', _) => (index + 1, false),
+        _ => (index + 1, true),
+    }
+}
+
+fn skip_typescript_line_comment(bytes: &[u8], index: usize) -> usize {
+    bytes[index + 2..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(bytes.len(), |offset| index + 2 + offset)
+}
+
+fn skip_typescript_block_comment(bytes: &[u8], index: usize) -> usize {
+    bytes[index + 2..]
+        .windows(2)
+        .position(|window| window == b"*/")
+        .map_or(bytes.len(), |offset| index + 2 + offset + 2)
 }
 
 struct ResolutionIndexFileInput<'index, 'file, 'budget, 'cancel, Cancel> {
@@ -5957,6 +6337,7 @@ impl ResolutionOutput<'_> {
             symbols,
             containments,
             references,
+            numerical_sites,
             import_bindings,
             has_inline_tests: _,
             test_search_text,
@@ -6005,6 +6386,14 @@ impl ResolutionOutput<'_> {
                 },
                 cancelled,
             )?;
+        }
+        for site in numerical_sites {
+            if cancelled() {
+                return Err(StageItemFailure);
+            }
+            self.facts
+                .numerical_sites
+                .push(numerical_site_input(&identity.file_id, site));
         }
         for symbol in symbols {
             if cancelled() {
@@ -6268,6 +6657,26 @@ impl ResolutionOutput<'_> {
     }
 }
 
+fn numerical_site_input(file_id: &FileId, site: ExtractedNumericalSite) -> NumericalSiteInput {
+    NumericalSiteInput {
+        site_id: site.id,
+        file_id: file_id.clone(),
+        owner_symbol_id: site.owner,
+        start_byte: site.span.start_byte(),
+        end_byte: site.span.end_byte(),
+        start_line: site.span.start_line(),
+        end_line: site.span.end_line(),
+        operation: site.operation,
+        hazard: site.hazard,
+        precision: site.precision,
+        expression_digest: site.expression_digest,
+        confidence_ppm: site.confidence_ppm,
+        provenance: site.provenance,
+        evidence_level: "heuristic".to_owned(),
+        unknowns: site.unknowns,
+    }
+}
+
 fn reserve_generation_vectors(
     facts: &mut GenerationFacts,
     extracted: &NativeFactAccumulator,
@@ -6278,6 +6687,7 @@ fn reserve_generation_vectors(
     let symbols = source_symbols.checked_add(files).ok_or(StageItemFailure)?;
     let containments = sum_lengths(&extracted.files, |file| file.containments.len())?;
     let references = sum_lengths(&extracted.files, |file| file.references.len())?;
+    let numerical_sites = sum_lengths(&extracted.files, |file| file.numerical_sites.len())?;
     let edges = containments
         .checked_add(references)
         .and_then(|count| count.checked_add(source_symbols))
@@ -6293,6 +6703,10 @@ fn reserve_generation_vectors(
             )
             .saturating_add(
                 usize_to_u64(references).saturating_mul(usize_to_u64(size_of::<ReferenceInput>())),
+            )
+            .saturating_add(
+                usize_to_u64(numerical_sites)
+                    .saturating_mul(usize_to_u64(size_of::<NumericalSiteInput>())),
             )
             .saturating_add(
                 usize_to_u64(files.saturating_add(source_symbols))
@@ -6314,6 +6728,10 @@ fn reserve_generation_vectors(
     facts
         .references
         .try_reserve_exact(references)
+        .map_err(|_| StageItemFailure)?;
+    facts
+        .numerical_sites
+        .try_reserve_exact(numerical_sites)
         .map_err(|_| StageItemFailure)?;
     facts
         .documents
@@ -6704,6 +7122,12 @@ struct ModuleResolutionRequest<'a> {
     importing_language: &'a str,
 }
 
+enum TypeScriptAliasModuleResolution<'a> {
+    NotMatched,
+    Resolved(&'a FileId),
+    Unresolved,
+}
+
 #[derive(Clone, Copy)]
 struct RustQualifiedModuleQuery<'context, 'request> {
     index: &'context ResolutionIndex,
@@ -6854,7 +7278,7 @@ where
     )?) {
         return Ok(resolution);
     }
-    if project_fallback_allowed(request)
+    if project_fallback_allowed(index, request)
         && let Some(target) = resolve_project(index, request, cancelled)?
     {
         return Ok(ReferenceResolution::resolved(target));
@@ -6875,7 +7299,7 @@ where
     if let Some(provenance) = fixed_unresolved_provenance(request) {
         return Ok(provenance);
     }
-    let import_scope = reference_import_scope(request, cancelled)?;
+    let import_scope = reference_import_scope(index, request, cancelled)?;
     if let Some(provenance) = import_scope_unresolved_provenance(import_scope, request) {
         return Ok(provenance);
     }
@@ -7084,13 +7508,13 @@ fn import_reference_resolution(resolution: ImportResolution) -> Option<Reference
     }
 }
 
-fn project_fallback_allowed(request: &ResolutionRequest<'_>) -> bool {
+fn project_fallback_allowed(index: &ResolutionIndex, request: &ResolutionRequest<'_>) -> bool {
     let runtime_require = javascript_family_name(request.language)
         && request.kind == ReferenceKind::Calls
         && request.name == "require";
     let external_binding = request.import_bindings.iter().any(|binding| {
         binding_matches_reference_name(binding, request.name)
-            && !import_binding_is_project_local(binding, request.language)
+            && !import_binding_is_project_local(index, binding, request)
     });
     !runtime_require && !external_binding
 }
@@ -7708,7 +8132,7 @@ where
     Ok(if module_file_id.is_some() {
         ImportResolution::Unresolved
     } else {
-        missing_import_module_resolution(reference, binding)
+        missing_import_module_resolution(index, reference, binding)
     })
 }
 
@@ -7985,6 +8409,7 @@ enum ImportScope {
 }
 
 fn reference_import_scope<Cancel>(
+    index: &ResolutionIndex,
     reference: &ResolutionRequest<'_>,
     cancelled: &mut Cancel,
 ) -> Result<ImportScope, StageItemFailure>
@@ -7999,7 +8424,7 @@ where
         if !binding_matches_reference_name(binding, reference.name) {
             continue;
         }
-        let candidate = if import_binding_is_project_local(binding, reference.language) {
+        let candidate = if import_binding_is_project_local(index, binding, reference) {
             ImportScope::Local
         } else {
             ImportScope::NonLocal
@@ -8020,14 +8445,27 @@ fn binding_matches_reference_name(binding: &ExtractedImportBinding, reference_na
             .is_some_and(|suffix| suffix.starts_with("::") || suffix.starts_with('.'))
 }
 
-fn import_binding_is_project_local(binding: &ExtractedImportBinding, language: &str) -> bool {
+fn import_binding_is_project_local(
+    index: &ResolutionIndex,
+    binding: &ExtractedImportBinding,
+    reference: &ResolutionRequest<'_>,
+) -> bool {
     let specifier = binding.module_specifier.as_str();
     matches!(binding.kind, ImportBindingKind::IncludeQuoted)
         || matches!(specifier, "." | "..")
         || specifier.starts_with("./")
         || specifier.starts_with("../")
-        || language == SourceLanguage::Rust.as_str() && rust_use_binding_is_hypothesis(specifier)
-        || (javascript_family_name(language)
+        || reference.language == SourceLanguage::Rust.as_str()
+            && rust_use_binding_is_hypothesis(specifier)
+        || typescript_alias_matches(
+            &index.modules,
+            TypeScriptAliasMatch {
+                importing_path: reference.file_path,
+                specifier,
+                importing_language: reference.language,
+            },
+        )
+        || (javascript_family_name(reference.language)
             && (specifier.starts_with("@/")
                 || specifier.starts_with("~/")
                 || specifier.starts_with("$lib/")))
@@ -8067,10 +8505,11 @@ where
 }
 
 fn missing_import_module_resolution(
+    index: &ResolutionIndex,
     reference: &ResolutionRequest<'_>,
     binding: &ExtractedImportBinding,
 ) -> ImportResolution {
-    if !import_binding_is_project_local(binding, reference.language)
+    if !import_binding_is_project_local(index, binding, reference)
         || (reference.language == SourceLanguage::Rust.as_str()
             && binding.kind == ImportBindingKind::Namespace
             && rust_use_binding_is_hypothesis(&binding.module_specifier))
@@ -8177,6 +8616,11 @@ fn resolve_module_file<'a>(
     {
         return Some(file_id);
     }
+    match resolve_typescript_alias_module(modules, request) {
+        TypeScriptAliasModuleResolution::Resolved(file_id) => return Some(file_id),
+        TypeScriptAliasModuleResolution::Unresolved => return None,
+        TypeScriptAliasModuleResolution::NotMatched => {}
+    }
     for candidate in framework_alias_module_paths(request.importing_language, request.specifier) {
         let Some(candidate) = candidate else {
             continue;
@@ -8188,6 +8632,99 @@ fn resolve_module_file<'a>(
         }
     }
     None
+}
+
+fn resolve_typescript_alias_module<'a>(
+    modules: &'a ModulePathIndex,
+    request: ModuleResolutionRequest<'_>,
+) -> TypeScriptAliasModuleResolution<'a> {
+    if !javascript_family_name(request.importing_language)
+        || matches!(request.specifier, "." | "..")
+        || request.specifier.starts_with("./")
+        || request.specifier.starts_with("../")
+    {
+        return TypeScriptAliasModuleResolution::NotMatched;
+    }
+    let Some(config) = nearest_typescript_alias_config(modules, request.importing_path) else {
+        return TypeScriptAliasModuleResolution::NotMatched;
+    };
+    for mapping in &config.mappings {
+        let Some(tail) = typescript_alias_tail(request.specifier, &mapping.pattern) else {
+            continue;
+        };
+        for substitution in &mapping.substitutions {
+            let replaced = substitute_module_alias(substitution, tail);
+            let Some(candidate) = normalize_typescript_alias_target(&config.base_path, &replaced)
+            else {
+                continue;
+            };
+            if let Some(file_id) =
+                resolve_normalized_module_file(modules, &candidate, request.importing_language)
+            {
+                return TypeScriptAliasModuleResolution::Resolved(file_id);
+            }
+        }
+        return TypeScriptAliasModuleResolution::Unresolved;
+    }
+    TypeScriptAliasModuleResolution::NotMatched
+}
+
+fn nearest_typescript_alias_config<'a>(
+    modules: &'a ModulePathIndex,
+    importing_path: &str,
+) -> Option<&'a TypeScriptAliasConfig> {
+    let mut directory = importing_path
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
+    loop {
+        if let Some(config) = modules.typescript_aliases.by_directory.get(directory) {
+            return Some(config);
+        }
+        let Some((parent, _)) = directory.rsplit_once('/') else {
+            return if directory.is_empty() {
+                None
+            } else {
+                modules.typescript_aliases.by_directory.get("")
+            };
+        };
+        directory = parent;
+    }
+}
+
+fn typescript_alias_tail<'a>(specifier: &'a str, pattern: &str) -> Option<&'a str> {
+    let Some(wildcard) = pattern.find('*') else {
+        return (specifier == pattern).then_some("");
+    };
+    specifier
+        .strip_prefix(&pattern[..wildcard])?
+        .strip_suffix(&pattern[wildcard + 1..])
+}
+
+fn normalize_typescript_alias_target(base_path: &str, substitution: &str) -> Option<String> {
+    if base_path.is_empty() {
+        return normalize_root_module_path(substitution);
+    }
+    let anchor = format!("{base_path}/__cartograph_alias__.ts");
+    normalize_joined_project_path(&anchor, substitution)
+}
+
+#[derive(Clone, Copy)]
+struct TypeScriptAliasMatch<'context> {
+    importing_path: &'context str,
+    specifier: &'context str,
+    importing_language: &'context str,
+}
+
+fn typescript_alias_matches(modules: &ModulePathIndex, input: TypeScriptAliasMatch<'_>) -> bool {
+    if !javascript_family_name(input.importing_language) {
+        return false;
+    }
+    nearest_typescript_alias_config(modules, input.importing_path).is_some_and(|config| {
+        config
+            .mappings
+            .iter()
+            .any(|mapping| typescript_alias_tail(input.specifier, &mapping.pattern).is_some())
+    })
 }
 
 fn rust_use_binding_is_hypothesis(specifier: &str) -> bool {
@@ -8540,7 +9077,7 @@ where
         return Ok(None);
     }
     let rust_local_import = request.language == SourceLanguage::Rust.as_str()
-        && reference_import_scope(request, cancelled)? == ImportScope::Local;
+        && reference_import_scope(index, request, cancelled)? == ImportScope::Local;
     let candidate = select_candidate(
         candidates,
         |candidate| {
@@ -10034,21 +10571,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "4548bf7735dc9a9b00579bd5f325b5bd3e1c835d6008fd83a83d4129280e490b";
+        "d67ce82c32230ef36158e6277161d7a6bae998125e2b696fe4dc9dc6a47fe11c";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "cdf923a598bf42ba3af4706e9a4d6ed379f7b454b36a82eb5f7eff716ccca02a";
+        "16851e79b5e33cd25a75bf6ce8133cdd0afb3369307c3f4816d0b639ce9eeeaa";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "860f6184d433be51528a7a37061126614cb2b9cee31559bf6d0c8b934c5e0c68";
+        "32038aae4beab2afa138072f35134e45b66170082cc6cdf41255f851ecbb2b12";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 12;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "91ea7bc81577d41dbe894d31fc23201b08c1e2ab77b04eba4e89ba21c63fafb2";
+        "44ce48ea5c242edd2ea7b97da271e774f8a53f10bd3891d69fe71b709692fcd2";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (12, 40, 34, 27, 40);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -11013,6 +11550,59 @@ mod tests {
         assert!(!report.worker_failed);
         assert!(!report.unobserved_results);
         generation
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn numerical_sites_survive_resolution_and_are_worker_invariant() {
+        let directory =
+            tempdir().unwrap_or_else(|error| panic!("could not create fixture: {error}"));
+        fs::create_dir_all(directory.path().join("src"))
+            .unwrap_or_else(|error| panic!("could not create numerical fixture: {error}"));
+        fs::write(
+            directory.path().join("src/numerics.rs"),
+            r"
+pub fn score(a: u16, b: u16, value: f32) -> f32 {
+    let widened = (a * b) as f32;
+    let root = value.sqrt();
+    if (root - widened).abs() < 1e-6 {
+        root.max(widened)
+    } else {
+        value / widened
+    }
+}
+",
+        )
+        .unwrap_or_else(|error| panic!("could not write numerical fixture: {error}"));
+
+        let serial = build(directory.path(), SERIAL_WORKERS).await;
+        let parallel = build(directory.path(), PARALLEL_WORKERS).await;
+        assert_eq!(serial.facts().digest(), parallel.facts().digest());
+        assert_eq!(
+            serial.facts().numerical_sites(),
+            parallel.facts().numerical_sites()
+        );
+        assert_eq!(
+            serial.facts().digest_version(),
+            cartograph_domain::GenerationDigestVersion::V7
+        );
+        assert_eq!(
+            serial.report().numerical_sites(),
+            usize_to_u64(serial.facts().numerical_sites().len())
+        );
+        let hazards = serial
+            .facts()
+            .numerical_sites()
+            .iter()
+            .map(|site| site.hazard.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "arithmetic_before_widening",
+            "absolute_only_tolerance",
+            "domain_precondition_unknown",
+            "nan_ordering_unknown",
+        ] {
+            assert!(hazards.contains(expected), "missing hazard {expected}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -13718,6 +14308,87 @@ mod tests {
             EXACT_LEXICAL_PROVENANCE
         );
         facts.assert_use_document_terms(&use_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn typescript_paths_without_base_url_resolve_from_the_config_directory() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create TypeScript alias fixture: {error}"));
+        fs::create_dir(directory.path().join("src"))
+            .unwrap_or_else(|error| panic!("could not create alias source directory: {error}"));
+        for (path, source) in [
+            (
+                "tsconfig.json",
+                r##"{
+  "compilerOptions": {
+    "moduleResolution": "bundler",
+    "paths": {
+      "~/*": ["./src/*"],
+      "#domain/*": ["./src/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}
+"##,
+            ),
+            (
+                "src/widget.tsx",
+                "export function Widget() { return <div />; }\n",
+            ),
+            (
+                "src/consumer.tsx",
+                "import { Widget } from '#domain/widget';\nexport function Consumer() { return <Widget />; }\n",
+            ),
+            (
+                "src/invalid.tsx",
+                "import { Missing } from '#domain/missing';\nexport function Invalid() { return <Missing />; }\n",
+            ),
+        ] {
+            fs::write(directory.path().join(path), source)
+                .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+        }
+
+        let serial = build(directory.path(), SERIAL_WORKERS).await;
+        let parallel = build(directory.path(), PARALLEL_WORKERS).await;
+        assert_eq!(serial.facts().digest(), parallel.facts().digest());
+        let facts = ModuleResolverFacts {
+            facts: serial.facts(),
+        };
+        let widget = facts.symbol("src/widget.tsx", "Widget");
+        let consumer = facts.symbol("src/consumer.tsx", "Consumer");
+        let imported = facts.import_declaration_reference("src/consumer.tsx", "Widget");
+        assert_eq!(imported.target_symbol_id.as_ref(), Some(&widget));
+        assert_eq!(imported.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+        let rendered = facts.reference(&consumer, "Widget");
+        assert_eq!(rendered.target_symbol_id.as_ref(), Some(&widget));
+        assert_eq!(rendered.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+        let invalid = facts.import_declaration_reference("src/invalid.tsx", "Missing");
+        assert!(invalid.target_symbol_id.is_none());
+        assert_eq!(invalid.resolution_provenance, UNRESOLVED_IMPORT_PROVENANCE);
+    }
+
+    #[test]
+    fn typescript_config_comment_stripping_preserves_quoted_comment_tokens() {
+        let stripped = strip_typescript_config_comments(
+            r#"{
+  // one line comment
+  "url": "https://example.invalid/a//b",
+  "escaped": "quote: \"/*literal*/\"",
+  /* one block comment */
+  "value": 1
+}"#,
+        );
+        let parsed: Value = serde_json::from_str(&stripped)
+            .unwrap_or_else(|error| panic!("stripped TypeScript config was invalid: {error}"));
+        assert_eq!(parsed["url"], "https://example.invalid/a//b");
+        assert_eq!(parsed["escaped"], "quote: \"/*literal*/\"");
+        assert_eq!(parsed["value"], 1);
+        assert!(!stripped.contains("one line comment"));
+        assert!(!stripped.contains("one block comment"));
+        assert_eq!(
+            strip_typescript_config_comments("{\"value\":1}/*unterminated"),
+            "{\"value\":1}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

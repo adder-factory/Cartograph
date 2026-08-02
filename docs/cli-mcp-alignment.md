@@ -1,9 +1,9 @@
 # CLI and MCP alignment
 
-Last release audit: 2026-08-01 (`v2.1.3`).
+Last release audit: 2026-08-02 (`v2.1.4`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands
-and 35 bounded MCP tools. Shared schemas generate ordinary CLI adapters where
+and 36 bounded MCP tools. Shared schemas generate ordinary CLI adapters where
 possible; hand-curated family commands retain deliberate positional and
 subcommand shapes.
 
@@ -31,10 +31,10 @@ digest             entry_points         explore
 files              find                 graph
 history            host                 hotspots
 imports            node                 note
-playbook           propose_rename       review
-role               session              sql
-status             summaries            tests_for
-trace_to_culprits  verify
+numerical          playbook             propose_rename
+review             role                 session
+sql                status               summaries
+tests_for          trace_to_culprits    verify
 ```
 
 <!-- CARTOGRAPH_MCP_TOOLS_END -->
@@ -54,7 +54,8 @@ startup schemas:
 | `cartograph_find` | `find --by name/path/reference/bm25/hybrid` plus source/env/SQL/build-context modes |
 | `cartograph_graph` | `graph --direction callers/callees/both/impact/path/similar` |
 | `cartograph_files` | `files --format tree/flat/grouped/summary/deps/symbols/module/read` |
-| `cartograph_review` | `review context/neighbors/risk/agent-audit/trust` |
+| `cartograph_numerical` | `numerical sites/coverage/explain/plan` |
+| `cartograph_review` | `review context/neighbors/risk/agent-audit/numerical/trust` |
 | `cartograph_session` | investigation, audit/usage, and macro subcommands |
 | `cartograph_summaries` | `summaries pending/save` |
 

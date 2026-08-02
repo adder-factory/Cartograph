@@ -1014,6 +1014,18 @@ fn apply_replacement(input: ReplacementInput<'_, '_>, imported: &mut ImportAccum
         }
         true
     });
+    for site in &mut facts.numerical_sites {
+        if covered.contains(&site.file_id)
+            && site
+                .owner_symbol_id
+                .as_ref()
+                .is_some_and(|owner| removed.contains(owner) && !retained_targets.contains(owner))
+        {
+            // SCIP does not carry Cartograph's numerical fact extension. Keep the exact
+            // source-derived site, but drop only an owner identity the replacement removed.
+            site.owner_symbol_id = None;
+        }
+    }
     facts.edges.retain(|edge| {
         !removed.contains(&edge.source_symbol_id)
             && (!removed.contains(&edge.target_symbol_id)

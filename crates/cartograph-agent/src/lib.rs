@@ -286,6 +286,8 @@ pub struct NativeIndexMetrics {
     pub source_bytes: u64,
     /// Extracted code symbols.
     pub symbols: u64,
+    /// Generation-scoped static numerical source sites.
+    pub numerical_sites: u64,
     /// References resolved to one exact symbol.
     pub resolved_references: u64,
     /// Explicit unresolved evidence retained without guessing.
@@ -360,6 +362,7 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
             skipped_oversized_files: report.skipped_oversized_files(),
             source_bytes: report.source_bytes(),
             symbols: report.symbols(),
+            numerical_sites: report.numerical_sites(),
             resolved_references: report.resolved_references(),
             unresolved_references: report.unresolved_references(),
             diagnostics: report.diagnostics(),
@@ -394,6 +397,8 @@ pub struct IndexReport {
     pub workers: u16,
     /// False when an identical source revision under the current digest contract made this a no-op.
     pub published: bool,
+    /// Explicit publication outcome, including why a no-op reused the visible current generation.
+    pub publication: IndexPublication,
     /// Native pipeline metrics, absent for a no-op publication.
     pub native: Option<NativeIndexMetrics>,
     /// Auxiliary Git churn/co-change indexing outcome. Git absence never invalidates code indexing.
@@ -404,6 +409,21 @@ pub struct IndexReport {
     pub profile: Option<IndexProfile>,
     /// Bounded post-index generation retention outcome.
     pub retention: GenerationRetentionStatus,
+}
+
+/// Unambiguous publication outcome for an index or sync request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum IndexPublication {
+    /// This request atomically published a new immutable generation.
+    Published,
+    /// Publication was deliberately skipped because the returned generation was already current.
+    Skipped {
+        /// Stable machine-readable no-op reason.
+        reason: &'static str,
+        /// The report generation remains the visible current generation.
+        generation_remains_current: bool,
+    },
 }
 
 /// Automatic bounded generation-retention outcome attached to every successful index request.
@@ -1228,6 +1248,10 @@ impl ProjectRuntime {
                     options.max_workers,
                 ),
                 published: false,
+                publication: IndexPublication::Skipped {
+                    reason: "unchanged_current_generation",
+                    generation_remains_current: true,
+                },
                 native: None,
                 history: HistoryIndexStatus::Unavailable {
                     reason: "not_attempted",
@@ -1307,6 +1331,16 @@ impl ProjectRuntime {
         cancellation: ProjectCancellation,
         profile_requested: bool,
     ) -> Result<IndexReport, ProjectError> {
+        self.prepare_index_publication(pending, cancellation)?
+            .execute(profile_requested)
+            .await
+    }
+
+    fn prepare_index_publication(
+        &self,
+        pending: PendingIndex,
+        cancellation: ProjectCancellation,
+    ) -> Result<PreparedIndexPublication, ProjectError> {
         let PendingIndex {
             project_id,
             generation_id,
@@ -1348,41 +1382,17 @@ impl ProjectRuntime {
             staged,
             report_sender,
         };
-        let current_result = supervisor
-            .run(request, move |context| prepare_generation(context, work))
-            .await;
-        cancellation_task.abort_and_reap().await;
-        let supervisor_status = supervisor.status().await;
-        let current = match current_result {
-            Ok(current) => current,
-            Err(_) if cancellation.is_cancelled() => return Err(ProjectError::RequestCancelled),
-            Err(_) => return Err(ProjectError::IndexFailed),
-        };
-        let native = report_receiver
-            .await
-            .map_err(|_| ProjectError::IndexFailed)?;
-        Ok(IndexReport {
+        Ok(PreparedIndexPublication {
             project_id,
             generation_id,
             source_revision,
-            content_digest: current.content_digest().clone(),
             workers,
-            published: true,
-            native: Some(native.into()),
-            history: HistoryIndexStatus::Unavailable {
-                reason: "not_attempted",
-            },
-            issue_history: IssueHistoryIndexStatus::Unavailable {
-                reason: "not_attempted",
-            },
-            profile: profile_requested.then(|| IndexProfile {
-                pipeline_millis: supervisor_status.total_elapsed_millis(),
-                pipeline_stages: supervisor_status.stage_timings().to_vec(),
-                ..IndexProfile::default()
-            }),
-            retention: GenerationRetentionStatus::Deferred {
-                reason: "not_attempted",
-            },
+            supervisor,
+            cancellation,
+            cancellation_task,
+            request,
+            work,
+            report_receiver,
         })
     }
 
@@ -1460,6 +1470,67 @@ struct PendingIndex {
     discovery_policy: DiscoveryPolicy,
     index_policy: SourceIndexPolicy,
     staged: StagedGeneration,
+}
+
+struct PreparedIndexPublication {
+    project_id: ProjectId,
+    generation_id: cartograph_domain::GenerationId,
+    source_revision: ContentDigest,
+    workers: u16,
+    supervisor: IndexerSupervisor,
+    cancellation: ProjectCancellation,
+    cancellation_task: AbortTaskOnDrop,
+    request: SupervisorRequest,
+    work: GenerationBuildWork,
+    report_receiver: oneshot::Receiver<NativePipelineReport>,
+}
+
+impl PreparedIndexPublication {
+    async fn execute(self, profile_requested: bool) -> Result<IndexReport, ProjectError> {
+        let current_result = self
+            .supervisor
+            .run(self.request, move |context| {
+                prepare_generation(context, self.work)
+            })
+            .await;
+        self.cancellation_task.abort_and_reap().await;
+        let supervisor_status = self.supervisor.status().await;
+        let current = match current_result {
+            Ok(current) => current,
+            Err(_) if self.cancellation.is_cancelled() => {
+                return Err(ProjectError::RequestCancelled);
+            }
+            Err(_) => return Err(ProjectError::IndexFailed),
+        };
+        let native = self
+            .report_receiver
+            .await
+            .map_err(|_| ProjectError::IndexFailed)?;
+        Ok(IndexReport {
+            project_id: self.project_id,
+            generation_id: self.generation_id,
+            source_revision: self.source_revision,
+            content_digest: current.content_digest().clone(),
+            workers: self.workers,
+            published: true,
+            publication: IndexPublication::Published,
+            native: Some(native.into()),
+            history: HistoryIndexStatus::Unavailable {
+                reason: "not_attempted",
+            },
+            issue_history: IssueHistoryIndexStatus::Unavailable {
+                reason: "not_attempted",
+            },
+            profile: profile_requested.then(|| IndexProfile {
+                pipeline_millis: supervisor_status.total_elapsed_millis(),
+                pipeline_stages: supervisor_status.stage_timings().to_vec(),
+                ..IndexProfile::default()
+            }),
+            retention: GenerationRetentionStatus::Deferred {
+                reason: "not_attempted",
+            },
+        })
+    }
 }
 
 struct GenerationBuildWork {

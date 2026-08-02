@@ -42,9 +42,9 @@ use cartograph_db::{
     CurrentGenerationLookup, CurrentGenerationRecord, CurrentSymbolRecord, CurrentSymbolSetLookup,
     DeadCodeQuery, FileCochangeQuery, FileDependencyDirection, FileDependencyQuery,
     FileHistoryQuery, FileSurfaceQuery, FileTestImpactQuery, FileTestImpactResult,
-    GroupedPathInput, GroupedSymbolQuery, QualifiedCentralityComparator, QualifiedSymbolHit,
-    QualifiedSymbolPage, QualifiedSymbolQuery, QualifiedSymbolSort, ReadOnlySqlError,
-    ReadOnlySqlRequest, SearchComponent, SearchHit, SimilarSymbolsResult,
+    GroupedPathInput, GroupedSymbolQuery, NumericalSiteQuery, QualifiedCentralityComparator,
+    QualifiedSymbolHit, QualifiedSymbolPage, QualifiedSymbolQuery, QualifiedSymbolSort,
+    ReadOnlySqlError, ReadOnlySqlRequest, SearchComponent, SearchHit, SimilarSymbolsResult,
     SimilarityMaterializationPolicy, StructuralFindingGroupQuery, StructuralFindingQuery,
     StructuralFindingSeverity, StructuralHotspotCategory, StructuralHotspotQuery,
     StructuralHotspotSort, SymbolCoverageQuery, VectorSearchHit, read_only_sql_schema,
@@ -120,6 +120,7 @@ const AT_RANGE_TOOL: &str = "cartograph_at_range";
 const GRAPH_TOOL: &str = "cartograph_graph";
 const AFFECTED_TOOL: &str = "cartograph_affected";
 const BIOMARKERS_TOOL: &str = "cartograph_biomarkers";
+const NUMERICAL_TOOL: &str = "cartograph_numerical";
 const COVERAGE_TOOL: &str = "cartograph_coverage";
 const DEAD_CODE_TOOL: &str = "cartograph_dead_code";
 const DEPS_TOOL: &str = "cartograph_deps";
@@ -336,6 +337,12 @@ const BIOMARKER_NAMES: &[&str] = &[
     "high_fan_out",
     "unresolved_reference_pressure",
 ];
+const NUMERICAL_DEFAULT_LIMIT: u16 = 30;
+const NUMERICAL_MAXIMUM_LIMIT: u16 = 100;
+const NUMERICAL_CATEGORY_MAXIMUM_BYTES: usize = 64;
+const NUMERICAL_AFFECTED_DEPTH: u8 = 4;
+const NUMERICAL_AFFECTED_NODES: u16 = 200;
+const NUMERICAL_AFFECTED_TESTS: u16 = 25;
 const IMPORTS_DEFAULT_LIMIT: u16 = 200;
 const IMPORTS_LOW_TOKEN_LIMIT: u16 = 40;
 const IMPORTS_MAXIMUM_LIMIT: u16 = 1_000;
@@ -1683,6 +1690,35 @@ struct StatusFeatureEvidence {
     inventory: Value,
     languages: Value,
     readiness: Value,
+    layer_findings: Vec<Value>,
+}
+
+struct StatusReadinessParts {
+    summary_coverage: Value,
+    summary_priority: Value,
+    coverage: Value,
+    roles: Value,
+    biomarker_stats: Value,
+    numerical: Value,
+    numerical_state: &'static str,
+}
+
+struct StatusInventoryEvidence {
+    inventory: Value,
+    languages: Value,
+}
+
+struct StatusAgentReadinessEvidence {
+    summary_coverage: Value,
+    summary_priority: Value,
+    coverage: Value,
+    roles: Value,
+}
+
+struct StatusStructuralReadinessEvidence {
+    biomarker_stats: Value,
+    numerical: Value,
+    numerical_state: &'static str,
     layer_findings: Vec<Value>,
 }
 
@@ -3807,9 +3843,8 @@ fn dispatch_group(name: &str) -> Result<DispatchGroup, ToolError> {
             Ok(DispatchGroup::Context)
         }
         FILES_TOOL | ENTRY_POINTS_TOOL | AT_RANGE_TOOL | GRAPH_TOOL | AFFECTED_TOOL
-        | BIOMARKERS_TOOL | COVERAGE_TOOL | DEAD_CODE_TOOL | DEPS_TOOL | HOTSPOTS_TOOL => {
-            Ok(DispatchGroup::Evidence)
-        }
+        | BIOMARKERS_TOOL | NUMERICAL_TOOL | COVERAGE_TOOL | DEAD_CODE_TOOL | DEPS_TOOL
+        | HOTSPOTS_TOOL => Ok(DispatchGroup::Evidence),
         HOST_TOOL | HISTORY_TOOL | IMPORTS_TOOL | NOTE_TOOL | PROPOSE_RENAME_TOOL | ROLE_TOOL
         | SESSION_TOOL | SUMMARIES_TOOL | SQL_TOOL | TESTS_FOR_TOOL => Ok(DispatchGroup::Workflow),
         TRACE_TO_CULPRITS_TOOL | VERIFY_TOOL | REVIEW_TOOL | PLAYBOOK_TOOL | ADMIN_TOOL => {
@@ -3865,6 +3900,9 @@ async fn dispatch_evidence_tools(
         AFFECTED_TOOL => Box::pin(GraphTools(handler).affected(call.arguments, cancellation)).await,
         BIOMARKERS_TOOL => {
             Box::pin(InsightTools(handler).biomarkers(call.arguments, cancellation)).await
+        }
+        NUMERICAL_TOOL => {
+            Box::pin(InsightTools(handler).numerical(call.arguments, cancellation)).await
         }
         COVERAGE_TOOL => {
             Box::pin(InsightTools(handler).coverage(call.arguments, cancellation)).await
@@ -5202,6 +5240,7 @@ impl ContextTools<'_> {
         };
         let next_calls = context_next_calls(
             response.intent,
+            response.parsed.task,
             !response.packet.affected_tests().is_empty(),
         );
         let evidence = ContextEvidence {
@@ -7617,6 +7656,183 @@ fn parse_hotspot_input(arguments: &Map<String, Value>) -> Result<HotspotInput<'_
     })
 }
 
+struct NumericalSiteSelection {
+    owner: Option<CurrentSymbolRecord>,
+    query: NumericalSiteQuery,
+}
+
+struct NumericalExecution<'a> {
+    arguments: &'a Map<String, Value>,
+    mode: &'a str,
+    project_id: ProjectId,
+    generation_id: GenerationId,
+    freshness: IndexFreshness,
+}
+
+async fn numerical_coverage_result(
+    tools: &InsightTools<'_>,
+    execution: &NumericalExecution<'_>,
+) -> Result<ToolResult, ToolError> {
+    reject_present(
+        execution.arguments,
+        &[
+            "symbol",
+            "path",
+            "operation",
+            "hazard",
+            "precision",
+            "evidenceLevel",
+            "minConfidence",
+            "hazardsOnly",
+            "limit",
+        ],
+    )?;
+    let coverage_stats = tools
+        .runtime
+        .database()
+        .current_numerical_site_stats(CurrentGenerationLookup::new(
+            &execution.project_id,
+            &execution.generation_id,
+        ))
+        .await
+        .map_err(internal_error)?;
+    let static_state = numerical_static_state(
+        execution.freshness,
+        coverage_stats.supported_files(),
+        coverage_stats.unanalyzed_files(),
+    );
+    fresh_json_result(
+        execution.freshness,
+        &json!({
+            "mode": "coverage",
+            "state": static_state,
+            "staticAnalyzer": numerical_static_analyzer_contract(),
+            "staticEvidence": coverage_stats,
+            "observationEvidence": {
+                "state": "not_configured",
+                "sources": 0,
+                "generationScoped": true
+            },
+            "formalEvidence": {"state": "not_configured"},
+            "evidenceLevelsRemainDistinct": true
+        }),
+    )
+}
+
+async fn numerical_site_selection(
+    tools: &InsightTools<'_>,
+    execution: &NumericalExecution<'_>,
+) -> Result<NumericalSiteSelection, ToolError> {
+    let arguments = execution.arguments;
+    let requested_symbol =
+        optional_bounded_text(arguments, "symbol", CONTEXT_ANCHOR_MAXIMUM_BYTES)?;
+    let owner = match requested_symbol {
+        Some(name) => Some(resolve_unique_symbol(tools, &execution.project_id, name).await?),
+        None => None,
+    };
+    let limit = optional_integer(
+        arguments,
+        "limit",
+        NumericBounds::new(1, NUMERICAL_DEFAULT_LIMIT, NUMERICAL_MAXIMUM_LIMIT),
+    )?;
+    let minimum_confidence =
+        optional_bounded_number(arguments, "minConfidence", 0.0..=1.0)?.unwrap_or(0.0);
+    let minimum_confidence_ppm = (minimum_confidence * 1_000_000.0)
+        .round()
+        .to_u32()
+        .ok_or_else(invalid_arguments)?;
+    let path = optional_bounded_text(arguments, "path", MAX_PROJECT_PATH_BYTES)?;
+    let operation = optional_text(arguments, "operation")?;
+    let hazard = optional_text(arguments, "hazard")?;
+    let precision = optional_text(arguments, "precision")?;
+    let evidence_level = optional_text(arguments, "evidenceLevel")?;
+    let hazards_only =
+        optional_bool(arguments, "hazardsOnly")?.unwrap_or(execution.mode != "sites");
+    let query = NumericalSiteQuery::new(limit)
+        .and_then(|query| query.with_path_prefix(path))
+        .map(|query| {
+            query.with_owner_symbol_id(owner.as_ref().map(|symbol| symbol.symbol_id().clone()))
+        })
+        .and_then(|query| query.with_operation(operation))
+        .and_then(|query| query.with_hazard(hazard))
+        .and_then(|query| query.with_precision(precision))
+        .and_then(|query| query.with_evidence_level(evidence_level))
+        .and_then(|query| query.with_minimum_confidence_ppm(minimum_confidence_ppm))
+        .map(|query| query.with_hazards_only(hazards_only))
+        .map_err(|_| invalid_arguments())?;
+    Ok(NumericalSiteSelection { owner, query })
+}
+
+async fn numerical_sites_result(
+    tools: &InsightTools<'_>,
+    execution: &NumericalExecution<'_>,
+) -> Result<ToolResult, ToolError> {
+    let selection = numerical_site_selection(tools, execution).await?;
+    let page = tools
+        .runtime
+        .database()
+        .current_numerical_sites(
+            CurrentGenerationLookup::new(&execution.project_id, &execution.generation_id),
+            &selection.query,
+        )
+        .await
+        .map_err(internal_error)?;
+    let affected_tests = if let Some(owner) = &selection.owner {
+        let request = TraversalRequest::new(
+            execution.project_id.clone(),
+            [owner.symbol_id().clone()],
+            TraversalBudget::new(NUMERICAL_AFFECTED_DEPTH, NUMERICAL_AFFECTED_NODES)
+                .map_err(|_| invalid_arguments())?,
+        )
+        .map_err(|_| invalid_arguments())?;
+        Some(
+            tools
+                .retrieval
+                .affected_tests(&request, NUMERICAL_AFFECTED_TESTS)
+                .await
+                .map_err(internal_error)?,
+        )
+    } else {
+        None
+    };
+    let evidence_limits = json!({
+        "staticAnalyzer": numerical_static_analyzer_contract(),
+        "staticSitesAreSourceDerived": true,
+        "runtimeObserved": false,
+        "formallyProven": false,
+        "missingRangesRemainExplicit": true,
+        "sourceExpressionsAndLiteralsPersisted": false
+    });
+    let output = match execution.mode {
+        "sites" => json!({
+            "mode": "sites",
+            "sites": page,
+            "owner": selection.owner,
+            "evidenceLimits": evidence_limits
+        }),
+        "explain" => json!({
+            "mode": "explain",
+            "sites": page,
+            "owner": selection.owner,
+            "affectedTests": affected_tests,
+            "evidenceLimits": evidence_limits,
+            "nextCalls": [GRAPH_TOOL, TESTS_FOR_TOOL]
+        }),
+        "plan" => json!({
+            "mode": "plan",
+            "sites": page,
+            "owner": selection.owner,
+            "affectedTests": affected_tests,
+            "execution": "not_performed",
+            "probePlan": numerical_probe_plan(),
+            "evidenceLimits": evidence_limits,
+            "nextCalls": [GRAPH_TOOL, TESTS_FOR_TOOL, VERIFY_TOOL]
+        }),
+        _ => return Err(ToolError::internal()),
+    };
+    fresh_json_result(execution.freshness, &output)
+}
+
 impl InsightTools<'_> {
     async fn biomarkers(
         &self,
@@ -7687,6 +7903,47 @@ impl InsightTools<'_> {
             BiomarkerMode::Symbol => biomarker_symbols(self, execution).await,
             BiomarkerMode::Ranked => biomarker_ranked(self, execution).await,
         }
+    }
+
+    async fn numerical(
+        &self,
+        arguments: Map<String, Value>,
+        cancellation: ProjectCancellation,
+    ) -> Result<ToolResult, ToolError> {
+        reject_unknown(
+            &arguments,
+            &[
+                "mode",
+                "symbol",
+                "path",
+                "operation",
+                "hazard",
+                "precision",
+                "evidenceLevel",
+                "minConfidence",
+                "hazardsOnly",
+                "limit",
+                "allowStale",
+            ],
+        )?;
+        let mode = optional_text(&arguments, "mode")?.unwrap_or("sites");
+        if !matches!(mode, "sites" | "coverage" | "explain" | "plan") {
+            return Err(invalid_arguments());
+        }
+        let allow_stale = optional_bool(&arguments, "allowStale")?.unwrap_or(false);
+        let (project_id, generation_id, freshness) =
+            current_project_generation_for_evidence(self, cancellation, allow_stale).await?;
+        let execution = NumericalExecution {
+            arguments: &arguments,
+            mode,
+            project_id,
+            generation_id,
+            freshness,
+        };
+        if mode == "coverage" {
+            return numerical_coverage_result(self, &execution).await;
+        }
+        numerical_sites_result(self, &execution).await
     }
 
     async fn coverage(
@@ -9826,6 +10083,7 @@ impl SummaryReviewTools<'_> {
             "neighbors" => self.review_neighbors(arguments, cancellation).await,
             "risk" => Box::pin(self.review_risk(arguments, cancellation)).await,
             "agent-audit" => self.review_agent_audit(arguments, cancellation).await,
+            "numerical" => self.review_numerical(arguments, cancellation).await,
             "trust" => self.review_trust(arguments, cancellation).await,
             _ => Err(invalid_arguments()),
         }
@@ -10064,6 +10322,88 @@ impl SummaryReviewTools<'_> {
                 "fixturesExcluded": true,
                 "completeCounts": stats.map_err(internal_error)?,
                 "completeCountsScope": "complete_project_all_detectors_unfiltered",
+            }),
+        )
+    }
+
+    async fn review_numerical(
+        &self,
+        arguments: Map<String, Value>,
+        cancellation: ProjectCancellation,
+    ) -> Result<ToolResult, ToolError> {
+        reject_present(
+            &arguments,
+            &[
+                "baseRef",
+                "maxChangedFiles",
+                "diff",
+                "maxCallersPerSymbol",
+                "maxCalleesPerSymbol",
+                "maxCoChangeWarnings",
+                "minCoChangeJaccard",
+                "minDiffMagnitude",
+                "files",
+                "symbols",
+                "k",
+                "dedupeByName",
+                "modelId",
+                "minCentrality",
+                "coverageSource",
+                "perDetectorLimit",
+                "minSeverity",
+                "deep",
+                "timeoutMs",
+            ],
+        )?;
+        let limit_key = if arguments.contains_key("topN") {
+            "topN"
+        } else {
+            "limit"
+        };
+        let top_n = optional_integer(
+            &arguments,
+            limit_key,
+            NumericBounds::new(1, REVIEW_DEFAULT_LENS_ROWS, REVIEW_MAXIMUM_LENS_ROWS),
+        )?;
+        let path_prefix = optional_bounded_text(&arguments, "pathFilter", MAX_PROJECT_PATH_BYTES)?;
+        let allow_stale = optional_bool(&arguments, "allowStale")?.unwrap_or(false);
+        let (project_id, generation_id, freshness) =
+            current_project_generation_for_evidence(self, cancellation, allow_stale).await?;
+        let query = NumericalSiteQuery::new(top_n)
+            .and_then(|query| query.with_path_prefix(path_prefix))
+            .map(|query| query.with_hazards_only(true))
+            .map_err(|_| invalid_arguments())?;
+        let database = self.runtime.database();
+        let (coverage_stats, sites) = tokio::join!(
+            database.current_numerical_site_stats(CurrentGenerationLookup::new(
+                &project_id,
+                &generation_id,
+            )),
+            database.current_numerical_sites(
+                CurrentGenerationLookup::new(&project_id, &generation_id),
+                &query,
+            ),
+        );
+        let coverage_stats = coverage_stats.map_err(internal_error)?;
+        let sites = sites.map_err(internal_error)?;
+        let static_state = numerical_static_state(
+            freshness,
+            coverage_stats.supported_files(),
+            coverage_stats.unanalyzed_files(),
+        );
+        fresh_json_result(
+            freshness,
+            &json!({
+                "mode": "numerical",
+                "state": static_state,
+                "coverage": coverage_stats,
+                "hazards": sites,
+                "pathFilter": path_prefix,
+                "staticAnalyzer": numerical_static_analyzer_contract(),
+                "observationEvidence": {"state": "not_configured", "sources": 0},
+                "formalEvidence": {"state": "not_configured"},
+                "evidenceLevelsRemainDistinct": true,
+                "nextTool": NUMERICAL_TOOL
             }),
         )
     }
@@ -12826,8 +13166,68 @@ fn enrichment_phase_report(result: Result<Value, ProjectError>) -> Result<Value,
     match result {
         Ok(report) => Ok(json!({"state": "succeeded", "report": report})),
         Err(ProjectError::RequestCancelled) => Err(ProjectError::RequestCancelled),
-        Err(_) => Ok(json!({"state": "failed", "baseGraphRemainsQueryable": true})),
+        Err(error) => Ok(enrichment_failure_report(error)),
     }
+}
+
+fn enrichment_failure_report(error: ProjectError) -> Value {
+    json!({
+        "state": "failed",
+        "reason": project_error_reason(error),
+        "retryBoundary": "retry_post_index_enrichment",
+        "baseGraphRemainsQueryable": true,
+    })
+}
+
+fn project_error_reason(error: ProjectError) -> &'static str {
+    if let Some(reason) = project_setup_error_reason(error) {
+        return reason;
+    }
+    if let Some(reason) = project_index_error_reason(error) {
+        return reason;
+    }
+    project_query_error_reason(error)
+}
+
+const fn project_setup_error_reason(error: ProjectError) -> Option<&'static str> {
+    match error {
+        ProjectError::ProjectRootUnavailable => Some("project_root_unavailable"),
+        ProjectError::DatabaseUnavailable => Some("database_unavailable"),
+        ProjectError::MigrationFailed => Some("migration_failed"),
+        ProjectError::RegisterFailed => Some("project_registration_failed"),
+        ProjectError::InvalidOptions => Some("invalid_options"),
+        _ => None,
+    }
+}
+
+const fn project_index_error_reason(error: ProjectError) -> Option<&'static str> {
+    match error {
+        ProjectError::BeginGenerationFailed => Some("generation_start_failed"),
+        ProjectError::SourceScanFailed => Some("source_scan_failed"),
+        ProjectError::StatusFailed => Some("project_status_unavailable"),
+        ProjectError::IndexFailed => Some("index_failed"),
+        ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
+        ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
+        _ => None,
+    }
+}
+
+const fn project_query_error_reason(error: ProjectError) -> &'static str {
+    match error {
+        ProjectError::SymbolNotFound => "symbol_not_found",
+        ProjectError::FileNotFound => "file_not_found",
+        ProjectError::SourceContextUnavailable => "source_context_unavailable",
+        ProjectError::EmbeddingConfigurationUnavailable => "embedding_configuration_unavailable",
+        ProjectError::EmbeddingOperationFailed => "embedding_operation_failed",
+        ProjectError::HnswCreateSharedMemoryUnavailable => "hnsw_shared_memory_unavailable",
+        ProjectError::RetrievalOperationFailed => "retrieval_operation_failed",
+        ProjectError::RequestCancelled => "request_cancelled",
+        _ => "project_operation_failed",
+    }
+}
+
+fn enrichment_failed(report: &Value) -> bool {
+    report["state"] == "failed"
 }
 
 async fn run_incremental_post_index_enrichment(
@@ -12844,8 +13244,16 @@ async fn run_incremental_post_index_enrichment(
         })
         .await,
     )?;
+    let partial = enrichment_failed(&request.structural.summaries)
+        || enrichment_failed(&request.structural.rollups)
+        || enrichment_failed(&roles);
     Ok(json!({
-        "state": "deterministic_incremental_complete",
+        "state": if partial {
+            "deterministic_incremental_complete_with_failures"
+        } else {
+            "deterministic_incremental_complete"
+        },
+        "optionalPhaseFailures": partial,
         "deepTail": "disabled_for_incremental_sync",
         "structuralSummaries": request.structural.summaries,
         "structuralRollups": request.structural.rollups,
@@ -12895,8 +13303,20 @@ async fn run_deep_post_index_enrichment(
         request.cancellation,
     )
     .await?;
+    let partial = [
+        &request.structural.summaries,
+        &request.structural.rollups,
+        &initial.report,
+        &neighbors,
+        &summary.report,
+        &refreshed,
+        &classification,
+    ]
+    .into_iter()
+    .any(enrichment_failed);
     Ok(json!({
-        "state": "complete",
+        "state": if partial { "complete_with_failures" } else { "complete" },
+        "optionalPhaseFailures": partial,
         "execution": "tracked_post_publication_admin_job",
         "baseGraphPublishedBeforeEnrichment": true,
         "optionalPhaseFailuresDoNotRollbackTheGraph": true,
@@ -12945,8 +13365,8 @@ async fn run_initial_embedding_phase(
             semantic_context: None,
         }),
         Err(ProjectError::RequestCancelled) => Err(ProjectError::RequestCancelled),
-        Err(_) => Ok(InitialEmbeddingPhase {
-            report: json!({"state": "failed", "baseGraphRemainsQueryable": true}),
+        Err(error) => Ok(InitialEmbeddingPhase {
+            report: enrichment_failure_report(error),
             semantic_context: None,
         }),
     }
@@ -12999,8 +13419,8 @@ async fn run_summary_enrichment_phase(
             succeeded: true,
         }),
         Err(ProjectError::RequestCancelled) => Err(ProjectError::RequestCancelled),
-        Err(_) => Ok(SummaryEnrichmentPhase {
-            report: json!({"state": "failed", "baseGraphRemainsQueryable": true}),
+        Err(error) => Ok(SummaryEnrichmentPhase {
+            report: enrichment_failure_report(error),
             succeeded: false,
         }),
     }
@@ -14199,7 +14619,8 @@ fn status_not_indexed_result(request: UnindexedStatusRequest<'_>) -> Result<Tool
             "summaryPriorityQueue": null,
             "coverage": null,
             "roles": [],
-            "biomarkers": null
+            "biomarkers": null,
+            "numerical": null
         },
         "rollups": {
             "topHotspots": request.options.top_hotspots,
@@ -14251,11 +14672,154 @@ async fn indexed_status_result(
     }))
 }
 
+fn status_generation_id(request: &IndexedStatusRequest) -> Result<GenerationId, ToolError> {
+    request
+        .status
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.current.as_ref())
+        .map(|current| current.generation_id.clone())
+        .ok_or_else(ToolError::internal)
+}
+
+fn status_feature_readiness(request: &IndexedStatusRequest, parts: &StatusReadinessParts) -> Value {
+    json!({
+        "state": "indexed",
+        "centrality": {
+            "pageRankEnabled": request.source_settings.enable_centrality(),
+            "pageRankAlgorithm": "directed_40_iterations_damping_0.85",
+            "sampledBetweennessEnabled": request.source_settings.enable_betweenness(),
+            "metricsRemainDistinct": true
+        },
+        "summaryCoverage": parts.summary_coverage,
+        "summaryPriorityQueue": parts.summary_priority,
+        "summaryBreakdownIncluded": request.options.summary_breakdown,
+        "coverage": parts.coverage,
+        "roles": parts.roles,
+        "biomarkers": parts.biomarker_stats,
+        "numerical": {
+            "state": parts.numerical_state,
+            "staticAnalyzer": numerical_static_analyzer_contract(),
+            "staticEvidence": parts.numerical,
+            "observationEvidence": {
+                "state": "not_configured",
+                "sources": 0,
+                "generationScoped": true
+            },
+            "formalEvidence": {"state": "not_configured"},
+            "queryTool": NUMERICAL_TOOL,
+            "evidenceLevelsRemainDistinct": true
+        },
+        "readinessCountsAreCurrentGenerationFenced": true
+    })
+}
+
+fn status_layer_findings<Error>(
+    biomarkers_enabled: bool,
+    layers: Result<LayerAnalysisReport, Error>,
+) -> Result<Vec<Value>, ToolError> {
+    if !biomarkers_enabled {
+        return Ok(Vec::new());
+    }
+    layers
+        .map_err(internal_error)?
+        .into_violations()
+        .into_iter()
+        .map(layer_finding_value)
+        .collect()
+}
+
 async fn load_status_features(
     handler: &CartographMcpHandler,
     request: &IndexedStatusRequest,
 ) -> Result<StatusFeatureEvidence, ToolError> {
+    let (inventory, agent, structural) = tokio::join!(
+        load_status_inventory(handler, request),
+        load_status_agent_readiness(handler, request),
+        load_status_structural_readiness(handler, request),
+    );
+    let inventory = inventory?;
+    let agent = agent?;
+    let structural = structural?;
+    let readiness = status_feature_readiness(
+        request,
+        &StatusReadinessParts {
+            summary_coverage: agent.summary_coverage,
+            summary_priority: agent.summary_priority,
+            coverage: agent.coverage,
+            roles: agent.roles,
+            biomarker_stats: structural.biomarker_stats,
+            numerical: structural.numerical,
+            numerical_state: structural.numerical_state,
+        },
+    );
+    Ok(StatusFeatureEvidence {
+        inventory: inventory.inventory,
+        languages: inventory.languages,
+        readiness,
+        layer_findings: structural.layer_findings,
+    })
+}
+
+async fn load_status_inventory(
+    handler: &CartographMcpHandler,
+    request: &IndexedStatusRequest,
+) -> Result<StatusInventoryEvidence, ToolError> {
     let inventory_query = FileSurfaceQuery::new(1).map_err(internal_error)?;
+    let database = handler.runtime.database();
+    let (inventory, aggregates) = tokio::join!(
+        database.current_file_surface(&request.project_id, &inventory_query),
+        database.current_file_aggregates(&request.project_id, &inventory_query, 1),
+    );
+    let inventory =
+        serde_json::to_value(inventory.map_err(internal_error)?).map_err(internal_error)?;
+    let languages = serde_json::to_value(
+        aggregates
+            .map_err(|error| status_storage_error(&error))?
+            .languages(),
+    )
+    .map_err(internal_error)?;
+    Ok(StatusInventoryEvidence {
+        inventory,
+        languages,
+    })
+}
+
+async fn load_status_agent_readiness(
+    handler: &CartographMcpHandler,
+    request: &IndexedStatusRequest,
+) -> Result<StatusAgentReadinessEvidence, ToolError> {
+    let database = handler.runtime.database();
+    let (summaries, roles, coverage, summary_priority) = tokio::join!(
+        database
+            .current_summary_coverage_with_policy(&request.project_id, &request.summary_policy,),
+        database.agent_role_distribution(&request.project_id),
+        database.current_coverage_stats(&request.project_id, None),
+        database.summary_priority_queue_stats(&request.project_id),
+    );
+    let mut summary_coverage =
+        serde_json::to_value(summaries.map_err(internal_error)?).map_err(internal_error)?;
+    if !request.options.summary_breakdown {
+        summary_coverage
+            .as_object_mut()
+            .ok_or_else(ToolError::internal)?
+            .remove("byModel");
+    }
+    Ok(StatusAgentReadinessEvidence {
+        summary_coverage,
+        summary_priority: serde_json::to_value(summary_priority.map_err(internal_error)?)
+            .map_err(internal_error)?,
+        coverage: serde_json::to_value(coverage.map_err(internal_error)?)
+            .map_err(internal_error)?,
+        roles: serde_json::to_value(roles.map_err(internal_error)?).map_err(internal_error)?,
+    })
+}
+
+async fn load_status_structural_readiness(
+    handler: &CartographMcpHandler,
+    request: &IndexedStatusRequest,
+) -> Result<StatusStructuralReadinessEvidence, ToolError> {
+    let generation_id = status_generation_id(request)?;
     let biomarkers_enabled = request.source_settings.enable_biomarkers();
     let database = handler.runtime.database();
     let finding_stats_future = async {
@@ -14267,72 +14831,39 @@ async fn load_status_features(
             .await
             .map(Some)
     };
-    let (inventory, aggregates, findings, summaries, roles, coverage, layers, summary_priority) = tokio::join!(
-        database.current_file_surface(&request.project_id, &inventory_query),
-        database.current_file_aggregates(&request.project_id, &inventory_query, 1),
+    let (findings, layers, numerical) = tokio::join!(
         finding_stats_future,
-        database
-            .current_summary_coverage_with_policy(&request.project_id, &request.summary_policy,),
-        database.agent_role_distribution(&request.project_id),
-        database.current_coverage_stats(&request.project_id, None),
         handler
             .runtime
             .analyze_layers(&request.project_id, request.cancellation.clone()),
-        database.summary_priority_queue_stats(&request.project_id),
+        database.current_numerical_site_stats(CurrentGenerationLookup::new(
+            &request.project_id,
+            &generation_id,
+        )),
     );
-    let layer_findings = if biomarkers_enabled {
-        layers
-            .map_err(internal_error)?
-            .into_violations()
-            .into_iter()
-            .map(layer_finding_value)
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        Vec::new()
-    };
-    let finding_stats = match findings.map_err(internal_error)? {
+    let layer_findings = status_layer_findings(biomarkers_enabled, layers)?;
+    let biomarker_stats = match findings.map_err(internal_error)? {
         Some(findings) => {
             serde_json::to_value(merge_layer_finding_stats(findings, layer_findings.len())?)
                 .map_err(internal_error)?
         }
         None => json!({"state": "disabled_by_project_config"}),
     };
-    let mut summary_coverage =
-        serde_json::to_value(summaries.map_err(internal_error)?).map_err(internal_error)?;
-    if !request.options.summary_breakdown {
-        summary_coverage
-            .as_object_mut()
-            .ok_or_else(ToolError::internal)?
-            .remove("byModel");
-    }
-    let inventory =
-        serde_json::to_value(inventory.map_err(internal_error)?).map_err(internal_error)?;
-    let languages = serde_json::to_value(
-        aggregates
-            .map_err(|error| status_storage_error(&error))?
-            .languages(),
-    )
-    .map_err(internal_error)?;
-    let readiness = json!({
-        "state": "indexed",
-        "centrality": {
-            "pageRankEnabled": request.source_settings.enable_centrality(),
-            "pageRankAlgorithm": "directed_40_iterations_damping_0.85",
-            "sampledBetweennessEnabled": request.source_settings.enable_betweenness(),
-            "metricsRemainDistinct": true
-        },
-        "summaryCoverage": summary_coverage,
-        "summaryPriorityQueue": summary_priority.map_err(internal_error)?,
-        "summaryBreakdownIncluded": request.options.summary_breakdown,
-        "coverage": coverage.map_err(internal_error)?,
-        "roles": roles.map_err(internal_error)?,
-        "biomarkers": finding_stats,
-        "readinessCountsAreCurrentGenerationFenced": true
-    });
-    Ok(StatusFeatureEvidence {
-        inventory,
-        languages,
-        readiness,
+    let numerical = numerical.map_err(internal_error)?;
+    let numerical_freshness = if request.status.fresh {
+        IndexFreshness::Current
+    } else {
+        IndexFreshness::Stale
+    };
+    let numerical_state = numerical_static_state(
+        numerical_freshness,
+        numerical.supported_files(),
+        numerical.unanalyzed_files(),
+    );
+    Ok(StatusStructuralReadinessEvidence {
+        biomarker_stats,
+        numerical: serde_json::to_value(numerical).map_err(internal_error)?,
+        numerical_state,
         layer_findings,
     })
 }
@@ -16266,6 +16797,60 @@ fn validate_coverage_via(via: &str) -> Result<(), ToolError> {
     }
 }
 
+fn numerical_probe_plan() -> Value {
+    json!([
+        {
+            "step": "establish_input_domain",
+            "purpose": "record realistic ranges, scales, shapes, dtypes, and backend assumptions"
+        },
+        {
+            "step": "define_oracle",
+            "purpose": "name the invariant or independent higher-precision reference and its tolerance provenance"
+        },
+        {
+            "step": "exercise_nonfinite_policy",
+            "purpose": "observe NaN, infinity, division, and domain-error behavior at explicit boundaries"
+        },
+        {
+            "step": "run_metamorphic_variants",
+            "purpose": "check scale, translation, permutation, batching, and repeated-run invariants where applicable"
+        },
+        {
+            "step": "compare_precision_and_backend",
+            "purpose": "compare intended dtype, accumulator precision, backend, and an independent higher-precision path"
+        },
+        {
+            "step": "minimize_reproduction",
+            "purpose": "retain the smallest input and exact source site that preserves an observed failure"
+        }
+    ])
+}
+
+fn numerical_static_analyzer_contract() -> Value {
+    json!({
+        "contract": "rust_ast_v1",
+        "supportedLanguages": ["rust"],
+        "scope": "parsed_or_partial_current_generation_files",
+        "sourceExpressionsAndLiteralsPersisted": false
+    })
+}
+
+const fn numerical_static_state(
+    freshness: IndexFreshness,
+    supported_files: u64,
+    unanalyzed_files: u64,
+) -> &'static str {
+    if !matches!(freshness, IndexFreshness::Current) {
+        "stale_static_evidence"
+    } else if supported_files == 0 {
+        "static_not_applicable"
+    } else if unanalyzed_files > 0 {
+        "static_partial"
+    } else {
+        "static_ready"
+    }
+}
+
 async fn coverage_load(
     handler: &CartographMcpHandler,
     execution: CoverageExecution<'_>,
@@ -16566,6 +17151,14 @@ async fn current_project(
     handler: &CartographMcpHandler,
     cancellation: ProjectCancellation,
 ) -> Result<(ProjectId, IndexFreshness), ToolError> {
+    let (project_id, _, freshness) = current_project_generation(handler, cancellation).await?;
+    Ok((project_id, freshness))
+}
+
+async fn current_project_generation(
+    handler: &CartographMcpHandler,
+    cancellation: ProjectCancellation,
+) -> Result<(ProjectId, GenerationId, IndexFreshness), ToolError> {
     let status = handler
         .runtime
         .status_with_cancellation(cancellation)
@@ -16577,20 +17170,33 @@ async fn current_project(
             "Cartograph has no project index; call cartograph_admin with action index",
         ));
     };
-    if snapshot.current.is_none() {
-        return Err(safe_error(
+    let current = snapshot.current.ok_or_else(|| {
+        safe_error(
             ToolErrorCode::NotReady,
             "Cartograph has no published project index; call cartograph_admin with action index",
-        ));
-    }
+        )
+    })?;
     Ok((
         snapshot.project_id,
+        current.generation_id,
         if status.fresh {
             IndexFreshness::Current
         } else {
             IndexFreshness::Stale
         },
     ))
+}
+
+async fn current_project_generation_for_evidence(
+    handler: &CartographMcpHandler,
+    cancellation: ProjectCancellation,
+    allow_stale: bool,
+) -> Result<(ProjectId, GenerationId, IndexFreshness), ToolError> {
+    let current = current_project_generation(handler, cancellation).await?;
+    if current.2 != IndexFreshness::Current && !allow_stale {
+        return Err(stale_index_error());
+    }
+    Ok(current)
 }
 
 async fn current_project_for_evidence(
@@ -16639,6 +17245,7 @@ pub(super) fn tool_definitions() -> Result<Vec<ToolDefinition>, ToolContractErro
         affected_definition(read_only)?,
         tests_for_definition(read_only)?,
         biomarkers_definition(read_only)?,
+        numerical_definition(read_only)?,
         coverage_definition(write_annotations())?,
         dead_code_definition(external_read_annotations())?,
         deps_definition(read_only)?,
@@ -17491,6 +18098,28 @@ fn biomarkers_definition(
     })
 }
 
+fn numerical_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, ToolContractError> {
+    read_definition(ReadDefinition {
+        name: NUMERICAL_TOOL,
+        description: "Inspect generation-scoped static numerical sites and hazards, report precision/range coverage gaps, explain one exact owner or path, or return a non-executing probe plan. Static heuristic evidence remains distinct from runtime observations and formal proof.",
+        schema: json!({
+            "mode": {"type": "string", "enum": ["sites", "coverage", "explain", "plan"]},
+            "symbol": {"type": "string", "minLength": 1, "maxLength": CONTEXT_ANCHOR_MAXIMUM_BYTES},
+            "path": {"type": "string", "minLength": 1, "maxLength": MAX_PROJECT_PATH_BYTES},
+            "operation": {"type": "string", "minLength": 1, "maxLength": NUMERICAL_CATEGORY_MAXIMUM_BYTES},
+            "hazard": {"type": "string", "minLength": 1, "maxLength": NUMERICAL_CATEGORY_MAXIMUM_BYTES},
+            "precision": {"type": "string", "minLength": 1, "maxLength": NUMERICAL_CATEGORY_MAXIMUM_BYTES},
+            "evidenceLevel": {"type": "string", "enum": ["proven", "heuristic", "coverage_gap"]},
+            "minConfidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "hazardsOnly": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": NUMERICAL_MAXIMUM_LIMIT},
+            "allowStale": {"type": "boolean"}
+        }),
+        required: &[],
+        annotations,
+    })
+}
+
 fn coverage_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, ToolContractError> {
     let schema = json!({
         "mode": {"type": "string", "enum": ["symbol", "ranked", "stats", "load", "refresh", "sources", "drop", "structural"]},
@@ -17849,8 +18478,8 @@ fn review_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, Too
     let schema = json!({
         "mode": {
             "type": "string",
-            "enum": ["context", "neighbors", "risk", "agent-audit", "trust"],
-            "description": "Select context for Git or unified-diff impact, neighbors for semantic sister implementations, risk for project triage, agent-audit for agent-prone findings, or trust for live readiness. Inferred from mode-specific inputs; no-input defaults to risk."
+            "enum": ["context", "neighbors", "risk", "agent-audit", "numerical", "trust"],
+            "description": "Select context for Git or unified-diff impact, neighbors for semantic sister implementations, risk for project triage, agent-audit for agent-prone findings, numerical for generation-scoped static numerical hazards, or trust for live readiness. Inferred from mode-specific inputs; no-input defaults to risk."
         },
         "diff": {"type": "string", "maxLength": REVIEW_MAXIMUM_DIFF_BYTES, "description": "(context) Bounded unified-diff text. When omitted, compare the live checkout to baseRef."},
         "baseRef": {"type": "string", "minLength": 1, "maxLength": REF_MAXIMUM_LENGTH, "default": "HEAD"},
@@ -17888,7 +18517,7 @@ fn review_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, Too
     });
     read_definition(ReadDefinition {
         name: REVIEW_TOOL,
-        description: "Five-mode review and triage surface: Git/unified-diff context with graph impact and tests; semantic sister implementations; project-wide risk lenses; all 16 agent-prone detectors; or live PostgreSQL, ParadeDB, pgvector, embedding, and LLM trust checks.",
+        description: "Six-mode review and triage surface: Git/unified-diff context with graph impact and tests; semantic sister implementations; project-wide risk lenses; all 16 agent-prone detectors; generation-scoped numerical hazards; or live PostgreSQL, ParadeDB, pgvector, embedding, and LLM trust checks.",
         schema,
         required: &[],
         annotations,
@@ -19864,6 +20493,7 @@ fn infer_review_mode(arguments: &Map<String, Value>) -> Result<&'static str, Too
             "neighbors" => Ok("neighbors"),
             "risk" => Ok("risk"),
             "agent-audit" => Ok("agent-audit"),
+            "numerical" => Ok("numerical"),
             "trust" => Ok("trust"),
             _ => Err(invalid_arguments()),
         };
@@ -21524,7 +22154,7 @@ fn qualified_find_symbol_row(
     let match_mode = if free_text.is_empty() {
         "qualified_filter"
     } else {
-        "qualified_name"
+        "exact_name"
     };
     let mut row = find_symbol_row(FindSymbolRow {
         symbol: hit.symbol(),
@@ -21664,7 +22294,8 @@ fn qualified_find_evidence(input: QualifiedFindEvidence<'_>) -> Value {
         "filtersAppliedBeforeResponseLimit": true,
         "candidateWindow": Value::Null,
         "candidateWindowEliminated": true,
-        "paradeTokenizer": "pdb.source_code",
+        "exactNameComparison": "case_insensitive_simple_or_qualified",
+        "paradeTokenizer": Value::Null,
     })
 }
 
@@ -22469,7 +23100,11 @@ fn searchable_symbol_tail(qualified_name: &str) -> &str {
     dotted.rsplit_once("::").map_or(dotted, |(_, name)| name)
 }
 
-fn context_next_calls(intent: TaskIntent, already_has_tests: bool) -> Vec<&'static str> {
+fn context_next_calls(
+    intent: TaskIntent,
+    task: &str,
+    already_has_tests: bool,
+) -> Vec<&'static str> {
     let mut calls = match intent {
         TaskIntent::SymbolLookup => vec![FIND_TOOL, NODE_TOOL],
         TaskIntent::ImplementationTrace => vec![NODE_TOOL, GRAPH_TOOL, TESTS_FOR_TOOL],
@@ -22479,10 +23114,42 @@ fn context_next_calls(intent: TaskIntent, already_has_tests: bool) -> Vec<&'stat
         TaskIntent::ArchitectureSurvey => vec![ENTRY_POINTS_TOOL, FILES_TOOL, GRAPH_TOOL],
         TaskIntent::DocumentationLookup => vec![FIND_TOOL, NODE_TOOL, SUMMARIES_TOOL],
     };
+    if numerical_diagnosis_task(task) && !calls.contains(&NUMERICAL_TOOL) {
+        calls.insert(0, NUMERICAL_TOOL);
+    }
     if already_has_tests {
         calls.retain(|tool| *tool != TESTS_FOR_TOOL);
     }
     calls
+}
+
+fn numerical_diagnosis_task(task: &str) -> bool {
+    task.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "numerical"
+                    | "numeric"
+                    | "floating"
+                    | "float"
+                    | "precision"
+                    | "roundoff"
+                    | "rounding"
+                    | "overflow"
+                    | "underflow"
+                    | "nan"
+                    | "infinity"
+                    | "tolerance"
+                    | "conditioning"
+                    | "dtype"
+                    | "tensor"
+                    | "f16"
+                    | "bf16"
+                    | "f32"
+                    | "f64"
+            )
+        })
 }
 
 fn validate_role(value: &str) -> Result<(), ToolError> {
@@ -23223,6 +23890,16 @@ mod tests {
     const TEST_SUB_MILLISECOND_NUMBER: f64 = 0.5;
 
     #[test]
+    fn optional_enrichment_failures_are_actionable_and_do_not_hide_graph_availability() {
+        let report = enrichment_phase_report(Err(ProjectError::StatusFailed))
+            .unwrap_or_else(|error| panic!("enrichment failure report was fatal: {error}"));
+        assert_eq!(report["state"], "failed");
+        assert_eq!(report["reason"], "project_status_unavailable");
+        assert_eq!(report["retryBoundary"], "retry_post_index_enrichment");
+        assert_eq!(report["baseGraphRemainsQueryable"], true);
+    }
+
+    #[test]
     fn database_storage_status_is_human_readable_without_replacing_exact_bytes() {
         let storage = ready_database_storage(StorageTotalsReport {
             database_bytes: 2_175_776_447,
@@ -23719,6 +24396,7 @@ mod tests {
                 AFFECTED_TOOL,
                 TESTS_FOR_TOOL,
                 BIOMARKERS_TOOL,
+                NUMERICAL_TOOL,
                 COVERAGE_TOOL,
                 DEAD_CODE_TOOL,
                 DEPS_TOOL,
@@ -23774,7 +24452,11 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(legacy.len(), current.len(), "the 35-tool registry drifted");
+        assert_eq!(
+            legacy.len() + 1,
+            current.len(),
+            "the additive v2 tool registry drifted"
+        );
         for tool in legacy {
             let name = tool["name"]
                 .as_str()
@@ -24123,6 +24805,10 @@ mod tests {
             infer_review_mode(&Map::from_iter([("deep".to_owned(), json!(true))])),
             Ok("trust")
         );
+        assert_eq!(
+            infer_review_mode(&Map::from_iter([("mode".to_owned(), json!("numerical"),)])),
+            Ok("numerical")
+        );
         assert!(
             infer_review_mode(&Map::from_iter([("mode".to_owned(), json!("not-a-mode"),)]))
                 .is_err()
@@ -24138,7 +24824,14 @@ mod tests {
         let properties = &definition["inputSchema"]["properties"];
         assert_eq!(
             properties["mode"]["enum"],
-            json!(["context", "neighbors", "risk", "agent-audit", "trust"])
+            json!([
+                "context",
+                "neighbors",
+                "risk",
+                "agent-audit",
+                "numerical",
+                "trust"
+            ])
         );
         assert_eq!(properties["diff"]["maxLength"], REVIEW_MAXIMUM_DIFF_BYTES);
         assert_eq!(
@@ -24149,6 +24842,58 @@ mod tests {
             properties["perDetectorLimit"]["maximum"],
             REVIEW_MAXIMUM_PER_DETECTOR
         );
+    }
+
+    #[test]
+    fn numerical_contract_and_routing_keep_evidence_boundaries_explicit() {
+        let definition = numerical_definition(read_only_annotations())
+            .unwrap_or_else(|error| panic!("numerical definition failed: {error}"));
+        let definition = serde_json::to_value(definition)
+            .unwrap_or_else(|error| panic!("numerical definition serialization failed: {error}"));
+        let schema = &definition["inputSchema"];
+        assert_eq!(schema["required"], json!([]));
+        assert_eq!(
+            schema["properties"]["mode"]["enum"],
+            json!(["sites", "coverage", "explain", "plan"])
+        );
+        assert_eq!(
+            schema["properties"]["evidenceLevel"]["enum"],
+            json!(["proven", "heuristic", "coverage_gap"])
+        );
+        assert_eq!(schema["properties"]["minConfidence"]["maximum"], 1.0);
+        assert!(
+            definition["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("Static heuristic evidence")
+                        && description.contains("formal proof")
+                })
+        );
+
+        assert_eq!(
+            numerical_static_state(IndexFreshness::Current, 0, 0),
+            "static_not_applicable"
+        );
+        assert_eq!(
+            numerical_static_state(IndexFreshness::Current, 2, 0),
+            "static_ready"
+        );
+        assert_eq!(
+            numerical_static_state(IndexFreshness::Current, 2, 1),
+            "static_partial"
+        );
+        assert_eq!(
+            numerical_static_state(IndexFreshness::Stale, 2, 0),
+            "stale_static_evidence"
+        );
+
+        let calls = context_next_calls(
+            TaskIntent::ErrorDiagnosis,
+            "diagnose f32 rounding near NaN",
+            false,
+        );
+        assert_eq!(calls.first(), Some(&NUMERICAL_TOOL));
+        assert!(!numerical_diagnosis_task("refloat the deployment"));
     }
 
     #[test]
@@ -25682,6 +26427,8 @@ pub fn root() -> u32 {
         let report = terminal
             .report
             .unwrap_or_else(|| panic!("post-index report was missing"));
+        assert_eq!(report["report"]["published"], true);
+        assert_eq!(report["report"]["publication"]["state"], "published");
         assert_eq!(report["enrichment"]["state"], "complete");
         assert_eq!(
             report["enrichment"]["execution"],
@@ -25720,6 +26467,16 @@ pub fn root() -> u32 {
             .report
             .unwrap_or_else(|| panic!("init-and-index report was missing"));
         assert_eq!(init_report["initialization"]["indexRequested"], true);
+        assert_eq!(init_report["index"]["published"], false);
+        assert_eq!(init_report["index"]["publication"]["state"], "skipped");
+        assert_eq!(
+            init_report["index"]["publication"]["reason"],
+            "unchanged_current_generation"
+        );
+        assert_eq!(
+            init_report["index"]["publication"]["generation_remains_current"],
+            true
+        );
         assert_eq!(init_report["enrichment"]["state"], "complete");
         assert_eq!(
             init_report["enrichment"]["classification"]["state"],
@@ -25746,6 +26503,8 @@ pub fn root() -> u32 {
         let sync_report = sync_terminal
             .report
             .unwrap_or_else(|| panic!("sync report was missing"));
+        assert_eq!(sync_report["report"]["published"], true);
+        assert_eq!(sync_report["report"]["publication"]["state"], "published");
         assert_eq!(
             sync_report["enrichment"]["state"],
             "deterministic_incremental_complete"
@@ -25761,6 +26520,22 @@ pub fn root() -> u32 {
         assert_eq!(
             sync_report["enrichment"]["classification"]["state"],
             "succeeded"
+        );
+        let status = handler
+            .runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("post-sync status failed: {error}"));
+        let current_generation = status
+            .snapshot
+            .and_then(|snapshot| snapshot.current)
+            .map_or_else(
+                || panic!("post-sync current generation was missing"),
+                |current| current.generation_id,
+            );
+        assert_eq!(
+            sync_report["report"]["generation_id"],
+            current_generation.as_str()
         );
     }
 
@@ -27208,6 +27983,7 @@ pub fn target(value: u32) -> u32 {
         .await;
         Box::pin(verify_agent_analysis_surfaces(&handler, project.path())).await;
         Box::pin(verify_agent_history_and_insight_surfaces(&handler)).await;
+        Box::pin(verify_agent_numerical_surfaces(&handler)).await;
         Box::pin(verify_agent_review_and_admin_surfaces(&handler)).await;
         Box::pin(verify_agent_session_and_ask_surfaces(&handler)).await;
 
@@ -27312,6 +28088,17 @@ pub fn target(value: u32) -> u32 {
         ] {
             execute_live_tool(handler, FIND_TOOL, arguments).await;
         }
+        let exact = execute_live_tool(
+            handler,
+            FIND_TOOL,
+            json!({"by": "name", "query": "buildSignupPath", "mode": "exact"}),
+        )
+        .await;
+        let exact = &exact["structuredContent"]["evidence"];
+        assert_eq!(exact["total"], 1);
+        assert_eq!(exact["rows"].as_array().map(Vec::len), Some(1));
+        assert_eq!(exact["rows"][0]["name"], "buildSignupPath");
+        assert_eq!(exact["rows"][0]["match"], "exact_name");
         let low_token_find = execute_live_tool(
             handler,
             FIND_TOOL,
@@ -27585,11 +28372,84 @@ pub fn target(value: u32) -> u32 {
         .await;
     }
 
+    async fn verify_agent_numerical_surfaces(handler: &CartographMcpHandler) {
+        let coverage =
+            execute_live_tool(handler, NUMERICAL_TOOL, json!({"mode": "coverage"})).await;
+        let coverage = &coverage["structuredContent"];
+        assert_eq!(coverage["freshness"], "current");
+        assert_eq!(coverage["evidence"]["state"], "static_ready");
+        assert!(
+            coverage["evidence"]["staticEvidence"]["totalSites"]
+                .as_u64()
+                .is_some_and(|total| total > 0)
+        );
+        assert_eq!(
+            coverage["evidence"]["observationEvidence"]["state"],
+            "not_configured"
+        );
+        assert_eq!(
+            coverage["evidence"]["formalEvidence"]["state"],
+            "not_configured"
+        );
+
+        let sites = execute_live_tool(
+            handler,
+            NUMERICAL_TOOL,
+            json!({
+                "mode": "sites",
+                "path": "src",
+                "operation": "tolerance_comparison",
+                "hazard": "absolute_only_tolerance",
+                "precision": "f64",
+                "evidenceLevel": "heuristic",
+                "minConfidence": 0.5,
+                "hazardsOnly": true,
+                "limit": 10
+            }),
+        )
+        .await;
+        let sites = &sites["structuredContent"]["evidence"];
+        assert_eq!(sites["sites"]["total"], 1);
+        assert_eq!(
+            sites["sites"]["sites"][0]["hazard"],
+            "absolute_only_tolerance"
+        );
+        assert_eq!(sites["sites"]["sites"][0]["precision"], "f64");
+
+        for mode in ["explain", "plan"] {
+            let result = execute_live_tool(
+                handler,
+                NUMERICAL_TOOL,
+                json!({
+                    "mode": mode,
+                    "symbol": "stable_equal",
+                    "hazardsOnly": true,
+                    "limit": 10
+                }),
+            )
+            .await;
+            let evidence = &result["structuredContent"]["evidence"];
+            assert_eq!(evidence["mode"], mode);
+            assert_eq!(evidence["sites"]["total"], 1);
+            assert_eq!(evidence["owner"]["qualified_name"], "stable_equal");
+            assert!(evidence["affectedTests"].is_object());
+            if mode == "plan" {
+                assert_eq!(evidence["execution"], "not_performed");
+                assert!(
+                    evidence["probePlan"]
+                        .as_array()
+                        .is_some_and(|steps| !steps.is_empty())
+                );
+            }
+        }
+    }
+
     async fn verify_agent_review_and_admin_surfaces(handler: &CartographMcpHandler) {
         for arguments in [
             json!({"mode": "context", "diff": "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -7,3 +7,3 @@\n pub fn root(value: i32) -> i32 {\n-    leaf(value)\n+    leaf(value + 1)\n }\n"}),
             json!({"mode": "risk", "topN": 20}),
             json!({"mode": "agent-audit", "perDetectorLimit": 10}),
+            json!({"mode": "numerical", "topN": 20, "pathFilter": "src"}),
             json!({"mode": "trust", "deep": false, "timeoutMs": 30000}),
         ] {
             execute_live_tool(handler, REVIEW_TOOL, arguments).await;
@@ -27700,6 +28560,10 @@ pub fn root(value: i32) -> i32 {
     leaf(value)
 }
 
+pub fn stable_equal(left: f64, right: f64) -> bool {
+    (left - right).abs() < f64::EPSILON
+}
+
 pub fn read_orders() -> String {
     let token = env::var("CARTOGRAPH_TOKEN").unwrap_or_default();
     let query = "SELECT id, status FROM orders";
@@ -27734,7 +28598,11 @@ export async function loadFeature() { return import("./feature"); }
         .unwrap_or_else(|error| panic!("agent-surface TypeScript fixture failed: {error}"));
         std::fs::write(
             project.join("src/feature.ts"),
-            "export function featureFlag(value: string): string { return value.trim(); }\n",
+            r#"export function featureFlag(value: string): string { return value.trim(); }
+export function buildSignupPath(id: string): string { return `/signup?id=${id}`; }
+export function buildSigninPath(): string { return "/signin"; }
+export function unrelatedAccountHandler(): null { return null; }
+"#,
         )
         .unwrap_or_else(|error| panic!("agent-surface feature fixture failed: {error}"));
         std::fs::write(

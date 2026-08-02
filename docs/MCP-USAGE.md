@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-01 (`v2.1.3`).
+Last release audit: 2026-08-02 (`v2.1.4`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -100,9 +100,9 @@ schema loading can safely expose the complete profile catalog.
 
 ## Selected high-use tools
 
-The full profile advertises 35 tools. The table below highlights the normal
+The full profile advertises 36 tools. The table below highlights the normal
 coding loop; see the [complete CLI/MCP alignment inventory](cli-mcp-alignment.md#public-mcp-tools)
-for all 35 wire contracts and their CLI families.
+for all 36 wire contracts and their CLI families.
 
 | Tool | Purpose |
 | --- | --- |
@@ -115,9 +115,20 @@ for all 35 wire contracts and their CLI families.
 | `cartograph_node` | Exact symbol metadata and bounded source only when indexed line provenance is fresh |
 | `cartograph_graph` | Bounded callers/callees/impact, exact edge filters, shortest paths, or model-scoped pgvector symbol neighbors |
 | `cartograph_affected` | Structurally connected test candidates |
+| `cartograph_numerical` | Generation-scoped static numerical sites, coverage, explanation, and non-executing probe plans with explicit evidence levels and unknowns |
 | `cartograph_review` | Git-ref plus committed/staged/unstaged/untracked review packet |
 | `cartograph_playbook` | Complete agent workflow, tool-routing map, evidence discipline, and anti-patterns |
 | `cartograph_admin` | Start, inspect, or cancel bounded lifecycle, index, semantic, model, and SCIP interchange work |
+
+`cartograph_numerical` currently uses the `rust_ast_v1` static analyzer for
+parsed or partial Rust files. `sites` returns exact source spans and bounded
+categories without persisting expressions or literal values; `coverage`
+separates supported, analyzed, skipped/failed, and site-bearing files;
+`explain` can attach graph-selected tests for one exact owner; and `plan`
+returns probe steps without executing project code. Static `heuristic`, future
+runtime observation, and formal-proof evidence remain separate. Observation
+and formal adapters currently report `not_configured`, and stale generations
+report `stale_static_evidence` even when stale reads are explicitly allowed.
 
 `cartograph_context` classifies deterministic task intents such as symbol
 lookup, implementation trace, change planning, test selection, error diagnosis,

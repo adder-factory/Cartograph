@@ -269,6 +269,37 @@ test('omitted path uses realpath(".")', async () => {
 }
 
 #[test]
+fn framework_routes_do_not_treat_expression_names_and_promise_all_as_express() {
+    let extracted = extract(
+        "src/generic-work.ts",
+        r#"
+function expressionCall(source) {
+  return source;
+}
+
+await Promise.all([
+  mkdir("scratch"),
+  writeFile("manifest.xml", ""),
+]);
+
+await Promise.all([
+  client.send("Runtime.enable"),
+]);
+"#,
+        SourceLanguage::TypeScript,
+    );
+
+    assert!(
+        extracted
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != SymbolKind::Route),
+        "Promise.all invented framework routes: {:?}",
+        extracted.symbols
+    );
+}
+
+#[test]
 fn framework_routes_cover_hono_on_and_fastify_object_forms() {
     let extracted = extract(
         "src/server.ts",

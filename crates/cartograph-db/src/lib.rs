@@ -21,6 +21,7 @@ mod issue_history;
 mod leases;
 mod managed;
 mod migrations;
+mod numerical;
 mod parse_cache;
 mod project;
 mod qualified;
@@ -95,8 +96,8 @@ pub use history::{
 pub use ingest::{
     CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, GenerationFacts,
     GenerationMemoryMeasurement, GenerationMemoryModelError, GenerationValidationError,
-    GenerationValidationLimits, GenerationValidationReport, ReferenceInput, ReferenceSpanPrecision,
-    SearchDocumentInput, SymbolInput, validate_generation_facts,
+    GenerationValidationLimits, GenerationValidationReport, NumericalSiteInput, ReferenceInput,
+    ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, validate_generation_facts,
 };
 pub use insights::{
     DeadCodeCandidate, DeadCodeQuery, DependencyCoverageRow, ExternalImportRecord, FileTestImpact,
@@ -131,6 +132,9 @@ pub use managed::{
     ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
 };
 pub use migrations::{MigrationError, MigrationReport};
+pub use numerical::{
+    NumericalSitePage, NumericalSiteQuery, NumericalSiteRecord, NumericalSiteStats,
+};
 pub use parse_cache::{
     MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheBudgetPressure, NativeParseCacheError,
     NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheRecord,

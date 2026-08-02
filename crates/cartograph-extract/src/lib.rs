@@ -18,6 +18,7 @@ mod grammars;
 mod identity;
 mod language;
 mod model;
+mod module_alias;
 mod native;
 mod reader;
 mod snapshot;
@@ -40,9 +41,10 @@ pub use language::{ExtractionStrategy, LanguageSpec};
 pub use model::{
     CloneTokenCount, CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX,
     DiagnosticCode, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, ExtractedImportBinding,
-    ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, ImportBindingKind,
-    RUST_MACRO_RESOLUTION_PREFIX, SymbolHealthMetrics,
+    ExtractedNumericalSite, ExtractedReference, ExtractedSymbol, ExtractionDiagnostic,
+    ImportBindingKind, RUST_MACRO_RESOLUTION_PREFIX, SymbolHealthMetrics,
 };
+pub use module_alias::substitute_module_alias;
 pub use native::{ExtractError, NativeExtractor};
 pub use reader::{SourceReadError, SourceReadOptions, SourceRoot};
 pub use snapshot::{

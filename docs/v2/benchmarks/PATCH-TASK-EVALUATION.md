@@ -1,6 +1,6 @@
 # V2 native patch-task evaluation
 
-Status: locked v1.1.33 parity gate and intended `v2.1.3` candidate evidence;
+Status: locked v1.1.33 parity gate and intended `v2.1.4` candidate evidence;
 an exact published-main gate is required before release
 
 Measured: 2026-08-01
@@ -13,7 +13,7 @@ impact, and affected-test evidence meet the frozen v1.1.33 patch-task floors.
 The gate does not invoke Bun, TypeScript, an LLM, an embedding service, or a
 SQLite library/database.
 
-| Metric | Frozen v1.1.33 requirement | Native v2.1.3 candidate result |
+| Metric | Frozen v1.1.33 requirement | Native v2.1.4 candidate result |
 | --- | ---: | ---: |
 | Hit@5 | 1.0000 | 1.0000 |
 | MRR | 1.0000 | 1.0000 |
@@ -31,7 +31,7 @@ test selections, abstentions, payload bytes, and aggregate scores.
 
 The frozen remote baseline comes from the successful exact-main, pre-correction
 [misnumbered v2.10.0 Rust gate](https://github.com/adder-factory/cartograph/actions/runs/30575543412)
-at commit `13bbee8740e98d37c4a2f913b4b7f9f3500aa500`. The local v2.1.3 candidate
+at commit `13bbee8740e98d37c4a2f913b4b7f9f3500aa500`. The local v2.1.4 candidate
 rerun on 2026-08-01 reproduced the same figures, both locked fingerprints, and
 all six quality scores at 1.000000. The published-main tree still requires its
 own exact-SHA gate before release.

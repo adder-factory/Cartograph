@@ -35,7 +35,7 @@ const CORPUS_FINGERPRINT_DOMAIN: &[u8] = b"cartograph-v2-native-real-corpus-v1";
 const EXPECTED_CORPUS_FINGERPRINT: &str =
     "ab91088c482ed36d31759382283342654ce6958be4e601429b8181da531c5fc1";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "940c0e0e3b65696d5f2389da81148b8090c60f7df1d529514f770a3d898cda65";
+    "947f0a3822dbab61e2520a7b033dbc1289217ddcd41a1719e6ae8d302714eacb";
 const EXPECTED_BM25_DOCUMENT_IDS: [&str; 5] = [
     "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
     "78f1eb97-24b2-8a80-ad44-6dd679456592",
@@ -52,10 +52,11 @@ const EXPECTED_TAGS_BM25_DOCUMENT_IDS: [&str; 6] = [
     "72da0535-5a0c-830b-a9ec-ab9948bceb6e",
 ];
 const EXPECTED_FILES: i64 = 34;
-const EXPECTED_SYMBOLS: i64 = 6_337;
-const EXPECTED_EDGES: i64 = 8_930;
-const EXPECTED_REFERENCES: i64 = 13_861;
-const EXPECTED_DOCUMENTS: i64 = 6_337;
+const EXPECTED_SYMBOLS: i64 = 6_336;
+const EXPECTED_EDGES: i64 = 8_929;
+const EXPECTED_REFERENCES: i64 = 13_860;
+const EXPECTED_NUMERICAL_SITES: i64 = 0;
+const EXPECTED_DOCUMENTS: i64 = 6_336;
 const EXPECTED_EDGE_KINDS: [&str; 10] = [
     "calls",
     "contains",
@@ -70,10 +71,10 @@ const EXPECTED_EDGE_KINDS: [&str; 10] = [
 ];
 const EXPECTED_SOURCE_BYTES: u64 = 1_052_564;
 const EXPECTED_RESOLVED_REFERENCES: u64 = 2_809;
-const EXPECTED_UNRESOLVED_REFERENCES: u64 = 11_064;
-const EXPECTED_MODELED_GENERATION_BYTES: u64 = 17_117_054;
-const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 103_110_354;
-const EXPECTED_VALIDATION_HIGH_WATER_BYTES: u64 = 123_162_013;
+const EXPECTED_UNRESOLVED_REFERENCES: u64 = 11_063;
+const EXPECTED_MODELED_GENERATION_BYTES: u64 = 17_114_803;
+const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 103_097_064;
+const EXPECTED_VALIDATION_HIGH_WATER_BYTES: u64 = 123_143_937;
 const CORPUS_QUERY: &str = "detectSecretsHandling";
 const TAGS_CORPUS_QUERY: &str = "tagscanary";
 const LIVE_SECRET_SENTINEL: &str = "sk_live_secret";
@@ -253,6 +254,7 @@ struct RowCounts {
     symbols: i64,
     edges: i64,
     references: i64,
+    numerical_sites: i64,
     documents: i64,
 }
 
@@ -261,6 +263,7 @@ struct NativeReport {
     discovered_files: u64,
     source_bytes: u64,
     symbols: u64,
+    numerical_sites: u64,
     resolved_references: u64,
     unresolved_references: u64,
     diagnostics: u64,
@@ -287,6 +290,7 @@ struct CopyTableNanos {
     symbols: u64,
     edges: u64,
     references: u64,
+    numerical_sites: u64,
     documents: u64,
 }
 
@@ -297,6 +301,7 @@ impl CopyTableNanos {
             symbols: duration_nanos(snapshot.symbols_copy_duration()),
             edges: duration_nanos(snapshot.edges_copy_duration()),
             references: duration_nanos(snapshot.references_copy_duration()),
+            numerical_sites: duration_nanos(snapshot.numerical_sites_copy_duration()),
             documents: duration_nanos(snapshot.documents_copy_duration()),
         }
     }
@@ -306,6 +311,7 @@ impl CopyTableNanos {
             && self.symbols != 0
             && self.edges != 0
             && self.references != 0
+            && self.numerical_sites != 0
             && self.documents != 0
     }
 
@@ -314,6 +320,7 @@ impl CopyTableNanos {
             .saturating_add(self.symbols)
             .saturating_add(self.edges)
             .saturating_add(self.references)
+            .saturating_add(self.numerical_sites)
             .saturating_add(self.documents)
     }
 }
@@ -1139,6 +1146,8 @@ async fn row_counts(
               WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS edges,
             (SELECT count(*) FROM "{schema}"."references"
               WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS references,
+            (SELECT count(*) FROM "{schema}"."numerical_sites"
+              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS numerical_sites,
             (SELECT count(*) FROM "{schema}"."search_documents"
               WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)) AS documents"#,
         schema = fixture.schema,
@@ -1161,6 +1170,9 @@ async fn row_counts(
             .map_err(|_| error("row-count-decode"))?,
         references: row
             .try_get("references")
+            .map_err(|_| error("row-count-decode"))?,
+        numerical_sites: row
+            .try_get("numerical_sites")
             .map_err(|_| error("row-count-decode"))?,
         documents: row
             .try_get("documents")
@@ -1245,6 +1257,7 @@ const fn expected_row_counts() -> RowCounts {
         symbols: EXPECTED_SYMBOLS,
         edges: EXPECTED_EDGES,
         references: EXPECTED_REFERENCES,
+        numerical_sites: EXPECTED_NUMERICAL_SITES,
         documents: EXPECTED_DOCUMENTS,
     }
 }
@@ -1254,6 +1267,7 @@ const fn expected_native_report() -> NativeReport {
         discovered_files: EXPECTED_FILES as u64,
         source_bytes: EXPECTED_SOURCE_BYTES,
         symbols: EXPECTED_SYMBOLS as u64,
+        numerical_sites: EXPECTED_NUMERICAL_SITES as u64,
         resolved_references: EXPECTED_RESOLVED_REFERENCES,
         unresolved_references: EXPECTED_UNRESOLVED_REFERENCES,
         diagnostics: 0,
@@ -1346,6 +1360,7 @@ fn copy_table_percentile(
         symbols: percentile(&values(|tables| tables.symbols), requested)?,
         edges: percentile(&values(|tables| tables.edges), requested)?,
         references: percentile(&values(|tables| tables.references), requested)?,
+        numerical_sites: percentile(&values(|tables| tables.numerical_sites), requested)?,
         documents: percentile(&values(|tables| tables.documents), requested)?,
     })
 }
@@ -1387,6 +1402,7 @@ fn native_report(report: cartograph_indexer::NativePipelineReport) -> NativeRepo
         discovered_files: report.discovered_files(),
         source_bytes: report.source_bytes(),
         symbols: report.symbols(),
+        numerical_sites: report.numerical_sites(),
         resolved_references: report.resolved_references(),
         unresolved_references: report.unresolved_references(),
         diagnostics: report.diagnostics(),

@@ -1,30 +1,77 @@
 use blake3::Hasher;
-use cartograph_domain::ContentDigest;
+use cartograph_domain::{ContentDigest, GenerationDigestVersion};
 
 use super::model::{
-    CanonicalSearchDocument, EdgeInput, FileInput, ReferenceInput, SymbolInput, ValidatedFactTables,
+    CanonicalSearchDocument, EdgeInput, FileInput, NumericalSiteInput, ReferenceInput, SymbolInput,
+    ValidatedFactTables,
 };
 
-const DIGEST_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v4";
+const DIGEST_V1_TO_V6_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v4";
+const DIGEST_V7_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v5";
 
 pub(super) fn logical_digest<Cancel>(
     facts: &ValidatedFactTables,
+    version: GenerationDigestVersion,
     mut cancelled: Cancel,
 ) -> Result<ContentDigest, ()>
 where
     Cancel: FnMut() -> bool,
 {
-    let mut digest = CanonicalDigest::new();
+    let domain = if version == GenerationDigestVersion::V7 {
+        DIGEST_V7_DOMAIN
+    } else {
+        DIGEST_V1_TO_V6_DOMAIN
+    };
+    let mut digest = CanonicalDigest::new(domain);
     digest_files(&mut digest, &facts.files, &mut cancelled)?;
     digest_symbols(&mut digest, &facts.symbols, &mut cancelled)?;
     digest_edges(&mut digest, &facts.edges, &mut cancelled)?;
     digest_references(&mut digest, &facts.references, &mut cancelled)?;
+    if version == GenerationDigestVersion::V7 {
+        digest_numerical_sites(&mut digest, &facts.numerical_sites, &mut cancelled)?;
+    }
     digest_documents(&mut digest, &facts.documents, &mut cancelled)?;
     if cancelled() {
         Err(())
     } else {
         Ok(digest.finish())
     }
+}
+
+fn digest_numerical_sites<Cancel>(
+    digest: &mut CanonicalDigest,
+    sites: &[NumericalSiteInput],
+    cancelled: &mut Cancel,
+) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+{
+    digest.section("numerical_sites", sites.len());
+    for site in sites {
+        if cancelled() {
+            return Err(());
+        }
+        digest.text(site.site_id.as_str());
+        digest.text(site.file_id.as_str());
+        digest.optional_text(
+            site.owner_symbol_id
+                .as_ref()
+                .map(cartograph_domain::SymbolId::as_str),
+        );
+        digest.u64(site.start_byte);
+        digest.u64(site.end_byte);
+        digest.u32(site.start_line);
+        digest.u32(site.end_line);
+        digest.text(&site.operation);
+        digest.text(&site.hazard);
+        digest.text(&site.precision);
+        digest.text(site.expression_digest.as_str());
+        digest.u32(site.confidence_ppm);
+        digest.text(&site.provenance);
+        digest.text(&site.evidence_level);
+        digest.text(&site.unknowns);
+    }
+    Ok(())
 }
 
 fn digest_files<Cancel>(
@@ -186,9 +233,9 @@ struct CanonicalDigest {
 }
 
 impl CanonicalDigest {
-    fn new() -> Self {
+    fn new(domain: &[u8]) -> Self {
         let mut hasher = Hasher::new();
-        hasher.update(DIGEST_DOMAIN);
+        hasher.update(domain);
         Self { hasher }
     }
 

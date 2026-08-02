@@ -9,6 +9,7 @@ use cartograph_db::ImportInsight;
 use cartograph_domain::{ContentDigest, ProjectId, SourceLanguage, SourceManifestDigestBuilder};
 use cartograph_extract::{
     DiscoveredSource, SourceDiscoveryOptions, SourceLimits, SourceReadOptions, SourceRoot,
+    substitute_module_alias,
 };
 use memchr::memchr_iter;
 use regex::Regex;
@@ -1009,7 +1010,7 @@ fn classify_alias(
             continue;
         };
         for substitution in substitutions {
-            let replaced = substitute_alias(substitution, tail);
+            let replaced = substitute_module_alias(substitution, tail);
             let Some(base) = normalize_join(&aliases.base_path, &replaced) else {
                 continue;
             };
@@ -1034,19 +1035,6 @@ fn alias_tail<'a>(specifier: &'a str, pattern: &str) -> Option<&'a str> {
     let prefix = &pattern[..wildcard];
     let suffix = &pattern[wildcard + 1..];
     specifier.strip_prefix(prefix)?.strip_suffix(suffix)
-}
-
-fn substitute_alias(substitution: &str, tail: &str) -> String {
-    substitution.find('*').map_or_else(
-        || substitution.to_owned(),
-        |wildcard| {
-            format!(
-                "{}{tail}{}",
-                &substitution[..wildcard],
-                &substitution[wildcard + 1..]
-            )
-        },
-    )
 }
 
 fn read_small_file(path: &Path) -> Option<String> {

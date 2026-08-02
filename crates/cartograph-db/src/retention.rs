@@ -18,12 +18,13 @@ const MAXIMUM_STALE_STAGING_AGE: Duration = Duration::from_hours(24);
 const DEFAULT_STALE_READY_AGE: Duration = Duration::from_hours(24);
 const MAXIMUM_STALE_READY_AGE: Duration = Duration::from_hours(720);
 const POST_RETENTION_VACUUM_ROW_THRESHOLD: u64 = 100_000;
-const RETENTION_ROW_TABLES: [&str; 15] = [
+const RETENTION_ROW_TABLES: [&str; 16] = [
     "index_generations",
     "files",
     "symbols",
     "edges",
     "references",
+    "numerical_sites",
     "search_documents",
     "project_operation_leases",
     "document_embeddings",

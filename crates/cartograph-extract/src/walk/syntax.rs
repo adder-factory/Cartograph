@@ -361,6 +361,7 @@ fn inspect_health_node(
             language: input.language,
         },
     );
+    record_dynamic_sql_health(metrics, input);
     let child_nesting = record_control_health(
         metrics,
         ControlHealthInput {
@@ -411,9 +412,43 @@ fn record_literal_health(metrics: &mut SymbolHealthMetrics, input: LiteralHealth
     if numeric_literal && is_magic_number(node_text, input.language) {
         metrics.magic_numbers = metrics.magic_numbers.saturating_add(1);
     }
-    if string_literal && contains_hardcoded_url(node_text) {
+    if string_literal
+        && !is_url_validation_input(input.node, input.source)
+        && contains_hardcoded_url(node_text)
+    {
         metrics.hardcoded_urls = metrics.hardcoded_urls.saturating_add(1);
     }
+}
+
+fn record_dynamic_sql_health(metrics: &mut SymbolHealthMetrics, input: HealthNodeInput<'_, '_>) {
+    if !is_javascript_language(input.language) {
+        return;
+    }
+    let raw = text_for(input.source, input.node);
+    let interpolated_template =
+        input.node.kind() == "template_string" && raw.contains("${") && contains_sql_word(raw);
+    let concatenated_sql = input.node.kind() == "binary_expression"
+        && children(input.node).any(|child| text_for(input.source, child).trim() == "+")
+        && descendants_including_root(input.node).any(|candidate| {
+            is_string_literal(candidate.kind())
+                && candidate
+                    .parent()
+                    .is_none_or(|parent| !is_string_literal(parent.kind()))
+                && contains_sql_word(text_for(input.source, candidate))
+        });
+    if interpolated_template || concatenated_sql {
+        metrics.sql_string_concatenation = 1;
+    }
+}
+
+const fn is_javascript_language(language: SourceLanguage) -> bool {
+    matches!(
+        language,
+        SourceLanguage::TypeScript
+            | SourceLanguage::Tsx
+            | SourceLanguage::JavaScript
+            | SourceLanguage::Jsx
+    )
 }
 
 fn record_control_health(
@@ -620,7 +655,10 @@ fn sensitive_body_evidence<'source>(
     let mut literal_fields = Vec::new();
     let mut stack = named_children(body).collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
-        if is_callable_node(node.kind()) || is_comment_node(node.kind()) {
+        if is_callable_node(node.kind())
+            || is_comment_node(node.kind())
+            || is_presentation_only_node(node.kind())
+        {
             excluded_ranges.push((node.start_byte(), node.end_byte()));
             continue;
         }
@@ -733,7 +771,7 @@ fn sensitive_material_score(code_fields: &[&str], literal_fields: &[&str]) -> (u
     add_sensitive_signal(
         &mut score,
         SensitiveSignal {
-            matched: fields_contain_substring(code_fields, PERSONAL_DATA_SUBSTRINGS),
+            matched: fields_contain_identifier_component(code_fields, PERSONAL_DATA_SUBSTRINGS),
             category: SIGNAL_CATEGORY_PERSONAL_DATA,
             weight: PERSONAL_DATA_SIGNAL_WEIGHT,
         },
@@ -1137,13 +1175,64 @@ fn contains_hardcoded_url(raw: &str) -> bool {
             if raw.as_bytes().get(after).is_some_and(|byte| {
                 !byte.is_ascii_whitespace()
                     && !matches!(byte, b'\'' | b'"' | b'`' | b')' | b'%' | b'{' | b'$')
-            }) {
+            }) && !is_xml_namespace_uri(raw, start)
+            {
                 return true;
             }
             offset = after;
         }
         false
     })
+}
+
+fn is_xml_namespace_uri(raw: &str, start: usize) -> bool {
+    let candidate = raw.get(start..).unwrap_or_default();
+    let Some((scheme, location)) = candidate.split_once("://") else {
+        return false;
+    };
+    let standard_namespace = matches!(scheme, "http" | "https")
+        && [
+            "www.w3.org/",
+            "schemas.openxmlformats.org/",
+            "schemas.microsoft.com/",
+        ]
+        .iter()
+        .any(|prefix| location.starts_with(prefix));
+    if !standard_namespace {
+        return false;
+    }
+    let prefix = raw.get(..start).unwrap_or_default();
+    let attribute_context = prefix
+        .rsplit(['<', '>'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    attribute_context.contains("xmlns")
+}
+
+fn is_url_validation_input(node: Node<'_>, source: &str) -> bool {
+    let mut current = Some(node);
+    for _ in 0..8 {
+        let Some(candidate) = current else {
+            return false;
+        };
+        if candidate.kind() == "call_expression"
+            && candidate
+                .child_by_field_name("function")
+                .is_some_and(|function| {
+                    let callee = text_for(source, function).trim();
+                    callee == "safeParse" || callee.ends_with(".safeParse")
+                })
+        {
+            return true;
+        }
+        current = candidate.parent();
+    }
+    false
+}
+
+fn is_presentation_only_node(kind: &str) -> bool {
+    matches!(kind, "jsx_text" | "jsx_attribute")
 }
 
 fn is_callable_node(kind: &str) -> bool {
@@ -1234,9 +1323,21 @@ fn direct_logical_operator_count(node: Node<'_>, source: &str) -> u16 {
 }
 
 fn catch_is_empty(node: Node<'_>, source: &str) -> bool {
-    node.child_by_field_name("body")
-        .map(|body| text_for(source, body))
-        .is_some_and(body_is_empty)
+    let Some(body) = node.child_by_field_name("body") else {
+        return false;
+    };
+    let mut statements = named_children(body).filter(|child| !is_comment_node(child.kind()));
+    let Some(statement) = statements.next() else {
+        return true;
+    };
+    if statements.next().is_some() {
+        return false;
+    }
+    match statement.kind() {
+        "pass_statement" => true,
+        "return_statement" => named_children(statement).next().is_none(),
+        _ => body_is_empty(text_for(source, body)),
+    }
 }
 
 fn populate_text_metrics(metrics: &mut SymbolHealthMetrics, input: TextMetricInput<'_>) {
@@ -1268,21 +1369,8 @@ fn populate_typescript_metrics(metrics: &mut SymbolHealthMetrics, raw: &str) {
 }
 
 fn populate_javascript_metrics(metrics: &mut SymbolHealthMetrics, input: TextMetricInput<'_>) {
-    let diagnostic_gate = ["process.env", "debug", "verbose", "trace"]
-        .iter()
-        .any(|needle| contains_ascii_case_insensitive(input.raw, needle));
-    if !diagnostic_gate {
-        metrics.debug_logs = count_javascript_signals(
-            input.raw,
-            &[
-                "console.log(",
-                "console.error(",
-                "console.warn(",
-                "console.info(",
-                "console.debug(",
-            ],
-        );
-    }
+    metrics.debug_logs =
+        count_javascript_signals(input.raw, &["console.log(", "console.debug(", "debugger;"]);
     metrics.dynamic_eval = count_javascript_signals(input.raw, &["eval(", "new function("]);
     metrics.insecure_hash = count_javascript_signals(
         input.raw,
@@ -1325,9 +1413,6 @@ fn populate_javascript_safety_metrics(metrics: &mut SymbolHealthMetrics, raw: &s
         && !contains_ascii_case_insensitive(raw, "signal")
     {
         metrics.http_without_timeout = network_calls;
-    }
-    if contains_sql_word(raw) && (raw.contains("${") || raw.contains(" + ")) {
-        metrics.sql_string_concatenation = 1;
     }
     let json_parse = count_ascii_case_insensitive(raw, "json.parse(");
     if json_parse > 0 && !contains_ascii_case_insensitive(raw, "try") {

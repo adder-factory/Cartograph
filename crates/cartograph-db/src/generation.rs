@@ -39,7 +39,7 @@ const RECONCILE_LEASE_ID_COLUMN: usize = 5;
 const RECONCILE_LEASE_UNEXPIRED_COLUMN: usize = 6;
 const RECONCILE_LEASE_GENERATION_COLUMN: usize = 7;
 const GENERATION_LOCK_NAMESPACE: &str = "cartograph-v2-generation";
-const COPIED_RELATION_PLANNER_COLUMNS: [(&str, &str); 5] = [
+const COPIED_RELATION_PLANNER_COLUMNS: [(&str, &str); 6] = [
     (
         "files",
         "project_id, generation_id, file_id, normalized_path",
@@ -55,6 +55,10 @@ const COPIED_RELATION_PLANNER_COLUMNS: [(&str, &str); 5] = [
     (
         "references",
         "project_id, generation_id, owner_symbol_id, target_symbol_id, reference_kind",
+    ),
+    (
+        "numerical_sites",
+        "project_id, generation_id, owner_symbol_id, file_id, hazard, precision",
     ),
     (
         "search_documents",
@@ -474,6 +478,7 @@ struct PrepareGenerationMetricsInner {
     symbols_copy: AtomicU64,
     edges_copy: AtomicU64,
     references_copy: AtomicU64,
+    numerical_sites_copy: AtomicU64,
     documents_copy: AtomicU64,
     relation_validation: AtomicU64,
 }
@@ -492,6 +497,7 @@ pub struct PrepareGenerationMetricsSnapshot {
     symbols_copy: Duration,
     edges_copy: Duration,
     references_copy: Duration,
+    numerical_sites_copy: Duration,
     documents_copy: Duration,
     relation_validation: Duration,
 }
@@ -503,7 +509,7 @@ impl PrepareGenerationMetrics {
         Self::default()
     }
 
-    /// Read the most recently observed five-table PostgreSQL COPY duration.
+    /// Read the most recently observed six-table PostgreSQL COPY duration.
     #[must_use]
     pub fn snapshot(&self) -> PrepareGenerationMetricsSnapshot {
         PrepareGenerationMetricsSnapshot {
@@ -512,6 +518,7 @@ impl PrepareGenerationMetrics {
             symbols_copy: observed_duration(&self.inner.symbols_copy),
             edges_copy: observed_duration(&self.inner.edges_copy),
             references_copy: observed_duration(&self.inner.references_copy),
+            numerical_sites_copy: observed_duration(&self.inner.numerical_sites_copy),
             documents_copy: observed_duration(&self.inner.documents_copy),
             relation_validation: observed_duration(&self.inner.relation_validation),
         }
@@ -523,6 +530,7 @@ impl PrepareGenerationMetrics {
         store_duration(&self.inner.symbols_copy, tables.symbols);
         store_duration(&self.inner.edges_copy, tables.edges);
         store_duration(&self.inner.references_copy, tables.references);
+        store_duration(&self.inner.numerical_sites_copy, tables.numerical_sites);
         store_duration(&self.inner.documents_copy, tables.documents);
         store_duration(&self.inner.relation_validation, Duration::ZERO);
     }
@@ -542,7 +550,7 @@ fn store_duration(target: &AtomicU64, duration: Duration) {
 }
 
 impl PrepareGenerationMetricsSnapshot {
-    /// Wall-clock duration spent streaming files, symbols, edges, references, and documents.
+    /// Wall-clock duration spent streaming all six immutable generation fact relations.
     #[must_use]
     pub const fn copy_duration(self) -> Duration {
         self.copy
@@ -570,6 +578,12 @@ impl PrepareGenerationMetricsSnapshot {
     #[must_use]
     pub const fn references_copy_duration(self) -> Duration {
         self.references_copy
+    }
+
+    /// Wall-clock duration of the numerical-sites COPY statement.
+    #[must_use]
+    pub const fn numerical_sites_copy_duration(self) -> Duration {
+        self.numerical_sites_copy
     }
 
     /// Wall-clock duration of the search-documents COPY statement, including BM25 maintenance.
@@ -1763,6 +1777,12 @@ async fn validate_copied_relations(
                   AND generation_id = CAST($2 AS uuid)
                   AND target_symbol_id IS NOT NULL
                 UNION ALL
+                SELECT owner_symbol_id
+                FROM {quoted_schema}."numerical_sites"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                  AND owner_symbol_id IS NOT NULL
+                UNION ALL
                 SELECT symbol_id
                 FROM {quoted_schema}."search_documents"
                 WHERE project_id = CAST($1 AS uuid)
@@ -1778,6 +1798,11 @@ async fn validate_copied_relations(
             ), required_files(file_id) AS (
                 SELECT file_id
                 FROM {quoted_schema}."references"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT file_id
+                FROM {quoted_schema}."numerical_sites"
                 WHERE project_id = CAST($1 AS uuid)
                   AND generation_id = CAST($2 AS uuid)
                 UNION ALL

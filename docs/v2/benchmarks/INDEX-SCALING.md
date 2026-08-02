@@ -39,7 +39,8 @@ All 30 digest-v4 warmup/measured runs at 1, 2, 4, 8, and 16 workers produced:
 
 - logical generation digest version 4,
   `b6b88a0a91b17a75f670cc61694e3034a316a7d9a09756d6ceb42b8514391937`;
-- 256 files, 256 symbols, 255 edges, 255 references, and 256 search documents;
+- 256 files, 256 symbols, 255 edges, 255 references, and 256 search documents
+  in the pre-V7 five-relation fixture;
 - BM25 first hit `30000000-0000-4000-8000-000000000001` for
   `needle cartograph benchmark`;
 - zero current stage items and reserved bytes after reduction;
@@ -68,9 +69,12 @@ Durations are wall-clock milliseconds. Throughput is based on the median
 stage or end-to-end duration. Stage time covers the bounded parallel Parse
 stage plus the one-item supervised canonical Reduce stage. Their reservations
 are sequential, so peak bytes are the larger live reservation, not their sum.
-COPY measures exactly the five table streams, including their bounded row
-encoding, but excludes validation, fencing, the ready transition, publication,
-and the verification queries.
+This historical digest-v4 run measured the then-current five table streams.
+The current V7 harness measures six streams by adding `numerical_sites` (zero
+rows in this synthetic TypeScript workload), including bounded row encoding,
+but still excludes validation, fencing, the ready transition, publication, and
+the verification queries. New timings must be published as a fresh audit rather
+than mixed into the historical table below.
 
 | Workers | Window | Stage p50 / p95 | COPY p50 / p95 | End-to-end p50 / p95 | Stage items/s | End-to-end items/s | Peak items | Peak reserved bytes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

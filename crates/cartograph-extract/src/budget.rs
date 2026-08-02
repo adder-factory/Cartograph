@@ -1,8 +1,8 @@
 use std::mem::size_of;
 
 use crate::{
-    Containment, ExtractError, ExtractedFile, ExtractedImportBinding, ExtractedReference,
-    ExtractedSymbol, ExtractionDiagnostic, SourceSnapshot,
+    Containment, ExtractError, ExtractedFile, ExtractedImportBinding, ExtractedNumericalSite,
+    ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, SourceSnapshot,
 };
 
 const PARSER_RESERVATION_MULTIPLIER: u64 = 32;
@@ -163,6 +163,16 @@ impl ExtractedFile {
                 })
             })
             .and_then(|bytes| {
+                bytes.checked_add(vector_bytes::<ExtractedNumericalSite>(
+                    self.numerical_sites.capacity(),
+                ))
+            })
+            .and_then(|bytes| {
+                self.numerical_sites.iter().try_fold(bytes, |total, site| {
+                    total.checked_add(numerical_site_string_bytes(site))
+                })
+            })
+            .and_then(|bytes| {
                 bytes.checked_add(vector_bytes::<ExtractedImportBinding>(
                     self.import_bindings.capacity(),
                 ))
@@ -194,6 +204,11 @@ pub(crate) fn containment_budget_bytes(edge: &Containment) -> u64 {
 
 pub(crate) fn reference_budget_bytes(reference: &ExtractedReference) -> u64 {
     vector_growth_bytes::<ExtractedReference>().saturating_add(reference_string_bytes(reference))
+}
+
+pub(crate) fn numerical_site_budget_bytes(site: &ExtractedNumericalSite) -> u64 {
+    vector_growth_bytes::<ExtractedNumericalSite>()
+        .saturating_add(numerical_site_string_bytes(site))
 }
 
 pub(crate) fn import_binding_budget_bytes(binding: &ExtractedImportBinding) -> u64 {
@@ -264,6 +279,21 @@ fn reference_string_bytes(reference: &ExtractedReference) -> u64 {
                 .as_ref()
                 .map_or(0, String::capacity),
         ))
+}
+
+fn numerical_site_string_bytes(site: &ExtractedNumericalSite) -> u64 {
+    usize_to_u64(site.id.as_str().len())
+        .saturating_add(
+            site.owner
+                .as_ref()
+                .map_or(0, |owner| usize_to_u64(owner.as_str().len())),
+        )
+        .saturating_add(usize_to_u64(site.operation.capacity()))
+        .saturating_add(usize_to_u64(site.hazard.capacity()))
+        .saturating_add(usize_to_u64(site.precision.capacity()))
+        .saturating_add(usize_to_u64(site.expression_digest.as_str().len()))
+        .saturating_add(usize_to_u64(site.provenance.capacity()))
+        .saturating_add(usize_to_u64(site.unknowns.capacity()))
 }
 
 fn import_binding_string_bytes(binding: &ExtractedImportBinding) -> u64 {

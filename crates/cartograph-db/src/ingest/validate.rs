@@ -14,8 +14,8 @@ use super::{
     digest::logical_digest,
     model::{
         CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, GenerationFacts,
-        GenerationMemoryModelError, ReferenceInput, SearchDocumentInput, SymbolInput,
-        ValidatedFactTables,
+        GenerationMemoryModelError, NumericalSiteInput, ReferenceInput, SearchDocumentInput,
+        SymbolInput, ValidatedFactTables,
     },
 };
 
@@ -27,6 +27,8 @@ const MAX_SIGNATURE_BYTES: usize = 64 * 1_024;
 const MAX_PROVENANCE_BYTES: usize = 256;
 const MAX_REFERENCE_NAME_BYTES: usize = 4_096;
 const MAX_REFERENCE_KIND_BYTES: usize = 64;
+const MAX_NUMERICAL_CATEGORY_BYTES: usize = 64;
+const MAX_NUMERICAL_UNKNOWNS_BYTES: usize = 256;
 const MAX_CODE_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_NATURAL_TEXT_BYTES: usize = 1_024 * 1_024;
 const MAX_METADATA_BYTES: usize = 64 * 1_024;
@@ -238,24 +240,70 @@ pub fn validate_generation_facts<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    let mut control = ValidationControl::new(limits, cancelled);
+    validate_generation_facts_with_version(
+        facts,
+        GenerationValidationPolicy {
+            limits,
+            digest_version: GenerationDigestVersion::CURRENT,
+        },
+        cancelled,
+    )
+}
+
+pub(crate) fn validate_generation_facts_for_v1_import<Cancel>(
+    facts: GenerationFacts,
+    limits: GenerationValidationLimits,
+    cancelled: Cancel,
+) -> Result<(CanonicalGenerationFacts, GenerationValidationReport), GenerationValidationError>
+where
+    Cancel: FnMut() -> bool,
+{
+    if !facts.numerical_sites.is_empty() {
+        return Err(invalid("v1_import_numerical_sites").into());
+    }
+    validate_generation_facts_with_version(
+        facts,
+        GenerationValidationPolicy {
+            limits,
+            digest_version: GenerationDigestVersion::V6,
+        },
+        cancelled,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct GenerationValidationPolicy {
+    limits: GenerationValidationLimits,
+    digest_version: GenerationDigestVersion,
+}
+
+fn validate_generation_facts_with_version<Cancel>(
+    facts: GenerationFacts,
+    policy: GenerationValidationPolicy,
+    cancelled: Cancel,
+) -> Result<(CanonicalGenerationFacts, GenerationValidationReport), GenerationValidationError>
+where
+    Cancel: FnMut() -> bool,
+{
+    let mut control = ValidationControl::new(policy.limits, cancelled);
     control.admit(&facts)?;
     let tables = ValidatedFactTables {
         files: reduce_files(facts.files, &mut control)?,
         symbols: reduce_symbols(facts.symbols, &mut control)?,
         edges: reduce_edges(facts.edges, &mut control)?,
         references: reduce_references(facts.references, &mut control)?,
+        numerical_sites: reduce_numerical_sites(facts.numerical_sites, &mut control)?,
         documents: reduce_documents(facts.documents, &mut control)?,
     };
     validate_relations(&tables, &mut control)?;
     control.poll()?;
-    let digest = logical_digest(&tables, || (control.cancelled)())
+    let digest = logical_digest(&tables, policy.digest_version, || (control.cancelled)())
         .map_err(|()| GenerationValidationError::Cancelled)?;
     control.charge(usize_to_u64(digest.as_str().len()))?;
     let facts = CanonicalGenerationFacts {
         tables,
         digest,
-        digest_version: GenerationDigestVersion::CURRENT,
+        digest_version: policy.digest_version,
     };
     let report = control.finish(&facts)?;
     Ok((facts, report))
@@ -492,6 +540,61 @@ where
     collect_values(by_key, control)
 }
 
+fn reduce_numerical_sites<Cancel>(
+    sites: Vec<NumericalSiteInput>,
+    control: &mut ValidationControl<Cancel>,
+) -> Result<Vec<NumericalSiteInput>, GenerationValidationError>
+where
+    Cancel: FnMut() -> bool,
+{
+    let mut by_id = BTreeMap::<String, NumericalSiteInput>::new();
+    for site in sites {
+        control.charge(
+            MAP_NODE_ALLOWANCE
+                .saturating_add(usize_to_u64(size_of::<NumericalSiteInput>()))
+                .saturating_add(usize_to_u64(site.site_id.as_str().len())),
+        )?;
+        validate_span(site.start_byte, site.end_byte, "numerical_site_byte_span")?;
+        validate_lines(site.start_line, site.end_line)?;
+        for (value, field) in [
+            (&site.operation, "numerical_operation"),
+            (&site.hazard, "numerical_hazard"),
+            (&site.precision, "numerical_precision"),
+            (&site.evidence_level, "numerical_evidence_level"),
+        ] {
+            validate_machine_token(value, field, MAX_NUMERICAL_CATEGORY_BYTES)?;
+        }
+        validate_machine_token(
+            &site.provenance,
+            "numerical_provenance",
+            MAX_PROVENANCE_BYTES,
+        )?;
+        validate_optional_text(
+            &site.unknowns,
+            "numerical_unknowns",
+            MAX_NUMERICAL_UNKNOWNS_BYTES,
+        )?;
+        if site.confidence_ppm > 1_000_000
+            || !matches!(
+                site.evidence_level.as_str(),
+                "proven" | "heuristic" | "coverage_gap"
+            )
+            || !valid_machine_token_list(&site.unknowns)
+        {
+            return Err(invalid("numerical_site").into());
+        }
+        insert_unique(
+            &mut by_id,
+            UniqueInput {
+                key: site.site_id.as_str().to_owned(),
+                value: site,
+                field: "duplicate_numerical_site_id",
+            },
+        )?;
+    }
+    collect_values(by_id, control)
+}
+
 fn reduce_documents<Cancel>(
     documents: Vec<SearchDocumentInput>,
     control: &mut ValidationControl<Cancel>,
@@ -624,22 +727,55 @@ where
     }
     for reference in &facts.references {
         control.poll()?;
-        let file = require_file(&files, &reference.file_id, "reference_file_id")?;
-        require_structural_file(file, "reference_file_parse_status")?;
-        require_within_file(reference.end_byte, file, "reference_byte_span")?;
-        if let Some(owner) = &reference.owner_symbol_id {
-            let owner = require_symbol(&symbols, owner, "reference_owner_symbol_id")?;
-            if owner.file_id != reference.file_id {
-                return Err(invalid("reference_owner_file_id").into());
-            }
-        }
-        if let Some(symbol) = &reference.target_symbol_id {
-            require_symbol(&symbols, symbol, "reference_target_symbol_id")?;
-        }
+        validate_reference_relations(reference, &files, &symbols)?;
+    }
+    for site in &facts.numerical_sites {
+        control.poll()?;
+        validate_numerical_site_relations(site, &files, &symbols)?;
     }
     for document in &facts.documents {
         control.poll()?;
         validate_document_relations(document, &files, &symbols)?;
+    }
+    Ok(())
+}
+
+fn validate_reference_relations(
+    reference: &ReferenceInput,
+    files: &BTreeMap<&str, &FileInput>,
+    symbols: &BTreeMap<&str, &SymbolInput>,
+) -> Result<(), GenerationValidationError> {
+    let file = require_file(files, &reference.file_id, "reference_file_id")?;
+    require_structural_file(file, "reference_file_parse_status")?;
+    require_within_file(reference.end_byte, file, "reference_byte_span")?;
+    if let Some(owner) = &reference.owner_symbol_id {
+        let owner = require_symbol(symbols, owner, "reference_owner_symbol_id")?;
+        if owner.file_id != reference.file_id {
+            return Err(invalid("reference_owner_file_id").into());
+        }
+    }
+    if let Some(symbol) = &reference.target_symbol_id {
+        require_symbol(symbols, symbol, "reference_target_symbol_id")?;
+    }
+    Ok(())
+}
+
+fn validate_numerical_site_relations(
+    site: &NumericalSiteInput,
+    files: &BTreeMap<&str, &FileInput>,
+    symbols: &BTreeMap<&str, &SymbolInput>,
+) -> Result<(), GenerationValidationError> {
+    let file = require_file(files, &site.file_id, "numerical_site_file_id")?;
+    require_structural_file(file, "numerical_site_file_parse_status")?;
+    require_within_file(site.end_byte, file, "numerical_site_byte_span")?;
+    if let Some(owner) = &site.owner_symbol_id {
+        let owner = require_symbol(symbols, owner, "numerical_site_owner_symbol_id")?;
+        if owner.file_id != site.file_id
+            || site.start_byte < owner.start_byte
+            || site.end_byte > owner.end_byte
+        {
+            return Err(invalid("numerical_site_owner_span").into());
+        }
     }
     Ok(())
 }
@@ -829,6 +965,32 @@ fn validate_optional_text(
     }
 }
 
+fn validate_machine_token(
+    value: &str,
+    field: &'static str,
+    maximum: usize,
+) -> Result<(), StorageError> {
+    validate_bounded_text(value, field, maximum)?;
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        Ok(())
+    } else {
+        Err(invalid(field))
+    }
+}
+
+fn valid_machine_token_list(value: &str) -> bool {
+    value.is_empty()
+        || value.split(',').all(|token| {
+            !token.is_empty()
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+}
+
 fn canonical_json<Cancel>(
     value: &Value,
     control: &mut ValidationControl<Cancel>,
@@ -1007,7 +1169,9 @@ const fn invalid(field: &'static str) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cartograph_domain::{ContentDigest, DocumentId, DocumentKind, FileParseStatus};
+    use cartograph_domain::{
+        ContentDigest, DocumentId, DocumentKind, FileParseStatus, NumericalSiteId,
+    };
     use std::cell::Cell;
 
     const TEST_DIGEST_BYTE: u8 = 0x11;
@@ -1101,6 +1265,27 @@ mod tests {
             resolution_provenance: "test-unresolved".to_owned(),
             site_count: 1,
             span_precision: super::super::ReferenceSpanPrecision::Exact,
+        }
+    }
+
+    fn numerical_site() -> NumericalSiteInput {
+        NumericalSiteInput {
+            site_id: NumericalSiteId::parse("44444444-4444-4444-8444-444444444444")
+                .unwrap_or_else(|error| panic!("fixture numerical site ID is invalid: {error}")),
+            file_id: file_id(),
+            owner_symbol_id: Some(symbol_id()),
+            start_byte: 1,
+            end_byte: 5,
+            start_line: 1,
+            end_line: 1,
+            operation: "multiplication".to_owned(),
+            hazard: "arithmetic_before_widening".to_owned(),
+            precision: "f32".to_owned(),
+            expression_digest: digest(),
+            confidence_ppm: 900_000,
+            provenance: "rust_ast_v1".to_owned(),
+            evidence_level: "heuristic".to_owned(),
+            unknowns: "operand_precision,overflow_or_rounding".to_owned(),
         }
     }
 
@@ -1254,6 +1439,99 @@ mod tests {
             ..GenerationFacts::default()
         };
         assert!(validate_and_reduce(facts).is_ok());
+    }
+
+    #[test]
+    fn numerical_sites_are_relationship_strict_and_part_of_digest_v7() {
+        let site = numerical_site();
+        let canonical = validate_and_reduce(GenerationFacts {
+            files: vec![file()],
+            symbols: vec![symbol()],
+            numerical_sites: vec![site.clone(), site.clone()],
+            ..GenerationFacts::default()
+        })
+        .unwrap_or_else(|error| panic!("numerical site was rejected: {error}"));
+        assert_eq!(canonical.numerical_sites(), std::slice::from_ref(&site));
+        assert_eq!(canonical.digest_version(), GenerationDigestVersion::V7);
+
+        let without_site = validate_and_reduce(GenerationFacts {
+            files: vec![file()],
+            symbols: vec![symbol()],
+            ..GenerationFacts::default()
+        })
+        .unwrap_or_else(|error| panic!("site-free generation was rejected: {error}"));
+        assert_ne!(canonical.digest(), without_site.digest());
+
+        let mut changed = site.clone();
+        changed.hazard = "none_observed".to_owned();
+        let changed = validate_and_reduce(GenerationFacts {
+            files: vec![file()],
+            symbols: vec![symbol()],
+            numerical_sites: vec![changed],
+            ..GenerationFacts::default()
+        })
+        .unwrap_or_else(|error| panic!("changed numerical site was rejected: {error}"));
+        assert_ne!(canonical.digest(), changed.digest());
+
+        let mut outside_owner = symbol();
+        outside_owner.start_byte = 2;
+        assert!(matches!(
+            validate_and_reduce(GenerationFacts {
+                files: vec![file()],
+                symbols: vec![outside_owner],
+                numerical_sites: vec![site.clone()],
+                ..GenerationFacts::default()
+            }),
+            Err(StorageError::InvalidInput {
+                field: "numerical_site_owner_span"
+            })
+        ));
+
+        let mut invalid_unknowns = site;
+        invalid_unknowns.unknowns = "operand_precision,".to_owned();
+        assert!(matches!(
+            validate_and_reduce(GenerationFacts {
+                files: vec![file()],
+                symbols: vec![symbol()],
+                numerical_sites: vec![invalid_unknowns],
+                ..GenerationFacts::default()
+            }),
+            Err(StorageError::InvalidInput {
+                field: "numerical_site"
+            })
+        ));
+    }
+
+    #[test]
+    fn v1_import_validation_remains_digest_v6_and_refuses_new_fact_families() {
+        let (legacy, _) = validate_generation_facts_for_v1_import(
+            GenerationFacts {
+                files: vec![file()],
+                ..GenerationFacts::default()
+            },
+            validation_limits(),
+            || false,
+        )
+        .unwrap_or_else(|error| panic!("legacy fact mapping was rejected: {error}"));
+        assert_eq!(legacy.digest_version(), GenerationDigestVersion::V6);
+
+        assert!(matches!(
+            validate_generation_facts_for_v1_import(
+                GenerationFacts {
+                    files: vec![file()],
+                    symbols: vec![symbol()],
+                    numerical_sites: vec![numerical_site()],
+                    ..GenerationFacts::default()
+                },
+                validation_limits(),
+                || false,
+            ),
+            Err(GenerationValidationError::Storage(
+                StorageError::InvalidInput {
+                    field: "v1_import_numerical_sites"
+                }
+            ))
+        ));
     }
 
     #[test]
@@ -1426,6 +1704,7 @@ mod tests {
             symbols: Vec::new(),
             edges: Vec::new(),
             references: Vec::new(),
+            numerical_sites: Vec::new(),
             documents: Vec::new(),
         };
         let relation_polls = Cell::<u64>::default();
@@ -1480,6 +1759,12 @@ mod tests {
         let mut references_control = ValidationControl::new(limits, || true);
         assert!(matches!(
             reduce_references(vec![reference()], &mut references_control),
+            Err(GenerationValidationError::Cancelled)
+        ));
+
+        let mut numerical_control = ValidationControl::new(limits, || true);
+        assert!(matches!(
+            reduce_numerical_sites(vec![numerical_site()], &mut numerical_control),
             Err(GenerationValidationError::Cancelled)
         ));
 

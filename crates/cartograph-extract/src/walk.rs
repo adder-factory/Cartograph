@@ -26,6 +26,7 @@ mod graphql_family;
 mod jvm_dynamic_family;
 mod managed_family;
 mod module_system;
+mod numerical;
 mod polyglot;
 mod prisma_family;
 mod references;
@@ -109,6 +110,7 @@ fn enrich_extraction(
 ) -> Result<(), ExtractError> {
     module_system::collect_explicit_exports(builder, root)?;
     builder.visit(root, 0)?;
+    numerical::enrich(builder, root)?;
     dynamic_dispatch::enrich(builder, root)?;
     schema::enrich(builder, root)?;
     embedded_sql::enrich(builder, root)?;
@@ -160,6 +162,7 @@ fn finish_extraction(
         symbols: builder.facts.symbols,
         containments: builder.facts.containments,
         references: builder.facts.references,
+        numerical_sites: builder.facts.numerical_sites,
         import_bindings: builder.facts.import_bindings,
         has_inline_tests,
         test_search_text: String::new(),
@@ -326,6 +329,7 @@ struct ExtractionFacts {
     symbols: Vec<ExtractedSymbol>,
     containments: Vec<Containment>,
     references: Vec<ExtractedReference>,
+    numerical_sites: Vec<crate::ExtractedNumericalSite>,
     import_bindings: Vec<ExtractedImportBinding>,
 }
 

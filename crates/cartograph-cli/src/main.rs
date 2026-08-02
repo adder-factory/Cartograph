@@ -3415,9 +3415,10 @@ fn print_index_report(report: &IndexReport, format: OutputFormat) -> Result<(), 
             println!("Logical digest: {}", report.content_digest);
             if let Some(native) = report.native {
                 println!(
-                    "Native facts: {} files, {} symbols, {} resolved and {} unresolved references",
+                    "Native facts: {} files, {} symbols, {} numerical sites, {} resolved and {} unresolved references",
                     native.files,
                     native.symbols,
+                    native.numerical_sites,
                     native.resolved_references,
                     native.unresolved_references
                 );
@@ -5336,9 +5337,9 @@ mod tests {
             "<!-- CARTOGRAPH_MCP_TOOLS_END -->",
         ));
         assert_eq!(documented_tools, expected_tools);
-        assert_eq!(expected_tools.len(), 35);
+        assert_eq!(expected_tools.len(), 36);
         assert!(MCP_USAGE.contains("Selected high-use tools"));
-        assert!(MCP_USAGE.contains("full profile advertises 35 tools"));
+        assert!(MCP_USAGE.contains("full profile advertises 36 tools"));
 
         for profile in McpProfile::value_variants() {
             let spelling = profile

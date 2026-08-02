@@ -36,6 +36,7 @@ status. Do not delete locks or database state while an owner is alive.
 | `cartograph_node` | Exact symbol metadata plus bounded source when line provenance is fresh |
 | `cartograph_graph` | Bounded callers, callees, or reverse impact |
 | `cartograph_affected` | Tests reachable through bounded reverse impact |
+| `cartograph_numerical` | Generation-scoped static numerical evidence, coverage, explanation, and non-executing probe plans |
 | `cartograph_review` | Git-ref plus staged/unstaged/untracked review evidence |
 | `cartograph_admin` | Explicit index/sync/embed job start, status, and cancellation |
 

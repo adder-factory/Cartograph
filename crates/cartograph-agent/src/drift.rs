@@ -2,11 +2,11 @@ use std::{collections::BTreeMap, time::UNIX_EPOCH};
 
 use cartograph_db::{IndexedFileFingerprint, StorageError};
 use cartograph_domain::{GenerationId, ProjectId};
-use cartograph_extract::{SourceDiscoveryOptions, SourceReadOptions, SourceRoot};
+use cartograph_extract::{DiscoveryPolicy, SourceDiscoveryOptions, SourceReadOptions, SourceRoot};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::{ProjectCancellation, ProjectRuntime, discovery_limits, source_limits};
+use crate::{ProjectCancellation, ProjectRuntime, discovery_limits};
 
 const DEFAULT_BUCKET_LIMIT: u16 = 100;
 const MAXIMUM_BUCKET_LIMIT: u16 = 500;
@@ -146,6 +146,8 @@ impl ProjectRuntime {
                 result.map_err(|_| FileDriftError::SourceUnavailable)?
             }
         };
+        let source_policy = crate::project_source_policy(&self.root)
+            .map_err(|_| FileDriftError::SourceUnavailable)?;
         let root = self.root.clone();
         let worker_cancellation = cancellation.clone();
         let scan = tokio::task::spawn_blocking(move || {
@@ -154,6 +156,10 @@ impl ProjectRuntime {
                 root: &root,
                 fingerprints,
                 options,
+                discovery_policy: source_policy.discovery,
+                maximum_source_bytes: source_policy
+                    .maximum_file_bytes
+                    .unwrap_or(crate::DEFAULT_MAX_SOURCE_BYTES),
                 cancelled: || worker_cancellation.is_cancelled(),
             })
         })
@@ -251,6 +257,8 @@ struct DriftScanRequest<'a, Cancel> {
     root: &'a std::path::Path,
     fingerprints: Vec<IndexedFileFingerprint>,
     options: FileDriftOptions,
+    discovery_policy: DiscoveryPolicy,
+    maximum_source_bytes: usize,
     cancelled: Cancel,
 }
 
@@ -262,11 +270,15 @@ where
         root,
         fingerprints,
         options,
+        discovery_policy,
+        maximum_source_bytes,
         mut cancelled,
     } = input;
-    let source_root = SourceRoot::open(root).map_err(|_| FileDriftError::SourceUnavailable)?;
+    let source_root = SourceRoot::open_with_policy(root, discovery_policy)
+        .map_err(|_| FileDriftError::SourceUnavailable)?;
     let discovery = discovery_limits().map_err(|_| FileDriftError::SourceUnavailable)?;
-    let read_limits = source_limits().map_err(|_| FileDriftError::SourceUnavailable)?;
+    let read_limits = crate::source_limits_with_max(maximum_source_bytes)
+        .map_err(|_| FileDriftError::SourceUnavailable)?;
     let files = source_root
         .discover_with_cancellation(SourceDiscoveryOptions::new(discovery, &mut cancelled))
         .map_err(|_| FileDriftError::SourceUnavailable)?;

@@ -20,6 +20,7 @@ const LOGICAL_RELATIONS: &[&str] = &[
     "symbols",
     "edges",
     "reference_sites",
+    "numerical_sites",
     "search_documents",
     "symbol_coverage",
     "file_history",
@@ -295,6 +296,26 @@ pub fn read_only_sql_schema() -> Vec<ReadOnlySqlRelation> {
                 "span_precision",
             ],
         ),
+        relation(
+            "numerical_sites",
+            &[
+                "numerical_site_id",
+                "file_id",
+                "owner_symbol_id",
+                "start_byte",
+                "end_byte",
+                "start_line",
+                "end_line",
+                "operation",
+                "hazard",
+                "precision",
+                "expression_digest",
+                "confidence_ppm",
+                "provenance",
+                "evidence_level",
+                "unknowns",
+            ],
+        ),
     ];
     relations.extend(read_only_analysis_relations());
     relations
@@ -545,6 +566,17 @@ fn logical_ctes(schema: &str) -> String {
                        stored.start_byte, stored.end_byte, stored.confidence,
                        stored.resolution_provenance, stored.site_count, stored.span_precision
                 FROM {schema}."references" AS stored
+                JOIN cartograph_current AS current
+                  ON current.project_id = stored.project_id
+                 AND current.generation_id = stored.generation_id
+            ),
+            numerical_sites AS (
+                SELECT stored.numerical_site_id, stored.file_id, stored.owner_symbol_id,
+                       stored.start_byte, stored.end_byte, stored.start_line, stored.end_line,
+                       stored.operation, stored.hazard, stored.precision,
+                       stored.expression_digest, stored.confidence_ppm,
+                       stored.provenance, stored.evidence_level, stored.unknowns
+                FROM {schema}."numerical_sites" AS stored
                 JOIN cartograph_current AS current
                   ON current.project_id = stored.project_id
                  AND current.generation_id = stored.generation_id

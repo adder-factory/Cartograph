@@ -50,12 +50,12 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V6 fences framework, resolver, test-ownership, and Rust Cargo
-workspace crate/re-export semantics: after an upgrade from an older contract,
-unchanged source remains stale until a normal index publishes current-contract
-facts. This contract check stays separate from the source-manifest digest so v1
-import still compares exact checkout bytes rather than a binary-specific
-identity.
+contract. Contract V7 includes generation-scoped static numerical sites;
+contract V6 fenced framework, resolver, test-ownership, and Rust Cargo workspace
+crate/re-export semantics. After an upgrade from an older contract, unchanged
+source remains stale until a normal index publishes current-contract facts.
+This contract check stays separate from the source-manifest digest so v1 import
+still compares exact checkout bytes rather than a binary-specific identity.
 
 ## Parsing and facts
 
@@ -72,12 +72,24 @@ The walker emits:
 - exact one-based line and byte spans;
 - import bindings and module specifiers;
 - typed references and containment;
+- privacy-safe Rust numerical sites with exact span, operation, potential
+  hazard, visible precision, deterministic confidence/provenance, and explicit
+  unknowns;
 - safe callable signatures and body-search text;
 - parser diagnostics.
 
 Callable signatures are normalized to exclude literal-bearing bodies/values.
 Search text is intentionally useful for code identifiers without becoming a
 secret or source-literal dump.
+
+The first numerical contract is `rust_ast_v1`. It detects arithmetic before a
+widening cast, absolute-only tolerance comparisons, low-precision reductions,
+domain-sensitive functions, NaN-sensitive ordering, and narrowing before
+accumulation. These are bounded static heuristics. The persisted expression
+identity is a source-version-fenced digest; source expressions and literal
+values are not persisted. Runtime observations and formal proof are separate
+future adapters and remain explicitly `not_configured` in current status/tool
+responses.
 
 ## Resolution
 
@@ -124,7 +136,7 @@ complete discovery/parser/resolution/search/import/freshness contract.
 The indexer converts extracted files into canonical facts:
 
 - project and generation identity;
-- files, symbols, typed edges, exact/coarse references;
+- files, symbols, typed edges, exact/coarse references, static numerical sites;
 - search documents for file/symbol code/name/natural text;
 - deterministic row ordering and logical digest;
 - literal row/count/byte admission reports.

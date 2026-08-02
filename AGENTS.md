@@ -185,6 +185,7 @@ Route questions by evidence type:
 | Lexical code relevance | `find --by bm25` |
 | Call or dependency shape | `cartograph graph` / `cartograph_graph` |
 | Tests likely affected | `cartograph affected` / `cartograph_affected` |
+| Numerical hazards and static coverage | `cartograph numerical` / `cartograph_numerical` |
 | Review current changes | `cartograph review --ref main` / `cartograph_review` |
 | Freshness and counts | `cartograph status` / `cartograph_status` |
 | Explicit refresh | `cartograph index` / `cartograph_admin` |

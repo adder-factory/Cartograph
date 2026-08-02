@@ -127,6 +127,7 @@ pub(super) fn map_source_facts(
         symbols,
         edges,
         references,
+        numerical_sites: Vec::new(),
         documents,
     })
 }

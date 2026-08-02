@@ -109,6 +109,17 @@ WITH current AS (
                 WHERE edges.project_id = CAST($1 AS uuid)
                   AND edges.edge_kind <> 'contains'
                 GROUP BY edges.target_symbol_id
+            ), function_locals AS (
+                SELECT DISTINCT containment.target_symbol_id AS symbol_id
+                FROM {schema}."edges" AS containment
+                JOIN current ON current.generation_id = containment.generation_id
+                JOIN {schema}."symbols" AS owner
+                  ON owner.project_id = containment.project_id
+                 AND owner.generation_id = containment.generation_id
+                 AND owner.symbol_id = containment.source_symbol_id
+                WHERE containment.project_id = CAST($1 AS uuid)
+                  AND containment.edge_kind = 'contains'
+                  AND owner.symbol_kind IN ('function', 'method', 'component')
             ), members AS (
                 SELECT parent.symbol_id,
                        COUNT(child.symbol_id) FILTER (
@@ -346,6 +357,8 @@ WITH current AS (
                        symbols.start_line, symbols.end_line,
                        symbols.end_line - symbols.start_line + 1 AS lines,
                        symbols.exported, symbols.default_export,
+                       symbols.declaration_only,
+                       function_locals.symbol_id IS NOT NULL AS function_local,
                        COALESCE(symbols.visibility = 'public', false) AS declared_external_api,
                        documents.document_kind = 'test' AS test_source,
                        (
@@ -478,6 +491,7 @@ WITH current AS (
                 LEFT JOIN outgoing ON outgoing.symbol_id = symbols.symbol_id
                 LEFT JOIN unresolved ON unresolved.symbol_id = symbols.symbol_id
                 LEFT JOIN incoming ON incoming.symbol_id = symbols.symbol_id
+                LEFT JOIN function_locals ON function_locals.symbol_id = symbols.symbol_id
                 LEFT JOIN potential_method_incoming
                   ON potential_method_incoming.symbol_id = symbols.symbol_id
                 LEFT JOIN members ON members.symbol_id = symbols.symbol_id
@@ -644,7 +658,7 @@ WITH current AS (
                       ('complex_method', 'cyclomatic', base.cyclomatic, 15.0, 15.0, 25.0, base.symbol_kind IN ('function','method','component')),
                       ('nested_complexity', 'max_nesting', base.max_nesting, 5.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component')),
                       ('complex_conditional', 'conditional_operands', base.max_conditional_operands, 6.0, 6.0, 8.0, base.symbol_kind IN ('function','method','component')),
-                      ('long_parameter_list', 'parameters', base.parameter_count, 4.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component')),
+                      ('long_parameter_list', 'parameters', base.parameter_count, 4.0, 5.0, 7.0, base.symbol_kind IN ('function','method','component') AND NOT base.declaration_only),
                       ('brain_method', 'composite_risk', (base.code_lines / 100.0) * (base.cyclomatic / 10.0) * GREATEST(1.0, base.max_nesting / 3.0) * GREATEST(1.0, base.max_conditional_operands / 4.0), 5.0, 10.0, 20.0, base.symbol_kind IN ('function','method','component') AND base.code_lines >= 50 AND base.cyclomatic >= 8),
                       ('magic_number', 'occurrences', base.magic_numbers, 3.0, 5.0, 8.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
                       ('hardcoded_url', 'occurrences', base.hardcoded_urls, 1.0, 2.0, 3.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
@@ -653,7 +667,7 @@ WITH current AS (
                       ('secrets_handling', 'confidence_percent', base.secrets_score, 50.0, 50.0, 70.0, base.symbol_kind IN ('function','method','component')),
                       ('god_class', 'behavioral_methods', base.behavioral_methods::double precision, 15.0, 40.0, 60.0, base.symbol_kind IN ('class','struct','module') AND base.complex_methods >= 5),
                       ('feature_envy', 'foreign_field_accesses', base.feature_envy_atfd::double precision, 6.0, 12.0, 999.0, base.symbol_kind = 'method' AND base.feature_envy_fdp <= 2 AND base.local_attribute_access < (1.0 / 3.0)),
-                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.framework_convention_export AND NOT base.declared_external_api AND NOT base.test_source),
+                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.function_local AND NOT base.framework_convention_export AND NOT base.declared_external_api AND NOT base.test_source),
                       ('low_coverage', 'uncovered_percent', (1.0 - COALESCE(base.coverage_fraction, 1.0)) * 100.0, 50.0, 50.0, 80.0, base.symbol_kind IN ('function','method','component') AND base.coverage_fraction <= 0.5 AND base.centrality_percentile >= 0.9),
                       ('duplicate_code', CASE WHEN base.duplicate_copies > 1 THEN 'exact_copies' WHEN base.clone_shape_copies > 1 THEN 'normalized_shape_copies' WHEN base.partial_clone_peers > 0 THEN 'partial_clone_peers' ELSE 'semantic_clone_peers' END, CASE WHEN base.duplicate_copies > 1 THEN base.duplicate_copies WHEN base.clone_shape_copies > 1 THEN base.clone_shape_copies WHEN base.partial_clone_peers > 0 THEN base.partial_clone_peers ELSE base.semantic_clone_peers END::double precision, CASE WHEN base.duplicate_copies > 1 OR base.clone_shape_copies > 1 THEN 2.0 ELSE 1.0 END, CASE WHEN base.duplicate_copies > 1 THEN 2.0 ELSE 999.0 END, 999.0, base.symbol_kind IN ('function','method','component') AND ((base.duplicate_copies > 1 AND base.lines >= 6) OR (base.clone_shape_copies > 1 AND base.lines >= 12) OR (base.partial_clone_peers > 0 AND base.lines >= 12) OR (base.semantic_clone_peers > 0 AND base.lines >= 6))),
                       ('high_fan_out', 'outgoing_dependencies', base.outgoing::double precision, 25.0, 50.0, 100.0, base.symbol_kind IN ('function','method','component','class','struct','module')),

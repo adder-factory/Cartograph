@@ -2,7 +2,8 @@ use std::mem::size_of;
 
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
-    GenerationDigestVersion, SymbolExecutionFlags, SymbolExportFlags, SymbolId, Visibility,
+    GenerationDigestVersion, NumericalSiteId, SymbolExecutionFlags, SymbolExportFlags, SymbolId,
+    Visibility,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -144,6 +145,41 @@ pub struct ReferenceInput {
     pub span_precision: ReferenceSpanPrecision,
 }
 
+/// One immutable, privacy-safe static numerical evidence site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumericalSiteInput {
+    /// Stable site identity derived independently of worker scheduling.
+    pub site_id: NumericalSiteId,
+    /// File containing the expression.
+    pub file_id: FileId,
+    /// Closest extracted declaration containing the expression.
+    pub owner_symbol_id: Option<SymbolId>,
+    /// Inclusive start byte in the source file.
+    pub start_byte: u64,
+    /// Exclusive end byte in the source file.
+    pub end_byte: u64,
+    /// One-based inclusive start line.
+    pub start_line: u32,
+    /// One-based inclusive end line.
+    pub end_line: u32,
+    /// Stable numerical operation category.
+    pub operation: String,
+    /// Stable potential-hazard category, or `none_observed`.
+    pub hazard: String,
+    /// Best statically visible precision category.
+    pub precision: String,
+    /// Source-version-fenced, privacy-safe expression identity digest.
+    pub expression_digest: ContentDigest,
+    /// Deterministic heuristic confidence in parts per million.
+    pub confidence_ppm: u32,
+    /// Bounded extractor or observer provenance.
+    pub provenance: String,
+    /// Evidence tier such as `heuristic`, never inferred from confidence.
+    pub evidence_level: String,
+    /// Stable comma-separated list of facts static analysis could not prove.
+    pub unknowns: String,
+}
+
 /// Search document staged as part of one immutable generation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchDocumentInput {
@@ -182,6 +218,8 @@ pub struct GenerationFacts {
     pub edges: Vec<EdgeInput>,
     /// Reference-span facts.
     pub references: Vec<ReferenceInput>,
+    /// Static numerical evidence facts.
+    pub numerical_sites: Vec<NumericalSiteInput>,
     /// BM25 search documents.
     pub documents: Vec<SearchDocumentInput>,
 }
@@ -256,6 +294,7 @@ pub(super) struct ValidatedFactTables {
     pub(super) symbols: Vec<SymbolInput>,
     pub(super) edges: Vec<EdgeInput>,
     pub(super) references: Vec<ReferenceInput>,
+    pub(super) numerical_sites: Vec<NumericalSiteInput>,
     pub(super) documents: Vec<CanonicalSearchDocument>,
 }
 
@@ -317,6 +356,12 @@ impl CanonicalGenerationFacts {
         &self.tables.references
     }
 
+    /// Canonically ordered static numerical evidence sites.
+    #[must_use]
+    pub fn numerical_sites(&self) -> &[NumericalSiteInput] {
+        &self.tables.numerical_sites
+    }
+
     /// Canonically ordered, metadata-normalized search documents.
     #[must_use]
     pub fn documents(&self) -> &[CanonicalSearchDocument] {
@@ -341,11 +386,13 @@ where
     model.add_vector(&facts.symbols)?;
     model.add_vector(&facts.edges)?;
     model.add_vector(&facts.references)?;
+    model.add_vector(&facts.numerical_sites)?;
     model.add_vector(&facts.documents)?;
     model_file_fields(&mut model, &facts.files)?;
     model_symbol_fields(&mut model, &facts.symbols)?;
     model_edge_fields(&mut model, &facts.edges)?;
     model_reference_fields(&mut model, &facts.references)?;
+    model_numerical_site_fields(&mut model, &facts.numerical_sites)?;
     for document in &facts.documents {
         model.poll()?;
         model_document_fields(
@@ -381,11 +428,13 @@ where
     model.add_vector(&facts.tables.symbols)?;
     model.add_vector(&facts.tables.edges)?;
     model.add_vector(&facts.tables.references)?;
+    model.add_vector(&facts.tables.numerical_sites)?;
     model.add_vector(&facts.tables.documents)?;
     model_file_fields(&mut model, &facts.tables.files)?;
     model_symbol_fields(&mut model, &facts.tables.symbols)?;
     model_edge_fields(&mut model, &facts.tables.edges)?;
     model_reference_fields(&mut model, &facts.tables.references)?;
+    model_numerical_site_fields(&mut model, &facts.tables.numerical_sites)?;
     for document in &facts.tables.documents {
         model.poll()?;
         model_document_fields(
@@ -473,6 +522,29 @@ where
         model.add_string(&reference.reference_name)?;
         model.add_string(&reference.reference_kind)?;
         model.add_string(&reference.resolution_provenance)?;
+    }
+    Ok(())
+}
+
+fn model_numerical_site_fields<Cancel>(
+    model: &mut MemoryModel<Cancel>,
+    sites: &[NumericalSiteInput],
+) -> Result<(), GenerationMemoryModelError>
+where
+    Cancel: FnMut() -> bool,
+{
+    for site in sites {
+        model.poll()?;
+        model.add_id(site.site_id.as_str())?;
+        model.add_id(site.file_id.as_str())?;
+        model.add_optional_id(site.owner_symbol_id.as_ref().map(SymbolId::as_str))?;
+        model.add_string(&site.operation)?;
+        model.add_string(&site.hazard)?;
+        model.add_string(&site.precision)?;
+        model.add_id(site.expression_digest.as_str())?;
+        model.add_string(&site.provenance)?;
+        model.add_string(&site.evidence_level)?;
+        model.add_string(&site.unknowns)?;
     }
     Ok(())
 }

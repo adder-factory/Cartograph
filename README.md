@@ -42,6 +42,7 @@ abstention instead of presenting stale or incomplete data as certainty.
 | Which code is most relevant? | Code-aware BM25 over names, implementation identifiers, and documentation |
 | What calls this, and what does it call? | Typed callers, callees, imports, references, and shortest paths |
 | What could this change affect? | Bounded reverse impact and structurally connected tests |
+| Where is numerical behavior risky or statically unknown? | Generation-scoped Rust operation/hazard/precision sites with exact spans and explicit evidence limits |
 | Is the graph current? | Immutable generation identity and exact supported-source freshness |
 | What changed in the working tree? | Separately labeled live overlay and Git-ref review packets |
 | Is an LLM required? | No for exact, lexical, graph, review, freshness, or affected-test workflows |
@@ -200,6 +201,7 @@ generation atomically.
 | `cartograph_entry_points` | Routes, commands, MCP tools, exports, and API boundaries |
 | `cartograph_graph` | Callers, callees, reverse impact, paths, and symbol similarity |
 | `cartograph_affected` | Bounded affected-test selection |
+| `cartograph_numerical` | Generation-scoped static numerical hazards, coverage, explanations, and non-executing probe plans |
 | `cartograph_review` | Git-ref plus staged, unstaged, and untracked evidence |
 | `cartograph_admin` | Explicit index, sync, embedding, and maintenance jobs |
 

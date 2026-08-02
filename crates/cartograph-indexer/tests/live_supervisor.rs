@@ -61,7 +61,10 @@ const STANDARD_CANCELLATION_GRACE: Duration = Duration::from_millis(300);
 const STANDARD_COPY_TIMEOUT: Duration = Duration::from_millis(50);
 const STALLED_PROGRESS_TIMEOUT: Duration = Duration::from_millis(200);
 const TEST_LEASE_DURATION: Duration = Duration::from_secs(3);
-const LEASE_WAIT_ATTEMPTS: usize = 100;
+// Observation waits are test-only and include executor scheduling time. Keep
+// them above the LLVM-instrumented scheduling tail without changing any
+// production operation, heartbeat, progress, or COPY deadline.
+const LEASE_WAIT_ATTEMPTS: usize = 250;
 const LEASE_WAIT_INTERVAL: Duration = Duration::from_millis(20);
 const NONCOOPERATIVE_WORK_DURATION: Duration = Duration::from_secs(2);
 const SHORT_CANCELLATION_GRACE: Duration = Duration::from_millis(150);
@@ -143,7 +146,7 @@ const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
 const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 14;
 const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
 const NATIVE_CUSTOM_FAMILY_FILE_COUNT: usize = 12;
-const NATIVE_EXPECTED_FILES: u64 = 67;
+const NATIVE_EXPECTED_FILES: u64 = 69;
 const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 60;
 const NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES: u64 = 3;
 const NATIVE_SEARCH_LIMIT: u16 = 10;
@@ -928,6 +931,29 @@ async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
             "ordinary unused export was hidden: {path}::{name}; findings={unused_exports:?}"
         );
     }
+    for local in ["escaped", "sequence_id"] {
+        assert!(
+            !has_structural_finding(&unused_exports, "src/rows.py", local),
+            "function-local Python binding was reported as unused export: {local}; findings={unused_exports:?}"
+        );
+    }
+    let long_parameters = fixture
+        .database
+        .query_current_structural_findings(
+            &fixture.project,
+            &StructuralFindingQuery::new(100)
+                .and_then(|query| query.with_finding(Some("long_parameter_list")))
+                .map_or_else(
+                    |error| panic!("long-parameter query was invalid: {error}"),
+                    |query| query.with_minimum_severity(StructuralFindingSeverity::Info),
+                ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("long-parameter findings failed: {error}"));
+    assert!(
+        !has_structural_finding(&long_parameters, "generated/platform.d.ts", "execute",),
+        "declaration-only generated API created implementation debt: {long_parameters:?}"
+    );
     fixture
         .database
         .current_structural_finding_stats(&fixture.project)
@@ -970,6 +996,14 @@ fn write_native_live_project(root: &std::path::Path) {
         (
             "lib/action.ts",
             "export function action(): string { return 'ordinary-unused-action'; }\n",
+        ),
+        (
+            "generated/platform.d.ts",
+            "// Generated file. Do not edit.\ninterface SyntheticPlatformApi {\n  execute(first: string, second: ArrayBuffer, third: unknown, fourth: unknown, fifth: unknown, sixth: boolean, seventh: string[]): Promise<unknown>;\n}\n",
+        ),
+        (
+            "src/rows.py",
+            "def build_rows(values):\n    escaped = [str(value).replace('|', '\\\\|') for value in values]\n    sequence_id = len(escaped)\n    return sequence_id, escaped\n",
         ),
     ] {
         let target = root.join(path);

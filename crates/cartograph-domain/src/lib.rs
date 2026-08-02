@@ -2,7 +2,7 @@
 //!
 //! Identifier constructors canonicalize UUID text at the boundary. Their
 //! fields remain private so raw strings cannot accidentally cross between
-//! project, generation, file, symbol, document, model, and task identities.
+//! project, generation, file, symbol, numerical site, document, model, and task identities.
 
 use std::{fmt, str::FromStr};
 
@@ -106,6 +106,7 @@ macro_rules! define_id {
 define_id!(ProjectId, "A stable Cartograph project identity.");
 define_id!(FileId, "A stable source-file identity.");
 define_id!(SymbolId, "A stable code-symbol identity.");
+define_id!(NumericalSiteId, "A stable numerical source-site identity.");
 define_id!(GenerationId, "An immutable index-generation identity.");
 define_id!(DocumentId, "A stable logical search-document identity.");
 define_id!(ModelId, "A registered embedding-model identity.");
@@ -290,11 +291,13 @@ pub enum GenerationDigestVersion {
     V5 = 5,
     /// Cargo-workspace Rust crate and named-reexport resolution semantics.
     V6 = 6,
+    /// Generation-scoped, privacy-safe static numerical site evidence.
+    V7 = 7,
 }
 
 impl GenerationDigestVersion {
     /// Current digest contract emitted by this Cartograph v2 binary.
-    pub const CURRENT: Self = Self::V6;
+    pub const CURRENT: Self = Self::V7;
 
     /// Stable PostgreSQL `smallint` representation.
     #[must_use]
@@ -316,6 +319,7 @@ impl GenerationDigestVersion {
             candidate if candidate == Self::V4.database_value() => Ok(Self::V4),
             candidate if candidate == Self::V5.database_value() => Ok(Self::V5),
             candidate if candidate == Self::V6.database_value() => Ok(Self::V6),
+            candidate if candidate == Self::V7.database_value() => Ok(Self::V7),
             _ => Err(InvalidGenerationDigestVersion),
         }
     }
@@ -607,7 +611,8 @@ mod tests {
     const DIGEST_V4_DATABASE_VALUE: i16 = 4;
     const DIGEST_V5_DATABASE_VALUE: i16 = 5;
     const DIGEST_V6_DATABASE_VALUE: i16 = 6;
-    const UNKNOWN_DIGEST_DATABASE_VALUE: i16 = 7;
+    const DIGEST_V7_DATABASE_VALUE: i16 = 7;
+    const UNKNOWN_DIGEST_DATABASE_VALUE: i16 = 8;
 
     #[test]
     fn branded_ids_canonicalize_and_validate_deserialized_values() {
@@ -640,7 +645,7 @@ mod tests {
         );
         assert_eq!(
             GenerationDigestVersion::CURRENT.database_value(),
-            DIGEST_V6_DATABASE_VALUE
+            DIGEST_V7_DATABASE_VALUE
         );
         assert_eq!(
             GenerationDigestVersion::from_database_value(DIGEST_V1_DATABASE_VALUE),
@@ -665,6 +670,10 @@ mod tests {
         assert_eq!(
             GenerationDigestVersion::from_database_value(DIGEST_V6_DATABASE_VALUE),
             Ok(GenerationDigestVersion::V6)
+        );
+        assert_eq!(
+            GenerationDigestVersion::from_database_value(DIGEST_V7_DATABASE_VALUE),
+            Ok(GenerationDigestVersion::V7)
         );
         assert!(
             GenerationDigestVersion::from_database_value(UNKNOWN_DIGEST_DATABASE_VALUE).is_err()

@@ -18,6 +18,7 @@ source must remain explicit until the complete native contract is implemented.
 | Literal route, command, resource, or component declaration | Framework fact extraction after explicit detection |
 | Reference in one language to a declaration in another | Cross-language bridge over typed facts |
 | Convention relating two already extracted nodes | Deterministic generation build step |
+| Static numerical operation, precision, or hazard evidence | Numerical site extractor with an explicit analyzer contract |
 
 A framework resolver should not become a second parser. A cross-language bridge
 should not fabricate declarations. A derived edge should not be added after
@@ -75,6 +76,12 @@ Produce typed facts with:
 
 Do not resolve during syntax walking. Retain enough unambiguous typed evidence
 for the resolver; leave dynamic or ambiguous references unresolved.
+
+Numerical evidence additionally requires a stable site ID, exact owner/file
+span, bounded machine-token categories, a privacy-safe expression digest,
+confidence independent from evidence level, explicit unknowns, and an analyzer
+contract included in freshness. Never persist the source expression or literal,
+and never label static syntax as observed or formally proven behavior.
 
 ### 5. Resolution
 

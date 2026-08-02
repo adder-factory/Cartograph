@@ -814,6 +814,187 @@ export function empty() {}
 }
 
 #[test]
+fn symbol_health_distinguishes_security_presentation_from_secret_handling() {
+    let file = extract(
+        "src/security-help.tsx",
+        r#"
+export function SecurityHelp() {
+  return (
+    <section className="panel">
+      Sign in with a security key instead of a password.
+    </section>
+  );
+}
+"#,
+    );
+
+    let help = symbol(&file, "SecurityHelp");
+    assert_eq!(help.health.secrets_score, 0);
+    assert_eq!(help.health.secrets_signal_mask, 0);
+}
+
+#[test]
+fn symbol_health_requires_sql_and_dynamic_text_in_the_same_expression() {
+    let file = extract(
+        "src/query-or-ui.tsx",
+        r#"
+export function StatusPicker({ value }: { value: string }) {
+  return (
+    <Select className={`picker picker-${value}`}>
+      <option value="open">Open</option>
+    </Select>
+  );
+}
+
+export function SettingsCopy({ value }: { value: string }) {
+  return <p className={`setting-${value}`}>Update settings</p>;
+}
+
+export function selectRecord(id: string) {
+  return `SELECT * FROM records WHERE id = ${id}`;
+}
+
+export function deleteRecord(id: string) {
+  return "DELETE FROM records WHERE id = " + id;
+}
+"#,
+    );
+
+    for name in ["StatusPicker", "SettingsCopy"] {
+        assert_eq!(
+            symbol(&file, name).health.sql_string_concatenation,
+            0,
+            "presentation-only TSX triggered SQL detection for {name}"
+        );
+    }
+    for name in ["selectRecord", "deleteRecord"] {
+        assert_eq!(
+            symbol(&file, name).health.sql_string_concatenation,
+            1,
+            "dynamic SQL was not detected for {name}"
+        );
+    }
+}
+
+#[test]
+fn symbol_health_does_not_label_structured_operational_telemetry_as_agent_debugging() {
+    let file = extract(
+        "src/consumer.ts",
+        r#"
+export async function consume(message: Message) {
+  try {
+    await processMessage(message.body);
+    message.ack();
+  } catch (error) {
+    console.error("queue_message_failed", { messageId: message.id, error });
+    console.warn("queue_message_retrying", { messageId: message.id });
+    console.info("queue_message_observed", { messageId: message.id });
+    message.retry();
+  }
+}
+
+export function temporaryProbe(value: unknown) {
+  console.log(value);
+  console.debug(value);
+  debugger;
+}
+"#,
+    );
+
+    assert_eq!(symbol(&file, "consume").health.debug_logs, 0);
+    assert_eq!(symbol(&file, "temporaryProbe").health.debug_logs, 3);
+}
+
+#[test]
+fn symbol_health_uses_catch_statements_instead_of_erasing_literal_braces() {
+    let file = extract(
+        "src/fallbacks.ts",
+        r"
+export function emptyCatch() {
+  try { work(); } catch {}
+}
+
+export function bareReturn() {
+  try { work(); } catch { return; }
+}
+
+export function objectFallback() {
+  try { return work(); } catch { return {}; }
+}
+
+export function arrayFallback() {
+  try { return work(); } catch { return []; }
+}
+
+export function recovery() {
+  try { return work(); } catch { return recover(); }
+}
+",
+    );
+
+    assert_eq!(symbol(&file, "emptyCatch").health.empty_catches, 1);
+    assert_eq!(symbol(&file, "bareReturn").health.empty_catches, 1);
+    for name in ["objectFallback", "arrayFallback", "recovery"] {
+        assert_eq!(
+            symbol(&file, name).health.empty_catches,
+            0,
+            "observable fallback was treated as an empty catch for {name}"
+        );
+    }
+}
+
+#[test]
+fn symbol_health_excludes_url_validation_inputs_and_xml_namespace_identifiers() {
+    let file = extract(
+        "src/url-boundaries.ts",
+        r#"
+export function worksheetXml(rows: string[]) {
+  const body = rows.map((row) => `<row>${row}</row>`).join("");
+  return `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${body}</worksheet>`;
+}
+
+export function urlBoundaryCheck() {
+  return {
+    acceptsHttps: PublicHttps.safeParse("https://hooks.example.com/events").success,
+    rejectsHttp: !PublicHttps.safeParse("http://hooks.example.com/events").success,
+    rejectsLoopback: !PublicHttps.safeParse("https://127.0.0.1/events").success,
+  };
+}
+
+export function productionEndpoint() {
+  return fetch("https://api.example.com/v1");
+}
+"#,
+    );
+
+    assert_eq!(symbol(&file, "worksheetXml").health.hardcoded_urls, 0);
+    assert_eq!(symbol(&file, "urlBoundaryCheck").health.hardcoded_urls, 0);
+    assert_eq!(symbol(&file, "productionEndpoint").health.hardcoded_urls, 1);
+}
+
+#[test]
+fn python_function_local_bindings_are_not_exported_symbols() {
+    let file = extract(
+        "src/rows.py",
+        r#"
+def build_rows(values):
+    escaped = [str(value).replace("|", "\\|") for value in values]
+    sequence_id = len(escaped)
+    return sequence_id, escaped
+"#,
+    );
+
+    for local in ["escaped", "sequence_id"] {
+        assert!(
+            file.symbols
+                .iter()
+                .all(|candidate| candidate.name != local || !candidate.export.exported),
+            "function-local Python binding was exported: {local}"
+        );
+    }
+}
+
+#[test]
 fn sequential_await_loop_health_is_limited_to_javascript_for_of_bodies() {
     let javascript = extract(
         "src/loops.ts",
@@ -1068,6 +1249,56 @@ export function second(value: number) {
     let second = symbol(&file, "second");
     assert_ne!(first.structural_digest, second.structural_digest);
     assert_eq!(first.clone_shape_digest, second.clone_shape_digest);
+}
+
+#[test]
+fn rust_numerical_sites_preserve_exact_static_hazards_and_unknowns() {
+    let file = extract(
+        "src/numerics.rs",
+        r"
+fn score(a: u16, b: u16, values: &[f32], halves: &[f16]) -> f32 {
+    let widened = (a * b) as f32;
+    let close = (widened - 1.0).abs() < 1e-6;
+    let sum = values.iter().copied().sum::<f32>();
+    let low = halves.iter().copied().sum::<f16>();
+    let root = widened.sqrt();
+    let selected = root.max(sum);
+    let mut accumulated = low;
+    accumulated += root as f16;
+    if close { selected } else { accumulated as f32 }
+}
+",
+    );
+    let hazards = file
+        .numerical_sites
+        .iter()
+        .map(|site| site.hazard.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "arithmetic_before_widening",
+        "absolute_only_tolerance",
+        "low_precision_reduction",
+        "domain_precondition_unknown",
+        "nan_ordering_unknown",
+        "narrowing_before_accumulation",
+    ] {
+        assert!(
+            hazards.contains(&expected),
+            "missing numerical hazard {expected}"
+        );
+    }
+    assert!(file.numerical_sites.iter().all(|site| {
+        site.owner.as_ref() == Some(&symbol(&file, "score").id)
+            && site.confidence_ppm <= 1_000_000
+            && site.provenance == "rust_ast_v1"
+            && !site.unknowns.is_empty()
+    }));
+    let identities = file
+        .numerical_sites
+        .iter()
+        .map(|site| site.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(identities.len(), file.numerical_sites.len());
 }
 
 fn extract(path: &str, source: &str) -> ExtractedFile {
