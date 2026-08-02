@@ -41,6 +41,32 @@ pub enum PipelineStage {
     Publish,
 }
 
+impl PipelineStage {
+    /// Stable credential-safe stage name used by CLI and MCP diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discover => "discover",
+            Self::Read => "read",
+            Self::Parse => "parse",
+            Self::Resolve => "resolve",
+            Self::Overlay => "overlay",
+            Self::Reduce => "reduce",
+            Self::Copy => "copy",
+            Self::RelationalMerge => "relational_merge",
+            Self::Bm25 => "bm25",
+            Self::Vector => "vector",
+            Self::Publish => "publish",
+        }
+    }
+}
+
+impl std::fmt::Display for PipelineStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Exact monotonic wall time spent in one supervisor stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -556,6 +582,28 @@ pub(crate) async fn hold_progress_write_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipeline_stage_names_are_stable_and_display_safe() {
+        let expected = [
+            (PipelineStage::Discover, "discover"),
+            (PipelineStage::Read, "read"),
+            (PipelineStage::Parse, "parse"),
+            (PipelineStage::Resolve, "resolve"),
+            (PipelineStage::Overlay, "overlay"),
+            (PipelineStage::Reduce, "reduce"),
+            (PipelineStage::Copy, "copy"),
+            (PipelineStage::RelationalMerge, "relational_merge"),
+            (PipelineStage::Bm25, "bm25"),
+            (PipelineStage::Vector, "vector"),
+            (PipelineStage::Publish, "publish"),
+        ];
+
+        for (stage, name) in expected {
+            assert_eq!(stage.as_str(), name);
+            assert_eq!(stage.to_string(), name);
+        }
+    }
 
     #[tokio::test]
     async fn progress_is_one_shot_ordered_and_monotonic() {

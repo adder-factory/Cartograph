@@ -32,10 +32,20 @@ WITH RECURSIVE current AS (
                           'tests', 'type_of', 'returns', 'instantiates', 'overrides',
                           'decorates', 'field_access', 'def_use', 'exports'
                       )
-                ), reached_symbols AS MATERIALIZED (
+                ), reached_symbol_candidates AS MATERIALIZED (
                     SELECT walk.symbol_id, MIN(walk.depth)::integer AS distance
                     FROM walk
                     GROUP BY walk.symbol_id
+                    ORDER BY MIN(walk.depth), walk.symbol_id
+                    LIMIT ($6 + 1)
+                ), traversal_status AS MATERIALIZED (
+                    SELECT COUNT(*) > $6 AS nodes_truncated
+                    FROM reached_symbol_candidates
+                ), reached_symbols AS MATERIALIZED (
+                    SELECT symbol_id, distance
+                    FROM reached_symbol_candidates
+                    ORDER BY distance, symbol_id
+                    LIMIT $6
                 ), reached_files AS MATERIALIZED (
                     SELECT files.file_id,
                            files.normalized_path,
@@ -85,8 +95,10 @@ WITH RECURSIVE current AS (
                                  AND normalized_path ~ '(^|/)index\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$'
                                ORDER BY normalized_path
                                LIMIT {MAX_REPORTED_BARRELS}
-                           ) AS reached_barrels
+                           ) AS reached_barrels,
+                           traversal_status.nodes_truncated
                     FROM current
+                    CROSS JOIN traversal_status
                 ), selected_tests AS (
                     SELECT normalized_path, distance
                     FROM reached_files
@@ -100,6 +112,7 @@ WITH RECURSIVE current AS (
                        summary.affected_test_file_count,
                        summary.reached_barrel_count,
                        summary.reached_barrels,
+                       summary.nodes_truncated,
                        selected_tests.normalized_path,
                        selected_tests.distance
                 FROM summary

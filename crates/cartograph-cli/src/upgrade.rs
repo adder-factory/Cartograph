@@ -40,7 +40,17 @@ pub(super) struct UpgradeReport {
     applied: bool,
     message: String,
     next_steps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_repair: Option<RegistrationRepair>,
     registrations: Vec<InstallTargetDetection>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistrationRepair {
+    attempted: u16,
+    repaired: u16,
+    failed: u16,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -54,6 +64,7 @@ struct UpdatedReportInput<'project> {
     latest_version: String,
     installed: InstalledBinary,
     project_path: &'project Path,
+    registration_repair: RegistrationRepair,
 }
 
 struct UnknownReportInput<'reason> {
@@ -173,6 +184,7 @@ pub(super) async fn run_upgrade(apply: bool, project_path: &Path) -> UpgradeRepo
             applied: false,
             message: format!("Cartograph {current_text} is current."),
             next_steps: registration_next_steps(&registrations),
+            registration_repair: None,
             registrations,
         };
     }
@@ -189,16 +201,22 @@ pub(super) async fn run_upgrade(apply: bool, project_path: &Path) -> UpgradeRepo
                     .to_owned(),
                 "Restart MCP clients after updating so they stop using the old process.".to_owned(),
             ],
+            registration_repair: None,
             registrations,
         };
     }
     match apply_release(&latest_text).await {
-        Ok(installed) => report_updated(UpdatedReportInput {
-            current_version: current_text,
-            latest_version: latest_text,
-            installed,
-            project_path,
-        }),
+        Ok(installed) => {
+            let registration_repair =
+                repair_stale_registrations(&installed.path, project_path).await;
+            report_updated(UpdatedReportInput {
+                current_version: current_text,
+                latest_version: latest_text,
+                installed,
+                project_path,
+                registration_repair,
+            })
+        }
         Err(message) => UpgradeReport {
             status: "blocked",
             current_version: current_text,
@@ -211,6 +229,7 @@ pub(super) async fn run_upgrade(apply: bool, project_path: &Path) -> UpgradeRepo
                     .to_owned(),
                 "Verify the checksum before replacing the current executable.".to_owned(),
             ],
+            registration_repair: None,
             registrations,
         },
     }
@@ -222,6 +241,7 @@ fn report_updated(input: UpdatedReportInput<'_>) -> UpgradeReport {
         latest_version,
         installed,
         project_path,
+        registration_repair,
     } = input;
     let InstalledBinary {
         path,
@@ -234,8 +254,18 @@ fn report_updated(input: UpdatedReportInput<'_>) -> UpgradeReport {
             "The release is installed, but a legacy PATH launcher could not be repointed ({warning}). Re-run `cartograph install` to repair project launchers."
         ));
     }
+    if registration_repair.failed > 0 {
+        next_steps.push(
+            "One or more stale MCP registrations could not be repinned automatically; run only the remaining reported repin commands."
+                .to_owned(),
+        );
+    } else if registration_repair.repaired > 0 {
+        next_steps.push(format!(
+            "Automatically repinned {} stale MCP registration(s) to the stable current launcher.",
+            registration_repair.repaired
+        ));
+    }
     next_steps.extend([
-        "Run the reported repin command for every stale MCP registration.".to_owned(),
         "Run `cartograph doctor <path>`; if the owned managed image is incompatible, create a fresh backup and use the confirmed `cartograph db upgrade` workflow before restarting hosts.".to_owned(),
         "Restart MCP clients so every connection uses the new binary.".to_owned(),
         "Run `cartograph --version` from a new process to verify the update.".to_owned(),
@@ -253,6 +283,7 @@ fn report_updated(input: UpdatedReportInput<'_>) -> UpgradeReport {
         applied: true,
         message,
         next_steps,
+        registration_repair: Some(registration_repair),
         registrations,
     }
 }
@@ -272,8 +303,56 @@ fn report_unknown(input: UnknownReportInput<'_>) -> UpgradeReport {
         applied: false,
         message: format!("Could not resolve the latest Cartograph release: {reason}."),
         next_steps: vec![format!("Check {RELEASES_URL} manually.")],
+        registration_repair: None,
         registrations,
     }
+}
+
+async fn repair_stale_registrations(executable: &Path, project_path: &Path) -> RegistrationRepair {
+    let stale = registration_audit(project_path, Some(executable))
+        .into_iter()
+        .filter(|registration| registration.command_state == "stale_absolute")
+        .collect::<Vec<_>>();
+    let mut report = RegistrationRepair {
+        attempted: u16::try_from(stale.len()).unwrap_or(u16::MAX),
+        ..RegistrationRepair::default()
+    };
+    for registration in stale {
+        let result = tokio::time::timeout(
+            Duration::from_mins(1),
+            Command::new(executable)
+                .args(registration_repair_args(&registration))
+                .arg(project_path)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        if matches!(result, Ok(Ok(output)) if output.status.success()) {
+            report.repaired = report.repaired.saturating_add(1);
+        } else {
+            report.failed = report.failed.saturating_add(1);
+        }
+    }
+    report
+}
+
+fn registration_repair_args(registration: &InstallTargetDetection) -> Vec<String> {
+    let mut arguments = vec![
+        "install".to_owned(),
+        "--yes".to_owned(),
+        "--no-permissions".to_owned(),
+        "--no-hooks".to_owned(),
+        "--target".to_owned(),
+        registration.target.to_owned(),
+        "--location".to_owned(),
+        registration.location.to_owned(),
+    ];
+    if let Some(port) = registration.managed_database_port {
+        arguments.push("--managed-database-port".to_owned());
+        arguments.push(port.to_string());
+    }
+    arguments.push("--project-path".to_owned());
+    arguments
 }
 
 fn registration_audit(
@@ -889,6 +968,7 @@ mod tests {
                 launcher_warning: Some("fixture launcher migration failed".to_owned()),
             },
             project_path: Path::new("/fixture/project"),
+            registration_repair: RegistrationRepair::default(),
         });
         assert!(succeeded(&report));
         assert!(report.applied);
@@ -921,6 +1001,7 @@ mod tests {
             cartograph_configured: true,
             config_path: ".codex/config.toml",
             command_state: "stale_absolute",
+            managed_database_port: None,
             repin_command: Some(
                 "cartograph install --yes --target codex --location local --project-path <path>"
                     .to_owned(),
@@ -934,6 +1015,7 @@ mod tests {
             applied: false,
             message: "Cartograph 2.1.0 is current.".to_owned(),
             next_steps: registration_next_steps(std::slice::from_ref(&registration)),
+            registration_repair: None,
             registrations: vec![registration],
         };
         let rendered = render(&report);
@@ -942,6 +1024,37 @@ mod tests {
         assert!(rendered.contains("Repin: cartograph install"));
         assert!(rendered.contains("restart that MCP host"));
         assert!(registration_next_steps(&[])[0].contains("No configured MCP registrations"));
+    }
+
+    #[test]
+    fn automatic_registration_repair_preserves_the_existing_argument_payload() {
+        let registration = InstallTargetDetection {
+            target: "codex",
+            location: "local",
+            config_present: true,
+            config_valid: true,
+            cartograph_configured: true,
+            config_path: ".codex/config.toml",
+            command_state: "stale_absolute",
+            managed_database_port: Some(55_435),
+            repin_command: None,
+        };
+        assert_eq!(
+            registration_repair_args(&registration),
+            vec![
+                "install".to_owned(),
+                "--yes".to_owned(),
+                "--no-permissions".to_owned(),
+                "--no-hooks".to_owned(),
+                "--target".to_owned(),
+                "codex".to_owned(),
+                "--location".to_owned(),
+                "local".to_owned(),
+                "--managed-database-port".to_owned(),
+                "55435".to_owned(),
+                "--project-path".to_owned(),
+            ]
+        );
     }
 
     #[test]

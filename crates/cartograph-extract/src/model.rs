@@ -150,13 +150,22 @@ pub struct CloneTokenCount(pub u64, pub u32);
 pub struct CloneTokenProfile {
     counts: Vec<CloneTokenCount>,
     total_tokens: u32,
+    identifier_counts: Vec<CloneTokenCount>,
+    identifier_tokens: u32,
 }
 
 impl CloneTokenProfile {
-    pub(crate) fn new(counts: Vec<CloneTokenCount>, total_tokens: u32) -> Self {
+    pub(crate) fn new(
+        counts: Vec<CloneTokenCount>,
+        total_tokens: u32,
+        identifier_counts: Vec<CloneTokenCount>,
+        identifier_tokens: u32,
+    ) -> Self {
         Self {
             counts,
             total_tokens,
+            identifier_counts,
+            identifier_tokens,
         }
     }
 
@@ -172,10 +181,25 @@ impl CloneTokenProfile {
         self.total_tokens
     }
 
+    /// Sorted privacy-safe identifier fingerprints and occurrence counts.
+    #[must_use]
+    pub fn identifier_counts(&self) -> &[CloneTokenCount] {
+        &self.identifier_counts
+    }
+
+    /// Identifier leaves retained for semantic clone compatibility.
+    #[must_use]
+    pub const fn identifier_tokens(&self) -> u32 {
+        self.identifier_tokens
+    }
+
     /// Retained heap bytes charged to the native extraction budget.
     #[must_use]
     pub const fn retained_bytes(&self) -> usize {
-        self.counts.capacity() * std::mem::size_of::<CloneTokenCount>()
+        self.counts
+            .capacity()
+            .saturating_add(self.identifier_counts.capacity())
+            .saturating_mul(std::mem::size_of::<CloneTokenCount>())
     }
 }
 
@@ -198,6 +222,12 @@ pub struct SymbolHealthMetrics {
     pub magic_numbers: u16,
     /// Hardcoded URL literals found in executable code.
     pub hardcoded_urls: u16,
+    /// Actionable hardcoded URL literals passed to request/client operations.
+    pub hardcoded_url_requests: u16,
+    /// Actionable hardcoded URL literals assigned to endpoint-like configuration.
+    pub hardcoded_url_configuration: u16,
+    /// Presentation, navigation, and vendor-asset URL literals intentionally abstained.
+    pub hardcoded_url_presentation_abstentions: u16,
     /// Credential/PII handling confidence on a bounded integer 0-100 scale.
     pub secrets_score: u16,
     /// Bit-set of the privacy-safe secret-signal categories contributing to the score.
@@ -212,6 +242,16 @@ pub struct SymbolHealthMetrics {
     pub sync_io_in_async: u16,
     /// Loops that await each iteration sequentially.
     pub sequential_await_loops: u16,
+    /// Awaited loops abstained because an awaited result feeds the next iteration.
+    pub serial_await_dependency_loops: u16,
+    /// Awaited loops abstained because post-await break or return preserves ordering.
+    pub serial_await_control_flow_loops: u16,
+    /// Awaited loops abstained through an explicit `cartograph: serial-await` marker.
+    pub serial_await_intent_loops: u16,
+    /// Nested delegate methods assembled into a returned facade object.
+    pub facade_factory_delegates: u16,
+    /// True when a function is a cohesive returned-object facade factory.
+    pub facade_factory: bool,
     /// TypeScript casts that explicitly erase a value to `any`.
     pub ts_any_casts: u16,
     /// TypeScript diagnostic-suppression directives.

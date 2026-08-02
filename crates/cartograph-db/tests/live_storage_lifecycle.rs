@@ -11,7 +11,7 @@ use cartograph_db::{
     NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheRetentionPolicy,
     NativeParseCacheRetentionPolicyInput, NativeParseCacheRetentionRequest, NewGeneration,
     NewProject, PostRetentionMaintenance, StorageCompactionPolicy, StorageCompactionPolicyInput,
-    validate_generation_facts,
+    latest_schema_version, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, GenerationId, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage,
@@ -45,7 +45,7 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         .migrate()
         .await
         .unwrap_or_else(|error| panic!("storage migration failed: {error}"));
-    assert_eq!(migration.current_version, 26);
+    assert_eq!(migration.current_version, latest_schema_version());
     assert_virtual_payload_accounting_and_autovacuum(&pool, &schema).await;
 
     let project = database

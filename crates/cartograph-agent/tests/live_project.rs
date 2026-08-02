@@ -4,6 +4,7 @@ mod dependency_ownership;
 
 use std::{
     env,
+    fmt::Write as _,
     io::{Read, Write},
     net::TcpListener,
     path::Path,
@@ -105,7 +106,7 @@ async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention()
             let (runtime, indexed) = task
                 .await
                 .unwrap_or_else(|error| panic!("contending runtime task failed: {error}"));
-            assert_eq!(indexed, Err(ProjectError::IndexFailed));
+            assert_eq!(indexed, Err(ProjectError::IndexLeaseFailed));
             contenders.push(runtime);
         }
         let counts_sql = format!(
@@ -1613,6 +1614,125 @@ export function partialBeta(input: number, limit: number): number {
         .unwrap_or_else(|error| panic!("deliberate clone source write failed: {error}"));
     std::fs::write(root.join("generated/copy.ts"), deliberate_copy)
         .unwrap_or_else(|error| panic!("allowlisted clone source write failed: {error}"));
+
+    std::fs::write(
+        root.join("presentation.tsx"),
+        r#"export function SetupHelp() {
+  return <>
+    <input placeholder="https://portal.example.test" />
+    <a href="https://docs.example.test/setup">Setup guide</a>
+    <script src="https://static.example.test/widget.js" async />
+  </>;
+}
+"#,
+    )
+    .unwrap_or_else(|error| panic!("presentation URL fixture write failed: {error}"));
+    std::fs::write(
+        root.join("serial-loops.ts"),
+        r#"export async function parallelCandidate(items: Item[]) {
+  for (const item of items) {
+    await consume(item);
+  }
+}
+
+export async function replay(events: Event[]) {
+  let revision = await currentRevision();
+  for (const event of events) {
+    revision = await applyEvent(event, revision);
+  }
+  return revision;
+}
+
+export async function drain(records: Record[]) {
+  for (const record of records) {
+    const outcome = await deliver(record);
+    if (outcome === "stop") break;
+    await acknowledge(record);
+  }
+}
+"#,
+    )
+    .unwrap_or_else(|error| panic!("serial loop fixture write failed: {error}"));
+    write_facade_fixture(root);
+    write_cross_domain_clone_fixtures(root);
+}
+
+fn write_facade_fixture(root: &Path) {
+    let mut facade = String::from("export function recordsRepository(db: unknown) {\n");
+    for index in 0..30 {
+        writeln!(
+            facade,
+            "  const operation{index} = (input: unknown) => focused{index}(db, input);"
+        )
+        .unwrap_or_else(|error| panic!("facade delegate formatting failed: {error}"));
+    }
+    facade.push_str("  return {\n");
+    for index in 0..30 {
+        writeln!(facade, "    operation{index},")
+            .unwrap_or_else(|error| panic!("facade return formatting failed: {error}"));
+    }
+    facade.push_str("  };\n}\n\nexport function mixedOrchestrator(input: unknown) {\n");
+    for index in 0..30 {
+        writeln!(facade, "  focused{index}(input);")
+            .unwrap_or_else(|error| panic!("orchestrator formatting failed: {error}"));
+    }
+    facade.push_str("}\n");
+    for index in 0..30 {
+        writeln!(
+            facade,
+            "function focused{index}(..._values: unknown[]) {{ return {index}; }}"
+        )
+        .unwrap_or_else(|error| panic!("focused operation formatting failed: {error}"));
+    }
+    std::fs::write(root.join("facade.ts"), facade)
+        .unwrap_or_else(|error| panic!("facade fixture write failed: {error}"));
+}
+
+fn write_cross_domain_clone_fixtures(root: &Path) {
+    for (path, source) in [
+        (
+            "sessions/revoke.ts",
+            r"export async function revokeSession(id: string) {
+  const result = await sessions.revoke(id);
+  const mapped = mapSessionResult(result);
+  if (mapped.ok) {
+    recordSessionAudit(mapped);
+  }
+
+
+
+
+  return mapped;
+}
+",
+        ),
+        (
+            "billing/cancel.ts",
+            r"export async function cancelInvoice(number: InvoiceId) {
+  const outcome = await invoices.cancel(number);
+  const response = mapInvoiceResult(outcome);
+  if (response.accepted) {
+    recordBillingLedger(response);
+  }
+
+
+
+
+  return response;
+}
+",
+        ),
+    ] {
+        let target = root.join(path);
+        std::fs::create_dir_all(
+            target
+                .parent()
+                .unwrap_or_else(|| panic!("cross-domain clone fixture had no parent")),
+        )
+        .unwrap_or_else(|error| panic!("cross-domain clone parent failed: {error}"));
+        std::fs::write(target, source)
+            .unwrap_or_else(|error| panic!("cross-domain clone fixture write failed: {error}"));
+    }
 }
 
 async fn insert_misleading_health_document(
@@ -1849,29 +1969,94 @@ fn assert_structural_finding_inventory(value: &serde_json::Value) {
             "missing {expected} finding in {findings:?}"
         );
     }
+    assert_contextual_detector_findings(findings);
     assert!(findings.iter().any(|finding| {
         finding["qualifiedName"] == "RETRY_COUNT" && finding["finding"] == "stale_doc"
     }));
-    for clone in ["firstClone", "secondClone"] {
-        assert!(findings.iter().any(|finding| {
-            finding["qualifiedName"] == clone
-                && finding["finding"] == "duplicate_code"
-                && finding["metricName"] == "normalized_shape_copies"
-        }));
-    }
-    for clone in ["partialAlpha", "partialBeta"] {
-        assert!(findings.iter().any(|finding| {
-            finding["qualifiedName"] == clone
-                && finding["finding"] == "duplicate_code"
-                && finding["metricName"] == "partial_clone_peers"
-        }));
-    }
-    let partial = findings
+    assert_clone_class_findings(findings);
+}
+
+fn assert_contextual_detector_findings(findings: &[serde_json::Value]) {
+    let endpoint = findings
         .iter()
         .find(|finding| {
-            finding["qualifiedName"] == "partialAlpha" && finding["finding"] == "duplicate_code"
+            finding["qualifiedName"] == "authenticate" && finding["finding"] == "hardcoded_url"
         })
-        .unwrap_or_else(|| panic!("partial clone detail was missing"));
+        .unwrap_or_else(|| panic!("hardcoded endpoint detail was missing"));
+    assert_eq!(endpoint["detail"]["category"], "service_configuration");
+    assert_eq!(endpoint["detail"]["serviceConfiguration"], 1);
+    assert!(!findings.iter().any(|finding| {
+        finding["qualifiedName"] == "SetupHelp" && finding["finding"] == "hardcoded_url"
+    }));
+
+    let parallel = findings
+        .iter()
+        .find(|finding| {
+            finding["qualifiedName"] == "parallelCandidate" && finding["finding"] == "forof_await"
+        })
+        .unwrap_or_else(|| panic!("parallelizable for-of finding was missing"));
+    assert_eq!(parallel["detail"]["awaitedCall"], "owned_await_expression");
+    for serial in ["replay", "drain"] {
+        assert!(!findings.iter().any(|finding| {
+            finding["qualifiedName"] == serial && finding["finding"] == "forof_await"
+        }));
+    }
+
+    assert!(!findings.iter().any(|finding| {
+        finding["qualifiedName"] == "recordsRepository" && finding["finding"] == "high_fan_out"
+    }));
+    let mixed = findings
+        .iter()
+        .find(|finding| {
+            finding["qualifiedName"] == "mixedOrchestrator" && finding["finding"] == "high_fan_out"
+        })
+        .unwrap_or_else(|| panic!("mixed orchestration fan-out finding was missing"));
+    assert_eq!(mixed["detail"]["role"], "mixed_orchestration");
+    assert!(
+        mixed["detail"]["dependencyGroups"]["calls"]
+            .as_u64()
+            .is_some_and(|calls| calls >= 25)
+    );
+}
+
+fn assert_clone_class_findings(findings: &[serde_json::Value]) {
+    let near_classes = findings
+        .iter()
+        .filter(|finding| {
+            matches!(
+                finding["qualifiedName"].as_str(),
+                Some("firstClone" | "secondClone")
+            ) && finding["finding"] == "duplicate_code"
+                && finding["metricName"] == "normalized_shape_copies"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        near_classes.len(),
+        1,
+        "near-clone class was not represented exactly once: {findings:?}"
+    );
+    assert_eq!(near_classes[0]["detail"]["recordScope"], "clone_class");
+    assert_eq!(
+        near_classes[0]["detail"]["symmetricMemberRowsSuppressed"],
+        true
+    );
+
+    let partial_classes = findings
+        .iter()
+        .filter(|finding| {
+            matches!(
+                finding["qualifiedName"].as_str(),
+                Some("partialAlpha" | "partialBeta")
+            ) && finding["finding"] == "duplicate_code"
+                && finding["metricName"] == "partial_clone_peers"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partial_classes.len(),
+        1,
+        "partial-clone class was not represented exactly once: {findings:?}"
+    );
+    let partial = partial_classes[0];
     assert_eq!(partial["detail"]["cloneType"], "partial");
     assert_eq!(partial["detail"]["classSize"], 2);
     assert_eq!(
@@ -1886,6 +2071,11 @@ fn assert_structural_finding_inventory(value: &serde_json::Value) {
     assert!(!findings.iter().any(|finding| {
         finding["qualifiedName"] == "deliberateCopy" && finding["finding"] == "duplicate_code"
     }));
+    for unrelated in ["revokeSession", "cancelInvoice"] {
+        assert!(!findings.iter().any(|finding| {
+            finding["qualifiedName"] == unrelated && finding["finding"] == "duplicate_code"
+        }));
+    }
 }
 
 async fn assert_structural_finding_queries(runtime: &ProjectRuntime, indexed: &IndexReport) {
@@ -2706,6 +2896,31 @@ async fn rename_plan_combines_exact_references_and_attributed_textual_mentions()
     drop_schema(&settings, &schema).await;
 }
 
+async fn assert_file_test_impact_node_budget(
+    runtime: &ProjectRuntime,
+    indexed: &IndexReport,
+    leaf: &NormalizedPath,
+) {
+    let capped = runtime
+        .database()
+        .current_file_test_impact(FileTestImpactQuery {
+            project_id: &indexed.project_id,
+            paths: std::slice::from_ref(leaf),
+            max_depth: 5,
+            max_nodes: 1,
+            limit: 40,
+            test_path_regex: None,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("capped test-impact query failed: {error}"))
+        .unwrap_or_else(|| panic!("capped test-impact generation was missing"));
+    assert!(capped.nodes_truncated());
+    let capped_json = serde_json::to_value(capped)
+        .unwrap_or_else(|error| panic!("capped test-impact serialization failed: {error}"));
+    assert_eq!(capped_json["nodesTruncated"], true);
+    assert_eq!(capped_json["testsTruncated"], true);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
 async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() {
@@ -2746,6 +2961,7 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
                 project_id: &indexed.project_id,
                 paths: &[leaf.clone(), missing],
                 max_depth: 5,
+                max_nodes: 40,
                 limit: 40,
                 test_path_regex: None,
             })
@@ -2756,11 +2972,13 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
         assert_eq!(impact.matched_inputs(), ["src/leaf.ts"]);
         assert!(impact.dependent_file_count() >= 2);
         assert_eq!(impact.affected_test_file_count(), 1);
+        assert!(!impact.nodes_truncated());
         assert_eq!(impact.tests().len(), 1);
         assert_eq!(impact.tests()[0].path(), "src/leaf.test.ts");
         assert!(impact.tests()[0].distance() >= 1);
         assert_eq!(impact.reached_barrel_count(), 1);
         assert_eq!(impact.reached_barrels(), ["src/index.ts"]);
+        assert_file_test_impact_node_budget(&runtime, &indexed, &leaf).await;
         let names = runtime
             .test_evidence(
                 indexed.project_id.clone(),
@@ -2793,6 +3011,7 @@ async fn changed_file_test_impact_traverses_named_imports_and_reports_barrels() 
                 project_id: &indexed.project_id,
                 paths: &[leaf],
                 max_depth: 5,
+                max_nodes: 40,
                 limit: 40,
                 test_path_regex: Some(".*\\.spec\\.ts"),
             })

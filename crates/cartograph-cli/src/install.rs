@@ -354,7 +354,9 @@ impl InstallRequest {
         if !executable_path.is_file() {
             return Err(InstallError::Executable);
         }
-        let executable = path_text(&executable_path)?.to_owned();
+        let registration_executable =
+            stable_registration_executable(&executable_path).unwrap_or(executable_path);
+        let executable = path_text(&registration_executable)?.to_owned();
         let home = host_home()?;
         let command_override = command_override
             .map(validate_command)
@@ -598,6 +600,35 @@ impl InstallRequest {
             allowed_root,
         })
     }
+}
+
+fn stable_registration_executable(executable: &Path) -> Option<PathBuf> {
+    let file_name = executable.file_name()?;
+    let bin = executable.parent()?;
+    let release = bin.parent()?;
+    let versions = release.parent()?;
+    let install_root = versions.parent()?;
+    if bin.file_name()? != "bin"
+        || versions.file_name()? != "versions"
+        || !release
+            .file_name()?
+            .to_str()?
+            .strip_prefix('v')?
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
+    {
+        return None;
+    }
+    let current = install_root.join("current");
+    if !fs::symlink_metadata(&current)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return None;
+    }
+    let candidate = current.join("bin").join(file_name);
+    (candidate.canonicalize().ok().as_deref() == Some(executable)).then_some(candidate)
 }
 
 #[cfg(test)]
@@ -2076,6 +2107,40 @@ pub(crate) enum InstallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn versioned_installations_register_the_stable_current_launcher() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("versioned launcher fixture failed: {error}"));
+        let install_root = fixture.path().join(".cartograph-cli");
+        let executable = install_root.join("versions/v2.1.4/bin/cartograph");
+        fs::create_dir_all(
+            executable
+                .parent()
+                .unwrap_or_else(|| panic!("versioned executable had no parent")),
+        )
+        .unwrap_or_else(|error| panic!("versioned executable parent failed: {error}"));
+        fs::write(&executable, b"fixture")
+            .unwrap_or_else(|error| panic!("versioned executable write failed: {error}"));
+        symlink("versions/v2.1.4", install_root.join("current"))
+            .unwrap_or_else(|error| panic!("current launcher link failed: {error}"));
+        let canonical = executable.canonicalize().unwrap_or_else(|error| {
+            panic!("versioned executable canonicalization failed: {error}")
+        });
+
+        assert_eq!(
+            stable_registration_executable(&canonical),
+            Some(
+                install_root
+                    .canonicalize()
+                    .unwrap_or_else(|error| panic!("install root canonicalization failed: {error}"))
+                    .join("current/bin/cartograph"),
+            )
+        );
+    }
 
     fn fake_executable(root: &Path) -> PathBuf {
         let path = root.join("cartograph-test-bin");

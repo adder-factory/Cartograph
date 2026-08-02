@@ -48,11 +48,27 @@ Restart the host. An open session is not assumed to hot-register a replaced MCP
 server. CLI success proves the native/database control path, not the old MCP
 transport.
 
-`cartograph upgrade --project-path /absolute/path/to/project --json` audits
-local and global Codex/Claude/Cursor registrations and emits a `repinCommand`
-for each stale absolute binary. If MCP startup reports managed-image or HNSW
-shared-memory incompatibility, run `doctor`, create the named fresh backup, and
-use the exact confirmed `db upgrade` command before restarting the host.
+Versioned installation registers
+`~/.cartograph-cli/current/bin/cartograph`; `cartograph upgrade --project-path
+/absolute/path/to/project --json` audits local and global
+Codex/Claude/Cursor registrations and repairs stale owned pins through the
+normal safe installer. Inspect `registrationRepair` and any remaining
+`repinCommand`, then restart the host.
+
+If startup says the database schema is newer than the binary, do not retry the
+old process. The error reports the running binary version, database schema
+version, and maximum supported schema version. Upgrade the native binary,
+repair the registration, restart the host, and verify the newly loaded MCP
+version. Startup exits nonzero; it never serves against a schema it cannot
+interpret.
+
+If MCP startup reports managed-image or HNSW shared-memory incompatibility, run
+`doctor`, create the named fresh backup, and use the exact confirmed
+`db upgrade` command before restarting the host. This preflight is
+intentionally stricter than read-only `status` or an ordinary relational index:
+an MCP process exposes semantic maintenance paths that may need HNSW, so it
+refuses an older 64 MiB managed container even when non-vector reads still
+work. `doctor` is the readiness authority for that boundary.
 
 ## Index is stale
 

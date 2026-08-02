@@ -5355,17 +5355,17 @@ mod tests {
 
     #[test]
     fn release_docs_identify_current_audit_and_historical_benchmarks() {
-        const VERSIONED_DOCS: [&str; 6] = [
+        const VERSIONED_DOCS: [&str; 5] = [
             include_str!("../../../docs/CLI-REFERENCE.md"),
             include_str!("../../../docs/MCP-USAGE.md"),
             include_str!("../../../docs/SUPPORT-MATRIX.md"),
             include_str!("../../../docs/LANGUAGE-COVERAGE-REPORT.md"),
             include_str!("../../../docs/v2/ARCHITECTURE.md"),
-            include_str!("../../../docs/v2/benchmarks/PATCH-TASK-EVALUATION.md"),
         ];
-        const HISTORICAL_BENCHMARKS: [&str; 2] = [
+        const HISTORICAL_BENCHMARKS: [&str; 3] = [
             include_str!("../../../docs/v2/benchmarks/INDEX-SCALING.md"),
             include_str!("../../../docs/v2/benchmarks/NATIVE-CORPUS-SCALING.md"),
+            include_str!("../../../docs/v2/benchmarks/PATCH-TASK-EVALUATION.md"),
         ];
 
         let release = format!("`v{}`", env!("CARGO_PKG_VERSION"));

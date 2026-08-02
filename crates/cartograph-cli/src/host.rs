@@ -259,6 +259,8 @@ pub(crate) struct InstallTargetDetection {
     pub(crate) config_path: &'static str,
     pub(crate) command_state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) managed_database_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) repin_command: Option<String>,
 }
 
@@ -423,6 +425,18 @@ fn detect_toml(
                 .and_then(toml_edit::Item::as_table)
                 .is_some_and(|servers| servers.contains_key("cartograph"))
         });
+    let managed_database_port = parsed.as_ref().and_then(|document| {
+        document
+            .get("mcp_servers")
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|servers| servers.get("cartograph"))
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|cartograph| cartograph.get("args"))
+            .and_then(toml_edit::Item::as_array)
+            .and_then(|args| {
+                managed_database_port_from_args(args.iter().filter_map(|arg| arg.as_str()))
+            })
+    });
     registration_detection(&RegistrationDetectionInput {
         target,
         location,
@@ -431,6 +445,7 @@ fn detect_toml(
         cartograph_configured,
         config_path,
         configured_command,
+        managed_database_port,
         selected_executable,
     })
 }
@@ -482,6 +497,11 @@ fn detect_json(
         .and_then(Value::as_object)
         .and_then(|entry| entry.get("command"))
         .and_then(Value::as_str);
+    let managed_database_port = configured_value
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("args"))
+        .and_then(Value::as_array)
+        .and_then(|args| managed_database_port_from_args(args.iter().filter_map(Value::as_str)));
     registration_detection(&RegistrationDetectionInput {
         target,
         location,
@@ -490,6 +510,7 @@ fn detect_json(
         cartograph_configured: configured_value.is_some(),
         config_path,
         configured_command,
+        managed_database_port,
         selected_executable,
     })
 }
@@ -502,15 +523,19 @@ struct RegistrationDetectionInput<'input> {
     cartograph_configured: bool,
     config_path: &'static str,
     configured_command: Option<&'input str>,
+    managed_database_port: Option<u16>,
     selected_executable: Option<&'input Path>,
 }
 
 fn registration_detection(input: &RegistrationDetectionInput<'_>) -> InstallTargetDetection {
     let command_state = registration_command_state(input);
     let repin_command = (command_state == "stale_absolute").then(|| {
+        let managed_port = input.managed_database_port.map_or_else(String::new, |port| {
+            format!(" --managed-database-port {port}")
+        });
         format!(
-            "cartograph install --yes --target {} --location {} --project-path <path>",
-            input.target, input.location
+            "cartograph install --yes --target {} --location {}{managed_port} --project-path <path>",
+            input.target, input.location,
         )
     });
     InstallTargetDetection {
@@ -521,8 +546,27 @@ fn registration_detection(input: &RegistrationDetectionInput<'_>) -> InstallTarg
         cartograph_configured: input.cartograph_configured,
         config_path: input.config_path,
         command_state,
+        managed_database_port: input.managed_database_port,
         repin_command,
     }
+}
+
+fn managed_database_port_from_args<'arg>(args: impl IntoIterator<Item = &'arg str>) -> Option<u16> {
+    let mut args = args.into_iter();
+    while let Some(argument) = args.next() {
+        let value = if argument == "--managed-database-port" {
+            args.next()
+        } else {
+            argument.strip_prefix("--managed-database-port=")
+        };
+        if let Some(port) = value
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|port| *port > 0)
+        {
+            return Some(port);
+        }
+    }
+    None
 }
 
 fn registration_command_state(input: &RegistrationDetectionInput<'_>) -> &'static str {
@@ -659,7 +703,7 @@ mod tests {
 
         fs::write(
             &codex,
-            "[mcp_servers.cartograph]\ncommand = '/usr/local/bin/cartograph'\n",
+            "[mcp_servers.cartograph]\ncommand = '/usr/local/bin/cartograph'\nargs = ['serve', '--mcp', '--managed-database-port', '55435']\n",
         )
         .unwrap_or_else(|error| panic!("valid TOML fixture failed: {error}"));
         let configured = detect_toml(
@@ -669,13 +713,14 @@ mod tests {
         assert!(configured.config_valid);
         assert!(configured.cartograph_configured);
         assert_eq!(configured.command_state, "stale_absolute");
+        assert_eq!(configured.managed_database_port, Some(55_435));
         assert!(configured.repin_command.is_some());
         assert!(bounded_text(&codex).is_some());
 
         let cursor = root.path().join("mcp.json");
         fs::write(
             &cursor,
-            br#"{"mcpServers":{"cartograph":{"command":"cartograph"}}}"#,
+            br#"{"mcpServers":{"cartograph":{"command":"cartograph","args":["serve","--mcp","--managed-database-port=55436"]}}}"#,
         )
         .unwrap_or_else(|error| panic!("cursor fixture failed: {error}"));
         let cursor_detection = detect_json(
@@ -689,6 +734,7 @@ mod tests {
         assert!(cursor_detection.config_present);
         assert!(cursor_detection.config_valid);
         assert!(cursor_detection.cartograph_configured);
+        assert_eq!(cursor_detection.managed_database_port, Some(55_436));
 
         let claude = root.path().join("claude.json");
         let project_key = root.path().to_string_lossy().into_owned();

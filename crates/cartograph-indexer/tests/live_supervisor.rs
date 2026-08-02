@@ -146,7 +146,7 @@ const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
 const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 14;
 const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
 const NATIVE_CUSTOM_FAMILY_FILE_COUNT: usize = 12;
-const NATIVE_EXPECTED_FILES: u64 = 69;
+const NATIVE_EXPECTED_FILES: u64 = 71;
 const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 60;
 const NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES: u64 = 3;
 const NATIVE_SEARCH_LIMIT: u16 = 10;
@@ -912,12 +912,14 @@ async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
         ("app/routes/dashboard.tsx", "loader"),
         ("app/routes/dashboard.tsx", "Dashboard"),
         ("src/routes/about.ts", "Route"),
+        ("src/model.ts", "PublicRecord"),
     ] {
         assert!(
             !has_structural_finding(&unused_exports, path, name),
             "framework-owned export was incorrectly reported: {path}::{name}; findings={unused_exports:?}"
         );
     }
+    assert_type_only_external_consumer(fixture).await;
     for (path, name) in [
         ("app/about/page.tsx", "someHelper"),
         ("app/api/things/route.ts", "metadata"),
@@ -937,6 +939,14 @@ async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
             "function-local Python binding was reported as unused export: {local}; findings={unused_exports:?}"
         );
     }
+    assert!(
+        !has_structural_finding(&unused_exports, "lib/action.ts", "claimDue"),
+        "declaration-only type member was reported as unused export: claimDue; findings={unused_exports:?}"
+    );
+    assert!(
+        !has_structural_finding(&unused_exports, "src/service.ts", "RuntimeSchema"),
+        "runtime use through an imported schema member was not resolved: RuntimeSchema; findings={unused_exports:?}"
+    );
     let long_parameters = fixture
         .database
         .query_current_structural_findings(
@@ -961,6 +971,37 @@ async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
         .unwrap_or_else(|error| panic!("current structural finding stats failed: {error}"));
 }
 
+async fn assert_type_only_external_consumer(fixture: &DatabaseFixture) {
+    let statement = format!(
+        r#"SELECT COUNT(DISTINCT source.file_id)::bigint AS incoming
+            FROM "{schema}"."edges" AS edges
+            JOIN "{schema}"."symbols" AS target
+              ON target.project_id = edges.project_id
+             AND target.generation_id = edges.generation_id
+             AND target.symbol_id = edges.target_symbol_id
+            JOIN "{schema}"."symbols" AS source
+              ON source.project_id = edges.project_id
+             AND source.generation_id = edges.generation_id
+             AND source.symbol_id = edges.source_symbol_id
+            WHERE edges.project_id = CAST($1 AS uuid)
+              AND target.qualified_name = 'PublicRecord'
+              AND source.file_id <> target.file_id"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("type-only consumer query failed: {error}"));
+    let incoming = row
+        .try_get::<i64, _>("incoming")
+        .unwrap_or_else(|error| panic!("type-only consumer count was invalid: {error}"));
+    assert_eq!(
+        incoming, 1,
+        "type-only export regression must prove one distinct external consumer file"
+    );
+}
+
 fn write_native_live_project(root: &std::path::Path) {
     std::fs::create_dir(root.join(".git"))
         .unwrap_or_else(|error| panic!("could not create native .git fixture: {error}"));
@@ -968,14 +1009,15 @@ fn write_native_live_project(root: &std::path::Path) {
         .unwrap_or_else(|error| panic!("could not create native source fixture: {error}"));
     std::fs::write(
         root.join("src/service.ts"),
-        "export interface Greeter {}\nexport class Service implements Greeter {\n  greet(): string { return format(); }\n}\n",
+        "export interface Greeter {}\nexport class Service implements Greeter {\n  greet(): string { return format(); }\n}\nexport const RuntimeSchema = z.object({ value: z.string() });\nexport type RuntimeSchema = z.infer<typeof RuntimeSchema>;\n",
     )
     .unwrap_or_else(|error| panic!("could not write native service fixture: {error}"));
     std::fs::write(
         root.join("src/build.ts"),
-        "import { Service } from './service';\nexport function build(): Service { return new Service(); }\n",
+        "import { RuntimeSchema, Service } from './service';\nexport function build(): Service { return new Service(); }\nexport function parseRuntime(value: unknown) { return RuntimeSchema.safeParse(value); }\n",
     )
     .unwrap_or_else(|error| panic!("could not write native build fixture: {error}"));
+    write_type_consumer_fixture(root);
     for (path, source) in [
         (
             "app/about/page.tsx",
@@ -995,7 +1037,7 @@ fn write_native_live_project(root: &std::path::Path) {
         ),
         (
             "lib/action.ts",
-            "export function action(): string { return 'ordinary-unused-action'; }\n",
+            "export type DeliveryStore = Readonly<{ claimDue(input: string): Promise<void> }>;\nexport function action(): string { return 'ordinary-unused-action'; }\n",
         ),
         (
             "generated/platform.d.ts",
@@ -1060,6 +1102,19 @@ fn write_native_live_project(root: &std::path::Path) {
         std::fs::write(target, source)
             .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
     }
+}
+
+fn write_type_consumer_fixture(root: &std::path::Path) {
+    std::fs::write(
+        root.join("src/model.ts"),
+        "export type PublicRecord = Readonly<{ id: string }>;\n",
+    )
+    .unwrap_or_else(|error| panic!("could not write type export fixture: {error}"));
+    std::fs::write(
+        root.join("src/consumer.ts"),
+        "import type { PublicRecord } from './model';\nexport function readId(value: PublicRecord): string { return value.id; }\n",
+    )
+    .unwrap_or_else(|error| panic!("could not write type consumer fixture: {error}"));
 }
 
 fn has_structural_finding(

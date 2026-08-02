@@ -25,8 +25,12 @@ The public detector names are:
   `high_fan_out`, `unresolved_reference_pressure`.
 
 `high_fan_out` measures distinct resolved target symbols. Repeated sites to the
-same dependency and recursive self-edges do not inflate the finding. The rule
-applies to executable and container symbols, not declarative constant tables.
+same dependency and recursive self-edges do not inflate the finding. Detail
+groups dependencies into calls, modules, types, composition, data flow, and
+other edges. Cohesive functions that only assemble and return a facade of
+focused one-call delegates abstain; mixed orchestration remains actionable.
+The rule applies to executable and container symbols, not declarative constant
+tables or framework-owned convention exports.
 `long_parameter_list` counts caller-supplied parameters, excluding an explicit
 language receiver such as Rust `self`, TypeScript's erased `this` parameter,
 and conventional Python method `self`/`cls` receivers.
@@ -51,6 +55,15 @@ navigation and history boundary.
 `magic_number` normalizes language numeric suffixes before applying the benign
 0/1/2 rules, so typed spellings such as Rust `0_u32` retain their numeric
 meaning.
+
+`hardcoded_url` is context classified. Request/client destinations and values
+assigned to endpoint-like configuration are actionable and expose
+`request_destination`, `service_configuration`, or `mixed_endpoint_use` in
+their detail. Form placeholders, navigation/documentation links, presentation
+or vendor asset `src` values, URL-validation examples, and plain data literals
+abstain. The response includes request/configuration/presentation counts so an
+agent can explain the classification instead of treating every URL-shaped
+string as a deployment endpoint.
 
 `god_class` measures production behavioral methods rather than accessors or
 test-only helpers. A method contributes to the size metric only when it owns at
@@ -77,11 +90,13 @@ fabricate a target or convert ambiguity into a resolved edge.
 `unused_export` is deliberately conservative at external boundaries. Explicit
 public API declarations and files modeled as test/fixture sources are not
 claimed unused merely because the indexed checkout cannot contain their
-outside consumer. Internal/module exports still require cross-file incoming
-evidence. Ambiguous targetless receiver calls conservatively count as potential
-incoming use for same-named internal methods; this avoids a dead-export claim
-when the graph cannot prove the receiver type. Framework-owned exports retain
-their convention-specific entry-point rules.
+outside consumer. Internal/module exports are actionable only with zero
+cross-file incoming edges; one resolved type-only or runtime consumer is enough
+to abstain. Declaration-only type members never enter the export finding
+population. Ambiguous targetless receiver calls conservatively count as
+potential incoming use for same-named internal methods; this avoids a
+dead-export claim when the graph cannot prove the receiver type. Framework-owned
+exports retain their convention-specific entry-point rules.
 
 All biomarker detectors operate on production symbol documents. Files in a
 modeled test/fixture path and Rust declarations owned by `#[cfg(test)]`, a test
@@ -91,7 +106,12 @@ queryable, but do not enter the production finding population.
 `forof_await` is specific to JavaScript-family `for ... of` loops whose own
 body contains an `await`. Rust and other language loops, `for ... in`,
 `for await ... of`, nested callbacks, and nested loops do not contribute to the
-enclosing loop's metric.
+enclosing loop's metric. It also abstains when an awaited assignment feeds the
+next iteration, when control can `break` or `return` after the await, or when
+the loop contains the explicit `cartograph: serial-await` intent marker. A
+finding therefore represents independent iterations with no detected ordering
+dependency; detail reports the awaited-expression ownership and each abstention
+category.
 
 `low_coverage` exists only when a generation-fenced LCOV source is loaded.
 `recently_grew` and issue/churn signals require bounded Git history.
@@ -108,8 +128,18 @@ Duplicate analysis distinguishes:
 4. generation/model-scoped semantic peers when matching embeddings exist.
 
 Path globs in `duplicateCodeAllowlist` exempt deliberate generated/vendor
-copies. The selected tier, peer provenance, and line floor remain visible so a
-semantic resemblance is never presented as an exact duplicate.
+copies. Identifier/literal-normalized and partial candidates additionally need
+a privacy-safe identifier-fingerprint overlap. Cross-file candidates use a
+strict overlap floor; same-file candidates may use their shared module context
+with a smaller but nonzero overlap. Cross-domain shapes with renamed callees
+therefore abstain. The selected tier, peer provenance, line floor, and class
+members remain visible so a semantic resemblance is never presented as an
+exact duplicate. Each class emits one representative finding with
+`recordScope: clone_class`; partial-clone representatives and class sizes come
+from the complete in-memory overlap component rather than the bounded ten-peer
+display list. Semantic representatives, class sizes, maximum scores, and
+bounded member lists come from a current-generation connected component rather
+than a local-neighbor minimum. Symmetric per-member rows are suppressed.
 
 ## Privacy and safety
 

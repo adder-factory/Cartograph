@@ -50,12 +50,14 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V7 includes generation-scoped static numerical sites;
-contract V6 fenced framework, resolver, test-ownership, and Rust Cargo workspace
-crate/re-export semantics. After an upgrade from an older contract, unchanged
-source remains stale until a normal index publishes current-contract facts.
-This contract check stays separate from the source-manifest digest so v1 import
-still compares exact checkout bytes rather than a binary-specific identity.
+contract. Contract V8 fences context-classified URL and serial-loop evidence,
+facade roles, and semantic clone compatibility; contract V7 added
+generation-scoped static numerical sites; contract V6 fenced framework,
+resolver, test-ownership, and Rust Cargo workspace crate/re-export semantics.
+After an upgrade from an older contract, unchanged source remains stale until a
+normal index publishes current-contract facts. This contract check stays
+separate from the source-manifest digest so v1 import still compares exact
+checkout bytes rather than a binary-specific identity.
 
 ## Parsing and facts
 
@@ -90,6 +92,15 @@ identity is a source-version-fenced digest; source expressions and literal
 values are not persisted. Runtime observations and formal proof are separate
 future adapters and remain explicitly `not_configured` in current status/tool
 responses.
+
+Structural-health extraction also retains bounded context, not raw literals:
+URL sites are separated into request destinations, endpoint configuration, and
+presentation/validation/data abstentions; JavaScript awaited loops retain
+loop-carried dependency, post-await exit, and explicit serial-intent
+abstentions; returned-object facade factories retain their delegate count; and
+clone profiles retain domain-separated identifier fingerprints only. These V8
+facts let PostgreSQL findings explain why a site was actionable or abstained
+without persisting a URL, identifier, or source expression.
 
 ## Resolution
 

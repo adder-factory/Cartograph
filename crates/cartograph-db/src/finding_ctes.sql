@@ -1,4 +1,4 @@
-WITH current AS (
+WITH RECURSIVE current AS (
                 SELECT current_generation_id AS generation_id
                 FROM {schema}."projects"
                 WHERE project_id = CAST($1 AS uuid)
@@ -33,7 +33,22 @@ WITH current AS (
                 LIMIT 1
             ), outgoing AS (
                 SELECT edges.source_symbol_id AS symbol_id,
-                       COUNT(DISTINCT edges.target_symbol_id)::bigint AS dependencies
+                       COUNT(DISTINCT edges.target_symbol_id)::bigint AS dependencies,
+                       COUNT(DISTINCT edges.target_symbol_id) FILTER (
+                           WHERE edges.edge_kind = 'calls'
+                       )::bigint AS call_dependencies,
+                       COUNT(DISTINCT edges.target_symbol_id) FILTER (
+                           WHERE edges.edge_kind IN ('imports', 'exports')
+                       )::bigint AS module_dependencies,
+                       COUNT(DISTINCT edges.target_symbol_id) FILTER (
+                           WHERE edges.edge_kind IN ('implements', 'extends', 'type_of', 'returns')
+                       )::bigint AS type_dependencies,
+                       COUNT(DISTINCT edges.target_symbol_id) FILTER (
+                           WHERE edges.edge_kind IN ('instantiates', 'decorates')
+                       )::bigint AS composition_dependencies,
+                       COUNT(DISTINCT edges.target_symbol_id) FILTER (
+                           WHERE edges.edge_kind IN ('field_access', 'def_use')
+                       )::bigint AS data_dependencies
                 FROM {schema}."edges" AS edges
                 JOIN current ON current.generation_id = edges.generation_id
                 WHERE edges.project_id = CAST($1 AS uuid)
@@ -196,6 +211,10 @@ WITH current AS (
                 LEFT JOIN duplicates
                   ON duplicates.structural_digest = symbols.structural_digest
                 WHERE duplicates.structural_digest IS NULL
+                  AND COALESCE(
+                        (symbols.search_metadata ->> 'near_clone_compatible')::boolean,
+                        false
+                      )
                   AND symbols.end_line - symbols.start_line + 1 >= 12
                   AND COALESCE(
                         (symbols.search_metadata #>> ARRAY['health','literal_bytes'])::double precision,
@@ -264,6 +283,41 @@ WITH current AS (
                        MAX(score) AS maximum_score
                 FROM undirected_semantic_clone_pairs
                 GROUP BY symbol_id
+            ), semantic_clone_component_seeds AS (
+                SELECT peers.symbol_id AS seed_symbol_id
+                FROM semantic_clone_peers AS peers
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM undirected_semantic_clone_pairs AS relation
+                    WHERE relation.symbol_id = peers.symbol_id
+                      AND relation.peer_symbol_id < peers.symbol_id
+                )
+            ), semantic_clone_reachability(seed_symbol_id, symbol_id) AS (
+                SELECT seed_symbol_id, seed_symbol_id
+                FROM semantic_clone_component_seeds
+                UNION
+                SELECT reachability.seed_symbol_id, relation.peer_symbol_id
+                FROM semantic_clone_reachability AS reachability
+                JOIN undirected_semantic_clone_pairs AS relation
+                  ON relation.symbol_id = reachability.symbol_id
+            ), semantic_clone_membership AS MATERIALIZED (
+                SELECT symbol_id,
+                       MIN(seed_symbol_id::text)::uuid AS representative_symbol_id
+                FROM semantic_clone_reachability
+                GROUP BY symbol_id
+            ), semantic_clone_components AS (
+                SELECT membership.symbol_id,
+                       membership.representative_symbol_id,
+                       peers.peers,
+                       COUNT(*) OVER (
+                           PARTITION BY membership.representative_symbol_id
+                       )::bigint AS component_size,
+                       MAX(peers.maximum_score) OVER (
+                           PARTITION BY membership.representative_symbol_id
+                       ) AS maximum_score
+                FROM semantic_clone_membership AS membership
+                JOIN semantic_clone_peers AS peers
+                  ON peers.symbol_id = membership.symbol_id
             ), source_classes AS (
                 SELECT methods.symbol_id, containers.symbol_id AS class_id
                 FROM {schema}."symbols" AS methods
@@ -354,6 +408,7 @@ WITH current AS (
                        symbols.structural_digest,
                        documents.metadata ->> 'clone_shape_digest' AS clone_shape_digest,
                        documents.metadata #> ARRAY['partial_clone','listed_peer_symbol_ids'] AS partial_clone_listed_peer_ids,
+                       documents.metadata #>> ARRAY['partial_clone','representative_symbol_id'] AS partial_clone_representative_symbol_id,
                        symbols.start_line, symbols.end_line,
                        symbols.end_line - symbols.start_line + 1 AS lines,
                        symbols.exported, symbols.default_export,
@@ -414,6 +469,11 @@ WITH current AS (
                            / population.possible_peers
                        ) AS degree_centrality,
                        COALESCE(outgoing.dependencies, 0)::bigint AS outgoing,
+                       COALESCE(outgoing.call_dependencies, 0)::bigint AS call_dependencies,
+                       COALESCE(outgoing.module_dependencies, 0)::bigint AS module_dependencies,
+                       COALESCE(outgoing.type_dependencies, 0)::bigint AS type_dependencies,
+                       COALESCE(outgoing.composition_dependencies, 0)::bigint AS composition_dependencies,
+                       COALESCE(outgoing.data_dependencies, 0)::bigint AS data_dependencies,
                        COALESCE(unresolved.sites, 0)::bigint AS unresolved,
                        (
                            COALESCE(incoming.external_edges, 0)
@@ -428,6 +488,10 @@ WITH current AS (
                            0
                        ) AS partial_clone_peers,
                        COALESCE(
+                           (documents.metadata #>> ARRAY['partial_clone','component_size'])::bigint,
+                           0
+                       ) AS partial_clone_component_size,
+                       COALESCE(
                            (documents.metadata #>> ARRAY['partial_clone','maximum_overlap_ppm'])::double precision,
                            0.0
                        ) AS partial_clone_maximum_overlap_ppm,
@@ -435,8 +499,10 @@ WITH current AS (
                            (documents.metadata #>> ARRAY['partial_clone','minimum_overlap_ppm'])::double precision,
                            0.0
                        ) AS partial_clone_minimum_overlap_ppm,
-                       COALESCE(semantic_clone_peers.peers, 0)::bigint AS semantic_clone_peers,
-                       COALESCE(semantic_clone_peers.maximum_score, 0.0)::double precision AS semantic_clone_maximum_score,
+                       COALESCE(semantic_clone_components.peers, 0)::bigint AS semantic_clone_peers,
+                       COALESCE(semantic_clone_components.component_size, 0)::bigint AS semantic_clone_component_size,
+                       semantic_clone_components.representative_symbol_id AS semantic_clone_representative_symbol_id,
+                       COALESCE(semantic_clone_components.maximum_score, 0.0)::double precision AS semantic_clone_maximum_score,
                        COALESCE(feature_envy.atfd, 0)::bigint AS feature_envy_atfd,
                        COALESCE(feature_envy.fdp, 0)::bigint AS feature_envy_fdp,
                        COALESCE(feature_envy.own_accesses, 0)::bigint AS own_accesses,
@@ -464,12 +530,20 @@ WITH current AS (
                        COALESCE((documents.metadata #>> ARRAY['health','max_conditional_operands'])::double precision, 0.0) AS max_conditional_operands,
                        COALESCE((documents.metadata #>> ARRAY['health','magic_numbers'])::double precision, 0.0) AS magic_numbers,
                        COALESCE((documents.metadata #>> ARRAY['health','hardcoded_urls'])::double precision, 0.0) AS hardcoded_urls,
+                       COALESCE((documents.metadata #>> ARRAY['health','hardcoded_url_requests'])::double precision, 0.0) AS hardcoded_url_requests,
+                       COALESCE((documents.metadata #>> ARRAY['health','hardcoded_url_configuration'])::double precision, 0.0) AS hardcoded_url_configuration,
+                       COALESCE((documents.metadata #>> ARRAY['health','hardcoded_url_presentation_abstentions'])::double precision, 0.0) AS hardcoded_url_presentation_abstentions,
                        COALESCE((documents.metadata #>> ARRAY['health','secrets_score'])::double precision, 0.0) AS secrets_score,
                        COALESCE((documents.metadata #>> ARRAY['health','stale_doc_numbers'])::double precision, 0.0) AS stale_doc_numbers,
                        COALESCE((documents.metadata #>> ARRAY['health','accidental_quadratic'])::double precision, 0.0) AS accidental_quadratic,
                        COALESCE((documents.metadata #>> ARRAY['health','empty_catches'])::double precision, 0.0) AS empty_catches,
                        COALESCE((documents.metadata #>> ARRAY['health','sync_io_in_async'])::double precision, 0.0) AS sync_io_in_async,
                        COALESCE((documents.metadata #>> ARRAY['health','sequential_await_loops'])::double precision, 0.0) AS sequential_await_loops,
+                       COALESCE((documents.metadata #>> ARRAY['health','serial_await_dependency_loops'])::double precision, 0.0) AS serial_await_dependency_loops,
+                       COALESCE((documents.metadata #>> ARRAY['health','serial_await_control_flow_loops'])::double precision, 0.0) AS serial_await_control_flow_loops,
+                       COALESCE((documents.metadata #>> ARRAY['health','serial_await_intent_loops'])::double precision, 0.0) AS serial_await_intent_loops,
+                       COALESCE((documents.metadata #>> ARRAY['health','facade_factory_delegates'])::double precision, 0.0) AS facade_factory_delegates,
+                       COALESCE((documents.metadata #>> ARRAY['health','facade_factory'])::boolean, false) AS facade_factory,
                        COALESCE((documents.metadata #>> ARRAY['health','ts_any_casts'])::double precision, 0.0) AS ts_any_casts,
                        COALESCE((documents.metadata #>> ARRAY['health','ts_suppressions'])::double precision, 0.0) AS ts_suppressions,
                        COALESCE((documents.metadata #>> ARRAY['health','debug_logs'])::double precision, 0.0) AS debug_logs,
@@ -510,7 +584,8 @@ WITH current AS (
                     LIMIT 1
                 ) AS clone_shape_match ON true
                 LEFT JOIN feature_envy ON feature_envy.symbol_id = symbols.symbol_id
-                LEFT JOIN semantic_clone_peers ON semantic_clone_peers.symbol_id = symbols.symbol_id
+                LEFT JOIN semantic_clone_components
+                  ON semantic_clone_components.symbol_id = symbols.symbol_id
                 LEFT JOIN prior_symbols ON prior_symbols.symbol_id = symbols.symbol_id
                 LEFT JOIN ranked_coverage ON ranked_coverage.symbol_id = symbols.symbol_id
                 CROSS JOIN population
@@ -540,9 +615,11 @@ WITH current AS (
                            'classSize', CASE
                              WHEN base.duplicate_copies > 1 THEN base.duplicate_copies
                              WHEN base.clone_shape_copies > 1 THEN base.clone_shape_copies
-                             WHEN base.partial_clone_peers > 0 THEN base.partial_clone_peers + 1
-                             ELSE base.semantic_clone_peers + 1
+                             WHEN base.partial_clone_peers > 0 THEN base.partial_clone_component_size
+                             ELSE base.semantic_clone_component_size
                            END,
+                           'recordScope', 'clone_class',
+                           'symmetricMemberRowsSuppressed', true,
                            'loc', base.lines,
                            'maximumOverlap', CASE
                              WHEN base.partial_clone_peers > 0
@@ -640,16 +717,56 @@ WITH current AS (
                                           'qualifiedName', peer.qualified_name,
                                           'location', peer.normalized_path || ':' || peer.start_line::text
                                         ) AS payload
-                                 FROM undirected_semantic_clone_pairs AS relation
+                                 FROM semantic_clone_components AS component
                                  JOIN production_clone_symbols AS peer
-                                   ON peer.symbol_id = relation.peer_symbol_id
-                                 WHERE relation.symbol_id = base.symbol_id
+                                   ON peer.symbol_id = component.symbol_id
+                                 WHERE component.representative_symbol_id =
+                                       base.semantic_clone_representative_symbol_id
+                                   AND peer.symbol_id <> base.symbol_id
                                  ORDER BY peer.normalized_path, peer.start_line, peer.symbol_id
                                  LIMIT 10
                                ) AS member
                              )
                            END
                          ))
+                       WHEN candidate.finding = 'hardcoded_url' THEN
+                         jsonb_build_object(
+                           'category', CASE
+                             WHEN base.hardcoded_url_requests > 0
+                               AND base.hardcoded_url_configuration > 0 THEN 'mixed_endpoint_use'
+                             WHEN base.hardcoded_url_requests > 0 THEN 'request_destination'
+                             ELSE 'service_configuration'
+                           END,
+                           'requestDestinations', base.hardcoded_url_requests,
+                           'serviceConfiguration', base.hardcoded_url_configuration,
+                           'presentationAbstentions', base.hardcoded_url_presentation_abstentions
+                         )
+                       WHEN candidate.finding = 'forof_await' THEN
+                         jsonb_build_object(
+                           'awaitedCall', 'owned_await_expression',
+                           'controlFlowReason', 'independent_iterations_without_loop_carried_dependency_or_post_await_exit',
+                           'dependencyAbstentions', base.serial_await_dependency_loops,
+                           'controlFlowAbstentions', base.serial_await_control_flow_loops,
+                           'declaredSerialIntentAbstentions', base.serial_await_intent_loops
+                         )
+                       WHEN candidate.finding = 'high_fan_out' THEN
+                         jsonb_build_object(
+                           'role', 'mixed_orchestration',
+                           'dependencyGroups', jsonb_build_object(
+                             'calls', base.call_dependencies,
+                             'modules', base.module_dependencies,
+                             'types', base.type_dependencies,
+                             'composition', base.composition_dependencies,
+                             'dataFlow', base.data_dependencies,
+                             'other', GREATEST(
+                               base.outgoing - base.call_dependencies - base.module_dependencies
+                               - base.type_dependencies - base.composition_dependencies
+                               - base.data_dependencies,
+                               0
+                             )
+                           ),
+                           'facadeDelegates', base.facade_factory_delegates
+                         )
                        ELSE NULL END AS detail
                 FROM base
                 CROSS JOIN LATERAL (
@@ -667,10 +784,10 @@ WITH current AS (
                       ('secrets_handling', 'confidence_percent', base.secrets_score, 50.0, 50.0, 70.0, base.symbol_kind IN ('function','method','component')),
                       ('god_class', 'behavioral_methods', base.behavioral_methods::double precision, 15.0, 40.0, 60.0, base.symbol_kind IN ('class','struct','module') AND base.complex_methods >= 5),
                       ('feature_envy', 'foreign_field_accesses', base.feature_envy_atfd::double precision, 6.0, 12.0, 999.0, base.symbol_kind = 'method' AND base.feature_envy_fdp <= 2 AND base.local_attribute_access < (1.0 / 3.0)),
-                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.function_local AND NOT base.framework_convention_export AND NOT base.declared_external_api AND NOT base.test_source),
+                      ('unused_export', 'external_incoming_edges', CASE WHEN base.exported AND base.external_incoming = 0 THEN 1.0 ELSE 0.0 END, 1.0, 1.0, 2.0, base.symbol_kind IN ('function','method','class','component','constant') AND base.path <> 'src/index.ts' AND base.path NOT LIKE '%.d.ts' AND NOT base.declaration_only AND NOT base.function_local AND NOT base.framework_convention_export AND NOT base.declared_external_api AND NOT base.test_source),
                       ('low_coverage', 'uncovered_percent', (1.0 - COALESCE(base.coverage_fraction, 1.0)) * 100.0, 50.0, 50.0, 80.0, base.symbol_kind IN ('function','method','component') AND base.coverage_fraction <= 0.5 AND base.centrality_percentile >= 0.9),
-                      ('duplicate_code', CASE WHEN base.duplicate_copies > 1 THEN 'exact_copies' WHEN base.clone_shape_copies > 1 THEN 'normalized_shape_copies' WHEN base.partial_clone_peers > 0 THEN 'partial_clone_peers' ELSE 'semantic_clone_peers' END, CASE WHEN base.duplicate_copies > 1 THEN base.duplicate_copies WHEN base.clone_shape_copies > 1 THEN base.clone_shape_copies WHEN base.partial_clone_peers > 0 THEN base.partial_clone_peers ELSE base.semantic_clone_peers END::double precision, CASE WHEN base.duplicate_copies > 1 OR base.clone_shape_copies > 1 THEN 2.0 ELSE 1.0 END, CASE WHEN base.duplicate_copies > 1 THEN 2.0 ELSE 999.0 END, 999.0, base.symbol_kind IN ('function','method','component') AND ((base.duplicate_copies > 1 AND base.lines >= 6) OR (base.clone_shape_copies > 1 AND base.lines >= 12) OR (base.partial_clone_peers > 0 AND base.lines >= 12) OR (base.semantic_clone_peers > 0 AND base.lines >= 6))),
-                      ('high_fan_out', 'outgoing_dependencies', base.outgoing::double precision, 25.0, 50.0, 100.0, base.symbol_kind IN ('function','method','component','class','struct','module')),
+                      ('duplicate_code', CASE WHEN base.duplicate_copies > 1 THEN 'exact_copies' WHEN base.clone_shape_copies > 1 THEN 'normalized_shape_copies' WHEN base.partial_clone_peers > 0 THEN 'partial_clone_peers' ELSE 'semantic_clone_peers' END, CASE WHEN base.duplicate_copies > 1 THEN base.duplicate_copies WHEN base.clone_shape_copies > 1 THEN base.clone_shape_copies WHEN base.partial_clone_peers > 0 THEN base.partial_clone_peers ELSE base.semantic_clone_peers END::double precision, CASE WHEN base.duplicate_copies > 1 OR base.clone_shape_copies > 1 THEN 2.0 ELSE 1.0 END, CASE WHEN base.duplicate_copies > 1 THEN 2.0 ELSE 999.0 END, 999.0, base.symbol_kind IN ('function','method','component') AND ((base.duplicate_copies > 1 AND base.lines >= 6) OR (base.clone_shape_copies > 1 AND base.lines >= 12) OR (base.partial_clone_peers > 0 AND base.lines >= 12) OR (base.semantic_clone_peers > 0 AND base.lines >= 6)) AND CASE WHEN base.duplicate_copies > 1 THEN base.symbol_id = (SELECT peer.symbol_id FROM production_clone_symbols AS peer WHERE peer.structural_digest = base.structural_digest AND peer.end_line - peer.start_line + 1 >= 6 ORDER BY peer.symbol_id LIMIT 1) WHEN base.clone_shape_copies > 1 THEN base.symbol_id = (SELECT peer.symbol_id FROM production_clone_symbols AS peer WHERE peer.search_metadata ->> 'clone_shape_digest' = base.clone_shape_digest AND COALESCE((peer.search_metadata ->> 'near_clone_compatible')::boolean, false) ORDER BY peer.symbol_id LIMIT 1) WHEN base.partial_clone_peers > 0 THEN base.symbol_id::text = base.partial_clone_representative_symbol_id ELSE base.symbol_id = base.semantic_clone_representative_symbol_id END),
+                      ('high_fan_out', 'outgoing_dependencies', base.outgoing::double precision, 25.0, 50.0, 100.0, base.symbol_kind IN ('function','method','component','class','struct','module') AND NOT base.facade_factory AND NOT base.framework_convention_export),
                       ('unresolved_reference_pressure', 'unresolved_sites', base.unresolved::double precision, 15.0, 40.0, 100.0, true),
                       ('accidental_quadratic', 'occurrences', base.accidental_quadratic, 1.0, 1.0, 5.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),
                       ('empty_catch', 'occurrences', base.empty_catches, 1.0, 1.0, 3.0, base.symbol_kind IN ('function','method','component') AND base.lines >= 5),

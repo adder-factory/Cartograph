@@ -7,7 +7,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cartograph_agent::{IndexOptions, ProjectRuntime, ProjectWatchFilter};
+use cartograph_agent::{
+    IndexOptions, PipelineStage, ProjectError, ProjectRuntime, ProjectWatchFilter,
+};
+use cartograph_domain::ContentDigest;
 use notify::{Config, Event, EventKind, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use thiserror::Error;
@@ -27,6 +30,9 @@ const WATCH_CHANNEL_CAPACITY: usize = 1;
 const CONFIG_RELATIVE_PATH: &str = ".cartograph/config.json";
 const SCIP_OVERLAY_RELATIVE_PATH: &str = ".cartograph/scip/overlay.scip";
 const WATCH_DEBOUNCE_ENV: &str = "CARTOGRAPH_WATCH_DEBOUNCE_MS";
+const INITIAL_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const MAXIMUM_RETRY_INTERVAL: Duration = Duration::from_mins(15);
+const MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION: u8 = 5;
 
 /// Live filesystem watcher plus periodic missed-event reconciliation for one project runtime.
 pub(crate) struct ProjectAutoSync {
@@ -73,6 +79,7 @@ impl ProjectAutoSync {
     }
 
     pub(crate) fn status(&self) -> AutoSyncStatus {
+        let failure = self.state.failure_status();
         AutoSyncStatus {
             active: self.state.active.load(Ordering::Acquire),
             backend: self.watcher.backend(),
@@ -85,6 +92,11 @@ impl ProjectAutoSync {
             last_success_unix_millis: nonzero(
                 self.state.last_success_unix_millis.load(Ordering::Acquire),
             ),
+            last_error_code: failure.last_error_code,
+            last_failure_at: failure.last_failure_at,
+            next_retry_at: failure.next_retry_at,
+            failed_revision_attempts: failure.attempts,
+            retry_suppressed: failure.retry_suppressed,
         }
     }
 }
@@ -107,6 +119,81 @@ struct AutoSyncState {
     noops: AtomicU64,
     errors: AtomicU64,
     last_success_unix_millis: AtomicU64,
+    failure: RwLock<AutoSyncFailureState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AutoSyncFailureStatus {
+    last_error_code: Option<&'static str>,
+    last_failure_at: Option<u64>,
+    next_retry_at: Option<u64>,
+    attempts: u8,
+    retry_suppressed: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AutoSyncFailureState {
+    failed_revision: Option<ContentDigest>,
+    status: AutoSyncFailureStatus,
+}
+
+impl AutoSyncState {
+    fn failure_status(&self) -> AutoSyncFailureStatus {
+        self.failure.read().map_or_else(
+            |_| AutoSyncFailureStatus::default(),
+            |failure| failure.status,
+        )
+    }
+
+    fn automatic_attempt_allowed(&self, revision: &ContentDigest, now: u64) -> bool {
+        self.failure.read().map_or(true, |failure| {
+            if failure.failed_revision.as_ref() != Some(revision) {
+                return true;
+            }
+            !failure.status.retry_suppressed
+                && failure
+                    .status
+                    .next_retry_at
+                    .is_none_or(|deadline| now >= deadline)
+        })
+    }
+
+    fn record_index_success(&self) {
+        if let Ok(mut failure) = self.failure.write() {
+            *failure = AutoSyncFailureState::default();
+        }
+    }
+
+    fn record_index_failure(&self, revision: ContentDigest, error: ProjectError, now: u64) {
+        self.errors.fetch_add(1, Ordering::AcqRel);
+        let Ok(mut failure) = self.failure.write() else {
+            return;
+        };
+        let attempts = if failure.failed_revision.as_ref() == Some(&revision) {
+            failure.status.attempts.saturating_add(1)
+        } else {
+            1
+        };
+        let retry_suppressed = attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION;
+        let next_retry_at = (!retry_suppressed).then(|| {
+            now.saturating_add(
+                retry_interval(attempts)
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            )
+        });
+        *failure = AutoSyncFailureState {
+            failed_revision: Some(revision),
+            status: AutoSyncFailureStatus {
+                last_error_code: Some(project_error_code(error)),
+                last_failure_at: Some(now),
+                next_retry_at,
+                attempts,
+                retry_suppressed,
+            },
+        };
+    }
 }
 
 /// Privacy-safe watcher health exposed through status without project paths.
@@ -122,6 +209,16 @@ pub(crate) struct AutoSyncStatus {
     pub noops: u64,
     pub errors: u64,
     pub last_success_unix_millis: Option<u64>,
+    /// Stable credential-safe code for the latest failed automatic index.
+    pub last_error_code: Option<&'static str>,
+    /// Unix-millisecond timestamp of the latest failed automatic index.
+    pub last_failure_at: Option<u64>,
+    /// Unix-millisecond deadline for the next automatic retry of this revision.
+    pub next_retry_at: Option<u64>,
+    /// Automatic attempts made for the unchanged failed source revision.
+    pub failed_revision_attempts: u8,
+    /// True after the bounded retry budget is exhausted until source changes.
+    pub retry_suppressed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -250,7 +347,7 @@ async fn run_auto_sync(input: AutoSyncTask) {
                 if event.is_none() || debounce_events(&mut events, &mut cancellation, debounce).await {
                     break;
                 }
-                synchronize(&runtime, &state).await;
+                synchronize_if_stale(&runtime, &state).await;
             }
             () = &mut startup_reconciliation, if startup_reconciliation_pending => {
                 startup_reconciliation_pending = false;
@@ -266,8 +363,17 @@ async fn run_auto_sync(input: AutoSyncTask) {
 
 async fn reconcile(runtime: &ProjectRuntime, state: &AutoSyncState) {
     state.reconciliations.fetch_add(1, Ordering::AcqRel);
+    synchronize_if_stale(runtime, state).await;
+}
+
+async fn synchronize_if_stale(runtime: &ProjectRuntime, state: &AutoSyncState) {
     match runtime.status().await {
-        Ok(status) if !status.fresh => synchronize(runtime, state).await,
+        Ok(status)
+            if !status.fresh
+                && state.automatic_attempt_allowed(&status.live_source_revision, unix_millis()) =>
+        {
+            synchronize(runtime, state, status.live_source_revision).await;
+        }
         Ok(_) => {}
         Err(_) => {
             state.errors.fetch_add(1, Ordering::AcqRel);
@@ -301,7 +407,7 @@ async fn debounce_events(
     }
 }
 
-async fn synchronize(runtime: &ProjectRuntime, state: &AutoSyncState) {
+async fn synchronize(runtime: &ProjectRuntime, state: &AutoSyncState, revision: ContentDigest) {
     state.sync_attempts.fetch_add(1, Ordering::AcqRel);
     match runtime.index(IndexOptions::default()).await {
         Ok(report) => {
@@ -313,10 +419,49 @@ async fn synchronize(runtime: &ProjectRuntime, state: &AutoSyncState) {
             state
                 .last_success_unix_millis
                 .store(unix_millis(), Ordering::Release);
+            state.record_index_success();
         }
-        Err(_) => {
-            state.errors.fetch_add(1, Ordering::AcqRel);
+        Err(error) => {
+            state.record_index_failure(revision, error, unix_millis());
         }
+    }
+}
+
+fn retry_interval(attempts: u8) -> Duration {
+    let exponent = u32::from(attempts.saturating_sub(1)).min(31);
+    let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
+    INITIAL_RETRY_INTERVAL
+        .saturating_mul(multiplier)
+        .min(MAXIMUM_RETRY_INTERVAL)
+}
+
+const fn project_error_code(error: ProjectError) -> &'static str {
+    match error {
+        ProjectError::BeginGenerationFailed => "generation_start_failed",
+        ProjectError::SourceScanFailed => "source_scan_failed",
+        ProjectError::IndexStageFailed { stage } => pipeline_stage_error_code(stage),
+        ProjectError::IndexLeaseFailed => "lease_failed",
+        ProjectError::IndexPublicationFailed => "publication_failed",
+        ProjectError::IndexCleanupFailed => "index_cleanup_failed",
+        ProjectError::ScipOverlayInvalid => "scip_overlay_invalid",
+        ProjectError::RequestCancelled => "request_cancelled",
+        _ => "index_failed",
+    }
+}
+
+const fn pipeline_stage_error_code(stage: PipelineStage) -> &'static str {
+    match stage {
+        PipelineStage::Discover => "discover_failed",
+        PipelineStage::Read => "read_failed",
+        PipelineStage::Parse => "parse_failed",
+        PipelineStage::Resolve => "resolve_failed",
+        PipelineStage::Overlay => "overlay_failed",
+        PipelineStage::Reduce => "reduce_failed",
+        PipelineStage::Copy => "copy_failed",
+        PipelineStage::RelationalMerge => "relational_merge_failed",
+        PipelineStage::Bm25 => "bm25_failed",
+        PipelineStage::Vector => "vector_failed",
+        PipelineStage::Publish => "publication_failed",
     }
 }
 
@@ -448,6 +593,100 @@ mod tests {
             (MINIMUM_DEBOUNCE_MILLIS..=MAXIMUM_DEBOUNCE_MILLIS)
                 .contains(&u64::try_from(DEFAULT_DEBOUNCE.as_millis()).unwrap_or_default())
         );
+    }
+
+    #[test]
+    fn unchanged_failed_revision_uses_bounded_backoff_and_new_source_resets_it() {
+        let state = AutoSyncState::default();
+        let first_revision = ContentDigest::from_bytes([1_u8; 32]);
+        let next_revision = ContentDigest::from_bytes([2_u8; 32]);
+        let mut now = 1_000_u64;
+
+        assert!(state.automatic_attempt_allowed(&first_revision, now));
+        state.record_index_failure(
+            first_revision.clone(),
+            ProjectError::IndexStageFailed {
+                stage: PipelineStage::Reduce,
+            },
+            now,
+        );
+        let first = state.failure_status();
+        assert_eq!(first.last_error_code, Some("reduce_failed"));
+        assert_eq!(first.last_failure_at, Some(now));
+        assert_eq!(first.attempts, 1);
+        assert!(!first.retry_suppressed);
+        assert!(!state.automatic_attempt_allowed(&first_revision, now));
+        now = first
+            .next_retry_at
+            .unwrap_or_else(|| panic!("first retry deadline was missing"));
+        assert!(state.automatic_attempt_allowed(&first_revision, now));
+
+        for expected_attempts in 2..=MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION {
+            state.record_index_failure(
+                first_revision.clone(),
+                ProjectError::IndexStageFailed {
+                    stage: PipelineStage::Copy,
+                },
+                now,
+            );
+            let status = state.failure_status();
+            assert_eq!(status.attempts, expected_attempts);
+            assert_eq!(status.last_error_code, Some("copy_failed"));
+            if expected_attempts < MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION {
+                now = status
+                    .next_retry_at
+                    .unwrap_or_else(|| panic!("retry deadline was missing"));
+            }
+        }
+        let exhausted = state.failure_status();
+        assert!(exhausted.retry_suppressed);
+        assert_eq!(exhausted.next_retry_at, None);
+        assert!(!state.automatic_attempt_allowed(&first_revision, u64::MAX));
+        assert!(state.automatic_attempt_allowed(&next_revision, now));
+
+        state.record_index_success();
+        assert_eq!(state.failure_status(), AutoSyncFailureStatus::default());
+        assert!(state.automatic_attempt_allowed(&first_revision, now));
+    }
+
+    #[test]
+    fn project_error_codes_are_stage_specific_and_credential_safe() {
+        let stage_codes = [
+            (PipelineStage::Discover, "discover_failed"),
+            (PipelineStage::Read, "read_failed"),
+            (PipelineStage::Parse, "parse_failed"),
+            (PipelineStage::Resolve, "resolve_failed"),
+            (PipelineStage::Overlay, "overlay_failed"),
+            (PipelineStage::Reduce, "reduce_failed"),
+            (PipelineStage::Copy, "copy_failed"),
+            (PipelineStage::RelationalMerge, "relational_merge_failed"),
+            (PipelineStage::Bm25, "bm25_failed"),
+            (PipelineStage::Vector, "vector_failed"),
+            (PipelineStage::Publish, "publication_failed"),
+        ];
+        for (stage, expected) in stage_codes {
+            assert_eq!(
+                project_error_code(ProjectError::IndexStageFailed { stage }),
+                expected
+            );
+        }
+
+        let error_codes = [
+            (
+                ProjectError::BeginGenerationFailed,
+                "generation_start_failed",
+            ),
+            (ProjectError::SourceScanFailed, "source_scan_failed"),
+            (ProjectError::IndexLeaseFailed, "lease_failed"),
+            (ProjectError::IndexPublicationFailed, "publication_failed"),
+            (ProjectError::IndexCleanupFailed, "index_cleanup_failed"),
+            (ProjectError::ScipOverlayInvalid, "scip_overlay_invalid"),
+            (ProjectError::RequestCancelled, "request_cancelled"),
+            (ProjectError::InvalidOptions, "index_failed"),
+        ];
+        for (error, expected) in error_codes {
+            assert_eq!(project_error_code(error), expected);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

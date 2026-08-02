@@ -34,8 +34,15 @@ const STORAGE_LIFECYCLE_HARDENING_SCHEMA_VERSION: i64 = 23;
 const RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION: i64 = 24;
 const DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION: i64 = 25;
 const NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION: i64 = 26;
-const LATEST_SCHEMA_VERSION: i64 = NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION;
+const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA_VERSION: i64 = 27;
+const LATEST_SCHEMA_VERSION: i64 = STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
+
+/// Latest append-only schema version understood by this native binary.
+#[must_use]
+pub const fn latest_schema_version() -> i64 {
+    LATEST_SCHEMA_VERSION
+}
 const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
             ON {schema}."search_documents"
             USING bm25 (
@@ -1118,7 +1125,16 @@ const NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA: Migration = Migration {
     ],
 };
 
-const MIGRATIONS: [&Migration; 26] = [
+const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA: Migration = Migration {
+    version: STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA_VERSION,
+    name: "context_classified_structural_diagnostics_digest_v8",
+    statements: &[r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8))"#],
+};
+
+const MIGRATIONS: [&Migration; 27] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1145,6 +1161,7 @@ const MIGRATIONS: [&Migration; 26] = [
     &RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA,
     &DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA,
     &NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA,
+    &STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1541,7 +1558,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 26] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 27] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1568,9 +1585,10 @@ mod tests {
         RUST_WORKSPACE_RESOLUTION_DIGEST_V6_SCHEMA_VERSION,
         DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION,
         NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION,
+        STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 26] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 27] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1675,6 +1693,10 @@ mod tests {
             26,
             "821c3fa10f3c60766d0a38c6dd0c747fdc273f2d10089fd6f715b347b9d47441",
         ),
+        (
+            27,
+            "b0e245329c8698665484bbfcdba2fdb8dee225b56162bf9591057ba7e7af05f4",
+        ),
     ];
 
     #[test]
@@ -1720,7 +1742,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION
+            STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA_VERSION
         );
     }
 

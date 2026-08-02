@@ -946,7 +946,7 @@ export function recovery() {
 #[test]
 fn symbol_health_excludes_url_validation_inputs_and_xml_namespace_identifiers() {
     let file = extract(
-        "src/url-boundaries.ts",
+        "src/url-boundaries.tsx",
         r#"
 export function worksheetXml(rows: string[]) {
   const body = rows.map((row) => `<row>${row}</row>`).join("");
@@ -964,12 +964,41 @@ export function urlBoundaryCheck() {
 export function productionEndpoint() {
   return fetch("https://api.example.com/v1");
 }
+
+export function setupHelp() {
+  return <><input placeholder="https://portal.example.test" /><a href="https://docs.example.test/setup">Setup</a><script src="https://static.example.test/widget.js" /></>;
+}
+
+export function configuredEndpoint() {
+  const baseUrl = "https://api.example.test/v2";
+  return createClient({ baseUrl });
+}
 "#,
     );
 
     assert_eq!(symbol(&file, "worksheetXml").health.hardcoded_urls, 0);
     assert_eq!(symbol(&file, "urlBoundaryCheck").health.hardcoded_urls, 0);
     assert_eq!(symbol(&file, "productionEndpoint").health.hardcoded_urls, 1);
+    assert_eq!(
+        symbol(&file, "productionEndpoint")
+            .health
+            .hardcoded_url_requests,
+        1
+    );
+    assert_eq!(symbol(&file, "setupHelp").health.hardcoded_urls, 0);
+    assert_eq!(
+        symbol(&file, "setupHelp")
+            .health
+            .hardcoded_url_presentation_abstentions,
+        3
+    );
+    assert_eq!(symbol(&file, "configuredEndpoint").health.hardcoded_urls, 1);
+    assert_eq!(
+        symbol(&file, "configuredEndpoint")
+            .health
+            .hardcoded_url_configuration,
+        1
+    );
 }
 
 #[test]
@@ -998,7 +1027,7 @@ def build_rows(values):
 fn sequential_await_loop_health_is_limited_to_javascript_for_of_bodies() {
     let javascript = extract(
         "src/loops.ts",
-        r"
+        r#"
 export async function sequential(items: string[]) {
   for (const item of items) { await consume(item); }
 }
@@ -1018,7 +1047,27 @@ export async function nested(items: string[][]) {
     for (const item of group) { await consume(item); }
   }
 }
-",
+export async function replay(events: Event[]) {
+  let revision = await currentRevision();
+  for (const event of events) {
+    revision = await applyEvent(event, revision);
+  }
+  return revision;
+}
+export async function drain(records: Record[]) {
+  for (const record of records) {
+    const outcome = await deliver(record);
+    if (outcome === "stop") break;
+    await acknowledge(record);
+  }
+}
+export async function declaredSerial(records: Record[]) {
+  for (const record of records) {
+    // cartograph: serial-await -- remote rate contract
+    await deliver(record);
+  }
+}
+"#,
     );
     assert_eq!(
         symbol(&javascript, "sequential")
@@ -1037,6 +1086,32 @@ export async function nested(items: string[][]) {
         symbol(&javascript, "nested").health.sequential_await_loops,
         1
     );
+    assert_eq!(
+        symbol(&javascript, "replay").health.sequential_await_loops,
+        0
+    );
+    assert_eq!(
+        symbol(&javascript, "replay")
+            .health
+            .serial_await_dependency_loops,
+        1
+    );
+    assert_eq!(
+        symbol(&javascript, "drain").health.sequential_await_loops,
+        0
+    );
+    assert_eq!(
+        symbol(&javascript, "drain")
+            .health
+            .serial_await_control_flow_loops,
+        1
+    );
+    assert_eq!(
+        symbol(&javascript, "declaredSerial")
+            .health
+            .serial_await_intent_loops,
+        1
+    );
 
     let rust = extract(
         "src/loops.rs",
@@ -1049,6 +1124,35 @@ async fn bounded(items: Vec<Item>) {
 ",
     );
     assert_eq!(symbol(&rust, "bounded").health.sequential_await_loops, 0);
+}
+
+#[test]
+fn cohesive_returned_object_factories_are_classified_as_facades() {
+    let file = extract(
+        "src/records.ts",
+        r"
+export function recordsRepository(db: Database) {
+  const find = (id: string) => findRecord(db, id);
+  const list = (query: Query) => listRecords(db, query);
+  const create = (input: Input) => createRecord(db, input);
+  const update = (id: string, input: Input) => updateRecord(db, id, input);
+  const remove = (id: string) => removeRecord(db, id);
+  return { find, list, create, update, remove };
+}
+
+export function mixedOrchestrator(db: Database) {
+  const find = (id: string) => findRecord(db, id);
+  const list = (query: Query) => listRecords(db, query);
+  const create = (input: Input) => createRecord(db, input);
+  audit(db);
+  return { find, list, create };
+}
+",
+    );
+    let facade = symbol(&file, "recordsRepository");
+    assert!(facade.health.facade_factory);
+    assert_eq!(facade.health.facade_factory_delegates, 5);
+    assert!(!symbol(&file, "mixedOrchestrator").health.facade_factory);
 }
 
 #[test]

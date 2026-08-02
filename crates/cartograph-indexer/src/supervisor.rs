@@ -1733,7 +1733,7 @@ pub enum SupervisorError {
         operation: &'static str,
     },
     /// Pipeline work returned a stage-scoped failure.
-    #[error("Cartograph indexing failed during the {stage:?} stage")]
+    #[error("Cartograph indexing failed during the {stage} stage")]
     Pipeline {
         /// Stable pipeline stage.
         stage: PipelineStage,

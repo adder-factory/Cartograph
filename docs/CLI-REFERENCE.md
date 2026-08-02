@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-02 (`v2.1.4`).
+Last release audit: 2026-08-02 (`v2.1.5`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -22,7 +22,9 @@ cartograph graph <SYMBOL_ID> --direction path --to <TARGET_SYMBOL_ID>
 cartograph graph <SYMBOL_ID> --direction similar
   [--k 5] [--min-score 0.3] [--same-language] [--model-id <UUID>]
 cartograph affected [CHANGED_FILE ...] [--stdin | --files CHANGED_FILE ...]
-cartograph affected --symbol-id <SYMBOL_ID>
+  [--max-depth 5] [--max-nodes 40] [--limit 40]
+cartograph affected --symbol-id <SYMBOL_ID> [--max-depth 5] [--max-nodes 40]
+  [--limit 40]
 cartograph show <SYMBOL_ID>
 cartograph review --ref <GIT_REF>
 cartograph doctor [PROJECT]
@@ -68,7 +70,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.4 top-level command advertised
+This inventory contains every non-hidden v2.1.5 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -113,9 +115,11 @@ selection skips those targets without writing elsewhere; text output prints a
 warning, while JSON omits a report for each skipped target.
 
 Install/uninstall preserves unrelated entries and pins the absolute native
-executable. With `--location local`, it modifies only project-local agent
-configuration. For a non-default managed port, the installer also pins the
-non-secret loopback port in the portable server arguments. Restart the host
+executable. A versioned native installation is registered through the stable
+`~/.cartograph-cli/current/bin/cartograph` launcher, whose target changes
+atomically on upgrade. With `--location local`, installation modifies only
+project-local agent configuration. For a non-default managed port, it also pins
+the non-secret loopback port in the portable server arguments. Restart the host
 after a configuration or binary change.
 
 The stdio server is dual-era: MCP `2026-07-28` clients use stateless
@@ -126,11 +130,14 @@ deterministically ordered, and private-cacheable for one hour; task-local schema
 selection belongs in the host rather than a connection-mutating dispatcher.
 
 `cartograph upgrade --project-path <PATH>` audits Codex, Claude, and Cursor
-registrations in both local and global locations against the selected native
-executable. JSON reports a secret/path-safe `commandState`; stale absolute pins
-include an explicit `repinCommand`. After repinning, restart the host and prove
-`server/discover` (or legacy `initialize`), `tools/list`, `cartograph_status`,
-and one real query on the new transport.
+registrations in both local and global locations against the stable launcher.
+After a versioned binary is installed, it repairs each stale owned pin through
+the normal safe installer, preserving unrelated configuration and managed-port
+arguments. JSON retains the secret/path-safe `commandState`, prior audit,
+`registrationRepair` outcome, and any remaining explicit `repinCommand`.
+Binary installation remains applied if a registration repair fails. Restart
+the host and prove `server/discover` (or legacy `initialize`), `tools/list`,
+`cartograph_status`, and one real query on the new transport.
 
 ## Database lifecycle
 

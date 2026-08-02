@@ -873,18 +873,55 @@ mod tests {
             .is_ok()
         );
         assert!(fs::write(root.join(".gitignore"), "third_party_sdk/\n").is_ok());
+        assert!(fs::create_dir_all(root.join(".private-worktrees/example")).is_ok());
+        run_git(
+            &root.join(".private-worktrees/example"),
+            &["init", "--initial-branch=main"],
+        );
+        assert!(
+            fs::write(
+                root.join(".private-worktrees/example/private.ts"),
+                "export const privateWorktree = true;\n"
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                root.join(".gitignore"),
+                "third_party_sdk/\n.private-worktrees/\n"
+            )
+            .is_ok()
+        );
 
         assert_eq!(
             nested_paths(root, true, true),
-            ["modules/sub/sub.ts", "third_party_sdk/sdk.ts"]
+            [
+                ".private-worktrees/example/private.ts",
+                "modules/sub/sub.ts",
+                "third_party_sdk/sdk.ts"
+            ]
         );
         assert_eq!(nested_paths(root, true, false), ["modules/sub/sub.ts"]);
         assert!(nested_paths(root, false, true).is_empty());
+        assert_eq!(
+            nested_paths_with_excludes(root, true, true, &[".private-worktrees/**".to_owned()]),
+            ["modules/sub/sub.ts", "third_party_sdk/sdk.ts"]
+        );
     }
 
     fn nested_paths(root: &Path, submodules: bool, embedded: bool) -> Vec<String> {
-        let policy = DiscoveryPolicy::new(&[], NestedRepositoryPolicy::new(submodules, embedded))
-            .unwrap_or_else(|error| panic!("nested policy failed: {error}"));
+        nested_paths_with_excludes(root, submodules, embedded, &[])
+    }
+
+    fn nested_paths_with_excludes(
+        root: &Path,
+        submodules: bool,
+        embedded: bool,
+        excludes: &[String],
+    ) -> Vec<String> {
+        let policy =
+            DiscoveryPolicy::new(excludes, NestedRepositoryPolicy::new(submodules, embedded))
+                .unwrap_or_else(|error| panic!("nested policy failed: {error}"));
         SourceRoot::open_with_policy(root, policy)
             .unwrap_or_else(|error| panic!("nested source root failed: {error}"))
             .discover(limits())

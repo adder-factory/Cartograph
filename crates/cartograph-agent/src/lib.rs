@@ -27,7 +27,7 @@ use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CartographDatabase, GenerationContents, GenerationRecoveryRequest, GenerationRetentionPolicy,
     GenerationRetentionReport, GenerationRetentionRequest, HistoryRefreshReport,
-    IssueHistoryRefreshReport, LeaseError, LeaseRequest, LeaseTarget,
+    IssueHistoryRefreshReport, LeaseError, LeaseRequest, LeaseTarget, MigrationError,
     NativeParseCacheRetentionPolicy, NativeParseCacheRetentionReport,
     NativeParseCacheRetentionRequest, NewGeneration, NewProject, ProjectSnapshot, StagedGeneration,
 };
@@ -39,11 +39,12 @@ use cartograph_extract::{
     DiscoveryLimits, DiscoveryPolicy, NestedRepositoryPolicy, SourceDiscoveryOptions, SourceLimits,
     SourceReadError, SourceReadOptions, SourceRoot, native_extractor_contract_digest,
 };
+pub use cartograph_indexer::PipelineStage;
 use cartograph_indexer::{
     IndexerSupervisor, NativeGenerationBuild, NativeParseCache, NativePipelineConfig,
     NativePipelineDeadlines, NativePipelineLimits, NativePipelineParallelism, NativePipelineReport,
-    NativeRetainedLimits, PipelineFailure, PipelineStage, PipelineStageTiming, ScipOverlayInput,
-    StageCapacity, SupervisorConfig, SupervisorContext, SupervisorRequest,
+    NativeRetainedLimits, PipelineFailure, PipelineStageTiming, ScipOverlayInput, StageCapacity,
+    SupervisorConfig, SupervisorContext, SupervisorError, SupervisorRequest,
     build_native_generation_with_scip_and_cache,
 };
 use cartograph_llm::{ProjectSourceSettings, load_project_source_settings};
@@ -1005,10 +1006,17 @@ impl ProjectRuntime {
             .await
             .map_err(|_| ProjectError::DatabaseUnavailable)?;
         let database = CartographDatabase::new(pool, settings.schema().clone());
-        database
-            .migrate()
-            .await
-            .map_err(|_| ProjectError::MigrationFailed)?;
+        match database.migrate().await {
+            Ok(_) => {}
+            Err(MigrationError::SchemaVersionAhead { version }) => {
+                return Err(ProjectError::SchemaVersionAhead {
+                    binary_version: env!("CARGO_PKG_VERSION"),
+                    database_schema_version: version,
+                    supported_schema_version: cartograph_db::latest_schema_version(),
+                });
+            }
+            Err(_) => return Err(ProjectError::MigrationFailed),
+        }
         Ok(Self {
             root,
             root_identity,
@@ -1500,6 +1508,17 @@ impl PreparedIndexPublication {
             Err(_) if self.cancellation.is_cancelled() => {
                 return Err(ProjectError::RequestCancelled);
             }
+            Err(SupervisorError::Pipeline { stage }) => {
+                return Err(ProjectError::IndexStageFailed { stage });
+            }
+            Err(SupervisorError::Lease { .. } | SupervisorError::OwnershipLost { .. }) => {
+                return Err(ProjectError::IndexLeaseFailed);
+            }
+            Err(
+                SupervisorError::Storage { .. }
+                | SupervisorError::AmbiguousOutcome { .. }
+                | SupervisorError::GenerationMismatch,
+            ) => return Err(ProjectError::IndexPublicationFailed),
             Err(_) => return Err(ProjectError::IndexFailed),
         };
         let native = self
@@ -2231,6 +2250,18 @@ pub enum ProjectError {
     /// Required capabilities or append-only migrations failed.
     #[error("Cartograph PostgreSQL migration failed")]
     MigrationFailed,
+    /// The database was migrated by a newer Cartograph binary.
+    #[error(
+        "Cartograph {binary_version} supports schema version {supported_schema_version}, but the database is at newer schema version {database_schema_version}; upgrade the Cartograph binary and repin the MCP registration before retrying"
+    )]
+    SchemaVersionAhead {
+        /// Version of the binary that detected the mismatch.
+        binary_version: &'static str,
+        /// Newer schema version recorded by PostgreSQL.
+        database_schema_version: i64,
+        /// Highest schema version this binary can safely use.
+        supported_schema_version: i64,
+    },
     /// A project identity could not be registered safely.
     #[error("Cartograph project registration failed")]
     RegisterFailed,
@@ -2246,6 +2277,24 @@ pub enum ProjectError {
     /// A bounded extraction/COPY/publication stage failed.
     #[error("Cartograph index operation failed; the previous generation remains visible")]
     IndexFailed,
+    /// One exact native pipeline stage failed before publication.
+    #[error(
+        "Cartograph index operation failed during the {stage} stage; the previous generation remains visible"
+    )]
+    IndexStageFailed {
+        /// Stable credential-safe stage identifier.
+        stage: PipelineStage,
+    },
+    /// The index operation could not acquire or retain its exact lease.
+    #[error(
+        "Cartograph index operation failed during the lease stage; the previous generation remains visible"
+    )]
+    IndexLeaseFailed,
+    /// Durable preparation or atomic publication could not be reconciled safely.
+    #[error(
+        "Cartograph index operation failed during the publication stage; the previous generation remains visible"
+    )]
+    IndexPublicationFailed,
     /// A failed pre-publication generation could not be terminalized safely.
     #[error("Cartograph index cleanup failed; inspect generation retention before retrying")]
     IndexCleanupFailed,
@@ -2286,6 +2335,20 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_ahead_error_names_binary_and_both_schema_versions() {
+        let error = ProjectError::SchemaVersionAhead {
+            binary_version: "2.1.4",
+            database_schema_version: 27,
+            supported_schema_version: 26,
+        };
+        let message = error.to_string();
+        assert!(message.contains("Cartograph 2.1.4"));
+        assert!(message.contains("schema version 26"));
+        assert!(message.contains("schema version 27"));
+        assert!(message.contains("repin the MCP registration"));
+    }
 
     #[test]
     fn retention_release_warning_preserves_the_committed_cleanup_report() {

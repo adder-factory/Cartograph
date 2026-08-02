@@ -355,8 +355,12 @@ backups remain separate.
 ### Agent cannot start the MCP server after upgrade
 
 Run `cartograph --version` and `cartograph doctor <project>` in the same shell,
-then re-run `cartograph install --yes --target <host>` to repin the absolute
-executable. Restart the host.
+then run `cartograph upgrade --project-path <project> --json`. Versioned native
+installs use the stable `~/.cartograph-cli/current/bin/cartograph` launcher and
+the upgrade repairs stale owned host pins through the safe installer. Inspect
+`registrationRepair` and any remaining `repinCommand`, then restart the host.
+If the database schema is newer than the loaded binary, use the reported binary
+and supported-schema versions to upgrade before retrying; startup fails closed.
 
 ## Development and release gates
 

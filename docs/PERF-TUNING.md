@@ -41,6 +41,15 @@ policy as indexing, reloads after `config.json` changes, and ignores access-only
 build-output, dependency-cache, and private `.cartograph` churn. Configuration
 and SCIP-overlay events remain explicit reconciliation triggers.
 
+An unchanged source revision that fails automatic indexing is not retried in a
+tight loop. Auto-sync records its stable stage code and uses exponential retry
+delays from 30 seconds through a 15-minute cap. After five failed automatic
+attempts, that revision is suppressed until the supported source revision
+changes. Explicit/manual index requests remain available. Structured status
+exposes `lastErrorCode`, `lastFailureAt`, `nextRetryAt`,
+`failedRevisionAttempts`, and `retrySuppressed`; a new source revision clears
+the failed-revision state before the next bounded attempt.
+
 Managed local LLM logs rotate at 32 MiB and retain one `.1` file. Inspect stale
 rotated logs and invalid PID state without mutation, then apply only a bounded
 age-qualified batch with the exact confirmation:

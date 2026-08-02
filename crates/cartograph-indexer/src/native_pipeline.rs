@@ -122,6 +122,8 @@ const DUPLICATE_NEAR_MINIMUM_LINES: u32 = 12;
 const DUPLICATE_MAXIMUM_LITERAL_RATIO_PPM: u64 = 600_000;
 const DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM: u32 = 950_000;
 const DUPLICATE_PARTIAL_WIDER_OVERLAP_PPM: u32 = 800_000;
+const DUPLICATE_IDENTIFIER_MINIMUM_OVERLAP_PPM: u32 = 500_000;
+const DUPLICATE_SAME_FILE_IDENTIFIER_OVERLAP_PPM: u32 = 100_000;
 const MAXIMUM_LISTED_CLONE_PEERS: usize = 10;
 const MAXIMUM_TYPESCRIPT_ALIAS_CONFIGS: usize = 256;
 const MAXIMUM_TYPESCRIPT_PATH_MAPPINGS: usize = 256;
@@ -1956,6 +1958,7 @@ fn normalize_native_symbol(
         clone_shape_digest,
         clone_token_profile,
         duplicate_detection_enabled: true,
+        near_clone_compatibility: NearCloneCompatibility::Unclaimed,
         partial_clone: None,
         augmentation,
     }
@@ -1982,14 +1985,29 @@ struct NativeSymbolFacts {
     clone_shape_digest: ContentDigest,
     clone_token_profile: Option<CloneTokenProfile>,
     duplicate_detection_enabled: bool,
+    near_clone_compatibility: NearCloneCompatibility,
     partial_clone: Option<PartialCloneEvidence>,
     augmentation: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NearCloneCompatibility {
+    Unclaimed,
+    Compatible,
+}
+
+impl NearCloneCompatibility {
+    const fn is_compatible(self) -> bool {
+        matches!(self, Self::Compatible)
+    }
+}
+
 struct PartialCloneEvidence {
     peer_count: u32,
+    component_size: u32,
     maximum_overlap_ppm: u32,
     minimum_overlap_ppm: u32,
+    representative: SymbolId,
     listed_peers: Vec<SymbolId>,
 }
 
@@ -2006,13 +2024,15 @@ impl NativeSymbolFacts {
                     .map_or(0, |profile| usize_to_u64(profile.retained_bytes())),
             )
             .saturating_add(self.partial_clone.as_ref().map_or(0, |evidence| {
-                vector_capacity_bytes(&evidence.listed_peers).saturating_add(
-                    evidence
-                        .listed_peers
-                        .iter()
-                        .map(|peer| usize_to_u64(peer.as_str().len()))
-                        .sum(),
-                )
+                vector_capacity_bytes(&evidence.listed_peers)
+                    .saturating_add(usize_to_u64(evidence.representative.as_str().len()))
+                    .saturating_add(
+                        evidence
+                            .listed_peers
+                            .iter()
+                            .map(|peer| usize_to_u64(peer.as_str().len()))
+                            .sum(),
+                    )
             }))
             .saturating_add(
                 self.docstring
@@ -4025,6 +4045,8 @@ struct CloneAnalysisCandidate {
     minimum_overlap_ppm: u32,
     listed_peer_indexes: [Option<usize>; MAXIMUM_LISTED_CLONE_PEERS],
     listed_peer_count: usize,
+    partial_component_parent: usize,
+    partial_component_rank: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -4098,6 +4120,7 @@ where
                 symbol.clone_token_profile = None;
                 continue;
             }
+            let candidate_index = candidates.len();
             candidates.push(CloneAnalysisCandidate {
                 file_index,
                 symbol_index,
@@ -4110,6 +4133,8 @@ where
                 minimum_overlap_ppm: 0,
                 listed_peer_indexes: [None; MAXIMUM_LISTED_CLONE_PEERS],
                 listed_peer_count: 0,
+                partial_component_parent: candidate_index,
+                partial_component_rank: 0,
             });
         }
     }
@@ -4197,7 +4222,7 @@ where
 }
 
 fn mark_near_clone_candidates<Cancel>(
-    extracted: &NativeFactAccumulator,
+    extracted: &mut NativeFactAccumulator,
     candidates: &mut [CloneAnalysisCandidate],
     cancelled: &mut Cancel,
 ) -> Result<(), StageItemFailure>
@@ -4241,9 +4266,27 @@ where
                     .structural_digest
                     != *first_digest
             });
-            if spans_multiple_exact_digests {
+            let semantic_compatible =
+                order[start..end]
+                    .iter()
+                    .enumerate()
+                    .all(|(left_position, left)| {
+                        order[start..end]
+                            .iter()
+                            .skip(left_position.saturating_add(1))
+                            .all(|right| {
+                                clone_candidates_semantically_compatible(
+                                    &candidates[*left],
+                                    &candidates[*right],
+                                )
+                            })
+                    });
+            if spans_multiple_exact_digests && semantic_compatible {
                 for candidate in &order[start..end] {
                     candidates[*candidate].syntactic_claimed = true;
+                    extracted.files[candidates[*candidate].file_index].symbols
+                        [candidates[*candidate].symbol_index]
+                        .near_clone_compatibility = NearCloneCompatibility::Compatible;
                 }
             }
         }
@@ -4318,19 +4361,25 @@ where
             if overlap_ppm < minimum_overlap_ppm {
                 continue;
             }
+            if !clone_candidates_semantically_compatible(
+                &candidates[left_index],
+                &candidates[right_index],
+            ) {
+                continue;
+            }
             link_partial_candidates(PartialCloneLink {
                 candidates,
                 left: left_index,
                 right: right_index,
                 overlap_ppm,
                 minimum_overlap_ppm,
-            });
+            })?;
         }
     }
     Ok(())
 }
 
-fn link_partial_candidates(input: PartialCloneLink<'_>) {
+fn link_partial_candidates(input: PartialCloneLink<'_>) -> Result<(), StageItemFailure> {
     let PartialCloneLink {
         candidates,
         left,
@@ -4338,6 +4387,7 @@ fn link_partial_candidates(input: PartialCloneLink<'_>) {
         overlap_ppm,
         minimum_overlap_ppm,
     } = input;
+    union_partial_clone_components(candidates, left, right)?;
     let (left_candidate, right_candidate) = if left < right {
         let (before_right, from_right) = candidates.split_at_mut(right);
         (&mut before_right[left], &mut from_right[0])
@@ -4359,6 +4409,53 @@ fn link_partial_candidates(input: PartialCloneLink<'_>) {
         left_candidate.first_partial_band_hit = true;
         right_candidate.first_partial_band_hit = true;
     }
+    Ok(())
+}
+
+fn partial_clone_component_root(
+    candidates: &[CloneAnalysisCandidate],
+    mut index: usize,
+) -> Result<usize, StageItemFailure> {
+    for _ in 0..=candidates.len() {
+        let candidate = candidates.get(index).ok_or(StageItemFailure)?;
+        if candidate.partial_component_parent == index {
+            return Ok(index);
+        }
+        index = candidate.partial_component_parent;
+    }
+    Err(StageItemFailure)
+}
+
+fn union_partial_clone_components(
+    candidates: &mut [CloneAnalysisCandidate],
+    left: usize,
+    right: usize,
+) -> Result<(), StageItemFailure> {
+    let mut left_root = partial_clone_component_root(candidates, left)?;
+    let mut right_root = partial_clone_component_root(candidates, right)?;
+    if left_root == right_root {
+        return Ok(());
+    }
+    let left_rank = candidates
+        .get(left_root)
+        .ok_or(StageItemFailure)?
+        .partial_component_rank;
+    let right_rank = candidates
+        .get(right_root)
+        .ok_or(StageItemFailure)?
+        .partial_component_rank;
+    if left_rank < right_rank {
+        std::mem::swap(&mut left_root, &mut right_root);
+    }
+    candidates
+        .get_mut(right_root)
+        .ok_or(StageItemFailure)?
+        .partial_component_parent = left_root;
+    if left_rank == right_rank {
+        let root = candidates.get_mut(left_root).ok_or(StageItemFailure)?;
+        root.partial_component_rank = root.partial_component_rank.saturating_add(1);
+    }
+    Ok(())
 }
 
 fn persist_partial_clone_evidence<Cancel>(
@@ -4373,7 +4470,41 @@ where
         budget,
         cancelled,
     } = input;
-    for candidate in candidates {
+    if candidates
+        .iter()
+        .all(|candidate| candidate.partial_peer_count == 0)
+    {
+        return Ok(());
+    }
+    let component_slot_bytes = usize_to_u64(candidates.len()).saturating_mul(
+        usize_to_u64(size_of::<Option<usize>>()).saturating_add(usize_to_u64(size_of::<u32>())),
+    );
+    budget.charge(component_slot_bytes)?;
+    let mut component_representatives = Vec::new();
+    component_representatives
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| StageItemFailure)?;
+    component_representatives.resize(candidates.len(), None);
+    let mut component_sizes = Vec::new();
+    component_sizes
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| StageItemFailure)?;
+    component_sizes.resize(candidates.len(), 0_u32);
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
+        if candidate.partial_peer_count == 0 {
+            continue;
+        }
+        let root = partial_clone_component_root(candidates, candidate_index)?;
+        component_sizes[root] = component_sizes[root].saturating_add(1);
+        let replace = component_representatives[root].is_none_or(|representative| {
+            clone_symbol_id(extracted, candidate)
+                < clone_symbol_id(extracted, &candidates[representative])
+        });
+        if replace {
+            component_representatives[root] = Some(candidate_index);
+        }
+    }
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -4401,11 +4532,19 @@ where
         for peer in peer_indexes {
             listed_peers.push(clone_symbol_id(extracted, &candidates[peer]).clone());
         }
+        let component_root = partial_clone_component_root(candidates, candidate_index)?;
+        let representative_index =
+            component_representatives[component_root].ok_or(StageItemFailure)?;
+        budget.charge(usize_to_u64(size_of::<SymbolId>()).saturating_add(UUID_TEXT_BYTES))?;
+        let representative = clone_symbol_id(extracted, &candidates[representative_index]).clone();
+        let component_size = component_sizes[component_root];
         extracted.files[candidate.file_index].symbols[candidate.symbol_index].partial_clone =
             Some(PartialCloneEvidence {
                 peer_count: candidate.partial_peer_count,
+                component_size,
                 maximum_overlap_ppm: candidate.maximum_overlap_ppm,
                 minimum_overlap_ppm: candidate.minimum_overlap_ppm,
+                representative,
                 listed_peers,
             });
     }
@@ -4488,6 +4627,45 @@ fn clone_profile_overlap_ppm(left: &CloneTokenProfile, right: &CloneTokenProfile
     }
     let maximum = u64::from(left.total_tokens().max(right.total_tokens())).max(1);
     u32::try_from(intersection.saturating_mul(1_000_000) / maximum).unwrap_or(u32::MAX)
+}
+
+fn clone_identifier_overlap_ppm(left: &CloneTokenProfile, right: &CloneTokenProfile) -> u32 {
+    let mut left_index = 0_usize;
+    let mut right_index = 0_usize;
+    let mut intersection = 0_u64;
+    while left_index < left.identifier_counts().len()
+        && right_index < right.identifier_counts().len()
+    {
+        let left_count = left.identifier_counts()[left_index];
+        let right_count = right.identifier_counts()[right_index];
+        match left_count.0.cmp(&right_count.0) {
+            std::cmp::Ordering::Less => left_index = left_index.saturating_add(1),
+            std::cmp::Ordering::Greater => right_index = right_index.saturating_add(1),
+            std::cmp::Ordering::Equal => {
+                intersection =
+                    intersection.saturating_add(u64::from(left_count.1.min(right_count.1)));
+                left_index = left_index.saturating_add(1);
+                right_index = right_index.saturating_add(1);
+            }
+        }
+    }
+    let maximum = u64::from(left.identifier_tokens().max(right.identifier_tokens())).max(1);
+    u32::try_from(intersection.saturating_mul(1_000_000) / maximum).unwrap_or(u32::MAX)
+}
+
+fn clone_candidates_semantically_compatible(
+    left: &CloneAnalysisCandidate,
+    right: &CloneAnalysisCandidate,
+) -> bool {
+    match (left.profile.as_ref(), right.profile.as_ref()) {
+        (Some(left_profile), Some(right_profile)) => {
+            let overlap = clone_identifier_overlap_ppm(left_profile, right_profile);
+            overlap >= DUPLICATE_IDENTIFIER_MINIMUM_OVERLAP_PPM
+                || (left.file_index == right.file_index
+                    && overlap >= DUPLICATE_SAME_FILE_IDENTIFIER_OVERLAP_PPM)
+        }
+        _ => false,
+    }
 }
 
 fn is_production_clone_path(path: &str) -> bool {
@@ -6587,12 +6765,15 @@ impl ResolutionOutput<'_> {
         let code = symbol_document_code(&symbol)?;
         let partial_clone = symbol.partial_clone.as_ref().map(|evidence| {
             json!({
+                "component_size": evidence.component_size,
                 "listed_peer_symbol_ids": evidence.listed_peers,
                 "maximum_overlap_ppm": evidence.maximum_overlap_ppm,
                 "minimum_overlap_ppm": evidence.minimum_overlap_ppm,
                 "peer_count": evidence.peer_count,
+                "representative_symbol_id": evidence.representative,
             })
         });
+        let health = symbol_health_metadata(&symbol.health);
         self.facts.documents.push(SearchDocumentInput {
             document_id,
             file_id: Some(identity.file_id.clone()),
@@ -6612,41 +6793,14 @@ impl ResolutionOutput<'_> {
                 "async": symbol.execution.async_symbol,
                 "body_search_truncated": symbol.body_search_truncated,
                 "clone_shape_digest": symbol.clone_shape_digest.as_str(),
+                "near_clone_compatible": symbol.near_clone_compatibility.is_compatible(),
                 "duplicate_detection_enabled": symbol.duplicate_detection_enabled,
                 "partial_clone": partial_clone,
                 "declaration_only": symbol.implementation.declaration_only,
                 "test_symbol": symbol.implementation.test_symbol,
                 "default_export": symbol.export.default_export,
                 "exported": symbol.export.exported,
-                "health": {
-                    "code_lines": symbol.health.code_lines,
-                    "parameter_count": symbol.health.parameter_count,
-                    "cyclomatic": symbol.health.cyclomatic,
-                    "max_nesting": symbol.health.max_nesting,
-                    "max_conditional_operands": symbol.health.max_conditional_operands,
-                    "literal_bytes": symbol.health.literal_bytes,
-                    "magic_numbers": symbol.health.magic_numbers,
-                    "hardcoded_urls": symbol.health.hardcoded_urls,
-                    "secrets_score": symbol.health.secrets_score,
-                    "secrets_signal_mask": symbol.health.secrets_signal_mask,
-                    "stale_doc_numbers": symbol.health.stale_doc_numbers,
-                    "accidental_quadratic": symbol.health.accidental_quadratic,
-                    "empty_catches": symbol.health.empty_catches,
-                    "sync_io_in_async": symbol.health.sync_io_in_async,
-                    "sequential_await_loops": symbol.health.sequential_await_loops,
-                    "ts_any_casts": symbol.health.ts_any_casts,
-                    "ts_suppressions": symbol.health.ts_suppressions,
-                    "debug_logs": symbol.health.debug_logs,
-                    "incomplete_markers": symbol.health.incomplete_markers,
-                    "dynamic_eval": symbol.health.dynamic_eval,
-                    "insecure_hash": symbol.health.insecure_hash,
-                    "insecure_random": symbol.health.insecure_random,
-                    "http_without_timeout": symbol.health.http_without_timeout,
-                    "sql_string_concatenation": symbol.health.sql_string_concatenation,
-                    "unsafe_json_parse": symbol.health.unsafe_json_parse,
-                    "unvalidated_env": symbol.health.unvalidated_env,
-                    "empty_body": symbol.health.empty_body,
-                },
+                "health": health,
                 "name": symbol.name,
                 "static": symbol.execution.static_member,
                 "visibility": symbol.visibility.map(Visibility::as_str),
@@ -6655,6 +6809,10 @@ impl ResolutionOutput<'_> {
         self.facts.symbols.push(symbol.input);
         Ok(())
     }
+}
+
+fn symbol_health_metadata(health: &cartograph_extract::SymbolHealthMetrics) -> Value {
+    json!(health)
 }
 
 fn numerical_site_input(file_id: &FileId, site: ExtractedNumericalSite) -> NumericalSiteInput {
@@ -8100,12 +8258,23 @@ where
             imported_name,
             module_file_id,
         });
+        let javascript_value_usage = matches!(site, ImportReferenceSite::Usage)
+            && javascript_family_name(reference.language)
+            && !matches!(
+                reference.kind,
+                ReferenceKind::TypeOf
+                    | ReferenceKind::Returns
+                    | ReferenceKind::Inherits
+                    | ReferenceKind::Implements
+                    | ReferenceKind::Extends
+            );
         if let Some(candidate) = select_candidate(
             candidates,
             |candidate| {
                 &candidate.file_id == module_file_id
                     && candidate.export.exported
                     && reference_kind_candidate(reference.kind, candidate)
+                    && (!javascript_value_usage || javascript_runtime_import_candidate(candidate))
                     && (reference.language != SourceLanguage::Rust.as_str()
                         || rust_module_candidate_visible(RustCandidateVisibility {
                             index,
@@ -8563,7 +8732,13 @@ fn runtime_binding_target_name<'a>(
 ) -> Option<&'a str> {
     match binding.kind {
         ImportBindingKind::Default | ImportBindingKind::Named => {
-            (binding.local_name == reference_name).then_some(binding.imported_name.as_str())
+            if binding.local_name == reference_name {
+                return Some(binding.imported_name.as_str());
+            }
+            reference_name
+                .strip_prefix(&binding.local_name)
+                .filter(|suffix| suffix.starts_with('.') || suffix.starts_with("::"))
+                .map(|_| binding.imported_name.as_str())
         }
         ImportBindingKind::Namespace => {
             if language == SourceLanguage::Rust.as_str() && binding.local_name == "*" {
@@ -8589,6 +8764,17 @@ fn runtime_binding_target_name<'a>(
         | ImportBindingKind::ReExportNamespace
         | ImportBindingKind::ReExportNamed => None,
     }
+}
+
+fn javascript_runtime_import_candidate(candidate: &ResolutionCandidate) -> bool {
+    !matches!(
+        candidate.kind,
+        SymbolKind::TypeAlias
+            | SymbolKind::Interface
+            | SymbolKind::Union
+            | SymbolKind::Trait
+            | SymbolKind::Protocol
+    )
 }
 
 fn resolve_module_file<'a>(
@@ -10571,21 +10757,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "d67ce82c32230ef36158e6277161d7a6bae998125e2b696fe4dc9dc6a47fe11c";
+        "59b61f108a6adf0b27afa8b7c8b653cd19e56f31b1fc38ab66fcb042188f0aa2";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "16851e79b5e33cd25a75bf6ce8133cdd0afb3369307c3f4816d0b639ce9eeeaa";
+        "5045210cf48045f8cfb4430331bc1fca725c84ade43331bd3ee1f424fecd83e1";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "32038aae4beab2afa138072f35134e45b66170082cc6cdf41255f851ecbb2b12";
+        "102b4a9004142e5ca0469c952745c2697797ecffcc92ec741fe1701aa8ed5231";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 12;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "44ce48ea5c242edd2ea7b97da271e774f8a53f10bd3891d69fe71b709692fcd2";
+        "5f78fa17a9f0d2a275323ea738b4dc762db383ce46b50ea7a74caf667288976e";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (12, 40, 34, 27, 40);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -11583,7 +11769,7 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
         );
         assert_eq!(
             serial.facts().digest_version(),
-            cartograph_domain::GenerationDigestVersion::V7
+            cartograph_domain::GenerationDigestVersion::V8
         );
         assert_eq!(
             serial.report().numerical_sites(),
@@ -12875,6 +13061,64 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
     }
 
     #[test]
+    fn value_and_type_only_imports_retain_external_consumers() {
+        let fixtures = [
+            (
+                "src/service.ts",
+                "import { z } from 'zod';\nexport const RuntimeSchema = z.object({ value: z.string() });\nexport type RuntimeSchema = z.infer<typeof RuntimeSchema>;\n",
+            ),
+            (
+                "src/build.ts",
+                "import { RuntimeSchema } from './service';\nexport function parseRuntime(value: unknown) { return RuntimeSchema.safeParse(value); }\n",
+            ),
+            (
+                "src/model.ts",
+                "export type PublicRecord = Readonly<{ id: string }>;\n",
+            ),
+            (
+                "src/consumer.ts",
+                "import type { PublicRecord } from './model';\nexport function readId(value: PublicRecord): string { return value.id; }\n",
+            ),
+        ];
+        let facts = build_capability_generation(&fixtures, false);
+        for (source_path, target_path, name) in [
+            ("src/build.ts", "src/service.ts", "RuntimeSchema"),
+            ("src/consumer.ts", "src/model.ts", "PublicRecord"),
+        ] {
+            let source_file = facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == source_path)
+                .unwrap_or_else(|| panic!("missing source file {source_path}"));
+            let target_file = facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == target_path)
+                .unwrap_or_else(|| panic!("missing target file {target_path}"));
+            let targets = facts
+                .symbols()
+                .iter()
+                .filter(|symbol| {
+                    symbol.file_id == target_file.file_id && symbol.qualified_name == name
+                })
+                .map(|symbol| &symbol.symbol_id)
+                .collect::<Vec<_>>();
+            assert!(!targets.is_empty(), "missing target {target_path}::{name}");
+            assert!(
+                facts.edges().iter().any(|edge| {
+                    targets.contains(&&edge.target_symbol_id)
+                        && facts.symbols().iter().any(|symbol| {
+                            symbol.symbol_id == edge.source_symbol_id
+                                && symbol.file_id == source_file.file_id
+                        })
+                }),
+                "missing external consumer edge {source_path} -> {target_path}::{name}; references={:?}",
+                facts.references()
+            );
+        }
+    }
+
+    #[test]
     fn static_javascript_value_references_resolve_to_traversable_handler_edges() {
         let fixtures = [(
             "src/wire.tsx",
@@ -13894,18 +14138,164 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
             .filter(|document| document.qualified_name() == "calculate")
             .collect::<Vec<_>>();
         assert_eq!(documents.len(), 2);
+        let document_symbol_ids = documents
+            .iter()
+            .filter_map(|document| document.symbol_id().map(SymbolId::as_str))
+            .collect::<BTreeSet<_>>();
+        let mut representatives = BTreeSet::new();
         for document in documents {
             let metadata = serde_json::from_str::<serde_json::Value>(document.metadata_json())
                 .unwrap_or_else(|error| panic!("clone metadata was invalid: {error}"));
             assert_eq!(metadata["partial_clone"]["peer_count"], 1);
+            assert_eq!(metadata["partial_clone"]["component_size"], 2);
             assert_eq!(metadata["partial_clone"]["maximum_overlap_ppm"], 1_000_000);
             assert_eq!(metadata["partial_clone"]["minimum_overlap_ppm"], 950_000);
+            let representative = metadata["partial_clone"]["representative_symbol_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("partial clone representative was missing"));
+            assert!(document_symbol_ids.contains(representative));
+            representatives.insert(representative.to_owned());
             assert_eq!(
                 metadata["partial_clone"]["listed_peer_symbol_ids"]
                     .as_array()
                     .map(Vec::len),
                 Some(1)
             );
+        }
+        assert_eq!(representatives.len(), 1);
+    }
+
+    #[test]
+    fn partial_clone_components_remain_single_beyond_the_display_peer_cap() {
+        let mut candidates = (0..MAXIMUM_LISTED_CLONE_PEERS.saturating_add(2))
+            .map(|index| CloneAnalysisCandidate {
+                file_index: index,
+                symbol_index: 0,
+                language: SourceLanguage::TypeScript,
+                profile: None,
+                syntactic_claimed: false,
+                first_partial_band_hit: false,
+                partial_peer_count: 0,
+                maximum_overlap_ppm: 0,
+                minimum_overlap_ppm: 0,
+                listed_peer_indexes: [None; MAXIMUM_LISTED_CLONE_PEERS],
+                listed_peer_count: 0,
+                partial_component_parent: index,
+                partial_component_rank: 0,
+            })
+            .collect::<Vec<_>>();
+        for left in 0..candidates.len() {
+            for right in left.saturating_add(1)..candidates.len() {
+                link_partial_candidates(PartialCloneLink {
+                    candidates: &mut candidates,
+                    left,
+                    right,
+                    overlap_ppm: DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM,
+                    minimum_overlap_ppm: DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM,
+                })
+                .unwrap_or_else(|_| panic!("partial clone component link failed"));
+            }
+        }
+        let root = partial_clone_component_root(&candidates, 0)
+            .unwrap_or_else(|_| panic!("partial clone component root failed"));
+        for (index, candidate) in candidates.iter().enumerate() {
+            assert_eq!(
+                candidate.partial_peer_count,
+                u32::try_from(candidates.len().saturating_sub(1)).unwrap_or(u32::MAX)
+            );
+            assert_eq!(candidate.listed_peer_count, MAXIMUM_LISTED_CLONE_PEERS);
+            assert_eq!(
+                partial_clone_component_root(&candidates, index)
+                    .unwrap_or_else(|_| panic!("partial clone component root failed")),
+                root
+            );
+        }
+    }
+
+    #[test]
+    fn clone_analysis_abstains_for_cross_domain_shape_lookalikes() {
+        let sessions = r"export async function revokeSession(id: string) {
+  const result = await sessions.revoke(id);
+  const mapped = mapSessionResult(result);
+  if (mapped.ok) {
+    recordSessionAudit(mapped);
+  }
+
+
+
+
+  return mapped;
+}
+";
+        let billing = r"export async function cancelInvoice(number: InvoiceId) {
+  const outcome = await invoices.cancel(number);
+  const response = mapInvoiceResult(outcome);
+  if (response.accepted) {
+    recordBillingLedger(response);
+  }
+
+
+
+
+  return response;
+}
+";
+        let facts = build_capability_generation(
+            &[
+                ("src/sessions/revoke.ts", sessions),
+                ("src/billing/cancel.ts", billing),
+            ],
+            false,
+        );
+        for document in facts.documents().iter().filter(|document| {
+            matches!(document.qualified_name(), "revokeSession" | "cancelInvoice")
+        }) {
+            let metadata = serde_json::from_str::<serde_json::Value>(document.metadata_json())
+                .unwrap_or_else(|error| panic!("clone metadata was invalid: {error}"));
+            assert_eq!(metadata["near_clone_compatible"], false);
+            assert!(metadata["partial_clone"].is_null());
+        }
+    }
+
+    #[test]
+    fn clone_analysis_keeps_same_file_shape_with_shared_semantic_callee() {
+        let source = r"export function firstClone(input: number) {
+  const offset = input + 2;
+  const doubled = offset * 3;
+  const bounded = Math.max(doubled, 1);
+  const normalized = bounded / 2;
+  if (normalized > 9) {
+    const adjusted = normalized - 4;
+    return adjusted * 2;
+  }
+  const fallback = normalized + 5;
+  return fallback * 3;
+}
+export function secondClone(value: number) {
+  const delta = value + 6;
+  const scaled = delta * 7;
+  const clamped = Math.max(scaled, 5);
+  const ratio = clamped / 4;
+  if (ratio > 21) {
+    const reduced = ratio - 8;
+    return reduced * 6;
+  }
+  const alternative = ratio + 11;
+  return alternative * 7;
+}
+";
+        let facts = build_capability_generation(&[("src/clones.ts", source)], false);
+        let documents = facts
+            .documents()
+            .iter()
+            .filter(|document| matches!(document.qualified_name(), "firstClone" | "secondClone"))
+            .collect::<Vec<_>>();
+        assert_eq!(documents.len(), 2);
+        for document in documents {
+            let metadata = serde_json::from_str::<serde_json::Value>(document.metadata_json())
+                .unwrap_or_else(|error| panic!("clone metadata was invalid: {error}"));
+            assert_eq!(metadata["near_clone_compatible"], true);
+            assert!(metadata["partial_clone"].is_null());
         }
     }
 

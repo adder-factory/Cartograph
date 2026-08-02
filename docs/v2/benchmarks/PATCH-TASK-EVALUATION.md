@@ -1,7 +1,8 @@
 # V2 native patch-task evaluation
 
-Status: locked v1.1.33 parity gate and intended `v2.1.4` candidate evidence;
-an exact published-main gate is required before release
+Historical benchmark: locked v1.1.33 parity gate measured for the `v2.1.4`
+candidate. It is not relabeled as v2.1.5 evidence; each release still requires
+its own exact published-main gate.
 
 Measured: 2026-08-01
 
@@ -138,7 +139,7 @@ The recorded run used:
 
 - PostgreSQL 18.4;
 - `pg_search` 0.25.0;
-- pgvector 0.8.4;
+- pgvector 0.8.4+;
 - digest-pinned image
   `paradedb/paradedb:0.25.0@sha256:6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7`;
 - stable Rust 1.97.1; and

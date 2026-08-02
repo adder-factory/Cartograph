@@ -120,7 +120,10 @@ project-owned container's published port when neither the flag nor
 `CARTOGRAPH_MANAGED_DATABASE_PORT` is set; an explicit wrong port fails with
 the discovered port instead of a generic connection error.
 
-Restart the agent host after registration or a binary upgrade.
+Versioned native installs register the stable
+`~/.cartograph-cli/current/bin/cartograph` launcher. `cartograph upgrade`
+repairs stale owned Codex, Claude, and Cursor registrations through the same
+safe installer. Restart the agent host after registration or a binary upgrade.
 
 ### 4. Verify the live integration
 
@@ -228,8 +231,8 @@ cartograph entry-points [--bucket public-exports] [--limit 20]
 cartograph graph <SYMBOL_ID> --direction callers|callees|both|impact
 cartograph graph <SYMBOL_ID> --direction path --to <TARGET_SYMBOL_ID>
 cartograph graph <SYMBOL_ID> --direction similar --k 5 --min-score 0.3
-cartograph affected [CHANGED_FILE ...]
-cartograph affected --symbol-id <SYMBOL_ID>
+cartograph affected [CHANGED_FILE ...] --max-nodes 40
+cartograph affected --symbol-id <SYMBOL_ID> --max-nodes 40
 cartograph review --ref <GIT_REF>
 cartograph serve --mcp [--profile coding|core|full|read-only|review]
 cartograph doctor [PROJECT]

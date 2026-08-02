@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-02 (`v2.1.4`).
+Last release audit: 2026-08-02 (`v2.1.5`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -11,7 +11,7 @@ provenance, failure, and fallback states remain explicit.
 ## Registration
 
 Prefer the native installer because it writes project-local configuration and
-pins the absolute executable path:
+pins the absolute stable launcher path for versioned native installs:
 
 ```sh
 cartograph install --yes --target codex --location local --project-path .
@@ -57,7 +57,10 @@ allocation. An incompatible container fails with exact backup and confirmed
 upgrade commands. Source catch-up starts through the native watcher after the
 stdio server is ready, so modern `server/discover`/`tools/list` and the legacy
 `initialize` handshake do not wait for a full index; `autoSync` in
-`cartograph_status` exposes attempts, publications, no-ops, and errors.
+`cartograph_status` exposes attempts, publications, no-ops, errors, stable
+stage-specific `lastErrorCode`, failure/retry times, unchanged-revision attempt
+count, and retry suppression. Failed unchanged revisions use bounded
+exponential backoff and stop after five automatic attempts until source changes.
 `--no-startup-sync` suppresses only the initial reconciliation.
 
 ## Profiles
@@ -114,7 +117,7 @@ for all 36 wire contracts and their CLI families.
 | `cartograph_at_range` | Exact symbols overlapping one source range or diff hunk |
 | `cartograph_node` | Exact symbol metadata and bounded source only when indexed line provenance is fresh |
 | `cartograph_graph` | Bounded callers/callees/impact, exact edge filters, shortest paths, or model-scoped pgvector symbol neighbors |
-| `cartograph_affected` | Structurally connected test candidates |
+| `cartograph_affected` | Structurally connected test candidates; file and symbol modes both enforce `maxDepth`, `maxNodes`, and result limits, and file mode reports `impact.nodesTruncated` when its traversal budget is reached |
 | `cartograph_numerical` | Generation-scoped static numerical sites, coverage, explanation, and non-executing probe plans with explicit evidence levels and unknowns |
 | `cartograph_review` | Git-ref plus committed/staged/unstaged/untracked review packet |
 | `cartograph_playbook` | Complete agent workflow, tool-routing map, evidence discipline, and anti-patterns |
@@ -129,6 +132,13 @@ returns probe steps without executing project code. Static `heuristic`, future
 runtime observation, and formal-proof evidence remain separate. Observation
 and formal adapters currently report `not_configured`, and stale generations
 report `stale_static_evidence` even when stale reads are explicitly allowed.
+
+`cartograph_review` risk mode binds every lens to the current generation and
+returns a `lensStatus` for findings, hotspots, dead-code candidates, and
+coverage. Each lens is independently bounded and reports `ready`, `timeout`, or
+`unavailable` with stage, limit, and retry guidance. Counts derived from the
+returned window are labeled `returned_rows_only`; partial non-Git or large
+project evidence is never presented as a complete scan.
 
 `cartograph_context` classifies deterministic task intents such as symbol
 lookup, implementation trace, change planning, test selection, error diagnosis,

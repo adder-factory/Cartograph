@@ -131,7 +131,7 @@ pub use managed::{
     ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedRemoveReport,
     ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
 };
-pub use migrations::{MigrationError, MigrationReport};
+pub use migrations::{MigrationError, MigrationReport, latest_schema_version};
 pub use numerical::{
     NumericalSitePage, NumericalSiteQuery, NumericalSiteRecord, NumericalSiteStats,
 };

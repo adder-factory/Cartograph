@@ -241,6 +241,7 @@ pub(crate) fn symbol_health_metrics(
         },
         cancelled,
     )?;
+    record_facade_health(&mut metrics, body, language, source);
     Ok(metrics)
 }
 
@@ -412,11 +413,24 @@ fn record_literal_health(metrics: &mut SymbolHealthMetrics, input: LiteralHealth
     if numeric_literal && is_magic_number(node_text, input.language) {
         metrics.magic_numbers = metrics.magic_numbers.saturating_add(1);
     }
-    if string_literal
-        && !is_url_validation_input(input.node, input.source)
-        && contains_hardcoded_url(node_text)
-    {
-        metrics.hardcoded_urls = metrics.hardcoded_urls.saturating_add(1);
+    if string_literal && contains_hardcoded_url(node_text) {
+        match classify_url_literal(input.node, input.source) {
+            UrlLiteralCategory::Request => {
+                metrics.hardcoded_urls = metrics.hardcoded_urls.saturating_add(1);
+                metrics.hardcoded_url_requests = metrics.hardcoded_url_requests.saturating_add(1);
+            }
+            UrlLiteralCategory::Configuration => {
+                metrics.hardcoded_urls = metrics.hardcoded_urls.saturating_add(1);
+                metrics.hardcoded_url_configuration =
+                    metrics.hardcoded_url_configuration.saturating_add(1);
+            }
+            UrlLiteralCategory::Presentation => {
+                metrics.hardcoded_url_presentation_abstentions = metrics
+                    .hardcoded_url_presentation_abstentions
+                    .saturating_add(1);
+            }
+            UrlLiteralCategory::Validation | UrlLiteralCategory::Data => {}
+        }
     }
 }
 
@@ -486,7 +500,17 @@ fn record_loop_health(metrics: &mut SymbolHealthMetrics, input: LiteralHealthInp
     if is_javascript_for_of(input.node, input.source, input.language)
         && loop_contains_owned_await(input.node)
     {
-        metrics.sequential_await_loops = metrics.sequential_await_loops.saturating_add(1);
+        if contains_ascii_case_insensitive(text, "cartograph: serial-await") {
+            metrics.serial_await_intent_loops = metrics.serial_await_intent_loops.saturating_add(1);
+        } else if loop_has_carried_await_dependency(input.node, input.source) {
+            metrics.serial_await_dependency_loops =
+                metrics.serial_await_dependency_loops.saturating_add(1);
+        } else if loop_has_post_await_exit(input.node) {
+            metrics.serial_await_control_flow_loops =
+                metrics.serial_await_control_flow_loops.saturating_add(1);
+        } else {
+            metrics.sequential_await_loops = metrics.sequential_await_loops.saturating_add(1);
+        }
     }
     if text.contains("namedChildCount") && text.contains("namedChild(") {
         metrics.accidental_quadratic = metrics.accidental_quadratic.saturating_add(1);
@@ -517,6 +541,133 @@ fn loop_contains_owned_await(node: Node<'_>) -> bool {
         stack.extend(named_children(descendant));
     }
     false
+}
+
+fn loop_has_post_await_exit(node: Node<'_>) -> bool {
+    let nodes = owned_loop_nodes(node);
+    let first_await = nodes
+        .iter()
+        .filter(|candidate| candidate.kind() == "await_expression")
+        .map(tree_sitter::Node::end_byte)
+        .min();
+    first_await.is_some_and(|await_end| {
+        nodes.iter().any(|candidate| {
+            matches!(candidate.kind(), "break_statement" | "return_statement")
+                && candidate.start_byte() >= await_end
+        })
+    })
+}
+
+fn loop_has_carried_await_dependency(node: Node<'_>, source: &str) -> bool {
+    owned_loop_nodes(node).into_iter().any(|candidate| {
+        if !matches!(
+            candidate.kind(),
+            "assignment_expression" | "augmented_assignment_expression"
+        ) {
+            return false;
+        }
+        let Some(left) = candidate.child_by_field_name("left") else {
+            return false;
+        };
+        let Some(right) = candidate.child_by_field_name("right") else {
+            return false;
+        };
+        if !descendants_including_root(right).any(|node| node.kind() == "await_expression") {
+            return false;
+        }
+        let left_identifiers = descendants_including_root(left)
+            .filter(|node| node.kind() == "identifier")
+            .map(|node| text_for(source, node))
+            .collect::<BTreeSet<_>>();
+        descendants_including_root(right)
+            .filter(|node| node.kind() == "identifier")
+            .map(|node| text_for(source, node))
+            .any(|identifier| left_identifiers.contains(identifier))
+    })
+}
+
+fn owned_loop_nodes(root: Node<'_>) -> Vec<Node<'_>> {
+    let mut nodes = Vec::new();
+    let mut stack = named_children(root).collect::<Vec<_>>();
+    while let Some(node) = stack.pop() {
+        if is_callable_node(node.kind()) || is_loop_node(node.kind()) {
+            continue;
+        }
+        nodes.push(node);
+        stack.extend(named_children(node));
+    }
+    nodes
+}
+
+fn record_facade_health(
+    metrics: &mut SymbolHealthMetrics,
+    body: Node<'_>,
+    language: SourceLanguage,
+    source: &str,
+) {
+    if !is_javascript_language(language) {
+        return;
+    }
+    let mut nested_callables = Vec::new();
+    let mut outer_stack = named_children(body).collect::<Vec<_>>();
+    let mut has_returned_object = false;
+    let mut outer_side_effects = 0_u16;
+    while let Some(node) = outer_stack.pop() {
+        if is_callable_node(node.kind()) {
+            nested_callables.push(node);
+            continue;
+        }
+        if node.kind() == "return_statement"
+            && named_children(node).any(|child| child.kind() == "object")
+        {
+            has_returned_object = true;
+        }
+        if matches!(
+            node.kind(),
+            "call_expression" | "new_expression" | "throw_statement" | "update_expression"
+        ) {
+            outer_side_effects = outer_side_effects.saturating_add(1);
+        }
+        outer_stack.extend(named_children(node));
+    }
+    let delegate_count = nested_callables
+        .iter()
+        .filter(|callable| callable_is_focused_delegate(**callable, source))
+        .count();
+    if has_returned_object
+        && nested_callables.len() >= 3
+        && delegate_count == nested_callables.len()
+        && outer_side_effects == 0
+    {
+        metrics.facade_factory = true;
+        metrics.facade_factory_delegates = u16::try_from(delegate_count).unwrap_or(u16::MAX);
+    }
+}
+
+fn callable_is_focused_delegate(callable: Node<'_>, _source: &str) -> bool {
+    let mut calls = 0_u16;
+    let mut stack = named_children(callable).collect::<Vec<_>>();
+    while let Some(node) = stack.pop() {
+        if node != callable && is_callable_node(node.kind()) {
+            continue;
+        }
+        if node.kind() == "call_expression" {
+            calls = calls.saturating_add(1);
+        }
+        if is_control_node(node.kind())
+            || matches!(
+                node.kind(),
+                "assignment_expression"
+                    | "augmented_assignment_expression"
+                    | "throw_statement"
+                    | "update_expression"
+            )
+        {
+            return false;
+        }
+        stack.extend(named_children(node));
+    }
+    calls == 1
 }
 
 fn incomplete_marker_count(body: Node<'_>, source: &str) -> u16 {
@@ -1231,6 +1382,92 @@ fn is_url_validation_input(node: Node<'_>, source: &str) -> bool {
     false
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UrlLiteralCategory {
+    Request,
+    Configuration,
+    Presentation,
+    Validation,
+    Data,
+}
+
+fn classify_url_literal(node: Node<'_>, source: &str) -> UrlLiteralCategory {
+    if is_url_validation_input(node, source) {
+        return UrlLiteralCategory::Validation;
+    }
+    let mut current = Some(node);
+    for _ in 0..12 {
+        let Some(candidate) = current else {
+            break;
+        };
+        if let Some(category) = url_literal_ancestor_category(candidate, source) {
+            return category;
+        }
+        if candidate != node && is_callable_node(candidate.kind()) {
+            break;
+        }
+        current = candidate.parent();
+    }
+    UrlLiteralCategory::Data
+}
+
+fn url_literal_ancestor_category(node: Node<'_>, source: &str) -> Option<UrlLiteralCategory> {
+    if jsx_url_presentation_attribute(node, source) {
+        return Some(UrlLiteralCategory::Presentation);
+    }
+    if node.kind() == "call_expression"
+        && node
+            .child_by_field_name("function")
+            .is_some_and(|function| request_callee(text_for(source, function)))
+    {
+        return Some(UrlLiteralCategory::Request);
+    }
+    let endpoint_name = matches!(node.kind(), "variable_declarator" | "pair")
+        && node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("key"))
+            .is_some_and(|name| endpoint_configuration_name(text_for(source, name)));
+    endpoint_name.then_some(UrlLiteralCategory::Configuration)
+}
+
+fn jsx_url_presentation_attribute(node: Node<'_>, source: &str) -> bool {
+    if node.kind() != "jsx_attribute" {
+        return false;
+    }
+    let attribute = node
+        .child_by_field_name("name")
+        .or_else(|| named_children(node).next())
+        .map(|name| text_for(source, name).trim())
+        .unwrap_or_default();
+    matches!(attribute, "placeholder" | "href" | "src")
+}
+
+fn request_callee(raw: &str) -> bool {
+    let callee = raw.trim().to_ascii_lowercase();
+    matches!(
+        callee.as_str(),
+        "fetch" | "request" | "axios" | "got" | "ky" | "websocket" | "eventsource"
+    ) || [
+        ".fetch", ".request", ".get", ".post", ".put", ".patch", ".delete", ".connect",
+    ]
+    .iter()
+    .any(|suffix| callee.ends_with(suffix))
+}
+
+fn endpoint_configuration_name(raw: &str) -> bool {
+    let name = raw
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "url", "uri", "endpoint", "baseurl", "origin", "webhook", "socket",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
 fn is_presentation_only_node(kind: &str) -> bool {
     matches!(kind, "jsx_text" | "jsx_attribute")
 }
@@ -1871,7 +2108,9 @@ pub(crate) fn clone_token_profile(
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Option<CloneTokenProfile>, ExtractError> {
     let mut counts = BTreeMap::<u64, u32>::new();
+    let mut identifier_counts = BTreeMap::<u64, u32>::new();
     let mut total_tokens = 0_u32;
+    let mut identifier_tokens = 0_u32;
     for node in descendants_including_root(root) {
         if cancelled() {
             return Err(ExtractError::Cancelled);
@@ -1892,6 +2131,11 @@ pub(crate) fn clone_token_profile(
             },
             cancelled,
         )?;
+        if class == CloneTokenClass::Identifier {
+            identifier_tokens = identifier_tokens.saturating_add(1);
+            let identifier_count = identifier_counts.entry(fingerprint).or_default();
+            *identifier_count = identifier_count.saturating_add(1);
+        }
         if let Some(count) = counts.get_mut(&fingerprint) {
             *count = count.saturating_add(1);
             continue;
@@ -1913,7 +2157,16 @@ pub(crate) fn clone_token_profile(
             .into_iter()
             .map(|(fingerprint, count)| CloneTokenCount(fingerprint, count)),
     );
-    Ok(Some(CloneTokenProfile::new(retained, total_tokens)))
+    let retained_identifiers = identifier_counts
+        .into_iter()
+        .map(|(fingerprint, count)| CloneTokenCount(fingerprint, count))
+        .collect();
+    Ok(Some(CloneTokenProfile::new(
+        retained,
+        total_tokens,
+        retained_identifiers,
+        identifier_tokens,
+    )))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

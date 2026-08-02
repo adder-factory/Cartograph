@@ -302,15 +302,30 @@ jobs:
             echo "Release tag must point at the published main head ($MAIN_SHA), not $TAG_SHA" >&2
             exit 1
           fi
+          NOTES="docs/releases/$TAG.md"
+          if [[ ! -f "$NOTES" || ! -s "$NOTES" ]]; then
+            echo "Tracked release notes are required at $NOTES" >&2
+            exit 1
+          fi
+          if ! grep -Fq "# Cartograph $TAG" "$NOTES"; then
+            echo "Release notes at $NOTES do not identify $TAG" >&2
+            exit 1
+          fi
+          if grep -Eiq '(TBD|TODO|PLACEHOLDER)' "$NOTES"; then
+            echo "Release notes at $NOTES still contain placeholder text" >&2
+            exit 1
+          fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             IS_DRAFT="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
             if [[ "$IS_DRAFT" != true ]]; then
               echo "Refusing to replace assets on published release $TAG" >&2
               exit 1
             fi
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file "$NOTES"
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "$TAG" --generate-notes --draft
+              --title "$TAG" --notes-file "$NOTES" --draft
           fi
           gh release upload "$TAG" release/cartograph-* release/SHA256SUMS \
             --clobber --repo "$GITHUB_REPOSITORY"

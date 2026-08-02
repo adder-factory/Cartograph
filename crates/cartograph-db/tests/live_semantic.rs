@@ -18,7 +18,7 @@ use cartograph_db::{
     RetireEmbeddingModelRequest, SearchDocumentInput, SemanticReadinessRequest,
     SemanticReadinessState, SemanticStorageError, SimilarSymbolsInput, SimilarSymbolsRequest,
     SimilarityMaterializationPolicy, SymbolInput, VectorSearchInput, VectorSearchRequest,
-    validate_generation_facts,
+    latest_schema_version, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, FileId, FileParseStatus, GenerationId, ModelId,
@@ -69,6 +69,7 @@ async fn semantic_storage_is_model_scoped_ready_bounded_and_retention_safe() {
     assert_embedding_writes_and_readiness(&fixture, &scenario).await;
     assert_vector_similarity(&fixture, &scenario).await;
     assert_semantic_clone_findings(&fixture, &scenario).await;
+    assert_non_clique_semantic_clone_component(&fixture, &scenario).await;
     let stale_cursor = prepare_replacement_and_retire(&fixture, &scenario).await;
     assert_generation_cursor_refresh(&fixture, &scenario, stale_cursor).await;
     assert_semantic_retention(&fixture, &scenario).await;
@@ -349,21 +350,25 @@ async fn assert_semantic_clone_findings(fixture: &Fixture, scenario: &SemanticSc
     let findings = findings
         .as_array()
         .unwrap_or_else(|| panic!("semantic clone findings were not an array"));
-    for symbol_name in ["alpha_symbol", "beta_symbol"] {
-        assert!(findings.iter().any(|finding| {
-            finding["qualifiedName"] == symbol_name
-                && finding["finding"] == "duplicate_code"
-                && finding["metricName"] == "semantic_clone_peers"
-        }));
-    }
-    let semantic_detail = findings
+    let semantic_classes = findings
         .iter()
-        .find(|finding| {
-            finding["qualifiedName"] == "alpha_symbol" && finding["finding"] == "duplicate_code"
+        .filter(|finding| {
+            matches!(
+                finding["qualifiedName"].as_str(),
+                Some("alpha_symbol" | "beta_symbol")
+            ) && finding["finding"] == "duplicate_code"
+                && finding["metricName"] == "semantic_clone_peers"
         })
-        .unwrap_or_else(|| panic!("semantic clone detail was missing"));
+        .collect::<Vec<_>>();
+    assert_eq!(
+        semantic_classes.len(),
+        1,
+        "semantic clone class was not represented exactly once: {findings:?}"
+    );
+    let semantic_detail = semantic_classes[0];
     assert_eq!(semantic_detail["detail"]["cloneType"], "semantic");
     assert_eq!(semantic_detail["detail"]["classSize"], 2);
+    assert_eq!(semantic_detail["detail"]["recordScope"], "clone_class");
     assert_eq!(semantic_detail["detail"]["semanticThreshold"], 0.95);
     assert_eq!(
         semantic_detail["detail"]["members"]
@@ -374,6 +379,72 @@ async fn assert_semantic_clone_findings(fixture: &Fixture, scenario: &SemanticSc
     assert!(!findings.iter().any(|finding| {
         finding["qualifiedName"] == "gamma_symbol" && finding["finding"] == "duplicate_code"
     }));
+}
+
+async fn assert_non_clique_semantic_clone_component(
+    fixture: &Fixture,
+    scenario: &SemanticScenario,
+) {
+    let statement = format!(
+        r#"UPDATE "{}"."symbol_similarity_edges"
+            SET score = CASE
+                WHEN (
+                    source_symbol_id = CAST($4 AS uuid)
+                    AND target_symbol_id = CAST($5 AS uuid)
+                ) OR (
+                    source_symbol_id = CAST($5 AS uuid)
+                    AND target_symbol_id = CAST($4 AS uuid)
+                ) THEN 0.90
+                ELSE 0.97
+            END
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND model_id = CAST($3 AS uuid)"#,
+        fixture.schema
+    );
+    let updated = query(AssertSqlSafe(statement))
+        .bind(scenario.project.as_str())
+        .bind(scenario.first.as_str())
+        .bind(scenario.selector_a.model_id().as_str())
+        .bind(SYMBOL_A)
+        .bind(SYMBOL_B)
+        .execute(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("semantic chain fixture failed: {error}"));
+    assert_eq!(updated.rows_affected(), 6);
+
+    let findings = fixture
+        .database
+        .current_structural_findings(&scenario.project, 100)
+        .await
+        .unwrap_or_else(|error| panic!("semantic chain findings failed: {error}"));
+    let findings = serde_json::to_value(findings)
+        .unwrap_or_else(|error| panic!("semantic chain findings serialization failed: {error}"));
+    let semantic_classes = findings
+        .as_array()
+        .unwrap_or_else(|| panic!("semantic chain findings were not an array"))
+        .iter()
+        .filter(|finding| {
+            matches!(
+                finding["qualifiedName"].as_str(),
+                Some("alpha_symbol" | "beta_symbol" | "gamma_symbol")
+            ) && finding["finding"] == "duplicate_code"
+                && finding["metricName"] == "semantic_clone_peers"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        semantic_classes.len(),
+        1,
+        "non-clique semantic component was not represented exactly once: {findings:?}"
+    );
+    let representative = semantic_classes[0];
+    assert_eq!(representative["qualifiedName"], "alpha_symbol");
+    assert_eq!(representative["detail"]["classSize"], 3);
+    assert_eq!(
+        representative["detail"]["members"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(representative["detail"]["maximumSemanticScore"], 0.97);
 }
 
 async fn prepare_replacement_and_retire(
@@ -860,10 +931,10 @@ async fn migrate(fixture: &Fixture) {
         report.applied_versions,
         [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26,
+            25, 26, 27,
         ]
     );
-    assert_eq!(report.current_version, 26);
+    assert_eq!(report.current_version, latest_schema_version());
 }
 
 fn model_registration(fixture: ModelFixture) -> EmbeddingModelRegistration {

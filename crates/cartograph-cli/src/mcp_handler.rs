@@ -19,10 +19,10 @@ use cartograph_agent::{
     GitLineHistoryRequest, GitLineRange, GitRenameEvidence, HistoryIndexError, HistoryIndexOptions,
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
     IndexOptions, IssueHistoryIndexError, IssueHistoryIndexOptions, IssueHistoryIndexRequest,
-    LayerAnalysisReport, LcovLoadOptions, MAXIMUM_UNIX_MILLISECONDS, ProjectCancellation,
-    ProjectError, ProjectRuntime, ProjectStatus, RenamePlanError, RenamePlanOptions,
-    RenamePlanRequest, RetrievalOptions, RetrievalRequest, ReviewError, ReviewOptions,
-    ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceCompareError,
+    LayerAnalysisReport, LcovLoadOptions, MAXIMUM_UNIX_MILLISECONDS, PipelineStage,
+    ProjectCancellation, ProjectError, ProjectRuntime, ProjectStatus, RenamePlanError,
+    RenamePlanOptions, RenamePlanRequest, RetrievalOptions, RetrievalRequest, ReviewError,
+    ReviewOptions, ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceCompareError,
     SourceCompareOptions, SourceContextOptions, SourceContextRequest, SourceSearchError,
     SourceSearchHit, SourceSearchOptions, SymbolSourceContext, TestEvidenceError,
     TestEvidenceOptions, TestEvidenceReport, VerificationCommand, WorkingTreeOverlayRequest,
@@ -1318,6 +1318,7 @@ struct SourceReferencePresentation<'input> {
 
 struct ParsedAffectedRequest {
     depth: u8,
+    max_nodes: u16,
     limit: u16,
     allow_stale: bool,
 }
@@ -1327,6 +1328,7 @@ struct AffectedExecution<'input> {
     freshness: IndexFreshness,
     arguments: &'input Map<String, Value>,
     depth: u8,
+    max_nodes: u16,
     limit: u16,
     cancellation: ProjectCancellation,
 }
@@ -1341,6 +1343,7 @@ struct FileImpactLookup<'input> {
     project_id: &'input ProjectId,
     paths: &'input [NormalizedPath],
     depth: u8,
+    max_nodes: u16,
     limit: u16,
     filter_regex: Option<&'input str>,
 }
@@ -1349,6 +1352,7 @@ struct AffectedFilePresentation<'input> {
     inputs: &'input AffectedFileInputs,
     unmatched_inputs: Vec<&'input str>,
     filter: Option<&'input str>,
+    max_nodes: u16,
     impact: FileTestImpactResult,
     commands: Vec<VerificationCommand>,
 }
@@ -2467,6 +2471,18 @@ enum AdminJobFailure {
     EmbeddingUnavailable,
     HnswCreateSharedMemoryUnavailable,
     InvalidOptions,
+    DiscoverFailed,
+    ReadFailed,
+    ParseFailed,
+    ResolveFailed,
+    OverlayFailed,
+    ReduceFailed,
+    CopyFailed,
+    RelationalMergeFailed,
+    Bm25Failed,
+    VectorFailed,
+    PublicationFailed,
+    LeaseFailed,
     OperationFailed,
 }
 
@@ -2727,6 +2743,7 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
         ProjectError::ProjectRootUnavailable => AdminJobFailure::ProjectUnavailable,
         ProjectError::DatabaseUnavailable
         | ProjectError::MigrationFailed
+        | ProjectError::SchemaVersionAhead { .. }
         | ProjectError::RegisterFailed
         | ProjectError::BeginGenerationFailed
         | ProjectError::StatusFailed => AdminJobFailure::DatabaseUnavailable,
@@ -2744,10 +2761,29 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
         ProjectError::InvalidOptions | ProjectError::ScipOverlayInvalid => {
             AdminJobFailure::InvalidOptions
         }
+        ProjectError::IndexStageFailed { stage } => admin_job_stage_failure(stage),
+        ProjectError::IndexLeaseFailed => AdminJobFailure::LeaseFailed,
+        ProjectError::IndexPublicationFailed => AdminJobFailure::PublicationFailed,
         ProjectError::IndexFailed
         | ProjectError::IndexCleanupFailed
         | ProjectError::RetrievalOperationFailed
         | ProjectError::RequestCancelled => AdminJobFailure::OperationFailed,
+    }
+}
+
+const fn admin_job_stage_failure(stage: PipelineStage) -> AdminJobFailure {
+    match stage {
+        PipelineStage::Discover => AdminJobFailure::DiscoverFailed,
+        PipelineStage::Read => AdminJobFailure::ReadFailed,
+        PipelineStage::Parse => AdminJobFailure::ParseFailed,
+        PipelineStage::Resolve => AdminJobFailure::ResolveFailed,
+        PipelineStage::Overlay => AdminJobFailure::OverlayFailed,
+        PipelineStage::Reduce => AdminJobFailure::ReduceFailed,
+        PipelineStage::Copy => AdminJobFailure::CopyFailed,
+        PipelineStage::RelationalMerge => AdminJobFailure::RelationalMergeFailed,
+        PipelineStage::Bm25 => AdminJobFailure::Bm25Failed,
+        PipelineStage::Vector => AdminJobFailure::VectorFailed,
+        PipelineStage::Publish => AdminJobFailure::PublicationFailed,
     }
 }
 
@@ -4916,6 +4952,7 @@ async fn explicit_file_verification(
             project_id: &project_id,
             paths: &paths,
             max_depth: input.depth,
+            max_nodes: INSIGHT_MAXIMUM_LIMIT,
             limit: TESTS_FOR_MAXIMUM_LIMIT,
             test_path_regex: None,
         })
@@ -7149,6 +7186,7 @@ impl GraphTools<'_> {
             freshness,
             arguments: &arguments,
             depth: parsed.depth,
+            max_nodes: parsed.max_nodes,
             limit: parsed.limit,
             cancellation,
         };
@@ -7164,15 +7202,11 @@ impl GraphTools<'_> {
         symbol: SymbolId,
     ) -> Result<ToolResult, ToolError> {
         reject_present(request.arguments, &["files", "filter", "includeCommands"])?;
-        let max_nodes = optional_integer(
-            request.arguments,
-            "maxNodes",
-            NumericBounds::new(1, AFFECTED_DEFAULT_NODES, GRAPH_MAXIMUM_NODES),
-        )?;
         let traversal = TraversalRequest::new(
             request.project_id.clone(),
             [symbol],
-            TraversalBudget::new(request.depth, max_nodes).map_err(|_| invalid_arguments())?,
+            TraversalBudget::new(request.depth, request.max_nodes)
+                .map_err(|_| invalid_arguments())?,
         )
         .map_err(|_| invalid_arguments())?;
         let evidence = self
@@ -7187,7 +7221,6 @@ impl GraphTools<'_> {
         &self,
         request: AffectedExecution<'_>,
     ) -> Result<ToolResult, ToolError> {
-        reject_present(request.arguments, &["maxNodes"])?;
         let inputs = self
             .affected_file_inputs(request.arguments, request.cancellation.clone())
             .await?;
@@ -7214,6 +7247,7 @@ impl GraphTools<'_> {
                 project_id: request.project_id,
                 paths: &paths,
                 depth: request.depth,
+                max_nodes: request.max_nodes,
                 limit: request.limit,
                 filter_regex: filter_regex.as_deref(),
             })
@@ -7236,6 +7270,7 @@ impl GraphTools<'_> {
                 inputs: &inputs,
                 unmatched_inputs,
                 filter,
+                max_nodes: request.max_nodes,
                 impact,
                 commands,
             }),
@@ -7284,6 +7319,7 @@ impl GraphTools<'_> {
                 project_id: lookup.project_id,
                 paths: lookup.paths,
                 max_depth: lookup.depth,
+                max_nodes: lookup.max_nodes,
                 limit: lookup.limit,
                 test_path_regex: lookup.filter_regex,
             })
@@ -9069,6 +9105,84 @@ struct RiskReviewInput<'input> {
     allow_stale: bool,
 }
 
+fn risk_lens_ready(limit: u16, returned: usize) -> Value {
+    json!({
+        "state": "ready",
+        "limit": limit,
+        "returned": returned,
+        "truncated": returned >= usize::from(limit),
+    })
+}
+
+fn risk_lens_unavailable(stage: &'static str, limit: u16) -> Value {
+    json!({
+        "state": "unavailable",
+        "stage": stage,
+        "limit": limit,
+        "retryGuidance": "retry with a narrower pathFilter or smaller topN",
+    })
+}
+
+fn risk_storage_lens_failure(stage: &'static str, limit: u16, error: &StorageError) -> Value {
+    match error {
+        StorageError::StatementTimeout { .. } => json!({
+            "state": "timeout",
+            "stage": stage,
+            "timeoutMs": 30_000,
+            "limit": limit,
+            "retryGuidance": "retry with a narrower pathFilter or smaller topN",
+        }),
+        _ => risk_lens_unavailable(stage, limit),
+    }
+}
+
+fn risk_storage_lens_value<T: Serialize>(
+    stage: &'static str,
+    limit: u16,
+    result: Result<Vec<T>, StorageError>,
+    status: &mut Map<String, Value>,
+) -> Result<Value, ToolError> {
+    match result {
+        Ok(rows) => {
+            status.insert(stage.to_owned(), risk_lens_ready(limit, rows.len()));
+            serde_json::to_value(rows).map_err(internal_error)
+        }
+        Err(error) => {
+            status.insert(
+                stage.to_owned(),
+                risk_storage_lens_failure(stage, limit, &error),
+            );
+            Ok(Value::Array(Vec::new()))
+        }
+    }
+}
+
+fn returned_finding_stats(findings: &[Value]) -> Value {
+    let mut info = 0_u64;
+    let mut warning = 0_u64;
+    let mut error = 0_u64;
+    let mut by_finding = BTreeMap::<String, u64>::new();
+    for finding in findings {
+        match finding.get("severity").and_then(Value::as_str) {
+            Some("info") => info = info.saturating_add(1),
+            Some("warning") => warning = warning.saturating_add(1),
+            Some("error") => error = error.saturating_add(1),
+            _ => {}
+        }
+        if let Some(name) = finding.get("finding").and_then(Value::as_str) {
+            let count = by_finding.entry(name.to_owned()).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+    json!({
+        "totalFindings": findings.len(),
+        "infoFindings": info,
+        "warningFindings": warning,
+        "errorFindings": error,
+        "byFinding": by_finding,
+    })
+}
+
 fn parse_risk_review_input(
     arguments: &Map<String, Value>,
 ) -> Result<RiskReviewInput<'_>, ToolError> {
@@ -9114,6 +9228,22 @@ fn parse_risk_review_input(
         path_prefix: optional_bounded_text(arguments, "pathFilter", 4_096)?,
         allow_stale: optional_bool(arguments, "allowStale")?.unwrap_or(false),
     })
+}
+
+fn risk_review_queries(
+    input: &RiskReviewInput<'_>,
+) -> Result<(SymbolCoverageQuery, StructuralFindingQuery), ToolError> {
+    let coverage = SymbolCoverageQuery::new(input.top_n)
+        .and_then(|query| query.with_source(input.coverage_source))
+        .and_then(|query| query.with_minimum_centrality(input.minimum_centrality))
+        .and_then(|query| query.with_path_prefix(input.path_prefix))
+        .map_err(internal_error)?;
+    let findings = StructuralFindingQuery::new(input.top_n)
+        .map(|query| query.with_minimum_severity(StructuralFindingSeverity::Info))
+        .and_then(|query| query.with_minimum_centrality(input.minimum_centrality))
+        .and_then(|query| query.with_path_prefix(input.path_prefix))
+        .map_err(internal_error)?;
+    Ok((coverage, findings))
 }
 
 struct NeighborReviewInput {
@@ -10151,43 +10281,55 @@ impl SummaryReviewTools<'_> {
     ) -> Result<ToolResult, ToolError> {
         let input = parse_risk_review_input(&arguments)?;
         let layer_cancellation = cancellation.clone();
-        let (project_id, freshness) =
-            current_project_for_evidence(self, cancellation, input.allow_stale).await?;
-        let coverage_query = SymbolCoverageQuery::new(REVIEW_MAXIMUM_LENS_ROWS)
-            .and_then(|query| query.with_source(input.coverage_source))
-            .and_then(|query| query.with_minimum_centrality(input.minimum_centrality))
-            .and_then(|query| query.with_path_prefix(input.path_prefix))
-            .map_err(internal_error)?;
-        let finding_query = StructuralFindingQuery::new(input.top_n)
-            .map(|query| query.with_minimum_severity(StructuralFindingSeverity::Info))
-            .and_then(|query| query.with_minimum_centrality(input.minimum_centrality))
-            .and_then(|query| query.with_path_prefix(input.path_prefix))
-            .map_err(internal_error)?;
+        let (project_id, generation_id, freshness) =
+            current_project_generation_for_evidence(self, cancellation, input.allow_stale).await?;
+        let (coverage_query, finding_query) = risk_review_queries(&input)?;
         let database = self.runtime.database();
-        let (findings, finding_count, finding_stats, hotspots, coverage, dead_code, layers) = tokio::join!(
+        let (findings, hotspots, coverage, dead_code, layers) = tokio::join!(
             database.query_current_structural_findings(&project_id, &finding_query),
-            database.count_current_structural_findings(&project_id, &finding_query),
-            database.current_structural_finding_stats(&project_id),
-            database.current_structural_hotspots(&project_id, INSIGHT_MAXIMUM_LIMIT),
+            database.current_structural_hotspots(&project_id, input.top_n),
             database.current_symbol_coverage(&project_id, &coverage_query),
-            database.current_dead_code(&project_id, INSIGHT_MAXIMUM_LIMIT, false),
+            database.current_dead_code(&project_id, input.top_n, false),
             self.runtime.analyze_layers(&project_id, layer_cancellation),
         );
-        let mut findings = findings
-            .map_err(internal_error)?
-            .into_iter()
-            .map(|finding| serde_json::to_value(finding).map_err(internal_error))
-            .collect::<Result<Vec<_>, _>>()?;
-        let layer_findings = layers
-            .map_err(internal_error)?
-            .into_violations()
-            .into_iter()
-            .map(layer_finding_value)
-            .collect::<Result<Vec<_>, _>>()?;
-        let project_finding_stats = merge_layer_finding_stats(
-            finding_stats.map_err(internal_error)?,
-            layer_findings.len(),
-        )?;
+        let mut lens_status = Map::new();
+        let mut findings = match findings {
+            Ok(findings) => {
+                lens_status.insert(
+                    "findings".to_owned(),
+                    risk_lens_ready(input.top_n, findings.len()),
+                );
+                findings
+                    .into_iter()
+                    .map(|finding| serde_json::to_value(finding).map_err(internal_error))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            Err(error) => {
+                lens_status.insert(
+                    "findings".to_owned(),
+                    risk_storage_lens_failure("structural_findings", input.top_n, &error),
+                );
+                Vec::new()
+            }
+        };
+        let layer_findings = if let Ok(layers) = layers {
+            let violations = layers
+                .into_violations()
+                .into_iter()
+                .map(layer_finding_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            lens_status.insert(
+                "layers".to_owned(),
+                risk_lens_ready(input.top_n, violations.len()),
+            );
+            violations
+        } else {
+            lens_status.insert(
+                "layers".to_owned(),
+                risk_lens_unavailable("layer_analysis", input.top_n),
+            );
+            Vec::new()
+        };
         let mut filtered_layers = filter_layer_findings(
             layer_findings,
             LayerFindingFilter {
@@ -10200,31 +10342,33 @@ impl SummaryReviewTools<'_> {
             },
         );
         retain_path_prefix(&mut filtered_layers, input.path_prefix);
-        let filtered_finding_count = finding_count
-            .map_err(internal_error)?
-            .saturating_add(u64::try_from(filtered_layers.len()).unwrap_or(u64::MAX));
         findings.append(&mut filtered_layers);
+        let returned_finding_count = findings.len();
         sort_and_truncate_findings(&mut findings, input.top_n);
         let mut hotspots =
-            serde_json::to_value(hotspots.map_err(internal_error)?).map_err(internal_error)?;
+            risk_storage_lens_value("hotspots", input.top_n, hotspots, &mut lens_status)?;
         filter_json_array_by_path(&mut hotspots, input.path_prefix, usize::from(input.top_n));
         let mut dead_code =
-            serde_json::to_value(dead_code.map_err(internal_error)?).map_err(internal_error)?;
+            risk_storage_lens_value("dead_code", input.top_n, dead_code, &mut lens_status)?;
         filter_json_array_by_path(&mut dead_code, input.path_prefix, usize::from(input.top_n));
         let mut coverage =
-            serde_json::to_value(coverage.map_err(internal_error)?).map_err(internal_error)?;
+            risk_storage_lens_value("coverage", input.top_n, coverage, &mut lens_status)?;
         truncate_json_array(&mut coverage, usize::from(input.top_n));
+        let finding_stats = returned_finding_stats(&findings);
         fresh_json_result(
             freshness,
             &json!({
                 "mode": "risk",
+                "generationId": generation_id,
                 "findings": findings,
-                "filteredFindingCount": filtered_finding_count,
-                "findingStats": project_finding_stats,
-                "findingStatsScope": "complete_project_unfiltered",
+                "filteredFindingCount": returned_finding_count,
+                "filteredFindingCountComplete": false,
+                "findingStats": finding_stats,
+                "findingStatsScope": "returned_rows_only",
                 "hotspots": hotspots,
                 "coverageGaps": coverage,
                 "deadCodeCandidates": dead_code,
+                "lensStatus": lens_status,
                 "pathFilter": input.path_prefix,
                 "rowsPerLens": input.top_n,
                 "lensesAreIndependentlyBounded": true,
@@ -13194,6 +13338,7 @@ const fn project_setup_error_reason(error: ProjectError) -> Option<&'static str>
         ProjectError::ProjectRootUnavailable => Some("project_root_unavailable"),
         ProjectError::DatabaseUnavailable => Some("database_unavailable"),
         ProjectError::MigrationFailed => Some("migration_failed"),
+        ProjectError::SchemaVersionAhead { .. } => Some("schema_version_ahead"),
         ProjectError::RegisterFailed => Some("project_registration_failed"),
         ProjectError::InvalidOptions => Some("invalid_options"),
         _ => None,
@@ -13206,9 +13351,28 @@ const fn project_index_error_reason(error: ProjectError) -> Option<&'static str>
         ProjectError::SourceScanFailed => Some("source_scan_failed"),
         ProjectError::StatusFailed => Some("project_status_unavailable"),
         ProjectError::IndexFailed => Some("index_failed"),
+        ProjectError::IndexStageFailed { stage } => Some(index_stage_failure_reason(stage)),
+        ProjectError::IndexLeaseFailed => Some("lease_failed"),
+        ProjectError::IndexPublicationFailed => Some("publication_failed"),
         ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
         ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
         _ => None,
+    }
+}
+
+const fn index_stage_failure_reason(stage: PipelineStage) -> &'static str {
+    match stage {
+        PipelineStage::Discover => "discover_failed",
+        PipelineStage::Read => "read_failed",
+        PipelineStage::Parse => "parse_failed",
+        PipelineStage::Resolve => "resolve_failed",
+        PipelineStage::Overlay => "overlay_failed",
+        PipelineStage::Reduce => "reduce_failed",
+        PipelineStage::Copy => "copy_failed",
+        PipelineStage::RelationalMerge => "relational_merge_failed",
+        PipelineStage::Bm25 => "bm25_failed",
+        PipelineStage::Vector => "vector_failed",
+        PipelineStage::Publish => "publication_failed",
     }
 }
 
@@ -16296,7 +16460,6 @@ async fn tests_for_files(
     execution: TestsForExecution<'_>,
     file_values: Vec<String>,
 ) -> Result<ToolResult, ToolError> {
-    reject_present(execution.arguments, &["maxNodes"])?;
     let depth = optional_integer(
         execution.arguments,
         "depth",
@@ -16306,6 +16469,11 @@ async fn tests_for_files(
         execution.arguments,
         "limit",
         NumericBounds::new(1, TESTS_FOR_DEFAULT_LIMIT, TESTS_FOR_MAXIMUM_LIMIT),
+    )?;
+    let max_nodes = optional_integer(
+        execution.arguments,
+        "maxNodes",
+        NumericBounds::new(1, AFFECTED_DEFAULT_NODES, GRAPH_MAXIMUM_NODES),
     )?;
     let filter = optional_bounded_text(
         execution.arguments,
@@ -16327,6 +16495,7 @@ async fn tests_for_files(
             project_id: &project_id,
             paths: &paths,
             max_depth: depth,
+            max_nodes,
             limit,
             test_path_regex: filter_regex.as_deref(),
         })
@@ -16370,6 +16539,7 @@ async fn tests_for_files(
         &json!({
             "mode": "files",
             "depth": depth,
+            "maxNodes": max_nodes,
             "filter": filter,
             "unmatchedInputs": unmatched_inputs,
             "inputBarrels": input_barrels,
@@ -16424,6 +16594,7 @@ async fn tests_for_symbol(
                 project_id: &project_id,
                 paths: std::slice::from_ref(symbol.path()),
                 max_depth: depth,
+                max_nodes,
                 limit,
                 test_path_regex: None,
             })
@@ -17750,6 +17921,11 @@ fn parse_affected_request(
             "depth",
             NumericBounds::new(1, TESTS_FOR_DEFAULT_DEPTH, GRAPH_MAXIMUM_DEPTH),
         )?,
+        max_nodes: optional_integer(
+            arguments,
+            "maxNodes",
+            NumericBounds::new(1, AFFECTED_DEFAULT_NODES, GRAPH_MAXIMUM_NODES),
+        )?,
         limit: optional_integer(
             arguments,
             "limit",
@@ -17810,6 +17986,7 @@ fn affected_file_presentation(input: &AffectedFilePresentation<'_>) -> Value {
         "inputFiles": input.inputs.values,
         "unmatchedInputs": input.unmatched_inputs,
         "filter": input.filter,
+        "maxNodes": input.max_nodes,
         "impact": input.impact,
         "commands": input.commands,
         "commandsExecuted": false
@@ -23784,6 +23961,17 @@ fn project_error(error: ProjectError) -> ToolError {
             ToolErrorCode::Unavailable,
             "Cartograph request was cancelled",
         ),
+        ProjectError::SchemaVersionAhead {
+            binary_version,
+            database_schema_version,
+            supported_schema_version,
+        } => ToolError::safe(
+            ToolErrorCode::NotReady,
+            format!(
+                "Cartograph {binary_version} supports schema version {supported_schema_version}, but PostgreSQL is at newer schema version {database_schema_version}; upgrade the binary and repin this MCP registration before retrying"
+            ),
+        )
+        .unwrap_or_else(|_| ToolError::internal()),
         ProjectError::ProjectRootUnavailable
         | ProjectError::DatabaseUnavailable
         | ProjectError::MigrationFailed
@@ -23792,6 +23980,9 @@ fn project_error(error: ProjectError) -> ToolError {
         | ProjectError::SourceScanFailed
         | ProjectError::StatusFailed
         | ProjectError::IndexFailed
+        | ProjectError::IndexStageFailed { .. }
+        | ProjectError::IndexLeaseFailed
+        | ProjectError::IndexPublicationFailed
         | ProjectError::IndexCleanupFailed => ToolError::internal(),
     }
 }
@@ -24633,6 +24824,51 @@ mod tests {
         assert_eq!(optional_integer(&zero, "limit", zero_allowed), Ok(0));
         let string = Map::from_iter([("limit".to_owned(), json!(TEST_VALID_LIMIT.to_string()))]);
         assert!(optional_integer(&string, "limit", bounds).is_err());
+    }
+
+    #[test]
+    fn affected_file_contract_accepts_and_bounds_max_nodes() {
+        let arguments = Map::from_iter([
+            ("files".to_owned(), json!(["src/example.ts"])),
+            ("depth".to_owned(), json!(3)),
+            ("limit".to_owned(), json!(100)),
+            ("maxNodes".to_owned(), json!(100)),
+        ]);
+        let parsed = parse_affected_request(&arguments)
+            .unwrap_or_else(|error| panic!("file-mode maxNodes was rejected: {error:?}"));
+        assert_eq!(parsed.depth, 3);
+        assert_eq!(parsed.limit, 100);
+        assert_eq!(parsed.max_nodes, 100);
+
+        let invalid = Map::from_iter([
+            ("files".to_owned(), json!(["src/example.ts"])),
+            ("maxNodes".to_owned(), json!(0)),
+        ]);
+        assert!(parse_affected_request(&invalid).is_err());
+    }
+
+    #[test]
+    fn risk_lens_failures_are_structured_and_returned_stats_are_explicitly_bounded() {
+        let timeout = risk_storage_lens_failure(
+            "structural_findings",
+            20,
+            &StorageError::StatementTimeout {
+                operation: "fixture",
+            },
+        );
+        assert_eq!(timeout["state"], "timeout");
+        assert_eq!(timeout["stage"], "structural_findings");
+        assert_eq!(timeout["timeoutMs"], 30_000);
+        assert_eq!(timeout["limit"], 20);
+
+        let stats = returned_finding_stats(&[
+            json!({"finding": "hardcoded_url", "severity": "warning"}),
+            json!({"finding": "forof_await", "severity": "info"}),
+        ]);
+        assert_eq!(stats["totalFindings"], 2);
+        assert_eq!(stats["warningFindings"], 1);
+        assert_eq!(stats["infoFindings"], 1);
+        assert_eq!(stats["byFinding"]["hardcoded_url"], 1);
     }
 
     #[test]

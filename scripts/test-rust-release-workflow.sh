@@ -123,6 +123,13 @@ fi
 grep -Fq 'verify-main-gate:' "$RELEASE" || fail 'release main-gate verification job is missing'
 grep -Fq 'gh attestation verify' "$RELEASE" || fail 'release does not verify main-gate provenance'
 grep -Fq -- '--source-ref refs/heads/main' "$RELEASE" || fail 'release does not bind evidence to main'
+grep -Fq 'NOTES="docs/releases/$TAG.md"' "$RELEASE" || \
+  fail 'release notes are not loaded from the tracked versioned file'
+grep -Fq -- '--notes-file "$NOTES"' "$RELEASE" || \
+  fail 'tracked release notes are not supplied to GitHub'
+if grep -Fq -- '--generate-notes' "$RELEASE"; then
+  fail 'release publication can still replace detailed notes with generated changelog text'
+fi
 grep -Fq 'needs: verify-main-gate' "$RELEASE" || fail 'release builds do not depend on exact main evidence'
 grep -Fq 'cache_key: release-windows-x64' "$RELEASE" || \
   fail 'Windows release artifacts do not use a release-profile cache'

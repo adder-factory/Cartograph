@@ -680,7 +680,7 @@ impl FileTestImpact {
     }
 }
 
-/// PostgreSQL-native changed-file to affected-test traversal with complete counts.
+/// PostgreSQL-native changed-file to affected-test traversal with bounded counts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileTestImpactResult {
@@ -690,6 +690,7 @@ pub struct FileTestImpactResult {
     affected_test_file_count: u64,
     reached_barrel_count: u64,
     reached_barrels: Vec<String>,
+    nodes_truncated: bool,
     barrels_truncated: bool,
     tests: Vec<FileTestImpact>,
     tests_truncated: bool,
@@ -703,6 +704,8 @@ pub struct FileTestImpactQuery<'a> {
     pub paths: &'a [NormalizedPath],
     /// Maximum reverse-dependency traversal depth.
     pub max_depth: u8,
+    /// Maximum number of distinct symbols admitted to the bounded traversal result.
+    pub max_nodes: u16,
     /// Maximum number of entries returned by this bounded request.
     pub limit: u16,
     /// Optional test path regex, when available.
@@ -744,16 +747,22 @@ impl FileTestImpactResult {
         &self.matched_inputs
     }
 
-    /// Distinct non-input files reached within the requested depth.
+    /// Distinct non-input files reached within the admitted node budget.
     #[must_use]
     pub const fn dependent_file_count(&self) -> u64 {
         self.dependent_file_count
     }
 
-    /// Complete number of affected test files before output limiting.
+    /// Affected test files found within the admitted node budget before output limiting.
     #[must_use]
     pub const fn affected_test_file_count(&self) -> u64 {
         self.affected_test_file_count
+    }
+
+    /// Whether more distinct symbols existed than the requested traversal node budget.
+    #[must_use]
+    pub const fn nodes_truncated(&self) -> bool {
+        self.nodes_truncated
     }
 
     /// Complete number of public API barrels reached after the input layer.
@@ -1722,7 +1731,8 @@ impl CartographDatabase {
     }
 
     /// Traverse current-generation file dependents in PostgreSQL and return
-    /// language-aware affected test files with complete counts. Every symbol
+    /// language-aware affected test files with bounded counts and explicit
+    /// node-budget truncation. Every symbol
     /// in every matched input file is a root, so named imports and symbol-level
     /// calls are not lost behind a synthetic file node.
     /// # Errors
@@ -1737,6 +1747,7 @@ impl CartographDatabase {
             project_id,
             paths,
             max_depth,
+            max_nodes,
             limit,
             test_path_regex,
         } = input;
@@ -1750,6 +1761,9 @@ impl CartographDatabase {
                 field: "test_impact_depth",
             });
         }
+        validate_limit(max_nodes).map_err(|_| StorageError::InvalidInput {
+            field: "test_impact_max_nodes",
+        })?;
         validate_limit(limit)?;
         if test_path_regex.is_some_and(|pattern| pattern.is_empty() || pattern.len() > 4_096) {
             return Err(StorageError::InvalidInput {
@@ -1774,6 +1788,7 @@ impl CartographDatabase {
                         .bind(i32::from(max_depth))
                         .bind(i64::from(limit))
                         .bind(test_path_regex)
+                        .bind(i64::from(max_nodes))
                 },
                 "current-file-test-impact",
             )
@@ -2294,8 +2309,9 @@ const RENAME_PROVENANCE_COLUMN: usize = 6;
 const FILE_IMPACT_AFFECTED_TEST_COUNT_COLUMN: usize = 3;
 const FILE_IMPACT_REACHED_BARREL_COUNT_COLUMN: usize = 4;
 const FILE_IMPACT_REACHED_BARRELS_COLUMN: usize = 5;
-const FILE_IMPACT_TEST_PATH_COLUMN: usize = 6;
-const FILE_IMPACT_TEST_DISTANCE_COLUMN: usize = 7;
+const FILE_IMPACT_NODES_TRUNCATED_COLUMN: usize = 6;
+const FILE_IMPACT_TEST_PATH_COLUMN: usize = 7;
+const FILE_IMPACT_TEST_DISTANCE_COLUMN: usize = 8;
 const COVERAGE_SYMBOL_KIND_COLUMN: usize = 3;
 const COVERAGE_DIRECT_TEST_FILES_COLUMN: usize = 4;
 const COVERAGE_INCOMING_EDGES_COLUMN: usize = 5;
@@ -2537,6 +2553,9 @@ fn decode_file_test_impact(
     let reached_barrels = first
         .try_get::<Vec<String>, _>(FILE_IMPACT_REACHED_BARRELS_COLUMN)
         .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
+    let nodes_truncated = first
+        .try_get::<bool, _>(FILE_IMPACT_NODES_TRUNCATED_COLUMN)
+        .map_err(|_| StorageError::CorruptStoredValue { field: "insight" })?;
     let mut tests = Vec::new();
     for row in rows {
         let path = optional_text(&row, FILE_IMPACT_TEST_PATH_COLUMN)?;
@@ -2562,9 +2581,10 @@ fn decode_file_test_impact(
         affected_test_file_count,
         reached_barrel_count,
         reached_barrels,
-        barrels_truncated: reached_barrel_count > returned_barrels,
+        nodes_truncated,
+        barrels_truncated: nodes_truncated || reached_barrel_count > returned_barrels,
         tests,
-        tests_truncated: affected_test_file_count > returned_tests,
+        tests_truncated: nodes_truncated || affected_test_file_count > returned_tests,
     }))
 }
 
