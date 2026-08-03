@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-02 (`v2.1.6`).
+Last release audit: 2026-08-02 (`v2.1.7`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -70,7 +70,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.6 top-level command advertised
+This inventory contains every non-hidden v2.1.7 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -129,15 +129,49 @@ form a process-lifetime authorization ceiling. Modern `tools/list` is stable,
 deterministically ordered, and private-cacheable for one hour; task-local schema
 selection belongs in the host rather than a connection-mutating dispatcher.
 
-`cartograph upgrade --project-path <PATH>` audits Codex, Claude, and Cursor
-registrations in both local and global locations against the stable launcher.
-After a versioned binary is installed, it repairs each stale owned pin through
-the normal safe installer, preserving unrelated configuration and managed-port
-arguments. JSON retains the secret/path-safe `commandState`, prior audit,
-`registrationRepair` outcome, and any remaining explicit `repinCommand`.
-Binary installation remains applied if a registration repair fails. Restart
-the host and prove `server/discover` (or legacy `initialize`), `tools/list`,
-`cartograph_status`, and one real query on the new transport.
+`cartograph upgrade --project-path <PATH>` is a read-only release and
+registration audit. The canonical version-to-version operation is:
+
+```sh
+cartograph upgrade --apply --project-path <PATH>
+```
+
+That command is safe to repeat. It checksum-verifies and smoke-tests the latest
+native release, atomically switches the stable launcher, starts or reuses the
+project-owned managed database when applicable, applies safe append-only schema
+migrations, reconciles a complete current generation, runs `doctor`, and uses
+the installed executable to require an exact installed-version/fresh-generation
+status. It then repairs stale owned Codex, Claude, and Cursor registrations in
+local and global locations through the normal installer, preserving unrelated
+configuration and managed-port arguments. Running `--apply` when the binary is
+already current resumes or heals the project and registration steps instead of
+returning early.
+
+The command never replaces an incompatible managed container implicitly. It
+keeps the verified binary installed, reports `completed: false`, and emits the
+exact private-backup and `--confirm upgrade-managed-database` commands. After
+that approval-gated replacement, rerun the same `upgrade --apply` command to
+resume. JSON distinguishes `currentVersion` (the process that began the
+operation), `latestVersion` (the published release), `installedVersion`,
+`applied`, `completed`, and `restartRequired`; `projectReconciliation` reports
+database, index, doctor, verification, freshness, generation, port, and any
+required confirmation independently. Registration failures likewise leave the
+already-verified binary installed and report only the remaining repair.
+
+`restartRequired` is deliberately run-local: it is true only when a completed
+invocation changed the installed binary or repaired a configured host pin. A
+pure idempotent project reconciliation does not request another reopen, while
+false still does not prove the version of a process that remained attached
+across an earlier invocation. Managed `db start` has a separate 15-minute cold
+image-pull/readiness budget. Exceeding it reports the database step as
+`timed_out`, draws no compatibility conclusion, and asks the caller to rerun
+the same command; only a bounded status probe with positive image/shared-memory
+incompatibility evidence can emit the destructive confirmation path.
+
+An already-open host cannot hot-load the new child. When `restartRequired` is
+true, close and reopen it once, then prove `server/discover` (or legacy
+`initialize`), `tools/list`, `cartograph_status`, and one real query on the new
+transport.
 
 ## Database lifecycle
 

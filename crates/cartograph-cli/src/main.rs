@@ -64,6 +64,7 @@ mod auto_sync;
 mod backend;
 mod byte_format;
 mod completions;
+mod error_codes;
 mod generated_cli;
 mod git_hooks;
 mod graph_export;
@@ -519,16 +520,16 @@ enum Command {
     /// Deprecated alias of `cartograph llm install`.
     #[command(name = "setup", hide = true)]
     Setup(llm_commands::InstallArguments),
-    /// Check for a newer native release and optionally install it in place.
+    /// Check for a release or complete the safe project upgrade sequence.
     #[command(alias = "update")]
     Upgrade {
-        /// Download, verify, smoke-test, and atomically install the latest release.
+        /// Install, reconcile the project, repair owned MCP pins, and verify freshness.
         #[arg(long)]
         apply: bool,
         /// Output structured JSON.
         #[arg(short = 'j', long)]
         json: bool,
-        /// Existing project whose local and global MCP registrations should be audited.
+        /// Existing project to audit or reconcile with the installed release.
         #[arg(long, default_value = ".")]
         project_path: PathBuf,
     },

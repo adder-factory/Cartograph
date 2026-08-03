@@ -17,7 +17,7 @@ struct Fixture {
     reference: Option<(&'static str, ReferenceKind)>,
 }
 
-const FIXTURES: [Fixture; 12] = [
+const FIXTURES: [Fixture; 13] = [
     Fixture {
         language: SourceLanguage::Aura,
         path: "force-app/main/default/aura/OrderPanel/OrderPanel.cmp",
@@ -73,6 +73,14 @@ const FIXTURES: [Fixture; 12] = [
         symbol_kind: SymbolKind::Constant,
         symbol_name: "orders.cache.ttl",
         reference: Some(("orders.default.ttl", ReferenceKind::References)),
+    },
+    Fixture {
+        language: SourceLanguage::Rhai,
+        path: "scripts/order-policy.rhai",
+        source: "import \"./orders\" as orders;\nfn load_order(id) { orders::fetch(id) }\nconst secret = \"cartograph_literal_secret_sentinel_7c1f\";\n",
+        symbol_kind: SymbolKind::Function,
+        symbol_name: "load_order",
+        reference: Some(("orders::fetch", ReferenceKind::Calls)),
     },
     Fixture {
         language: SourceLanguage::Svelte,

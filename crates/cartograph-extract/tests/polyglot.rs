@@ -1364,6 +1364,10 @@ export function classifyToken(token: string, parsed: { signature: string }) {
   return key === "sig" ? parsed.signature : value;
 }
 
+export function fingerprintToken(token: string) {
+  return fingerprint(token);
+}
+
 export function signPayload(payload: string, secretKey: string) {
   return sign(payload, secretKey);
 }
@@ -1393,6 +1397,9 @@ export function readEnvironmentSecret() {
     assert_eq!(symbol(&file, "unfinished").health.incomplete_markers, 2);
     assert!(symbol(&file, "literalLeak").health.secrets_score >= 60);
     assert!(symbol(&file, "classifyToken").health.secrets_score < 50);
+    let fingerprint = symbol(&file, "fingerprintToken");
+    assert_ne!(fingerprint.health.secrets_signal_mask, 0);
+    assert!(!fingerprint.health.secrets_actionable);
     let safe_handling = symbol(&file, "signPayload");
     assert_ne!(safe_handling.health.secrets_signal_mask, 0);
     assert!(!safe_handling.health.secrets_actionable);
@@ -1409,6 +1416,30 @@ export function readEnvironmentSecret() {
             .health
             .secrets_actionable
     );
+}
+
+#[test]
+fn health_markers_distinguish_incomplete_macros_from_match_vocabulary() {
+    let file = extract(
+        "src/python_intrinsics.rs",
+        r#"
+fn python_builtin_exception(name: &str) -> bool {
+    matches!(name, "NotImplementedError" | "UnsupportedOperationException")
+}
+
+fn unfinished() {
+    todo!()
+}
+"#,
+    );
+
+    assert_eq!(
+        symbol(&file, "python_builtin_exception")
+            .health
+            .incomplete_markers,
+        0
+    );
+    assert_eq!(symbol(&file, "unfinished").health.incomplete_markers, 1);
 }
 
 #[test]

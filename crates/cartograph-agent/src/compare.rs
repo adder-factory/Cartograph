@@ -824,15 +824,30 @@ struct SymbolPairInput<'symbol> {
     suppress_line_range_only: bool,
 }
 
+#[derive(Clone, Copy)]
+struct SymbolDeltaInput<'symbol, 'reason> {
+    symbol: &'symbol ExtractedSymbol,
+    path: &'symbol NormalizedPath,
+    modified_reasons: &'reason [&'static str],
+    include_findings: bool,
+}
+
 fn record_symbol_pair(diff: &mut SymbolDiff, input: SymbolPairInput<'_>) {
     match (input.before, input.after) {
         (None, Some(after)) => {
-            diff.added
-                .push(symbol_delta(after, input.path, &[], input.include_findings));
+            diff.added.push(symbol_delta(SymbolDeltaInput {
+                symbol: after,
+                path: input.path,
+                modified_reasons: &[],
+                include_findings: input.include_findings,
+            }));
         }
-        (Some(before), None) => diff
-            .removed
-            .push(symbol_delta(before, input.path, &[], false)),
+        (Some(before), None) => diff.removed.push(symbol_delta(SymbolDeltaInput {
+            symbol: before,
+            path: input.path,
+            modified_reasons: &[],
+            include_findings: false,
+        })),
         (Some(before), Some(after)) => {
             let reasons = modification_reasons(before, after);
             if reasons.is_empty() {
@@ -841,12 +856,12 @@ fn record_symbol_pair(diff: &mut SymbolDiff, input: SymbolPairInput<'_>) {
             if input.suppress_line_range_only && reasons == ["line_range_changed"] {
                 diff.line_range_only_count = diff.line_range_only_count.saturating_add(1);
             } else {
-                diff.modified.push(symbol_delta(
-                    after,
-                    input.path,
-                    &reasons,
-                    input.include_findings,
-                ));
+                diff.modified.push(symbol_delta(SymbolDeltaInput {
+                    symbol: after,
+                    path: input.path,
+                    modified_reasons: &reasons,
+                    include_findings: input.include_findings,
+                }));
             }
         }
         (None, None) => {}
@@ -906,22 +921,17 @@ fn modification_reasons(before: &ExtractedSymbol, after: &ExtractedSymbol) -> Ve
     reasons
 }
 
-fn symbol_delta(
-    symbol: &ExtractedSymbol,
-    path: &NormalizedPath,
-    modified_reasons: &[&'static str],
-    include_findings: bool,
-) -> SourceSymbolDelta {
+fn symbol_delta(input: SymbolDeltaInput<'_, '_>) -> SourceSymbolDelta {
     SourceSymbolDelta {
-        symbol_id: symbol.id.clone(),
-        qualified_name: symbol.qualified_name.clone(),
-        name: symbol.name.clone(),
-        symbol_kind: symbol.kind.as_str().to_owned(),
-        start_line: symbol.span.start_line(),
-        end_line: symbol.span.end_line(),
-        modified_reasons: modified_reasons.to_vec(),
-        findings: if include_findings {
-            findings_for_symbol(symbol, path)
+        symbol_id: input.symbol.id.clone(),
+        qualified_name: input.symbol.qualified_name.clone(),
+        name: input.symbol.name.clone(),
+        symbol_kind: input.symbol.kind.as_str().to_owned(),
+        start_line: input.symbol.span.start_line(),
+        end_line: input.symbol.span.end_line(),
+        modified_reasons: input.modified_reasons.to_vec(),
+        findings: if input.include_findings {
+            findings_for_symbol(input.symbol, input.path)
         } else {
             Vec::new()
         },

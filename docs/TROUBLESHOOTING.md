@@ -49,11 +49,25 @@ server. CLI success proves the native/database control path, not the old MCP
 transport.
 
 Versioned installation registers
-`~/.cartograph-cli/current/bin/cartograph`; `cartograph upgrade --project-path
-/absolute/path/to/project --json` audits local and global
-Codex/Claude/Cursor registrations and repairs stale owned pins through the
-normal safe installer. Inspect `registrationRepair` and any remaining
-`repinCommand`, then restart the host.
+`~/.cartograph-cli/current/bin/cartograph`. Run the resumable upgrade sequence
+instead of manually stitching the binary, database, index, and registration
+steps together:
+
+```sh
+cartograph upgrade --apply --project-path /absolute/path/to/project --json
+```
+
+Success requires `completed: true`; `applied: false` can simply mean the newest
+binary was already installed and the remaining project steps were reconciled.
+If `restartRequired` is true, close and reopen the host once. If the report is
+blocked, inspect `projectReconciliation`, `registrationRepair`, and the bounded
+`nextSteps`; after fixing the named boundary, rerun the same command to resume.
+An idempotent rerun reports `restartRequired: false` when it changed neither the
+binary nor a host pin; that run-local result does not claim that a process left
+open across an earlier upgrade has been inspected. A database step with
+`state: timed_out` means the 15-minute cold image-pull/readiness budget expired,
+not that incompatibility was detected; rerun the same command without invoking
+the destructive database replacement path.
 
 If startup says the database schema is newer than the binary, do not retry the
 old process. The error reports the running binary version, database schema
@@ -62,9 +76,10 @@ repair the registration, restart the host, and verify the newly loaded MCP
 version. Startup exits nonzero; it never serves against a schema it cannot
 interpret.
 
-If MCP startup reports managed-image or HNSW shared-memory incompatibility, run
-`doctor`, create the named fresh backup, and use the exact confirmed
-`db upgrade` command before restarting the host. This preflight is
+If MCP startup reports managed-image or HNSW shared-memory incompatibility,
+`upgrade --apply` stops before replacement and prints the named fresh-backup and
+exact confirmed `db upgrade` commands. Run them, then rerun `upgrade --apply`
+before restarting the host. This preflight is
 intentionally stricter than read-only `status` or an ordinary relational index:
 an MCP process exposes semantic maintenance paths that may need HNSW, so it
 refuses an older 64 MiB managed container even when non-vector reads still

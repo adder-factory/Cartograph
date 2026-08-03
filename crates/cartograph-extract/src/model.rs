@@ -161,13 +161,21 @@ pub struct CloneTokenProfile {
     identifier_tokens: u32,
 }
 
+pub(crate) struct CloneTokenProfileInput {
+    pub(crate) counts: Vec<CloneTokenCount>,
+    pub(crate) total_tokens: u32,
+    pub(crate) identifier_counts: Vec<CloneTokenCount>,
+    pub(crate) identifier_tokens: u32,
+}
+
 impl CloneTokenProfile {
-    pub(crate) fn new(
-        counts: Vec<CloneTokenCount>,
-        total_tokens: u32,
-        identifier_counts: Vec<CloneTokenCount>,
-        identifier_tokens: u32,
-    ) -> Self {
+    pub(crate) fn new(input: CloneTokenProfileInput) -> Self {
+        let CloneTokenProfileInput {
+            counts,
+            total_tokens,
+            identifier_counts,
+            identifier_tokens,
+        } = input;
         Self {
             counts,
             total_tokens,

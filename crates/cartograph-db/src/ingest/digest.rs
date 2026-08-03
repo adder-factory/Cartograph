@@ -10,6 +10,7 @@ const DIGEST_V1_TO_V6_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v4";
 const DIGEST_V7_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v5";
 const DIGEST_V8_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v6";
 const DIGEST_V9_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v7";
+const DIGEST_V10_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v8";
 
 pub(super) fn logical_digest<Cancel>(
     facts: &ValidatedFactTables,
@@ -20,6 +21,7 @@ where
     Cancel: FnMut() -> bool,
 {
     let domain = match version {
+        GenerationDigestVersion::V10 => DIGEST_V10_DOMAIN,
         GenerationDigestVersion::V9 => DIGEST_V9_DOMAIN,
         GenerationDigestVersion::V8 => DIGEST_V8_DOMAIN,
         GenerationDigestVersion::V7 => DIGEST_V7_DOMAIN,
@@ -32,7 +34,10 @@ where
     digest_references(&mut digest, &facts.references, &mut cancelled)?;
     if matches!(
         version,
-        GenerationDigestVersion::V7 | GenerationDigestVersion::V8 | GenerationDigestVersion::V9
+        GenerationDigestVersion::V7
+            | GenerationDigestVersion::V8
+            | GenerationDigestVersion::V9
+            | GenerationDigestVersion::V10
     ) {
         digest_numerical_sites(&mut digest, &facts.numerical_sites, &mut cancelled)?;
     }

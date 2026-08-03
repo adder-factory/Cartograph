@@ -1,17 +1,22 @@
 use std::{
     cmp::Ordering,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::Write as _,
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::{Command as ProcessCommand, Stdio},
     time::Duration,
 };
 
+use cartograph_config::DATABASE_URL_ENV;
+use cartograph_domain::GenerationId;
 use futures_util::StreamExt as _;
 use reqwest::Client;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tempfile::{NamedTempFile, TempPath};
+use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 
 use crate::host::{DiagnosticLocation, InstallTargetDetection, detect_install_targets};
@@ -26,6 +31,10 @@ const MAXIMUM_CHECKSUM_BYTES: usize = 1024 * 1024;
 const MAXIMUM_BINARY_BYTES: usize = 200 * 1024 * 1024;
 const MAXIMUM_STAGED_BINARY_LAUNCH_ATTEMPTS: usize = 3;
 const STAGED_BINARY_LAUNCH_RETRY_DELAY: Duration = Duration::from_millis(25);
+const PROJECT_UPGRADE_TIMEOUT: Duration = Duration::from_mins(30);
+const MANAGED_START_TIMEOUT: Duration = Duration::from_mins(15);
+const PROJECT_VERIFICATION_TIMEOUT: Duration = Duration::from_mins(2);
+const MAXIMUM_STATUS_PROBE_BYTES: usize = 8 * 1024 * 1024;
 const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const HIGH_NIBBLE_SHIFT: u8 = 4;
 const LOW_NIBBLE_MASK: u8 = 0x0f;
@@ -36,13 +45,25 @@ pub(super) struct UpgradeReport {
     status: &'static str,
     current_version: String,
     latest_version: Option<String>,
-    apply_requested: bool,
-    applied: bool,
+    installed_version: Option<String>,
+    #[serde(flatten)]
+    operation: UpgradeOperationState,
+    restart_required: bool,
     message: String,
     next_steps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     registration_repair: Option<RegistrationRepair>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_reconciliation: Option<ProjectReconciliation>,
     registrations: Vec<InstallTargetDetection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpgradeOperationState {
+    apply_requested: bool,
+    applied: bool,
+    completed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -53,18 +74,153 @@ struct RegistrationRepair {
     failed: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpgradeStep {
+    state: &'static str,
+    message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectReconciliation {
+    state: &'static str,
+    database: UpgradeStep,
+    index: UpgradeStep,
+    doctor: UpgradeStep,
+    verification: UpgradeStep,
+    fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    managed_database_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_confirmation: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectDatabaseMode {
+    External,
+    Managed(u16),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectCommand {
+    ManagedStatus,
+    ManagedStart,
+    Index,
+    Doctor,
+    Status,
+}
+
+impl ProjectCommand {
+    const fn timeout(self) -> Duration {
+        match self {
+            Self::ManagedStart => MANAGED_START_TIMEOUT,
+            Self::Index => PROJECT_UPGRADE_TIMEOUT,
+            Self::ManagedStatus | Self::Doctor | Self::Status => PROJECT_VERIFICATION_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectProcessOutcome {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconciliationPhase {
+    Index,
+    Doctor,
+}
+
+impl ReconciliationPhase {
+    const fn command(self) -> ProjectCommand {
+        match self {
+            Self::Index => ProjectCommand::Index,
+            Self::Doctor => ProjectCommand::Doctor,
+        }
+    }
+
+    const fn ready_message(self) -> &'static str {
+        match self {
+            Self::Index => "The new binary completed schema and current-generation reconciliation.",
+            Self::Doctor => {
+                "The new binary passed PostgreSQL, ParadeDB, pgvector, and project doctor checks."
+            }
+        }
+    }
+
+    const fn blocked_message(self) -> &'static str {
+        match self {
+            Self::Index => "The new binary could not reconcile a complete current generation.",
+            Self::Doctor => "The new binary's capability and project doctor did not pass.",
+        }
+    }
+
+    const fn timeout_message(self) -> &'static str {
+        match self {
+            Self::Index => {
+                "Generation reconciliation timed out; rerun the same upgrade command to resume."
+            }
+            Self::Doctor => {
+                "Doctor verification timed out; rerun the same upgrade command to retry it."
+            }
+        }
+    }
+
+    const fn report_step(self, report: &mut ProjectReconciliation) -> &mut UpgradeStep {
+        match self {
+            Self::Index => &mut report.index,
+            Self::Doctor => &mut report.doctor,
+        }
+    }
+}
+
+struct ProjectProcessInput<'input> {
+    executable: &'input Path,
+    project_path: &'input Path,
+    database_mode: ProjectDatabaseMode,
+    command: ProjectCommand,
+}
+
+struct CompletionInput<'project> {
+    running_version: String,
+    latest_version: String,
+    installed_version: String,
+    binary_applied: bool,
+    installed: InstalledBinary,
+    project_path: &'project Path,
+    registrations_before: Vec<InstallTargetDetection>,
+}
+
+#[derive(Clone, Copy)]
+struct CompletionGuidance<'report> {
+    launcher_warning: Option<&'report str>,
+    project_reconciliation: Option<&'report ProjectReconciliation>,
+    registration_repair: RegistrationRepair,
+    completed: bool,
+    host_configured: bool,
+    restart_required: bool,
+}
+
+struct ResolvedUpgradeInput<'project> {
+    apply: bool,
+    current: Version,
+    current_text: String,
+    current_executable: Option<PathBuf>,
+    latest: Version,
+    latest_text: String,
+    project_path: &'project Path,
+    registrations: Vec<InstallTargetDetection>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct InstalledBinary {
     path: PathBuf,
     launcher_warning: Option<String>,
-}
-
-struct UpdatedReportInput<'project> {
-    current_version: String,
-    latest_version: String,
-    installed: InstalledBinary,
-    project_path: &'project Path,
-    registration_repair: RegistrationRepair,
 }
 
 struct UnknownReportInput<'reason> {
@@ -175,54 +331,167 @@ pub(super) async fn run_upgrade(apply: bool, project_path: &Path) -> UpgradeRepo
             registrations,
         });
     };
+    run_resolved_upgrade(ResolvedUpgradeInput {
+        apply,
+        current,
+        current_text,
+        current_executable,
+        latest,
+        latest_text,
+        project_path,
+        registrations,
+    })
+    .await
+}
+
+async fn run_resolved_upgrade(input: ResolvedUpgradeInput<'_>) -> UpgradeReport {
+    if !input.apply {
+        return report_upgrade_audit(input);
+    }
+    if input.current >= input.latest {
+        complete_current_upgrade(input).await
+    } else {
+        install_and_complete_upgrade(input).await
+    }
+}
+
+fn report_upgrade_audit(input: ResolvedUpgradeInput<'_>) -> UpgradeReport {
+    let ResolvedUpgradeInput {
+        current,
+        current_text,
+        latest,
+        latest_text,
+        registrations,
+        ..
+    } = input;
     if current >= latest {
         return UpgradeReport {
             status: "current",
             current_version: current_text.clone(),
             latest_version: Some(latest_text),
-            apply_requested: apply,
-            applied: false,
+            installed_version: Some(current_text.clone()),
+            operation: UpgradeOperationState {
+                apply_requested: false,
+                applied: false,
+                completed: true,
+            },
+            restart_required: false,
             message: format!("Cartograph {current_text} is current."),
             next_steps: registration_next_steps(&registrations),
             registration_repair: None,
+            project_reconciliation: None,
             registrations,
         };
     }
-    if !apply {
-        return UpgradeReport {
-            status: "update_available",
-            current_version: current_text.clone(),
-            latest_version: Some(latest_text.clone()),
+    UpgradeReport {
+        status: "update_available",
+        current_version: current_text.clone(),
+        latest_version: Some(latest_text.clone()),
+        installed_version: Some(current_text.clone()),
+        operation: UpgradeOperationState {
             apply_requested: false,
             applied: false,
-            message: format!("Cartograph {current_text} -> {latest_text} is available."),
-            next_steps: vec![
-                "Run `cartograph upgrade --apply` to install the verified native release."
-                    .to_owned(),
-                "Restart MCP clients after updating so they stop using the old process.".to_owned(),
-            ],
-            registration_repair: None,
-            registrations,
-        };
+            completed: false,
+        },
+        restart_required: false,
+        message: format!("Cartograph {current_text} -> {latest_text} is available."),
+        next_steps: vec![
+            "Run `cartograph upgrade --apply --project-path <path>` once; it installs the verified release, repairs owned registrations, migrates safe schema changes, refreshes the index, and verifies a fresh next-process status."
+                .to_owned(),
+        ],
+        registration_repair: None,
+        project_reconciliation: None,
+        registrations,
     }
+}
+
+async fn complete_current_upgrade(input: ResolvedUpgradeInput<'_>) -> UpgradeReport {
+    let ResolvedUpgradeInput {
+        current_text,
+        current_executable,
+        latest_text,
+        project_path,
+        registrations,
+        ..
+    } = input;
+    let Some(path) = current_executable else {
+        return unresolved_current_executable_report(current_text, latest_text, registrations);
+    };
+    complete_upgrade(CompletionInput {
+        running_version: current_text.clone(),
+        latest_version: latest_text,
+        installed_version: current_text,
+        binary_applied: false,
+        installed: InstalledBinary {
+            path,
+            launcher_warning: None,
+        },
+        project_path,
+        registrations_before: registrations,
+    })
+    .await
+}
+
+fn unresolved_current_executable_report(
+    current_text: String,
+    latest_text: String,
+    registrations: Vec<InstallTargetDetection>,
+) -> UpgradeReport {
+    UpgradeReport {
+        status: "blocked",
+        current_version: current_text.clone(),
+        latest_version: Some(latest_text),
+        installed_version: Some(current_text),
+        operation: UpgradeOperationState {
+            apply_requested: true,
+            applied: false,
+            completed: false,
+        },
+        restart_required: false,
+        message: "The running Cartograph binary is current but could not be resolved safely for project reconciliation."
+            .to_owned(),
+        next_steps: vec![
+            "Reinstall Cartograph through the native installer, then rerun `cartograph upgrade --apply --project-path <path>`."
+                .to_owned(),
+        ],
+        registration_repair: None,
+        project_reconciliation: None,
+        registrations,
+    }
+}
+
+async fn install_and_complete_upgrade(input: ResolvedUpgradeInput<'_>) -> UpgradeReport {
+    let ResolvedUpgradeInput {
+        current_text,
+        latest_text,
+        project_path,
+        registrations,
+        ..
+    } = input;
     match apply_release(&latest_text).await {
         Ok(installed) => {
-            let registration_repair =
-                repair_stale_registrations(&installed.path, project_path).await;
-            report_updated(UpdatedReportInput {
-                current_version: current_text,
-                latest_version: latest_text,
+            complete_upgrade(CompletionInput {
+                running_version: current_text,
+                latest_version: latest_text.clone(),
+                installed_version: latest_text,
+                binary_applied: true,
                 installed,
                 project_path,
-                registration_repair,
+                registrations_before: registrations,
             })
+            .await
         }
         Err(message) => UpgradeReport {
             status: "blocked",
-            current_version: current_text,
+            current_version: current_text.clone(),
             latest_version: Some(latest_text),
-            apply_requested: true,
-            applied: false,
+            installed_version: Some(current_text),
+            operation: UpgradeOperationState {
+                apply_requested: true,
+                applied: false,
+                completed: false,
+            },
+            restart_required: false,
             message,
             next_steps: vec![
                 "Download the matching native asset and SHA256SUMS from the GitHub release."
@@ -230,62 +499,543 @@ pub(super) async fn run_upgrade(apply: bool, project_path: &Path) -> UpgradeRepo
                 "Verify the checksum before replacing the current executable.".to_owned(),
             ],
             registration_repair: None,
+            project_reconciliation: None,
             registrations,
         },
     }
 }
 
-fn report_updated(input: UpdatedReportInput<'_>) -> UpgradeReport {
-    let UpdatedReportInput {
-        current_version,
+async fn complete_upgrade(input: CompletionInput<'_>) -> UpgradeReport {
+    let CompletionInput {
+        running_version,
         latest_version,
+        installed_version,
+        binary_applied,
         installed,
         project_path,
-        registration_repair,
+        registrations_before,
     } = input;
     let InstalledBinary {
         path,
         launcher_warning,
     } = installed;
+    let project_reconciliation =
+        if project_upgrade_is_configured(project_path, &registrations_before) {
+            Some(reconcile_project(&path, project_path, &installed_version).await)
+        } else {
+            None
+        };
+    let project_ready = project_reconciliation
+        .as_ref()
+        .is_none_or(|report| report.state == "ready");
+    let registration_repair = if project_ready {
+        repair_stale_registrations(&path, project_path).await
+    } else {
+        RegistrationRepair::default()
+    };
     let registrations = registration_audit(project_path, Some(&path));
-    let mut next_steps = Vec::with_capacity(4);
-    if let Some(warning) = launcher_warning {
+    let launcher_blocked = launcher_warning.is_some();
+    let blocked = launcher_blocked || !project_ready || registration_repair.failed > 0;
+    let completed = !blocked;
+    let host_configured = registrations
+        .iter()
+        .any(|registration| registration.cartograph_configured);
+    let restart_required =
+        host_restart_required(binary_applied, registration_repair, host_configured);
+    let next_steps = completion_next_steps(CompletionGuidance {
+        launcher_warning: launcher_warning.as_deref(),
+        project_reconciliation: project_reconciliation.as_ref(),
+        registration_repair,
+        completed,
+        host_configured,
+        restart_required,
+    });
+    let status = completion_status(completed, binary_applied);
+    let message = completion_message(completed, binary_applied, &installed_version);
+    UpgradeReport {
+        status,
+        current_version: running_version,
+        latest_version: Some(latest_version),
+        installed_version: Some(installed_version),
+        operation: UpgradeOperationState {
+            apply_requested: true,
+            applied: binary_applied,
+            completed,
+        },
+        restart_required: completed && restart_required,
+        message,
+        next_steps,
+        registration_repair: Some(registration_repair),
+        project_reconciliation,
+        registrations,
+    }
+}
+
+const fn host_restart_required(
+    binary_applied: bool,
+    registration_repair: RegistrationRepair,
+    host_configured: bool,
+) -> bool {
+    host_configured && (binary_applied || registration_repair.repaired > 0)
+}
+
+fn completion_next_steps(input: CompletionGuidance<'_>) -> Vec<String> {
+    let mut next_steps = Vec::with_capacity(6);
+    if let Some(warning) = input.launcher_warning {
         next_steps.push(format!(
             "The release is installed, but a legacy PATH launcher could not be repointed ({warning}). Re-run `cartograph install` to repair project launchers."
         ));
     }
-    if registration_repair.failed > 0 {
+    add_project_reconciliation_steps(&mut next_steps, input.project_reconciliation);
+    if input.registration_repair.failed > 0 {
         next_steps.push(
             "One or more stale MCP registrations could not be repinned automatically; run only the remaining reported repin commands."
                 .to_owned(),
         );
-    } else if registration_repair.repaired > 0 {
+    } else if input.registration_repair.repaired > 0 {
         next_steps.push(format!(
             "Automatically repinned {} stale MCP registration(s) to the stable current launcher.",
-            registration_repair.repaired
+            input.registration_repair.repaired
         ));
     }
-    next_steps.extend([
-        "Run `cartograph doctor <path>`; if the owned managed image is incompatible, create a fresh backup and use the confirmed `cartograph db upgrade` workflow before restarting hosts.".to_owned(),
-        "Restart MCP clients so every connection uses the new binary.".to_owned(),
-        "Run `cartograph --version` from a new process to verify the update.".to_owned(),
-        "After restart, prove `initialize`, `tools/list`, `cartograph_status`, and one real Cartograph query on the fresh transport.".to_owned(),
-    ]);
-    let message = format!(
-        "Installed the checksum-verified Cartograph {latest_version} binary at {}.",
-        path.display()
-    );
-    UpgradeReport {
-        status: "updated",
-        current_version,
-        latest_version: Some(latest_version),
-        apply_requested: true,
-        applied: true,
-        message,
-        next_steps,
-        registration_repair: Some(registration_repair),
-        registrations,
+    if input.completed && input.restart_required {
+        next_steps.extend([
+            "Close and reopen each configured MCP host once; an already-attached process cannot hot-reload the new binary."
+                .to_owned(),
+            "After reopening, verify the attached version, `tools/list`, `cartograph_status`, and one real query."
+                .to_owned(),
+        ]);
+    } else if input.completed && input.host_configured {
+        next_steps.push(
+            "Configured MCP registrations already use the current launcher, and this invocation made no host-loaded change; no additional reopen is required. This does not prove the version of a process attached before an earlier upgrade."
+                .to_owned(),
+        );
+    } else if input.completed {
+        next_steps.push(
+            "No MCP registration was found for this project; install one when an agent host should attach."
+                .to_owned(),
+        );
     }
+    next_steps
+}
+
+const fn completion_status(completed: bool, binary_applied: bool) -> &'static str {
+    if !completed {
+        "blocked"
+    } else if binary_applied {
+        "updated"
+    } else {
+        "reconciled"
+    }
+}
+
+fn completion_message(completed: bool, binary_applied: bool, installed_version: &str) -> String {
+    if !completed {
+        format!(
+            "Cartograph {installed_version} is installed, but the complete project upgrade is blocked."
+        )
+    } else if binary_applied {
+        format!(
+            "Installed Cartograph {installed_version} and completed the safe project upgrade sequence."
+        )
+    } else {
+        format!(
+            "Cartograph {installed_version} was already installed; project state and owned registrations are reconciled."
+        )
+    }
+}
+
+fn project_upgrade_is_configured(
+    project_path: &Path,
+    registrations: &[InstallTargetDetection],
+) -> bool {
+    env::var_os(DATABASE_URL_ENV).is_some()
+        || project_path.join(".cartograph").exists()
+        || registrations
+            .iter()
+            .any(|registration| registration.cartograph_configured)
+}
+
+fn add_project_reconciliation_steps(
+    next_steps: &mut Vec<String>,
+    reconciliation: Option<&ProjectReconciliation>,
+) {
+    let Some(reconciliation) = reconciliation else {
+        return;
+    };
+    if reconciliation.state == "ready" {
+        next_steps.push(
+            "Database migrations, index refresh, doctor checks, and fresh next-process status all passed."
+                .to_owned(),
+        );
+        return;
+    }
+    if reconciliation.database.state == "timed_out" {
+        next_steps.push(
+            "The managed start timed out without concluding that the database is incompatible; rerun `cartograph upgrade --apply --project-path <path>` to resume the cold image pull or readiness wait."
+                .to_owned(),
+        );
+        return;
+    }
+    if let Some(port) = reconciliation.managed_database_port
+        && reconciliation.required_confirmation == Some("upgrade-managed-database")
+    {
+        next_steps.extend([
+            format!(
+                "Create a fresh private backup: `cartograph db backup ./cartograph-pre-upgrade.backup --project-path <path> --port {port}`."
+            ),
+            format!(
+                "Then replace only the owned incompatible container: `cartograph db upgrade --project-path <path> --port {port} --confirm upgrade-managed-database`."
+            ),
+            "Rerun `cartograph upgrade --apply --project-path <path>`; the already-installed binary will resume the remaining safe steps."
+                .to_owned(),
+        ]);
+    } else {
+        next_steps.push(
+            "Run the installed binary's `cartograph doctor <path>` for the exact failure, fix that boundary, then rerun `cartograph upgrade --apply --project-path <path>`."
+                .to_owned(),
+        );
+    }
+}
+
+async fn reconcile_project(
+    executable: &Path,
+    project_path: &Path,
+    installed_version: &str,
+) -> ProjectReconciliation {
+    let project_path = match fs::canonicalize(project_path) {
+        Ok(path) if path.is_dir() => path,
+        _ => return invalid_project_reconciliation(),
+    };
+    let database_mode = if env::var_os(DATABASE_URL_ENV).is_some() {
+        ProjectDatabaseMode::External
+    } else {
+        match crate::resolve_managed_database_port(&project_path, None).await {
+            Ok(port) => ProjectDatabaseMode::Managed(port),
+            Err(_) => return unresolved_database_reconciliation(),
+        }
+    };
+    reconcile_project_with(CompletionProjectInput {
+        executable,
+        project_path: &project_path,
+        installed_version,
+        database_mode,
+    })
+    .await
+}
+
+struct CompletionProjectInput<'input> {
+    executable: &'input Path,
+    project_path: &'input Path,
+    installed_version: &'input str,
+    database_mode: ProjectDatabaseMode,
+}
+
+async fn reconcile_project_with(input: CompletionProjectInput<'_>) -> ProjectReconciliation {
+    let mut report = started_project_reconciliation(input.database_mode);
+    if !reconcile_database(&input, &mut report).await {
+        return report;
+    }
+    if !reconcile_phase(&input, &mut report, ReconciliationPhase::Index).await {
+        return report;
+    }
+    if !reconcile_phase(&input, &mut report, ReconciliationPhase::Doctor).await {
+        return report;
+    }
+    reconcile_status(&input, &mut report).await;
+    report
+}
+
+fn started_project_reconciliation(database_mode: ProjectDatabaseMode) -> ProjectReconciliation {
+    ProjectReconciliation {
+        state: "blocked",
+        database: upgrade_step("not_run", "Database reconciliation did not run."),
+        index: upgrade_step("not_run", "Index reconciliation did not run."),
+        doctor: upgrade_step("not_run", "Doctor verification did not run."),
+        verification: upgrade_step("not_run", "Freshness verification did not run."),
+        fresh: false,
+        generation_id: None,
+        managed_database_port: match database_mode {
+            ProjectDatabaseMode::External => None,
+            ProjectDatabaseMode::Managed(port) => Some(port),
+        },
+        required_confirmation: None,
+    }
+}
+
+async fn reconcile_database(
+    input: &CompletionProjectInput<'_>,
+    report: &mut ProjectReconciliation,
+) -> bool {
+    if input.database_mode == ProjectDatabaseMode::External {
+        report.database = upgrade_step(
+            "ready",
+            "Using the validated external PostgreSQL boundary from the environment.",
+        );
+        return true;
+    }
+    let outcome = run_project_process(ProjectProcessInput {
+        executable: input.executable,
+        project_path: input.project_path,
+        database_mode: input.database_mode,
+        command: ProjectCommand::ManagedStart,
+    })
+    .await;
+    match outcome {
+        ProjectProcessOutcome::Succeeded => {
+            report.database = upgrade_step(
+                "ready",
+                "The owned managed database is healthy and safe append-only migrations are current.",
+            );
+            return true;
+        }
+        ProjectProcessOutcome::TimedOut => {
+            report.database = upgrade_step(
+                "timed_out",
+                "The managed database start exceeded its cold-image-pull and readiness budget; no compatibility conclusion was made.",
+            );
+            return false;
+        }
+        ProjectProcessOutcome::Failed => {}
+    }
+    report.database = upgrade_step(
+        "blocked",
+        "The owned managed database could not complete its idempotent start and migration step.",
+    );
+    if managed_database_upgrade_required(ProjectProcessInput {
+        executable: input.executable,
+        project_path: input.project_path,
+        database_mode: input.database_mode,
+        command: ProjectCommand::ManagedStatus,
+    })
+    .await
+    {
+        report.required_confirmation = Some("upgrade-managed-database");
+    }
+    false
+}
+
+async fn reconcile_phase(
+    input: &CompletionProjectInput<'_>,
+    report: &mut ProjectReconciliation,
+    phase: ReconciliationPhase,
+) -> bool {
+    let outcome = run_project_process(ProjectProcessInput {
+        executable: input.executable,
+        project_path: input.project_path,
+        database_mode: input.database_mode,
+        command: phase.command(),
+    })
+    .await;
+    let (state, message, ready) = match outcome {
+        ProjectProcessOutcome::Succeeded => ("ready", phase.ready_message(), true),
+        ProjectProcessOutcome::Failed => ("blocked", phase.blocked_message(), false),
+        ProjectProcessOutcome::TimedOut => ("timed_out", phase.timeout_message(), false),
+    };
+    *phase.report_step(report) = upgrade_step(state, message);
+    ready
+}
+
+async fn reconcile_status(input: &CompletionProjectInput<'_>, report: &mut ProjectReconciliation) {
+    match run_status_probe(
+        ProjectProcessInput {
+            executable: input.executable,
+            project_path: input.project_path,
+            database_mode: input.database_mode,
+            command: ProjectCommand::Status,
+        },
+        input.installed_version,
+    )
+    .await
+    {
+        Ok(generation_id) => {
+            report.state = "ready";
+            report.verification = upgrade_step(
+                "ready",
+                "A next-process status reports the installed version and a fresh current generation.",
+            );
+            report.fresh = true;
+            report.generation_id = Some(generation_id);
+        }
+        Err(()) => {
+            report.verification = upgrade_step(
+                "blocked",
+                "The next-process version/freshness proof did not pass.",
+            );
+        }
+    }
+}
+
+fn invalid_project_reconciliation() -> ProjectReconciliation {
+    blocked_project_reconciliation("The project path is not an existing real directory.", None)
+}
+
+fn unresolved_database_reconciliation() -> ProjectReconciliation {
+    blocked_project_reconciliation(
+        "The managed database port could not be resolved safely.",
+        None,
+    )
+}
+
+fn blocked_project_reconciliation(message: &str, port: Option<u16>) -> ProjectReconciliation {
+    ProjectReconciliation {
+        state: "blocked",
+        database: upgrade_step("blocked", message),
+        index: upgrade_step("not_run", "Index reconciliation did not run."),
+        doctor: upgrade_step("not_run", "Doctor verification did not run."),
+        verification: upgrade_step("not_run", "Freshness verification did not run."),
+        fresh: false,
+        generation_id: None,
+        managed_database_port: port,
+        required_confirmation: None,
+    }
+}
+
+fn upgrade_step(state: &'static str, message: &str) -> UpgradeStep {
+    UpgradeStep {
+        state,
+        message: message.to_owned(),
+    }
+}
+
+async fn run_project_process(input: ProjectProcessInput<'_>) -> ProjectProcessOutcome {
+    let timeout = input.command.timeout();
+    let mut command = configured_project_command(&input);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    match tokio::time::timeout(timeout, command.status()).await {
+        Ok(Ok(status)) if status.success() => ProjectProcessOutcome::Succeeded,
+        Ok(_) => ProjectProcessOutcome::Failed,
+        Err(_) => ProjectProcessOutcome::TimedOut,
+    }
+}
+
+async fn managed_database_upgrade_required(input: ProjectProcessInput<'_>) -> bool {
+    let Ok(value) = run_project_json(input).await else {
+        return false;
+    };
+    managed_status_requires_upgrade(&value)
+}
+
+fn managed_status_requires_upgrade(value: &serde_json::Value) -> bool {
+    let state = value.get("state").and_then(serde_json::Value::as_str);
+    state != Some("missing")
+        && (value
+            .get("image_matches")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+            || value
+                .get("hnsw_shared_memory_ready")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false))
+}
+
+async fn run_status_probe(
+    input: ProjectProcessInput<'_>,
+    installed_version: &str,
+) -> Result<String, ()> {
+    let value = run_project_json(input).await?;
+    decode_status_probe(&value, installed_version)
+}
+
+fn decode_status_probe(value: &serde_json::Value, installed_version: &str) -> Result<String, ()> {
+    if value.get("version").and_then(serde_json::Value::as_str) != Some(installed_version)
+        || value
+            .pointer("/project/fresh")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || value
+            .pointer("/project/snapshot/current")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        return Err(());
+    }
+    value
+        .pointer("/project/snapshot/current/generation_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| GenerationId::parse(value).ok())
+        .map(|generation_id| generation_id.as_str().to_owned())
+        .ok_or(())
+}
+
+async fn run_project_json(input: ProjectProcessInput<'_>) -> Result<serde_json::Value, ()> {
+    let mut command = configured_project_command(&input);
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| ())?;
+    let stdout = child.stdout.take().ok_or(())?;
+    let probe = async move {
+        let mut bytes = Vec::with_capacity(MAXIMUM_STATUS_PROBE_BYTES.min(64 * 1024));
+        stdout
+            .take((MAXIMUM_STATUS_PROBE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| ())?;
+        if bytes.len() > MAXIMUM_STATUS_PROBE_BYTES {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(());
+        }
+        let status = child.wait().await.map_err(|_| ())?;
+        Ok((status, bytes))
+    };
+    let (status, stdout) = tokio::time::timeout(PROJECT_VERIFICATION_TIMEOUT, probe)
+        .await
+        .map_err(|_| ())??;
+    if !status.success() {
+        return Err(());
+    }
+    serde_json::from_slice(&stdout).map_err(|_| ())
+}
+
+fn configured_project_command(input: &ProjectProcessInput<'_>) -> Command {
+    let mut command = Command::new(input.executable);
+    command
+        .args(project_command_arguments(input))
+        .current_dir(input.project_path)
+        .kill_on_drop(true);
+    if let ProjectDatabaseMode::Managed(port) = input.database_mode {
+        command.env(crate::MANAGED_DATABASE_PORT_ENV, port.to_string());
+    }
+    command
+}
+
+fn project_command_arguments(input: &ProjectProcessInput<'_>) -> Vec<OsString> {
+    let mut arguments = match input.command {
+        ProjectCommand::ManagedStatus => vec![
+            OsString::from("db"),
+            OsString::from("status"),
+            OsString::from("--project-path"),
+            input.project_path.as_os_str().to_owned(),
+        ],
+        ProjectCommand::ManagedStart => vec![
+            OsString::from("db"),
+            OsString::from("start"),
+            OsString::from("--project-path"),
+            input.project_path.as_os_str().to_owned(),
+        ],
+        ProjectCommand::Index => vec![
+            OsString::from("index"),
+            input.project_path.as_os_str().to_owned(),
+        ],
+        ProjectCommand::Doctor => vec![
+            OsString::from("doctor"),
+            input.project_path.as_os_str().to_owned(),
+        ],
+        ProjectCommand::Status => vec![
+            OsString::from("status"),
+            input.project_path.as_os_str().to_owned(),
+        ],
+    };
+    if matches!(
+        input.command,
+        ProjectCommand::ManagedStatus | ProjectCommand::ManagedStart
+    ) && let ProjectDatabaseMode::Managed(port) = input.database_mode
+    {
+        arguments.push(OsString::from("--port"));
+        arguments.push(OsString::from(port.to_string()));
+    }
+    arguments.push(OsString::from("--format"));
+    arguments.push(OsString::from("json"));
+    arguments
 }
 
 fn report_unknown(input: UnknownReportInput<'_>) -> UpgradeReport {
@@ -297,13 +1047,19 @@ fn report_unknown(input: UnknownReportInput<'_>) -> UpgradeReport {
     } = input;
     UpgradeReport {
         status: "unknown",
-        current_version,
+        current_version: current_version.clone(),
         latest_version: None,
-        apply_requested: apply,
-        applied: false,
+        installed_version: Some(current_version),
+        operation: UpgradeOperationState {
+            apply_requested: apply,
+            applied: false,
+            completed: false,
+        },
+        restart_required: false,
         message: format!("Could not resolve the latest Cartograph release: {reason}."),
         next_steps: vec![format!("Check {RELEASES_URL} manually.")],
         registration_repair: None,
+        project_reconciliation: None,
         registrations,
     }
 }
@@ -323,11 +1079,13 @@ async fn repair_stale_registrations(executable: &Path, project_path: &Path) -> R
             Command::new(executable)
                 .args(registration_repair_args(&registration))
                 .arg(project_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .kill_on_drop(true)
-                .output(),
+                .status(),
         )
         .await;
-        if matches!(result, Ok(Ok(output)) if output.status.success()) {
+        if matches!(result, Ok(Ok(status)) if status.success()) {
             report.repaired = report.repaired.saturating_add(1);
         } else {
             report.failed = report.failed.saturating_add(1);
@@ -909,11 +1667,15 @@ fn compare_prerelease(left: &[PrereleasePart], right: &[PrereleasePart]) -> Orde
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         io::{Read as _, Write as _},
         net::TcpListener,
         thread,
         time::Duration,
     };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
 
@@ -960,24 +1722,6 @@ mod tests {
         assert!(rendered.contains("fixture lookup failed"));
         assert!(rendered.contains(RELEASES_URL));
 
-        let report = report_updated(UpdatedReportInput {
-            current_version: "2.0.7".to_owned(),
-            latest_version: "2.0.8".to_owned(),
-            installed: InstalledBinary {
-                path: PathBuf::from("/fixture/versions/v2.0.8/bin/cartograph"),
-                launcher_warning: Some("fixture launcher migration failed".to_owned()),
-            },
-            project_path: Path::new("/fixture/project"),
-            registration_repair: RegistrationRepair::default(),
-        });
-        assert!(succeeded(&report));
-        assert!(report.applied);
-        assert_eq!(report.status, "updated");
-        let rendered = render(&report);
-        assert!(rendered.contains("The release is installed"));
-        assert!(rendered.contains("fixture launcher migration failed"));
-        assert!(!rendered.contains("Download the matching native asset"));
-
         for invalid in ["", "2", "2.0", "2.0.0.1", "two.0.0"] {
             assert!(parse_version(invalid).is_none(), "accepted {invalid}");
         }
@@ -1011,11 +1755,17 @@ mod tests {
             status: "current",
             current_version: "2.1.0".to_owned(),
             latest_version: Some("2.1.0".to_owned()),
-            apply_requested: false,
-            applied: false,
+            installed_version: Some("2.1.0".to_owned()),
+            operation: UpgradeOperationState {
+                apply_requested: false,
+                applied: false,
+                completed: true,
+            },
+            restart_required: false,
             message: "Cartograph 2.1.0 is current.".to_owned(),
             next_steps: registration_next_steps(std::slice::from_ref(&registration)),
             registration_repair: None,
+            project_reconciliation: None,
             registrations: vec![registration],
         };
         let rendered = render(&report);
@@ -1024,6 +1774,255 @@ mod tests {
         assert!(rendered.contains("Repin: cartograph install"));
         assert!(rendered.contains("restart that MCP host"));
         assert!(registration_next_steps(&[])[0].contains("No configured MCP registrations"));
+    }
+
+    #[test]
+    fn upgrade_report_distinguishes_running_published_and_installed_versions()
+    -> Result<(), serde_json::Error> {
+        let report = UpgradeReport {
+            status: "reconciled",
+            current_version: "2.1.7-rc.1".to_owned(),
+            latest_version: Some("2.1.6".to_owned()),
+            installed_version: Some("2.1.7-rc.1".to_owned()),
+            operation: UpgradeOperationState {
+                apply_requested: true,
+                applied: false,
+                completed: true,
+            },
+            restart_required: false,
+            message: "fixture reconciliation complete".to_owned(),
+            next_steps: Vec::new(),
+            registration_repair: Some(RegistrationRepair::default()),
+            project_reconciliation: None,
+            registrations: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&report)?;
+        assert_eq!(encoded["currentVersion"], "2.1.7-rc.1");
+        assert_eq!(encoded["latestVersion"], "2.1.6");
+        assert_eq!(encoded["installedVersion"], "2.1.7-rc.1");
+        assert_eq!(encoded["completed"], true);
+        assert_eq!(encoded["restartRequired"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn host_restart_is_required_only_for_a_change_loaded_by_the_host() {
+        let unchanged = RegistrationRepair::default();
+        let repaired = RegistrationRepair {
+            attempted: 1,
+            repaired: 1,
+            failed: 0,
+        };
+        assert!(!host_restart_required(false, unchanged, true));
+        assert!(host_restart_required(true, unchanged, true));
+        assert!(host_restart_required(false, repaired, true));
+        assert!(!host_restart_required(true, unchanged, false));
+    }
+
+    #[test]
+    fn idempotent_registered_upgrade_does_not_request_another_reopen() {
+        let steps = completion_next_steps(CompletionGuidance {
+            launcher_warning: None,
+            project_reconciliation: None,
+            registration_repair: RegistrationRepair::default(),
+            completed: true,
+            host_configured: true,
+            restart_required: false,
+        });
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].contains("no additional reopen is required"));
+        assert!(!steps[0].contains("No MCP registration was found"));
+    }
+
+    #[test]
+    fn managed_start_has_a_cold_pull_budget_distinct_from_short_probes() {
+        assert_eq!(
+            ProjectCommand::ManagedStart.timeout(),
+            Duration::from_mins(15)
+        );
+        assert_eq!(ProjectCommand::Index.timeout(), Duration::from_mins(30));
+        assert_eq!(ProjectCommand::Doctor.timeout(), Duration::from_mins(2));
+        assert_eq!(ProjectCommand::Status.timeout(), Duration::from_mins(2));
+    }
+
+    #[test]
+    fn project_command_arguments_are_explicit_and_machine_readable() {
+        let project_path = Path::new("/fixture/project");
+        let managed_start = project_command_arguments(&ProjectProcessInput {
+            executable: Path::new("/fixture/cartograph"),
+            project_path,
+            database_mode: ProjectDatabaseMode::Managed(55_433),
+            command: ProjectCommand::ManagedStart,
+        });
+        assert_eq!(
+            managed_start,
+            [
+                "db",
+                "start",
+                "--project-path",
+                "/fixture/project",
+                "--port",
+                "55433",
+                "--format",
+                "json",
+            ]
+            .map(OsString::from)
+        );
+
+        for (command, first) in [
+            (ProjectCommand::Index, "index"),
+            (ProjectCommand::Doctor, "doctor"),
+            (ProjectCommand::Status, "status"),
+        ] {
+            assert_eq!(
+                project_command_arguments(&ProjectProcessInput {
+                    executable: Path::new("/fixture/cartograph"),
+                    project_path,
+                    database_mode: ProjectDatabaseMode::External,
+                    command,
+                }),
+                [first, "/fixture/project", "--format", "json"].map(OsString::from)
+            );
+        }
+    }
+
+    #[test]
+    fn managed_replacement_requires_positive_incompatibility_evidence() {
+        assert!(!managed_status_requires_upgrade(&serde_json::json!({
+            "state": "missing",
+            "image_matches": false,
+            "hnsw_shared_memory_ready": false
+        })));
+        assert!(!managed_status_requires_upgrade(&serde_json::json!({
+            "state": "healthy",
+            "image_matches": true,
+            "hnsw_shared_memory_ready": true
+        })));
+        assert!(managed_status_requires_upgrade(&serde_json::json!({
+            "state": "stopped",
+            "image_matches": false,
+            "hnsw_shared_memory_ready": true
+        })));
+        assert!(managed_status_requires_upgrade(&serde_json::json!({
+            "state": "healthy",
+            "image_matches": true,
+            "hnsw_shared_memory_ready": false
+        })));
+        assert!(!managed_status_requires_upgrade(&serde_json::json!({
+            "state": "healthy"
+        })));
+    }
+
+    #[test]
+    fn status_probe_requires_the_installed_version_and_fresh_generation() {
+        let generation_id = "11111111-1111-4111-8111-111111111111";
+        let status = serde_json::json!({
+            "version": "2.1.7",
+            "project": {
+                "fresh": true,
+                "snapshot": {"current": {"generation_id": generation_id}}
+            }
+        });
+        assert_eq!(
+            decode_status_probe(&status, "2.1.7"),
+            Ok(generation_id.to_owned())
+        );
+
+        let mut wrong_version = status.clone();
+        wrong_version["version"] = serde_json::json!("2.1.6");
+        assert_eq!(decode_status_probe(&wrong_version, "2.1.7"), Err(()));
+        let mut stale = status.clone();
+        stale["project"]["fresh"] = serde_json::json!(false);
+        assert_eq!(decode_status_probe(&stale, "2.1.7"), Err(()));
+        let mut missing_generation = status.clone();
+        missing_generation["project"]["snapshot"]["current"] = serde_json::Value::Null;
+        assert_eq!(decode_status_probe(&missing_generation, "2.1.7"), Err(()));
+        let mut malformed_generation = status;
+        malformed_generation["project"]["snapshot"]["current"]["generation_id"] =
+            serde_json::json!("not-a-generation");
+        assert_eq!(decode_status_probe(&malformed_generation, "2.1.7"), Err(()));
+    }
+
+    #[test]
+    fn managed_replacement_steps_preserve_backup_confirmation_and_resume() {
+        let mut reconciliation = blocked_project_reconciliation("fixture blocked", Some(55_433));
+        reconciliation.required_confirmation = Some("upgrade-managed-database");
+        let mut steps = Vec::new();
+        add_project_reconciliation_steps(&mut steps, Some(&reconciliation));
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].contains("db backup"));
+        assert!(steps[0].contains("--port 55433"));
+        assert!(steps[1].contains("--confirm upgrade-managed-database"));
+        assert!(steps[2].contains("upgrade --apply"));
+        assert!(steps[2].contains("resume"));
+    }
+
+    #[test]
+    fn managed_start_timeout_retries_without_claiming_incompatibility() {
+        let mut reconciliation =
+            started_project_reconciliation(ProjectDatabaseMode::Managed(55_433));
+        reconciliation.database = upgrade_step(
+            "timed_out",
+            "fixture cold managed start exceeded its readiness budget",
+        );
+        let mut steps = Vec::new();
+        add_project_reconciliation_steps(&mut steps, Some(&reconciliation));
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].contains("timed out"));
+        assert!(steps[0].contains("upgrade --apply"));
+        assert!(!steps[0].contains("--confirm"));
+        assert!(!steps[0].contains("doctor"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_reconciliation_runs_index_doctor_and_next_process_status_in_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = tempfile::tempdir()?;
+        let executable = project.path().join("fixture-cartograph");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+case "$1" in
+  index)
+    : > "$PWD/.upgrade-indexed"
+    ;;
+  doctor)
+    test -f "$PWD/.upgrade-indexed" || exit 21
+    : > "$PWD/.upgrade-doctored"
+    ;;
+  status)
+    test -f "$PWD/.upgrade-doctored" || exit 22
+    printf '%s\n' '{"version":"2.1.7","project":{"fresh":true,"snapshot":{"current":{"generation_id":"11111111-1111-4111-8111-111111111111"}}}}'
+    ;;
+  *)
+    exit 23
+    ;;
+esac
+"#,
+        )?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions)?;
+
+        let report = reconcile_project_with(CompletionProjectInput {
+            executable: &executable,
+            project_path: project.path(),
+            installed_version: "2.1.7",
+            database_mode: ProjectDatabaseMode::External,
+        })
+        .await;
+        assert_eq!(report.state, "ready");
+        assert_eq!(report.database.state, "ready");
+        assert_eq!(report.index.state, "ready");
+        assert_eq!(report.doctor.state, "ready");
+        assert_eq!(report.verification.state, "ready");
+        assert!(report.fresh);
+        assert_eq!(
+            report.generation_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        Ok(())
     }
 
     #[test]

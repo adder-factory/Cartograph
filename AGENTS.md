@@ -354,11 +354,24 @@ backups remain separate.
 
 ### Agent cannot start the MCP server after upgrade
 
-Run `cartograph --version` and `cartograph doctor <project>` in the same shell,
-then run `cartograph upgrade --project-path <project> --json`. Versioned native
-installs use the stable `~/.cartograph-cli/current/bin/cartograph` launcher and
-the upgrade repairs stale owned host pins through the safe installer. Inspect
-`registrationRepair` and any remaining `repinCommand`, then restart the host.
+Run the single resumable operation from the project checkout:
+
+```sh
+cartograph upgrade --apply --project-path <project> --json
+```
+
+It installs the verified release when needed, reconciles safe database
+migrations and a fresh current generation, runs `doctor`, proves status through
+the installed binary, and repairs stale owned host pins. Require
+`completed: true`; do not mistake `applied: false` for failure when
+`installedVersion` was already current. If `projectReconciliation` requests
+`upgrade-managed-database`, run only its backup and exact confirmed replacement
+steps, then rerun the same command to resume. Restart or reopen the host only
+when `restartRequired` is true, because an attached process cannot hot-load the
+new child. That flag describes binary or pin changes made by the current
+invocation; false on a no-op rerun does not prove the version of a process left
+attached across an earlier upgrade. Treat a database `timed_out` step as a
+retryable cold-pull/readiness timeout, not as permission to replace a container.
 If the database schema is newer than the loaded binary, use the reported binary
 and supported-schema versions to upgrade before retrying; startup fails closed.
 

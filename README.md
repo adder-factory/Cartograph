@@ -121,9 +121,25 @@ project-owned container's published port when neither the flag nor
 the discovered port instead of a generic connection error.
 
 Versioned native installs register the stable
-`~/.cartograph-cli/current/bin/cartograph` launcher. `cartograph upgrade`
-repairs stale owned Codex, Claude, and Cursor registrations through the same
-safe installer. Restart the agent host after registration or a binary upgrade.
+`~/.cartograph-cli/current/bin/cartograph` launcher. A normal version-to-version
+upgrade is one resumable command from the project root:
+
+```sh
+cartograph upgrade --apply --project-path .
+```
+
+It checksum-verifies and smoke-tests the release, switches the stable launcher,
+applies safe append-only schema migrations, refreshes the current generation,
+runs `doctor`, verifies a fresh next-process status, and repairs stale owned
+Codex, Claude, and Cursor pins. The only routine manual boundary is closing and
+reopening an already-running agent host, which cannot hot-load a replaced MCP
+child. If an older managed container itself must be replaced, the command stops
+with the exact backup and confirmation commands; rerun the same upgrade command
+afterward to resume rather than restarting the workflow. A cold first-time
+image pull has its own 15-minute budget; a timeout is reported as retryable and
+never treated as evidence that the container is incompatible. A fully
+idempotent rerun does not request another host reopen unless that invocation
+changed the binary or repaired a host pin.
 
 ### 4. Verify the live integration
 
@@ -281,10 +297,10 @@ semantics, read the [v2 architecture](docs/v2/ARCHITECTURE.md).
 
 ## Language support
 
-The stable registry production-admits 74 language modes and the complete 163
+The stable registry production-admits 126 language modes and the complete 163
 v1 extension manifest, plus additive Python `.pyi` support. Sixty-one modes use
-pinned native tree-sitter grammars; thirteen mixed-markup, configuration, and
-domain-specific modes use bounded Rust structural scanners.
+pinned native tree-sitter grammars; 65 mixed-markup, configuration,
+domain-specific, and game-scripting modes use bounded Rust structural scanners.
 
 Every admitted mode must prove deterministic facts, cancellation, literal
 safety, parallel-worker identity, and live PostgreSQL/ParadeDB publication.
@@ -292,6 +308,7 @@ Unknown extensions are excluded rather than represented as a misleading empty
 graph.
 
 - [Language support matrix](docs/SUPPORT-MATRIX.md)
+- [Game scripting language coverage](docs/v2/GAME-SCRIPTING-LANGUAGES.md)
 - [Native extraction architecture](docs/v2/EXTRACTION.md)
 - [Add or extend a language](docs/EXTENDING-EXTRACTORS-RESOLVERS.md)
 

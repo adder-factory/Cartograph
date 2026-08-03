@@ -145,8 +145,8 @@ const NATIVE_STAGE_TIMEOUT: Duration = Duration::from_secs(3);
 const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
 const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 14;
 const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
-const NATIVE_CUSTOM_FAMILY_FILE_COUNT: usize = 12;
-const NATIVE_EXPECTED_FILES: u64 = 71;
+const NATIVE_CUSTOM_FAMILY_FILE_COUNT: usize = 13;
+const NATIVE_EXPECTED_FILES: u64 = 72;
 const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 60;
 const NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES: u64 = 3;
 const NATIVE_SEARCH_LIMIT: u16 = 10;
@@ -487,6 +487,12 @@ const NATIVE_CUSTOM_FAMILY_FIXTURES: [(&str, &str, &str, &str); NATIVE_CUSTOM_FA
         "properties.order.beacon=enabled\n",
         "properties",
         "properties.order.beacon",
+    ),
+    (
+        "scripts/rhaibeacon.rhai",
+        "fn rhaibeacon(value) { transform(value) }\n",
+        "rhai",
+        "rhaibeacon",
     ),
     (
         "components/SvelteOrderBeacon.svelte",

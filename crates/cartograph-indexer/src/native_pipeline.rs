@@ -18,13 +18,13 @@ use cartograph_domain::{
     SymbolImplementationFlags, SymbolKind, Visibility, symbol_signature_is_search_safe,
 };
 use cartograph_extract::{
-    CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX, DiscoveredSource,
-    DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile, ExtractedImportBinding,
-    ExtractedNumericalSite, ExtractedReference, ImportBindingKind, NativeExtractor,
-    RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits, SourceReadError,
-    SourceReadOptions, SourceRoot, TYPE_QUERY_VALUE_RESOLUTION_PREFIX, is_test_source_path,
-    native_extraction_reservation, native_extractor_contract_digest, native_read_reservation,
-    substitute_module_alias,
+    CloneTokenCount, CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX,
+    DiscoveredSource, DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile,
+    ExtractedImportBinding, ExtractedNumericalSite, ExtractedReference, ImportBindingKind,
+    NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits,
+    SourceReadError, SourceReadOptions, SourceRoot, TYPE_QUERY_VALUE_RESOLUTION_PREFIX,
+    is_test_source_path, native_extraction_reservation, native_extractor_contract_digest,
+    native_read_reservation, substitute_module_alias,
 };
 use cartograph_scip::{
     ScipOverlayReport, ScipOverlayRequest, apply_scip_overlay_with_cancellation,
@@ -131,11 +131,6 @@ const MAXIMUM_TYPESCRIPT_ALIAS_CONFIGS: usize = 256;
 const MAXIMUM_TYPESCRIPT_PATH_MAPPINGS: usize = 256;
 const MAXIMUM_TYPESCRIPT_PATH_SUBSTITUTIONS: usize = 32;
 const MAXIMUM_TYPESCRIPT_PATH_TEXT_BYTES: usize = 4_096;
-const MODULE_EXTENSIONS: [&str; 18] = [
-    ".d.ts", ".d.mts", ".d.cts", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs",
-    ".cjs", ".vue", ".svelte", ".astro", ".rs", ".py", ".go",
-];
-
 /// PostgreSQL-backed path/content cache policy for one complete native build.
 #[derive(Clone)]
 pub struct NativeParseCache {
@@ -3878,6 +3873,12 @@ struct CloneAnalysisInput<'context> {
     budget: &'context mut ResolveBudget,
 }
 
+struct CloneCandidateCollectionInput<'context> {
+    extracted: &'context mut NativeFactAccumulator,
+    source_root: &'context SourceRoot,
+    budget: &'context mut ResolveBudget,
+}
+
 struct PartialCloneBand<'context, Cancel> {
     extracted: &'context NativeFactAccumulator,
     candidates: &'context mut [CloneAnalysisCandidate],
@@ -4083,6 +4084,59 @@ where
         policy,
         budget,
     } = input;
+    let mut candidates = collect_clone_candidates(
+        CloneCandidateCollectionInput {
+            extracted: &mut *extracted,
+            source_root,
+            budget: &mut *budget,
+        },
+        cancelled,
+    )?;
+    if candidates.len() < 2 {
+        return Ok(());
+    }
+    let order_bytes = usize_to_u64(candidates.len())
+        .saturating_mul(usize_to_u64(size_of::<usize>()))
+        .saturating_mul(3);
+    budget.charge(order_bytes)?;
+    mark_exact_clone_candidates(extracted, &mut candidates, cancelled)?;
+    mark_near_clone_candidates(extracted, &mut candidates, cancelled)?;
+    compare_partial_clone_band(PartialCloneBand {
+        extracted,
+        candidates: &mut candidates,
+        minimum_overlap_ppm: DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM,
+        exclude_first_band: false,
+        cancelled,
+    })?;
+    if policy.wider_partial_band {
+        compare_partial_clone_band(PartialCloneBand {
+            extracted,
+            candidates: &mut candidates,
+            minimum_overlap_ppm: DUPLICATE_PARTIAL_WIDER_OVERLAP_PPM,
+            exclude_first_band: true,
+            cancelled,
+        })?;
+    }
+    persist_partial_clone_evidence(PersistPartialClones {
+        extracted,
+        candidates: &candidates,
+        budget,
+        cancelled,
+    })
+}
+
+fn collect_clone_candidates<Cancel>(
+    input: CloneCandidateCollectionInput<'_>,
+    cancelled: &mut Cancel,
+) -> Result<Vec<CloneAnalysisCandidate>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let CloneCandidateCollectionInput {
+        extracted,
+        source_root,
+        budget,
+    } = input;
     let symbol_count = extracted
         .files
         .iter()
@@ -4140,37 +4194,7 @@ where
             });
         }
     }
-    if candidates.len() < 2 {
-        return Ok(());
-    }
-    let order_bytes = usize_to_u64(candidates.len())
-        .saturating_mul(usize_to_u64(size_of::<usize>()))
-        .saturating_mul(3);
-    budget.charge(order_bytes)?;
-    mark_exact_clone_candidates(extracted, &mut candidates, cancelled)?;
-    mark_near_clone_candidates(extracted, &mut candidates, cancelled)?;
-    compare_partial_clone_band(PartialCloneBand {
-        extracted,
-        candidates: &mut candidates,
-        minimum_overlap_ppm: DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM,
-        exclude_first_band: false,
-        cancelled,
-    })?;
-    if policy.wider_partial_band {
-        compare_partial_clone_band(PartialCloneBand {
-            extracted,
-            candidates: &mut candidates,
-            minimum_overlap_ppm: DUPLICATE_PARTIAL_WIDER_OVERLAP_PPM,
-            exclude_first_band: true,
-            cancelled,
-        })?;
-    }
-    persist_partial_clone_evidence(PersistPartialClones {
-        extracted,
-        candidates: &candidates,
-        budget,
-        cancelled,
-    })
+    Ok(candidates)
 }
 
 fn mark_exact_clone_candidates<Cancel>(
@@ -4609,13 +4633,19 @@ fn clone_profile_total(candidate: &CloneAnalysisCandidate) -> u32 {
         .map_or(0, CloneTokenProfile::total_tokens)
 }
 
-fn clone_profile_overlap_ppm(left: &CloneTokenProfile, right: &CloneTokenProfile) -> u32 {
+#[derive(Clone, Copy)]
+struct CloneProfileView<'profile> {
+    counts: &'profile [CloneTokenCount],
+    total: u32,
+}
+
+fn clone_multiset_overlap_ppm(left: CloneProfileView<'_>, right: CloneProfileView<'_>) -> u32 {
     let mut left_index = 0_usize;
     let mut right_index = 0_usize;
     let mut intersection = 0_u64;
-    while left_index < left.counts().len() && right_index < right.counts().len() {
-        let left_count = left.counts()[left_index];
-        let right_count = right.counts()[right_index];
+    while left_index < left.counts.len() && right_index < right.counts.len() {
+        let left_count = left.counts[left_index];
+        let right_count = right.counts[right_index];
         match left_count.0.cmp(&right_count.0) {
             std::cmp::Ordering::Less => left_index = left_index.saturating_add(1),
             std::cmp::Ordering::Greater => right_index = right_index.saturating_add(1),
@@ -4627,32 +4657,33 @@ fn clone_profile_overlap_ppm(left: &CloneTokenProfile, right: &CloneTokenProfile
             }
         }
     }
-    let maximum = u64::from(left.total_tokens().max(right.total_tokens())).max(1);
+    let maximum = u64::from(left.total.max(right.total)).max(1);
     u32::try_from(intersection.saturating_mul(1_000_000) / maximum).unwrap_or(u32::MAX)
 }
 
-fn clone_identifier_overlap_ppm(left: &CloneTokenProfile, right: &CloneTokenProfile) -> u32 {
-    let mut left_index = 0_usize;
-    let mut right_index = 0_usize;
-    let mut intersection = 0_u64;
-    while left_index < left.identifier_counts().len()
-        && right_index < right.identifier_counts().len()
-    {
-        let left_count = left.identifier_counts()[left_index];
-        let right_count = right.identifier_counts()[right_index];
-        match left_count.0.cmp(&right_count.0) {
-            std::cmp::Ordering::Less => left_index = left_index.saturating_add(1),
-            std::cmp::Ordering::Greater => right_index = right_index.saturating_add(1),
-            std::cmp::Ordering::Equal => {
-                intersection =
-                    intersection.saturating_add(u64::from(left_count.1.min(right_count.1)));
-                left_index = left_index.saturating_add(1);
-                right_index = right_index.saturating_add(1);
-            }
-        }
+fn complete_clone_profile(profile: &CloneTokenProfile) -> CloneProfileView<'_> {
+    CloneProfileView {
+        counts: profile.counts(),
+        total: profile.total_tokens(),
     }
-    let maximum = u64::from(left.identifier_tokens().max(right.identifier_tokens())).max(1);
-    u32::try_from(intersection.saturating_mul(1_000_000) / maximum).unwrap_or(u32::MAX)
+}
+
+fn identifier_clone_profile(profile: &CloneTokenProfile) -> CloneProfileView<'_> {
+    CloneProfileView {
+        counts: profile.identifier_counts(),
+        total: profile.identifier_tokens(),
+    }
+}
+
+fn clone_profile_overlap_ppm(left: &CloneTokenProfile, right: &CloneTokenProfile) -> u32 {
+    clone_multiset_overlap_ppm(complete_clone_profile(left), complete_clone_profile(right))
+}
+
+fn clone_identifier_overlap_ppm(left: &CloneTokenProfile, right: &CloneTokenProfile) -> u32 {
+    clone_multiset_overlap_ppm(
+        identifier_clone_profile(left),
+        identifier_clone_profile(right),
+    )
 }
 
 fn clone_candidates_semantically_compatible(
@@ -6986,7 +7017,7 @@ fn index_module_path(
         },
         budget,
     )?;
-    let Some(stem) = strip_module_extension(&file.normalized_path) else {
+    let Some(stem) = strip_module_extension(&file.normalized_path, &file.language) else {
         return Ok(());
     };
     index_module_stem(modules, ModuleStemInput { file, stem }, budget)
@@ -7077,10 +7108,48 @@ fn native_package_name(file: &NativeFileFacts) -> Option<&str> {
         .map(|symbol| symbol.name.as_str())
 }
 
-fn strip_module_extension(path: &str) -> Option<&str> {
-    MODULE_EXTENSIONS
+fn strip_module_extension<'path>(path: &'path str, language: &str) -> Option<&'path str> {
+    const TYPESCRIPT_DECLARATION_EXTENSIONS: [&str; 3] = [".d.mts", ".d.cts", ".d.ts"];
+    if language == SourceLanguage::TypeScript.as_str()
+        && let Some(stem) = TYPESCRIPT_DECLARATION_EXTENSIONS
+            .into_iter()
+            .find_map(|extension| strip_suffix_ignore_ascii_case(path, extension))
+    {
+        return Some(stem);
+    }
+    let language = SourceLanguage::from_stable_str(language)?;
+    language
+        .v1_extensions()
         .iter()
-        .find_map(|extension| path.strip_suffix(extension))
+        .chain(language.additional_extensions())
+        .filter_map(|extension| {
+            strip_suffix_ignore_ascii_case(path, extension).map(|stem| (extension.len(), stem))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, stem)| stem)
+}
+
+fn strip_any_module_extension(path: &str) -> Option<&str> {
+    const TYPESCRIPT_DECLARATION_EXTENSIONS: [&str; 3] = [".d.mts", ".d.cts", ".d.ts"];
+    if let Some(stem) = TYPESCRIPT_DECLARATION_EXTENSIONS
+        .into_iter()
+        .find_map(|extension| strip_suffix_ignore_ascii_case(path, extension))
+    {
+        return Some(stem);
+    }
+    SourceLanguage::ALL
+        .into_iter()
+        .flat_map(|language| {
+            language
+                .v1_extensions()
+                .iter()
+                .chain(language.additional_extensions())
+        })
+        .filter_map(|extension| {
+            strip_suffix_ignore_ascii_case(path, extension).map(|stem| (extension.len(), stem))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, stem)| stem)
 }
 
 fn push_module_path(
@@ -7282,6 +7351,39 @@ enum ImportReferenceSite {
 struct ImportResolutionRequest<'a, 'b> {
     reference: &'a ResolutionRequest<'b>,
     site: ImportReferenceSite,
+}
+
+struct ImportCandidateFilter<'index, 'request> {
+    index: &'index ResolutionIndex,
+    reference: &'index ResolutionRequest<'request>,
+    imported_name: &'index str,
+    module_file_id: &'index FileId,
+    javascript_value_usage: bool,
+}
+
+impl ImportCandidateFilter<'_, '_> {
+    fn matches(&self, candidate: &ResolutionCandidate) -> bool {
+        if &candidate.file_id != self.module_file_id || !candidate.export.exported {
+            return false;
+        }
+        if !reference_kind_candidate(self.reference.kind, candidate) {
+            return false;
+        }
+        if self.javascript_value_usage && !javascript_runtime_import_candidate(candidate) {
+            return false;
+        }
+        if self.reference.language == SourceLanguage::Rust.as_str()
+            && !rust_module_candidate_visible(RustCandidateVisibility {
+                index: self.index,
+                candidate,
+                target_name: self.imported_name,
+                source_path: self.reference.file_path,
+            })
+        {
+            return false;
+        }
+        true
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -8467,23 +8569,16 @@ where
                     | ReferenceKind::Implements
                     | ReferenceKind::Extends
             );
-        if let Some(candidate) = select_candidate(
-            candidates,
-            |candidate| {
-                &candidate.file_id == module_file_id
-                    && candidate.export.exported
-                    && reference_kind_candidate(reference.kind, candidate)
-                    && (!javascript_value_usage || javascript_runtime_import_candidate(candidate))
-                    && (reference.language != SourceLanguage::Rust.as_str()
-                        || rust_module_candidate_visible(RustCandidateVisibility {
-                            index,
-                            candidate,
-                            target_name: imported_name,
-                            source_path: reference.file_path,
-                        }))
-            },
-            cancelled,
-        )? {
+        let filter = ImportCandidateFilter {
+            index,
+            reference,
+            imported_name,
+            module_file_id,
+            javascript_value_usage,
+        };
+        if let Some(candidate) =
+            select_candidate(candidates, |candidate| filter.matches(candidate), cancelled)?
+        {
             return Ok(ImportResolution::Resolved(import_binding_target(candidate)));
         }
     }
@@ -8825,6 +8920,9 @@ fn import_binding_is_project_local(
         || specifier.starts_with("../")
         || reference.language == SourceLanguage::Rust.as_str()
             && rust_use_binding_is_hypothesis(specifier)
+        || SourceLanguage::from_stable_str(reference.language).is_some_and(|language| {
+            language.is_game_scripting() && game_script_module_specifier_is_local(specifier)
+        })
         || typescript_alias_matches(
             &index.modules,
             TypeScriptAliasMatch {
@@ -8983,6 +9081,15 @@ fn resolve_module_file<'a>(
     if request.importing_language == SourceLanguage::Rust.as_str()
         && request.specifier == "crate"
         && let Some(file_id) = rust_crate_entry_file(modules, request.importing_path)
+    {
+        return Some(file_id);
+    }
+    if SourceLanguage::from_stable_str(request.importing_language)
+        .is_some_and(SourceLanguage::is_game_scripting)
+        && let Some(normalized) =
+            normalize_game_script_module_path(request.importing_path, request.specifier)
+        && let Some(file_id) =
+            resolve_normalized_module_file(modules, &normalized, request.importing_language)
     {
         return Some(file_id);
     }
@@ -9272,7 +9379,7 @@ fn resolve_normalized_module_file<'a>(
         ModuleFileMatch::Ambiguous => return None,
         ModuleFileMatch::Missing => {}
     }
-    let stem = strip_module_extension(normalized).unwrap_or(normalized);
+    let stem = strip_any_module_extension(normalized).unwrap_or(normalized);
     let stem_match = module_file_match(modules.stem.get(stem), &modules.files, importing_language);
     let directory_match = module_file_match(
         modules.directory_index.get(normalized),
@@ -9374,6 +9481,25 @@ fn normalize_relative_module_path(importing_path: &str, specifier: &str) -> Opti
         return None;
     }
     normalize_joined_project_path(importing_path, specifier)
+}
+
+fn normalize_game_script_module_path(importing_path: &str, specifier: &str) -> Option<String> {
+    if let Some(root_path) = specifier.strip_prefix("res://") {
+        return normalize_root_module_path(root_path);
+    }
+    if let Some(game_path) = specifier.strip_prefix("/Game/") {
+        return normalize_root_module_path(game_path);
+    }
+    game_script_module_specifier_is_local(specifier)
+        .then(|| normalize_joined_project_path(importing_path, specifier))?
+}
+
+fn game_script_module_specifier_is_local(specifier: &str) -> bool {
+    !specifier.is_empty()
+        && specifier.len() <= MAXIMUM_TYPESCRIPT_PATH_TEXT_BYTES
+        && !specifier.contains(['\\', '\0'])
+        && (!specifier.starts_with('/') || specifier.starts_with("/Game/"))
+        && (!specifier.contains("://") || specifier.starts_with("res://"))
 }
 
 fn normalize_include_path(importing_path: &str, specifier: &str) -> Option<String> {
@@ -10956,23 +11082,23 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "afe81d3c819a750ebcdf141c2eb62cdc61cd02a986188b63118e206f81d6f36e";
+        "a507e3cb60c16644fb4afa734dd2ebbaa515b398afc260398d156457d1ffd8af";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "3ec7c030beaebcfab6528900ce3e8c412b6fa1ea2dc26925b7ff3489f4c966dc";
+        "920be8badeb2144a92e484cbe4a3c1c02ac6b97843d5b42bba10a53ec6e43de5";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "50259aa96166111916d3b0fa7a031558314a8b467a304bd8ef98bb5d045d78cc";
+        "13fd0caa9ed0278422be5421c86711bf87b070c831b58c76a52b2e2032d265a5";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
-    const CUSTOM_FAMILY_FILE_COUNT: usize = 12;
+    const CUSTOM_FAMILY_FILE_COUNT: usize = 13;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "33b63d456afbfc9ce385f160eb783465d409fc39a90c3166026f376cad674db2";
+        "77a1bb3eb361d023b5a7659dac05b6d7b0e6a32a3f05c3f93b59779cc1f3424b";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
-        (12, 40, 34, 27, 40);
+        (13, 49, 44, 32, 49);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
         (
             "force-app/main/default/aura/OrderPanel/OrderPanel.cmp",
@@ -11008,6 +11134,11 @@ mod tests {
             "config/application.properties",
             "orders.cache.ttl=${orders.default.ttl}\n",
             SourceLanguage::Properties,
+        ),
+        (
+            "scripts/order-policy.rhai",
+            include_str!("../../../docs/test-beds/rhai/fixture.rhai"),
+            SourceLanguage::Rhai,
         ),
         (
             "components/OrderPanel.svelte",
@@ -12357,6 +12488,89 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
                     && document.kind() == DocumentKind::Symbol
             }));
         }
+    }
+
+    #[test]
+    fn rhai_literal_modules_and_namespace_calls_resolve_without_execution() {
+        let fixtures = [
+            (
+                "scripts/crypto.rhai",
+                "fn encrypt(value) { value }\nprivate fn hidden(value) { value }\n",
+            ),
+            (
+                "scripts/main.rhai",
+                "import \"crypto\" as lock;\nfn call_crypto(value) { lock::encrypt(value) }\n",
+            ),
+        ];
+        let forward = build_capability_generation(&fixtures, false);
+        let reversed = build_capability_generation(&fixtures, true);
+        assert_eq!(forward.digest(), reversed.digest());
+        assert_eq!(forward.references(), reversed.references());
+        assert_eq!(forward.edges(), reversed.edges());
+
+        let caller = capability_symbol(&forward, "scripts/main.rhai", "call_crypto");
+        let target = capability_symbol(&forward, "scripts/crypto.rhai", "encrypt");
+        let reference = CapabilityReferenceQuery::new(&forward, caller)
+            .named("lock::encrypt", ReferenceKind::Calls);
+        assert_eq!(reference.target_symbol_id.as_ref(), Some(&target.symbol_id));
+        assert_eq!(reference.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+        assert!(forward.edges().iter().any(|edge| {
+            edge.source_symbol_id == caller.symbol_id
+                && edge.target_symbol_id == target.symbol_id
+                && edge.kind == EdgeKind::Calls
+        }));
+
+        let hidden = capability_symbol(&forward, "scripts/crypto.rhai", "hidden");
+        assert!(!hidden.export.exported);
+        assert_eq!(hidden.visibility, Some(Visibility::Private));
+    }
+
+    #[test]
+    fn game_script_module_paths_resolve_relative_and_engine_root_imports() {
+        let fixtures = [
+            ("wren/helper.wren", "class Helper { }\n"),
+            (
+                "wren/main.wren",
+                "import \"./helper\" for Helper\nclass Main { }\n",
+            ),
+            ("scripts/helper.gd", "class_name Helper\n"),
+            (
+                "scripts/main.gd",
+                "class_name Main\nconst Helper = preload(\"res://scripts/helper.gd\")\n",
+            ),
+        ];
+        let forward = build_capability_generation(&fixtures, false);
+        let reversed = build_capability_generation(&fixtures, true);
+        assert_eq!(forward.digest(), reversed.digest());
+        assert_eq!(forward.references(), reversed.references());
+        assert_eq!(forward.edges(), reversed.edges());
+
+        assert_import_targets_file(&forward, "wren/main.wren", "./helper", "wren/helper.wren");
+        assert_import_targets_file(
+            &forward,
+            "scripts/main.gd",
+            "res://scripts/helper.gd",
+            "scripts/helper.gd",
+        );
+    }
+
+    fn assert_import_targets_file(
+        facts: &CanonicalGenerationFacts,
+        source_path: &str,
+        module: &str,
+        target_path: &str,
+    ) {
+        let source = capability_file_symbol(facts, source_path);
+        let target = capability_file_symbol(facts, target_path);
+        let reference =
+            CapabilityReferenceQuery::new(facts, source).named(module, ReferenceKind::Imports);
+        assert_eq!(reference.target_symbol_id.as_ref(), Some(&target.symbol_id));
+        assert_eq!(reference.resolution_provenance, MODULE_IMPORT_PROVENANCE);
+        assert!(facts.edges().iter().any(|edge| {
+            edge.source_symbol_id == source.symbol_id
+                && edge.target_symbol_id == target.symbol_id
+                && edge.kind == EdgeKind::Imports
+        }));
     }
 
     #[test]
@@ -15322,8 +15536,18 @@ export function secondClone(value: number) {
             normalize_relative_module_path("src/consumer.ts", "package"),
             None
         );
-        assert_eq!(strip_module_extension("src/api.d.ts"), Some("src/api"));
-        assert_eq!(strip_module_extension("src/api.d.mts"), Some("src/api"));
+        assert_eq!(
+            strip_module_extension("src/api.d.ts", SourceLanguage::TypeScript.as_str()),
+            Some("src/api")
+        );
+        assert_eq!(
+            strip_module_extension("src/api.d.mts", SourceLanguage::TypeScript.as_str()),
+            Some("src/api")
+        );
+        assert_eq!(
+            strip_module_extension("scripts/helper.wren", SourceLanguage::Wren.as_str()),
+            Some("scripts/helper")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

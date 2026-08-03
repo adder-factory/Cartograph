@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-02 (`v2.1.6`)
+Last implementation review: 2026-08-02 (`v2.1.7`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,9 +59,11 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns twenty-eight versions.
-Migration 28 admits generation digest V9 for precision-fenced executable-line,
-resolver-provenance, import-consumer, and biomarker evidence; migration 27
+The append-only migration ledger currently owns twenty-nine versions.
+Migration 29 admits generation digest V10 for call-target-precise secret
+exposure and incomplete-implementation evidence; migration 28 admits generation
+digest V9 for precision-fenced executable-line, resolver-provenance,
+import-consumer, and biomarker evidence; migration 27
 admits generation digest V8 for context-classified structural diagnostics and
 clone compatibility; migration 26 adds immutable numerical sites and admits
 generation digest V7; migration 25 preserves exact
@@ -111,7 +113,7 @@ The complete supported-source revision is built from an exact count plus
 ordered normalized path/content-digest pairs through one shared domain builder.
 Indexer, status, source context, and importer use the same encoding. The importer
 builds its caller-owned manifest from the exact checkout through the frozen
-v1.1.33 path boundary, excluding only additive v2 `.pyi` and TOML modes. An
+v1.1.33 path boundary, excluding every additive v2 extension and mode. An
 imported schema must contain exactly that checkout path/content set; missing,
 extra, or substituted paths fail before durable mutation.
 
@@ -124,9 +126,10 @@ state lowers confidence and is never treated as a clean result.
 
 ## Native extraction
 
-Current production admission covers all 73 v1.1.33 language modes plus native
-TOML: 61 pinned grammar-backed modes and 13 bounded Rust custom scanners. The
-163-extension v1 manifest is exact; `.pyi` and `.toml` are additive
+Current production admission covers all 73 v1.1.33 language modes, native
+TOML, and 52 dedicated textual game-scripting modes: 61 pinned grammar-backed
+modes and 65 bounded Rust custom scanners. The 163-extension v1 manifest is
+exact; `.pyi` and every dedicated game-script extension are additive
 improvements. Every family has
 literal-safety and cancellation tests, deterministic 1-vs-4 worker facts, and
 live PostgreSQL/ParadeDB COPY, publication, and BM25 evidence. Unknown discovery

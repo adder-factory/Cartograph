@@ -244,83 +244,6 @@ const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 57] = [
     || arborium_yaml::language().into(),
 ];
 
-const SOURCE_LANGUAGE_GRAMMARS: [Option<NativeGrammar>; 74] = [
-    Some(NativeGrammar::Abap),
-    Some(NativeGrammar::Apex),
-    Some(NativeGrammar::ArkTs),
-    Some(NativeGrammar::Astro),
-    None,
-    Some(NativeGrammar::Bash),
-    None,
-    None,
-    None,
-    Some(NativeGrammar::C),
-    Some(NativeGrammar::Clojure),
-    Some(NativeGrammar::CommonLisp),
-    Some(NativeGrammar::Cpp),
-    Some(NativeGrammar::CSharp),
-    Some(NativeGrammar::Css),
-    Some(NativeGrammar::Cuda),
-    Some(NativeGrammar::Dart),
-    Some(NativeGrammar::Elixir),
-    Some(NativeGrammar::EmbeddedTemplate),
-    Some(NativeGrammar::Fish),
-    Some(NativeGrammar::FSharp),
-    Some(NativeGrammar::Glsl),
-    Some(NativeGrammar::Go),
-    Some(NativeGrammar::GraphQl),
-    Some(NativeGrammar::Groovy),
-    Some(NativeGrammar::Haskell),
-    Some(NativeGrammar::Hcl),
-    Some(NativeGrammar::Hlsl),
-    Some(NativeGrammar::Html),
-    Some(NativeGrammar::Java),
-    Some(NativeGrammar::JavaScript),
-    Some(NativeGrammar::JsDoc),
-    Some(NativeGrammar::Json),
-    Some(NativeGrammar::JavaScript),
-    Some(NativeGrammar::Julia),
-    Some(NativeGrammar::Json),
-    Some(NativeGrammar::Lua),
-    Some(NativeGrammar::Kotlin),
-    Some(NativeGrammar::Lean),
-    None,
-    Some(NativeGrammar::Lua),
-    Some(NativeGrammar::Luau),
-    Some(NativeGrammar::Nix),
-    Some(NativeGrammar::ObjectiveC),
-    Some(NativeGrammar::Ocaml),
-    Some(NativeGrammar::OcamlInterface),
-    None,
-    Some(NativeGrammar::Pascal),
-    Some(NativeGrammar::Php),
-    Some(NativeGrammar::PowerShell),
-    Some(NativeGrammar::Prisma),
-    None,
-    Some(NativeGrammar::Python),
-    Some(NativeGrammar::R),
-    Some(NativeGrammar::Regex),
-    Some(NativeGrammar::ReScript),
-    Some(NativeGrammar::Ruby),
-    Some(NativeGrammar::Rust),
-    Some(NativeGrammar::Scala),
-    Some(NativeGrammar::Solidity),
-    Some(NativeGrammar::Sql),
-    None,
-    Some(NativeGrammar::Swift),
-    None,
-    Some(NativeGrammar::Tsx),
-    Some(NativeGrammar::TypeScript),
-    None,
-    Some(NativeGrammar::VisualBasic),
-    Some(NativeGrammar::Verilog),
-    None,
-    None,
-    None,
-    Some(NativeGrammar::Yaml),
-    Some(NativeGrammar::Bash),
-];
-
 impl NativeGrammar {
     /// Every admitted binding in stable language-id order.
     pub const ALL: [Self; 57] = [
@@ -395,11 +318,132 @@ impl NativeGrammar {
         NATIVE_GRAMMAR_FACTORIES[self as usize]()
     }
 
-    /// Native grammar binding selected for every grammar-backed v1 mode.
-    /// Twelve bounded custom languages intentionally return `None`.
+    /// Native grammar binding selected for every grammar-backed mode.
+    /// Bounded custom languages intentionally return `None`.
     #[must_use]
     pub const fn for_source_language(language: SourceLanguage) -> Option<Self> {
-        SOURCE_LANGUAGE_GRAMMARS[language as usize]
+        if let Some(grammar) = grammar_group_a(language) {
+            return Some(grammar);
+        }
+        if let Some(grammar) = grammar_group_b(language) {
+            return Some(grammar);
+        }
+        if let Some(grammar) = grammar_group_c(language) {
+            return Some(grammar);
+        }
+        if let Some(grammar) = grammar_group_d(language) {
+            return Some(grammar);
+        }
+        if let Some(grammar) = grammar_group_e(language) {
+            return Some(grammar);
+        }
+        grammar_group_f(language)
+    }
+}
+
+const fn grammar_group_a(language: SourceLanguage) -> Option<NativeGrammar> {
+    match language {
+        SourceLanguage::Abap => Some(NativeGrammar::Abap),
+        SourceLanguage::Apex => Some(NativeGrammar::Apex),
+        SourceLanguage::ArkTs => Some(NativeGrammar::ArkTs),
+        SourceLanguage::Astro => Some(NativeGrammar::Astro),
+        SourceLanguage::Bash | SourceLanguage::Zsh => Some(NativeGrammar::Bash),
+        SourceLanguage::C => Some(NativeGrammar::C),
+        SourceLanguage::Clojure => Some(NativeGrammar::Clojure),
+        SourceLanguage::CommonLisp => Some(NativeGrammar::CommonLisp),
+        SourceLanguage::Cpp => Some(NativeGrammar::Cpp),
+        SourceLanguage::CSharp => Some(NativeGrammar::CSharp),
+        _ => None,
+    }
+}
+
+const fn grammar_group_b(language: SourceLanguage) -> Option<NativeGrammar> {
+    match language {
+        SourceLanguage::Css => Some(NativeGrammar::Css),
+        SourceLanguage::Cuda => Some(NativeGrammar::Cuda),
+        SourceLanguage::Dart => Some(NativeGrammar::Dart),
+        SourceLanguage::Elixir => Some(NativeGrammar::Elixir),
+        SourceLanguage::EmbeddedTemplate => Some(NativeGrammar::EmbeddedTemplate),
+        SourceLanguage::Fish => Some(NativeGrammar::Fish),
+        SourceLanguage::FSharp => Some(NativeGrammar::FSharp),
+        SourceLanguage::Glsl => Some(NativeGrammar::Glsl),
+        SourceLanguage::Go => Some(NativeGrammar::Go),
+        SourceLanguage::GraphQl => Some(NativeGrammar::GraphQl),
+        SourceLanguage::Groovy => Some(NativeGrammar::Groovy),
+        _ => None,
+    }
+}
+
+const fn grammar_group_c(language: SourceLanguage) -> Option<NativeGrammar> {
+    match language {
+        SourceLanguage::Haskell => Some(NativeGrammar::Haskell),
+        SourceLanguage::Hcl => Some(NativeGrammar::Hcl),
+        SourceLanguage::Hlsl => Some(NativeGrammar::Hlsl),
+        SourceLanguage::Html => Some(NativeGrammar::Html),
+        SourceLanguage::Java => Some(NativeGrammar::Java),
+        SourceLanguage::JavaScript | SourceLanguage::Jsx => Some(NativeGrammar::JavaScript),
+        SourceLanguage::JsDoc => Some(NativeGrammar::JsDoc),
+        SourceLanguage::Json | SourceLanguage::Jupyter => Some(NativeGrammar::Json),
+        SourceLanguage::Julia => Some(NativeGrammar::Julia),
+        SourceLanguage::Khn | SourceLanguage::Lua => Some(NativeGrammar::Lua),
+        _ => None,
+    }
+}
+
+const fn grammar_group_d(language: SourceLanguage) -> Option<NativeGrammar> {
+    match language {
+        SourceLanguage::Kotlin => Some(NativeGrammar::Kotlin),
+        SourceLanguage::Lean => Some(NativeGrammar::Lean),
+        SourceLanguage::Luau => Some(NativeGrammar::Luau),
+        SourceLanguage::Nix => Some(NativeGrammar::Nix),
+        SourceLanguage::ObjectiveC => Some(NativeGrammar::ObjectiveC),
+        SourceLanguage::Ocaml => Some(NativeGrammar::Ocaml),
+        SourceLanguage::OcamlInterface => Some(NativeGrammar::OcamlInterface),
+        SourceLanguage::Pascal => Some(NativeGrammar::Pascal),
+        SourceLanguage::Php => Some(NativeGrammar::Php),
+        SourceLanguage::PowerShell => Some(NativeGrammar::PowerShell),
+        _ => None,
+    }
+}
+
+const fn grammar_group_e(language: SourceLanguage) -> Option<NativeGrammar> {
+    if let Some(grammar) = grammar_group_e_data(language) {
+        return Some(grammar);
+    }
+    grammar_group_e_systems(language)
+}
+
+const fn grammar_group_e_data(language: SourceLanguage) -> Option<NativeGrammar> {
+    match language {
+        SourceLanguage::Prisma => Some(NativeGrammar::Prisma),
+        SourceLanguage::Python => Some(NativeGrammar::Python),
+        SourceLanguage::R => Some(NativeGrammar::R),
+        SourceLanguage::Regex => Some(NativeGrammar::Regex),
+        SourceLanguage::ReScript => Some(NativeGrammar::ReScript),
+        _ => None,
+    }
+}
+
+const fn grammar_group_e_systems(language: SourceLanguage) -> Option<NativeGrammar> {
+    match language {
+        SourceLanguage::Ruby => Some(NativeGrammar::Ruby),
+        SourceLanguage::Rust => Some(NativeGrammar::Rust),
+        SourceLanguage::Scala => Some(NativeGrammar::Scala),
+        SourceLanguage::Solidity => Some(NativeGrammar::Solidity),
+        SourceLanguage::Sql => Some(NativeGrammar::Sql),
+        _ => None,
+    }
+}
+
+const fn grammar_group_f(language: SourceLanguage) -> Option<NativeGrammar> {
+    match language {
+        SourceLanguage::Swift => Some(NativeGrammar::Swift),
+        SourceLanguage::Tsx => Some(NativeGrammar::Tsx),
+        SourceLanguage::TypeScript => Some(NativeGrammar::TypeScript),
+        SourceLanguage::VbNet => Some(NativeGrammar::VisualBasic),
+        SourceLanguage::Verilog => Some(NativeGrammar::Verilog),
+        SourceLanguage::Yaml => Some(NativeGrammar::Yaml),
+        _ => None,
     }
 }
 

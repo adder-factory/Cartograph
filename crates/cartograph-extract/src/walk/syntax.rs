@@ -7,7 +7,7 @@ use tree_sitter::{Node, TreeCursor};
 
 use crate::{
     CloneTokenCount, CloneTokenProfile, DiagnosticCode, ExtractError, ExtractionDiagnostic,
-    SymbolHealthMetrics, budget::ensure_fact_string_length,
+    SymbolHealthMetrics, budget::ensure_fact_string_length, model::CloneTokenProfileInput,
 };
 
 const MAX_DIAGNOSTICS: usize = 32;
@@ -87,18 +87,16 @@ const SENSITIVE_EXPOSURE_SUBSTRINGS: &[&str] = &[
     "console.error",
     "logger.",
     "log.",
-    "print(",
-    "println!",
 ];
+const SENSITIVE_EXPOSURE_CALL_WORDS: &[&str] = &["print", "println"];
 const INCOMPLETE_COMMENT_MARKERS: &[&str] = &["todo", "fixme", "xxx", "hack"];
 const INCOMPLETE_COMMENT_PHRASE: &str = "not implemented";
 const INCOMPLETE_SYNTAX_MARKERS: &[&str] = &[
-    "todo!",
-    "unimplemented!",
     "not implemented",
     "notimplementederror",
     "unsupportedoperationexception",
 ];
+const INCOMPLETE_MACRO_NAMES: &[&str] = &["todo", "unimplemented"];
 const INTEGER_LITERAL_SUFFIXES: &[&str] = &[
     "usize", "isize", "u128", "i128", "u64", "i64", "u32", "i32", "u16", "i16", "u8", "i8", "ull",
     "llu", "ul", "lu", "ll", "u", "l",
@@ -202,6 +200,68 @@ struct TextMetricInput<'source> {
     async_symbol: bool,
 }
 
+struct CodeLineState {
+    depth: usize,
+    static_jsx_by_depth: Vec<bool>,
+    previous_row: Option<usize>,
+    lines: u32,
+}
+
+impl CodeLineState {
+    fn new() -> Self {
+        Self {
+            depth: 0,
+            static_jsx_by_depth: vec![false],
+            previous_row: None,
+            lines: 0,
+        }
+    }
+
+    fn record(&mut self, node: Node<'_>, static_jsx: bool) -> bool {
+        let comment = is_comment_node(node.kind());
+        if !comment && !static_jsx {
+            let row = node.start_position().row;
+            if self.previous_row != Some(row) {
+                self.lines = self.lines.saturating_add(1);
+                self.previous_row = Some(row);
+            }
+        }
+        comment
+    }
+
+    fn descend(
+        &mut self,
+        cursor: &mut TreeCursor<'_>,
+        child_static_jsx: bool,
+        descend: bool,
+    ) -> bool {
+        if !descend || !cursor.goto_first_child() {
+            return false;
+        }
+        self.depth = self.depth.saturating_add(1);
+        if let Some(static_jsx) = self.static_jsx_by_depth.get_mut(self.depth) {
+            *static_jsx = child_static_jsx;
+        } else {
+            self.static_jsx_by_depth.push(child_static_jsx);
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FacadeHealthInput<'tree, 'source> {
+    body: Node<'tree>,
+    language: SourceLanguage,
+    source: &'source str,
+}
+
+#[derive(Clone, Copy)]
+struct SensitiveBoundaryInput<'source> {
+    code_fields: &'source [&'source str],
+    literal_fields: &'source [&'source str],
+    boundary: SensitiveBoundaryEvidence,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SymbolHealthInput<'tree, 'source> {
     pub(crate) declaration: Node<'tree>,
@@ -266,7 +326,14 @@ pub(crate) fn symbol_health_metrics(
         },
         cancelled,
     )?;
-    record_facade_health(&mut metrics, body, language, source);
+    record_facade_health(
+        &mut metrics,
+        FacadeHealthInput {
+            body,
+            language,
+            source,
+        },
+    );
     Ok(metrics)
 }
 
@@ -276,34 +343,29 @@ fn code_line_count(
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<u32, ExtractError> {
     let mut cursor = declaration.walk();
-    let mut depth = 0_usize;
+    let mut state = CodeLineState::new();
     let mut root = true;
-    let mut previous_row = None;
-    let mut lines = 0_u32;
     let mut visited = 0_usize;
-    let mut static_jsx_by_depth = vec![false];
     loop {
         let node = cursor.node();
         poll_code_line_walk(&mut visited, cancelled)?;
-        let inherited_static_jsx = static_jsx_by_depth.get(depth).copied().unwrap_or(false);
+        let inherited_static_jsx = state
+            .static_jsx_by_depth
+            .get(state.depth)
+            .copied()
+            .unwrap_or(false);
         let (static_jsx, child_static_jsx) =
             jsx_line_context(language, node.kind(), inherited_static_jsx);
-        let comment = record_health_line(node, static_jsx, &mut previous_row, &mut lines);
+        let comment = state.record(node, static_jsx);
         let descend = !comment
             && !is_opaque_string_literal(node.kind())
             && (root || !is_callable_node(node.kind()));
         root = false;
-        if descend_code_line_cursor(
-            &mut cursor,
-            &mut depth,
-            &mut static_jsx_by_depth,
-            child_static_jsx,
-            descend,
-        ) {
+        if state.descend(&mut cursor, child_static_jsx, descend) {
             continue;
         }
-        if !advance_health_cursor(&mut cursor, &mut depth) {
-            return Ok(lines);
+        if !advance_health_cursor(&mut cursor, &mut state.depth) {
+            return Ok(state.lines);
         }
     }
 }
@@ -336,42 +398,6 @@ fn jsx_line_context(
     let jsx_scaffolding = is_jsx_scaffolding_node(node_kind);
     let static_jsx = jsx_scaffolding || inherited_static_jsx;
     (static_jsx, static_jsx)
-}
-
-fn descend_code_line_cursor(
-    cursor: &mut TreeCursor<'_>,
-    depth: &mut usize,
-    static_jsx_by_depth: &mut Vec<bool>,
-    child_static_jsx: bool,
-    descend: bool,
-) -> bool {
-    if !descend || !cursor.goto_first_child() {
-        return false;
-    }
-    *depth = depth.saturating_add(1);
-    if let Some(static_jsx) = static_jsx_by_depth.get_mut(*depth) {
-        *static_jsx = child_static_jsx;
-    } else {
-        static_jsx_by_depth.push(child_static_jsx);
-    }
-    true
-}
-
-fn record_health_line(
-    node: Node<'_>,
-    static_jsx: bool,
-    previous_row: &mut Option<usize>,
-    lines: &mut u32,
-) -> bool {
-    let comment = is_comment_node(node.kind());
-    if !comment && !static_jsx {
-        let row = node.start_position().row;
-        if *previous_row != Some(row) {
-            *lines = lines.saturating_add(1);
-            *previous_row = Some(row);
-        }
-    }
-    comment
 }
 
 fn is_jsx_scaffolding_node(kind: &str) -> bool {
@@ -687,17 +713,12 @@ fn owned_loop_nodes(root: Node<'_>) -> Vec<Node<'_>> {
     nodes
 }
 
-fn record_facade_health(
-    metrics: &mut SymbolHealthMetrics,
-    body: Node<'_>,
-    language: SourceLanguage,
-    source: &str,
-) {
-    if !is_javascript_language(language) {
+fn record_facade_health(metrics: &mut SymbolHealthMetrics, input: FacadeHealthInput<'_, '_>) {
+    if !is_javascript_language(input.language) {
         return;
     }
     let mut nested_callables = Vec::new();
-    let mut outer_stack = named_children(body).collect::<Vec<_>>();
+    let mut outer_stack = named_children(input.body).collect::<Vec<_>>();
     let mut has_returned_object = false;
     let mut outer_side_effects = 0_u16;
     while let Some(node) = outer_stack.pop() {
@@ -720,7 +741,7 @@ fn record_facade_health(
     }
     let delegate_count = nested_callables
         .iter()
-        .filter(|callable| callable_is_focused_delegate(**callable, source))
+        .filter(|callable| callable_is_focused_delegate(**callable, input.source))
         .count();
     if has_returned_object
         && nested_callables.len() >= 3
@@ -778,11 +799,7 @@ fn incomplete_marker_count(body: Node<'_>, source: &str) -> u16 {
             )));
             continue;
         }
-        if is_incomplete_syntax_node(node.kind())
-            && INCOMPLETE_SYNTAX_MARKERS
-                .iter()
-                .any(|marker| contains_ascii_case_insensitive(text, marker))
-        {
+        if contains_incomplete_syntax_marker(node, source) {
             count = count.saturating_add(1);
             continue;
         }
@@ -791,11 +808,30 @@ fn incomplete_marker_count(body: Node<'_>, source: &str) -> u16 {
     count
 }
 
-fn is_incomplete_syntax_node(kind: &str) -> bool {
-    matches!(
-        kind,
-        "call_expression" | "macro_invocation" | "raise_statement" | "throw_statement"
-    )
+fn contains_incomplete_syntax_marker(node: Node<'_>, source: &str) -> bool {
+    match node.kind() {
+        "macro_invocation" => node
+            .child_by_field_name("macro")
+            .or_else(|| node.named_child(0))
+            .is_some_and(|target| {
+                fields_contain_identifier_component(
+                    &[text_for(source, target)],
+                    INCOMPLETE_MACRO_NAMES,
+                )
+            }),
+        "call" | "call_expression" => node
+            .child_by_field_name("function")
+            .or_else(|| node.named_child(0))
+            .is_some_and(|target| {
+                INCOMPLETE_SYNTAX_MARKERS
+                    .iter()
+                    .any(|marker| contains_ascii_case_insensitive(text_for(source, target), marker))
+            }),
+        "raise_statement" | "throw_statement" => INCOMPLETE_SYNTAX_MARKERS
+            .iter()
+            .any(|marker| contains_ascii_case_insensitive(text_for(source, node), marker)),
+        _ => false,
+    }
 }
 
 fn parameter_count(input: ParameterMetricInput<'_, '_>) -> u16 {
@@ -1034,8 +1070,14 @@ fn sensitive_material_score(
             },
         },
     );
-    let actionable_boundary =
-        add_sensitive_boundary_signals(&mut score, code_fields, literal_fields, boundary);
+    let actionable_boundary = add_sensitive_boundary_signals(
+        &mut score,
+        SensitiveBoundaryInput {
+            code_fields,
+            literal_fields,
+            boundary,
+        },
+    );
     let actionable = signed_claim_literal || cloud_literal || actionable_boundary;
     (
         score.value.min(MAX_SENSITIVE_SCORE),
@@ -1046,14 +1088,12 @@ fn sensitive_material_score(
 
 fn add_sensitive_boundary_signals(
     score: &mut SensitiveScore,
-    code_fields: &[&str],
-    literal_fields: &[&str],
-    boundary: SensitiveBoundaryEvidence,
+    input: SensitiveBoundaryInput<'_>,
 ) -> bool {
     add_sensitive_signal(
         score,
         SensitiveSignal {
-            matched: boundary.environment_secret,
+            matched: input.boundary.environment_secret,
             category: SIGNAL_CATEGORY_ENVIRONMENT,
             weight: ENVIRONMENT_SIGNAL_WEIGHT,
         },
@@ -1061,12 +1101,16 @@ fn add_sensitive_boundary_signals(
     add_sensitive_signal(
         score,
         SensitiveSignal {
-            matched: fields_contain_identifier_component(code_fields, PERSONAL_DATA_SUBSTRINGS),
+            matched: fields_contain_identifier_component(
+                input.code_fields,
+                PERSONAL_DATA_SUBSTRINGS,
+            ),
             category: SIGNAL_CATEGORY_PERSONAL_DATA,
             weight: PERSONAL_DATA_SIGNAL_WEIGHT,
         },
     );
-    let long_token_literal = literal_fields
+    let long_token_literal = input
+        .literal_fields
         .iter()
         .any(|field| contains_long_token_literal(field));
     add_sensitive_signal(
@@ -1080,12 +1124,14 @@ fn add_sensitive_boundary_signals(
     add_sensitive_signal(
         score,
         SensitiveSignal {
-            matched: boundary.exposed_sensitive_material,
+            matched: input.boundary.exposed_sensitive_material,
             category: SIGNAL_CATEGORY_EXPOSURE,
             weight: EXPOSURE_SIGNAL_WEIGHT,
         },
     );
-    boundary.environment_secret || long_token_literal || boundary.exposed_sensitive_material
+    input.boundary.environment_secret
+        || long_token_literal
+        || input.boundary.exposed_sensitive_material
 }
 
 fn is_environment_access_boundary(kind: &str) -> bool {
@@ -1111,7 +1157,8 @@ fn text_contains_environment_secret(text: &str) -> bool {
 }
 
 fn text_contains_sensitive_exposure(text: &str) -> bool {
-    fields_contain_substring(&[text], SENSITIVE_EXPOSURE_SUBSTRINGS)
+    (fields_contain_substring(&[text], SENSITIVE_EXPOSURE_SUBSTRINGS)
+        || fields_contain_identifier_component(&[text], SENSITIVE_EXPOSURE_CALL_WORDS))
         && text_contains_sensitive_material(text)
 }
 
@@ -2401,12 +2448,12 @@ pub(crate) fn clone_token_profile(
         .into_iter()
         .map(|(fingerprint, count)| CloneTokenCount(fingerprint, count))
         .collect();
-    Ok(Some(CloneTokenProfile::new(
-        retained,
+    Ok(Some(CloneTokenProfile::new(CloneTokenProfileInput {
+        counts: retained,
         total_tokens,
-        retained_identifiers,
+        identifier_counts: retained_identifiers,
         identifier_tokens,
-    )))
+    })))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

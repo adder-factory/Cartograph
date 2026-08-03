@@ -9,7 +9,8 @@ input. It does not depend on PostgreSQL, MCP, or an LLM.
 
 The authoritative, exhaustively tested manifest is
 `cartograph_domain::SourceLanguage::ALL`: all 73 v1.1.33 modes and their 163
-extensions, plus additive `.pyi` support and a native TOML mode. The
+extensions, plus additive `.pyi`, native TOML, and 52 dedicated textual
+game-scripting modes. The
 implementation is divided into:
 
 - JavaScript/TypeScript, Rust/Python/Go, query-tag, C-family, shell, managed,
@@ -17,7 +18,8 @@ implementation is divided into:
 - parser-only structural file documents for CSS, embedded templates, JSDoc,
   JSON/Jupyter, and regex sources;
 - bounded custom scanners for Aura, BG3 Anubis/resources/stats, Liquid, Osiris,
-  properties, Svelte, TOML, VB6, Visualforce, Vue, and MyBatis XML.
+  properties, Svelte, TOML, VB6, Visualforce, Vue, MyBatis XML, and the
+  [researched game-scripting inventory](GAME-SCRIPTING-LANGUAGES.md).
 
 Unknown extensions are excluded by discovery and rejected when explicitly read.
 They do not produce a misleading “successful empty graph.” The v1 PostgreSQL
@@ -50,9 +52,11 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V9 fences JSX executable-line ownership, SQL/document/secret
-health precision, Python intrinsic and receiver provenance, React lazy default
-consumers, and TypeScript `typeof` value consumers; contract V8 fenced
+contract. Contract V10 fences call-target-precise secret exposure and
+incomplete-implementation evidence; contract V9 fenced JSX executable-line
+ownership, SQL/document/secret health precision, Python intrinsic and receiver
+provenance, React lazy default consumers, and TypeScript `typeof` value
+consumers; contract V8 fenced
 context-classified URL and serial-loop evidence, facade roles, and semantic
 clone compatibility; contract V7 added generation-scoped static numerical
 sites; contract V6 fenced framework, resolver, test-ownership, and Rust Cargo

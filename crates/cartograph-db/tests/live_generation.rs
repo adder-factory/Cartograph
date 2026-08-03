@@ -79,8 +79,9 @@ const DIRECTORY_IMPORT_SIMPLE_NAME_MIGRATION_VERSION: i64 = 25;
 const NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_VERSION: i64 = 26;
 const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_VERSION: i64 = 27;
 const BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION: i64 = 28;
-const LATEST_MIGRATION_VERSION: i64 = BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 28] = [
+const DETECTOR_PRECISION_DIGEST_V10_MIGRATION_VERSION: i64 = 29;
+const LATEST_MIGRATION_VERSION: i64 = DETECTOR_PRECISION_DIGEST_V10_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 29] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -109,6 +110,7 @@ const EXPECTED_MIGRATIONS: [i64; 28] = [
     NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_VERSION,
     STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_VERSION,
     BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION,
+    DETECTOR_PRECISION_DIGEST_V10_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -151,6 +153,8 @@ const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_CHECKSUM: &str =
     "b0e245329c8698665484bbfcdba2fdb8dee225b56162bf9591057ba7e7af05f4";
 const BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_CHECKSUM: &str =
     "702c0fdafe0c2aa6bac5b967f373a310a4ad4ef4ecc0ff710dd0fb2e4c86a8b8";
+const DETECTOR_PRECISION_DIGEST_V10_MIGRATION_CHECKSUM: &str =
+    "84f354b54354963e1a0733e8415d87b4dec7475bdf32d6e6365e0e390eb19b22";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -3711,76 +3715,29 @@ async fn assert_deterministic_cochange_order_migration(pool: &sqlx_postgres::PgP
 }
 
 async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, schema: &str) {
-    let ledger = format!(
-        r#"SELECT checksum
-            FROM "{schema}"."schema_migrations"
-            WHERE version = 22"#
-    );
-    let checksum = query(AssertSqlSafe(ledger))
-        .fetch_one(pool)
-        .await
-        .and_then(|row| row.try_get::<String, _>("checksum"))
-        .unwrap_or_else(|error| panic!("could not verify digest-v5 migration: {error}"));
-    assert_eq!(checksum, NATIVE_INDEX_DIGEST_V5_MIGRATION_CHECKSUM);
-
-    let latest_ledger = format!(
-        r#"SELECT checksum
-            FROM "{schema}"."schema_migrations"
-            WHERE version = 24"#
-    );
-    let latest_checksum = query(AssertSqlSafe(latest_ledger))
-        .fetch_one(pool)
-        .await
-        .and_then(|row| row.try_get::<String, _>("checksum"))
-        .unwrap_or_else(|error| panic!("could not verify digest-v6 migration: {error}"));
     assert_eq!(
-        latest_checksum,
+        schema_migration_checksum(pool, schema, 22).await,
+        NATIVE_INDEX_DIGEST_V5_MIGRATION_CHECKSUM
+    );
+    assert_eq!(
+        schema_migration_checksum(pool, schema, 24).await,
         RUST_WORKSPACE_RESOLUTION_DIGEST_V6_MIGRATION_CHECKSUM
     );
-
-    let numerical_ledger = format!(
-        r#"SELECT checksum
-            FROM "{schema}"."schema_migrations"
-            WHERE version = 26"#
-    );
-    let numerical_checksum = query(AssertSqlSafe(numerical_ledger))
-        .fetch_one(pool)
-        .await
-        .and_then(|row| row.try_get::<String, _>("checksum"))
-        .unwrap_or_else(|error| panic!("could not verify digest-v7 migration: {error}"));
     assert_eq!(
-        numerical_checksum,
+        schema_migration_checksum(pool, schema, 26).await,
         NUMERICAL_EVIDENCE_DIGEST_V7_MIGRATION_CHECKSUM
     );
-
-    let diagnostics_ledger = format!(
-        r#"SELECT checksum
-            FROM "{schema}"."schema_migrations"
-            WHERE version = 27"#
-    );
-    let diagnostics_checksum = query(AssertSqlSafe(diagnostics_ledger))
-        .fetch_one(pool)
-        .await
-        .and_then(|row| row.try_get::<String, _>("checksum"))
-        .unwrap_or_else(|error| panic!("could not verify digest-v8 migration: {error}"));
     assert_eq!(
-        diagnostics_checksum,
+        schema_migration_checksum(pool, schema, 27).await,
         STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_CHECKSUM
     );
-
-    let precision_ledger = format!(
-        r#"SELECT checksum
-            FROM "{schema}"."schema_migrations"
-            WHERE version = 28"#
-    );
-    let precision_checksum = query(AssertSqlSafe(precision_ledger))
-        .fetch_one(pool)
-        .await
-        .and_then(|row| row.try_get::<String, _>("checksum"))
-        .unwrap_or_else(|error| panic!("could not verify digest-v9 migration: {error}"));
     assert_eq!(
-        precision_checksum,
+        schema_migration_checksum(pool, schema, 28).await,
         BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_CHECKSUM
+    );
+    assert_eq!(
+        schema_migration_checksum(pool, schema, 29).await,
+        DETECTOR_PRECISION_DIGEST_V10_MIGRATION_CHECKSUM
     );
 
     let definition = query(
@@ -3798,11 +3755,29 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
     .fetch_one(pool)
     .await
     .and_then(|row| row.try_get::<String, _>("definition"))
-    .unwrap_or_else(|error| panic!("could not inspect digest-v9 constraint: {error}"));
+    .unwrap_or_else(|error| panic!("could not inspect digest-v10 constraint: {error}"));
     assert!(
-        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9]"),
+        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"),
         "{definition}"
     );
+}
+
+async fn schema_migration_checksum(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    version: i64,
+) -> String {
+    let ledger = format!(
+        r#"SELECT checksum
+            FROM "{schema}"."schema_migrations"
+            WHERE version = $1"#
+    );
+    query(AssertSqlSafe(ledger))
+        .bind(version)
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get::<String, _>("checksum"))
+        .unwrap_or_else(|error| panic!("could not verify migration {version}: {error}"))
 }
 
 async fn seed_exact_lookup_scale(

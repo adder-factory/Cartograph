@@ -36,7 +36,8 @@ const DIRECTORY_IMPORT_SIMPLE_NAME_SCHEMA_VERSION: i64 = 25;
 const NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION: i64 = 26;
 const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA_VERSION: i64 = 27;
 const BIOMARKER_PRECISION_DIGEST_V9_SCHEMA_VERSION: i64 = 28;
-const LATEST_SCHEMA_VERSION: i64 = BIOMARKER_PRECISION_DIGEST_V9_SCHEMA_VERSION;
+const DETECTOR_PRECISION_DIGEST_V10_SCHEMA_VERSION: i64 = 29;
+const LATEST_SCHEMA_VERSION: i64 = DETECTOR_PRECISION_DIGEST_V10_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 /// Latest append-only schema version understood by this native binary.
@@ -1144,7 +1145,16 @@ const BIOMARKER_PRECISION_DIGEST_V9_SCHEMA: Migration = Migration {
                 CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8, 9))"#],
 };
 
-const MIGRATIONS: [&Migration; 28] = [
+const DETECTOR_PRECISION_DIGEST_V10_SCHEMA: Migration = Migration {
+    version: DETECTOR_PRECISION_DIGEST_V10_SCHEMA_VERSION,
+    name: "detector_precision_digest_v10",
+    statements: &[r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10))"#],
+};
+
+const MIGRATIONS: [&Migration; 29] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1173,6 +1183,7 @@ const MIGRATIONS: [&Migration; 28] = [
     &NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA,
     &STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA,
     &BIOMARKER_PRECISION_DIGEST_V9_SCHEMA,
+    &DETECTOR_PRECISION_DIGEST_V10_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1569,7 +1580,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 28] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 29] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1598,9 +1609,10 @@ mod tests {
         NUMERICAL_EVIDENCE_DIGEST_V7_SCHEMA_VERSION,
         STRUCTURAL_DIAGNOSTICS_DIGEST_V8_SCHEMA_VERSION,
         BIOMARKER_PRECISION_DIGEST_V9_SCHEMA_VERSION,
+        DETECTOR_PRECISION_DIGEST_V10_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 28] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 29] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1713,6 +1725,10 @@ mod tests {
             28,
             "702c0fdafe0c2aa6bac5b967f373a310a4ad4ef4ecc0ff710dd0fb2e4c86a8b8",
         ),
+        (
+            29,
+            "84f354b54354963e1a0733e8415d87b4dec7475bdf32d6e6365e0e390eb19b22",
+        ),
     ];
 
     #[test]
@@ -1758,7 +1774,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            BIOMARKER_PRECISION_DIGEST_V9_SCHEMA_VERSION
+            DETECTOR_PRECISION_DIGEST_V10_SCHEMA_VERSION
         );
     }
 

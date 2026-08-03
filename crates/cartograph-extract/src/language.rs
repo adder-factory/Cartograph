@@ -59,81 +59,7 @@ impl LanguageSpec {
     /// Resolve the one authoritative extractor registration for a language.
     #[must_use]
     pub const fn for_language(language: SourceLanguage) -> Self {
-        let strategy = match language {
-            SourceLanguage::TypeScript
-            | SourceLanguage::Tsx
-            | SourceLanguage::JavaScript
-            | SourceLanguage::Jsx => ExtractionStrategy::JavaScriptFamily,
-            SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
-                ExtractionStrategy::PolyglotStructural
-            }
-            SourceLanguage::Css
-            | SourceLanguage::EmbeddedTemplate
-            | SourceLanguage::JsDoc
-            | SourceLanguage::Json
-            | SourceLanguage::Jupyter
-            | SourceLanguage::Regex => ExtractionStrategy::ParserOnly,
-            SourceLanguage::Elixir
-            | SourceLanguage::Haskell
-            | SourceLanguage::Julia
-            | SourceLanguage::Ocaml
-            | SourceLanguage::OcamlInterface
-            | SourceLanguage::Verilog => ExtractionStrategy::TagsQuery,
-            SourceLanguage::C
-            | SourceLanguage::Cpp
-            | SourceLanguage::Cuda
-            | SourceLanguage::Glsl
-            | SourceLanguage::Hlsl => ExtractionStrategy::CFamily,
-            SourceLanguage::Bash
-            | SourceLanguage::Fish
-            | SourceLanguage::PowerShell
-            | SourceLanguage::Zsh => ExtractionStrategy::ShellFamily,
-            SourceLanguage::Java | SourceLanguage::CSharp => ExtractionStrategy::ManagedFamily,
-            SourceLanguage::Kotlin | SourceLanguage::Scala | SourceLanguage::Groovy => {
-                ExtractionStrategy::JvmDynamicFamily
-            }
-            SourceLanguage::Abap
-            | SourceLanguage::Apex
-            | SourceLanguage::ArkTs
-            | SourceLanguage::Astro
-            | SourceLanguage::Clojure
-            | SourceLanguage::CommonLisp
-            | SourceLanguage::Dart
-            | SourceLanguage::FSharp
-            | SourceLanguage::GraphQl
-            | SourceLanguage::Hcl
-            | SourceLanguage::Html
-            | SourceLanguage::Khn
-            | SourceLanguage::Lean
-            | SourceLanguage::Lua
-            | SourceLanguage::Luau
-            | SourceLanguage::Nix
-            | SourceLanguage::ObjectiveC
-            | SourceLanguage::Pascal
-            | SourceLanguage::Php
-            | SourceLanguage::Prisma
-            | SourceLanguage::R
-            | SourceLanguage::ReScript
-            | SourceLanguage::Ruby
-            | SourceLanguage::Solidity
-            | SourceLanguage::Sql
-            | SourceLanguage::Swift
-            | SourceLanguage::VbNet
-            | SourceLanguage::Yaml => ExtractionStrategy::GenericStructural,
-            SourceLanguage::Aura
-            | SourceLanguage::Bg3Anubis
-            | SourceLanguage::Bg3Resource
-            | SourceLanguage::Bg3Stats
-            | SourceLanguage::Liquid
-            | SourceLanguage::Osiris
-            | SourceLanguage::Properties
-            | SourceLanguage::Svelte
-            | SourceLanguage::Toml
-            | SourceLanguage::Vb6
-            | SourceLanguage::Visualforce
-            | SourceLanguage::Vue
-            | SourceLanguage::Xml => ExtractionStrategy::CustomStructural,
-        };
+        let strategy = strategy_for_language(language);
         Self {
             language,
             grammar: NativeGrammar::for_source_language(language),
@@ -158,6 +84,92 @@ impl LanguageSpec {
     pub const fn strategy(self) -> ExtractionStrategy {
         self.strategy
     }
+}
+
+const fn strategy_for_language(language: SourceLanguage) -> ExtractionStrategy {
+    if is_game_scripting_language(language) {
+        return ExtractionStrategy::CustomStructural;
+    }
+    match language {
+        SourceLanguage::TypeScript
+        | SourceLanguage::Tsx
+        | SourceLanguage::JavaScript
+        | SourceLanguage::Jsx => ExtractionStrategy::JavaScriptFamily,
+        SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
+            ExtractionStrategy::PolyglotStructural
+        }
+        SourceLanguage::Css
+        | SourceLanguage::EmbeddedTemplate
+        | SourceLanguage::JsDoc
+        | SourceLanguage::Json
+        | SourceLanguage::Jupyter
+        | SourceLanguage::Regex => ExtractionStrategy::ParserOnly,
+        SourceLanguage::Elixir
+        | SourceLanguage::Haskell
+        | SourceLanguage::Julia
+        | SourceLanguage::Ocaml
+        | SourceLanguage::OcamlInterface
+        | SourceLanguage::Verilog => ExtractionStrategy::TagsQuery,
+        SourceLanguage::C
+        | SourceLanguage::Cpp
+        | SourceLanguage::Cuda
+        | SourceLanguage::Glsl
+        | SourceLanguage::Hlsl => ExtractionStrategy::CFamily,
+        SourceLanguage::Bash
+        | SourceLanguage::Fish
+        | SourceLanguage::PowerShell
+        | SourceLanguage::Zsh => ExtractionStrategy::ShellFamily,
+        SourceLanguage::Java | SourceLanguage::CSharp => ExtractionStrategy::ManagedFamily,
+        SourceLanguage::Kotlin | SourceLanguage::Scala | SourceLanguage::Groovy => {
+            ExtractionStrategy::JvmDynamicFamily
+        }
+        SourceLanguage::Abap
+        | SourceLanguage::Apex
+        | SourceLanguage::ArkTs
+        | SourceLanguage::Astro
+        | SourceLanguage::Clojure
+        | SourceLanguage::CommonLisp
+        | SourceLanguage::Dart
+        | SourceLanguage::FSharp
+        | SourceLanguage::GraphQl
+        | SourceLanguage::Hcl
+        | SourceLanguage::Html
+        | SourceLanguage::Khn
+        | SourceLanguage::Lean
+        | SourceLanguage::Lua
+        | SourceLanguage::Luau
+        | SourceLanguage::Nix
+        | SourceLanguage::ObjectiveC
+        | SourceLanguage::Pascal
+        | SourceLanguage::Php
+        | SourceLanguage::Prisma
+        | SourceLanguage::R
+        | SourceLanguage::ReScript
+        | SourceLanguage::Ruby
+        | SourceLanguage::Solidity
+        | SourceLanguage::Sql
+        | SourceLanguage::Swift
+        | SourceLanguage::VbNet
+        | SourceLanguage::Yaml => ExtractionStrategy::GenericStructural,
+        SourceLanguage::Aura
+        | SourceLanguage::Bg3Anubis
+        | SourceLanguage::Bg3Resource
+        | SourceLanguage::Bg3Stats
+        | SourceLanguage::Liquid
+        | SourceLanguage::Osiris
+        | SourceLanguage::Properties
+        | SourceLanguage::Svelte
+        | SourceLanguage::Toml
+        | SourceLanguage::Vb6
+        | SourceLanguage::Visualforce
+        | SourceLanguage::Vue
+        | SourceLanguage::Xml => ExtractionStrategy::CustomStructural,
+        _ => panic!("game scripting registry drifted"),
+    }
+}
+
+const fn is_game_scripting_language(language: SourceLanguage) -> bool {
+    language.is_game_scripting()
 }
 
 #[cfg(test)]

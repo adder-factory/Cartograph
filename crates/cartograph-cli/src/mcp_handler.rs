@@ -19,14 +19,14 @@ use cartograph_agent::{
     GitLineHistoryRequest, GitLineRange, GitRenameEvidence, HistoryIndexError, HistoryIndexOptions,
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
     IndexOptions, IssueHistoryIndexError, IssueHistoryIndexOptions, IssueHistoryIndexRequest,
-    LayerAnalysisReport, LcovLoadOptions, MAXIMUM_UNIX_MILLISECONDS, PipelineStage,
-    ProjectCancellation, ProjectError, ProjectRuntime, ProjectStatus, RenamePlanError,
-    RenamePlanOptions, RenamePlanRequest, RetrievalOptions, RetrievalRequest, ReviewError,
-    ReviewOptions, ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceCompareError,
-    SourceCompareOptions, SourceContextOptions, SourceContextRequest, SourceSearchError,
-    SourceSearchHit, SourceSearchOptions, SymbolSourceContext, TestEvidenceError,
-    TestEvidenceOptions, TestEvidenceReport, VerificationCommand, WorkingTreeOverlayRequest,
-    judge_dead_code_candidates,
+    LayerAnalysisError, LayerAnalysisReport, LcovLoadOptions, MAXIMUM_UNIX_MILLISECONDS,
+    PipelineStage, ProjectCancellation, ProjectError, ProjectRuntime, ProjectStatus,
+    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalOptions, RetrievalRequest,
+    ReviewError, ReviewOptions, ScipExportRequest, ScipImportLimits, ScipImportRequest,
+    SourceCompareError, SourceCompareOptions, SourceContextOptions, SourceContextRequest,
+    SourceSearchError, SourceSearchHit, SourceSearchOptions, SymbolSourceContext,
+    TestEvidenceError, TestEvidenceOptions, TestEvidenceReport, VerificationCommand,
+    WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_db::{
     AgentArtifactContent, AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope,
@@ -98,6 +98,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::auto_sync::{AutoSyncError, AutoSyncStatus, ProjectAutoSync};
 use crate::byte_format::format_binary_bytes;
+use crate::error_codes::pipeline_stage_failure_code;
 use crate::host::{
     DiagnosticLocation, HostInspectionError, ProjectDiscoveryRequest, detect_install_targets,
     discover_projects,
@@ -9105,6 +9106,25 @@ struct RiskReviewInput<'input> {
     allow_stale: bool,
 }
 
+struct RiskStorageLensInput<'status, T> {
+    stage: &'static str,
+    limit: u16,
+    result: Result<Vec<T>, StorageError>,
+    status: &'status mut Map<String, Value>,
+}
+
+struct RiskLayerFindingsInput<'input> {
+    layers: Result<LayerAnalysisReport, LayerAnalysisError>,
+    top_n: u16,
+    minimum_centrality: Option<f64>,
+    path_prefix: Option<&'input str>,
+}
+
+struct RiskLayerFindingsOutput {
+    findings: Vec<Value>,
+    status: Value,
+}
+
 fn risk_lens_ready(limit: u16, returned: usize) -> Value {
     json!({
         "state": "ready",
@@ -9137,24 +9157,56 @@ fn risk_storage_lens_failure(stage: &'static str, limit: u16, error: &StorageErr
 }
 
 fn risk_storage_lens_value<T: Serialize>(
-    stage: &'static str,
-    limit: u16,
-    result: Result<Vec<T>, StorageError>,
-    status: &mut Map<String, Value>,
+    input: RiskStorageLensInput<'_, T>,
 ) -> Result<Value, ToolError> {
-    match result {
+    match input.result {
         Ok(rows) => {
-            status.insert(stage.to_owned(), risk_lens_ready(limit, rows.len()));
+            input.status.insert(
+                input.stage.to_owned(),
+                risk_lens_ready(input.limit, rows.len()),
+            );
             serde_json::to_value(rows).map_err(internal_error)
         }
         Err(error) => {
-            status.insert(
-                stage.to_owned(),
-                risk_storage_lens_failure(stage, limit, &error),
+            input.status.insert(
+                input.stage.to_owned(),
+                risk_storage_lens_failure(input.stage, input.limit, &error),
             );
             Ok(Value::Array(Vec::new()))
         }
     }
+}
+
+fn risk_layer_findings(
+    input: RiskLayerFindingsInput<'_>,
+) -> Result<RiskLayerFindingsOutput, ToolError> {
+    let (findings, status) = if let Ok(layers) = input.layers {
+        let violations = layers
+            .into_violations()
+            .into_iter()
+            .map(layer_finding_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let status = risk_lens_ready(input.top_n, violations.len());
+        (violations, status)
+    } else {
+        (
+            Vec::new(),
+            risk_lens_unavailable("layer_analysis", input.top_n),
+        )
+    };
+    let mut findings = filter_layer_findings(
+        findings,
+        LayerFindingFilter {
+            biomarker: None,
+            minimum_severity: StructuralFindingSeverity::Info,
+            minimum_metric: None,
+            maximum_metric: None,
+            minimum_centrality: input.minimum_centrality,
+            excluded_path: None,
+        },
+    );
+    retain_path_prefix(&mut findings, input.path_prefix);
+    Ok(RiskLayerFindingsOutput { findings, status })
 }
 
 fn returned_finding_stats(findings: &[Value]) -> Value {
@@ -10312,47 +10364,39 @@ impl SummaryReviewTools<'_> {
                 Vec::new()
             }
         };
-        let layer_findings = if let Ok(layers) = layers {
-            let violations = layers
-                .into_violations()
-                .into_iter()
-                .map(layer_finding_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            lens_status.insert(
-                "layers".to_owned(),
-                risk_lens_ready(input.top_n, violations.len()),
-            );
-            violations
-        } else {
-            lens_status.insert(
-                "layers".to_owned(),
-                risk_lens_unavailable("layer_analysis", input.top_n),
-            );
-            Vec::new()
-        };
-        let mut filtered_layers = filter_layer_findings(
-            layer_findings,
-            LayerFindingFilter {
-                biomarker: None,
-                minimum_severity: StructuralFindingSeverity::Info,
-                minimum_metric: None,
-                maximum_metric: None,
-                minimum_centrality: input.minimum_centrality,
-                excluded_path: None,
-            },
-        );
-        retain_path_prefix(&mut filtered_layers, input.path_prefix);
-        findings.append(&mut filtered_layers);
+        let RiskLayerFindingsOutput {
+            findings: mut layer_findings,
+            status: layer_status,
+        } = risk_layer_findings(RiskLayerFindingsInput {
+            layers,
+            top_n: input.top_n,
+            minimum_centrality: input.minimum_centrality,
+            path_prefix: input.path_prefix,
+        })?;
+        lens_status.insert("layers".to_owned(), layer_status);
+        findings.append(&mut layer_findings);
         let returned_finding_count = findings.len();
         sort_and_truncate_findings(&mut findings, input.top_n);
-        let mut hotspots =
-            risk_storage_lens_value("hotspots", input.top_n, hotspots, &mut lens_status)?;
+        let mut hotspots = risk_storage_lens_value(RiskStorageLensInput {
+            stage: "hotspots",
+            limit: input.top_n,
+            result: hotspots,
+            status: &mut lens_status,
+        })?;
         filter_json_array_by_path(&mut hotspots, input.path_prefix, usize::from(input.top_n));
-        let mut dead_code =
-            risk_storage_lens_value("dead_code", input.top_n, dead_code, &mut lens_status)?;
+        let mut dead_code = risk_storage_lens_value(RiskStorageLensInput {
+            stage: "dead_code",
+            limit: input.top_n,
+            result: dead_code,
+            status: &mut lens_status,
+        })?;
         filter_json_array_by_path(&mut dead_code, input.path_prefix, usize::from(input.top_n));
-        let mut coverage =
-            risk_storage_lens_value("coverage", input.top_n, coverage, &mut lens_status)?;
+        let mut coverage = risk_storage_lens_value(RiskStorageLensInput {
+            stage: "coverage",
+            limit: input.top_n,
+            result: coverage,
+            status: &mut lens_status,
+        })?;
         truncate_json_array(&mut coverage, usize::from(input.top_n));
         let finding_stats = returned_finding_stats(&findings);
         fresh_json_result(
@@ -13351,28 +13395,12 @@ const fn project_index_error_reason(error: ProjectError) -> Option<&'static str>
         ProjectError::SourceScanFailed => Some("source_scan_failed"),
         ProjectError::StatusFailed => Some("project_status_unavailable"),
         ProjectError::IndexFailed => Some("index_failed"),
-        ProjectError::IndexStageFailed { stage } => Some(index_stage_failure_reason(stage)),
+        ProjectError::IndexStageFailed { stage } => Some(pipeline_stage_failure_code(stage)),
         ProjectError::IndexLeaseFailed => Some("lease_failed"),
         ProjectError::IndexPublicationFailed => Some("publication_failed"),
         ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
         ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
         _ => None,
-    }
-}
-
-const fn index_stage_failure_reason(stage: PipelineStage) -> &'static str {
-    match stage {
-        PipelineStage::Discover => "discover_failed",
-        PipelineStage::Read => "read_failed",
-        PipelineStage::Parse => "parse_failed",
-        PipelineStage::Resolve => "resolve_failed",
-        PipelineStage::Overlay => "overlay_failed",
-        PipelineStage::Reduce => "reduce_failed",
-        PipelineStage::Copy => "copy_failed",
-        PipelineStage::RelationalMerge => "relational_merge_failed",
-        PipelineStage::Bm25 => "bm25_failed",
-        PipelineStage::Vector => "vector_failed",
-        PipelineStage::Publish => "publication_failed",
     }
 }
 

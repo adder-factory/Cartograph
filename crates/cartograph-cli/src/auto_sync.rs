@@ -7,9 +7,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cartograph_agent::{
-    IndexOptions, PipelineStage, ProjectError, ProjectRuntime, ProjectWatchFilter,
-};
+#[cfg(test)]
+use cartograph_agent::PipelineStage;
+use cartograph_agent::{IndexOptions, ProjectError, ProjectRuntime, ProjectWatchFilter};
 use cartograph_domain::ContentDigest;
 use notify::{Config, Event, EventKind, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -19,6 +19,8 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, MissedTickBehavior},
 };
+
+use crate::error_codes::pipeline_stage_failure_code;
 
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(750);
 const MINIMUM_DEBOUNCE_MILLIS: u64 = 50;
@@ -439,29 +441,13 @@ const fn project_error_code(error: ProjectError) -> &'static str {
     match error {
         ProjectError::BeginGenerationFailed => "generation_start_failed",
         ProjectError::SourceScanFailed => "source_scan_failed",
-        ProjectError::IndexStageFailed { stage } => pipeline_stage_error_code(stage),
+        ProjectError::IndexStageFailed { stage } => pipeline_stage_failure_code(stage),
         ProjectError::IndexLeaseFailed => "lease_failed",
         ProjectError::IndexPublicationFailed => "publication_failed",
         ProjectError::IndexCleanupFailed => "index_cleanup_failed",
         ProjectError::ScipOverlayInvalid => "scip_overlay_invalid",
         ProjectError::RequestCancelled => "request_cancelled",
         _ => "index_failed",
-    }
-}
-
-const fn pipeline_stage_error_code(stage: PipelineStage) -> &'static str {
-    match stage {
-        PipelineStage::Discover => "discover_failed",
-        PipelineStage::Read => "read_failed",
-        PipelineStage::Parse => "parse_failed",
-        PipelineStage::Resolve => "resolve_failed",
-        PipelineStage::Overlay => "overlay_failed",
-        PipelineStage::Reduce => "reduce_failed",
-        PipelineStage::Copy => "copy_failed",
-        PipelineStage::RelationalMerge => "relational_merge_failed",
-        PipelineStage::Bm25 => "bm25_failed",
-        PipelineStage::Vector => "vector_failed",
-        PipelineStage::Publish => "publication_failed",
     }
 }
 

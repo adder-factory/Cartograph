@@ -1,9 +1,10 @@
 # Support Matrix
 
-Last implementation audit: 2026-08-02 (`v2.1.6`).
+Last implementation audit: 2026-08-02 (`v2.1.7`).
 
-Cartograph v2 supports all 73 v1.1.33 language modes plus native TOML: 74 modes
-total. The source of truth is `cartograph_domain::SourceLanguage::ALL`; native
+Cartograph v2 supports all 73 v1.1.33 language modes, native TOML, and 52
+dedicated textual game-scripting modes: 126 modes total. The source of truth is
+`cartograph_domain::SourceLanguage::ALL`; native
 extractor strategy lives in `crates/cartograph-extract/src/language.rs`, and
 framework/cross-language enrichment lives in the focused Rust modules beside
 it.
@@ -96,6 +97,67 @@ does not yet extract language-specific symbols from that grammar.
 | XML (MyBatis) | `.xml` | Custom extractor |
 | YAML | `.yml`, `.yaml` | Tree-sitter |
 | Zsh | `.zsh`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin` | Tree-sitter |
+
+### Dedicated game scripting modes
+
+These additive modes use bounded, non-executing Rust scanners. The researched
+scope, collision policy, exclusions, and primary-source trail are in
+[Game scripting language coverage](v2/GAME-SCRIPTING-LANGUAGES.md).
+
+| Language mode | Extensions / scope |
+|---|---|
+| ActionScript | `.as` |
+| AGS Script | `.asc`, `.ash` |
+| AngelScript | `.angelscript`; content-qualified `.as` |
+| Boo | `.boo` |
+| BYOND Dream Maker | `.dm` |
+| ChoiceScript | command-bearing `scenes/**/*.txt` |
+| Daedalus | content-qualified `.d` |
+| Doom ACS | `.acs` |
+| Doom DECORATE | `DECORATE`, `DECORATE.txt` |
+| Enforce Script | content/path-qualified `.c` |
+| Galaxy | `.galaxy` |
+| GameMaker Language | `.gml` |
+| GameMonkey | `.gm` |
+| GDScript | `.gd` |
+| GSC | `.gsc`, `.csc`, `.gsh` |
+| HaloScript | `.hsc` |
+| hscript | `.hscript` |
+| id Tech Script | `.script` |
+| Inform 6 | content-qualified `.inf` |
+| Inform 7 | `.ni`, `.i7x` |
+| ink | `.ink` |
+| JASS | `.j` |
+| KerboScript | `.ks` source; `.ksm` remains excluded binary code |
+| LPC | content/path-qualified `.c` |
+| Linden Scripting Language | `.lsl` |
+| Minecraft Function | `.mcfunction` |
+| MiniScript | `.ms` |
+| NWScript | `.nss` |
+| Papyrus | `.psc` |
+| Paradox Script | executable `.txt` in known game script paths plus content markers |
+| Pawn | `.pwn`, `.sma` |
+| PICO-8 Lua cartridge source | Lua section of `.p8` only |
+| QuakeC | `.qc` unless Valve directives qualify it as Valve QC |
+| REDscript | `.reds` |
+| Ren'Py | `.rpy` |
+| Rhai | `.rhai` |
+| Skript | `.sk` |
+| SourcePawn | `.sp` |
+| SQF | `.sqf`, `.hqf` |
+| SQS | `.sqs` |
+| Squirrel | `.nut` |
+| TADS | content-qualified `.t` |
+| TorqueScript | `.gui`, `.mis`; content-qualified `.cs` |
+| Twee | `.twee`, `.tw` |
+| UnrealScript | `.uc` |
+| Valve QC | `.qci`; directive-qualified `.qc` |
+| Verse | `.verse` |
+| WitcherScript | `.ws` |
+| Wren | `.wren` |
+| WurstScript | `.wurst` |
+| Yarn Spinner | `.yarn` |
+| ZScript | `.zs`, `zscript.txt` |
 
 Special cases:
 

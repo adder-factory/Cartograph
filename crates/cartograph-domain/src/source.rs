@@ -318,7 +318,7 @@ macro_rules! source_languages {
         impl SourceLanguage {
             /// Exhaustive stable language set. Generated with the enum so a
             /// future variant cannot be omitted from the registry.
-            pub const ALL: [Self; 74] = [$(Self::$variant),+];
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
 
             /// Stable storage, search, and protocol representation.
             #[must_use]
@@ -357,7 +357,7 @@ macro_rules! source_languages {
             /// Additive v2 modes are deliberately excluded from the frozen v1 digest.
             #[must_use]
             pub const fn is_v1_language(self) -> bool {
-                !matches!(self, Self::Toml)
+                !self.v1_extensions().is_empty() || matches!(self, Self::Bg3Stats)
             }
 
             /// Parse any stable language identifier known to the v2 registry.
@@ -377,6 +377,9 @@ macro_rules! source_languages {
 // below are preserved exactly; `.pyi` is an additive v2 improvement.
 source_languages!(
     Abap => { stable: "abap", v1_extensions: [".abap"], additions: [], native: true },
+    ActionScript => { stable: "action_script", v1_extensions: [], additions: [".as"], native: true },
+    AgsScript => { stable: "ags_script", v1_extensions: [], additions: [".asc", ".ash"], native: true },
+    AngelScript => { stable: "angel_script", v1_extensions: [], additions: [".angelscript", ".as"], native: true },
     Apex => { stable: "apex", v1_extensions: [".cls", ".trigger"], additions: [], native: true },
     ArkTs => { stable: "arkts", v1_extensions: [".ets"], additions: [], native: true },
     Astro => { stable: "astro", v1_extensions: [".astro"], additions: [], native: true },
@@ -385,26 +388,45 @@ source_languages!(
     Bg3Anubis => { stable: "bg3_anubis", v1_extensions: [".ann", ".anc"], additions: [], native: true },
     Bg3Resource => { stable: "bg3_resource", v1_extensions: [".lsx", ".lsf", ".lsfx", ".lsefx", ".tbl", ".stats", ".mei", ".lsj"], additions: [], native: true },
     Bg3Stats => { stable: "bg3_stats", v1_extensions: [], additions: [], native: true },
+    Boo => { stable: "boo", v1_extensions: [], additions: [".boo"], native: true },
+    ByondDm => { stable: "byond_dm", v1_extensions: [], additions: [".dm"], native: true },
     C => { stable: "c", v1_extensions: [".c", ".h"], additions: [], native: true },
+    ChoiceScript => { stable: "choice_script", v1_extensions: [], additions: [], native: true },
     Clojure => { stable: "clojure", v1_extensions: [".clj", ".cljs", ".cljc", ".edn", ".bb"], additions: [], native: true },
     CommonLisp => { stable: "common_lisp", v1_extensions: [".lisp", ".lsp", ".l", ".cl", ".asd", ".ros"], additions: [], native: true },
     Cpp => { stable: "cpp", v1_extensions: [".cpp", ".cc", ".cxx", ".hpp", ".hxx"], additions: [], native: true },
     CSharp => { stable: "csharp", v1_extensions: [".cs"], additions: [], native: true },
     Css => { stable: "css", v1_extensions: [".css"], additions: [], native: true },
     Cuda => { stable: "cuda", v1_extensions: [".cu", ".cuh"], additions: [], native: true },
+    Daedalus => { stable: "daedalus", v1_extensions: [], additions: [".d"], native: true },
     Dart => { stable: "dart", v1_extensions: [".dart"], additions: [], native: true },
+    DoomAcs => { stable: "doom_acs", v1_extensions: [], additions: [".acs"], native: true },
+    DoomDecorate => { stable: "doom_decorate", v1_extensions: [], additions: [], native: true },
     Elixir => { stable: "elixir", v1_extensions: [".ex", ".exs"], additions: [], native: true },
     EmbeddedTemplate => { stable: "embedded_template", v1_extensions: [".erb", ".ejs", ".eta", ".etlua"], additions: [], native: true },
+    EnforceScript => { stable: "enforce_script", v1_extensions: [], additions: [".c"], native: true },
     Fish => { stable: "fish", v1_extensions: [".fish"], additions: [], native: true },
     FSharp => { stable: "fsharp", v1_extensions: [".fs", ".fsx"], additions: [], native: true },
+    Galaxy => { stable: "galaxy", v1_extensions: [], additions: [".galaxy"], native: true },
+    GameMakerLanguage => { stable: "game_maker_language", v1_extensions: [], additions: [".gml"], native: true },
+    GameMonkey => { stable: "game_monkey", v1_extensions: [], additions: [".gm"], native: true },
+    GdScript => { stable: "gdscript", v1_extensions: [], additions: [".gd"], native: true },
     Glsl => { stable: "glsl", v1_extensions: [".glsl", ".vert", ".frag", ".comp", ".geom", ".tesc", ".tese"], additions: [], native: true },
     Go => { stable: "go", v1_extensions: [".go"], additions: [], native: true },
     GraphQl => { stable: "graphql", v1_extensions: [".graphql", ".gql"], additions: [], native: true },
     Groovy => { stable: "groovy", v1_extensions: [".groovy", ".gradle"], additions: [], native: true },
+    Gsc => { stable: "gsc", v1_extensions: [], additions: [".gsc", ".csc", ".gsh"], native: true },
+    HaloScript => { stable: "halo_script", v1_extensions: [], additions: [".hsc"], native: true },
     Haskell => { stable: "haskell", v1_extensions: [".hs"], additions: [], native: true },
     Hcl => { stable: "hcl", v1_extensions: [".tf", ".tfvars", ".hcl", ".tofu"], additions: [], native: true },
     Hlsl => { stable: "hlsl", v1_extensions: [".hlsl", ".hlsli", ".fx", ".fxh"], additions: [], native: true },
+    Hscript => { stable: "hscript", v1_extensions: [], additions: [".hscript"], native: true },
     Html => { stable: "html", v1_extensions: [".html", ".htm"], additions: [], native: true },
+    IdTechScript => { stable: "idtech_script", v1_extensions: [], additions: [".script"], native: true },
+    Inform6 => { stable: "inform6", v1_extensions: [], additions: [".inf"], native: true },
+    Inform7 => { stable: "inform7", v1_extensions: [], additions: [".ni", ".i7x"], native: true },
+    Ink => { stable: "ink", v1_extensions: [], additions: [".ink"], native: true },
+    Jass => { stable: "jass", v1_extensions: [], additions: [".j"], native: true },
     Java => { stable: "java", v1_extensions: [".java"], additions: [], native: true },
     JavaScript => { stable: "javascript", v1_extensions: [".js", ".mjs", ".cjs", ".xsjs", ".xsjslib"], additions: [], native: true },
     JsDoc => { stable: "jsdoc", v1_extensions: [".jsdoc"], additions: [], native: true },
@@ -412,47 +434,138 @@ source_languages!(
     Jsx => { stable: "jsx", v1_extensions: [".jsx"], additions: [], native: true },
     Julia => { stable: "julia", v1_extensions: [".jl"], additions: [], native: true },
     Jupyter => { stable: "jupyter", v1_extensions: [".ipynb"], additions: [], native: true },
+    KerboScript => { stable: "kerboscript", v1_extensions: [], additions: [".ks"], native: true },
     Khn => { stable: "khn", v1_extensions: [".khn"], additions: [], native: true },
     Kotlin => { stable: "kotlin", v1_extensions: [".kt", ".kts"], additions: [], native: true },
     Lean => { stable: "lean", v1_extensions: [".lean"], additions: [], native: true },
     Liquid => { stable: "liquid", v1_extensions: [".liquid"], additions: [], native: true },
+    Lpc => { stable: "lpc", v1_extensions: [], additions: [".c"], native: true },
+    Lsl => { stable: "lsl", v1_extensions: [], additions: [".lsl"], native: true },
     Lua => { stable: "lua", v1_extensions: [".lua"], additions: [], native: true },
     Luau => { stable: "luau", v1_extensions: [".luau"], additions: [], native: true },
+    MinecraftFunction => { stable: "minecraft_function", v1_extensions: [], additions: [".mcfunction"], native: true },
+    MiniScript => { stable: "miniscript", v1_extensions: [], additions: [".ms"], native: true },
     Nix => { stable: "nix", v1_extensions: [".nix"], additions: [], native: true },
+    NwScript => { stable: "nwscript", v1_extensions: [], additions: [".nss"], native: true },
     ObjectiveC => { stable: "objc", v1_extensions: [".m", ".mm"], additions: [], native: true },
     Ocaml => { stable: "ocaml", v1_extensions: [".ml"], additions: [], native: true },
     OcamlInterface => { stable: "ocaml_interface", v1_extensions: [".mli"], additions: [], native: true },
     Osiris => { stable: "osiris", v1_extensions: [".div"], additions: [], native: true },
+    Papyrus => { stable: "papyrus", v1_extensions: [], additions: [".psc"], native: true },
+    ParadoxScript => { stable: "paradox_script", v1_extensions: [], additions: [], native: true },
     Pascal => { stable: "pascal", v1_extensions: [".pas", ".dpr", ".dpk", ".lpr", ".dfm", ".fmx"], additions: [], native: true },
+    Pawn => { stable: "pawn", v1_extensions: [], additions: [".pwn", ".sma"], native: true },
     Php => { stable: "php", v1_extensions: [".php", ".module", ".install", ".theme", ".inc"], additions: [], native: true },
+    Pico8 => { stable: "pico8", v1_extensions: [], additions: [".p8"], native: true },
     PowerShell => { stable: "powershell", v1_extensions: [".ps1", ".psm1", ".psd1"], additions: [], native: true },
     Prisma => { stable: "prisma", v1_extensions: [".prisma"], additions: [], native: true },
     Properties => { stable: "properties", v1_extensions: [".properties"], additions: [], native: true },
     Python => { stable: "python", v1_extensions: [".py", ".pyw"], additions: [".pyi"], native: true },
+    QuakeC => { stable: "quakec", v1_extensions: [], additions: [".qc"], native: true },
     R => { stable: "r", v1_extensions: [".r"], additions: [], native: true },
+    Redscript => { stable: "redscript", v1_extensions: [], additions: [".reds"], native: true },
     Regex => { stable: "regex", v1_extensions: [".regex", ".regexp"], additions: [], native: true },
+    Renpy => { stable: "renpy", v1_extensions: [], additions: [".rpy"], native: true },
     ReScript => { stable: "rescript", v1_extensions: [".res", ".resi"], additions: [], native: true },
+    Rhai => { stable: "rhai", v1_extensions: [], additions: [".rhai"], native: true },
     Ruby => { stable: "ruby", v1_extensions: [".rb", ".rake"], additions: [], native: true },
     Rust => { stable: "rust", v1_extensions: [".rs"], additions: [], native: true },
     Scala => { stable: "scala", v1_extensions: [".scala", ".sc"], additions: [], native: true },
+    Skript => { stable: "skript", v1_extensions: [], additions: [".sk"], native: true },
     Solidity => { stable: "solidity", v1_extensions: [".sol"], additions: [], native: true },
+    SourcePawn => { stable: "sourcepawn", v1_extensions: [], additions: [".sp"], native: true },
+    Sqf => { stable: "sqf", v1_extensions: [], additions: [".sqf", ".hqf"], native: true },
     Sql => { stable: "sql", v1_extensions: [".sql", ".ddl", ".dml"], additions: [], native: true },
+    Sqs => { stable: "sqs", v1_extensions: [], additions: [".sqs"], native: true },
+    Squirrel => { stable: "squirrel", v1_extensions: [], additions: [".nut"], native: true },
     Svelte => { stable: "svelte", v1_extensions: [".svelte"], additions: [], native: true },
     Swift => { stable: "swift", v1_extensions: [".swift"], additions: [], native: true },
+    Tads => { stable: "tads", v1_extensions: [], additions: [".t"], native: true },
     Toml => { stable: "toml", v1_extensions: [], additions: [".toml"], native: true },
+    TorqueScript => { stable: "torque_script", v1_extensions: [], additions: [".cs", ".gui", ".mis"], native: true },
     Tsx => { stable: "tsx", v1_extensions: [".tsx"], additions: [], native: true },
+    Twee => { stable: "twee", v1_extensions: [], additions: [".twee", ".tw"], native: true },
     TypeScript => { stable: "typescript", v1_extensions: [".ts", ".mts", ".cts"], additions: [], native: true },
+    UnrealScript => { stable: "unrealscript", v1_extensions: [], additions: [".uc"], native: true },
+    ValveQc => { stable: "valve_qc", v1_extensions: [], additions: [".qci", ".qc"], native: true },
     Vb6 => { stable: "vb6", v1_extensions: [".bas", ".frm", ".ctl", ".dob", ".dsr", ".pag", ".vbp"], additions: [], native: true },
     VbNet => { stable: "vbnet", v1_extensions: [".vb"], additions: [], native: true },
     Verilog => { stable: "verilog", v1_extensions: [".v", ".vh", ".sv", ".svh"], additions: [], native: true },
+    Verse => { stable: "verse", v1_extensions: [], additions: [".verse"], native: true },
     Visualforce => { stable: "visualforce", v1_extensions: [".page", ".component"], additions: [], native: true },
     Vue => { stable: "vue", v1_extensions: [".vue"], additions: [], native: true },
+    WitcherScript => { stable: "witcher_script", v1_extensions: [], additions: [".ws"], native: true },
+    Wren => { stable: "wren", v1_extensions: [], additions: [".wren"], native: true },
+    WurstScript => { stable: "wurstscript", v1_extensions: [], additions: [".wurst"], native: true },
     Xml => { stable: "xml", v1_extensions: [".xml"], additions: [], native: true },
     Yaml => { stable: "yaml", v1_extensions: [".yml", ".yaml"], additions: [], native: true },
+    YarnSpinner => { stable: "yarn_spinner", v1_extensions: [], additions: [".yarn"], native: true },
+    Zscript => { stable: "zscript", v1_extensions: [], additions: [".zs"], native: true },
     Zsh => { stable: "zsh", v1_extensions: [".zsh", ".zshrc", ".zshenv", ".zprofile", ".zlogin"], additions: [], native: true },
 );
 
 impl SourceLanguage {
+    /// Whether this is a dedicated textual game, modding, or interactive-fiction
+    /// scripting mode added beyond the frozen v1 language floor.
+    #[must_use]
+    pub const fn is_game_scripting(self) -> bool {
+        matches!(
+            self,
+            Self::ActionScript
+                | Self::AgsScript
+                | Self::AngelScript
+                | Self::Boo
+                | Self::ByondDm
+                | Self::ChoiceScript
+                | Self::Daedalus
+                | Self::DoomAcs
+                | Self::DoomDecorate
+                | Self::EnforceScript
+                | Self::Galaxy
+                | Self::GameMakerLanguage
+                | Self::GameMonkey
+                | Self::GdScript
+                | Self::Gsc
+                | Self::HaloScript
+                | Self::Hscript
+                | Self::IdTechScript
+                | Self::Inform6
+                | Self::Inform7
+                | Self::Ink
+                | Self::Jass
+                | Self::KerboScript
+                | Self::Lpc
+                | Self::Lsl
+                | Self::MinecraftFunction
+                | Self::MiniScript
+                | Self::NwScript
+                | Self::Papyrus
+                | Self::ParadoxScript
+                | Self::Pawn
+                | Self::Pico8
+                | Self::QuakeC
+                | Self::Redscript
+                | Self::Renpy
+                | Self::Rhai
+                | Self::Skript
+                | Self::SourcePawn
+                | Self::Sqf
+                | Self::Sqs
+                | Self::Squirrel
+                | Self::Tads
+                | Self::TorqueScript
+                | Self::Twee
+                | Self::UnrealScript
+                | Self::ValveQc
+                | Self::Verse
+                | Self::WitcherScript
+                | Self::Wren
+                | Self::WurstScript
+                | Self::YarnSpinner
+                | Self::Zscript
+        )
+    }
+
     /// Detect a known language using the bounded v1 path/content contract.
     /// The result may still be pending native extraction.
     #[must_use]
@@ -481,17 +594,14 @@ impl SourceLanguage {
         if !Self::is_v1_candidate_path(path) {
             return None;
         }
-        Self::detect(path, Some(source))
+        detect_v1_source_language(path, Some(source))
             .filter(|language| language.is_native_indexable() && language.is_v1_language())
     }
 
     /// Whether a path could become supported after bounded content inspection.
     #[must_use]
     pub fn is_known_candidate_path(path: &str) -> bool {
-        extension_owner(path).is_some()
-            || matches!(path_extension(path), Some(value) if value.eq_ignore_ascii_case(".md"))
-            || is_play_routes_file(path)
-            || path_specific_language(path).is_some()
+        is_candidate_path_with(path, |_| true)
     }
 
     /// Whether bounded content inspection could select a currently executable
@@ -505,18 +615,7 @@ impl SourceLanguage {
     /// v1.1.33 source modes. Paths admitted only by v2 additions are excluded.
     #[must_use]
     pub fn is_v1_candidate_path(path: &str) -> bool {
-        let extension = path_extension(path);
-        if SourceLanguage::ALL.into_iter().any(|language| {
-            language
-                .additional_extensions()
-                .iter()
-                .any(|addition| extension.is_some_and(|value| value.eq_ignore_ascii_case(addition)))
-        }) {
-            return false;
-        }
-        is_candidate_path_with(path, |language| {
-            language.is_native_indexable() && language.is_v1_language()
-        })
+        is_v1_candidate_path(path)
     }
 
     /// Whether a path could resolve to a native language admitted by a
@@ -537,41 +636,67 @@ fn is_candidate_path_with(path: &str, enabled: impl Fn(SourceLanguage) -> bool) 
     if is_play_routes_file(path) {
         return enabled(SourceLanguage::Yaml);
     }
-    if let Some(language) = path_specific_language(path) {
+    if let Some(language) = v1_path_specific_language(path) {
         return enabled(language);
+    }
+    if game_path_candidates(path).into_iter().any(&enabled) {
+        return true;
     }
     let extension = path_extension(path);
     if matches!(extension, Some(value) if value.eq_ignore_ascii_case(".md")) {
         return enabled(SourceLanguage::Liquid) && is_jekyll_liquid_path(path);
     }
-    if matches!(extension, Some(value) if value.eq_ignore_ascii_case(".h")) {
-        return [
+    if matches!(extension, Some(value) if value.eq_ignore_ascii_case(".h"))
+        && [
             SourceLanguage::C,
             SourceLanguage::Cpp,
             SourceLanguage::ObjectiveC,
         ]
         .into_iter()
-        .any(&enabled);
+        .any(&enabled)
+    {
+        return true;
     }
-    if matches!(extension, Some(value) if value.eq_ignore_ascii_case(".cls")) {
-        return [SourceLanguage::Apex, SourceLanguage::Vb6]
+    if matches!(extension, Some(value) if value.eq_ignore_ascii_case(".cls"))
+        && [SourceLanguage::Apex, SourceLanguage::Vb6]
             .into_iter()
-            .any(&enabled);
+            .any(&enabled)
+    {
+        return true;
     }
     if matches!(extension, Some(value) if value.eq_ignore_ascii_case(".html")) {
         return enabled(SourceLanguage::Html)
             || enabled(SourceLanguage::Liquid) && is_jekyll_liquid_path(path);
     }
-    let Some(owner) = extension_owner(path) else {
-        return false;
-    };
-    if owner == SourceLanguage::Aura {
-        return enabled(owner) && is_salesforce_aura_file(path, None);
+    SourceLanguage::ALL.into_iter().any(|language| {
+        enabled(language)
+            && extension.is_some_and(|value| language_owns_extension(language, value, true))
+            && candidate_path_admits_language(path, language)
+    })
+}
+
+fn is_v1_candidate_path(path: &str) -> bool {
+    if is_play_routes_file(path) || v1_path_specific_language(path).is_some() {
+        return true;
     }
-    if owner == SourceLanguage::Visualforce {
-        return enabled(owner) && is_salesforce_visualforce_file(path, None);
+    let extension = path_extension(path);
+    if matches!(extension, Some(value) if value.eq_ignore_ascii_case(".md")) {
+        return is_jekyll_liquid_path(path);
     }
-    enabled(owner)
+    SourceLanguage::ALL.into_iter().any(|language| {
+        language.is_v1_language()
+            && language.is_native_indexable()
+            && extension.is_some_and(|value| language_owns_extension(language, value, false))
+            && candidate_path_admits_language(path, language)
+    })
+}
+
+fn candidate_path_admits_language(path: &str, language: SourceLanguage) -> bool {
+    match language {
+        SourceLanguage::Aura => is_salesforce_aura_file(path, None),
+        SourceLanguage::Visualforce => is_salesforce_visualforce_file(path, None),
+        _ => true,
+    }
 }
 
 fn is_jekyll_liquid_path(path: &str) -> bool {
@@ -631,28 +756,104 @@ fn language_registry_digest(
 }
 
 fn detect_source_language(path: &str, source: Option<&str>) -> Option<SourceLanguage> {
-    if is_play_routes_file(path) {
-        return Some(SourceLanguage::Yaml);
+    if let Some(language) = fixed_path_language(path) {
+        return Some(language);
     }
-    if let Some(language) = path_specific_language(path) {
+    if let Some(language) = game_path_language(path, source) {
         return Some(language);
     }
 
-    let extension = path_extension(path);
-    if source.is_some_and(has_yaml_front_matter)
-        && matches!(extension, Some(value) if value.eq_ignore_ascii_case(".html") || value.eq_ignore_ascii_case(".md"))
-    {
+    let extension = path_extension(path)?;
+    if is_liquid_with_front_matter(extension, source) {
         return Some(SourceLanguage::Liquid);
     }
+    if let Some(language) = detect_colliding_game_extension(path, extension, source) {
+        return Some(language);
+    }
+    if content_gated_extension(extension) {
+        return detect_content_gated_language(extension, source);
+    }
+    validated_extension_language(path, extension, source)
+}
 
-    let mut language = extension_owner(path)?;
+fn fixed_path_language(path: &str) -> Option<SourceLanguage> {
+    is_play_routes_file(path)
+        .then_some(SourceLanguage::Yaml)
+        .or_else(|| v1_path_specific_language(path))
+}
+
+fn is_liquid_with_front_matter(extension: &str, source: Option<&str>) -> bool {
+    source.is_some_and(has_yaml_front_matter)
+        && (extension.eq_ignore_ascii_case(".html") || extension.eq_ignore_ascii_case(".md"))
+}
+
+fn content_gated_extension(extension: &str) -> bool {
+    [".d", ".inf", ".t"]
+        .into_iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+}
+
+fn detect_content_gated_language(extension: &str, source: Option<&str>) -> Option<SourceLanguage> {
+    let source = source?;
+    if extension.eq_ignore_ascii_case(".d") && looks_like_daedalus(source) {
+        return Some(SourceLanguage::Daedalus);
+    }
+    if extension.eq_ignore_ascii_case(".inf") && looks_like_inform6(source) {
+        return Some(SourceLanguage::Inform6);
+    }
+    if extension.eq_ignore_ascii_case(".t") && looks_like_tads(source) {
+        return Some(SourceLanguage::Tads);
+    }
+    None
+}
+
+fn validated_extension_language(
+    path: &str,
+    extension: &str,
+    source: Option<&str>,
+) -> Option<SourceLanguage> {
+    let language = extension_owner(path, true)?;
     if language == SourceLanguage::Aura && !is_salesforce_aura_file(path, source) {
         return None;
     }
     if language == SourceLanguage::Visualforce && !is_salesforce_visualforce_file(path, source) {
         return None;
     }
+    if language == SourceLanguage::Apex
+        && extension.eq_ignore_ascii_case(".cls")
+        && source.is_some_and(looks_like_vb6)
+    {
+        return Some(SourceLanguage::Vb6);
+    }
+    if language == SourceLanguage::C
+        && extension.eq_ignore_ascii_case(".h")
+        && let Some(source) = source
+    {
+        return Some(detect_header_language(source));
+    }
+    Some(language)
+}
 
+fn detect_v1_source_language(path: &str, source: Option<&str>) -> Option<SourceLanguage> {
+    if is_play_routes_file(path) {
+        return Some(SourceLanguage::Yaml);
+    }
+    if let Some(language) = v1_path_specific_language(path) {
+        return Some(language);
+    }
+    let extension = path_extension(path);
+    if source.is_some_and(has_yaml_front_matter)
+        && matches!(extension, Some(value) if value.eq_ignore_ascii_case(".html") || value.eq_ignore_ascii_case(".md"))
+    {
+        return Some(SourceLanguage::Liquid);
+    }
+    let mut language = extension_owner(path, false)?;
+    if language == SourceLanguage::Aura && !is_salesforce_aura_file(path, source) {
+        return None;
+    }
+    if language == SourceLanguage::Visualforce && !is_salesforce_visualforce_file(path, source) {
+        return None;
+    }
     if language == SourceLanguage::Apex
         && matches!(extension, Some(value) if value.eq_ignore_ascii_case(".cls"))
         && source.is_some_and(looks_like_vb6)
@@ -668,15 +869,27 @@ fn detect_source_language(path: &str, source: Option<&str>) -> Option<SourceLang
     Some(language)
 }
 
-fn extension_owner(path: &str) -> Option<SourceLanguage> {
+fn extension_owner(path: &str, include_additions: bool) -> Option<SourceLanguage> {
     let extension = path_extension(path)?;
-    SourceLanguage::ALL.into_iter().find(|language| {
-        language
-            .v1_extensions()
-            .iter()
-            .chain(language.additional_extensions())
-            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-    })
+    SourceLanguage::ALL
+        .into_iter()
+        .find(|language| language_owns_extension(*language, extension, include_additions))
+}
+
+fn language_owns_extension(
+    language: SourceLanguage,
+    extension: &str,
+    include_additions: bool,
+) -> bool {
+    language
+        .v1_extensions()
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        || include_additions
+            && language
+                .additional_extensions()
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
 }
 
 fn path_extension(path: &str) -> Option<&str> {
@@ -685,7 +898,252 @@ fn path_extension(path: &str) -> Option<&str> {
     Some(&filename[offset..])
 }
 
-fn path_specific_language(path: &str) -> Option<SourceLanguage> {
+fn game_path_candidates(path: &str) -> impl Iterator<Item = SourceLanguage> {
+    [
+        is_decorate_path(path).then_some(SourceLanguage::DoomDecorate),
+        is_zscript_path(path).then_some(SourceLanguage::Zscript),
+        is_choice_script_path(path).then_some(SourceLanguage::ChoiceScript),
+        is_paradox_script_path(path).then_some(SourceLanguage::ParadoxScript),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn game_path_language(path: &str, source: Option<&str>) -> Option<SourceLanguage> {
+    if is_decorate_path(path) {
+        return Some(SourceLanguage::DoomDecorate);
+    }
+    if is_zscript_path(path) {
+        return Some(SourceLanguage::Zscript);
+    }
+    if is_choice_script_path(path) && source.is_some_and(looks_like_choice_script) {
+        return Some(SourceLanguage::ChoiceScript);
+    }
+    if is_paradox_script_path(path) && source.is_some_and(looks_like_paradox_script) {
+        return Some(SourceLanguage::ParadoxScript);
+    }
+    None
+}
+
+fn detect_colliding_game_extension(
+    path: &str,
+    extension: &str,
+    source: Option<&str>,
+) -> Option<SourceLanguage> {
+    let source = source?;
+    if extension.eq_ignore_ascii_case(".as") && looks_like_angelscript(source) {
+        return Some(SourceLanguage::AngelScript);
+    }
+    if extension.eq_ignore_ascii_case(".c") {
+        if looks_like_enforce_script(path, source) {
+            return Some(SourceLanguage::EnforceScript);
+        }
+        if looks_like_lpc(path, source) {
+            return Some(SourceLanguage::Lpc);
+        }
+    }
+    if extension.eq_ignore_ascii_case(".cs") && looks_like_torque_script(source) {
+        return Some(SourceLanguage::TorqueScript);
+    }
+    if extension.eq_ignore_ascii_case(".qc") && looks_like_valve_qc(source) {
+        return Some(SourceLanguage::ValveQc);
+    }
+    None
+}
+
+fn is_decorate_path(path: &str) -> bool {
+    path.rsplit('/').next().is_some_and(|filename| {
+        filename.eq_ignore_ascii_case("decorate") || filename.eq_ignore_ascii_case("decorate.txt")
+    })
+}
+
+fn is_zscript_path(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|filename| filename.eq_ignore_ascii_case("zscript.txt"))
+}
+
+fn is_choice_script_path(path: &str) -> bool {
+    has_extension(path, "txt")
+        && path
+            .split('/')
+            .any(|component| component.eq_ignore_ascii_case("scenes"))
+}
+
+fn is_paradox_script_path(path: &str) -> bool {
+    if !has_extension(path, "txt") {
+        return false;
+    }
+    path.split('/').any(|component| {
+        matches_ignore_ascii_case(
+            component,
+            &[
+                "common",
+                "decisions",
+                "events",
+                "history",
+                "missions",
+                "on_actions",
+                "scripted_effects",
+                "scripted_triggers",
+            ],
+        )
+    })
+}
+
+fn looks_like_choice_script(source: &str) -> bool {
+    bounded_prefix(source, CONTENT_CLASSIFIER_BYTES)
+        .lines()
+        .map(str::trim_start)
+        .any(|line| {
+            [
+                "*choice",
+                "*create ",
+                "*goto ",
+                "*gosub ",
+                "*label ",
+                "*scene_list",
+            ]
+            .into_iter()
+            .any(|marker| line.to_ascii_lowercase().starts_with(marker))
+        })
+}
+
+fn looks_like_paradox_script(source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    let structured = prefix.contains("= {") || prefix.contains("={");
+    structured
+        && [
+            "namespace =",
+            "country_event =",
+            "character_event =",
+            "planet_event =",
+            "scripted_trigger =",
+            "on_action =",
+            "potential =",
+            "immediate =",
+        ]
+        .into_iter()
+        .any(|marker| prefix.contains(marker))
+}
+
+fn looks_like_angelscript(source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    ["funcdef ", "mixin class ", "shared class ", "interface "]
+        .into_iter()
+        .any(|marker| prefix.contains(marker))
+        || prefix.contains("@+")
+        || prefix.contains("@ ")
+}
+
+fn looks_like_enforce_script(path: &str, source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    let language_marker = [
+        "modded class ",
+        "proto native ",
+        "autoptr ",
+        "ref array<",
+        "override void eon",
+    ]
+    .into_iter()
+    .any(|marker| prefix.contains(marker));
+    let normalized = path.to_ascii_lowercase();
+    language_marker
+        || normalized.contains("/scripts/3_game/") && prefix.contains("class ")
+        || normalized.contains("/scripts/4_world/") && prefix.contains("class ")
+        || normalized.contains("/scripts/5_mission/") && prefix.contains("class ")
+}
+
+fn looks_like_lpc(path: &str, source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    let language_marker = [
+        "inherit \"",
+        "inherit(\"",
+        "mapping ",
+        "mixed ",
+        "nomask ",
+        "object *",
+    ]
+    .into_iter()
+    .any(|marker| prefix.contains(marker));
+    language_marker
+        || path
+            .split('/')
+            .any(|component| component.eq_ignore_ascii_case("mudlib"))
+            && (prefix.contains("void create(") || prefix.contains("reset("))
+}
+
+fn looks_like_torque_script(source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    ["datablock ", "function ", "new simobject(", "exec(\""]
+        .into_iter()
+        .any(|marker| prefix.contains(marker))
+        && (prefix.contains('%') || prefix.contains('$') || prefix.contains("::"))
+}
+
+fn looks_like_valve_qc(source: &str) -> bool {
+    bounded_prefix(source, CONTENT_CLASSIFIER_BYTES)
+        .lines()
+        .map(str::trim_start)
+        .any(|line| {
+            [
+                "$body",
+                "$bodygroup",
+                "$cdmaterials",
+                "$modelname",
+                "$sequence",
+            ]
+            .into_iter()
+            .any(|marker| line.to_ascii_lowercase().starts_with(marker))
+        })
+}
+
+fn looks_like_daedalus(source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    [
+        "instance ",
+        "prototype ",
+        "func ",
+        "var c_npc",
+        "var c_info",
+    ]
+    .into_iter()
+    .filter(|marker| prefix.contains(marker))
+    .take(2)
+    .count()
+        >= 2
+}
+
+fn looks_like_inform6(source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    [
+        "constant story",
+        "include \"parser\"",
+        "include \"verblib\"",
+        "[ initialise",
+        "object ",
+    ]
+    .into_iter()
+    .filter(|marker| prefix.contains(marker))
+    .take(2)
+    .count()
+        >= 2
+}
+
+fn looks_like_tads(source: &str) -> bool {
+    let prefix = bounded_prefix(source, CONTENT_CLASSIFIER_BYTES).to_ascii_lowercase();
+    [
+        "#include <adv3.h>",
+        "#include <tads.h>",
+        "gamemaindef",
+        "room 'external name'",
+        "modify ",
+    ]
+    .into_iter()
+    .any(|marker| prefix.contains(marker))
+}
+
+fn v1_path_specific_language(path: &str) -> Option<SourceLanguage> {
     let normalized = path.to_ascii_lowercase();
     let localization_marker = normalized
         .contains("/localization/")
@@ -1566,13 +2024,26 @@ mod tests {
     fn language_registry_preserves_v1_contract_and_tracks_v2_additions_separately() {
         let stable_ids = SourceLanguage::ALL.map(SourceLanguage::as_str);
         assert!(stable_ids.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(stable_ids.into_iter().collect::<BTreeSet<_>>().len(), 74);
+        assert_eq!(stable_ids.into_iter().collect::<BTreeSet<_>>().len(), 126);
         assert_eq!(
             SourceLanguage::ALL
                 .into_iter()
                 .filter(|language| language.is_v1_language())
                 .count(),
             73
+        );
+        assert_eq!(
+            SourceLanguage::ALL
+                .into_iter()
+                .filter(|language| language.is_game_scripting())
+                .count(),
+            52
+        );
+        assert!(
+            SourceLanguage::ALL
+                .into_iter()
+                .filter(|language| language.is_game_scripting())
+                .all(|language| !language.is_v1_language())
         );
 
         let v1_extensions = SourceLanguage::ALL
@@ -1587,11 +2058,18 @@ mod tests {
         );
         assert_eq!(SourceLanguage::Python.v1_extensions(), &[".py", ".pyw"]);
         assert_eq!(SourceLanguage::Python.additional_extensions(), &[".pyi"]);
+        assert!(SourceLanguage::Rhai.v1_extensions().is_empty());
+        assert_eq!(SourceLanguage::Rhai.additional_extensions(), &[".rhai"]);
         assert!(SourceLanguage::Toml.v1_extensions().is_empty());
         assert_eq!(SourceLanguage::Toml.additional_extensions(), &[".toml"]);
         assert!(SourceLanguage::is_v1_candidate_path("src/service.py"));
         assert!(!SourceLanguage::is_v1_candidate_path("src/service.pyi"));
+        assert!(!SourceLanguage::is_v1_candidate_path("scripts/policy.rhai"));
         assert!(!SourceLanguage::is_v1_candidate_path("Cargo.toml"));
+        assert_eq!(
+            SourceLanguage::for_normalized_path("scripts/policy.rhai"),
+            Some(SourceLanguage::Rhai)
+        );
         assert_eq!(
             SourceLanguage::for_v1_normalized_path_with_source(
                 "src/service.py",
@@ -1614,7 +2092,7 @@ mod tests {
             );
             let path = representative_path(language);
             assert_eq!(
-                SourceLanguage::detect(&path, None),
+                SourceLanguage::detect(&path, Some(representative_source(language))),
                 Some(language),
                 "{} was not routed from {path}",
                 language.as_str()
@@ -1634,7 +2112,7 @@ mod tests {
             blake3::Hash::from_bytes(v2_language_additions_digest())
                 .to_hex()
                 .as_str(),
-            "854ee232eb2be4e00eba8303ddd47c6bbc43e0bd0c67e1569d8d272206bed1cb"
+            "2c17a1d31eccb245fa1af89365fac963f605ae60a97dd321e4e882340600cee4"
         );
     }
 
@@ -1969,6 +2447,9 @@ mod tests {
         match language {
             SourceLanguage::Bg3Stats => "game/Stats/Generated/sample.txt".to_owned(),
             SourceLanguage::Aura => "force-app/main/default/aura/Sample/Sample.cmp".to_owned(),
+            SourceLanguage::ChoiceScript => "game/scenes/startup.txt".to_owned(),
+            SourceLanguage::DoomDecorate => "game/DECORATE".to_owned(),
+            SourceLanguage::ParadoxScript => "game/events/start.txt".to_owned(),
             SourceLanguage::Visualforce => "force-app/main/default/pages/Sample.page".to_owned(),
             _ => {
                 let extension = language
@@ -1980,6 +2461,23 @@ mod tests {
                     });
                 format!("src/sample{extension}")
             }
+        }
+    }
+
+    const fn representative_source(language: SourceLanguage) -> &'static str {
+        match language {
+            SourceLanguage::ChoiceScript => "*label start\n*choice\n  #Continue\n    *finish\n",
+            SourceLanguage::Daedalus => "INSTANCE Start (C_NPC) { }\nFUNC VOID Run() { };\n",
+            SourceLanguage::DoomDecorate => "actor Start 1000 { }\n",
+            SourceLanguage::EnforceScript => "modded class Start { }\n",
+            SourceLanguage::Inform6 => {
+                "Constant Story \"Start\";\nInclude \"Parser\";\n[ Start; ];\n"
+            }
+            SourceLanguage::Lpc => "inherit \"/std/object\";\nvoid create() { }\n",
+            SourceLanguage::ParadoxScript => "country_event = { immediate = { } }\n",
+            SourceLanguage::Tads => "#include <adv3.h>\nstartRoom: Room { }\n",
+            SourceLanguage::TorqueScript => "function Start(%value) { }\n",
+            _ => "",
         }
     }
 

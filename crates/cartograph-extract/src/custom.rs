@@ -20,29 +20,63 @@ use crate::{
 
 const CUSTOM_DIGEST_CONTEXT: &str = "cartograph.v2.custom-structural-digest.2026-07-24";
 const MAX_REFERENCE_NAME_BYTES: usize = 4_096;
+const CUSTOM_CANCELLATION_POLL_BYTES: usize = 4_096;
+
+mod game_scripting;
+mod rhai;
+
+fn poll_cancellation(
+    cancelled: &mut dyn FnMut() -> bool,
+    cursor: usize,
+    next_poll: &mut usize,
+) -> Result<(), ExtractError> {
+    if cursor < *next_poll {
+        return Ok(());
+    }
+    if cancelled() {
+        return Err(ExtractError::Cancelled);
+    }
+    *next_poll = cursor.saturating_add(CUSTOM_CANCELLATION_POLL_BYTES);
+    Ok(())
+}
 
 pub(crate) fn extract(
     snapshot: &SourceSnapshot,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ExtractedFile, ExtractError> {
     let mut builder = CustomBuilder::new(snapshot, cancelled)?;
-    match snapshot.language() {
-        SourceLanguage::Properties => extract_properties(&mut builder)?,
+    if snapshot.language() == SourceLanguage::Rhai {
+        let parse_status = rhai::extract(&mut builder)?;
+        return builder.finish(parse_status);
+    }
+    if game_scripting::supports(snapshot.language()) {
+        let parse_status = game_scripting::extract(&mut builder)?;
+        return builder.finish(parse_status);
+    }
+    let parse_status = extract_existing_custom(&mut builder)?;
+    builder.finish(parse_status)
+}
+
+fn extract_existing_custom(
+    builder: &mut CustomBuilder<'_, '_>,
+) -> Result<FileParseStatus, ExtractError> {
+    match builder.snapshot.language() {
+        SourceLanguage::Properties => extract_properties(builder)?,
         SourceLanguage::Toml => {}
-        SourceLanguage::Liquid => extract_liquid(&mut builder)?,
-        SourceLanguage::Svelte | SourceLanguage::Vue => extract_component_file(&mut builder)?,
+        SourceLanguage::Liquid => extract_liquid(builder)?,
+        SourceLanguage::Svelte | SourceLanguage::Vue => extract_component_file(builder)?,
         SourceLanguage::Aura | SourceLanguage::Visualforce => {
-            extract_salesforce_markup(&mut builder)?;
+            extract_salesforce_markup(builder)?;
         }
-        SourceLanguage::Vb6 => extract_vb6(&mut builder)?,
-        SourceLanguage::Xml => extract_xml(&mut builder)?,
-        SourceLanguage::Bg3Anubis => extract_anubis(&mut builder)?,
-        SourceLanguage::Bg3Stats => extract_bg3_stats(&mut builder)?,
-        SourceLanguage::Osiris => extract_osiris(&mut builder)?,
-        SourceLanguage::Bg3Resource => extract_bg3_resource(&mut builder)?,
+        SourceLanguage::Vb6 => extract_vb6(builder)?,
+        SourceLanguage::Xml => extract_xml(builder)?,
+        SourceLanguage::Bg3Anubis => extract_anubis(builder)?,
+        SourceLanguage::Bg3Stats => extract_bg3_stats(builder)?,
+        SourceLanguage::Osiris => extract_osiris(builder)?,
+        SourceLanguage::Bg3Resource => extract_bg3_resource(builder)?,
         _ => return Err(ExtractError::UnsupportedLanguage),
     }
-    builder.finish()
+    Ok(FileParseStatus::Parsed)
 }
 
 #[derive(Default)]
@@ -125,6 +159,7 @@ impl<'name> CustomReferenceInput<'name> {
 
 struct CustomImportInput<'name> {
     owner: Option<SymbolId>,
+    kind: ImportBindingKind,
     module: &'name str,
     imported: &'name str,
     local: &'name str,
@@ -180,6 +215,7 @@ impl<'name> CustomImportInput<'name> {
     fn new(owner: Option<SymbolId>, module: &'name str) -> Self {
         Self {
             owner,
+            kind: ImportBindingKind::Named,
             module,
             imported: module,
             local: module,
@@ -191,6 +227,11 @@ impl<'name> CustomImportInput<'name> {
     const fn binding(mut self, imported: &'name str, local: &'name str) -> Self {
         self.imported = imported;
         self.local = local;
+        self
+    }
+
+    const fn with_kind(mut self, kind: ImportBindingKind) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -354,24 +395,21 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
         Ok(())
     }
 
-    fn add_import(&mut self, input: CustomImportInput<'_>) -> Result<(), ExtractError> {
-        let CustomImportInput {
-            owner,
-            module,
-            imported,
-            local,
-            start,
-            end,
-        } = input;
+    fn add_import(&mut self, input: &CustomImportInput<'_>) -> Result<(), ExtractError> {
         self.add_reference(
-            CustomReferenceInput::new(owner, module, ReferenceKind::Imports).at(start, end),
+            CustomReferenceInput::new(input.owner.clone(), input.module, ReferenceKind::Imports)
+                .at(input.start, input.end),
         )?;
+        self.add_import_binding(input)
+    }
+
+    fn add_import_binding(&mut self, input: &CustomImportInput<'_>) -> Result<(), ExtractError> {
         let binding = ExtractedImportBinding {
-            kind: ImportBindingKind::Named,
-            module_specifier: bounded_string(module)?,
-            imported_name: bounded_string(imported)?,
-            local_name: bounded_string(local)?,
-            span: self.span(start, end)?,
+            kind: input.kind,
+            module_specifier: bounded_string(input.module)?,
+            imported_name: bounded_string(input.imported)?,
+            local_name: bounded_string(input.local)?,
+            span: self.span(input.start, input.end)?,
         };
         self.budget.reserve_fact(
             import_binding_budget_bytes(&binding),
@@ -385,7 +423,7 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
         Ok(())
     }
 
-    fn finish(self) -> Result<ExtractedFile, ExtractError> {
+    fn finish(self, parse_status: FileParseStatus) -> Result<ExtractedFile, ExtractError> {
         let output_limit = self.budget.output_limit();
         let file = ExtractedFile {
             file_id: self.snapshot.file_id().clone(),
@@ -394,7 +432,7 @@ impl<'source, 'cancel> CustomBuilder<'source, 'cancel> {
             content_hash: self.snapshot.content_hash().clone(),
             byte_size: self.snapshot.byte_size(),
             line_count: self.snapshot.line_count(),
-            parse_status: FileParseStatus::Parsed,
+            parse_status,
             symbols: self.symbols,
             containments: self.containments,
             references: self.references,
@@ -737,7 +775,7 @@ fn extract_liquid_tag(
                     }),
             )?;
             builder.add_import(
-                CustomImportInput::new(Some(id), &module)
+                &CustomImportInput::new(Some(id), &module)
                     .binding(partner, partner)
                     .at(start, end),
             )?;
@@ -1205,7 +1243,7 @@ fn add_embedded_script_import(
         }),
     )?;
     builder.add_import(
-        CustomImportInput::new(Some(symbol), input.import.module)
+        &CustomImportInput::new(Some(symbol), input.import.module)
             .binding(input.import.imported, input.import.local)
             .at(
                 input.line.absolute + input.import.module_offset,
@@ -2062,7 +2100,7 @@ fn extract_vb6_project(builder: &mut CustomBuilder<'_, '_>) -> Result<(), Extrac
             }),
         )?;
         builder.add_import(
-            CustomImportInput::new(Some(id), value)
+            &CustomImportInput::new(Some(id), value)
                 .binding(name, name)
                 .at(line_start + offset, line_start + offset + name.len()),
         )?;
