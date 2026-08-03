@@ -7,9 +7,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-use cartograph_agent::PipelineStage;
 use cartograph_agent::{IndexOptions, ProjectError, ProjectRuntime, ProjectWatchFilter};
+#[cfg(test)]
+use cartograph_agent::{PipelineFailureReason, PipelineStage};
 use cartograph_domain::ContentDigest;
 use notify::{Config, Event, EventKind, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -20,7 +20,7 @@ use tokio::{
     time::{Instant, MissedTickBehavior},
 };
 
-use crate::error_codes::pipeline_stage_failure_code;
+use crate::error_codes::{pipeline_failure_reason_code, pipeline_stage_failure_code};
 
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(750);
 const MINIMUM_DEBOUNCE_MILLIS: u64 = 50;
@@ -442,6 +442,9 @@ const fn project_error_code(error: ProjectError) -> &'static str {
         ProjectError::BeginGenerationFailed => "generation_start_failed",
         ProjectError::SourceScanFailed => "source_scan_failed",
         ProjectError::IndexStageFailed { stage } => pipeline_stage_failure_code(stage),
+        ProjectError::IndexStageFailedWithReason { stage, reason } => {
+            pipeline_failure_reason_code(stage, reason)
+        }
         ProjectError::IndexLeaseFailed => "lease_failed",
         ProjectError::IndexPublicationFailed => "publication_failed",
         ProjectError::IndexCleanupFailed => "index_cleanup_failed",
@@ -656,6 +659,13 @@ mod tests {
                 expected
             );
         }
+        assert_eq!(
+            project_error_code(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Reduce,
+                reason: PipelineFailureReason::ReferenceNameTooLong,
+            }),
+            "reduce_reference_name_too_long"
+        );
 
         let error_codes = [
             (

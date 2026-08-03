@@ -52,8 +52,9 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V10 fences call-target-precise secret exposure and
-incomplete-implementation evidence; contract V9 fenced JSX executable-line
+contract. Contract V11 fences anonymous Rust call-target normalization;
+contract V10 fenced call-target-precise
+secret exposure and incomplete-implementation evidence; contract V9 fenced JSX executable-line
 ownership, SQL/document/secret health precision, Python intrinsic and receiver
 provenance, React lazy default consumers, and TypeScript `typeof` value
 consumers; contract V8 fenced
@@ -86,6 +87,13 @@ The walker emits:
   unknowns;
 - safe callable signatures and body-search text;
 - parser diagnostics.
+
+Immediately invoked Rust closures have no stable declaration target, so their
+source bodies are never retained as named call references. Calls inside the
+closure remain ordinary typed evidence. If another extracted reference still
+violates the canonical storage bound, reduction returns the allowlisted
+`reference_name_too_long` reason without rendering the name, source, project
+path, database URL, or driver text.
 
 Callable signatures are normalized to exclude literal-bearing bodies/values.
 Search text is intentionally useful for code identifiers without becoming a

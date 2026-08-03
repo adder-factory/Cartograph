@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-03 (`v2.1.8`).
+Last release audit: 2026-08-03 (`v2.1.9`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -139,6 +139,14 @@ coverage. Each lens is independently bounded and reports `ready`, `timeout`, or
 `unavailable` with stage, limit, and retry guidance. Counts derived from the
 returned window are labeled `returned_rows_only`; partial non-Git or large
 project evidence is never presented as a complete scan.
+
+`cartograph_review` context mode accepts the shared `pathFilter` and
+`allowStale` fields advertised by its schema. `pathFilter` is a validated
+project-relative segment prefix for both live Git comparison and supplied-diff
+evidence; sibling prefixes do not match. `allowStale` is a compatibility no-op
+in context mode because the Git review packet already reports immutable graph
+freshness separately, while non-Git review lenses continue to use it as an
+explicit stale-evidence opt-in.
 
 `cartograph_context` classifies deterministic task intents such as symbol
 lookup, implementation trace, change planning, test selection, error diagnosis,

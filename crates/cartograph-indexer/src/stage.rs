@@ -563,8 +563,10 @@ pub enum StageFailureKind {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StageRunError {
     /// Capacity/deadline/stage policy was invalid before useful work began.
-    #[error("invalid {field} in Cartograph parallel stage configuration")]
+    #[error("invalid {field} in Cartograph {stage:?} stage configuration")]
     InvalidConfig {
+        /// Stage whose configuration was invalid.
+        stage: PipelineStage,
         /// Stable invalid field name.
         field: &'static str,
     },
@@ -644,6 +646,26 @@ pub enum StageRunError {
         /// Stage whose cleanup bound elapsed.
         stage: PipelineStage,
     },
+}
+
+impl StageRunError {
+    /// Exact stage retained by every failure that began stage execution.
+    #[must_use]
+    pub const fn stage(&self) -> PipelineStage {
+        match self {
+            Self::InvalidConfig { stage, .. }
+            | Self::InputSequence { stage, .. }
+            | Self::Admission { stage, .. }
+            | Self::Item { stage, .. }
+            | Self::StageDeadline { stage }
+            | Self::Reduce { stage, .. }
+            | Self::Progress { stage, .. }
+            | Self::Metrics { stage, .. }
+            | Self::Cancelled { stage }
+            | Self::Join { stage }
+            | Self::Reap { stage } => *stage,
+        }
+    }
 }
 
 /// Supervisor-bound entry point for bounded ordered stage execution.
@@ -1050,6 +1072,7 @@ where
                     break;
                 };
                 let expected = self.input.expected.ok_or(StageRunError::InvalidConfig {
+                    stage: self.policy.stage,
                     field: "input_sequence",
                 })?;
                 let actual = envelope.meta.sequence();
@@ -1329,31 +1352,48 @@ fn validate_stage(
     max_tasks: usize,
 ) -> Result<ValidatedStage, StageRunError> {
     if config.stage == PipelineStage::Publish {
-        return Err(StageRunError::InvalidConfig { field: "stage" });
+        return Err(StageRunError::InvalidConfig {
+            stage: config.stage,
+            field: "stage",
+        });
     }
     if config.capacity.workers == 0 {
-        return Err(StageRunError::InvalidConfig { field: "workers" });
+        return Err(StageRunError::InvalidConfig {
+            stage: config.stage,
+            field: "workers",
+        });
     }
     let window = config
         .capacity
         .workers
         .checked_add(config.capacity.queued_items)
         .ok_or(StageRunError::InvalidConfig {
+            stage: config.stage,
             field: "queued_items",
         })?;
     if window > max_tasks {
-        return Err(StageRunError::InvalidConfig { field: "capacity" });
+        return Err(StageRunError::InvalidConfig {
+            stage: config.stage,
+            field: "capacity",
+        });
     }
     if config.capacity.workers > Semaphore::MAX_PERMITS {
-        return Err(StageRunError::InvalidConfig { field: "workers" });
+        return Err(StageRunError::InvalidConfig {
+            stage: config.stage,
+            field: "workers",
+        });
     }
     if Instant::now() >= config.deadlines.deadline {
-        return Err(StageRunError::InvalidConfig { field: "deadline" });
+        return Err(StageRunError::InvalidConfig {
+            stage: config.stage,
+            field: "deadline",
+        });
     }
     if config.deadlines.cleanup_grace.is_zero()
         || config.deadlines.cleanup_grace > MAX_STAGE_CLEANUP_GRACE
     {
         return Err(StageRunError::InvalidConfig {
+            stage: config.stage,
             field: "cleanup_grace",
         });
     }
@@ -2253,19 +2293,28 @@ mod tests {
                 ),
                 1,
             ),
-            Err(StageRunError::InvalidConfig { field: "stage" })
+            Err(StageRunError::InvalidConfig { field: "stage", .. })
         ));
         assert!(matches!(
             validate_stage(config(0, 0, future), 1),
-            Err(StageRunError::InvalidConfig { field: "workers" })
+            Err(StageRunError::InvalidConfig {
+                field: "workers",
+                ..
+            })
         ));
         assert!(matches!(
             validate_stage(config(1, 1, future), 1),
-            Err(StageRunError::InvalidConfig { field: "capacity" })
+            Err(StageRunError::InvalidConfig {
+                field: "capacity",
+                ..
+            })
         ));
         assert!(matches!(
             validate_stage(config(1, 0, expired), 1),
-            Err(StageRunError::InvalidConfig { field: "deadline" })
+            Err(StageRunError::InvalidConfig {
+                field: "deadline",
+                ..
+            })
         ));
         assert!(matches!(
             validate_stage(
@@ -2277,7 +2326,8 @@ mod tests {
                 1,
             ),
             Err(StageRunError::InvalidConfig {
-                field: "cleanup_grace"
+                field: "cleanup_grace",
+                ..
             })
         ));
     }

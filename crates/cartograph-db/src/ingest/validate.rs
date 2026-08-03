@@ -116,6 +116,9 @@ pub enum GenerationValidationError {
     /// A storage field or relation violated its public boundary.
     #[error(transparent)]
     Storage(#[from] StorageError),
+    /// One extracted reference name exceeded the canonical byte boundary.
+    #[error("Cartograph generation reference name exceeds the canonical byte limit")]
+    ReferenceNameTooLong,
     /// Cooperative validation cancellation was observed.
     #[error("Cartograph generation validation was cancelled")]
     Cancelled,
@@ -222,6 +225,7 @@ fn validate_and_reduce(facts: GenerationFacts) -> Result<CanonicalGenerationFact
         .map(|(facts, _)| facts)
         .map_err(|error| match error {
             GenerationValidationError::Storage(error) => error,
+            GenerationValidationError::ReferenceNameTooLong => invalid("reference_name"),
             GenerationValidationError::Cancelled => invalid("generation_validation_cancelled"),
             GenerationValidationError::RetainedLimit => invalid("generation_retained_bytes"),
         })
@@ -488,11 +492,7 @@ where
                 .saturating_add(usize_to_u64(reference.reference_kind.len()))
                 .saturating_add(usize_to_u64(reference.resolution_provenance.len())),
         )?;
-        validate_bounded_text(
-            &reference.reference_name,
-            "reference_name",
-            MAX_REFERENCE_NAME_BYTES,
-        )?;
+        validate_reference_name(&reference.reference_name)?;
         validate_bounded_text(
             &reference.reference_kind,
             "reference_kind",
@@ -953,6 +953,14 @@ fn validate_bounded_text(
     }
 }
 
+fn validate_reference_name(value: &str) -> Result<(), GenerationValidationError> {
+    if value.len() > MAX_REFERENCE_NAME_BYTES {
+        Err(GenerationValidationError::ReferenceNameTooLong)
+    } else {
+        validate_bounded_text(value, "reference_name", MAX_REFERENCE_NAME_BYTES).map_err(Into::into)
+    }
+}
+
 fn validate_optional_text(
     value: &str,
     field: &'static str,
@@ -1398,6 +1406,39 @@ mod tests {
                 field: "reference_byte_span"
             })
         ));
+    }
+
+    #[test]
+    fn reference_name_validation_distinguishes_too_long_from_other_invalid_text() {
+        let validate = |name: String| {
+            let mut candidate = reference();
+            candidate.reference_name = name;
+            validate_generation_facts(
+                GenerationFacts {
+                    files: vec![file()],
+                    references: vec![candidate],
+                    ..GenerationFacts::default()
+                },
+                validation_limits(),
+                || false,
+            )
+        };
+
+        assert!(validate("x".repeat(MAX_REFERENCE_NAME_BYTES)).is_ok());
+        assert!(matches!(
+            validate("x".repeat(MAX_REFERENCE_NAME_BYTES + 1)),
+            Err(GenerationValidationError::ReferenceNameTooLong)
+        ));
+        for invalid_name in [String::new(), "valid\0name".to_owned()] {
+            assert!(matches!(
+                validate(invalid_name),
+                Err(GenerationValidationError::Storage(
+                    StorageError::InvalidInput {
+                        field: "reference_name"
+                    }
+                ))
+            ));
+        }
     }
 
     #[test]

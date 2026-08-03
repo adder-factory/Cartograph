@@ -37,7 +37,6 @@ use cartograph_extract::{
     DiscoveryLimits, DiscoveryPolicy, NestedRepositoryPolicy, SourceDiscoveryOptions, SourceLimits,
     SourceReadError, SourceReadOptions, SourceRoot, native_extractor_contract_digest,
 };
-pub use cartograph_indexer::PipelineStage;
 use cartograph_indexer::{
     IndexerSupervisor, NativeGenerationBuild, NativeParseCache, NativePipelineConfig,
     NativePipelineDeadlines, NativePipelineLimits, NativePipelineParallelism, NativePipelineReport,
@@ -45,6 +44,7 @@ use cartograph_indexer::{
     SupervisorConfig, SupervisorContext, SupervisorError, SupervisorRequest,
     build_native_generation_with_scip_and_cache,
 };
+pub use cartograph_indexer::{PipelineFailureReason, PipelineStage};
 use cartograph_llm::{ProjectSourceSettings, load_project_source_settings};
 use serde::Serialize;
 use thiserror::Error;
@@ -1509,6 +1509,9 @@ impl PreparedIndexPublication {
             Err(SupervisorError::Pipeline { stage }) => {
                 return Err(ProjectError::IndexStageFailed { stage });
             }
+            Err(SupervisorError::PipelineWithReason { stage, reason }) => {
+                return Err(ProjectError::IndexStageFailedWithReason { stage, reason });
+            }
             Err(SupervisorError::Lease { .. } | SupervisorError::OwnershipLost { .. }) => {
                 return Err(ProjectError::IndexLeaseFailed);
             }
@@ -1562,7 +1565,7 @@ async fn prepare_generation(
 ) -> Result<cartograph_db::ReadyGeneration, PipelineFailure> {
     let native = build_native_generation_with_scip_and_cache(&context.stages(), work.build)
         .await
-        .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+        .map_err(|error| native_pipeline_failure(&error))?;
     let report = native.report();
     let (facts, _) = native.into_parts();
     work.report_sender
@@ -1577,6 +1580,13 @@ async fn prepare_generation(
         .prepare_generation(GenerationContents::new(work.staged, facts))
         .await
         .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+}
+
+fn native_pipeline_failure(error: &cartograph_indexer::NativePipelineError) -> PipelineFailure {
+    match error.reason() {
+        Some(reason) => PipelineFailure::with_reason(error.stage(), reason),
+        None => PipelineFailure::new(error.stage()),
+    }
 }
 
 struct SourceScanRequest {
@@ -2283,6 +2293,16 @@ pub enum ProjectError {
         /// Stable credential-safe stage identifier.
         stage: PipelineStage,
     },
+    /// One exact native pipeline stage failed for an allowlisted actionable reason.
+    #[error(
+        "Cartograph index operation failed during {stage}/{reason}; the previous generation remains visible"
+    )]
+    IndexStageFailedWithReason {
+        /// Stable credential-safe stage identifier.
+        stage: PipelineStage,
+        /// Stable allowlisted reason with source and driver text discarded.
+        reason: PipelineFailureReason,
+    },
     /// The index operation could not acquire or retain its exact lease.
     #[error(
         "Cartograph index operation failed during the lease stage; the previous generation remains visible"
@@ -2346,6 +2366,38 @@ mod tests {
         assert!(message.contains("schema version 26"));
         assert!(message.contains("schema version 27"));
         assert!(message.contains("repin the MCP registration"));
+    }
+
+    #[test]
+    fn native_pipeline_failures_preserve_stage_and_allowlisted_reason_without_source_text() {
+        let parse = native_pipeline_failure(&cartograph_indexer::NativePipelineError::Stage(
+            cartograph_indexer::StageRunError::StageDeadline {
+                stage: PipelineStage::Parse,
+            },
+        ));
+        assert_eq!(parse.stage(), PipelineStage::Parse);
+        assert_eq!(parse.reason(), None);
+
+        let bounded =
+            native_pipeline_failure(&cartograph_indexer::NativePipelineError::Validation {
+                reason: Some(PipelineFailureReason::ReferenceNameTooLong),
+            });
+        assert_eq!(bounded.stage(), PipelineStage::Reduce);
+        assert_eq!(
+            bounded.reason(),
+            Some(PipelineFailureReason::ReferenceNameTooLong)
+        );
+        let Some(reason) = bounded.reason() else {
+            panic!("allowlisted pipeline reason was discarded");
+        };
+        let public = ProjectError::IndexStageFailedWithReason {
+            stage: bounded.stage(),
+            reason,
+        };
+        assert_eq!(
+            public.to_string(),
+            "Cartograph index operation failed during reduce/reference_name_too_long; the previous generation remains visible"
+        );
     }
 
     #[test]

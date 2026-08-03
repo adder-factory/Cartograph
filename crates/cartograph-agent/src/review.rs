@@ -28,6 +28,7 @@ pub struct ReviewOptions {
     base_ref: String,
     max_changed_files: u16,
     evidence_budget: ReviewBudget,
+    path_filter: Option<NormalizedPath>,
 }
 
 impl ReviewOptions {
@@ -45,6 +46,7 @@ impl ReviewOptions {
             base_ref,
             max_changed_files: DEFAULT_MAX_CHANGED_FILES,
             evidence_budget: ReviewBudget::default(),
+            path_filter: None,
         })
     }
 
@@ -58,6 +60,19 @@ impl ReviewOptions {
             return Err(ReviewError::InvalidOptions);
         }
         self.max_changed_files = limit;
+        Ok(self)
+    }
+
+    /// Restrict changed paths to one canonical project-relative prefix.
+    /// # Errors
+    ///
+    /// Returns [`ReviewError::InvalidOptions`] when the filter is empty,
+    /// absolute, parent-escaping, contains NUL, or exceeds the path bound.
+    pub fn with_path_filter(mut self, filter: Option<&str>) -> Result<Self, ReviewError> {
+        self.path_filter = filter
+            .map(NormalizedPath::parse)
+            .transpose()
+            .map_err(|_| ReviewError::InvalidOptions)?;
         Ok(self)
     }
 
@@ -94,6 +109,10 @@ impl fmt::Debug for ReviewOptions {
             .field("base_ref", &"<redacted>")
             .field("max_changed_files", &self.max_changed_files)
             .field("evidence_budget", &self.evidence_budget)
+            .field(
+                "path_filter",
+                &self.path_filter.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -406,6 +425,9 @@ pub async fn discover_git_comparison(
     for path in parse_paths(&untracked.stdout)? {
         changed.entry(path).or_insert(GitChangeKind::Untracked);
     }
+    if let Some(filter) = options.path_filter.as_ref() {
+        changed.retain(|path, _| path_matches_filter(path, filter));
+    }
     let truncated = changed.len() > usize::from(options.max_changed_files);
     let files = changed
         .into_iter()
@@ -419,6 +441,14 @@ pub async fn discover_git_comparison(
         worktree_dirty: !status.stdout.is_empty(),
         truncated,
     })
+}
+
+pub(crate) fn path_matches_filter(path: &NormalizedPath, filter: &NormalizedPath) -> bool {
+    path == filter
+        || path
+            .as_str()
+            .strip_prefix(filter.as_str())
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 pub(super) struct GitOutput {

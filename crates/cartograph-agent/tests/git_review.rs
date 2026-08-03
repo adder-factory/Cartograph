@@ -110,6 +110,31 @@ async fn changed_file_limit_is_explicit_and_keeps_the_stable_prefix() {
 }
 
 #[tokio::test]
+async fn review_path_filter_is_canonical_and_does_not_match_sibling_prefixes() {
+    let repository = repository_fixture();
+    for directory in ["src2", "tests"] {
+        std::fs::create_dir_all(repository.path().join(directory))
+            .unwrap_or_else(|error| panic!("filtered fixture directory failed: {error}"));
+    }
+    write(repository.path().join("src/a.rs"), "pub fn a() {}\n");
+    write(repository.path().join("src2/b.rs"), "pub fn b() {}\n");
+    write(repository.path().join("tests/c.rs"), "pub fn c() {}\n");
+    let options = ReviewOptions::new("HEAD")
+        .and_then(|options| options.with_path_filter(Some("./src/")))
+        .unwrap_or_else(|error| panic!("review path filter failed: {error}"));
+    let comparison = discover_git_comparison(repository.path(), &options)
+        .await
+        .unwrap_or_else(|error| panic!("filtered Git comparison failed: {error}"));
+
+    assert_eq!(comparison.files().len(), 1);
+    assert_eq!(comparison.files()[0].path().as_str(), "src/a.rs");
+    assert_eq!(
+        ReviewOptions::new("HEAD").and_then(|options| options.with_path_filter(Some("../src"))),
+        Err(ReviewError::InvalidOptions)
+    );
+}
+
+#[tokio::test]
 async fn nested_project_review_excludes_changes_outside_its_root() {
     let repository = repository_fixture();
     std::fs::create_dir_all(repository.path().join("workspace"))

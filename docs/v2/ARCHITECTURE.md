@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-03 (`v2.1.8`)
+Last implementation review: 2026-08-03 (`v2.1.9`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,9 +59,11 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns twenty-nine versions.
-Migration 29 admits generation digest V10 for call-target-precise secret
-exposure and incomplete-implementation evidence; migration 28 admits generation
+The append-only migration ledger currently owns thirty versions. Migration 30
+admits generation digest V11 for anonymous Rust call-target normalization;
+migration 29 admits generation digest V10
+for call-target-precise secret exposure and incomplete-implementation evidence;
+migration 28 admits generation
 digest V9 for precision-fenced executable-line, resolver-provenance,
 import-consumer, and biomarker evidence; migration 27
 admits generation digest V8 for context-classified structural diagnostics and

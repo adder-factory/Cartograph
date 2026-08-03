@@ -312,6 +312,32 @@ fn rust_extracts_receiver_and_macro_calls_with_resolution_hints() {
 }
 
 #[test]
+fn rust_omits_anonymous_closure_call_targets_without_retaining_their_bodies() {
+    const STORAGE_REFERENCE_NAME_BYTES: usize = 4_096;
+
+    let payload = "x".repeat(5_000);
+    let source = format!(
+        r#"pub fn synthetic_trigger() -> usize {{
+    (|| {{
+        let payload = "{payload}";
+        payload.len()
+    }})()
+}}
+"#
+    );
+    let file = extract("src/repro.rs", &source);
+
+    assert!(file.references.iter().all(|reference| {
+        reference.name.len() <= STORAGE_REFERENCE_NAME_BYTES
+            && !reference.name.contains("let payload")
+            && !reference.name.contains(&payload)
+    }));
+    assert!(file.references.iter().any(|reference| {
+        reference.kind == ReferenceKind::Calls && reference.name == "payload.len"
+    }));
+}
+
+#[test]
 fn rust_extracts_qualified_calls_inside_macro_token_trees() {
     let source = r#"
 fn run() {

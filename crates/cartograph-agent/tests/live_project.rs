@@ -17,11 +17,12 @@ use cartograph_agent::{
     DiffReviewOptions, EmbeddingClientRequest, EmbeddingOptions, FileDriftOptions,
     FileSourceOptions, FileSourceRequest, GenerationRetentionStatus, HistoryIndexOptions,
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
-    IndexOptions, IndexReport, LcovLoadOptions, ProjectCancellation, ProjectError, ProjectRuntime,
-    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalClientRequest,
-    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportLimits,
-    ScipImportRequest, SourceContextOptions, SourceContextRequest, SourceSearchOptions,
-    TestEvidenceOptions, WorkingTreeOverlayRequest, judge_dead_code_candidates,
+    IndexOptions, IndexReport, LcovLoadOptions, PipelineFailureReason, PipelineStage,
+    ProjectCancellation, ProjectError, ProjectRuntime, RenamePlanError, RenamePlanOptions,
+    RenamePlanRequest, RetrievalClientRequest, RetrievalOptions, RetrievalRequest, ReviewOptions,
+    ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceContextOptions,
+    SourceContextRequest, SourceSearchOptions, TestEvidenceOptions, WorkingTreeOverlayRequest,
+    judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
@@ -3351,6 +3352,87 @@ async fn file_drift_distinguishes_content_hash_from_mtime_threshold_semantics() 
         assert_eq!(threshold["modifiedCount"], 0);
         assert_eq!(threshold["addedCount"], 1);
         assert_eq!(threshold["deletedCount"], 1);
+        runtime.close().await;
+    }
+    drop_schema(&settings, &schema).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn closure_indexing_succeeds_and_reference_bound_failures_preserve_current_generation() {
+    let (schema, settings, project) = live_project_fixture("8");
+    let source_path = project.path().join("repro.rs");
+    let long_target = "reference_target_".repeat(300);
+    let invalid_source = format!("pub fn trigger() {{ {long_target}(); }}\n");
+    std::fs::write(&source_path, &invalid_source)
+        .unwrap_or_else(|error| panic!("reference-bound fixture failed: {error}"));
+
+    {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("reference-bound runtime connect failed: {error}"));
+        let options = IndexOptions::default()
+            .with_force(true)
+            .with_history_refresh(false);
+        let first_failure = runtime.index(options).await;
+        assert_eq!(
+            first_failure,
+            Err(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Reduce,
+                reason: PipelineFailureReason::ReferenceNameTooLong,
+            })
+        );
+        let empty_status = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("empty-generation status failed: {error}"));
+        assert!(
+            empty_status
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.current.is_none())
+        );
+
+        let payload = "x".repeat(5_000);
+        let closure_source = format!(
+            "pub fn synthetic_trigger() -> usize {{\n    (|| {{\n        let payload = \"{payload}\";\n        payload.len()\n    }})()\n}}\n"
+        );
+        std::fs::write(&source_path, closure_source)
+            .unwrap_or_else(|error| panic!("closure fixture failed: {error}"));
+        let published = runtime
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("closure index failed: {error}"));
+        assert!(published.published);
+
+        std::fs::write(&source_path, &invalid_source)
+            .unwrap_or_else(|error| panic!("second reference-bound fixture failed: {error}"));
+        let second_failure = runtime.index(options).await;
+        assert_eq!(
+            second_failure,
+            Err(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Reduce,
+                reason: PipelineFailureReason::ReferenceNameTooLong,
+            })
+        );
+        let retained = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("retained-generation status failed: {error}"));
+        assert_eq!(
+            retained
+                .snapshot
+                .and_then(|snapshot| snapshot.current)
+                .map(|current| current.generation_id),
+            Some(published.generation_id)
+        );
+        let rendered = match second_failure {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("second oversized reference unexpectedly indexed"),
+        };
+        assert!(rendered.contains("reduce/reference_name_too_long"));
+        assert!(!rendered.contains(&long_target));
+        assert!(!rendered.contains(&project.path().to_string_lossy().to_string()));
         runtime.close().await;
     }
     drop_schema(&settings, &schema).await;

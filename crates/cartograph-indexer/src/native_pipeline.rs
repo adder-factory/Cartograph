@@ -7,10 +7,11 @@ use std::{
 
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationFacts,
-    GenerationValidationLimits, GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
-    NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheWrite, NumericalSiteInput,
-    ReferenceInput, ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
-    apply_sampled_betweenness, validate_generation_facts,
+    GenerationValidationError, GenerationValidationLimits, GenerationValidationReport,
+    MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheKey, NativeParseCacheKeyInput,
+    NativeParseCacheWrite, NumericalSiteInput, ReferenceInput, ReferenceSpanPrecision,
+    SearchDocumentInput, SymbolInput, apply_page_rank, apply_sampled_betweenness,
+    validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, NormalizedPath, ProjectId,
@@ -39,9 +40,10 @@ use tokio::{
 };
 
 use crate::{
-    PipelineStage, StageCancellation, StageCapacity, StageDeadlinePolicy, StageEnvelope,
-    StageExecution, StageFold, StageItemBudget, StageItemFailure, StageItemMeta, StageOutput,
-    StageRunConfig, StageRunError, StageRunner, StageSequence, StageWorkItem, StageWorkload,
+    PipelineFailureReason, PipelineStage, StageCancellation, StageCapacity, StageDeadlinePolicy,
+    StageEnvelope, StageExecution, StageFold, StageItemBudget, StageItemFailure, StageItemMeta,
+    StageOutput, StageRunConfig, StageRunError, StageRunner, StageSequence, StageWorkItem,
+    StageWorkload,
 };
 
 const MAX_PIPELINE_RETAINED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -733,9 +735,40 @@ pub enum NativePipelineError {
     /// A bounded stage rejected, cancelled, or failed work.
     #[error(transparent)]
     Stage(#[from] StageRunError),
+    /// Canonical validation failed with only an optional allowlisted reason retained.
+    #[error("native pipeline canonical validation failed")]
+    Validation {
+        /// Stable actionable reason, when the failure matched an allowlisted boundary.
+        reason: Option<PipelineFailureReason>,
+    },
     /// A supposedly single-output stage violated its internal contract.
-    #[error("native pipeline stage output was incomplete")]
-    Incomplete,
+    #[error("native pipeline {stage} stage output was incomplete")]
+    Incomplete {
+        /// Exact stage whose single-output contract failed.
+        stage: PipelineStage,
+    },
+}
+
+impl NativePipelineError {
+    /// Best exact stage retained by the native failure boundary.
+    #[must_use]
+    pub const fn stage(&self) -> PipelineStage {
+        match self {
+            Self::Runtime => PipelineStage::Discover,
+            Self::Stage(error) => error.stage(),
+            Self::Validation { .. } => PipelineStage::Reduce,
+            Self::Incomplete { stage } => *stage,
+        }
+    }
+
+    /// Optional allowlisted actionable reason with source and driver text discarded.
+    #[must_use]
+    pub const fn reason(&self) -> Option<PipelineFailureReason> {
+        match self {
+            Self::Validation { reason } => *reason,
+            Self::Runtime | Self::Stage(_) | Self::Incomplete { .. } => None,
+        }
+    }
 }
 
 /// Complete bounded input for a native generation build with optional overlays and cache reads.
@@ -891,7 +924,9 @@ async fn run_discovery_stage(
         .discovery_limits
         .max_retained_path_bytes()
         .checked_add(usize_to_u64(size_of::<SourceRoot>()))
-        .ok_or(NativePipelineError::Incomplete)?;
+        .ok_or(NativePipelineError::Incomplete {
+            stage: PipelineStage::Discover,
+        })?;
     let deadline = config.stage_deadlines();
     let item_deadline = planned_item_deadline(config.deadlines.item_timeout, deadline.deadline());
     let inputs = [StageEnvelope::new(
@@ -1264,7 +1299,9 @@ async fn run_resolve_stage(
         .runner
         .execute(execution)
         .await?
-        .ok_or(NativePipelineError::Incomplete)
+        .ok_or(NativePipelineError::Incomplete {
+            stage: PipelineStage::Resolve,
+        })
 }
 
 struct ScipOverlayWork {
@@ -1287,9 +1324,11 @@ async fn run_scip_overlay_stage(
     let config = stages.config;
     let deadline = config.stage_deadlines();
     let item_deadline = planned_item_deadline(config.deadlines.item_timeout, deadline.deadline());
-    let high_water_bytes =
-        generation_validation_limits(config.limits.retained.max_generation_bytes)?
-            .maximum_working_bytes();
+    let high_water_bytes = generation_validation_limits(
+        config.limits.retained.max_generation_bytes,
+        PipelineStage::Overlay,
+    )?
+    .maximum_working_bytes();
     let progress_bytes = usize_to_u64(overlay.byte_size());
     let inputs = [StageEnvelope::new(
         StageItemMeta::new(
@@ -1339,7 +1378,9 @@ async fn run_scip_overlay_stage(
         .runner
         .execute(execution)
         .await?
-        .ok_or(NativePipelineError::Incomplete)
+        .ok_or(NativePipelineError::Incomplete {
+            stage: PipelineStage::Overlay,
+        })
 }
 
 struct ScipOverlayExecution {
@@ -1411,8 +1452,10 @@ async fn run_reduce_stage(
     let config = stages.config;
     let deadline = config.stage_deadlines();
     let item_deadline = planned_item_deadline(config.deadlines.item_timeout, deadline.deadline());
-    let validation_limits =
-        generation_validation_limits(config.limits.retained.max_generation_bytes)?;
+    let validation_limits = generation_validation_limits(
+        config.limits.retained.max_generation_bytes,
+        PipelineStage::Reduce,
+    )?;
     let inputs = [StageEnvelope::new(
         StageItemMeta::new(
             StageSequence::new(0),
@@ -1425,40 +1468,67 @@ async fn run_reduce_stage(
         ),
         facts,
     )];
-    let execution =
-        StageExecution::new(
-            StageRunConfig::new(PipelineStage::Reduce, StageCapacity::new(1, 0), deadline),
-            StageWorkload::new(
-                inputs,
-                move |item: StageWorkItem<u8, GenerationFacts>| async move {
-                    let cancellation = item.cancellation();
-                    let (_, _, facts) = item.into_parts();
-                    block_in_place(move || {
-                        validate_generation_facts(facts, validation_limits, || {
-                            cancellation.is_cancelled()
-                        })
-                        .map_err(|_| StageItemFailure)
-                    })
-                },
-            ),
-            StageFold::new(
-                None,
-                |reduced: &mut Option<(CanonicalGenerationFacts, GenerationValidationReport)>,
-                 output: StageOutput<
-                    u8,
+    let execution = StageExecution::new(
+        StageRunConfig::new(PipelineStage::Reduce, StageCapacity::new(1, 0), deadline),
+        StageWorkload::new(
+            inputs,
+            move |item: StageWorkItem<u8, GenerationFacts>| async move {
+                let cancellation = item.cancellation();
+                let (_, _, facts) = item.into_parts();
+                block_in_place(move || {
+                    Ok::<_, StageItemFailure>(validate_generation_facts(
+                        facts,
+                        validation_limits,
+                        || cancellation.is_cancelled(),
+                    ))
+                })
+            },
+        ),
+        StageFold::new(
+            None,
+            |reduced: &mut Option<
+                Result<
                     (CanonicalGenerationFacts, GenerationValidationReport),
-                >| {
-                    let (_, output) = output.into_parts();
-                    *reduced = Some(output);
-                    Ok(())
-                },
-            ),
-        );
-    stages
-        .runner
-        .execute(execution)
-        .await?
-        .ok_or(NativePipelineError::Incomplete)
+                    GenerationValidationError,
+                >,
+            >,
+             output: StageOutput<
+                u8,
+                Result<
+                    (CanonicalGenerationFacts, GenerationValidationReport),
+                    GenerationValidationError,
+                >,
+            >| {
+                let (_, output) = output.into_parts();
+                *reduced = Some(output);
+                Ok(())
+            },
+        ),
+    );
+    let result =
+        stages
+            .runner
+            .execute(execution)
+            .await?
+            .ok_or(NativePipelineError::Incomplete {
+                stage: PipelineStage::Reduce,
+            })?;
+    result.map_err(|error| NativePipelineError::Validation {
+        reason: generation_validation_failure_reason(&error),
+    })
+}
+
+fn generation_validation_failure_reason(
+    error: &GenerationValidationError,
+) -> Option<PipelineFailureReason> {
+    match error {
+        GenerationValidationError::ReferenceNameTooLong => {
+            Some(PipelineFailureReason::ReferenceNameTooLong)
+        }
+        GenerationValidationError::Storage(_)
+        | GenerationValidationError::Cancelled
+        | GenerationValidationError::RetainedLimit => None,
+    }
 }
 
 struct ReadEnvelopeIterator<Inputs> {
@@ -10944,17 +11014,20 @@ fn try_clone_text(value: &str) -> Result<String, StageItemFailure> {
 fn resolve_reservation(maximum_generation_bytes: u64) -> Result<u64, NativePipelineError> {
     maximum_generation_bytes
         .checked_mul(3)
-        .ok_or(NativePipelineError::Incomplete)
+        .ok_or(NativePipelineError::Incomplete {
+            stage: PipelineStage::Resolve,
+        })
 }
 
 fn generation_validation_limits(
     maximum_generation_bytes: u64,
+    stage: PipelineStage,
 ) -> Result<GenerationValidationLimits, NativePipelineError> {
     let maximum_working_bytes = maximum_generation_bytes
         .checked_mul(VALIDATION_WORKING_MULTIPLIER)
-        .ok_or(NativePipelineError::Incomplete)?;
+        .ok_or(NativePipelineError::Incomplete { stage })?;
     GenerationValidationLimits::new(maximum_generation_bytes, maximum_working_bytes)
-        .map_err(|_| NativePipelineError::Incomplete)
+        .map_err(|_| NativePipelineError::Incomplete { stage })
 }
 
 fn vector_capacity_bytes<T>(values: &Vec<T>) -> u64 {
@@ -11082,21 +11155,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "a507e3cb60c16644fb4afa734dd2ebbaa515b398afc260398d156457d1ffd8af";
+        "3170deb1483d25525e758641db75733beaaf022da13c4e5ec8c8365d01289eaf";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "920be8badeb2144a92e484cbe4a3c1c02ac6b97843d5b42bba10a53ec6e43de5";
+        "e7e1287cf8c8f4d4eb5413c8b904d87b49b584210615b0f78bad750e9a95e5b3";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "13fd0caa9ed0278422be5421c86711bf87b070c831b58c76a52b2e2032d265a5";
+        "e84b50020236b1953e8745ce8787a6a4d928c9a267227ee97dcb9f747f4188df";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 13;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "77a1bb3eb361d023b5a7659dac05b6d7b0e6a32a3f05c3f93b59779cc1f3424b";
+        "bcab4c6025a7f943541abbe11952f990f87a614f8191635e28da23466c6f46d2";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (13, 49, 44, 32, 49);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -11938,6 +12011,23 @@ mod tests {
                 Err(error) => panic!("test native pipeline deadlines were invalid: {error}"),
             };
         NativePipelineConfig::new(limits, parallelism, deadlines)
+    }
+
+    async fn parse_project_through_native_stages(
+        stages: &NativeStageContext<'_>,
+    ) -> NativeFactAccumulator {
+        let discovered = run_discovery_stage(stages)
+            .await
+            .unwrap_or_else(|error| panic!("discovery failed: {error}"));
+        let (manifest, _) = run_read_stage(stages, discovered)
+            .await
+            .unwrap_or_else(|error| panic!("read stage failed: {error}"));
+        run_parse_stage(stages, manifest.entries, None)
+            .await
+            .map_or_else(
+                |error| panic!("parse stage failed: {error}"),
+                |(facts, _)| facts,
+            )
     }
 
     fn write_project(root: &std::path::Path) {
@@ -14591,7 +14681,7 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
             || false,
         )
         .unwrap_or_else(|_| panic!("capability resolution exceeded its declared budget"));
-        let validation_limits = generation_validation_limits(maximum_bytes)
+        let validation_limits = generation_validation_limits(maximum_bytes, PipelineStage::Reduce)
             .unwrap_or_else(|error| panic!("capability validation limits failed: {error}"));
         validate_generation_facts(facts, validation_limits, || false).map_or_else(
             |error| panic!("capability canonicalization failed: {error}"),
@@ -15678,8 +15768,9 @@ export function secondClone(value: number) {
                 <= resolve_reservation(TEST_GENERATION_BYTES)
                     .unwrap_or_else(|error| panic!("resolve reservation failed: {error}"))
         );
-        let validation_limits = generation_validation_limits(TEST_GENERATION_BYTES)
-            .unwrap_or_else(|error| panic!("validation limits failed: {error}"));
+        let validation_limits =
+            generation_validation_limits(TEST_GENERATION_BYTES, PipelineStage::Reduce)
+                .unwrap_or_else(|error| panic!("validation limits failed: {error}"));
         let (canonical, validation) = validate_generation_facts(facts, validation_limits, || false)
             .unwrap_or_else(|error| panic!("long-path validation failed: {error}"));
         assert!(validation.charged_high_water_bytes() <= validation_limits.maximum_working_bytes());
@@ -15902,18 +15993,45 @@ export function secondClone(value: number) {
         let result = build_native_generation(&runner, source_root, config(SERIAL_WORKERS)).await;
         assert!(matches!(
             result,
-            Err(NativePipelineError::Stage(StageRunError::Item {
-                stage: PipelineStage::Reduce,
-                kind: crate::StageFailureKind::Worker,
-                ..
-            }))
+            Err(NativePipelineError::Validation { reason: None })
         ));
         drop(cancellation);
         let report = tasks
             .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
             .await;
         assert!(report.all_joined);
-        assert!(report.worker_failed);
+        assert!(!report.worker_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pipeline_allowlists_oversized_reference_reason_without_retaining_source_text() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create reference-boundary fixture: {error}"));
+        let long_target = "reference_target_".repeat(300);
+        let source = format!("pub fn trigger() {{ {long_target}(); }}\n");
+        assert!(fs::write(directory.path().join("oversized.rs"), source).is_ok());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open reference-boundary fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let result = build_native_generation(&runner, source_root, config(SERIAL_WORKERS)).await;
+        let Err(error) = result else {
+            panic!("oversized reference unexpectedly produced a generation");
+        };
+        assert_eq!(error.stage(), PipelineStage::Reduce);
+        assert_eq!(
+            error.reason(),
+            Some(PipelineFailureReason::ReferenceNameTooLong)
+        );
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(&long_target));
+        assert!(!rendered.contains(&directory.path().to_string_lossy().to_string()));
+        drop(cancellation);
+        let report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(report.all_joined);
+        assert!(!report.worker_failed);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -15961,6 +16079,84 @@ export function secondClone(value: number) {
                 stage: PipelineStage::Parse,
                 ..
             }))
+        ));
+        drop(cancellation);
+        let report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(report.all_joined);
+        assert!(report.worker_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_failure_preserves_the_real_native_stage() {
+        let directory =
+            tempdir().unwrap_or_else(|error| panic!("could not create resolve fixture: {error}"));
+        write_project(directory.path());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open resolve fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let stages = NativeStageContext {
+            runner: &runner,
+            source_root: source_root.clone(),
+            config: config(SERIAL_WORKERS),
+        };
+        let extracted = parse_project_through_native_stages(&stages).await;
+        let rejecting = NativeStageContext {
+            runner: &runner,
+            source_root,
+            config: config_with_generation_limit(SERIAL_WORKERS, REJECTING_GENERATION_BYTES),
+        };
+        let Err(error) = run_resolve_stage(&rejecting, extracted).await else {
+            panic!("rejecting resolve limit unexpectedly produced facts");
+        };
+        assert_eq!(error.stage(), PipelineStage::Resolve);
+        assert!(matches!(
+            error,
+            NativePipelineError::Stage(StageRunError::Item {
+                stage: PipelineStage::Resolve,
+                ..
+            })
+        ));
+        drop(cancellation);
+        let report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(report.all_joined);
+        assert!(report.worker_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overlay_failure_preserves_the_real_native_stage() {
+        let directory =
+            tempdir().unwrap_or_else(|error| panic!("could not create overlay fixture: {error}"));
+        write_project(directory.path());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open overlay fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let stages = NativeStageContext {
+            runner: &runner,
+            source_root,
+            config: config(SERIAL_WORKERS),
+        };
+        let extracted = parse_project_through_native_stages(&stages).await;
+        let (facts, _) = run_resolve_stage(&stages, extracted)
+            .await
+            .unwrap_or_else(|error| panic!("resolve stage failed: {error}"));
+        let overlay = ScipOverlayInput::new(vec![0xff], 1)
+            .unwrap_or_else(|error| panic!("invalid overlay test setup: {error}"));
+        let Err(error) = run_scip_overlay_stage(&stages, facts, overlay).await else {
+            panic!("malformed overlay unexpectedly produced facts");
+        };
+        assert_eq!(error.stage(), PipelineStage::Overlay);
+        assert!(matches!(
+            error,
+            NativePipelineError::Stage(StageRunError::Item {
+                stage: PipelineStage::Overlay,
+                ..
+            })
         ));
         drop(cancellation);
         let report = tasks

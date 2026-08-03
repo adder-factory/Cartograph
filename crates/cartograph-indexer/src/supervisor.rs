@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     future::Future,
     ops::Deref,
     sync::{Arc, Mutex},
@@ -54,19 +55,61 @@ impl SupervisorRequest {
 #[error("Cartograph indexing failed during the {stage:?} stage")]
 pub struct PipelineFailure {
     stage: PipelineStage,
+    reason: Option<PipelineFailureReason>,
+}
+
+/// Stable credential-safe detail for a pipeline failure whose cause is actionable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipelineFailureReason {
+    /// Canonical reduction rejected an extracted reference name above the storage bound.
+    ReferenceNameTooLong,
+}
+
+impl PipelineFailureReason {
+    /// Stable machine-readable reason code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReferenceNameTooLong => "reference_name_too_long",
+        }
+    }
+}
+
+impl fmt::Display for PipelineFailureReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl PipelineFailure {
     /// Identify the stable stage without accepting arbitrary error text.
     #[must_use]
     pub const fn new(stage: PipelineStage) -> Self {
-        Self { stage }
+        Self {
+            stage,
+            reason: None,
+        }
+    }
+
+    /// Attach one allowlisted actionable reason without retaining source or driver text.
+    #[must_use]
+    pub const fn with_reason(stage: PipelineStage, reason: PipelineFailureReason) -> Self {
+        Self {
+            stage,
+            reason: Some(reason),
+        }
     }
 
     /// Stable failed stage recorded by the supervisor and structured workers.
     #[must_use]
     pub const fn stage(self) -> PipelineStage {
         self.stage
+    }
+
+    /// Optional allowlisted actionable reason.
+    #[must_use]
+    pub const fn reason(self) -> Option<PipelineFailureReason> {
+        self.reason
     }
 }
 
@@ -411,6 +454,11 @@ impl RunCoordinator<'_> {
             self.progress.mark_failed().await;
             return Err(SupervisorError::UnreapedWorkers);
         }
+        if let MonitorOutcome::Failed(failure) = &outcome {
+            return self
+                .fail_owned(operation, pipeline_supervisor_error(*failure))
+                .await;
+        }
         if reap.worker_failed {
             return self
                 .fail_owned(operation, SupervisorError::WorkerFailed)
@@ -430,13 +478,8 @@ impl RunCoordinator<'_> {
                     .await
             }
             MonitorOutcome::Failed(failure) => {
-                self.fail_owned(
-                    operation,
-                    SupervisorError::Pipeline {
-                        stage: failure.stage,
-                    },
-                )
-                .await
+                self.fail_owned(operation, pipeline_supervisor_error(failure))
+                    .await
             }
             MonitorOutcome::Cancelled(cancellation) => {
                 self.finish_cancelled(operation, cancellation).await
@@ -529,6 +572,18 @@ impl RunCoordinator<'_> {
         DurableCoordinator {
             supervisor: self.supervisor,
         }
+    }
+}
+
+const fn pipeline_supervisor_error(failure: PipelineFailure) -> SupervisorError {
+    match failure.reason {
+        Some(reason) => SupervisorError::PipelineWithReason {
+            stage: failure.stage,
+            reason,
+        },
+        None => SupervisorError::Pipeline {
+            stage: failure.stage,
+        },
     }
 }
 
@@ -1737,6 +1792,14 @@ pub enum SupervisorError {
     Pipeline {
         /// Stable pipeline stage.
         stage: PipelineStage,
+    },
+    /// Pipeline work returned an allowlisted stage/reason failure.
+    #[error("Cartograph indexing failed during {stage}/{reason}")]
+    PipelineWithReason {
+        /// Stable pipeline stage.
+        stage: PipelineStage,
+        /// Stable actionable reason with no source or driver text.
+        reason: PipelineFailureReason,
     },
     /// A full index operation did not identify a generation to publish.
     #[error("Cartograph indexer supervision requires a generation-bound lease target")]

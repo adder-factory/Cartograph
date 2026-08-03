@@ -1,4 +1,4 @@
-use cartograph_agent::PipelineStage;
+use cartograph_agent::{PipelineFailureReason, PipelineStage};
 
 pub(crate) const fn pipeline_stage_failure_code(stage: PipelineStage) -> &'static str {
     match stage {
@@ -13,5 +13,17 @@ pub(crate) const fn pipeline_stage_failure_code(stage: PipelineStage) -> &'stati
         PipelineStage::Bm25 => "bm25_failed",
         PipelineStage::Vector => "vector_failed",
         PipelineStage::Publish => "publication_failed",
+    }
+}
+
+pub(crate) const fn pipeline_failure_reason_code(
+    stage: PipelineStage,
+    reason: PipelineFailureReason,
+) -> &'static str {
+    match (stage, reason) {
+        (PipelineStage::Reduce, PipelineFailureReason::ReferenceNameTooLong) => {
+            "reduce_reference_name_too_long"
+        }
+        _ => pipeline_stage_failure_code(stage),
     }
 }

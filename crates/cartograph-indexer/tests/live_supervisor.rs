@@ -1508,6 +1508,42 @@ async fn dropped_failed_child_blocks_publication_and_cleans_owned_generation() {
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn propagated_pipeline_failure_precedes_the_observed_worker_poison_bit() {
+    let fixture = open_fixture().await;
+    let staged = begin_generation(&fixture).await;
+    let generation_id = staged.generation_id().clone();
+    let target = target(&fixture.project, &generation_id);
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), standard_config());
+    let result = supervisor
+        .run(request(target.clone()), move |context| async move {
+            drop(staged);
+            let failed_child = context
+                .spawn(1, async {
+                    Err::<(), PipelineFailure>(PipelineFailure::new(PipelineStage::Parse))
+                })
+                .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+            let _observed_failure = failed_child.join().await;
+            Err::<ReadyGeneration, _>(PipelineFailure::new(PipelineStage::Parse))
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SupervisorError::Pipeline {
+            stage: PipelineStage::Parse
+        })
+    ));
+    assert_eq!(supervisor.status().await.state(), SupervisorState::Failed);
+    assert_generation_state(&fixture, &generation_id, GenerationState::Failed).await;
+    assert!(matches!(
+        fixture.database.lease_status(&target).await,
+        Ok(None)
+    ));
+
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
 async fn blocked_supervised_copy_rolls_back_backend_query_and_advisory_locks() {
     let fixture = open_fixture().await;
     let staged = begin_generation(&fixture).await;

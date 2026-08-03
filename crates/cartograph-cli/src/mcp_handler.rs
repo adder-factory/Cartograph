@@ -20,13 +20,13 @@ use cartograph_agent::{
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
     IndexOptions, IssueHistoryIndexError, IssueHistoryIndexOptions, IssueHistoryIndexRequest,
     LayerAnalysisError, LayerAnalysisReport, LcovLoadOptions, MAXIMUM_UNIX_MILLISECONDS,
-    PipelineStage, ProjectCancellation, ProjectError, ProjectRuntime, ProjectStatus,
-    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalOptions, RetrievalRequest,
-    ReviewError, ReviewOptions, ScipExportRequest, ScipImportLimits, ScipImportRequest,
-    SourceCompareError, SourceCompareOptions, SourceContextOptions, SourceContextRequest,
-    SourceSearchError, SourceSearchHit, SourceSearchOptions, SymbolSourceContext,
-    TestEvidenceError, TestEvidenceOptions, TestEvidenceReport, VerificationCommand,
-    WorkingTreeOverlayRequest, judge_dead_code_candidates,
+    PipelineFailureReason, PipelineStage, ProjectCancellation, ProjectError, ProjectRuntime,
+    ProjectStatus, RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalOptions,
+    RetrievalRequest, ReviewError, ReviewOptions, ScipExportRequest, ScipImportLimits,
+    ScipImportRequest, SourceCompareError, SourceCompareOptions, SourceContextOptions,
+    SourceContextRequest, SourceSearchError, SourceSearchHit, SourceSearchOptions,
+    SymbolSourceContext, TestEvidenceError, TestEvidenceOptions, TestEvidenceReport,
+    VerificationCommand, WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_db::{
     AgentArtifactContent, AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope,
@@ -98,7 +98,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::auto_sync::{AutoSyncError, AutoSyncStatus, ProjectAutoSync};
 use crate::byte_format::format_binary_bytes;
-use crate::error_codes::pipeline_stage_failure_code;
+use crate::error_codes::{pipeline_failure_reason_code, pipeline_stage_failure_code};
 use crate::host::{
     DiagnosticLocation, HostInspectionError, ProjectDiscoveryRequest, detect_install_targets,
     discover_projects,
@@ -2478,6 +2478,7 @@ enum AdminJobFailure {
     ResolveFailed,
     OverlayFailed,
     ReduceFailed,
+    ReduceReferenceNameTooLong,
     CopyFailed,
     RelationalMergeFailed,
     Bm25Failed,
@@ -2763,12 +2764,27 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
             AdminJobFailure::InvalidOptions
         }
         ProjectError::IndexStageFailed { stage } => admin_job_stage_failure(stage),
+        ProjectError::IndexStageFailedWithReason { stage, reason } => {
+            admin_job_reason_failure(stage, reason)
+        }
         ProjectError::IndexLeaseFailed => AdminJobFailure::LeaseFailed,
         ProjectError::IndexPublicationFailed => AdminJobFailure::PublicationFailed,
         ProjectError::IndexFailed
         | ProjectError::IndexCleanupFailed
         | ProjectError::RetrievalOperationFailed
         | ProjectError::RequestCancelled => AdminJobFailure::OperationFailed,
+    }
+}
+
+const fn admin_job_reason_failure(
+    stage: PipelineStage,
+    reason: PipelineFailureReason,
+) -> AdminJobFailure {
+    match (stage, reason) {
+        (PipelineStage::Reduce, PipelineFailureReason::ReferenceNameTooLong) => {
+            AdminJobFailure::ReduceReferenceNameTooLong
+        }
+        _ => admin_job_stage_failure(stage),
     }
 }
 
@@ -9024,6 +9040,7 @@ async fn save_summaries(
 struct DiffReviewExecution<'input> {
     arguments: &'input Map<String, Value>,
     diff: &'input str,
+    path_filter: Option<&'input str>,
     cancellation: ProjectCancellation,
 }
 
@@ -9086,13 +9103,12 @@ async fn review_supplied_diff(
         .and_then(|options| options.with_minimum_cochange_jaccard(minimum_jaccard))
         .and_then(|options| options.with_minimum_diff_magnitude(minimum_magnitude))
         .map_err(diff_review_error)?;
+    let input = DiffReviewInput::new(execution.diff, options, execution.cancellation)
+        .with_path_filter(execution.path_filter)
+        .map_err(diff_review_error)?;
     let report = handler
         .runtime
-        .review_diff_with_cancellation(DiffReviewInput::new(
-            execution.diff,
-            options,
-            execution.cancellation,
-        ))
+        .review_diff_with_cancellation(input)
         .await
         .map_err(diff_review_error)?;
     json_result(&report)
@@ -10288,14 +10304,13 @@ impl SummaryReviewTools<'_> {
                 "limit",
                 "minCentrality",
                 "coverageSource",
-                "pathFilter",
                 "perDetectorLimit",
                 "minSeverity",
                 "deep",
                 "timeoutMs",
-                "allowStale",
             ],
         )?;
+        let controls = parse_context_review_controls(&arguments)?;
         if let Some(diff) = optional_bounded_text(&arguments, "diff", REVIEW_MAXIMUM_DIFF_BYTES)?
             && !diff.trim().is_empty()
         {
@@ -10304,6 +10319,7 @@ impl SummaryReviewTools<'_> {
                 DiffReviewExecution {
                     arguments: &arguments,
                     diff,
+                    path_filter: controls.path_filter,
                     cancellation,
                 },
             )
@@ -10317,6 +10333,7 @@ impl SummaryReviewTools<'_> {
         )?;
         let options = ReviewOptions::new(base_ref)
             .and_then(|options| options.with_max_changed_files(max_changed_files))
+            .and_then(|options| options.with_path_filter(controls.path_filter))
             .map_err(review_error)?;
         let report = self
             .runtime
@@ -10719,6 +10736,18 @@ impl SummaryReviewTools<'_> {
             "semanticEvidenceRequiresReadyModelCoverage": true,
         }))
     }
+}
+
+struct ContextReviewControls<'input> {
+    path_filter: Option<&'input str>,
+}
+
+fn parse_context_review_controls(
+    arguments: &Map<String, Value>,
+) -> Result<ContextReviewControls<'_>, ToolError> {
+    let path_filter = optional_bounded_text(arguments, "pathFilter", MAX_PROJECT_PATH_BYTES)?;
+    let _allow_stale = optional_bool(arguments, "allowStale")?.unwrap_or(false);
+    Ok(ContextReviewControls { path_filter })
 }
 
 impl AdminCoreTools<'_> {
@@ -13396,6 +13425,9 @@ const fn project_index_error_reason(error: ProjectError) -> Option<&'static str>
         ProjectError::StatusFailed => Some("project_status_unavailable"),
         ProjectError::IndexFailed => Some("index_failed"),
         ProjectError::IndexStageFailed { stage } => Some(pipeline_stage_failure_code(stage)),
+        ProjectError::IndexStageFailedWithReason { stage, reason } => {
+            Some(pipeline_failure_reason_code(stage, reason))
+        }
         ProjectError::IndexLeaseFailed => Some("lease_failed"),
         ProjectError::IndexPublicationFailed => Some("publication_failed"),
         ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
@@ -18713,12 +18745,12 @@ fn review_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, Too
         "limit": {"type": "integer", "minimum": 1, "maximum": REVIEW_MAXIMUM_LENS_ROWS, "description": "(risk) Alias for topN; topN wins."},
         "minCentrality": {"type": "number", "minimum": 0, "maximum": 1},
         "coverageSource": {"type": "string", "minLength": 1, "maxLength": ARTIFACT_MAXIMUM_LABEL_BYTES},
-        "pathFilter": {"type": "string", "minLength": 1, "maxLength": MAX_PROJECT_PATH_BYTES},
+        "pathFilter": {"type": "string", "minLength": 1, "maxLength": MAX_PROJECT_PATH_BYTES, "description": "Restrict path-bearing review lenses and context-mode Git or supplied-diff evidence to one canonical project-relative prefix."},
         "perDetectorLimit": {"type": "integer", "minimum": 1, "maximum": REVIEW_MAXIMUM_PER_DETECTOR, "default": REVIEW_DEFAULT_PER_DETECTOR},
         "minSeverity": {"type": "string", "enum": ["info", "warning", "error"], "default": "info"},
         "deep": {"type": "boolean", "default": false, "description": "(trust) Execute bounded live readiness probes rather than configuration checks only."},
         "timeoutMs": {"type": "integer", "minimum": REVIEW_TRUST_MINIMUM_TIMEOUT_MS, "maximum": REVIEW_TRUST_MAXIMUM_TIMEOUT_MS, "default": REVIEW_TRUST_DEFAULT_TIMEOUT_MS},
-        "allowStale": {"type": "boolean", "default": false, "description": "Allow explicitly labeled stale indexed evidence for non-Git review lenses."}
+        "allowStale": {"type": "boolean", "default": false, "description": "Allow explicitly labeled stale indexed evidence for non-Git review lenses; accepted as a compatibility no-op in context mode because Git evidence already reports freshness."}
     });
     read_definition(ReadDefinition {
         name: REVIEW_TOOL,
@@ -24009,6 +24041,7 @@ fn project_error(error: ProjectError) -> ToolError {
         | ProjectError::StatusFailed
         | ProjectError::IndexFailed
         | ProjectError::IndexStageFailed { .. }
+        | ProjectError::IndexStageFailedWithReason { .. }
         | ProjectError::IndexLeaseFailed
         | ProjectError::IndexPublicationFailed
         | ProjectError::IndexCleanupFailed => ToolError::internal(),
@@ -25105,6 +25138,48 @@ mod tests {
         assert_eq!(
             properties["perDetectorLimit"]["maximum"],
             REVIEW_MAXIMUM_PER_DETECTOR
+        );
+        assert!(
+            properties["pathFilter"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("context-mode"))
+        );
+        assert!(
+            properties["allowStale"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("compatibility no-op"))
+        );
+    }
+
+    #[test]
+    fn review_context_accepts_and_validates_schema_advertised_shared_controls() {
+        let arguments = Map::from_iter([
+            ("mode".to_owned(), json!("context")),
+            ("baseRef".to_owned(), json!("HEAD")),
+            ("pathFilter".to_owned(), json!("src")),
+            ("allowStale".to_owned(), json!(true)),
+        ]);
+        let controls = parse_context_review_controls(&arguments)
+            .unwrap_or_else(|error| panic!("context controls were rejected: {error:?}"));
+        assert_eq!(controls.path_filter, Some("src"));
+
+        let invalid = Map::from_iter([("allowStale".to_owned(), json!("true"))]);
+        assert!(parse_context_review_controls(&invalid).is_err());
+    }
+
+    #[test]
+    fn admin_and_mcp_reasons_keep_the_reference_bound_failure_actionable() {
+        let error = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Reduce,
+            reason: PipelineFailureReason::ReferenceNameTooLong,
+        };
+        assert_eq!(
+            admin_job_failure(error),
+            AdminJobFailure::ReduceReferenceNameTooLong
+        );
+        assert_eq!(
+            project_error_reason(error),
+            "reduce_reference_name_too_long"
         );
     }
 
@@ -28710,7 +28785,7 @@ pub fn target(value: u32) -> u32 {
 
     async fn verify_agent_review_and_admin_surfaces(handler: &CartographMcpHandler) {
         for arguments in [
-            json!({"mode": "context", "diff": "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -7,3 +7,3 @@\n pub fn root(value: i32) -> i32 {\n-    leaf(value)\n+    leaf(value + 1)\n }\n"}),
+            json!({"mode": "context", "diff": "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -7,3 +7,3 @@\n pub fn root(value: i32) -> i32 {\n-    leaf(value)\n+    leaf(value + 1)\n }\n", "pathFilter": "src", "allowStale": true}),
             json!({"mode": "risk", "topN": 20}),
             json!({"mode": "agent-audit", "perDetectorLimit": 10}),
             json!({"mode": "numerical", "topN": 20, "pathFilter": "src"}),

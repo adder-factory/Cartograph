@@ -298,6 +298,12 @@ pub(super) fn capture_invocation(
         return Ok(());
     }
     if invocation == InvocationKind::Call
+        && builder.context.snapshot.language() == SourceLanguage::Rust
+        && rust_anonymous_call_target(target, 0)
+    {
+        return Ok(());
+    }
+    if invocation == InvocationKind::Call
         && matches!(
             builder.context.snapshot.language(),
             SourceLanguage::TypeScript
@@ -347,6 +353,23 @@ pub(super) fn capture_invocation(
             span: reference_node,
         },
     )
+}
+
+fn rust_anonymous_call_target(target: Node<'_>, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match target.kind() {
+        "closure_expression" => true,
+        "parenthesized_expression" => {
+            let mut children = named_children(target);
+            let Some(child) = children.next() else {
+                return false;
+            };
+            children.next().is_none() && rust_anonymous_call_target(child, depth.saturating_add(1))
+        }
+        _ => false,
+    }
 }
 
 fn rust_receiver_call_resolution(

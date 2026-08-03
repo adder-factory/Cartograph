@@ -157,6 +157,7 @@ pub struct DiffReviewInput<'review> {
     diff: &'review str,
     options: DiffReviewOptions,
     cancellation: ProjectCancellation,
+    path_filter: Option<NormalizedPath>,
 }
 
 impl<'review> DiffReviewInput<'review> {
@@ -171,7 +172,21 @@ impl<'review> DiffReviewInput<'review> {
             diff,
             options,
             cancellation,
+            path_filter: None,
         }
+    }
+
+    /// Restrict retained patch paths to one canonical project-relative prefix.
+    /// # Errors
+    ///
+    /// Returns [`DiffReviewError::InvalidOptions`] when the filter is empty,
+    /// absolute, parent-escaping, contains NUL, or exceeds the path bound.
+    pub fn with_path_filter(mut self, filter: Option<&str>) -> Result<Self, DiffReviewError> {
+        self.path_filter = filter
+            .map(NormalizedPath::parse)
+            .transpose()
+            .map_err(|_| DiffReviewError::InvalidOptions)?;
+        Ok(self)
     }
 }
 
@@ -273,6 +288,25 @@ impl UnifiedDiffComparison {
     #[must_use]
     pub const fn magnitude(&self) -> u64 {
         self.added_lines.saturating_add(self.removed_lines)
+    }
+
+    fn retain_path_filter(&mut self, filter: &NormalizedPath, maximum_files: u16) {
+        self.files
+            .retain(|file| crate::review::path_matches_filter(&file.path, filter));
+        self.files_truncated |= self.files.len() > usize::from(maximum_files);
+        self.files.truncate(usize::from(maximum_files));
+        self.added_lines = self
+            .files
+            .iter()
+            .flat_map(|file| &file.hunks)
+            .map(|hunk| u64::from(hunk.added_lines))
+            .fold(0_u64, u64::saturating_add);
+        self.removed_lines = self
+            .files
+            .iter()
+            .flat_map(|file| &file.hunks)
+            .map(|hunk| u64::from(hunk.removed_lines))
+            .fold(0_u64, u64::saturating_add);
     }
 }
 
@@ -529,7 +563,15 @@ impl crate::ProjectRuntime {
         &self,
         input: DiffReviewInput<'_>,
     ) -> Result<DiffReviewReport, DiffReviewError> {
-        let comparison = parse_unified_diff(input.diff, input.options.max_changed_files)?;
+        let parse_limit = if input.path_filter.is_some() {
+            MAX_CHANGED_FILES
+        } else {
+            input.options.max_changed_files
+        };
+        let mut comparison = parse_unified_diff(input.diff, parse_limit)?;
+        if let Some(filter) = input.path_filter.as_ref() {
+            comparison.retain_path_filter(filter, input.options.max_changed_files);
+        }
         let status = self
             .status_with_cancellation(input.cancellation.clone())
             .await
@@ -1100,6 +1142,29 @@ deleted file mode 100644
         assert_eq!(
             parsed.files()[0].path().as_str(),
             "src/hello world-\u{e9}.rs"
+        );
+    }
+
+    #[test]
+    fn supplied_diff_path_filter_uses_canonical_segment_boundaries() {
+        let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n--- a/src2/b.rs\n+++ b/src2/b.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let mut parsed = parse_unified_diff(diff, MAX_CHANGED_FILES)
+            .unwrap_or_else(|error| panic!("filtered diff parse failed: {error}"));
+        let filter = NormalizedPath::parse("./src/")
+            .unwrap_or_else(|error| panic!("filtered diff path failed: {error}"));
+        parsed.retain_path_filter(&filter, 10);
+
+        assert_eq!(parsed.files().len(), 1);
+        assert_eq!(parsed.files()[0].path().as_str(), "src/a.rs");
+        assert_eq!(parsed.magnitude(), 2);
+        assert!(
+            DiffReviewInput::new(
+                diff,
+                DiffReviewOptions::default(),
+                ProjectCancellation::new(),
+            )
+            .with_path_filter(Some("../src"))
+            .is_err()
         );
     }
 
