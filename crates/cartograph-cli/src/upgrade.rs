@@ -1667,13 +1667,14 @@ fn compare_prerelease(left: &[PrereleasePart], right: &[PrereleasePart]) -> Orde
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
         io::{Read as _, Write as _},
         net::TcpListener,
         thread,
         time::Duration,
     };
 
+    #[cfg(unix)]
+    use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
