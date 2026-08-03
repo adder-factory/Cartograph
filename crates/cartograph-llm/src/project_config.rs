@@ -37,6 +37,7 @@ const MAXIMUM_LLAMA_SERVER_ARGUMENT_TOTAL_BYTES: usize = 32 * 1_024;
 const MAXIMUM_PROBE_BYTES: usize = 1024 * 1024;
 const MAXIMUM_PROBE_MODELS: usize = 128;
 const MAXIMUM_PROJECT_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+const MAXIMUM_PROJECT_GENERATION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAXIMUM_PROJECT_EXCLUDES: usize = 4_096;
 const MAXIMUM_PROJECT_EXCLUDE_BYTES: usize = 4_096;
 const OPENAI_CLOUD_ENDPOINT: &str = "https://api.openai.com";
@@ -150,6 +151,7 @@ impl ProjectLlmProvider {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectSourceSettings {
     maximum_file_bytes: Option<usize>,
+    maximum_generation_bytes: Option<u64>,
     languages: Vec<SourceLanguage>,
     includes: Option<Vec<String>>,
     excludes: Vec<String>,
@@ -208,6 +210,7 @@ impl std::fmt::Debug for ProjectSourceSettings {
         formatter
             .debug_struct("ProjectSourceSettings")
             .field("maximum_file_bytes", &self.maximum_file_bytes)
+            .field("maximum_generation_bytes", &self.maximum_generation_bytes)
             .field("configured_languages", &self.languages.len())
             .field(
                 "include_patterns",
@@ -252,6 +255,12 @@ impl ProjectSourceSettings {
     /// Returns the maximum file bytes.
     pub const fn maximum_file_bytes(&self) -> Option<usize> {
         self.maximum_file_bytes
+    }
+
+    /// Returns the explicit retained canonical-generation byte ceiling.
+    #[must_use]
+    pub const fn maximum_generation_bytes(&self) -> Option<u64> {
+        self.maximum_generation_bytes
     }
 
     /// Empty means every native language; otherwise this is the canonical
@@ -1036,16 +1045,17 @@ pub fn load_project_source_settings(
 fn parse_project_source_settings(
     root: &Map<String, Value>,
 ) -> Result<ProjectSourceSettings, ProjectLlmConfigError> {
-    let maximum_file_bytes = root
-        .get("maxFileSize")
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|value| usize::try_from(value).ok())
-                .filter(|value| (1..=MAXIMUM_PROJECT_SOURCE_BYTES).contains(value))
-                .ok_or(ProjectLlmConfigError::InvalidConfig)
-        })
-        .transpose()?;
+    let maximum_file_bytes = optional_bounded_config_u64(
+        root,
+        "maxFileSize",
+        u64::try_from(MAXIMUM_PROJECT_SOURCE_BYTES)
+            .map_err(|_| ProjectLlmConfigError::InvalidConfig)?,
+    )?
+    .map(usize::try_from)
+    .transpose()
+    .map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
+    let maximum_generation_bytes =
+        optional_bounded_config_u64(root, "maxGenerationBytes", MAXIMUM_PROJECT_GENERATION_BYTES)?;
     let languages = root
         .get("languages")
         .map(parse_project_languages)
@@ -1126,12 +1136,28 @@ fn parse_project_source_settings(
     }
     Ok(ProjectSourceSettings {
         maximum_file_bytes,
+        maximum_generation_bytes,
         languages,
         includes,
         excludes,
         features,
         duplicate_code_allowlist,
     })
+}
+
+fn optional_bounded_config_u64(
+    root: &Map<String, Value>,
+    key: &str,
+    maximum: u64,
+) -> Result<Option<u64>, ProjectLlmConfigError> {
+    root.get(key)
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| (1..=maximum).contains(value))
+                .ok_or(ProjectLlmConfigError::InvalidConfig)
+        })
+        .transpose()
 }
 
 fn parse_project_languages(value: &Value) -> Result<Vec<SourceLanguage>, ProjectLlmConfigError> {
@@ -2677,12 +2703,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("config directory failed: {error}"));
         fs::write(
             root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
-            r#"{"maxFileSize":4096,"languages":["typescript","rust","rust"],"exclude":["private/**"],"extractDocstrings":false,"trackCallSites":false,"indexSubmodules":false,"indexEmbeddedRepos":true,"enableCentrality":false,"enableBetweenness":false,"enableChurn":false,"enableCoChange":false,"enableBiomarkers":false,"enableIssueHistory":false,"enableConfigRefs":false,"enableSqlRefs":false,"enableBuildContextRefs":false,"enableStringImports":false,"duplicateCodePartialClones":true,"duplicateCodeAllowlist":["generated/**","vendor-copy/**"],"llm":{"apiKey":"do-not-render"}}"#,
+            r#"{"maxFileSize":4096,"maxGenerationBytes":8589934592,"languages":["typescript","rust","rust"],"exclude":["private/**"],"extractDocstrings":false,"trackCallSites":false,"indexSubmodules":false,"indexEmbeddedRepos":true,"enableCentrality":false,"enableBetweenness":false,"enableChurn":false,"enableCoChange":false,"enableBiomarkers":false,"enableIssueHistory":false,"enableConfigRefs":false,"enableSqlRefs":false,"enableBuildContextRefs":false,"enableStringImports":false,"duplicateCodePartialClones":true,"duplicateCodeAllowlist":["generated/**","vendor-copy/**"],"llm":{"apiKey":"do-not-render"}}"#,
         )
         .unwrap_or_else(|error| panic!("source config fixture failed: {error}"));
         let settings = load_project_source_settings(root.path())
             .unwrap_or_else(|error| panic!("source settings failed: {error}"));
         assert_eq!(settings.maximum_file_bytes(), Some(4096));
+        assert_eq!(settings.maximum_generation_bytes(), Some(8_589_934_592));
         assert_eq!(
             settings.languages(),
             [SourceLanguage::Rust, SourceLanguage::TypeScript]
@@ -2717,6 +2744,16 @@ mod tests {
             r#"{"exclude":"not-an-array"}"#,
         )
         .unwrap_or_else(|error| panic!("invalid source config fixture failed: {error}"));
+        assert_eq!(
+            load_project_source_settings(root.path()),
+            Err(ProjectLlmConfigError::InvalidConfig)
+        );
+
+        fs::write(
+            root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
+            r#"{"maxGenerationBytes":8589934593}"#,
+        )
+        .unwrap_or_else(|error| panic!("invalid generation config fixture failed: {error}"));
         assert_eq!(
             load_project_source_settings(root.path()),
             Err(ProjectLlmConfigError::InvalidConfig)

@@ -69,12 +69,14 @@ const LEASE_WAIT_INTERVAL: Duration = Duration::from_millis(20);
 const NONCOOPERATIVE_WORK_DURATION: Duration = Duration::from_secs(2);
 const SHORT_CANCELLATION_GRACE: Duration = Duration::from_millis(150);
 const CANCELLING_OBSERVATION_DELAY: Duration = Duration::from_millis(40);
-// Keep one complete heartbeat request-and-reap horizon between acquisition and
-// the active-work deadline so this test isolates operation cancellation even
-// under LLVM coverage instrumentation.
-const DEADLINE_TEST_TIMEOUT: Duration = Duration::from_millis(1_400);
-const DEADLINE_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(400);
-const DEADLINE_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(100);
+// This test proves the whole-operation deadline despite continuous work
+// progress. Keep exactly one normal heartbeat comfortably inside the active
+// window so LLVM scheduling cannot turn an unrelated lease-authority deadline
+// into the primary result. Dedicated tests below retain the hostile heartbeat
+// timeout and uncertainty coverage.
+const DEADLINE_TEST_TIMEOUT: Duration = Duration::from_secs(3);
+const DEADLINE_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(800);
+const DEADLINE_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(250);
 const DEADLINE_PROGRESS_TIMEOUT: Duration = Duration::from_millis(300);
 const DEADLINE_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 const DEADLINE_COPY_TIMEOUT: Duration = Duration::from_millis(50);
@@ -107,9 +109,16 @@ const TRANSIENT_HEARTBEAT_LEASE_DURATION: Duration = Duration::from_secs(6);
 const TRANSIENT_HEARTBEAT_DELAY_SECONDS: &str = "0.60";
 const TRANSIENT_HEARTBEAT_DELAY_ATTEMPTS: i64 = 2;
 const EXPECTED_TRANSIENT_HEARTBEAT_ATTEMPTS: i64 = 3;
-const ABORT_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_200);
+const ABORT_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const ABORT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 const ABORT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(100);
+// Blocked COPY and cleanup tests isolate PostgreSQL statement cancellation and
+// backend reaping. Their first active heartbeat is deliberately later than the
+// 100 ms fault deadline; cleanup heartbeats still have a coverage-safe but
+// lease-valid request horizon. Other tests retain the hostile heartbeat values
+// above so they continue to exercise heartbeat/cancellation interaction.
+const ISOLATED_ABORT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+const ISOLATED_ABORT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(250);
 const ABORT_PROGRESS_TIMEOUT: Duration = Duration::from_millis(400);
 const ABORT_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 const ABORT_COPY_TIMEOUT: Duration = Duration::from_millis(100);
@@ -129,7 +138,7 @@ const LONG_COPY_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const LONG_COPY_TIMEOUT: Duration = Duration::from_millis(500);
 const LARGE_COPY_OPERATION_TIMEOUT: Duration = Duration::from_secs(6);
 const LARGE_COPY_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(300);
-const LARGE_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
+const LARGE_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_millis(100);
 const LARGE_COPY_TIMEOUT: Duration = Duration::from_secs(1);
 const LARGE_COPY_TRIGGER_DELAY_SECONDS: &str = "0.40";
 const LARGE_COPY_CODE_BYTES: usize = 2 * 1_024 * 1_024;
@@ -2755,8 +2764,8 @@ fn transient_heartbeat_config() -> SupervisorConfig {
 
 fn abort_config() -> SupervisorConfig {
     SupervisorConfig::new(ABORT_OPERATION_TIMEOUT)
-        .with_heartbeat_interval(ABORT_HEARTBEAT_INTERVAL)
-        .with_heartbeat_timeout(ABORT_HEARTBEAT_TIMEOUT)
+        .with_heartbeat_interval(ISOLATED_ABORT_HEARTBEAT_INTERVAL)
+        .with_heartbeat_timeout(ISOLATED_ABORT_HEARTBEAT_TIMEOUT)
         .with_progress_timeout(ABORT_PROGRESS_TIMEOUT)
         .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
         .with_copy_timeout(ABORT_COPY_TIMEOUT)

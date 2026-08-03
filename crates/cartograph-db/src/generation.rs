@@ -447,6 +447,7 @@ pub struct GenerationContents {
     generation: StagedGeneration,
     facts: CanonicalGenerationFacts,
     metrics: Option<PrepareGenerationMetrics>,
+    progress: Option<PrepareGenerationProgress>,
 }
 
 struct PrepareTransactionInput<'a> {
@@ -455,6 +456,7 @@ struct PrepareTransactionInput<'a> {
     facts: CanonicalGenerationFacts,
     fence: &'a LeaseFence,
     metrics: Option<&'a PrepareGenerationMetrics>,
+    progress: Option<&'a PrepareGenerationProgress>,
 }
 
 struct CopiedRelationCheck<'a> {
@@ -468,6 +470,7 @@ struct CopyAndValidateInput<'a> {
     generation: &'a StagedGeneration,
     facts: CanonicalGenerationFacts,
     metrics: Option<&'a PrepareGenerationMetrics>,
+    progress: Option<&'a PrepareGenerationProgress>,
 }
 
 /// Cloneable observer for the exact PostgreSQL COPY-stream duration.
@@ -487,6 +490,12 @@ struct PrepareGenerationMetricsInner {
 #[derive(Clone, Default)]
 pub struct PrepareGenerationMetrics {
     inner: Arc<PrepareGenerationMetricsInner>,
+}
+
+/// Cloneable monotonic evidence that a durable prepare operation completed bounded work.
+#[derive(Clone, Default)]
+pub struct PrepareGenerationProgress {
+    sequence: Arc<AtomicU64>,
 }
 
 /// Point-in-time prepare metrics retained after the generation contents move.
@@ -537,6 +546,28 @@ impl PrepareGenerationMetrics {
 
     fn record_relation_validation(&self, duration: Duration) {
         store_duration(&self.inner.relation_validation, duration);
+    }
+}
+
+impl PrepareGenerationProgress {
+    /// Create an empty progress observer for one supervised prepare operation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read the monotonic number of completed COPY statements and prepare phases.
+    #[must_use]
+    pub fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn advance(&self) {
+        let _ = self
+            .sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_add(1))
+            });
     }
 }
 
@@ -704,6 +735,7 @@ impl GenerationContents {
             generation,
             facts,
             metrics: None,
+            progress: None,
         }
     }
 
@@ -711,6 +743,13 @@ impl GenerationContents {
     #[must_use]
     pub fn with_metrics(mut self, metrics: PrepareGenerationMetrics) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Attach monotonic supervised progress without changing persistence behavior.
+    #[must_use]
+    pub fn with_progress(mut self, progress: PrepareGenerationProgress) -> Self {
+        self.progress = Some(progress);
         self
     }
 }
@@ -915,6 +954,7 @@ impl CartographDatabase {
             generation,
             facts,
             metrics,
+            progress,
         } = contents;
         if !fence_matches_generation(fence, generation.project_id(), generation.generation_id()) {
             return Err(PrepareGenerationError {
@@ -949,6 +989,7 @@ impl CartographDatabase {
                 facts,
                 fence,
                 metrics: metrics.as_ref(),
+                progress: progress.as_ref(),
             },
         )
         .await;
@@ -1602,9 +1643,11 @@ async fn prepare_transaction(
             generation: input.generation,
             facts: input.facts,
             metrics: input.metrics,
+            progress: input.progress,
         },
     )
     .await?;
+    advance_prepare_progress(input.progress);
     rebuild_generation_search_relation(
         connection,
         GenerationSearchBuild {
@@ -1615,6 +1658,7 @@ async fn prepare_transaction(
         },
     )
     .await?;
+    advance_prepare_progress(input.progress);
     carry_forward_unchanged_generation_evidence(
         connection,
         GenerationEvidenceCarry {
@@ -1625,7 +1669,9 @@ async fn prepare_transaction(
         },
     )
     .await?;
+    advance_prepare_progress(input.progress);
     analyze_copied_relations(connection, input.schema).await?;
+    advance_prepare_progress(input.progress);
     mark_generation_ready(
         connection,
         ReadyTransition {
@@ -1636,7 +1682,15 @@ async fn prepare_transaction(
             digest_version,
         },
     )
-    .await
+    .await?;
+    advance_prepare_progress(input.progress);
+    Ok(())
+}
+
+fn advance_prepare_progress(progress: Option<&PrepareGenerationProgress>) {
+    if let Some(progress) = progress {
+        progress.advance();
+    }
 }
 
 async fn mark_generation_ready(
@@ -1722,6 +1776,7 @@ async fn copy_and_validate_generation(
             generation_id: input.generation.generation_id().clone(),
         },
         input.facts,
+        input.progress,
     )
     .await;
     if let Some(metrics) = input.metrics {
@@ -2459,4 +2514,19 @@ const fn database_error(operation: &'static str) -> StorageError {
 
 const fn corrupt(field: &'static str) -> StorageError {
     StorageError::CorruptStoredValue { field }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrepareGenerationProgress;
+
+    #[test]
+    fn prepare_progress_is_monotonic_and_shared_across_clones() {
+        let progress = PrepareGenerationProgress::new();
+        let observed = progress.clone();
+        assert_eq!(observed.sequence(), 0);
+        progress.advance();
+        progress.advance();
+        assert_eq!(observed.sequence(), 2);
+    }
 }

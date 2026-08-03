@@ -666,6 +666,34 @@ mod tests {
             }),
             "reduce_reference_name_too_long"
         );
+        assert_eq!(
+            project_error_code(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Resolve,
+                reason: PipelineFailureReason::GenerationCapacityExceeded,
+            }),
+            "resolve_generation_capacity_exceeded"
+        );
+        assert_eq!(
+            project_error_code(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Parse,
+                reason: PipelineFailureReason::GenerationCapacityExceeded,
+            }),
+            "parse_generation_capacity_exceeded"
+        );
+        assert_eq!(
+            project_error_code(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Parse,
+                reason: PipelineFailureReason::ExtractionNestingLimitExceeded,
+            }),
+            "parse_extraction_nesting_limit_exceeded"
+        );
+        assert_eq!(
+            project_error_code(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Parse,
+                reason: PipelineFailureReason::ExtractionOutputLimitExceeded,
+            }),
+            "parse_extraction_output_limit_exceeded"
+        );
 
         let error_codes = [
             (

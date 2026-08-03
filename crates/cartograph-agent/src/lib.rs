@@ -295,6 +295,10 @@ pub struct NativeIndexMetrics {
     pub diagnostics: u64,
     /// Conservative retained canonical-generation bytes.
     pub modeled_generation_bytes: u64,
+    /// Conservative cumulative allocation charge observed while resolving facts.
+    pub resolve_high_water_bytes: u64,
+    /// Conservative cumulative allocation charge observed while canonicalizing the payload.
+    pub validation_high_water_bytes: u64,
     /// Persistent SCIP replacement accounting, absent when no overlay is configured.
     pub scip_overlay: Option<ScipOverlayMetrics>,
     /// PostgreSQL incremental parse-cache evidence.
@@ -366,6 +370,8 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
             unresolved_references: report.unresolved_references(),
             diagnostics: report.diagnostics(),
             modeled_generation_bytes: report.modeled_generation_bytes(),
+            resolve_high_water_bytes: report.resolve_high_water_bytes(),
+            validation_high_water_bytes: report.validation_high_water_bytes(),
             scip_overlay,
             parse_cache: NativeParseCacheMetrics {
                 hits: parse_cache.hits(),
@@ -1219,6 +1225,9 @@ impl ProjectRuntime {
             .max_source_bytes
             .or(source_policy.maximum_file_bytes)
             .unwrap_or(DEFAULT_MAX_SOURCE_BYTES);
+        let max_generation_bytes = source_policy
+            .maximum_generation_bytes
+            .unwrap_or(DEFAULT_MAX_GENERATION_BYTES);
         let source = self
             .scan_source_for_index(IndexSourceScan {
                 cancellation: cancellation.clone(),
@@ -1298,6 +1307,7 @@ impl ProjectRuntime {
             scip_overlay: source.scip_overlay,
             workers,
             max_source_bytes,
+            max_generation_bytes,
             parse_cache_reads: !options.force,
             discovery_policy: source_policy.discovery,
             index_policy: source_policy.index,
@@ -1354,6 +1364,7 @@ impl ProjectRuntime {
             scip_overlay,
             workers,
             max_source_bytes,
+            max_generation_bytes,
             parse_cache_reads,
             discovery_policy,
             index_policy,
@@ -1364,7 +1375,21 @@ impl ProjectRuntime {
             ProjectOperation::Index,
             Some(generation_id.clone()),
         );
-        let supervisor = IndexerSupervisor::new(self.database.clone(), supervisor_config());
+        let source_root = SourceRoot::open_with_policy(&self.root, discovery_policy)
+            .map_err(|_| ProjectError::ProjectRootUnavailable)?;
+        let pipeline = pipeline_config(
+            workers,
+            max_source_bytes,
+            max_generation_bytes,
+            index_policy,
+        )?;
+        let maximum_stage_reservation = pipeline
+            .maximum_stage_reservation_bytes()
+            .map_err(|_| ProjectError::InvalidOptions)?;
+        let supervisor = IndexerSupervisor::new(
+            self.database.clone(),
+            supervisor_config(maximum_stage_reservation.max(DEFAULT_MAX_SUPERVISOR_BYTES)),
+        );
         let cancellation_supervisor = supervisor.clone();
         let cancellation_signal = cancellation.clone();
         let cancellation_task = AbortTaskOnDrop::new(tokio::spawn(async move {
@@ -1372,9 +1397,6 @@ impl ProjectRuntime {
             let _cancellation_was_new = cancellation_supervisor.cancel();
         }));
         let request = SupervisorRequest::new(target, process_owner(), DEFAULT_LEASE_DURATION);
-        let source_root = SourceRoot::open_with_policy(&self.root, discovery_policy)
-            .map_err(|_| ProjectError::ProjectRootUnavailable)?;
-        let pipeline = pipeline_config(workers, max_source_bytes, index_policy)?;
         let parse_cache = NativeParseCache::new(self.database.clone(), project_id.clone())
             .with_reads(parse_cache_reads);
         let (report_sender, report_receiver) = oneshot::channel();
@@ -1472,6 +1494,7 @@ struct PendingIndex {
     scip_overlay: Option<ScipOverlayInput>,
     workers: u16,
     max_source_bytes: usize,
+    max_generation_bytes: u64,
     parse_cache_reads: bool,
     discovery_policy: DiscoveryPolicy,
     index_policy: SourceIndexPolicy,
@@ -1667,6 +1690,7 @@ struct SourceRevision {
 struct ProjectSourcePolicy {
     discovery: DiscoveryPolicy,
     maximum_file_bytes: Option<usize>,
+    maximum_generation_bytes: Option<u64>,
     index: SourceIndexPolicy,
 }
 
@@ -1785,6 +1809,7 @@ impl ProjectSourcePolicy {
         Ok(Self {
             discovery,
             maximum_file_bytes: settings.maximum_file_bytes(),
+            maximum_generation_bytes: settings.maximum_generation_bytes(),
             index: SourceIndexPolicy::from_settings(settings),
         })
     }
@@ -2190,11 +2215,11 @@ fn source_limits_with_max(max_source_bytes: usize) -> Result<SourceLimits, Proje
 fn pipeline_config(
     workers: u16,
     max_source_bytes: usize,
+    max_generation_bytes: u64,
     policy: SourceIndexPolicy,
 ) -> Result<NativePipelineConfig, ProjectError> {
-    let retained =
-        NativeRetainedLimits::new(DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_GENERATION_BYTES)
-            .map_err(|_| ProjectError::InvalidOptions)?;
+    let retained = NativeRetainedLimits::new(DEFAULT_MAX_MANIFEST_BYTES, max_generation_bytes)
+        .map_err(|_| ProjectError::InvalidOptions)?;
     let queue = usize::from(workers)
         .checked_mul(2)
         .ok_or(ProjectError::InvalidOptions)?;
@@ -2223,7 +2248,7 @@ fn pipeline_config(
     .with_partial_clones(policy.partial_clones))
 }
 
-fn supervisor_config() -> SupervisorConfig {
+fn supervisor_config(max_worker_bytes: u64) -> SupervisorConfig {
     SupervisorConfig::new(DEFAULT_OPERATION_TIMEOUT)
         .with_heartbeat_interval(DEFAULT_HEARTBEAT_INTERVAL)
         .with_heartbeat_timeout(DEFAULT_HEARTBEAT_TIMEOUT)
@@ -2231,7 +2256,7 @@ fn supervisor_config() -> SupervisorConfig {
         .with_cancellation_grace(DEFAULT_CANCELLATION_GRACE)
         .with_copy_timeout(DEFAULT_COPY_TIMEOUT)
         .with_max_worker_tasks(DEFAULT_MAX_SUPERVISOR_TASKS)
-        .with_max_worker_bytes(DEFAULT_MAX_SUPERVISOR_BYTES)
+        .with_max_worker_bytes(max_worker_bytes)
 }
 
 fn monotonic_millis(duration: Duration) -> u64 {
@@ -2386,6 +2411,27 @@ mod tests {
         assert_eq!(
             bounded.reason(),
             Some(PipelineFailureReason::ReferenceNameTooLong)
+        );
+        let capacity =
+            native_pipeline_failure(&cartograph_indexer::NativePipelineError::StageWithReason {
+                stage: PipelineStage::Resolve,
+                reason: PipelineFailureReason::GenerationCapacityExceeded,
+            });
+        assert_eq!(capacity.stage(), PipelineStage::Resolve);
+        assert_eq!(
+            capacity.reason(),
+            Some(PipelineFailureReason::GenerationCapacityExceeded)
+        );
+        let Some(capacity_reason) = capacity.reason() else {
+            panic!("generation-capacity reason was discarded");
+        };
+        assert_eq!(
+            ProjectError::IndexStageFailedWithReason {
+                stage: capacity.stage(),
+                reason: capacity_reason,
+            }
+            .to_string(),
+            "Cartograph index operation failed during resolve/generation_capacity_exceeded; the previous generation remains visible"
         );
         let Some(reason) = bounded.reason() else {
             panic!("allowlisted pipeline reason was discarded");

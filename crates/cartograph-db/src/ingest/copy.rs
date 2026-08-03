@@ -1,5 +1,6 @@
 use std::{
     fmt::Display,
+    mem,
     time::{Duration, Instant},
 };
 
@@ -8,7 +9,7 @@ use cartograph_domain::{GenerationId, ProjectId};
 use sqlx_core::error::Error as SqlxError;
 use sqlx_postgres::{PgConnection, PgCopyIn};
 
-use crate::{StorageError, database::quoted_schema};
+use crate::{StorageError, database::quoted_schema, generation::PrepareGenerationProgress};
 
 use super::model::{
     CanonicalGenerationFacts, CanonicalSearchDocument, EdgeInput, FileInput, NumericalSiteInput,
@@ -16,6 +17,8 @@ use super::model::{
 };
 
 const COPY_CHUNK_BYTES: usize = 1024 * 1024;
+const COPY_STATEMENT_BYTES: usize = 64 * 1024 * 1024;
+const COPY_STATEMENT_ROWS: usize = 100_000;
 const COPY_ABORT_MESSAGE: &str = "Cartograph v2 COPY stream aborted";
 const ASCII_BACKSPACE: u8 = 0x08;
 const ASCII_VERTICAL_TAB: u8 = 0x0b;
@@ -59,6 +62,7 @@ struct CopyGenerationProgress<'a> {
     context: CopyGenerationContext,
     durations: CopyTableDurations,
     result: Result<(), StorageError>,
+    prepare_progress: Option<&'a PrepareGenerationProgress>,
 }
 
 struct CopyTableRequest<T, Encode> {
@@ -91,12 +95,17 @@ impl CopyTableDurations {
 }
 
 impl<'a> CopyGenerationProgress<'a> {
-    fn new(connection: &'a mut PgConnection, context: CopyGenerationContext) -> Self {
+    fn new(
+        connection: &'a mut PgConnection,
+        context: CopyGenerationContext,
+        prepare_progress: Option<&'a PrepareGenerationProgress>,
+    ) -> Self {
         Self {
             connection,
             context,
             durations: CopyTableDurations::default(),
             result: Ok(()),
+            prepare_progress,
         }
     }
 
@@ -122,7 +131,8 @@ impl<'a> CopyGenerationProgress<'a> {
             layout,
             encode,
         };
-        let (duration, result) = timed_copy_table(self.connection, plan).await;
+        let (duration, result) =
+            timed_copy_table(self.connection, plan, self.prepare_progress).await;
         self.durations.record(table, duration);
         if let Err(error) = result {
             self.result = Err(error);
@@ -139,8 +149,51 @@ impl<'a> CopyGenerationProgress<'a> {
 
 struct CopyTableSpec {
     statement: String,
-    expected_rows: usize,
     operation: &'static str,
+}
+
+struct CopyStatementBuffer {
+    rows: Vec<Vec<u8>>,
+    bytes: usize,
+    maximum_rows: usize,
+    maximum_bytes: usize,
+}
+
+impl CopyStatementBuffer {
+    fn new(maximum_rows: usize, maximum_bytes: usize) -> Self {
+        Self {
+            rows: Vec::new(),
+            bytes: 0,
+            maximum_rows,
+            maximum_bytes,
+        }
+    }
+
+    fn push(&mut self, row: Vec<u8>) -> Option<Vec<Vec<u8>>> {
+        let completed = if !self.rows.is_empty()
+            && (self.rows.len() >= self.maximum_rows
+                || self.bytes.saturating_add(row.len()) > self.maximum_bytes)
+        {
+            self.take()
+        } else {
+            None
+        };
+        self.bytes = self.bytes.saturating_add(row.len());
+        self.rows.push(row);
+        completed
+    }
+
+    fn finish(&mut self) -> Option<Vec<Vec<u8>>> {
+        self.take()
+    }
+
+    fn take(&mut self) -> Option<Vec<Vec<u8>>> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        self.bytes = 0;
+        Some(mem::take(&mut self.rows))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -203,6 +256,7 @@ pub(crate) async fn copy_generation_facts(
     connection: &mut PgConnection,
     context: CopyGenerationContext,
     facts: CanonicalGenerationFacts,
+    prepare_progress: Option<&PrepareGenerationProgress>,
 ) -> CopyGenerationAttempt {
     let ValidatedFactTables {
         files,
@@ -212,7 +266,7 @@ pub(crate) async fn copy_generation_facts(
         numerical_sites,
         documents,
     } = facts.tables;
-    let mut progress = CopyGenerationProgress::new(connection, context);
+    let mut progress = CopyGenerationProgress::new(connection, context, prepare_progress);
     progress
         .copy(CopyTableRequest::new(files, FILES_LAYOUT, encode_file))
         .await;
@@ -253,19 +307,21 @@ pub(crate) async fn copy_generation_facts(
 async fn timed_copy_table<T, Encode>(
     connection: &mut PgConnection,
     plan: CopyTablePlan<T, Encode>,
+    prepare_progress: Option<&PrepareGenerationProgress>,
 ) -> (Duration, Result<(), StorageError>)
 where
     T: Send,
     Encode: Fn(&CopyGenerationContext, &T) -> Vec<u8> + Copy + Send,
 {
     let started = Instant::now();
-    let result = copy_table(connection, plan).await;
+    let result = copy_table(connection, plan, prepare_progress).await;
     (started.elapsed(), result)
 }
 
 async fn copy_table<T, Encode>(
     connection: &mut PgConnection,
     plan: CopyTablePlan<T, Encode>,
+    prepare_progress: Option<&PrepareGenerationProgress>,
 ) -> Result<(), StorageError>
 where
     T: Send,
@@ -277,37 +333,49 @@ where
         encode,
     } = plan;
     let schema = quoted_schema(&batch.context.schema);
-    let expected_rows = batch.rows.len();
     let context = batch.context;
     let table = layout.table;
     let columns = layout.columns;
-    copy_text_rows(
-        connection,
-        CopyTableSpec {
-            statement: format!(
-                r#"COPY {schema}."{table}" ({columns}) FROM STDIN WITH (FORMAT text)"#
-            ),
-            expected_rows,
-            operation: layout.operation,
-        },
-        batch
-            .rows
-            .into_iter()
-            .map(move |row| encode(&context, &row)),
-    )
-    .await
+    let spec = CopyTableSpec {
+        statement: format!(r#"COPY {schema}."{table}" ({columns}) FROM STDIN WITH (FORMAT text)"#),
+        operation: layout.operation,
+    };
+    let mut statements = CopyStatementBuffer::new(COPY_STATEMENT_ROWS, COPY_STATEMENT_BYTES);
+    for row in batch.rows {
+        if let Some(rows) = statements.push(encode(&context, &row)) {
+            copy_text_rows(connection, &spec, rows).await?;
+            advance_prepare_progress(prepare_progress);
+        }
+    }
+    if let Some(rows) = statements.finish() {
+        copy_text_rows(connection, &spec, rows).await?;
+        advance_prepare_progress(prepare_progress);
+    }
+    Ok(())
+}
+
+fn advance_prepare_progress(progress: Option<&PrepareGenerationProgress>) {
+    if let Some(progress) = progress {
+        progress.advance();
+    }
 }
 
 async fn copy_text_rows<I>(
     connection: &mut PgConnection,
-    spec: CopyTableSpec,
+    spec: &CopyTableSpec,
     rows: I,
 ) -> Result<(), StorageError>
 where
     I: IntoIterator<Item = Vec<u8>> + Send,
     I::IntoIter: Send,
 {
-    if spec.expected_rows == 0 {
+    let rows = rows.into_iter();
+    let (minimum_rows, maximum_rows) = rows.size_hint();
+    let expected_rows = maximum_rows.filter(|upper| *upper == minimum_rows);
+    let Some(expected_rows) = expected_rows else {
+        return Err(database_error("copy-row-count-unknown"));
+    };
+    if expected_rows == 0 {
         return Ok(());
     }
     // The only dynamic identifier is a validated, double-quoted
@@ -325,7 +393,7 @@ where
         .await
         .map_err(|_| database_error(spec.operation))?;
     let expected =
-        u64::try_from(spec.expected_rows).map_err(|_| database_error("copy-row-count-overflow"))?;
+        u64::try_from(expected_rows).map_err(|_| database_error("copy-row-count-overflow"))?;
     if copied != expected {
         return Err(database_error("copy-row-count-mismatch"));
     }
@@ -583,5 +651,44 @@ mod tests {
             row.finish(),
             b"plain\ttab\\tline\\nreturn\\rslash\\\\null-marker\\\\N\t\\N\t\n"
         );
+    }
+
+    #[test]
+    fn copy_statement_buffer_batches_by_rows_and_encoded_bytes_without_reordering() {
+        let mut buffer = CopyStatementBuffer::new(3, 8);
+        let mut completed = Vec::new();
+        for row in [
+            b"aa".to_vec(),
+            b"bbb".to_vec(),
+            b"c".to_vec(),
+            b"dddd".to_vec(),
+        ] {
+            if let Some(rows) = buffer.push(row) {
+                completed.push(rows);
+            }
+        }
+        if let Some(rows) = buffer.finish() {
+            completed.push(rows);
+        }
+
+        assert_eq!(
+            completed,
+            vec![
+                vec![b"aa".to_vec(), b"bbb".to_vec(), b"c".to_vec()],
+                vec![b"dddd".to_vec()]
+            ]
+        );
+
+        let mut byte_bounded = CopyStatementBuffer::new(10, 5);
+        assert!(byte_bounded.push(b"1234".to_vec()).is_none());
+        assert_eq!(
+            byte_bounded.push(b"56".to_vec()),
+            Some(vec![b"1234".to_vec()])
+        );
+        assert_eq!(byte_bounded.finish(), Some(vec![b"56".to_vec()]));
+
+        let mut indivisible = CopyStatementBuffer::new(10, 5);
+        assert!(indivisible.push(b"123456".to_vec()).is_none());
+        assert_eq!(indivisible.finish(), Some(vec![b"123456".to_vec()]));
     }
 }

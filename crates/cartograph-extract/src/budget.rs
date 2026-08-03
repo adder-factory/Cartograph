@@ -5,13 +5,16 @@ use crate::{
     ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, SourceSnapshot,
 };
 
-const PARSER_RESERVATION_MULTIPLIER: u64 = 32;
+// The transient construction budget charges two vector-growth slots per fact so an allocation
+// cannot outrun supervisor accounting. It is deliberately separate from the smaller retained
+// output ceiling checked against the completed file.
+const PARSER_RESERVATION_MULTIPLIER: u64 = 64;
 const MINIMUM_PARSER_RESERVATION_BYTES: u64 = 1024 * 1024;
 const READ_RESERVATION_MULTIPLIER: u64 = 2;
 const MINIMUM_READ_RESERVATION_BYTES: u64 = 128 * 1024;
-// Dense schemas can emit several bounded graph facts per source token. Keep the retained-output
-// ceiling below the independent 32x parser reservation while admitting real 12-13x corpora.
-const OUTPUT_LIMIT_MULTIPLIER: u64 = 16;
+// Dense schemas can emit several bounded graph facts per source token. The completed output stays
+// below the independent 64x construction reservation while admitting generated API fixtures.
+const OUTPUT_LIMIT_MULTIPLIER: u64 = 32;
 const MINIMUM_OUTPUT_LIMIT_BYTES: u64 = 256 * 1024;
 const MINIMUM_FACT_LIMIT: u64 = 1024;
 const MINIMUM_STRING_LIMIT_BYTES: u64 = 4096;
@@ -44,7 +47,8 @@ pub fn native_output_limit(source_bytes: u64) -> Option<u64> {
 }
 
 pub(crate) struct ExtractionBudget {
-    output_limit: u64,
+    retained_output_limit: u64,
+    working_limit: u64,
     string_limit: u64,
     fact_limit: u64,
     retained_bytes: u64,
@@ -54,7 +58,10 @@ pub(crate) struct ExtractionBudget {
 impl ExtractionBudget {
     pub(crate) fn new(snapshot: &SourceSnapshot) -> Result<Self, ExtractError> {
         let source_bytes = snapshot.byte_size();
-        let output_limit = native_output_limit(source_bytes).ok_or(ExtractError::OutputLimit)?;
+        let retained_output_limit =
+            native_output_limit(source_bytes).ok_or(ExtractError::OutputLimit)?;
+        let working_limit =
+            native_extraction_reservation(source_bytes).ok_or(ExtractError::OutputLimit)?;
         let string_limit = source_bytes
             .checked_add(MAXIMUM_QUALIFIER_SEPARATOR_BYTES)
             .ok_or(ExtractError::OutputLimit)?
@@ -63,11 +70,12 @@ impl ExtractionBudget {
             .checked_add(MINIMUM_FACT_LIMIT)
             .ok_or(ExtractError::OutputLimit)?;
         let retained_bytes = snapshot_header_bytes(snapshot).ok_or(ExtractError::OutputLimit)?;
-        if retained_bytes > output_limit {
+        if retained_bytes > retained_output_limit || retained_bytes > working_limit {
             return Err(ExtractError::OutputLimit);
         }
         Ok(Self {
-            output_limit,
+            retained_output_limit,
+            working_limit,
             string_limit,
             fact_limit,
             retained_bytes,
@@ -91,7 +99,7 @@ impl ExtractionBudget {
             .retained_bytes
             .checked_add(retained_bytes)
             .ok_or(ExtractError::OutputLimit)?;
-        if facts > self.fact_limit || next > self.output_limit {
+        if facts > self.fact_limit || next > self.working_limit {
             return Err(ExtractError::OutputLimit);
         }
         self.facts = facts;
@@ -100,7 +108,7 @@ impl ExtractionBudget {
     }
 
     pub(crate) const fn output_limit(&self) -> u64 {
-        self.output_limit
+        self.retained_output_limit
     }
 
     pub(crate) fn ensure_string_length(&self, length: usize) -> Result<(), ExtractError> {
@@ -117,7 +125,7 @@ impl ExtractionBudget {
         self.retained_bytes = self
             .retained_bytes
             .checked_add(usize_to_u64(value.len()))
-            .filter(|next| *next <= self.output_limit)
+            .filter(|next| *next <= self.working_limit)
             .ok_or(ExtractError::OutputLimit)?;
         Ok(())
     }

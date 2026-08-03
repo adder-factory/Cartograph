@@ -14,6 +14,8 @@ use super::{
     },
 };
 
+const MAX_DURABLE_REFERENCE_NAME_BYTES: usize = 4_096;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum InvocationKind {
     Call,
@@ -298,9 +300,27 @@ pub(super) fn capture_invocation(
         return Ok(());
     }
     if invocation == InvocationKind::Call
-        && builder.context.snapshot.language() == SourceLanguage::Rust
-        && rust_anonymous_call_target(target, 0)
+        && anonymous_call_target(builder.context.snapshot.language(), target, 0)
     {
+        return Ok(());
+    }
+    if invocation == InvocationKind::Call
+        && builder.context.snapshot.language() == SourceLanguage::Go
+        && target.end_byte().saturating_sub(target.start_byte()) > MAX_DURABLE_REFERENCE_NAME_BYTES
+    {
+        if target.kind() == "selector_expression"
+            && let Some(field) = target.child_by_field_name("field")
+        {
+            let name = builder.context.owned_text(field)?;
+            let resolution_name = dynamic_dispatch_resolution(builder, &name)?;
+            builder.emit_reference(ExtractedReference {
+                owner: builder.owners.last().cloned(),
+                name,
+                resolution_name: Some(resolution_name),
+                kind: reference_kind,
+                span: span_for(field)?,
+            })?;
+        }
         return Ok(());
     }
     if invocation == InvocationKind::Call
@@ -355,18 +375,21 @@ pub(super) fn capture_invocation(
     )
 }
 
-fn rust_anonymous_call_target(target: Node<'_>, depth: usize) -> bool {
+fn anonymous_call_target(language: SourceLanguage, target: Node<'_>, depth: usize) -> bool {
     if depth > 8 {
         return false;
     }
-    match target.kind() {
-        "closure_expression" => true,
-        "parenthesized_expression" => {
+    match (language, target.kind()) {
+        (SourceLanguage::Rust, "closure_expression")
+        | (SourceLanguage::Go, "func_literal")
+        | (SourceLanguage::Python, "lambda") => true,
+        (_, "parenthesized_expression") => {
             let mut children = named_children(target);
             let Some(child) = children.next() else {
                 return false;
             };
-            children.next().is_none() && rust_anonymous_call_target(child, depth.saturating_add(1))
+            children.next().is_none()
+                && anonymous_call_target(language, child, depth.saturating_add(1))
         }
         _ => false,
     }

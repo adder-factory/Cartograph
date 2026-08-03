@@ -61,6 +61,12 @@ pub struct PipelineFailure {
 /// Stable credential-safe detail for a pipeline failure whose cause is actionable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PipelineFailureReason {
+    /// The configured in-memory generation ceiling rejected bounded work.
+    GenerationCapacityExceeded,
+    /// One source syntax tree exceeded the extractor's defensive nesting ceiling.
+    ExtractionNestingLimitExceeded,
+    /// One source file exceeded its bounded modeled extraction output allowance.
+    ExtractionOutputLimitExceeded,
     /// Canonical reduction rejected an extracted reference name above the storage bound.
     ReferenceNameTooLong,
 }
@@ -70,6 +76,9 @@ impl PipelineFailureReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::GenerationCapacityExceeded => "generation_capacity_exceeded",
+            Self::ExtractionNestingLimitExceeded => "extraction_nesting_limit_exceeded",
+            Self::ExtractionOutputLimitExceeded => "extraction_output_limit_exceeded",
             Self::ReferenceNameTooLong => "reference_name_too_long",
         }
     }
@@ -383,6 +392,7 @@ impl RunCoordinator<'_> {
             receiver,
             lifecycle: &self.lifecycle,
             lease: Some(lease),
+            prepares: prepares.clone(),
         }
         .run(work(context))
         .await;
@@ -1198,6 +1208,7 @@ struct WorkMonitor<'a> {
     receiver: watch::Receiver<bool>,
     lifecycle: &'a Arc<Mutex<LifecycleGate>>,
     lease: Option<ProjectLease>,
+    prepares: PrepareScope,
 }
 
 impl WorkMonitor<'_> {
@@ -1226,6 +1237,9 @@ impl WorkMonitor<'_> {
         let operation_deadline = sleep_until(self.budget.work_deadline);
         let progress_deadline =
             sleep_until(self.progress.last_progress().await + self.config.deadlines.progress);
+        let mut prepare_progress_sequence = self.prepares.progress_sequence();
+        let mut prepare_progress_at = Instant::now();
+        let mut prepare_was_running = self.prepares.is_running();
         let mut heartbeat = interval_at(
             Instant::now() + self.config.deadlines.heartbeat_interval,
             self.config.deadlines.heartbeat_interval,
@@ -1246,8 +1260,27 @@ impl WorkMonitor<'_> {
                     break self.cancel_work(CancellationReason::OperationDeadline, work).await;
                 },
                 () = &mut progress_deadline => {
+                    let now = Instant::now();
+                    let prepare_running = self.prepares.is_running();
+                    if prepare_running {
+                        let sequence = self.prepares.progress_sequence();
+                        if !prepare_was_running || sequence != prepare_progress_sequence {
+                            prepare_progress_sequence = sequence;
+                            prepare_progress_at = now;
+                        }
+                        prepare_was_running = true;
+                        let durable_deadline = prepare_progress_at + self.config.deadlines.copy_timeout();
+                        if durable_deadline > now {
+                            progress_deadline.as_mut().reset(
+                                durable_deadline.min(now + self.config.deadlines.progress)
+                            );
+                            continue;
+                        }
+                    } else {
+                        prepare_was_running = false;
+                    }
                     let next = self.progress.last_progress().await + self.config.deadlines.progress;
-                    if next <= Instant::now() {
+                    if next <= now {
                         break self.cancel_work(CancellationReason::ProgressStalled, work).await;
                     }
                     progress_deadline.as_mut().reset(next);

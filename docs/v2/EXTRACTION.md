@@ -52,7 +52,8 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V11 fences anonymous Rust call-target normalization;
+contract. Contract V12 fences stable bounded Go and Python anonymous call-target
+normalization; contract V11 fenced anonymous Rust call-target normalization;
 contract V10 fenced call-target-precise
 secret exposure and incomplete-implementation evidence; contract V9 fenced JSX executable-line
 ownership, SQL/document/secret health precision, Python intrinsic and receiver
@@ -94,6 +95,12 @@ closure remain ordinary typed evidence. If another extracted reference still
 violates the canonical storage bound, reduction returns the allowlisted
 `reference_name_too_long` reason without rendering the name, source, project
 path, database URL, or driver text.
+
+The same stable-target rule applies to immediately invoked Go function
+literals and Python lambdas. For an oversized Go call expression,
+composite/nested/unary targets are omitted instead of retaining an unstable
+source-sized name; an oversized selector retains only its bounded stable field
+and remains dynamic-dispatch evidence.
 
 Callable signatures are normalized to exclude literal-bearing bodies/values.
 Search text is intentionally useful for code identifiers without becoming a
@@ -169,6 +176,10 @@ The indexer converts extracted files into canonical facts:
 
 Resolution output is reduced in stable order before PostgreSQL. Parallel worker
 completion order cannot affect IDs, rows, digest, or BM25 document identity.
+The unordered resolver payload is charged to the separate working-set bound;
+the smaller configured generation ceiling is enforced on canonical output.
+Applying the output ceiling to both would incorrectly reject dense inputs that
+reduce safely.
 
 ## Parallel pipeline
 
@@ -187,6 +198,9 @@ The supervisor and stage runner enforce:
   caller/hardware caps;
 - bounded queues, tasks, per-item bytes, retained output, and total operation
   memory model;
+- distinct per-file extraction limits: completed retained output is capped at
+  32 times source bytes plus a fixed allowance, while transient parser/fact
+  construction is reserved at 64 times source bytes plus its fixed allowance;
 - input sequence numbers and ordered reduction;
 - item/stage/operation/COPY/heartbeat/cancellation deadlines;
 - cancellation polling inside discovery, reads, parser callbacks, resolution,
@@ -195,9 +209,11 @@ The supervisor and stage runner enforce:
   caller future is dropped;
 - exact lease ownership and rollback before publication.
 
-The in-memory canonical generation is hard-capped. V2.0 does not claim an
-unbounded corpus or spill-to-disk reducer; oversize input is rejected before
-unsafe allocation or publication.
+The in-memory generation is hard-capped. V2 does not claim an unbounded corpus
+or spill-to-disk reducer; oversize input is rejected before unsafe allocation
+or publication. PostgreSQL COPY uses bounded multi-statement batches, but parse,
+resolve, and canonical reduce still require their explicitly reserved native
+working sets.
 
 ## Search document boundary
 

@@ -85,8 +85,9 @@ pub use generation::{
     CurrentGeneration, FailGenerationError, FailedGeneration, GenerationContents,
     GenerationRecoveryRequest, NewGeneration, NewProject, ObservedGeneration, ObservedLease,
     OperationReconciliation, PrepareGenerationError, PrepareGenerationMetrics,
-    PrepareGenerationMetricsSnapshot, PrepareGenerationMutation, PublishGenerationError,
-    ReadyGeneration, RecoverableGeneration, StagedGeneration, TerminalGenerationMutation,
+    PrepareGenerationMetricsSnapshot, PrepareGenerationMutation, PrepareGenerationProgress,
+    PublishGenerationError, ReadyGeneration, RecoverableGeneration, StagedGeneration,
+    TerminalGenerationMutation,
 };
 pub use history::{
     FileCochangeFact, FileCochangeMetrics, FileCochangeQuery, FileCochangeRecord, FileHistoryFact,

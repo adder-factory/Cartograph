@@ -2475,9 +2475,14 @@ enum AdminJobFailure {
     DiscoverFailed,
     ReadFailed,
     ParseFailed,
+    ParseExtractionNestingLimitExceeded,
+    ParseExtractionOutputLimitExceeded,
+    ParseGenerationCapacityExceeded,
     ResolveFailed,
+    ResolveGenerationCapacityExceeded,
     OverlayFailed,
     ReduceFailed,
+    ReduceGenerationCapacityExceeded,
     ReduceReferenceNameTooLong,
     CopyFailed,
     RelationalMergeFailed,
@@ -2781,6 +2786,21 @@ const fn admin_job_reason_failure(
     reason: PipelineFailureReason,
 ) -> AdminJobFailure {
     match (stage, reason) {
+        (PipelineStage::Parse, PipelineFailureReason::GenerationCapacityExceeded) => {
+            AdminJobFailure::ParseGenerationCapacityExceeded
+        }
+        (PipelineStage::Parse, PipelineFailureReason::ExtractionNestingLimitExceeded) => {
+            AdminJobFailure::ParseExtractionNestingLimitExceeded
+        }
+        (PipelineStage::Parse, PipelineFailureReason::ExtractionOutputLimitExceeded) => {
+            AdminJobFailure::ParseExtractionOutputLimitExceeded
+        }
+        (PipelineStage::Resolve, PipelineFailureReason::GenerationCapacityExceeded) => {
+            AdminJobFailure::ResolveGenerationCapacityExceeded
+        }
+        (PipelineStage::Reduce, PipelineFailureReason::GenerationCapacityExceeded) => {
+            AdminJobFailure::ReduceGenerationCapacityExceeded
+        }
         (PipelineStage::Reduce, PipelineFailureReason::ReferenceNameTooLong) => {
             AdminJobFailure::ReduceReferenceNameTooLong
         }
@@ -15051,7 +15071,7 @@ async fn load_status_structural_readiness(
             return Ok(None);
         }
         database
-            .current_structural_finding_stats(&request.project_id)
+            .current_structural_finding_stats_bounded(&request.project_id, STATUS_STORAGE_TIMEOUT)
             .await
             .map(Some)
     };
@@ -15066,12 +15086,13 @@ async fn load_status_structural_readiness(
         )),
     );
     let layer_findings = status_layer_findings(biomarkers_enabled, layers)?;
-    let biomarker_stats = match findings.map_err(internal_error)? {
-        Some(findings) => {
+    let biomarker_stats = match findings {
+        Ok(Some(findings)) => {
             serde_json::to_value(merge_layer_finding_stats(findings, layer_findings.len())?)
                 .map_err(internal_error)?
         }
-        None => json!({"state": "disabled_by_project_config"}),
+        Ok(None) => json!({"state": "disabled_by_project_config"}),
+        Err(error) => status_biomarker_stats_unavailable(&error),
     };
     let numerical = numerical.map_err(internal_error)?;
     let numerical_freshness = if request.status.fresh {
@@ -15111,6 +15132,19 @@ async fn status_database_storage(handler: &CartographMcpHandler) -> Value {
             "detailCommand": "cartograph db usage --project-path <path>"
         }),
     }
+}
+
+fn status_biomarker_stats_unavailable(error: &StorageError) -> Value {
+    json!({
+        "state": "unavailable",
+        "reason": if matches!(error, StorageError::StatementTimeout { .. }) {
+            "timeout"
+        } else {
+            "database_error"
+        },
+        "detailTool": BIOMARKERS_TOOL,
+        "currentGenerationFenced": true
+    })
 }
 
 fn ready_database_storage(totals: StorageTotalsReport) -> Value {
@@ -24172,6 +24206,18 @@ mod tests {
         assert_eq!(storage["humanReadable"]["toast"], "80.06 MiB");
     }
 
+    #[test]
+    fn status_biomarker_timeout_is_explicit_without_hiding_index_readiness() {
+        let unavailable = status_biomarker_stats_unavailable(&StorageError::StatementTimeout {
+            operation: "current-structural-finding-stats",
+        });
+
+        assert_eq!(unavailable["state"], "unavailable");
+        assert_eq!(unavailable["reason"], "timeout");
+        assert_eq!(unavailable["detailTool"], BIOMARKERS_TOOL);
+        assert_eq!(unavailable["currentGenerationFenced"], true);
+    }
+
     struct DropFlag(Arc<AtomicBool>);
 
     impl Drop for DropFlag {
@@ -25180,6 +25226,58 @@ mod tests {
         assert_eq!(
             project_error_reason(error),
             "reduce_reference_name_too_long"
+        );
+
+        let capacity = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Resolve,
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+        };
+        assert_eq!(
+            admin_job_failure(capacity),
+            AdminJobFailure::ResolveGenerationCapacityExceeded
+        );
+        assert_eq!(
+            project_error_reason(capacity),
+            "resolve_generation_capacity_exceeded"
+        );
+
+        let parse_capacity = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Parse,
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+        };
+        assert_eq!(
+            admin_job_failure(parse_capacity),
+            AdminJobFailure::ParseGenerationCapacityExceeded
+        );
+        assert_eq!(
+            project_error_reason(parse_capacity),
+            "parse_generation_capacity_exceeded"
+        );
+
+        let parse_nesting = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Parse,
+            reason: PipelineFailureReason::ExtractionNestingLimitExceeded,
+        };
+        assert_eq!(
+            admin_job_failure(parse_nesting),
+            AdminJobFailure::ParseExtractionNestingLimitExceeded
+        );
+        assert_eq!(
+            project_error_reason(parse_nesting),
+            "parse_extraction_nesting_limit_exceeded"
+        );
+
+        let parse_output = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Parse,
+            reason: PipelineFailureReason::ExtractionOutputLimitExceeded,
+        };
+        assert_eq!(
+            admin_job_failure(parse_output),
+            AdminJobFailure::ParseExtractionOutputLimitExceeded
+        );
+        assert_eq!(
+            project_error_reason(parse_output),
+            "parse_extraction_output_limit_exceeded"
         );
     }
 

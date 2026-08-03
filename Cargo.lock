@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "aho-corasick"
-version = "1.1.4"
+version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
 dependencies = [
  "memchr",
 ]
@@ -589,7 +589,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cartograph-agent"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-cli"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "blake3",
  "cartograph-agent",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-config"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "secrecy",
  "thiserror",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-db"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-domain"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "blake3",
  "serde",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-extract"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "arborium-bash",
  "arborium-c",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-indexer"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-llm"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "blake3",
  "cartograph-domain",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-mcp"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-scip"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "blake3",
  "cartograph-db",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-search"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "cartograph-db",
  "cartograph-domain",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-test-support"
-version = "2.1.9"
+version = "2.1.10"
 dependencies = [
  "sqlx-core",
  "sqlx-postgres",
@@ -1511,9 +1511,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.31"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f8a7b8211e695a1d0cd91cace480d4d0bd57667ab10277cc412c5f7f4884f83"
+checksum = "0b17771570a2b94107741a7b033f19132c2eee21d59d21b24d2ced26500bd66e"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -1557,9 +1557,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.12.0"
+version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "itoa"

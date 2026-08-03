@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-03 (`v2.1.9`).
+Last release audit: 2026-08-03 (`v2.1.10`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -70,7 +70,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.9 top-level command advertised
+This inventory contains every non-hidden v2.1.10 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -210,6 +210,13 @@ requires backup plus the confirmed managed upgrade before HNSW maintenance.
 readable IEC units such as MiB and GiB. Structured JSON retains exact `*Bytes`
 integers and adds `databaseStorage.humanReadable` display strings; `db usage`
 retains the relation, cache, generation, and maintenance detail.
+Optional full-generation biomarker statistics have their own five-second
+status deadline and use serial PostgreSQL planning to avoid parallel-worker
+shared-memory spikes. If that lens is too expensive for a large graph,
+`featureReadiness.biomarkers` reports `state: unavailable` and `reason: timeout`;
+fresh generation, storage, numerical, and graph readiness remain
+available, and `cartograph biomarkers` is the explicit detail path with its
+separate insight deadline.
 
 ## LLM credentials and local backend state
 

@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-03 (`v2.1.9`)
+Last implementation review: 2026-08-03 (`v2.1.10`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,8 +59,10 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns thirty versions. Migration 30
-admits generation digest V11 for anonymous Rust call-target normalization;
+The append-only migration ledger currently owns thirty-one versions. Migration
+31 admits generation digest V12 for stable bounded Go and Python anonymous
+call-target normalization; migration 30 admits generation digest V11 for
+anonymous Rust call-target normalization;
 migration 29 admits generation digest V10
 for call-target-precise secret exposure and incomplete-implementation evidence;
 migration 28 admits generation
@@ -180,11 +182,26 @@ discover -> read/hash -> parse/extract -> resolve -> optional SCIP overlay -> de
 ```
 
 Workers complete out of order; the reducer commits in input order. Canonical
-facts and six PostgreSQL COPY streams are bounded and checked. A failed search
-table or index build rolls back with the staging transaction and therefore
-cannot reach `ready`. Publication is atomic: it first requires the exact
-generation relation and catalog to remain valid, then one transaction swaps the
-current pointer and supersedes the prior current generation.
+facts and six PostgreSQL COPY streams are bounded and checked. Resolve measures
+its unordered facts against the working-set allowance; deterministic reduction
+then independently proves that the canonical output fits the configured final
+generation ceiling. This distinction admits dense graphs that safely reduce
+below the publication bound without weakening either limit.
+
+Each table's canonical order is retained across COPY statements. A new
+statement starts at 100,000 rows or before an encoded batch would exceed 64 MiB;
+one independently bounded row is indivisible. Every statement verifies its
+exact row count, and all statements still run inside the same
+generation-preparation transaction. Successful statements and later prepare
+phases advance a
+monotonic durable-progress observer. The supervisor extends its short generic
+progress deadline only while preparation is running, only after real progress,
+and never beyond the independent COPY deadline; a genuinely stuck transaction
+is still cancelled. A failed COPY, search table, or index build rolls back with
+the staging transaction and therefore cannot reach `ready`. Publication is
+atomic: it first requires the exact generation relation and catalog to remain
+valid, then one transaction swaps the current pointer and supersedes the prior
+current generation.
 
 After an actual COPY, preparation runs column-targeted `ANALYZE` only on the
 six copied relations before the generation can become ready. The relations
@@ -200,6 +217,13 @@ Supervisor tests cover queued/running cancellation, timeouts, slow/hung/panicked
 work, database faults, lease uncertainty/takeover, caller-future drop, child/task
 reaping, rollback, and publication cleanup. The committed worker matrices must
 retain identical digest, rows, edge kinds, diagnostics, and ordered BM25 IDs.
+
+The native parse/resolve/reduce path remains deliberately memory-bounded; it is
+not an arbitrary-size spill pipeline. The default canonical-output ceiling is
+1 GiB, project configuration can explicitly raise it through 8 GiB, and the
+largest resolve/reduce worker reservation is four times that ceiling. Database
+COPY batching removes statement-size/deadline scaling from publication but does
+not erase this native working-set boundary.
 
 ## SCIP interchange without a visual viewer
 

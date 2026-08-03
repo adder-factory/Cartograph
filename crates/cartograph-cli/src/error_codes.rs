@@ -21,6 +21,21 @@ pub(crate) const fn pipeline_failure_reason_code(
     reason: PipelineFailureReason,
 ) -> &'static str {
     match (stage, reason) {
+        (PipelineStage::Parse, PipelineFailureReason::GenerationCapacityExceeded) => {
+            "parse_generation_capacity_exceeded"
+        }
+        (PipelineStage::Parse, PipelineFailureReason::ExtractionNestingLimitExceeded) => {
+            "parse_extraction_nesting_limit_exceeded"
+        }
+        (PipelineStage::Parse, PipelineFailureReason::ExtractionOutputLimitExceeded) => {
+            "parse_extraction_output_limit_exceeded"
+        }
+        (PipelineStage::Resolve, PipelineFailureReason::GenerationCapacityExceeded) => {
+            "resolve_generation_capacity_exceeded"
+        }
+        (PipelineStage::Reduce, PipelineFailureReason::GenerationCapacityExceeded) => {
+            "reduce_generation_capacity_exceeded"
+        }
         (PipelineStage::Reduce, PipelineFailureReason::ReferenceNameTooLong) => {
             "reduce_reference_name_too_long"
         }

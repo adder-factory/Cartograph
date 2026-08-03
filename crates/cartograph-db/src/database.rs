@@ -138,6 +138,7 @@ pub(crate) struct RowReadRequest {
     pub(crate) statement: String,
     pub(crate) operation: &'static str,
     pub(crate) statement_timeout: Duration,
+    pub(crate) serial_planning: bool,
 }
 
 impl RowReadRequest {
@@ -150,7 +151,13 @@ impl RowReadRequest {
             statement,
             operation,
             statement_timeout,
+            serial_planning: false,
         }
+    }
+
+    pub(crate) const fn with_serial_planning(mut self) -> Self {
+        self.serial_planning = true;
+        self
     }
 }
 
@@ -228,6 +235,7 @@ where
         statement,
         operation,
         statement_timeout,
+        serial_planning,
     } = request;
     let database_error = || StorageError::DatabaseOperation { operation };
     let mut transaction = database.pool.begin().await.map_err(|_| database_error())?;
@@ -238,6 +246,12 @@ where
     set_local_statement_timeout(&mut transaction, statement_timeout)
         .await
         .map_err(|()| database_error())?;
+    if serial_planning {
+        query("SELECT set_config('max_parallel_workers_per_gather', '0', true)")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| database_error())?;
+    }
     let rows = bind(query(AssertSqlSafe(statement)))
         .fetch_all(&mut *transaction)
         .await

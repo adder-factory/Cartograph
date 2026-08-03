@@ -2,16 +2,17 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     mem::size_of,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationFacts,
-    GenerationValidationError, GenerationValidationLimits, GenerationValidationReport,
-    MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheKey, NativeParseCacheKeyInput,
-    NativeParseCacheWrite, NumericalSiteInput, ReferenceInput, ReferenceSpanPrecision,
-    SearchDocumentInput, SymbolInput, apply_page_rank, apply_sampled_betweenness,
-    validate_generation_facts,
+    GenerationMemoryModelError, GenerationValidationError, GenerationValidationLimits,
+    GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheKey,
+    NativeParseCacheKeyInput, NativeParseCacheWrite, NumericalSiteInput, ReferenceInput,
+    ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
+    apply_sampled_betweenness, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, NormalizedPath, ProjectId,
@@ -20,7 +21,7 @@ use cartograph_domain::{
 };
 use cartograph_extract::{
     CloneTokenCount, CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX,
-    DiscoveredSource, DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractedFile,
+    DiscoveredSource, DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractError, ExtractedFile,
     ExtractedImportBinding, ExtractedNumericalSite, ExtractedReference, ImportBindingKind,
     NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits,
     SourceReadError, SourceReadOptions, SourceRoot, TYPE_QUERY_VALUE_RESOLUTION_PREFIX,
@@ -41,9 +42,9 @@ use tokio::{
 
 use crate::{
     PipelineFailureReason, PipelineStage, StageCancellation, StageCapacity, StageDeadlinePolicy,
-    StageEnvelope, StageExecution, StageFold, StageItemBudget, StageItemFailure, StageItemMeta,
-    StageOutput, StageRunConfig, StageRunError, StageRunner, StageSequence, StageWorkItem,
-    StageWorkload,
+    StageEnvelope, StageExecution, StageFailureKind, StageFold, StageItemBudget, StageItemFailure,
+    StageItemMeta, StageOutput, StageRunConfig, StageRunError, StageRunner, StageSequence,
+    StageWorkItem, StageWorkload,
 };
 
 const MAX_PIPELINE_RETAINED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -117,6 +118,7 @@ const UUID_TEXT_BYTES: u64 = 36;
 const MAX_RESOLUTION_PROVENANCE_BYTES: u64 = 64;
 const MAX_SYMBOL_QUALIFIED_NAME_BYTES: usize = 2_048;
 const FILE_SYMBOL_FALLBACK_PREFIX: &str = "file:";
+const RESOLVE_WORKING_MULTIPLIER: u64 = 4;
 const VALIDATION_WORKING_MULTIPLIER: u64 = 4;
 const MAXIMUM_SCIP_OVERLAY_BYTES: usize = 256 * 1024 * 1024;
 const MAXIMUM_SCIP_OVERLAY_ROWS: usize = 10_000_000;
@@ -475,6 +477,22 @@ impl NativePipelineConfig {
         self
     }
 
+    /// Largest single supervisor-owned worker reservation required by this pipeline.
+    /// # Errors
+    ///
+    /// Returns an error if a retained generation ceiling cannot be expanded
+    /// into the separately bounded resolve and validation working allowances.
+    pub fn maximum_stage_reservation_bytes(self) -> Result<u64, NativePipelineConfigError> {
+        let retained = self.limits.retained.max_generation_bytes;
+        let resolve = retained
+            .checked_mul(RESOLVE_WORKING_MULTIPLIER)
+            .ok_or_else(|| NativePipelineConfigError::invalid("max_generation_bytes"))?;
+        let validation = retained
+            .checked_mul(VALIDATION_WORKING_MULTIPLIER)
+            .ok_or_else(|| NativePipelineConfigError::invalid("max_generation_bytes"))?;
+        Ok(resolve.max(validation))
+    }
+
     fn stage_deadlines(self) -> StageDeadlinePolicy {
         let now = Instant::now();
         StageDeadlinePolicy::new(
@@ -735,6 +753,14 @@ pub enum NativePipelineError {
     /// A bounded stage rejected, cancelled, or failed work.
     #[error(transparent)]
     Stage(#[from] StageRunError),
+    /// A bounded stage rejected work for one allowlisted actionable reason.
+    #[error("native pipeline failed during {stage}/{reason}")]
+    StageWithReason {
+        /// Exact stage whose worker returned the classified failure.
+        stage: PipelineStage,
+        /// Stable reason with source, identifier, path, and driver text discarded.
+        reason: PipelineFailureReason,
+    },
     /// Canonical validation failed with only an optional allowlisted reason retained.
     #[error("native pipeline canonical validation failed")]
     Validation {
@@ -756,8 +782,8 @@ impl NativePipelineError {
         match self {
             Self::Runtime => PipelineStage::Discover,
             Self::Stage(error) => error.stage(),
+            Self::StageWithReason { stage, .. } | Self::Incomplete { stage } => *stage,
             Self::Validation { .. } => PipelineStage::Reduce,
-            Self::Incomplete { stage } => *stage,
         }
     }
 
@@ -765,6 +791,7 @@ impl NativePipelineError {
     #[must_use]
     pub const fn reason(&self) -> Option<PipelineFailureReason> {
         match self {
+            Self::StageWithReason { reason, .. } => Some(*reason),
             Self::Validation { reason } => *reason,
             Self::Runtime | Self::Stage(_) | Self::Incomplete { .. } => None,
         }
@@ -1052,6 +1079,8 @@ async fn run_parse_stage(
     };
     let source_root = stages.source_root.clone();
     let worker_cache = parse_cache;
+    let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
+    let worker_failure_reasons = Arc::clone(&failure_reasons);
     let execution = StageExecution::new(
         StageRunConfig::new(
             PipelineStage::Parse,
@@ -1063,10 +1092,11 @@ async fn run_parse_stage(
             move |item: StageWorkItem<FileId, SourceManifestEntry>| {
                 let source_root = source_root.clone();
                 let parse_cache = worker_cache.clone();
+                let failure_reasons = Arc::clone(&worker_failure_reasons);
                 async move {
                     let cancellation = item.cancellation();
-                    let (_, _, manifest) = item.into_parts();
-                    parse_manifest_entry_with_cache(
+                    let (sequence, _, manifest) = item.into_parts();
+                    let result = parse_manifest_entry_with_cache(
                         ParseManifestRequest {
                             source_root: &source_root,
                             manifest,
@@ -1074,7 +1104,18 @@ async fn run_parse_stage(
                         },
                         cancellation,
                     )
-                    .await
+                    .await;
+                    match result {
+                        Ok(parsed) => Ok(parsed),
+                        Err(failure) => {
+                            if let Some(reason) = failure.reason()
+                                && let Ok(mut retained) = failure_reasons.lock()
+                            {
+                                retained.insert(sequence, reason);
+                            }
+                            Err(StageItemFailure)
+                        }
+                    }
                 }
             },
         ),
@@ -1088,12 +1129,36 @@ async fn run_parse_stage(
             },
         ),
     );
-    stages
-        .runner
-        .execute(execution)
-        .await
-        .map(|state| (state.facts, state.cache))
-        .map_err(Into::into)
+    match stages.runner.execute(execution).await {
+        Ok(state) => Ok((state.facts, state.cache)),
+        Err(StageRunError::Reduce {
+            stage: PipelineStage::Parse,
+            ..
+        }) => Err(NativePipelineError::StageWithReason {
+            stage: PipelineStage::Parse,
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+        }),
+        Err(error) => {
+            let reason = match &error {
+                StageRunError::Item {
+                    stage: PipelineStage::Parse,
+                    sequence,
+                    kind: StageFailureKind::Worker,
+                } => failure_reasons
+                    .lock()
+                    .ok()
+                    .and_then(|retained| retained.get(sequence).copied()),
+                _ => None,
+            };
+            match reason {
+                Some(reason) => Err(NativePipelineError::StageWithReason {
+                    stage: PipelineStage::Parse,
+                    reason,
+                }),
+                None => Err(NativePipelineError::Stage(error)),
+            }
+        }
+    }
 }
 
 struct ParseStageAccumulator {
@@ -1130,10 +1195,41 @@ struct ParseManifestRequest<'input> {
     parse_cache: Option<&'input NativeParseCache>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParseManifestFailure {
+    reason: Option<PipelineFailureReason>,
+}
+
+impl ParseManifestFailure {
+    const fn unclassified() -> Self {
+        Self { reason: None }
+    }
+
+    const fn from_extract(error: ExtractError) -> Self {
+        let reason = match error {
+            ExtractError::NestingLimit => {
+                Some(PipelineFailureReason::ExtractionNestingLimitExceeded)
+            }
+            ExtractError::OutputLimit => Some(PipelineFailureReason::ExtractionOutputLimitExceeded),
+            ExtractError::UnsupportedLanguage
+            | ExtractError::LanguageMismatch
+            | ExtractError::GrammarUnavailable
+            | ExtractError::ParserStopped
+            | ExtractError::Cancelled
+            | ExtractError::InvalidSpan => None,
+        };
+        Self { reason }
+    }
+
+    const fn reason(self) -> Option<PipelineFailureReason> {
+        self.reason
+    }
+}
+
 async fn parse_manifest_entry_with_cache(
     request: ParseManifestRequest<'_>,
     cancellation: StageCancellation,
-) -> Result<ParsedManifestEntry, StageItemFailure> {
+) -> Result<ParsedManifestEntry, ParseManifestFailure> {
     let ParseManifestRequest {
         source_root,
         manifest,
@@ -1146,7 +1242,8 @@ async fn parse_manifest_entry_with_cache(
             match cache.database.load_native_parse_cache(key).await {
                 Ok(Some(record)) => {
                     if let Some(file) = decode_cached_file(&manifest, &record) {
-                        revalidate_manifest(source_root, &manifest, &cancellation)?;
+                        revalidate_manifest(source_root, &manifest, &cancellation)
+                            .map_err(|_| ParseManifestFailure::unclassified())?;
                         metrics.hits = 1;
                         return Ok(ParsedManifestEntry {
                             file,
@@ -1169,7 +1266,7 @@ async fn parse_manifest_entry_with_cache(
         }
     }
     if cancellation.is_cancelled() {
-        return Err(StageItemFailure);
+        return Err(ParseManifestFailure::unclassified());
     }
     metrics.parsed_files = 1;
     let parse_cancellation = cancellation.clone();
@@ -1177,10 +1274,11 @@ async fn parse_manifest_entry_with_cache(
         parse_manifest_entry(source_root, &manifest, || parse_cancellation.is_cancelled())
     })?;
     if cancellation.is_cancelled() {
-        return Err(StageItemFailure);
+        return Err(ParseManifestFailure::unclassified());
     }
     if let (Some(cache), Some(key)) = (parse_cache, key.as_ref()) {
-        let payload = serde_json::to_vec(&file).map_err(|_| StageItemFailure)?;
+        let payload =
+            serde_json::to_vec(&file).map_err(|_| ParseManifestFailure::unclassified())?;
         if payload.len() <= MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES {
             match cache.database.store_native_parse_cache(key, &payload).await {
                 Ok(NativeParseCacheWrite::Inserted) => metrics.writes = 1,
@@ -1261,16 +1359,19 @@ async fn run_resolve_stage(
     let evidence_policy = config.evidence_policy();
     let clone_policy = config.clone_policy();
     let source_root = stages.source_root.clone();
+    let failure_reason = Arc::new(Mutex::new(None));
+    let worker_failure_reason = Arc::clone(&failure_reason);
     let execution = StageExecution::new(
         StageRunConfig::new(PipelineStage::Resolve, StageCapacity::new(1, 0), deadline),
         StageWorkload::new(
             inputs,
             move |item: StageWorkItem<u8, NativeFactAccumulator>| {
                 let source_root = source_root.clone();
+                let worker_failure_reason = Arc::clone(&worker_failure_reason);
                 async move {
                     let cancellation = item.cancellation();
                     let (_, _, extracted) = item.into_parts();
-                    block_in_place(move || {
+                    let result = block_in_place(move || {
                         resolve_generation(
                             ResolveGenerationRequest {
                                 extracted,
@@ -1281,7 +1382,18 @@ async fn run_resolve_stage(
                             },
                             || cancellation.is_cancelled(),
                         )
-                    })
+                    });
+                    match result {
+                        Ok(output) => Ok(output),
+                        Err(failure) => {
+                            if let Some(reason) = failure.reason()
+                                && let Ok(mut retained) = worker_failure_reason.lock()
+                            {
+                                *retained = Some(reason);
+                            }
+                            Err(StageItemFailure)
+                        }
+                    }
                 }
             },
         ),
@@ -1295,13 +1407,22 @@ async fn run_resolve_stage(
             },
         ),
     );
-    stages
-        .runner
-        .execute(execution)
-        .await?
-        .ok_or(NativePipelineError::Incomplete {
+    match stages.runner.execute(execution).await {
+        Ok(output) => output.ok_or(NativePipelineError::Incomplete {
             stage: PipelineStage::Resolve,
-        })
+        }),
+        Err(error @ StageRunError::Item { .. }) => {
+            let reason = failure_reason.lock().ok().and_then(|retained| *retained);
+            match reason {
+                Some(reason) => Err(NativePipelineError::StageWithReason {
+                    stage: PipelineStage::Resolve,
+                    reason,
+                }),
+                None => Err(NativePipelineError::Stage(error)),
+            }
+        }
+        Err(error) => Err(NativePipelineError::Stage(error)),
+    }
 }
 
 struct ScipOverlayWork {
@@ -1525,9 +1646,10 @@ fn generation_validation_failure_reason(
         GenerationValidationError::ReferenceNameTooLong => {
             Some(PipelineFailureReason::ReferenceNameTooLong)
         }
-        GenerationValidationError::Storage(_)
-        | GenerationValidationError::Cancelled
-        | GenerationValidationError::RetainedLimit => None,
+        GenerationValidationError::RetainedLimit => {
+            Some(PipelineFailureReason::GenerationCapacityExceeded)
+        }
+        GenerationValidationError::Storage(_) | GenerationValidationError::Cancelled => None,
     }
 }
 
@@ -1696,29 +1818,32 @@ fn parse_manifest_entry<Cancel>(
     source_root: &SourceRoot,
     manifest: &SourceManifestEntry,
     mut cancelled: Cancel,
-) -> Result<ExtractedFile, StageItemFailure>
+) -> Result<ExtractedFile, ParseManifestFailure>
 where
     Cancel: FnMut() -> bool,
 {
-    let exact_limits =
-        exact_source_limits(manifest.byte_size, exact_limit_ceiling(manifest.byte_size)?)?;
+    let ceiling = exact_limit_ceiling(manifest.byte_size)
+        .map_err(|_| ParseManifestFailure::unclassified())?;
+    let exact_limits = exact_source_limits(manifest.byte_size, ceiling)
+        .map_err(|_| ParseManifestFailure::unclassified())?;
     let snapshot = source_root
         .read_with_cancellation(
             &manifest.path,
             SourceReadOptions::new(exact_limits, &mut cancelled),
         )
-        .map_err(|_| StageItemFailure)?;
+        .map_err(|_| ParseManifestFailure::unclassified())?;
     if snapshot.byte_size() != manifest.byte_size
         || snapshot.content_hash() != &manifest.content_hash
         || snapshot.file_id() != &manifest.file_id
         || snapshot.language() != manifest.language
     {
-        return Err(StageItemFailure);
+        return Err(ParseManifestFailure::unclassified());
     }
-    let mut extractor = NativeExtractor::new(snapshot.language()).map_err(|_| StageItemFailure)?;
+    let mut extractor =
+        NativeExtractor::new(snapshot.language()).map_err(ParseManifestFailure::from_extract)?;
     extractor
         .extract_with_cancellation(&snapshot, cancelled)
-        .map_err(|_| StageItemFailure)
+        .map_err(ParseManifestFailure::from_extract)
 }
 
 fn exact_source_limits(
@@ -2222,6 +2347,27 @@ struct ResolutionReport {
 struct ResolveBudget {
     charged_bytes: u64,
     maximum_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolveGenerationFailure {
+    reason: Option<PipelineFailureReason>,
+}
+
+impl ResolveGenerationFailure {
+    const fn unclassified() -> Self {
+        Self { reason: None }
+    }
+
+    const fn generation_capacity_exceeded() -> Self {
+        Self {
+            reason: Some(PipelineFailureReason::GenerationCapacityExceeded),
+        }
+    }
+
+    const fn reason(self) -> Option<PipelineFailureReason> {
+        self.reason
+    }
 }
 
 impl ResolveBudget {
@@ -3983,7 +4129,7 @@ struct DerivedResolutionEvidence<'context, Cancel> {
 fn resolve_generation<Cancel>(
     request: ResolveGenerationRequest,
     mut cancelled: Cancel,
-) -> Result<(GenerationFacts, ResolutionReport), StageItemFailure>
+) -> Result<(GenerationFacts, ResolutionReport), ResolveGenerationFailure>
 where
     Cancel: FnMut() -> bool,
 {
@@ -3995,10 +4141,13 @@ where
         clone_policy,
     } = request;
     if cancelled() {
-        return Err(StageItemFailure);
+        return Err(ResolveGenerationFailure::unclassified());
     }
-    let working_limit = maximum_bytes.checked_mul(3).ok_or(StageItemFailure)?;
-    let mut budget = ResolveBudget::new(extracted.retained_bytes, working_limit)?;
+    let working_limit = maximum_bytes
+        .checked_mul(RESOLVE_WORKING_MULTIPLIER)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    let mut budget = ResolveBudget::new(extracted.retained_bytes, working_limit)
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
     if !evidence_policy.retention.docstrings {
         for file in &mut extracted.files {
             for symbol in &mut file.symbols {
@@ -4014,7 +4163,8 @@ where
             budget: &mut budget,
         },
         &mut cancelled,
-    )?;
+    )
+    .map_err(|_| classify_resolve_failure(&budget))?;
     let index = build_resolution_index(
         &extracted,
         ResolutionIndexContext {
@@ -4022,14 +4172,16 @@ where
             budget: &mut budget,
             cancelled: &mut cancelled,
         },
-    )?;
+    )
+    .map_err(|_| classify_resolve_failure(&budget))?;
     let diagnostics = extracted.diagnostics;
     let mut report = ResolutionReport {
         diagnostics,
         ..ResolutionReport::default()
     };
     let mut facts = GenerationFacts::default();
-    reserve_generation_vectors(&mut facts, &extracted, &mut budget)?;
+    reserve_generation_vectors(&mut facts, &extracted, &mut budget)
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
     {
         let mut output = ResolutionOutput {
             index: &index,
@@ -4038,7 +4190,9 @@ where
             budget: &mut budget,
         };
         for file in extracted.files {
-            output.append_file(file, &mut cancelled)?;
+            output
+                .append_file(file, &mut cancelled)
+                .map_err(|_| classify_resolve_failure(output.budget))?;
         }
     }
     append_derived_resolution_evidence(DerivedResolutionEvidence {
@@ -4047,14 +4201,42 @@ where
         budget: &mut budget,
         policy: evidence_policy,
         cancelled: &mut cancelled,
-    })?;
+    })
+    .map_err(|_| classify_resolve_failure(&budget))?;
+    // Unordered facts are the resolver's bounded working set. Canonical
+    // validation below separately enforces `maximum_bytes` on the reduced
+    // output, so applying that final-output ceiling here rejects inputs that
+    // safely reduce well below it.
     let measurement = facts
-        .measure_retained_bytes(maximum_bytes, &mut cancelled)
-        .map_err(|_| StageItemFailure)?;
-    budget.charge(measurement.transient_bytes())?;
+        .measure_retained_bytes(working_limit, &mut cancelled)
+        .map_err(classify_resolve_measurement_failure)?;
+    budget
+        .charge(measurement.transient_bytes())
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
     report.retained_bytes = measurement.retained_bytes();
     report.charged_high_water_bytes = budget.charged_bytes;
     Ok((facts, report))
+}
+
+fn classify_resolve_failure(budget: &ResolveBudget) -> ResolveGenerationFailure {
+    if budget.charged_bytes > budget.maximum_bytes {
+        ResolveGenerationFailure::generation_capacity_exceeded()
+    } else {
+        ResolveGenerationFailure::unclassified()
+    }
+}
+
+const fn classify_resolve_measurement_failure(
+    error: GenerationMemoryModelError,
+) -> ResolveGenerationFailure {
+    match error {
+        GenerationMemoryModelError::RetainedLimit => {
+            ResolveGenerationFailure::generation_capacity_exceeded()
+        }
+        GenerationMemoryModelError::Cancelled | GenerationMemoryModelError::MetadataDepth => {
+            ResolveGenerationFailure::unclassified()
+        }
+    }
 }
 
 fn append_derived_resolution_evidence<Cancel>(
@@ -11013,7 +11195,7 @@ fn try_clone_text(value: &str) -> Result<String, StageItemFailure> {
 
 fn resolve_reservation(maximum_generation_bytes: u64) -> Result<u64, NativePipelineError> {
     maximum_generation_bytes
-        .checked_mul(3)
+        .checked_mul(RESOLVE_WORKING_MULTIPLIER)
         .ok_or(NativePipelineError::Incomplete {
             stage: PipelineStage::Resolve,
         })
@@ -11155,21 +11337,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "3170deb1483d25525e758641db75733beaaf022da13c4e5ec8c8365d01289eaf";
+        "0dcc80c5f377a570b40707768e50b266cb761d8f554fc685d0ad486f639162b2";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "e7e1287cf8c8f4d4eb5413c8b904d87b49b584210615b0f78bad750e9a95e5b3";
+        "5c906e90c421712b0a734d5b72db9afe4f5afafaa4b6a284d52e3c6b1995d21a";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "e84b50020236b1953e8745ce8787a6a4d928c9a267227ee97dcb9f747f4188df";
+        "e1d2e2ffbc19febb65cf7fc5f184b8f7466c98c9251eb83c4395b1bed720bced";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 13;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "bcab4c6025a7f943541abbe11952f990f87a614f8191635e28da23466c6f46d2";
+        "805f9da1e4fa1b04cd62fc6fd925c748cccac1120401dc1d335eb9703dd17161";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (13, 49, 44, 32, 49);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -15841,7 +16023,10 @@ export function secondClone(value: number) {
                 next >= CANCEL_AFTER_POLLS
             },
         );
-        assert!(matches!(result, Err(StageItemFailure)));
+        assert!(matches!(
+            result,
+            Err(ResolveGenerationFailure { reason: None })
+        ));
         assert_eq!(polls.get(), CANCEL_AFTER_POLLS);
     }
 
@@ -15877,8 +16062,9 @@ export function secondClone(value: number) {
         assert_eq!(polls.get(), INNER_CANCEL_AFTER_POLLS);
     }
 
-    #[test]
-    fn unresolved_reference_edge_capacity_is_part_of_the_retained_proof() {
+    fn resolve_unresolved_reference_fixture(
+        maximum_bytes: u64,
+    ) -> (GenerationFacts, ResolutionReport) {
         let mut calls = String::new();
         for index in 0..256 {
             append_fixture_text(&mut calls, format_args!("missing_{index}();"));
@@ -15897,14 +16083,16 @@ export function secondClone(value: number) {
         let extracted = extractor
             .extract(&snapshot)
             .unwrap_or_else(|error| panic!("unresolved extraction failed: {error}"));
+        // Parsing has its own retained-output admission. This helper varies
+        // only the resolver's final canonical-output policy.
         let mut accumulator = NativeFactAccumulator::new(TEST_GENERATION_BYTES);
         accumulator
             .push(extracted)
             .unwrap_or_else(|_| panic!("unresolved facts exceeded the modeled input limit"));
-        let (facts, report) = resolve_generation(
+        resolve_generation(
             ResolveGenerationRequest {
                 extracted: accumulator,
-                maximum_bytes: TEST_GENERATION_BYTES,
+                maximum_bytes,
                 source_root: test_source_root(),
                 evidence_policy: FULL_TEST_EVIDENCE,
                 clone_policy: NativeClonePolicy {
@@ -15913,7 +16101,12 @@ export function secondClone(value: number) {
             },
             || false,
         )
-        .unwrap_or_else(|_| panic!("unresolved resolution exceeded its declared budget"));
+        .unwrap_or_else(|_| panic!("unresolved resolution exceeded its declared budget"))
+    }
+
+    #[test]
+    fn unresolved_reference_edge_capacity_is_part_of_the_retained_proof() {
+        let (facts, report) = resolve_unresolved_reference_fixture(TEST_GENERATION_BYTES);
         assert_eq!(report.resolved, 0);
         assert_eq!(report.unresolved, 256);
         assert_eq!(facts.edges.len(), 1);
@@ -15927,6 +16120,50 @@ export function secondClone(value: number) {
         let edge_capacity_bytes = usize_to_u64(facts.edges.capacity())
             .saturating_mul(usize_to_u64(size_of::<EdgeInput>()));
         assert!(report.retained_bytes >= edge_capacity_bytes);
+    }
+
+    #[test]
+    fn resolve_keeps_unordered_working_facts_distinct_from_canonical_output() {
+        let (facts, report) = resolve_unresolved_reference_fixture(TEST_GENERATION_BYTES);
+        let generous_limits =
+            generation_validation_limits(TEST_GENERATION_BYTES, PipelineStage::Reduce)
+                .unwrap_or_else(|error| panic!("generous validation limits failed: {error}"));
+        let (_, validation) = validate_generation_facts(facts, generous_limits, || false)
+            .unwrap_or_else(|error| panic!("generous validation failed: {error}"));
+        assert!(report.retained_bytes > validation.output_bytes());
+        let maximum_output_bytes = report
+            .retained_bytes
+            .checked_sub(1)
+            .unwrap_or_else(|| panic!("fixture output limit underflowed"));
+        assert!(validation.output_bytes() < maximum_output_bytes);
+        assert!(maximum_output_bytes < report.retained_bytes);
+
+        let (facts, bounded_report) = resolve_unresolved_reference_fixture(maximum_output_bytes);
+        assert!(bounded_report.retained_bytes > maximum_output_bytes);
+        let bounded_limits =
+            generation_validation_limits(maximum_output_bytes, PipelineStage::Reduce)
+                .unwrap_or_else(|error| panic!("bounded validation limits failed: {error}"));
+        let (_, bounded_validation) = validate_generation_facts(facts, bounded_limits, || false)
+            .unwrap_or_else(|error| panic!("bounded validation failed: {error}"));
+        assert!(bounded_validation.output_bytes() <= maximum_output_bytes);
+        assert!(
+            bounded_validation.charged_high_water_bytes() <= bounded_limits.maximum_working_bytes()
+        );
+    }
+
+    #[test]
+    fn resolve_measurement_classifies_only_the_retained_limit_as_capacity() {
+        assert_eq!(
+            classify_resolve_measurement_failure(GenerationMemoryModelError::RetainedLimit)
+                .reason(),
+            Some(PipelineFailureReason::GenerationCapacityExceeded)
+        );
+        for error in [
+            GenerationMemoryModelError::Cancelled,
+            GenerationMemoryModelError::MetadataDepth,
+        ] {
+            assert_eq!(classify_resolve_measurement_failure(error).reason(), None);
+        }
     }
 
     #[test]
@@ -16089,6 +16326,67 @@ export function secondClone(value: number) {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parse_preserves_bounded_extraction_limit_reasons_without_source_details() {
+        let mut nested = String::from("void deep(void) {\n");
+        for _ in 0..300 {
+            nested.push_str("if (enabled) {\n");
+        }
+        for _ in 0..300 {
+            nested.push_str("}\n");
+        }
+        nested.push_str("}\n");
+        assert_parse_extraction_reason(
+            "private-nesting-marker.c",
+            nested,
+            PipelineFailureReason::ExtractionNestingLimitExceeded,
+        )
+        .await;
+
+        let mut excessive = String::new();
+        for index in 0..20_000 {
+            excessive.push_str("int v");
+            excessive.push_str(&index.to_string());
+            excessive.push_str(";\n");
+        }
+        assert_parse_extraction_reason(
+            "private-output-marker.c",
+            excessive,
+            PipelineFailureReason::ExtractionOutputLimitExceeded,
+        )
+        .await;
+    }
+
+    async fn assert_parse_extraction_reason(
+        file_name: &str,
+        source: String,
+        expected: PipelineFailureReason,
+    ) {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create extraction-limit fixture: {error}"));
+        assert!(fs::write(directory.path().join(file_name), &source).is_ok());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open extraction-limit fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let result = build_native_generation(&runner, source_root, config(SERIAL_WORKERS)).await;
+        let Err(error) = result else {
+            panic!("extraction-limit fixture unexpectedly produced a generation");
+        };
+        assert_eq!(error.stage(), PipelineStage::Parse);
+        assert_eq!(error.reason(), Some(expected));
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(file_name));
+        assert!(!rendered.contains("private_output_marker"));
+        assert!(!rendered.contains(&directory.path().to_string_lossy().to_string()));
+        drop(cancellation);
+        let report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(report.all_joined);
+        assert!(report.worker_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_failure_preserves_the_real_native_stage() {
         let directory =
             tempdir().unwrap_or_else(|error| panic!("could not create resolve fixture: {error}"));
@@ -16112,13 +16410,10 @@ export function secondClone(value: number) {
             panic!("rejecting resolve limit unexpectedly produced facts");
         };
         assert_eq!(error.stage(), PipelineStage::Resolve);
-        assert!(matches!(
-            error,
-            NativePipelineError::Stage(StageRunError::Item {
-                stage: PipelineStage::Resolve,
-                ..
-            })
-        ));
+        assert_eq!(
+            error.reason(),
+            Some(PipelineFailureReason::GenerationCapacityExceeded)
+        );
         drop(cancellation);
         let report = tasks
             .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
@@ -16187,10 +16482,10 @@ export function secondClone(value: number) {
         .await;
         assert!(matches!(
             result,
-            Err(NativePipelineError::Stage(StageRunError::Reduce {
+            Err(NativePipelineError::StageWithReason {
                 stage: PipelineStage::Parse,
-                ..
-            }))
+                reason: PipelineFailureReason::GenerationCapacityExceeded,
+            })
         ));
         drop(cancellation);
         let report = tasks
@@ -16394,6 +16689,13 @@ export function secondClone(value: number) {
 
     #[test]
     fn config_rejects_zero_capacity_and_unbounded_memory() {
+        let config = config(SERIAL_WORKERS);
+        assert_eq!(
+            config
+                .maximum_stage_reservation_bytes()
+                .unwrap_or_else(|error| panic!("stage reservation failed: {error}")),
+            TEST_GENERATION_BYTES * RESOLVE_WORKING_MULTIPLIER
+        );
         assert!(matches!(
             NativePipelineParallelism::new(
                 StageCapacity::new(0, 0),

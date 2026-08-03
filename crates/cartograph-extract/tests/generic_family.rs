@@ -1,9 +1,14 @@
 //! Integration coverage for Cartograph native extraction contracts.
 
+use std::fmt::Write as _;
+
 mod dependency_ownership;
 
 use cartograph_domain::SourceLanguage;
-use cartograph_extract::{NativeExtractor, NativeGrammar, SourceLimits, SourceSnapshot};
+use cartograph_extract::{
+    NativeExtractor, NativeGrammar, SourceLimits, SourceSnapshot, native_extraction_reservation,
+    native_output_limit,
+};
 
 const SOURCE_LIMIT: usize = 1024 * 1024;
 const SECRET_SENTINEL: &str = "sk_live_generic_family_secret";
@@ -226,6 +231,38 @@ fn remaining_grammar_families_are_production_admitted_and_emit_bounded_symbols()
             fixture.path
         );
     }
+}
+
+#[test]
+fn dense_yaml_uses_separate_working_and_retained_output_bounds() {
+    let mut source = String::from("root:\n");
+    for index in 0..1_500 {
+        writeln!(source, "  field_{index}: value_{index}")
+            .unwrap_or_else(|error| panic!("could not construct dense YAML fixture: {error}"));
+    }
+    let snapshot = SourceSnapshot::from_bytes("fixtures/dense.yaml", source.as_bytes(), limits())
+        .unwrap_or_else(|error| panic!("dense YAML snapshot failed: {error}"));
+    let mut extractor = NativeExtractor::new(SourceLanguage::Yaml)
+        .unwrap_or_else(|error| panic!("YAML extractor failed: {error}"));
+    let extracted = extractor
+        .extract(&snapshot)
+        .unwrap_or_else(|error| panic!("dense YAML extraction failed: {error}"));
+    let source_bytes = u64::try_from(source.len())
+        .unwrap_or_else(|error| panic!("dense YAML source length overflowed: {error}"));
+    let retained = extracted.modeled_retained_bytes();
+    let retained_limit = native_output_limit(source_bytes)
+        .unwrap_or_else(|| panic!("dense YAML retained limit overflowed"));
+    let working_limit = native_extraction_reservation(source_bytes)
+        .unwrap_or_else(|| panic!("dense YAML working limit overflowed"));
+    let previous_combined_limit = source_bytes
+        .checked_mul(16)
+        .and_then(|bytes| bytes.checked_add(256 * 1024))
+        .unwrap_or_else(|| panic!("dense YAML previous limit overflowed"));
+
+    assert!(extracted.symbols.len() >= 1_500);
+    assert!(retained > previous_combined_limit);
+    assert!(retained <= retained_limit, "{retained} > {retained_limit}");
+    assert!(retained_limit < working_limit);
 }
 
 #[test]

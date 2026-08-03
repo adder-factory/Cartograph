@@ -13,6 +13,7 @@ The file is optional. A representative v2 configuration is:
   "include": ["src/**", "tests/**"],
   "exclude": ["vendor/**", "generated/**"],
   "maxFileSize": 5242880,
+  "maxGenerationBytes": 1073741824,
   "extractDocstrings": true,
   "trackCallSites": true,
   "enableCentrality": true,
@@ -39,6 +40,7 @@ The file is optional. A representative v2 configuration is:
 | `include` | Project-relative glob allowlist; omitted means all admitted paths | omitted |
 | `exclude` | Additional project-relative glob exclusions | `[]` plus built-in exclusions |
 | `maxFileSize` | Per-source byte ceiling, 1 byte through 32 MiB | runtime default |
+| `maxGenerationBytes` | Final canonical-generation byte ceiling, 1 byte through 8 GiB | 1 GiB |
 | `extractDocstrings` | Retain safe structural documentation evidence | `true` |
 | `trackCallSites` | Retain reference-site provenance | `true` |
 | `indexSubmodules` | Include Git submodules | `true` |
@@ -63,6 +65,22 @@ otherwise hide v2's additive coverage. New configuration should use version 2.
 Discovery follows Git-compatible ignore behavior, then applies explicit
 Cartograph policy. A `.cartographignore` marker excludes its directory tree; at
 the project root it opts the entire checkout out of indexing.
+
+`maxGenerationBytes` bounds the reduced canonical generation that can be
+published; it is not a total-process-memory limit. Resolve and canonical
+validation admit separately measured unordered/temporary working sets of up to
+four times that value. Raising the option is therefore an explicit high-memory
+choice and should follow a typed `*_generation_capacity_exceeded` result plus
+observed host headroom. The default remains 1 GiB.
+
+PostgreSQL publication is independently bounded: each canonical table starts a
+new COPY statement at 100,000 rows or before an encoded batch would exceed 64
+MiB; one independently bounded row is indivisible. The complete generation
+remains in one atomic transaction. This prevents one
+large COPY statement from consuming the whole database deadline, but it does
+not turn native parse/resolve/reduce into an unbounded spill-to-database
+pipeline. Extremely large corpora can still require an explicit generation
+ceiling or can fail safely before publication.
 
 Dependency audit allowlists are read from `dependenciesAllowlist` or
 `analysis.dependenciesAllowlist`. Architecture-layer policy uses `layers` and

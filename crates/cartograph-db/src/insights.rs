@@ -2114,6 +2114,26 @@ impl CartographDatabase {
         &self,
         project_id: &ProjectId,
     ) -> Result<StructuralFindingStats, StorageError> {
+        self.current_structural_finding_stats_bounded(project_id, DEFAULT_INSIGHT_TIMEOUT)
+            .await
+    }
+
+    /// Aggregate every current-generation finding within a caller-selected
+    /// statement timeout no greater than the normal insight deadline.
+    /// # Errors
+    ///
+    /// Returns an error if the timeout is zero or exceeds the insight bound,
+    /// the aggregate cannot be queried, or a stored count is malformed.
+    pub async fn current_structural_finding_stats_bounded(
+        &self,
+        project_id: &ProjectId,
+        statement_timeout: Duration,
+    ) -> Result<StructuralFindingStats, StorageError> {
+        if statement_timeout.is_zero() || statement_timeout > DEFAULT_INSIGHT_TIMEOUT {
+            return Err(StorageError::InvalidInput {
+                field: "statement_timeout",
+            });
+        }
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r"{}, totals AS (
@@ -2151,10 +2171,11 @@ impl CartographDatabase {
             finding_ctes(&schema),
         );
         let mut rows = self
-            .bounded_rows(
+            .bounded_serial_rows(
                 statement,
                 |statement| statement.bind(project_id.as_str()),
                 "current-structural-finding-stats",
+                statement_timeout,
             )
             .await?;
         let row = rows
@@ -2170,6 +2191,21 @@ impl CartographDatabase {
         operation: &'static str,
     ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError> {
         let request = RowReadRequest::new(statement, operation, DEFAULT_INSIGHT_TIMEOUT);
+        read_rows(self, request, bind).await
+    }
+
+    async fn bounded_serial_rows<'query>(
+        &self,
+        statement: String,
+        bind: impl FnOnce(PgQuery<'query>) -> PgQuery<'query>,
+        operation: &'static str,
+        statement_timeout: Duration,
+    ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError> {
+        // This full-generation aggregate can otherwise reserve one dynamic
+        // shared-memory segment per PostgreSQL worker. Serial planning keeps
+        // status bounded on large projects without weakening the query.
+        let request =
+            RowReadRequest::new(statement, operation, statement_timeout).with_serial_planning();
         read_rows(self, request, bind).await
     }
 }

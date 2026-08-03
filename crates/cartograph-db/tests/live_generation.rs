@@ -81,8 +81,9 @@ const STRUCTURAL_DIAGNOSTICS_DIGEST_V8_MIGRATION_VERSION: i64 = 27;
 const BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION: i64 = 28;
 const DETECTOR_PRECISION_DIGEST_V10_MIGRATION_VERSION: i64 = 29;
 const RUST_CLOSURE_CALL_TARGET_DIGEST_V11_MIGRATION_VERSION: i64 = 30;
-const LATEST_MIGRATION_VERSION: i64 = RUST_CLOSURE_CALL_TARGET_DIGEST_V11_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 30] = [
+const GO_CALL_TARGET_DIGEST_V12_MIGRATION_VERSION: i64 = 31;
+const LATEST_MIGRATION_VERSION: i64 = GO_CALL_TARGET_DIGEST_V12_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 31] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -113,6 +114,7 @@ const EXPECTED_MIGRATIONS: [i64; 30] = [
     BIOMARKER_PRECISION_DIGEST_V9_MIGRATION_VERSION,
     DETECTOR_PRECISION_DIGEST_V10_MIGRATION_VERSION,
     RUST_CLOSURE_CALL_TARGET_DIGEST_V11_MIGRATION_VERSION,
+    GO_CALL_TARGET_DIGEST_V12_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -159,6 +161,8 @@ const DETECTOR_PRECISION_DIGEST_V10_MIGRATION_CHECKSUM: &str =
     "84f354b54354963e1a0733e8415d87b4dec7475bdf32d6e6365e0e390eb19b22";
 const RUST_CLOSURE_CALL_TARGET_DIGEST_V11_MIGRATION_CHECKSUM: &str =
     "263ca9fb0ce149525b45c77ab037dd363e4c294d880c06a584ec93904efc30ef";
+const GO_CALL_TARGET_DIGEST_V12_MIGRATION_CHECKSUM: &str =
+    "a078b0076c3448fe6fee0fb99d0ddf0c2073dfc64be1ca860dea74b222714b46";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -3747,6 +3751,10 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
         schema_migration_checksum(pool, schema, 30).await,
         RUST_CLOSURE_CALL_TARGET_DIGEST_V11_MIGRATION_CHECKSUM
     );
+    assert_eq!(
+        schema_migration_checksum(pool, schema, 31).await,
+        GO_CALL_TARGET_DIGEST_V12_MIGRATION_CHECKSUM
+    );
 
     let definition = query(
         r"SELECT pg_get_constraintdef(constraints.oid) AS definition
@@ -3763,9 +3771,9 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
     .fetch_one(pool)
     .await
     .and_then(|row| row.try_get::<String, _>("definition"))
-    .unwrap_or_else(|error| panic!("could not inspect digest-v11 constraint: {error}"));
+    .unwrap_or_else(|error| panic!("could not inspect digest-v12 constraint: {error}"));
     assert!(
-        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]"),
+        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]"),
         "{definition}"
     );
 }

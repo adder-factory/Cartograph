@@ -338,6 +338,96 @@ fn rust_omits_anonymous_closure_call_targets_without_retaining_their_bodies() {
 }
 
 #[test]
+fn go_omits_immediately_invoked_function_targets_without_retaining_their_bodies() {
+    const STORAGE_REFERENCE_NAME_BYTES: usize = 4_096;
+
+    let payload = "x".repeat(5_000);
+    let source = format!(
+        r#"package repro
+
+func syntheticTrigger() int {{
+    return func() int {{
+        payload := "{payload}"
+        return len(payload)
+    }}()
+}}
+"#
+    );
+    let file = extract("src/repro.go", &source);
+
+    assert!(file.references.iter().all(|reference| {
+        reference.name.len() <= STORAGE_REFERENCE_NAME_BYTES
+            && !reference.name.contains("payload :=")
+            && !reference.name.contains(&payload)
+    }));
+    assert!(
+        file.references
+            .iter()
+            .any(|reference| { reference.kind == ReferenceKind::Calls && reference.name == "len" })
+    );
+}
+
+#[test]
+fn python_omits_immediately_invoked_lambda_targets_without_retaining_their_bodies() {
+    const STORAGE_REFERENCE_NAME_BYTES: usize = 4_096;
+
+    let payload = "x".repeat(5_000);
+    let source = format!(
+        r#"def synthetic_trigger():
+    return (lambda: len("{payload}"))()
+"#
+    );
+    let file = extract("src/repro.py", &source);
+
+    assert!(file.references.iter().all(|reference| {
+        reference.name.len() <= STORAGE_REFERENCE_NAME_BYTES
+            && !reference.name.contains("lambda:")
+            && !reference.name.contains(&payload)
+    }));
+    assert!(
+        file.references
+            .iter()
+            .any(|reference| { reference.kind == ReferenceKind::Calls && reference.name == "len" })
+    );
+}
+
+#[test]
+fn go_bounds_dynamic_call_targets_to_their_stable_selector() {
+    const STORAGE_REFERENCE_NAME_BYTES: usize = 4_096;
+
+    let payload = "x".repeat(5_000);
+    let source = format!(
+        r#"package repro
+
+func syntheticTrigger() {{
+    (struct {{ invoke func() }}{{
+        invoke: func() {{
+            payload := "{payload}"
+            _ = payload
+        }},
+    }}).invoke()
+}}
+"#
+    );
+    let file = extract("src/repro.go", &source);
+
+    assert!(file.references.iter().all(|reference| {
+        reference.name.len() <= STORAGE_REFERENCE_NAME_BYTES
+            && !reference.name.contains("payload :=")
+            && !reference.name.contains(&payload)
+    }));
+    let call = file
+        .references
+        .iter()
+        .find(|reference| reference.kind == ReferenceKind::Calls && reference.name == "invoke")
+        .unwrap_or_else(|| panic!("bounded dynamic Go call was missing: {file:?}"));
+    assert_eq!(
+        call.resolution_name.as_deref(),
+        Some(format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}invoke").as_str())
+    );
+}
+
+#[test]
 fn rust_extracts_qualified_calls_inside_macro_token_trees() {
     let source = r#"
 fn run() {

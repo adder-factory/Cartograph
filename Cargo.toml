@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.9"
+version = "2.1.10"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Adder Factory"]
@@ -75,7 +75,7 @@ clap = { version = "4.6.5", default-features = false, features = [
   "usage",
 ] }
 getrandom = "0.4.3"
-ignore = "0.4.31"
+ignore = "0.4.32"
 libc = "0.2.189"
 memchr = "=2.8.3"
 notify = "=8.2.0"

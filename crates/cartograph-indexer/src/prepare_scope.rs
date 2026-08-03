@@ -5,7 +5,7 @@ use std::{
 
 use cartograph_db::{
     CartographDatabase, GenerationContents, LeaseFence, PrepareGenerationError,
-    PrepareGenerationMutation, ReadyGeneration,
+    PrepareGenerationMutation, PrepareGenerationProgress, ReadyGeneration,
 };
 use thiserror::Error;
 use tokio::{
@@ -37,6 +37,7 @@ pub(crate) struct PrepareScope {
     fence: LeaseFence,
     statement_timeout: Duration,
     registry: Arc<Mutex<PrepareRegistry>>,
+    progress: PrepareGenerationProgress,
 }
 
 struct PrepareRegistry {
@@ -69,6 +70,7 @@ impl PrepareScope {
                 state: PrepareState::Open,
                 handle: None,
             })),
+            progress: PrepareGenerationProgress::new(),
         }
     }
 
@@ -103,6 +105,8 @@ impl PrepareScope {
         let database = self.database.clone();
         let fence = self.fence.clone();
         let statement_timeout = self.statement_timeout;
+        let progress = self.progress.clone();
+        let contents = contents.with_progress(progress);
         let (sender, receiver) = oneshot::channel();
         registry.handle = Some(tokio::spawn(async move {
             let result = database
@@ -152,5 +156,15 @@ impl PrepareScope {
         } else {
             Ok(None)
         }
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.registry
+            .lock()
+            .is_ok_and(|registry| registry.state == PrepareState::Running)
+    }
+
+    pub(crate) fn progress_sequence(&self) -> u64 {
+        self.progress.sequence()
     }
 }
