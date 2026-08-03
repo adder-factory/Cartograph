@@ -8,7 +8,6 @@ use cartograph_mcp::{
     ToolContractError, ToolDefinition, ToolDefinitionInput, ToolError, ToolErrorCode, ToolHandler,
     ToolProfile, ToolProfiles, ToolResult,
 };
-use cartograph_search::test_support::exact_reference_context_packet;
 use serde as _;
 use serde_json::{Value, json};
 use tokio::{
@@ -122,7 +121,7 @@ impl ToolHandler for FixtureHandler {
             ),
             definition(
                 "cartograph_context_fixture",
-                "Typed context-packet fixture",
+                "Structured reference-payload fixture",
                 empty_schema(),
                 ToolProfiles::CORE,
             ),
@@ -141,11 +140,9 @@ impl ToolHandler for FixtureHandler {
                 },
                 "cartograph_big" => Ok(ToolResult::text("x".repeat(8_192))),
                 "cartograph_fail" => Err(ToolError::internal()),
-                "cartograph_context_fixture" => {
-                    serde_json::to_string(&exact_reference_context_packet())
-                        .map(ToolResult::text)
-                        .map_err(|_| ToolError::internal())
-                }
+                "cartograph_context_fixture" => serde_json::to_string(&reference_context_payload())
+                    .map(ToolResult::text)
+                    .map_err(|_| ToolError::internal()),
                 "cartograph_slow" => {
                     let _drop = SlowDrop(self.slow_dropped.clone());
                     self.slow_started.notify_one();
@@ -244,6 +241,29 @@ const FIXTURE_CONFIDENCE: f64 = 0.95;
 const FIXTURE_SITE_COUNT: u64 = 7;
 const FIXTURE_OWNER_SYMBOL_ID: &str = "11111111-1111-4111-8111-111111111111";
 const FIXTURE_TARGET_SYMBOL_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+fn reference_context_payload() -> Value {
+    json!({
+        "confidence": "high",
+        "graph_direction": "callers",
+        "evidence": [{
+            "reasons": ["exact_reference"],
+            "language": "rust",
+            "document_kind": "symbol",
+            "reference": {
+                "reference_id": FIXTURE_REFERENCE_ID,
+                "owner_symbol_id": FIXTURE_OWNER_SYMBOL_ID,
+                "target_symbol_id": FIXTURE_TARGET_SYMBOL_ID,
+                "start_byte": FIXTURE_START_BYTE,
+                "end_byte": FIXTURE_END_BYTE,
+                "span_precision": "exact",
+                "confidence": FIXTURE_CONFIDENCE,
+                "provenance": "resolved_fixture",
+                "represented_site_count": FIXTURE_SITE_COUNT,
+            }
+        }]
+    })
+}
 
 #[tokio::test]
 async fn initialize_initialized_and_ping_match_the_golden_wire_contract() -> TestResult {
@@ -618,7 +638,7 @@ async fn tools_list_is_sorted_schema_exact_profile_filtered_and_deterministic() 
 }
 
 #[tokio::test]
-async fn tool_transport_preserves_typed_reference_evidence_and_multiplicity() -> TestResult {
+async fn tool_transport_preserves_structured_reference_payload_and_multiplicity() -> TestResult {
     let server = test_server(
         ToolProfile::Core,
         ServerLimits::default(),
@@ -641,10 +661,10 @@ async fn tool_transport_preserves_typed_reference_evidence_and_multiplicity() ->
     let response = connection.read_value().await?;
     let transported = response["result"]["content"][0]["text"]
         .as_str()
-        .ok_or_else(|| io::Error::other("typed context packet was not transported as text"))?;
+        .ok_or_else(|| io::Error::other("structured reference payload was not transported"))?;
     assert_eq!(
         transported,
-        serde_json::to_string(&exact_reference_context_packet())?
+        serde_json::to_string(&reference_context_payload())?
     );
     let transported: Value = serde_json::from_str(transported)?;
     let reference = &transported["evidence"][0]["reference"];

@@ -76,7 +76,6 @@ tree-sitter-typescript.workspace = true
 unicode-ident.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 
 [build-dependencies]

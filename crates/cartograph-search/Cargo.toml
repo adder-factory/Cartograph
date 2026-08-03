@@ -9,9 +9,6 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-test-support = []
-
 [dependencies]
 cartograph-db = { path = "../cartograph-db" }
 cartograph-domain = { path = "../cartograph-domain" }
@@ -21,7 +18,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

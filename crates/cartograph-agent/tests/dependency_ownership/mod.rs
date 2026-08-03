@@ -25,7 +25,6 @@ use serde as _;
 use serde_json as _;
 use sha2 as _;
 use sqlx_core as _;
-use sqlx_postgres as _;
 use tempfile as _;
 use thiserror as _;
 use tokio as _;

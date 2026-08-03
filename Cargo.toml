@@ -65,7 +65,15 @@ arborium-vb = "=2.18.1"
 arborium-verilog = "=2.18.1"
 arborium-yaml = "=2.18.1"
 blake3 = "1.8.5"
-clap = { version = "4.6.5", features = ["derive", "string"] }
+clap = { version = "4.6.5", default-features = false, features = [
+  "derive",
+  "error-context",
+  "help",
+  "std",
+  "string",
+  "suggestions",
+  "usage",
+] }
 getrandom = "0.4.3"
 ignore = "0.4.31"
 libc = "0.2.189"

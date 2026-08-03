@@ -45,19 +45,19 @@ pub use traversal::is_test_path;
 
 #[cfg(test)]
 use model::{GraphEvidenceFixture, evidence_fixture, graph_evidence_fixture};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use model::{
     ReferenceEvidenceFixture, SearchEvidenceFixture, enrich_search_evidence_fixture,
     reference_evidence_fixture,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use packet::{PacketAssembly, assemble_packet};
 #[cfg(test)]
 use review::{ReviewAssembly, assemble_review_packet};
 #[cfg(test)]
 use traversal::{FrontierInput, GraphArc, GraphArcFixture, expand_frontier, strongest_arc};
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn fixture_generation() -> GenerationEvidence {
     let generation_id =
         match cartograph_domain::GenerationId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") {
@@ -67,7 +67,7 @@ fn fixture_generation() -> GenerationEvidence {
     GenerationEvidence::new(generation_id, 1)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn fixture_retrieval() -> HybridSearchPacket {
     let input = HybridSearchInput::new(
         SearchMode::Deterministic,
@@ -76,75 +76,6 @@ fn fixture_retrieval() -> HybridSearchPacket {
     )
     .unwrap_or_else(|error| panic!("fixture retrieval input failed: {error}"));
     fuse_search(input).unwrap_or_else(|error| panic!("fixture retrieval failed: {error}"))
-}
-
-/// Deterministic typed fixtures for downstream protocol tests.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub mod test_support {
-    use cartograph_domain::{DocumentKind, SourceLanguage, SymbolId};
-
-    use super::{
-        ContextGraphDirection, ContextPacket, IndexFreshness, PacketAssembly,
-        ReferenceEvidenceFixture, ReferenceSpanPrecision, SearchEvidenceFixture, TaskIntent,
-        assemble_packet, enrich_search_evidence_fixture, fixture_generation, fixture_retrieval,
-        reference_evidence_fixture,
-    };
-
-    const OWNER_SYMBOL_ID: &str = "11111111-1111-4111-8111-111111111111";
-    const TARGET_SYMBOL_ID: &str = "22222222-2222-4222-8222-222222222222";
-    const REFERENCE_ID: u64 = 101;
-    const START_BYTE: u64 = 12;
-    const END_BYTE: u64 = 19;
-    const CONFIDENCE: f32 = 0.95;
-    const SITE_COUNT: u64 = 7;
-    const EVIDENCE_LIMIT: u16 = 10;
-
-    /// Build a real context packet containing one exact retained reference.
-    #[must_use]
-    pub fn exact_reference_context_packet() -> ContextPacket {
-        let evidence = reference_evidence_fixture(ReferenceEvidenceFixture {
-            reference_id: REFERENCE_ID,
-            path: "src/reference_fixture.rs",
-            qualified_name: "fixture::target",
-            owner_symbol_id: Some(fixture_symbol_id(OWNER_SYMBOL_ID)),
-            target_symbol_id: Some(fixture_symbol_id(TARGET_SYMBOL_ID)),
-            start_byte: START_BYTE,
-            end_byte: END_BYTE,
-            span_precision: ReferenceSpanPrecision::Exact,
-            confidence: CONFIDENCE,
-            provenance: "resolved_fixture",
-            represented_site_count: SITE_COUNT,
-        });
-        let evidence = enrich_search_evidence_fixture(
-            evidence,
-            SearchEvidenceFixture {
-                file_id: None,
-                symbol_id: Some(fixture_symbol_id(TARGET_SYMBOL_ID)),
-                language: SourceLanguage::Rust,
-                document_kind: DocumentKind::Symbol,
-                fused_rank: None,
-                reciprocal_rank_score: None,
-            },
-        );
-        assemble_packet(PacketAssembly {
-            task: "trace fixture target",
-            generation: Some(fixture_generation()),
-            intent: TaskIntent::ImplementationTrace,
-            graph_direction: Some(ContextGraphDirection::Callers),
-            freshness: IndexFreshness::Current,
-            retrieval: fixture_retrieval(),
-            evidence: vec![evidence],
-            affected_tests: Vec::new(),
-            evidence_limit: EVIDENCE_LIMIT,
-            truncated: false,
-        })
-    }
-
-    fn fixture_symbol_id(value: &str) -> SymbolId {
-        SymbolId::parse(value)
-            .unwrap_or_else(|error| panic!("test-support symbol id is invalid: {error}"))
-    }
 }
 
 #[cfg(test)]
@@ -178,6 +109,9 @@ mod contract_tests {
     const SECOND_REFERENCE_END: u64 = 29;
     const COARSE_REFERENCE_START: u64 = 40;
     const COARSE_REFERENCE_END: u64 = 41;
+    const REFERENCE_OWNER_SYMBOL_ID: &str = "44444444-4444-4444-8444-444444444444";
+    const REFERENCE_TARGET_SYMBOL_ID: &str = "55555555-5555-4555-8555-555555555555";
+    const SERIALIZED_CONFIDENCE_TOLERANCE: f64 = 0.000_001;
 
     fn project_id() -> ProjectId {
         match ProjectId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") {
@@ -756,8 +690,8 @@ mod contract_tests {
 
     #[test]
     fn reference_evidence_preserves_rows_precision_links_and_site_totals() {
-        let owner = symbol_id("44444444-4444-4444-8444-444444444444");
-        let target = symbol_id("55555555-5555-4555-8555-555555555555");
+        let owner = symbol_id(REFERENCE_OWNER_SYMBOL_ID);
+        let target = symbol_id(REFERENCE_TARGET_SYMBOL_ID);
         let packet = assemble_packet(PacketAssembly {
             task: "change exact reference",
             generation: Some(fixture_generation()),
@@ -822,6 +756,27 @@ mod contract_tests {
         }
         assert!(serialized.contains("coarse_owner"));
         assert!(serialized.contains("coarse_reference"));
+        let serialized = serde_json::from_str::<serde_json::Value>(&serialized)
+            .unwrap_or_else(|error| panic!("reference packet JSON was invalid: {error}"));
+        let reference = &serialized["evidence"][0]["reference"];
+        assert_eq!(reference["reference_id"], SECOND_REFERENCE_ID);
+        assert_eq!(reference["owner_symbol_id"], REFERENCE_OWNER_SYMBOL_ID);
+        assert_eq!(reference["target_symbol_id"], REFERENCE_TARGET_SYMBOL_ID);
+        assert_eq!(reference["start_byte"], SECOND_REFERENCE_START);
+        assert_eq!(reference["end_byte"], SECOND_REFERENCE_END);
+        assert_eq!(reference["span_precision"], "exact");
+        assert_eq!(reference["provenance"], "resolved_fixture");
+        assert_eq!(
+            reference["represented_site_count"],
+            ADDITIONAL_REFERENCE_SITES
+        );
+        let confidence = reference["confidence"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("serialized reference confidence was not numeric"));
+        assert!(
+            (confidence - f64::from(SECOND_EDGE_CONFIDENCE)).abs()
+                <= SERIALIZED_CONFIDENCE_TOLERANCE
+        );
     }
 
     #[test]

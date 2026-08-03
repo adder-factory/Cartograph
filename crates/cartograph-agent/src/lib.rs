@@ -10,8 +10,6 @@ use cartograph_test_support as _;
 use sha2 as _;
 #[cfg(test)]
 use sqlx_core as _;
-#[cfg(test)]
-use sqlx_postgres as _;
 
 use std::{
     collections::BTreeSet,

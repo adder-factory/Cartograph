@@ -2135,7 +2135,7 @@ fn graph_evidence_identity(evidence: &GraphEvidence) -> (&SymbolId, &SymbolId, &
     )
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn evidence_fixture(
     path: &str,
     qualified_name: &str,
@@ -2150,7 +2150,7 @@ pub(crate) fn evidence_fixture(
     item
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) struct SearchEvidenceFixture {
     pub(crate) file_id: Option<FileId>,
     pub(crate) symbol_id: Option<SymbolId>,
@@ -2160,7 +2160,7 @@ pub(crate) struct SearchEvidenceFixture {
     pub(crate) reciprocal_rank_score: Option<f64>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn enrich_search_evidence_fixture(
     mut item: EvidenceItem,
     input: SearchEvidenceFixture,
@@ -2174,7 +2174,7 @@ pub(crate) fn enrich_search_evidence_fixture(
     item
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) struct ReferenceEvidenceFixture<'input> {
     pub(crate) reference_id: u64,
     pub(crate) path: &'input str,
@@ -2189,7 +2189,7 @@ pub(crate) struct ReferenceEvidenceFixture<'input> {
     pub(crate) represented_site_count: u64,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn reference_evidence_fixture(input: ReferenceEvidenceFixture<'_>) -> EvidenceItem {
     let mut item = evidence_fixture(
         input.path,

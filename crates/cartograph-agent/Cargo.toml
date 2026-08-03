@@ -38,7 +38,6 @@ libc.workspace = true
 cartograph-test-support = { path = "../cartograph-test-support" }
 sha2.workspace = true
 sqlx-core.workspace = true
-sqlx-postgres.workspace = true
 
 [lints]
 workspace = true
