@@ -12,6 +12,7 @@ Native Rust CLI and MCP server · PostgreSQL 18 · code-aware BM25 · typed code
 [![Runtime: Rust](https://img.shields.io/badge/runtime-Rust-b7410e.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 [Quick start](#quick-start) · [Agent workflow](#agent-workflow) ·
+[Large codebases](#large-codebases-and-streaming-indexing) ·
 [Architecture](#architecture) · [Documentation](#documentation)
 
 </div>
@@ -260,21 +261,70 @@ cartograph uninstall --yes --target <HOST>
 Text output is optimized for concise human diagnostics. JSON is the stable
 automation surface where exposed by command help.
 
+## Large codebases and streaming indexing
+
+No special command is required for a large first index. With the default
+`generationStorage: "auto"`, Cartograph selects its PostgreSQL spill path at
+10,000 supported files, 64 MiB of indexed source, or when a conservative 16x
+source-expansion estimate reaches `maxGenerationBytes`. A dense smaller corpus
+can opt in explicitly through `.cartograph/config.json`:
+
+```json
+{
+  "version": 2,
+  "generationStorage": "postgres"
+}
+```
+
+The spill path lazily admits at most 64 files and 64 MiB of combined source per
+parse work item, reuses one parser per encountered language, and writes
+file-local extraction plus resolved typed facts in bounded batches. PostgreSQL
+then performs deterministic partitioned reduction behind the staging
+generation's lease and fence. Readers continue to see the prior complete
+generation until the new canonical generation passes validation and publishes.
+
+This bounds the bulky per-file working set; it does not make every native
+structure unlimited. Compact project-wide resolution, clone, and centrality
+indexes remain bounded by `maxGenerationBytes`, while `maxSpillBytes` and
+`maxSpillRows` bound the durable unordered payload. Cartograph fails closed at
+either boundary rather than lowering extraction or graph quality.
+
+Parse time and complete-index time are separate measurements. The published
+[VS Code streaming benchmark](docs/v2/benchmarks/LARGE-PUBLIC-CORPUS-STREAMING.md)
+records the final pre-release candidate retained with v2.1.11; it is not an
+exact tagged-binary rerun. That candidate extracted 14,693 files / 171,015,058
+source bytes in 23.04 seconds. The full cold request, including resolution,
+reduction, exact digest, BM25 construction, and atomic publication, completed
+in 467.42 seconds at 2.90 GiB maximum RSS. An unchanged-source reconciliation
+took 3.19 seconds. A qualified error such as `resolve_progress_stalled` means
+the watchdog observed no durable work checkpoint; it does not merely mean that
+a large stage ran for a long time.
+
+See [configuration](docs/CONFIGURATION.md),
+[performance tuning](docs/PERF-TUNING.md), and
+[capacity troubleshooting](docs/TROUBLESHOOTING.md#native-generation-reaches-its-capacity-bound)
+for the complete limits and operator guidance.
+
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[Source checkout] --> B[Bounded Rust discovery and parsing]
-    B --> C[Deterministic symbols, references, and edges]
-    C --> D[(PostgreSQL 18 canonical generation)]
-    D --> E[ParadeDB BM25]
-    D --> F[Typed graph and impact]
-    D --> G[Optional pgvector semantic retrieval]
-    E --> H[Evidence packet]
-    F --> H
-    G --> H
-    H --> I[Native CLI]
-    H --> J[MCP server]
+    A[Source checkout] --> B[Bounded Rust discovery]
+    B --> C{Generation storage selector}
+    C -->|memory| D[Parallel parse and memory reduction]
+    C -->|PostgreSQL spill| E[Lazy parse batches and fenced staging rows]
+    E --> F[Deterministic partitioned reduction]
+    D --> G[Canonical facts]
+    F --> G
+    G --> H[(PostgreSQL 18 canonical generation)]
+    H --> I[ParadeDB BM25]
+    H --> J[Typed graph and impact]
+    H --> K[Optional pgvector semantic retrieval]
+    I --> L[Evidence packet]
+    J --> L
+    K --> L
+    L --> M[Native CLI]
+    L --> N[MCP server]
 ```
 
 The architecture has a few hard boundaries:
@@ -339,13 +389,14 @@ display. `db usage` remains the detailed bounded report and separates schema
 heap/index/TOAST, generation, and parse-cache
 allocations. Parse-cache evidence distinguishes uncompressed logical payload,
 live compressed storage, whole-schema allocation, and physical overhead so a
-high-water TOAST file cannot masquerade as live cache data. `db compact` plans bounded one-at-a-time concurrent B-tree rebuilds
-and remains read-only until `--apply --confirm compact-online-indexes`; apply
-also requires verified filesystem headroom. Legacy inline LLM keys can be
-audited with `cartograph llm migrate-credentials .` and atomically moved only
-after an exact environment-value match. Local backend logs rotate at 32 MiB;
-`cartograph backend cleanup .` is a bounded dry run for old rotated logs and
-invalid PID state.
+high-water TOAST file cannot masquerade as live cache data. `db compact` plans
+bounded one-at-a-time concurrent B-tree rebuilds and remains read-only until
+`--apply --confirm compact-online-indexes`; apply also requires verified
+filesystem headroom. Legacy inline LLM keys can be audited with
+`cartograph llm migrate-credentials .` and atomically moved only after an exact
+environment-value match. Local backend logs rotate at 32 MiB. The bounded
+`cartograph backend cleanup .` dry run reports old rotated logs and invalid PID
+state.
 
 Community ParadeDB BM25 is treated as rebuildable local derived data. Shared,
 hosted, replicated, customer-facing, or paying production use requires a
@@ -403,9 +454,9 @@ or a container image. See the [distribution and licensing policy](docs/v2/LICENS
 | [Configuration](docs/CONFIGURATION.md) | Database, retrieval, LLM, and bounded runtime settings |
 | [Architecture](docs/v2/ARCHITECTURE.md) | Crate ownership, generations, retrieval, leases, and trust boundaries |
 | [Storage operations](docs/STORAGE-BACKENDS.md) | Managed/external PostgreSQL, migration, recovery, and retention |
-| [Performance tuning](docs/PERF-TUNING.md) | Worker, connection, timeout, and indexing guidance |
+| [Performance tuning](docs/PERF-TUNING.md) | Worker selection, streaming, connection, timeout, and indexing guidance |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Docker, PostgreSQL, pg_search, pgvector, and MCP failures |
-| [Release benchmarks](docs/v2/benchmarks/) | Determinism, scaling, and patch-task evidence |
+| [Release benchmarks](docs/v2/benchmarks/) | Determinism, scaling, large-corpus streaming, and patch-task evidence |
 
 ## Development
 

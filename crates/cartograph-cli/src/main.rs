@@ -5356,12 +5356,20 @@ mod tests {
 
     #[test]
     fn release_docs_identify_current_audit_and_historical_benchmarks() {
-        const VERSIONED_DOCS: [&str; 5] = [
+        const README: &str = include_str!("../../../README.md");
+        const AGENT_INSTALL: &str = include_str!("../../../docs/AGENT-INSTALL.md");
+        const CONFIGURATION: &str = include_str!("../../../docs/CONFIGURATION.md");
+        const PERFORMANCE: &str = include_str!("../../../docs/PERF-TUNING.md");
+        const LARGE_CORPUS_BENCHMARK: &str =
+            include_str!("../../../docs/v2/benchmarks/LARGE-PUBLIC-CORPUS-STREAMING.md");
+        const VERSIONED_DOCS: [&str; 7] = [
             include_str!("../../../docs/CLI-REFERENCE.md"),
             include_str!("../../../docs/MCP-USAGE.md"),
             include_str!("../../../docs/SUPPORT-MATRIX.md"),
             include_str!("../../../docs/LANGUAGE-COVERAGE-REPORT.md"),
+            include_str!("../../../docs/cli-mcp-alignment.md"),
             include_str!("../../../docs/v2/ARCHITECTURE.md"),
+            include_str!("../../../docs/v2/GAME-SCRIPTING-LANGUAGES.md"),
         ];
         const HISTORICAL_BENCHMARKS: [&str; 3] = [
             include_str!("../../../docs/v2/benchmarks/INDEX-SCALING.md"),
@@ -5381,6 +5389,19 @@ mod tests {
             assert!(document.contains("`pg_search` 0.25.0"));
             assert!(document.contains("pgvector 0.8.4+"));
         }
+
+        for document in [README, AGENT_INSTALL] {
+            assert!(document.contains("generationStorage"));
+            assert!(document.contains("10,000 supported files"));
+            assert!(document.contains("64 MiB"));
+            assert!(document.contains("LARGE-PUBLIC-CORPUS-STREAMING.md"));
+        }
+        assert!(CONFIGURATION.contains("`generationStorage` only chooses"));
+        assert!(!CONFIGURATION.contains("Storage selection is not a project-config option"));
+        assert!(PERFORMANCE.contains("reported final count can therefore be intermediate"));
+        assert!(LARGE_CORPUS_BENCHMARK.contains("Status: published `v2.1.11` benchmark record"));
+        assert!(!LARGE_CORPUS_BENCHMARK.contains("release-candidate evidence"));
+        assert!(LARGE_CORPUS_BENCHMARK.contains("not an exact tagged-binary rerun"));
     }
 
     fn walk_cli_contract(

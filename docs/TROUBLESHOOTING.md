@@ -130,6 +130,10 @@ observed host headroom or reduce the admitted source/features. A configured SCIP
 overlay currently selects the memory path in `auto`; forcing `postgres` with
 that overlay is rejected until streamed replacement parity is available.
 
+For a measured example with parser, resolver, publication, memory, row-count,
+and no-op timings kept separate, see the published
+[large public corpus streaming benchmark record](v2/benchmarks/LARGE-PUBLIC-CORPUS-STREAMING.md).
+
 ## Native stage reports `progress_stalled`
 
 The supervisor cancels an operation when its active stage produces no durable

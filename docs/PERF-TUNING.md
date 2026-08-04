@@ -1,10 +1,13 @@
 # Performance tuning
 
 Cartograph v2 chooses bounded parallelism from supported-file count, exact
-indexed source bytes, hardware, and the caller cap. Supported index worker
-counts are 1, 2, 4, 8, and 16. A deterministic reducer must produce identical
-logical facts, digests, and ordered retrieval evidence at every count; faster
-output is never allowed to change meaning.
+indexed source bytes, hardware, and the caller cap. The corpus selector requests
+the tiers 1, 2, 4, 8, and 16, then applies caller and detected-hardware caps; the
+reported final count can therefore be intermediate, such as 14 on a 14-core
+host. A deterministic reducer must produce identical logical facts, digests,
+and ordered retrieval evidence at every admitted count. The release identity
+matrix explicitly exercises 1, 2, 4, 8, and 16 workers; faster output is never
+allowed to change meaning.
 
 ## Operator controls
 

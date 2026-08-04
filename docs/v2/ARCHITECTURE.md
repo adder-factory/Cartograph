@@ -234,15 +234,16 @@ explicitly selected manifests lazily form parse batches as the bounded
 scheduler admits them behind the exact generation/lease fence. Each batch is
 capped at 64 files and 64 MiB of combined source, except that one larger file
 remains indivisible; item deadlines therefore cannot expire while still
-waiting in an unmaterialized manifest tail. Cacheable extraction payloads are written once and
-referenced from the spill; inline and cached rows retain one
-representation-independent logical batch identity. Resolver workers COPY
-validated typed fact groups under independent row, logical-byte, and
-retained-memory bounds. PostgreSQL then reduces files, symbols, edges,
-references, numerical sites, and documents through 64 deterministic UUID
-partitions per relation, committing four contiguous partitions at a time. A
-completed raw group is deleted in the same transaction that inserts its
-canonical rows and advances the durable cursor.
+waiting in an unmaterialized manifest tail. An admitted batch reuses one native
+extractor per encountered language, including its parser and compiled queries.
+Cacheable extraction payloads are written once and referenced from the spill;
+inline and cached rows retain one representation-independent logical batch
+identity. Resolver workers COPY validated typed fact groups under independent
+row, logical-byte, and retained-memory bounds. PostgreSQL then reduces files,
+symbols, edges, references, numerical sites, and documents through 64
+deterministic UUID partitions per relation, committing four contiguous
+partitions at a time. A completed raw group is deleted in the same transaction
+that inserts its canonical rows and advances the durable cursor.
 PostgreSQL may spill grouping/sorting to its configured temporary storage;
 Rust never reloads the complete canonical payload to compute the digest.
 

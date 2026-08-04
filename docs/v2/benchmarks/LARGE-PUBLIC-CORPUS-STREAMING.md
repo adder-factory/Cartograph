@@ -1,6 +1,14 @@
 # V2 large public corpus streaming benchmark
 
-Status: v2.1.11 release-candidate evidence
+Status: published `v2.1.11` benchmark record from the final pre-release candidate
+
+This report is committed in release
+[v2.1.11](https://github.com/adder-factory/cartograph/releases/tag/v2.1.11) at
+signed main/tag commit
+[`d2211fbd816d180620159b7e94037cf9f1636234`](https://github.com/adder-factory/cartograph/commit/d2211fbd816d180620159b7e94037cf9f1636234).
+The measured run preceded the final `regex-automata` 0.4.17 dependency-lock
+refresh. No post-refresh exact-tag benchmark was run, so the timings and digest
+below are final-candidate evidence, not an exact tagged-binary rerun.
 
 Measured: 2026-08-04
 
@@ -41,7 +49,7 @@ uses a reduced-quality parser mode.
 
 ## Locked logical result
 
-The final cold release candidate published canonical V13 digest:
+The final measured pre-release candidate published canonical V13 digest:
 
 `807bee88ee0a0c98b7127784243dcc2baae229e2e893b675c78505f36537f653`
 
@@ -74,11 +82,11 @@ maximum RSS.
 ## Parser result
 
 The original cold spill parse was first observed in `resolving` at 2 minutes
-50 seconds. On the final candidate, PostgreSQL timestamps put the last of all
-14,693 extracted-file rows at 23.04 seconds after the generation started. The
-first resolved fact batch was committed at 49.77 seconds, after the two bounded
-resolver-preparation passes. These are durable database timestamps rather than
-an inferred CPU microbenchmark.
+50 seconds. On the final measured candidate, PostgreSQL timestamps put the last
+of all 14,693 extracted-file rows at 23.04 seconds after the generation started.
+The first resolved fact batch was committed at 49.77 seconds, after the two
+bounded resolver-preparation passes. These are durable database timestamps
+rather than an inferred CPU microbenchmark.
 
 The improvement does not skip AST work:
 
@@ -100,7 +108,7 @@ search-relation/BM25 construction, ready transition, and publication.
 | --- | --- | --- | ---: | ---: | --- |
 | Before parser/validation optimization | cold, 14,693 writes | published | 546.37 | 2.58 | V12 |
 | Earlier optimized candidate | warm, 14,693 hits | published | 415.57 | 2.32 | V12 |
-| Final release candidate | cold, 14,693 writes | published | 467.42 | 2.90 | V13 |
+| Final measured pre-release candidate | cold, 14,693 writes | published | 467.42 | 2.90 | V13 |
 
 These full-request rows intentionally disclose their different cache states
 and digest contracts; they are not presented as an isolated parser A/B result.
@@ -112,9 +120,9 @@ before use.
 ## Streaming and document-reduction findings
 
 Resolver publication originally retained a second fully text-encoded
-`Vec<Vec<u8>>` for each fact group. The final candidate lazily encodes each
-validated typed row directly into the 1 MiB COPY transport buffer. Group row,
-logical-byte, and retained-memory caps remain in force.
+`Vec<Vec<u8>>` for each fact group. The final measured candidate lazily encodes
+each validated typed row directly into the 1 MiB COPY transport buffer. Group
+row, logical-byte, and retained-memory caps remain in force.
 
 The first large document partition also exposed an exact 120-second Reduce
 failure: conflict validation materialized and hashed large code/natural-text

@@ -121,8 +121,10 @@ bounded schema.
 
 ## PostgreSQL settings
 
-Cartograph v2 is PostgreSQL-only. Storage selection is not a project-config
-option: use environment/private managed state.
+Cartograph v2 is PostgreSQL-only. Database ownership, connection, schema, pool,
+and TLS selection are not project-config options; use the environment or
+private managed state. `generationStorage` only chooses the native construction
+working-set strategy. It does not select a different durable database engine.
 
 ```sh
 export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'

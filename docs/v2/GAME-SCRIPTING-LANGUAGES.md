@@ -1,11 +1,13 @@
 # Game scripting language coverage
 
-Last research and implementation audit: 2026-08-02 (`v2.1.7`).
+Last implementation audit: 2026-08-04 (`v2.1.11`).
 
-Cartograph v2.1.7 recognizes 126 native source-language modes. Seventy-three
+Research inventory last reviewed: 2026-08-02 (`v2.1.7`).
+
+Cartograph v2.1.11 recognizes 126 native source-language modes. Seventy-three
 remain the byte-for-byte v1.1.33 parity floor, TOML remains an additive v2 mode,
-and 52 dedicated game, modding, and interactive-fiction scripting modes are
-additive v2.1.7 modes. Rhai is included in the 52.
+and 52 dedicated game, modding, and interactive-fiction scripting modes were
+introduced in v2.1.7. Rhai is included in the 52.
 
 This page defines what “all game scripting languages” means for the release. It
 is a researched and testable support boundary, not a claim that every private

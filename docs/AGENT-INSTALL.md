@@ -58,6 +58,25 @@ install -m 0755 target/release/cartograph "$HOME/.local/bin/cartograph"
 
 Cartograph v2 has no TypeScript/Bun or SQLite runtime.
 
+## Upgrade an existing installation
+
+From an already initialized project, use the single resumable upgrade rather
+than replacing the binary or editing host configuration by hand:
+
+```sh
+cartograph upgrade --apply --project-path . --json
+```
+
+Require `completed: true`. The operation verifies and smoke-tests the release,
+applies safe schema migrations, reconciles a fresh current generation, runs
+`doctor`, and repairs stale owned host pins. If it reports that the managed
+database must be replaced, perform only the exact backup and confirmed upgrade
+steps it prints, then rerun the same command. Reopen the agent host only when
+`restartRequired` is true; a process already attached to an older MCP child
+cannot hot-load the new binary. That flag describes changes made by the current
+invocation; `false` on a later no-op rerun does not prove that a host left open
+across an earlier upgrade loaded the replacement child.
+
 ## Database bootstrap
 
 The normal local macOS/Linux path is:
@@ -79,14 +98,46 @@ For external PostgreSQL, create both extensions and pass secrets through the
 process environment:
 
 ```sh
-export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
 export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'
+# CARTOGRAPH_DATABASE_URL must already be loaded from the shell or secret manager.
 cartograph doctor .
 cartograph index .
 ```
 
 Never write the URL into a committed config. See
 [PostgreSQL storage and operations](STORAGE-BACKENDS.md).
+
+## Index a large repository
+
+Leave `generationStorage` at its default `auto` for the first run. Cartograph
+automatically selects PostgreSQL spill at 10,000 supported files, 64 MiB of
+indexed source, or when its conservative 16x source-expansion estimate reaches
+`maxGenerationBytes`. A dense smaller repository can force the same path in
+`.cartograph/config.json`:
+
+```json
+{
+  "version": 2,
+  "generationStorage": "postgres"
+}
+```
+
+The spill path parses lazily in work items of at most 64 files and 64 MiB of
+combined source, reuses parsers by language, and publishes extraction,
+resolution, and reduction progress without weakening facts or references. Do
+not raise memory or spill limits before the reported stage names a capacity
+boundary and host/database headroom has been measured. PostgreSQL spill bounds
+bulky per-file state, but compact project-wide resolution, clone, and centrality
+structures remain bounded.
+
+Treat parser completion and complete graph publication as different timings.
+The published
+[large-corpus streaming benchmark record](v2/benchmarks/LARGE-PUBLIC-CORPUS-STREAMING.md)
+keeps both timings, maximum RSS, canonical digest, full fact counts, and an
+unchanged-source no-op with its exact pre-release provenance. See
+[performance tuning](PERF-TUNING.md) and
+[capacity troubleshooting](TROUBLESHOOTING.md#native-generation-reaches-its-capacity-bound)
+before changing defaults.
 
 ## Register an agent host
 
