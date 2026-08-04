@@ -2000,6 +2000,12 @@ impl CartographDatabase {
         request: &StructuralFindingGroupQuery,
     ) -> Result<StructuralFindingGroup, StorageError> {
         validate_limit(request.per_finding_limit)?;
+        let Some(generation) = current_generation_for_findings(self, project_id).await? else {
+            return Ok(StructuralFindingGroup {
+                findings: Vec::new(),
+                counts: BTreeMap::new(),
+            });
+        };
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r"{}, ranked AS (
@@ -2018,13 +2024,13 @@ impl CartographDatabase {
                                         path, start_line, symbol_id
                            ) AS detector_rank
                     FROM findings
-                    WHERE finding = ANY($2::text[])
+                    WHERE finding = ANY($3::text[])
                       AND CASE severity
                             WHEN 'error' THEN 3
                             WHEN 'warning' THEN 2
                             ELSE 1
-                          END >= $3
-                      AND (NOT $4::boolean OR NOT (
+                          END >= $4
+                      AND (NOT $5::boolean OR NOT (
                           path ~* '(^|/)(fixtures?|test-beds?|__tests__|__mocks__|tests?|specs?|integration|testing|testlib)(/|$)'
                           OR path ~* '(\.test\.|\.spec\.|_test\.|_spec\.)[a-z0-9]+$'
                           OR path ~ '([A-Za-z](Test|Tests|TestCase|Spec))\.[a-z0-9]+$'
@@ -2037,7 +2043,7 @@ impl CartographDatabase {
                        unresolved::bigint AS unresolved_references,
                        detail::text AS detail, detector_total
                 FROM ranked
-                WHERE detector_rank <= $5
+                WHERE detector_rank <= $6
                 ORDER BY finding, detector_rank, path, start_line, symbol_id",
             finding_ctes(&schema),
         );
@@ -2047,6 +2053,7 @@ impl CartographDatabase {
                 |statement| {
                     statement
                         .bind(project_id.as_str())
+                        .bind(generation.as_str())
                         .bind(request.findings.clone())
                         .bind(request.minimum_severity.rank())
                         .bind(request.exclude_fixtures)
@@ -2130,6 +2137,9 @@ impl CartographDatabase {
                 field: "statement_timeout",
             });
         }
+        let Some(generation) = current_generation_for_findings(self, project_id).await? else {
+            return Ok(StructuralFindingStats::default());
+        };
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r"{}, totals AS (
@@ -2169,7 +2179,11 @@ impl CartographDatabase {
         let mut rows = self
             .bounded_serial_rows(
                 statement,
-                |statement| statement.bind(project_id.as_str()),
+                |statement| {
+                    statement
+                        .bind(project_id.as_str())
+                        .bind(generation.as_str())
+                },
                 "current-structural-finding-stats",
                 statement_timeout,
             )
@@ -2210,6 +2224,39 @@ pub(crate) const FINDING_CTES_SQL_TEMPLATE: &str = include_str!("finding_ctes.sq
 
 pub(crate) fn finding_ctes(schema: &str) -> String {
     FINDING_CTES_SQL_TEMPLATE.replace("{schema}", schema)
+}
+
+/// Exact published generation the cascade must fence on, if one exists.
+///
+/// Binding this as a parameter rather than spelling a subquery lets PostgreSQL
+/// plan with the column's real statistics; an opaque fence collapses the row
+/// estimate and the planner picks nested loops over the whole graph.
+async fn current_generation_for_findings(
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+) -> Result<Option<String>, StorageError> {
+    let schema = quoted_schema(&database.schema);
+    let statement = format!(
+        r#"SELECT projects.current_generation_id::text
+            FROM {schema}."projects" AS projects
+            WHERE projects.project_id = CAST($1 AS uuid)
+              AND projects.current_generation_id IS NOT NULL"#
+    );
+    let mut rows = database
+        .bounded_rows(
+            statement,
+            |statement| statement.bind(project_id.as_str()),
+            "current-finding-generation",
+        )
+        .await?;
+    rows.pop()
+        .map(|row| {
+            row.try_get::<String, _>(0)
+                .map_err(|_| StorageError::CorruptStoredValue {
+                    field: "generation_id",
+                })
+        })
+        .transpose()
 }
 
 /// Generation-fenced source and shared filter predicates for the stored relation.
