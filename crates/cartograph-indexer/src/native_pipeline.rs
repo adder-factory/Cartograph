@@ -1548,9 +1548,11 @@ async fn run_spilled_parse_stage(
                     let cancellation = item.cancellation();
                     let (sequence, _, batch) = item.into_parts();
                     let result = stream_spilled_parse_batch(
-                        &spill,
-                        &source_root,
-                        parse_cache.as_ref(),
+                        SpilledParseInputs {
+                            spill: &spill,
+                            source_root: &source_root,
+                            parse_cache: parse_cache.as_ref(),
+                        },
                         batch,
                         cancellation,
                     )
@@ -1947,9 +1949,11 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         };
         flush_spilled_parse_cache_writes(
             cache,
-            &mut self.cache_writes,
-            &mut self.cache_write_bytes,
-            &mut self.output.cache,
+            &mut PendingCacheWrites {
+                writes: &mut self.cache_writes,
+                logical_bytes: &mut self.cache_write_bytes,
+                report: &mut self.output.cache,
+            },
             &mut self.transaction,
         )
         .await
@@ -1962,13 +1966,24 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     }
 }
 
+/// Spill authority, source root, and optional parse cache for one batch.
+#[derive(Clone, Copy)]
+struct SpilledParseInputs<'inputs> {
+    spill: &'inputs NativeGenerationSpill,
+    source_root: &'inputs SourceRoot,
+    parse_cache: Option<&'inputs NativeParseCache>,
+}
+
 async fn stream_spilled_parse_batch(
-    spill: &NativeGenerationSpill,
-    source_root: &SourceRoot,
-    parse_cache: Option<&NativeParseCache>,
+    inputs: SpilledParseInputs<'_>,
     batch: SpilledParseManifestBatch,
     cancellation: StageCancellation,
 ) -> Result<SpilledParsedManifestBatch, ParseManifestFailure> {
+    let SpilledParseInputs {
+        spill,
+        source_root,
+        parse_cache,
+    } = inputs;
     let entries = batch.entries;
     let (cache_keys, cached, cache_read_failed) =
         load_spilled_parse_cache(parse_cache, &entries).await;
@@ -2034,19 +2049,29 @@ fn record_spilled_parse_output(
     Ok(())
 }
 
+/// Pending cache writes and the accounting they advance.
+struct PendingCacheWrites<'writes> {
+    writes: &'writes mut Vec<PendingSpilledParseCacheWrite>,
+    logical_bytes: &'writes mut usize,
+    report: &'writes mut NativeParseCacheReport,
+}
+
 async fn flush_spilled_parse_cache_writes(
     cache: &NativeParseCache,
-    writes: &mut Vec<PendingSpilledParseCacheWrite>,
-    logical_bytes: &mut usize,
-    report: &mut NativeParseCacheReport,
+    pending: &mut PendingCacheWrites<'_>,
     transaction: &mut SpilledParseTransaction<'_>,
 ) -> Result<(), ParseManifestFailure> {
+    let PendingCacheWrites {
+        writes,
+        logical_bytes,
+        report,
+    } = pending;
     if writes.is_empty() {
         return Ok(());
     }
-    let pending = take(writes);
+    let pending = take(*writes);
     let pending_rows = usize_to_u64(pending.len());
-    *logical_bytes = 0;
+    **logical_bytes = 0;
     let cache_entries = pending
         .iter()
         .map(|write| NativeParseCacheEntry::new(write.key.clone(), write.payload.clone()))
@@ -2683,9 +2708,11 @@ async fn run_spilled_resolve_stage(
                     match resolve_spilled_generation(
                         source,
                         source_root,
-                        config,
-                        &cancellation,
-                        &progress,
+                        SpilledStageContext {
+                            config,
+                            cancellation: &cancellation,
+                            progress: &progress,
+                        },
                     )
                     .await
                     {
@@ -2730,28 +2757,39 @@ async fn run_spilled_resolve_stage(
     }
 }
 
+/// Fixed configuration, cancellation, and progress reporting for one spilled stage.
+#[derive(Clone, Copy)]
+struct SpilledStageContext<'context> {
+    config: NativePipelineConfig,
+    cancellation: &'context StageCancellation,
+    progress: &'context StageRunner,
+}
+
 async fn resolve_spilled_generation(
     source: SpilledNativeFacts,
     source_root: SourceRoot,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<SpilledResolutionOutput, ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     if cancellation.is_cancelled() {
         return Err(ResolveGenerationFailure::unclassified());
     }
-    let mut state =
-        initialize_spilled_resolution(&source, &source_root, config, cancellation, progress)
-            .await?;
-    spill_resolved_files(&source, &mut state, config, cancellation, progress).await?;
-    spill_derived_generation_facts(&source, &mut state, config, cancellation, progress).await?;
+    let mut state = initialize_spilled_resolution(&source, &source_root, context).await?;
+    spill_resolved_files(&source, &mut state, context).await?;
+    spill_derived_generation_facts(&source, &mut state, context).await?;
     if state.centrality_enabled {
         apply_spilled_centrality(
             &source.spill,
             &mut state.centrality,
-            config.evidence_policy().centrality,
-            cancellation,
-            progress,
+            SpilledCentralityRequest {
+                policy: config.evidence_policy().centrality,
+                cancellation,
+                progress,
+            },
         )
         .await?;
         state.high_water = state.high_water.max(state.centrality_budget.charged_bytes);
@@ -2772,10 +2810,13 @@ async fn resolve_spilled_generation(
 async fn initialize_spilled_resolution(
     source: &SpilledNativeFacts,
     source_root: &SourceRoot,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<SpilledResolutionState, ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let (clone_evidence, index, preparation_high_water) = build_spilled_resolution_preparation(
         source,
@@ -2816,10 +2857,13 @@ async fn initialize_spilled_resolution(
 async fn spill_resolved_files(
     source: &SpilledNativeFacts,
     state: &mut SpilledResolutionState,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     let mut cursor = NativeGenerationExtractedCursor::default();
     let mut input_sequence = 0_u64;
     let worker_count = config.parallelism.parse_capacity.workers();
@@ -2973,10 +3017,13 @@ fn resolve_file_facts(
 async fn spill_derived_generation_facts(
     source: &SpilledNativeFacts,
     state: &mut SpilledResolutionState,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let mut derived_sequence = source.files;
     for derive in [
@@ -3087,13 +3134,24 @@ fn append_spilled_centrality_facts(
     Ok(())
 }
 
+/// Centrality policy plus the observation channel for one spilled pass.
+#[derive(Clone, Copy)]
+struct SpilledCentralityRequest<'request> {
+    policy: NativeCentralityPolicy,
+    cancellation: &'request StageCancellation,
+    progress: &'request StageRunner,
+}
+
 async fn apply_spilled_centrality(
     spill: &NativeGenerationSpill,
     facts: &mut GenerationFacts,
-    policy: NativeCentralityPolicy,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    request: SpilledCentralityRequest<'_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledCentralityRequest {
+        policy,
+        cancellation,
+        progress,
+    } = request;
     if policy.page_rank {
         let report = apply_page_rank(facts, || cancellation.is_cancelled())
             .map_err(|_| ResolveGenerationFailure::unclassified())?;
