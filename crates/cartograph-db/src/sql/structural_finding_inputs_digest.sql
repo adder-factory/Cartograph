@@ -28,7 +28,16 @@ SELECT generations.current_generation_id::text AS generation_id,
                       )
                    || '|'
                    || (
+                          -- Scores feed the semantic clone band directly, so a
+                          -- rewritten score must move the fingerprint even when
+                          -- the edge count is unchanged.
                           SELECT COUNT(*)::text
+                                 || ':'
+                                 || COALESCE(SUM(similarity.score)::text, '')
+                                 || ':'
+                                 || COALESCE(MIN(similarity.score)::text, '')
+                                 || ':'
+                                 || COALESCE(MAX(similarity.score)::text, '')
                           FROM {schema}."symbol_similarity_edges" AS similarity
                           WHERE similarity.project_id = CAST($1 AS uuid)
                             AND similarity.generation_id = generations.current_generation_id
@@ -36,7 +45,14 @@ SELECT generations.current_generation_id::text AS generation_id,
                    || '|'
                    || (
                           SELECT COALESCE(
-                                     string_agg(builds.model_id, ',' ORDER BY builds.model_id),
+                                     string_agg(
+                                         builds.model_id::text
+                                         || ':'
+                                         || builds.edges_written::text
+                                         || ':'
+                                         || builds.built_at::text,
+                                         ',' ORDER BY builds.model_id
+                                     ),
                                      ''
                                  )
                           FROM {schema}."symbol_similarity_builds" AS builds

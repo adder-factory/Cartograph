@@ -68,9 +68,10 @@ const SPILL_CENTRALITY_LOOKUP_MIGRATION_VERSION: i64 = 33;
 const SPILL_PARSE_CACHE_REFERENCE_MIGRATION_VERSION: i64 = 34;
 const SEARCH_DOCUMENT_CANONICAL_METADATA_MIGRATION_VERSION: i64 = 35;
 const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_VERSION: i64 = 36;
-const LATEST_MIGRATION_VERSION: i64 = JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_VERSION;
-const LATER_MIGRATION_COUNT: u64 = 35;
-const EXPECTED_MIGRATIONS: [i64; 36] = [
+const STRUCTURAL_FINDING_CACHE_MIGRATION_VERSION: i64 = 37;
+const LATEST_MIGRATION_VERSION: i64 = STRUCTURAL_FINDING_CACHE_MIGRATION_VERSION;
+const LATER_MIGRATION_COUNT: u64 = 36;
+const EXPECTED_MIGRATIONS: [i64; 37] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -107,8 +108,9 @@ const EXPECTED_MIGRATIONS: [i64; 36] = [
     SPILL_PARSE_CACHE_REFERENCE_MIGRATION_VERSION,
     SEARCH_DOCUMENT_CANONICAL_METADATA_MIGRATION_VERSION,
     JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_VERSION,
+    STRUCTURAL_FINDING_CACHE_MIGRATION_VERSION,
 ];
-const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 35] = [
+const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 36] = [
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
     REFERENCE_EVIDENCE_MIGRATION_VERSION,
@@ -144,6 +146,7 @@ const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 35] = [
     SPILL_PARSE_CACHE_REFERENCE_MIGRATION_VERSION,
     SEARCH_DOCUMENT_CANONICAL_METADATA_MIGRATION_VERSION,
     JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_VERSION,
+    STRUCTURAL_FINDING_CACHE_MIGRATION_VERSION,
 ];
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -289,6 +292,7 @@ async fn assert_v1_to_latest_upgrade(
     schema: &str,
 ) {
     remove_post_v12_schema(pool, schema).await;
+    remove_structural_finding_cache_schema(pool, schema).await;
     remove_typed_symbol_semantics_schema(pool, schema).await;
     remove_generation_search_relations_schema(pool, schema).await;
     remove_exact_lookup_schema(pool, schema).await;
@@ -493,6 +497,18 @@ async fn remove_semantic_storage_schema(pool: &sqlx_postgres::PgPool, schema: &s
     for statement in statements {
         if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
             panic!("could not remove semantic-storage migration fixture: {error}");
+        }
+    }
+}
+
+async fn remove_structural_finding_cache_schema(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(r#"DROP TABLE "{schema}"."structural_findings""#),
+        format!(r#"DROP TABLE "{schema}"."structural_finding_runs""#),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not remove structural finding cache migration fixture: {error}");
         }
     }
 }
