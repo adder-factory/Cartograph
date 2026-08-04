@@ -38,7 +38,7 @@ pub enum StructuralFindingRefresh {
 ///
 /// A detector-SQL change must invalidate every stored relation; otherwise a warm
 /// cache keeps serving findings that the shipped rules no longer produce.
-pub(crate) fn detector_contract_digest() -> &'static str {
+fn detector_contract_digest() -> &'static str {
     static DIGEST: OnceLock<ContentDigest> = OnceLock::new();
     DIGEST
         .get_or_init(|| {

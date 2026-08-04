@@ -18,10 +18,10 @@ use crate::{
     database::{audited_query, set_local_statement_timeout},
     generation::{check_staging_generation_fence, lock_staging_generation_fence},
     ingest::{
-        CanonicalSearchDocument, CountedTextCopy, EdgeInput, FileInput, GenerationFacts,
-        GenerationValidationError, GenerationValidationLimits, LogicalDigestBuilder,
-        NumericalSiteInput, ReferenceInput, SymbolInput, TextRow, ValidatedFactTables,
-        canonical_stored_metadata, validate_spill_fact_batch,
+        CanonicalSearchDocument, CountedCopyRequest, CountedTextCopy, EdgeInput, FileInput,
+        GenerationFacts, GenerationValidationError, GenerationValidationLimits,
+        LogicalDigestBuilder, NumericalSiteInput, ReferenceInput, SymbolInput, TextRow,
+        ValidatedFactTables, canonical_stored_metadata, validate_spill_fact_batch,
     },
     parse_cache::{NativeParseCacheKey, path_digest as parse_cache_path_digest},
 };
@@ -790,6 +790,23 @@ impl NativeGenerationExtractedPage {
     }
 }
 
+/// Exact paging position inside one spilled extraction stream.
+#[derive(Clone, Copy)]
+struct ExtractedPageCursor {
+    after: i64,
+    minimum_batch_sequence: i64,
+}
+
+/// Lease fence, spill policy, and deadline bound to one spilled generation.
+pub struct NativeGenerationSpillRequest {
+    /// Exact lease fence the spill must hold for its whole lifetime.
+    pub fence: LeaseFence,
+    /// Byte and row ceilings admitted for this spill.
+    pub policy: NativeGenerationSpillPolicy,
+    /// Per-statement deadline applied to every spill statement.
+    pub statement_timeout: Duration,
+}
+
 /// Exact generation and lease-fenced PostgreSQL spill authority.
 #[derive(Clone)]
 pub struct NativeGenerationSpill {
@@ -823,10 +840,13 @@ impl NativeGenerationSpill {
     pub fn new(
         database: CartographDatabase,
         generation: &StagedGeneration,
-        fence: LeaseFence,
-        policy: NativeGenerationSpillPolicy,
-        statement_timeout: Duration,
+        request: NativeGenerationSpillRequest,
     ) -> Result<Self, StorageError> {
+        let NativeGenerationSpillRequest {
+            fence,
+            policy,
+            statement_timeout,
+        } = request;
         if statement_timeout.is_zero()
             || fence.target().project_id() != generation.project_id()
             || fence.target().generation_id() != Some(generation.generation_id())
@@ -2056,8 +2076,10 @@ impl NativeGenerationSpill {
             .select_extracted_page_window(
                 &mut transaction,
                 &schema,
-                after,
-                minimum_batch_sequence,
+                ExtractedPageCursor {
+                    after,
+                    minimum_batch_sequence,
+                },
                 maximum_bytes,
             )
             .await?;
@@ -2073,8 +2095,10 @@ impl NativeGenerationSpill {
             .load_extracted_page_payloads(
                 &mut transaction,
                 &schema,
-                after,
-                minimum_batch_sequence,
+                ExtractedPageCursor {
+                    after,
+                    minimum_batch_sequence,
+                },
                 &window,
             )
             .await?;
@@ -2093,10 +2117,13 @@ impl NativeGenerationSpill {
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
         schema: &str,
-        after: i64,
-        minimum_batch_sequence: i64,
+        cursor: ExtractedPageCursor,
         maximum_bytes: u64,
     ) -> Result<Option<ExtractedPageWindow>, StorageError> {
+        let ExtractedPageCursor {
+            after,
+            minimum_batch_sequence,
+        } = cursor;
         // Select only inline row metadata first. Keeping the TOAST-able payload out
         // avoids carrying every remaining file through a cumulative page window.
         let sql = format!(
@@ -2157,10 +2184,13 @@ impl NativeGenerationSpill {
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
         schema: &str,
-        after: i64,
-        minimum_batch_sequence: i64,
+        cursor: ExtractedPageCursor,
         window: &ExtractedPageWindow,
     ) -> Result<Vec<(u64, NativeGenerationSpillRow)>, StorageError> {
+        let ExtractedPageCursor {
+            after,
+            minimum_batch_sequence,
+        } = cursor;
         let sql = format!(
             r#"SELECT batch_sequence + row_ordinal::bigint AS row_sequence,
                       spill.sort_key, COALESCE(spill.payload, cache.payload),
@@ -2667,7 +2697,15 @@ where
         return Ok(());
     }
     let statement = typed_fact_insert_sql(schema, T::RELATION)?;
-    let mut copy = CountedTextCopy::begin(transaction, &statement, T::OPERATION, expected).await?;
+    let mut copy = CountedTextCopy::begin(
+        transaction,
+        CountedCopyRequest {
+            statement: &statement,
+            operation: T::OPERATION,
+            expected_rows: expected,
+        },
+    )
+    .await?;
     for (sequence, batch) in batches {
         for (ordinal, row) in select(batch).iter().enumerate() {
             copy.push(encode_spill_copy_row(
@@ -3226,21 +3264,21 @@ where
         .map_err(|_| database_error("spill-digest-documents"))?
     {
         pulse.row().await?;
-        let raw_kind = read_string(&row, 5, "document_kind")?;
-        let raw_metadata = read_string(&row, 9, "metadata")?;
+        let raw_kind = read_string(&row, "document_kind")?;
+        let raw_metadata = read_string(&row, "metadata")?;
         let metadata = serde_json::from_str(&raw_metadata).map_err(|_| corrupt("metadata"))?;
         let metadata_json =
             canonical_stored_metadata(&metadata).map_err(|_| corrupt("metadata"))?;
         stream.digest.push_document(&CanonicalSearchDocument {
-            document_id: parse_document_id(&row, 0)?,
-            file_id: parse_optional_file_id(&row, 1)?,
-            symbol_id: parse_optional_symbol_id(&row, 2, "symbol_id")?,
-            path: read_string(&row, 3, "path")?,
-            language: read_string(&row, 4, "language")?,
+            document_id: parse_document_id(&row, "document_id")?,
+            file_id: parse_optional_file_id(&row, "file_id")?,
+            symbol_id: parse_optional_symbol_id(&row, "symbol_id")?,
+            path: read_string(&row, "path")?,
+            language: read_string(&row, "language")?,
             kind: parse_document_kind(&raw_kind)?,
-            qualified_name: read_string(&row, 6, "qualified_name")?,
-            code: read_string(&row, 7, "code")?,
-            natural_text: read_string(&row, 8, "natural_text")?,
+            qualified_name: read_string(&row, "qualified_name")?,
+            code: read_string(&row, "code")?,
+            natural_text: read_string(&row, "natural_text")?,
             metadata_json,
         });
     }
@@ -3248,19 +3286,16 @@ where
     Ok(())
 }
 
-fn read_string(
-    row: &sqlx_postgres::PgRow,
-    index: usize,
-    field: &'static str,
-) -> Result<String, StorageError> {
-    row.try_get::<String, _>(index).map_err(|_| corrupt(field))
+fn read_string(row: &sqlx_postgres::PgRow, column: &'static str) -> Result<String, StorageError> {
+    row.try_get::<String, _>(column)
+        .map_err(|_| corrupt(column))
 }
 
 fn parse_optional_file_id(
     row: &sqlx_postgres::PgRow,
-    index: usize,
+    column: &'static str,
 ) -> Result<Option<FileId>, StorageError> {
-    row.try_get::<Option<String>, _>(index)
+    row.try_get::<Option<String>, _>(column)
         .map_err(|_| corrupt("file_id"))?
         .map(|raw| FileId::parse(&raw).map_err(|_| corrupt("file_id")))
         .transpose()
@@ -3268,17 +3303,19 @@ fn parse_optional_file_id(
 
 fn parse_optional_symbol_id(
     row: &sqlx_postgres::PgRow,
-    index: usize,
-    field: &'static str,
+    column: &'static str,
 ) -> Result<Option<SymbolId>, StorageError> {
-    row.try_get::<Option<String>, _>(index)
-        .map_err(|_| corrupt(field))?
-        .map(|raw| SymbolId::parse(&raw).map_err(|_| corrupt(field)))
+    row.try_get::<Option<String>, _>(column)
+        .map_err(|_| corrupt(column))?
+        .map(|raw| SymbolId::parse(&raw).map_err(|_| corrupt(column)))
         .transpose()
 }
 
-fn parse_document_id(row: &sqlx_postgres::PgRow, index: usize) -> Result<DocumentId, StorageError> {
-    let raw = read_string(row, index, "document_id")?;
+fn parse_document_id(
+    row: &sqlx_postgres::PgRow,
+    column: &'static str,
+) -> Result<DocumentId, StorageError> {
+    let raw = read_string(row, column)?;
     DocumentId::parse(&raw).map_err(|_| corrupt("document_id"))
 }
 

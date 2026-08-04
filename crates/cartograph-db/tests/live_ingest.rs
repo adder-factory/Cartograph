@@ -15,9 +15,9 @@ use cartograph_db::{
     LeaseRequest, LeaseTarget, NativeGenerationExtractedCursor, NativeGenerationSpill,
     NativeGenerationSpillCachedRow, NativeGenerationSpillExtractedBatch,
     NativeGenerationSpillFactBatch, NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy,
-    NativeGenerationSpillRow, NativeGenerationSpillState, NativeGenerationSpillWrite,
-    NativeParseCacheBatchWrite, NativeParseCacheEntry, NativeParseCacheKey,
-    NativeParseCacheKeyInput, NewGeneration, NewProject, NumericalSiteInput,
+    NativeGenerationSpillRequest, NativeGenerationSpillRow, NativeGenerationSpillState,
+    NativeGenerationSpillWrite, NativeParseCacheBatchWrite, NativeParseCacheEntry,
+    NativeParseCacheKey, NativeParseCacheKeyInput, NewGeneration, NewProject, NumericalSiteInput,
     PrepareGenerationMetrics, ProjectLease, ReadyGeneration, RecoverableGeneration, ReferenceInput,
     SearchDocumentInput, SpilledGenerationContents, StagedGeneration, StorageError, SymbolInput,
     validate_generation_facts,
@@ -573,9 +573,11 @@ async fn begin_spill_test(fixture: &DatabaseFixture) -> SpillTestRun {
     let spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &staged,
-        lease.fence(),
-        policy,
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: lease.fence(),
+            policy,
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("spill authority was invalid: {error}"));
     let report = spill
@@ -738,9 +740,11 @@ async fn exercise_spill_parse_resume(fixture: &DatabaseFixture, run: &mut SpillT
     run.spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &run.staged,
-        run.lease.fence(),
-        run.policy,
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: run.lease.fence(),
+            policy: run.policy,
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("resumed parse authority was invalid: {error}"));
     let resumed = run
@@ -867,9 +871,11 @@ async fn exercise_spill_fact_resume(
     run.spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &run.staged,
-        run.lease.fence(),
-        run.policy,
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: run.lease.fence(),
+            policy: run.policy,
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("resumed reduction authority was invalid: {error}"));
     assert_spill_resume_replay(&run.spill, limits).await;
@@ -1004,10 +1010,12 @@ async fn assert_spill_quota_and_fence(fixture: &DatabaseFixture) {
     let spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &staged,
-        lease.fence(),
-        NativeGenerationSpillPolicy::new(1, 1)
-            .unwrap_or_else(|error| panic!("quota policy was invalid: {error}")),
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: lease.fence(),
+            policy: NativeGenerationSpillPolicy::new(1, 1)
+                .unwrap_or_else(|error| panic!("quota policy was invalid: {error}")),
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("quota authority was invalid: {error}"));
     spill

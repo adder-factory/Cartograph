@@ -9513,6 +9513,43 @@ impl<'a> ImportBindingSelection<'a> {
     }
 }
 
+/// Resolution-name classification for one extracted reference.
+///
+/// A resolver prefix decides which lookup a reference gets, so the prefixes are
+/// stripped once here rather than being re-tested through the resolution path.
+struct ReferenceLookup<'reference> {
+    dynamic_dispatch_name: Option<&'reference str>,
+    rust_macro_name: Option<&'reference str>,
+    type_query_value_name: Option<&'reference str>,
+    embedded_sql: Option<EmbeddedSqlLookup<'reference>>,
+    lookup_name: &'reference str,
+}
+
+impl<'reference> ReferenceLookup<'reference> {
+    fn classify(reference: &'reference ExtractedReference) -> Self {
+        let resolution_name = reference.resolution_name.as_deref();
+        let dynamic_dispatch_name =
+            resolution_name.and_then(|name| name.strip_prefix(DYNAMIC_DISPATCH_RESOLUTION_PREFIX));
+        let rust_macro_name =
+            resolution_name.and_then(|name| name.strip_prefix(RUST_MACRO_RESOLUTION_PREFIX));
+        let type_query_value_name =
+            resolution_name.and_then(|name| name.strip_prefix(TYPE_QUERY_VALUE_RESOLUTION_PREFIX));
+        let embedded_sql = embedded_sql_lookup(resolution_name);
+        let lookup_name = dynamic_dispatch_name
+            .or(rust_macro_name)
+            .or(type_query_value_name)
+            .or_else(|| embedded_sql.as_ref().map(|lookup| lookup.table))
+            .unwrap_or_else(|| resolution_name.unwrap_or(&reference.name));
+        Self {
+            dynamic_dispatch_name,
+            rust_macro_name,
+            type_query_value_name,
+            embedded_sql,
+            lookup_name,
+        }
+    }
+}
+
 struct ReferenceAppendRequest<'a, 'b> {
     context: &'a FileResolutionContext<'b>,
     reference: ExtractedReference,
@@ -9711,29 +9748,14 @@ impl ResolutionOutput<'_> {
         Cancel: FnMut() -> bool,
     {
         let ReferenceAppendRequest { context, reference } = request;
-        let dynamic_dispatch_name = reference
-            .resolution_name
-            .as_deref()
-            .and_then(|name| name.strip_prefix(DYNAMIC_DISPATCH_RESOLUTION_PREFIX));
-        let rust_macro_name = reference
-            .resolution_name
-            .as_deref()
-            .and_then(|name| name.strip_prefix(RUST_MACRO_RESOLUTION_PREFIX));
-        let type_query_value_name = reference
-            .resolution_name
-            .as_deref()
-            .and_then(|name| name.strip_prefix(TYPE_QUERY_VALUE_RESOLUTION_PREFIX));
-        let embedded_sql = embedded_sql_lookup(reference.resolution_name.as_deref());
-        let lookup_name = dynamic_dispatch_name
-            .or(rust_macro_name)
-            .or(type_query_value_name)
-            .or_else(|| embedded_sql.as_ref().map(|lookup| lookup.table))
-            .unwrap_or_else(|| {
-                reference
-                    .resolution_name
-                    .as_deref()
-                    .unwrap_or(&reference.name)
-            });
+        let lookup = ReferenceLookup::classify(&reference);
+        let ReferenceLookup {
+            dynamic_dispatch_name,
+            rust_macro_name,
+            type_query_value_name,
+            embedded_sql,
+            lookup_name,
+        } = lookup;
         let import_bindings = import_binding_scratch.select(context.import_bindings, lookup_name);
         let mut resolution = if rust_macro_name.is_some() {
             ReferenceResolution::unresolved(RUST_MACRO_UNRESOLVED_PROVENANCE)
@@ -9766,19 +9788,7 @@ impl ResolutionOutput<'_> {
             target.confidence = DYNAMIC_DISPATCH_CONFIDENCE;
             target.provenance = DYNAMIC_DISPATCH_PROVENANCE;
         }
-        if resolution.target.is_some() {
-            self.report.resolved = self
-                .report
-                .resolved
-                .checked_add(1)
-                .ok_or(StageItemFailure)?;
-        } else {
-            self.report.unresolved = self
-                .report
-                .unresolved
-                .checked_add(1)
-                .ok_or(StageItemFailure)?;
-        }
+        self.count_resolution(resolution.target.is_some())?;
         let source_symbol_id = reference
             .owner
             .clone()
@@ -9804,6 +9814,17 @@ impl ResolutionOutput<'_> {
                 reference,
                 resolution,
             }));
+        Ok(())
+    }
+
+    /// Record exactly one resolved or unresolved reference outcome.
+    fn count_resolution(&mut self, resolved: bool) -> Result<(), StageItemFailure> {
+        let counter = if resolved {
+            &mut self.report.resolved
+        } else {
+            &mut self.report.unresolved
+        };
+        *counter = counter.checked_add(1).ok_or(StageItemFailure)?;
         Ok(())
     }
 

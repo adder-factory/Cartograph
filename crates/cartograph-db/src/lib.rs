@@ -191,8 +191,8 @@ pub use spill::{
     NativeGenerationSpillCentralityScore, NativeGenerationSpillDigestReport,
     NativeGenerationSpillExtractedBatch, NativeGenerationSpillExtractedRow,
     NativeGenerationSpillFactBatch, NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy,
-    NativeGenerationSpillRelation, NativeGenerationSpillReport, NativeGenerationSpillRow,
-    NativeGenerationSpillState, NativeGenerationSpillWrite,
+    NativeGenerationSpillRelation, NativeGenerationSpillReport, NativeGenerationSpillRequest,
+    NativeGenerationSpillRow, NativeGenerationSpillState, NativeGenerationSpillWrite,
 };
 use sqlx_core::{pool::PoolOptions, query::query};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgSslMode, Postgres};

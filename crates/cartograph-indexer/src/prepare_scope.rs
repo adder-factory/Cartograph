@@ -5,9 +5,9 @@ use std::{
 
 use cartograph_db::{
     CartographDatabase, GenerationContents, LeaseFence, NativeGenerationSpill,
-    NativeGenerationSpillPolicy, PrepareGenerationError, PrepareGenerationMutation,
-    PrepareGenerationProgress, ReadyGeneration, SpilledGenerationContents, StagedGeneration,
-    StorageError,
+    NativeGenerationSpillPolicy, NativeGenerationSpillRequest, PrepareGenerationError,
+    PrepareGenerationMutation, PrepareGenerationProgress, ReadyGeneration,
+    SpilledGenerationContents, StagedGeneration, StorageError,
 };
 use thiserror::Error;
 use tokio::{
@@ -108,9 +108,11 @@ impl PrepareScope {
         NativeGenerationSpill::new(
             self.database.clone(),
             generation,
-            self.fence.clone(),
-            policy,
-            self.statement_timeout,
+            NativeGenerationSpillRequest {
+                fence: self.fence.clone(),
+                policy,
+                statement_timeout: self.statement_timeout,
+            },
         )
     }
 

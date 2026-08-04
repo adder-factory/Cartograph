@@ -1131,61 +1131,12 @@ fn parse_project_source_settings(
         .map(parse_project_excludes)
         .transpose()?
         .unwrap_or_default();
-    let extract_docstrings = optional_config_bool(root, "extractDocstrings")?.unwrap_or(true);
-    let track_call_sites = optional_config_bool(root, "trackCallSites")?.unwrap_or(true);
-    let index_submodules = optional_config_bool(root, "indexSubmodules")?.unwrap_or(true);
-    let index_embedded_repositories =
-        optional_config_bool(root, "indexEmbeddedRepos")?.unwrap_or(true) && index_submodules;
-    let enable_centrality = optional_config_bool(root, "enableCentrality")?.unwrap_or(true);
-    // v2 enables its bounded native implementation by default. The legacy
-    // `false` override remains authoritative for projects that prefer the
-    // indexing-cost tradeoff from v1.
-    let enable_betweenness = optional_config_bool(root, "enableBetweenness")?.unwrap_or(true);
-    let enable_churn = optional_config_bool(root, "enableChurn")?.unwrap_or(true);
-    let enable_co_change = optional_config_bool(root, "enableCoChange")?.unwrap_or(true);
-    let enable_biomarkers = optional_config_bool(root, "enableBiomarkers")?.unwrap_or(true);
-    let enable_issue_history = optional_config_bool(root, "enableIssueHistory")?.unwrap_or(true);
-    let enable_config_refs = optional_config_bool(root, "enableConfigRefs")?.unwrap_or(true);
-    let enable_sql_refs = optional_config_bool(root, "enableSqlRefs")?.unwrap_or(true);
-    let enable_build_context_refs =
-        optional_config_bool(root, "enableBuildContextRefs")?.unwrap_or(true);
-    let enable_string_imports = optional_config_bool(root, "enableStringImports")?.unwrap_or(true);
-    let duplicate_code_partial_clones =
-        optional_config_bool(root, "duplicateCodePartialClones")?.unwrap_or(false);
+    let features = parse_source_features(root)?;
     let duplicate_code_allowlist = root
         .get("duplicateCodeAllowlist")
         .map(parse_project_globs)
         .transpose()?
         .unwrap_or_default();
-    let mut features = SourceFeatureFlags::default();
-    for (feature, enabled) in [
-        (SourceFeature::ExtractDocstrings, extract_docstrings),
-        (SourceFeature::TrackCallSites, track_call_sites),
-        (SourceFeature::IndexSubmodules, index_submodules),
-        (
-            SourceFeature::IndexEmbeddedRepositories,
-            index_embedded_repositories,
-        ),
-        (SourceFeature::Centrality, enable_centrality),
-        (SourceFeature::Betweenness, enable_betweenness),
-        (SourceFeature::Churn, enable_churn),
-        (SourceFeature::CoChange, enable_co_change),
-        (SourceFeature::Biomarkers, enable_biomarkers),
-        (SourceFeature::IssueHistory, enable_issue_history),
-        (SourceFeature::ConfigReferences, enable_config_refs),
-        (SourceFeature::SqlReferences, enable_sql_refs),
-        (
-            SourceFeature::BuildContextReferences,
-            enable_build_context_refs,
-        ),
-        (SourceFeature::StringImports, enable_string_imports),
-        (
-            SourceFeature::DuplicateCodePartialClones,
-            duplicate_code_partial_clones,
-        ),
-    ] {
-        features.set(feature, enabled);
-    }
     Ok(ProjectSourceSettings {
         maximum_file_bytes,
         maximum_generation_bytes,
@@ -1198,6 +1149,56 @@ fn parse_project_source_settings(
         features,
         duplicate_code_allowlist,
     })
+}
+
+/// Every boolean source feature with its configuration key and v2 default.
+///
+/// v2 enables its bounded native implementations by default. A legacy `false`
+/// override remains authoritative for projects that prefer v1's indexing-cost
+/// tradeoff.
+const SOURCE_FEATURE_DEFAULTS: [(SourceFeature, &str, bool); 15] = [
+    (SourceFeature::ExtractDocstrings, "extractDocstrings", true),
+    (SourceFeature::TrackCallSites, "trackCallSites", true),
+    (SourceFeature::IndexSubmodules, "indexSubmodules", true),
+    (
+        SourceFeature::IndexEmbeddedRepositories,
+        "indexEmbeddedRepos",
+        true,
+    ),
+    (SourceFeature::Centrality, "enableCentrality", true),
+    (SourceFeature::Betweenness, "enableBetweenness", true),
+    (SourceFeature::Churn, "enableChurn", true),
+    (SourceFeature::CoChange, "enableCoChange", true),
+    (SourceFeature::Biomarkers, "enableBiomarkers", true),
+    (SourceFeature::IssueHistory, "enableIssueHistory", true),
+    (SourceFeature::ConfigReferences, "enableConfigRefs", true),
+    (SourceFeature::SqlReferences, "enableSqlRefs", true),
+    (
+        SourceFeature::BuildContextReferences,
+        "enableBuildContextRefs",
+        true,
+    ),
+    (SourceFeature::StringImports, "enableStringImports", true),
+    (
+        SourceFeature::DuplicateCodePartialClones,
+        "duplicateCodePartialClones",
+        false,
+    ),
+];
+
+fn parse_source_features(
+    root: &Map<String, Value>,
+) -> Result<SourceFeatureFlags, ProjectLlmConfigError> {
+    let mut features = SourceFeatureFlags::default();
+    for (feature, key, default) in SOURCE_FEATURE_DEFAULTS {
+        features.set(feature, optional_config_bool(root, key)?.unwrap_or(default));
+    }
+    // An embedded repository is only reachable through submodule indexing, so
+    // the two flags are conjunctive rather than independent.
+    if !features.enabled(SourceFeature::IndexSubmodules) {
+        features.set(SourceFeature::IndexEmbeddedRepositories, false);
+    }
+    Ok(features)
 }
 
 fn parse_generation_storage(

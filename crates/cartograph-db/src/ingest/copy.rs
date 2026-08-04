@@ -381,29 +381,37 @@ where
         u64::try_from(expected_rows).map_err(|_| database_error("copy-row-count-overflow"))?;
     copy_text_rows_counted(
         connection,
-        &spec.statement,
-        spec.operation,
-        expected_rows,
+        CountedCopyRequest {
+            statement: &spec.statement,
+            operation: spec.operation,
+            expected_rows,
+        },
         rows.map(Ok),
     )
     .await
 }
 
-pub(crate) async fn copy_text_rows_counted<I>(
+/// Exact statement, audit label, and admitted row count for one COPY stream.
+#[derive(Clone, Copy)]
+pub(crate) struct CountedCopyRequest<'request> {
+    pub(crate) statement: &'request str,
+    pub(crate) operation: &'static str,
+    pub(crate) expected_rows: u64,
+}
+
+async fn copy_text_rows_counted<I>(
     connection: &mut PgConnection,
-    statement: &str,
-    operation: &'static str,
-    expected_rows: u64,
+    request: CountedCopyRequest<'_>,
     rows: I,
 ) -> Result<(), StorageError>
 where
     I: IntoIterator<Item = Result<Vec<u8>, StorageError>> + Send,
     I::IntoIter: Send,
 {
-    if expected_rows == 0 {
+    if request.expected_rows == 0 {
         return Ok(());
     }
-    let mut copy = CountedTextCopy::begin(connection, statement, operation, expected_rows).await?;
+    let mut copy = CountedTextCopy::begin(connection, request).await?;
     for row in rows {
         copy.push(row).await?;
     }
@@ -421,10 +429,13 @@ pub(crate) struct CountedTextCopy<'connection> {
 impl<'connection> CountedTextCopy<'connection> {
     pub(crate) async fn begin(
         connection: &'connection mut PgConnection,
-        statement: &str,
-        operation: &'static str,
-        expected_rows: u64,
+        request: CountedCopyRequest<'_>,
     ) -> Result<Self, StorageError> {
+        let CountedCopyRequest {
+            statement,
+            operation,
+            expected_rows,
+        } = request;
         if expected_rows == 0 {
             return Err(StorageError::InvalidInput {
                 field: "copy_expected_rows",
