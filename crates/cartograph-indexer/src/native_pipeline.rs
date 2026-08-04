@@ -1673,10 +1673,13 @@ impl<'spill> SpilledParseTransaction<'spill> {
         &mut self,
         sequence: u64,
         file_id: &FileId,
-        key: NativeParseCacheKey,
-        payload_digest: ContentDigest,
-        payload_bytes: u64,
+        payload: CachedParsePayload,
     ) -> Result<(), ParseManifestFailure> {
+        let CachedParsePayload {
+            key,
+            payload_digest,
+            payload_bytes,
+        } = payload;
         let sort_key = file_id.as_str().as_bytes().to_vec();
         let row_bytes = usize_to_u64(sort_key.len()).saturating_add(payload_bytes);
         self.prepare_push(sequence, row_bytes).await?;
@@ -1782,11 +1785,15 @@ struct SpilledParseBatchContext<'input, 'spill> {
 impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     fn new(
         spill: &'spill NativeGenerationSpill,
-        source_root: &'input SourceRoot,
-        parse_cache: Option<&'input NativeParseCache>,
+        inputs: SpilledParseInputs<'input>,
         cancellation: &'input StageCancellation,
         capacity: usize,
     ) -> Result<Self, ParseManifestFailure> {
+        let SpilledParseInputs {
+            source_root,
+            parse_cache,
+            ..
+        } = inputs;
         let mut cache_writes = Vec::new();
         cache_writes
             .try_reserve_exact(capacity)
@@ -1818,9 +1825,11 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         if let Some((file, payload_digest, payload_bytes)) = self
             .cached_file(
                 &entry.manifest,
-                key,
-                cached,
-                cache_read_failed,
+                CachedParseLookup {
+                    key,
+                    cached,
+                    cache_read_failed,
+                },
                 &mut metrics,
             )
             .await?
@@ -1834,9 +1843,11 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
                 .push_cached(
                     entry.sequence,
                     &file.file_id,
-                    key.clone(),
-                    payload_digest,
-                    payload_bytes,
+                    CachedParsePayload {
+                        key: key.clone(),
+                        payload_digest,
+                        payload_bytes,
+                    },
                 )
                 .await?;
             return Ok(());
@@ -1878,11 +1889,14 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     async fn cached_file(
         &self,
         manifest: &SourceManifestEntry,
-        key: Option<&NativeParseCacheKey>,
-        cached: Option<NativeParseCacheRecord>,
-        cache_read_failed: bool,
+        lookup: CachedParseLookup<'_>,
         metrics: &mut NativeParseCacheReport,
     ) -> Result<Option<(ExtractedFile, ContentDigest, u64)>, ParseManifestFailure> {
+        let CachedParseLookup {
+            key,
+            cached,
+            cache_read_failed,
+        } = lookup;
         let (Some(cache), Some(key)) = (self.parse_cache, key) else {
             return Ok(None);
         };
@@ -1989,8 +2003,11 @@ async fn stream_spilled_parse_batch(
         load_spilled_parse_cache(parse_cache, &entries).await;
     let mut context = SpilledParseBatchContext::new(
         spill,
-        source_root,
-        parse_cache,
+        SpilledParseInputs {
+            spill,
+            source_root,
+            parse_cache,
+        },
         &cancellation,
         entries.len(),
     )?;
@@ -2087,9 +2104,11 @@ async fn flush_spilled_parse_cache_writes(
                 .push_cached(
                     write.sequence,
                     &write.file_id,
-                    write.key,
-                    write.payload_digest,
-                    usize_to_u64(write.payload.len()),
+                    CachedParsePayload {
+                        key: write.key,
+                        payload_digest: write.payload_digest,
+                        payload_bytes: usize_to_u64(write.payload.len()),
+                    },
                 )
                 .await?;
         }
@@ -2107,13 +2126,16 @@ async fn flush_spilled_parse_cache_writes(
 async fn visit_spilled_native_files<State, Visit>(
     source: &SpilledNativeFacts,
     state: &mut State,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    observation: SpilledVisitObservation<'_>,
     mut visit: Visit,
 ) -> Result<(), StageItemFailure>
 where
     Visit: FnMut(&mut State, NativeFileFacts) -> Result<(), StageItemFailure>,
 {
+    let SpilledVisitObservation {
+        cancellation,
+        progress,
+    } = observation;
     let mut cursor = NativeGenerationExtractedCursor::default();
     let mut expected_sequence = 0_u64;
     loop {
@@ -2757,6 +2779,44 @@ async fn run_spilled_resolve_stage(
     }
 }
 
+/// Observation channel for one spilled file walk.
+#[derive(Clone, Copy)]
+struct SpilledVisitObservation<'observation> {
+    cancellation: &'observation StageCancellation,
+    progress: &'observation StageRunner,
+}
+
+/// Cache key and payload accounting for one cached parse result.
+struct CachedParsePayload {
+    key: NativeParseCacheKey,
+    payload_digest: ContentDigest,
+    payload_bytes: u64,
+}
+
+/// Cache lookup outcome for one manifest entry.
+struct CachedParseLookup<'lookup> {
+    key: Option<&'lookup NativeParseCacheKey>,
+    cached: Option<NativeParseCacheRecord>,
+    cache_read_failed: bool,
+}
+
+/// Resolution index, configuration, and cancellation for one file.
+#[derive(Clone, Copy)]
+struct SpilledFileResolution<'resolution> {
+    index: &'resolution ResolutionIndex,
+    config: NativePipelineConfig,
+    cancellation: &'resolution StageCancellation,
+}
+
+/// Clone policy, working bound, and observation channel for one preparation.
+#[derive(Clone, Copy)]
+struct ResolutionPreparationRequest<'request> {
+    policy: NativeClonePolicy,
+    maximum_bytes: u64,
+    cancellation: &'request StageCancellation,
+    progress: &'request StageRunner,
+}
+
 /// Fixed configuration, cancellation, and progress reporting for one spilled stage.
 #[derive(Clone, Copy)]
 struct SpilledStageContext<'context> {
@@ -2821,10 +2881,12 @@ async fn initialize_spilled_resolution(
     let (clone_evidence, index, preparation_high_water) = build_spilled_resolution_preparation(
         source,
         source_root,
-        config.clone_policy(),
-        maximum_bytes,
-        cancellation,
-        progress,
+        ResolutionPreparationRequest {
+            policy: config.clone_policy(),
+            maximum_bytes,
+            cancellation,
+            progress,
+        },
     )
     .await
     .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
@@ -2953,7 +3015,15 @@ async fn schedule_spilled_resolution_page(
         let worker_cancellation = cancellation.clone();
         let sequence = *sequence;
         tasks.spawn_blocking(move || {
-            resolve_file_facts(sequence, file, index.as_ref(), config, &worker_cancellation)
+            resolve_file_facts(
+                sequence,
+                file,
+                SpilledFileResolution {
+                    index: index.as_ref(),
+                    config,
+                    cancellation: &worker_cancellation,
+                },
+            )
         });
         **input_sequence = input_sequence
             .checked_add(1)
@@ -2980,10 +3050,13 @@ fn require_spilled_resolution_sequence(
 fn resolve_file_facts(
     sequence: u64,
     file: NativeFileFacts,
-    index: &ResolutionIndex,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
+    resolution: SpilledFileResolution<'_>,
 ) -> Result<ResolvedFileFacts, ResolveGenerationFailure> {
+    let SpilledFileResolution {
+        index,
+        config,
+        cancellation,
+    } = resolution;
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let mut facts = GenerationFacts::default();
     let mut report = ResolutionReport::default();
@@ -6593,11 +6666,14 @@ struct SpilledResolutionPreparation {
 async fn build_spilled_resolution_preparation(
     source: &SpilledNativeFacts,
     source_root: &SourceRoot,
-    policy: NativeClonePolicy,
-    maximum_bytes: u64,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    preparation: ResolutionPreparationRequest<'_>,
 ) -> Result<(CloneEvidenceMap, ResolutionIndex, u64), StageItemFailure> {
+    let ResolutionPreparationRequest {
+        policy,
+        maximum_bytes,
+        cancellation,
+        progress,
+    } = preparation;
     let working_limit = maximum_bytes
         .checked_mul(RESOLVE_WORKING_MULTIPLIER)
         .ok_or(StageItemFailure)?;
@@ -6609,8 +6685,10 @@ async fn build_spilled_resolution_preparation(
     visit_spilled_native_files(
         source,
         &mut preparation,
-        cancellation,
-        progress,
+        SpilledVisitObservation {
+            cancellation,
+            progress,
+        },
         |state, file| {
             let mut cancelled = || cancellation.is_cancelled();
             index_resolution_file_metadata(ResolutionIndexFileInput {
@@ -6639,8 +6717,10 @@ async fn build_spilled_resolution_preparation(
     visit_spilled_native_files(
         source,
         &mut preparation,
-        cancellation,
-        progress,
+        SpilledVisitObservation {
+            cancellation,
+            progress,
+        },
         |state, file| {
             let mut cancelled = || cancellation.is_cancelled();
             index_rust_workspace_package_file(

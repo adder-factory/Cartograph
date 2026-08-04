@@ -16,7 +16,9 @@ use sqlx_core::row::Row;
 use crate::{
     CartographDatabase, LeaseFence, StagedGeneration, StorageError,
     database::{audited_query, set_local_statement_timeout},
-    generation::{check_staging_generation_fence, lock_staging_generation_fence},
+    generation::{
+        StagingFenceTarget, check_staging_generation_fence, lock_staging_generation_fence,
+    },
     ingest::{
         CanonicalSearchDocument, CountedCopyRequest, CountedTextCopy, EdgeInput, FileInput,
         GenerationFacts, GenerationValidationError, GenerationValidationLimits,
@@ -790,6 +792,20 @@ impl NativeGenerationExtractedPage {
     }
 }
 
+/// Relation and batches for one typed spilled-fact insert.
+struct TypedFactPayloads<'payloads> {
+    relation: NativeGenerationSpillRelation,
+    batches: &'payloads [(i64, &'payloads NativeGenerationSpillFactBatch)],
+}
+
+/// Bounded totals one spill write adds to the run's running accounting.
+#[derive(Clone, Copy)]
+struct SpillTotalsDelta {
+    logical_bytes: u64,
+    rows: u64,
+    extracted_files: u64,
+}
+
 /// Exact paging position inside one spilled extraction stream.
 #[derive(Clone, Copy)]
 struct ExtractedPageCursor {
@@ -1285,10 +1301,13 @@ impl NativeGenerationSpill {
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
         schema: &str,
-        logical_bytes: u64,
-        rows: u64,
-        extracted_files: u64,
+        totals: SpillTotalsDelta,
     ) -> Result<(), StorageError> {
+        let SpillTotalsDelta {
+            logical_bytes,
+            rows,
+            extracted_files,
+        } = totals;
         let sql = format!(
             r#"UPDATE {schema}."native_generation_spills"
                 SET logical_bytes = logical_bytes + $3,
@@ -1397,9 +1416,11 @@ impl NativeGenerationSpill {
         self.increment_spill_totals(
             &mut transaction,
             &schema,
-            batch.logical_bytes,
-            batch_rows,
-            batch_rows,
+            SpillTotalsDelta {
+                logical_bytes: batch.logical_bytes,
+                rows: batch_rows,
+                extracted_files: batch_rows,
+            },
         )
         .await?;
         self.commit_transaction(transaction, "spill-append-commit")
@@ -1498,20 +1519,26 @@ impl NativeGenerationSpill {
             for relation in NativeGenerationSpillRelation::FACTS {
                 insert_typed_fact_payloads(
                     &mut transaction,
-                    &schema,
-                    &self.project_id,
-                    &self.generation_id,
-                    relation,
-                    &admitted,
+                    SpillScope {
+                        schema: &schema,
+                        project_id: &self.project_id,
+                        generation_id: &self.generation_id,
+                    },
+                    TypedFactPayloads {
+                        relation,
+                        batches: &admitted,
+                    },
                 )
                 .await?;
             }
             self.increment_spill_totals(
                 &mut transaction,
                 &schema,
-                admitted_bytes,
-                admitted_rows,
-                0,
+                SpillTotalsDelta {
+                    logical_bytes: admitted_bytes,
+                    rows: admitted_rows,
+                    extracted_files: 0,
+                },
             )
             .await?;
         }
@@ -1952,7 +1979,7 @@ impl NativeGenerationSpill {
         }
         let (digest, counts) = stream_spilled_digest(
             &mut transaction,
-            SpilledDigestScope {
+            SpillScope {
                 schema: &schema,
                 project_id: &self.project_id,
                 generation_id: &self.generation_id,
@@ -2264,10 +2291,12 @@ impl NativeGenerationSpill {
         lock_staging_generation_fence(
             transaction,
             &self.database.schema,
-            &self.fence,
-            &self.project_id,
-            &self.generation_id,
-            self.generation_sequence,
+            StagingFenceTarget {
+                fence: &self.fence,
+                project_id: &self.project_id,
+                generation_id: &self.generation_id,
+                sequence: self.generation_sequence,
+            },
         )
         .await
     }
@@ -2280,10 +2309,12 @@ impl NativeGenerationSpill {
         check_staging_generation_fence(
             &mut transaction,
             &self.database.schema,
-            &self.fence,
-            &self.project_id,
-            &self.generation_id,
-            self.generation_sequence,
+            StagingFenceTarget {
+                fence: &self.fence,
+                project_id: &self.project_id,
+                generation_id: &self.generation_id,
+                sequence: self.generation_sequence,
+            },
         )
         .await?;
         transaction
@@ -2676,17 +2707,22 @@ impl SpillCopyRow for CanonicalSearchDocument {
     }
 }
 
+/// Batches to copy and the accessor selecting one typed relation from each.
+struct TypedFactCopy<'copy, T> {
+    batches: &'copy [(i64, &'copy NativeGenerationSpillFactBatch)],
+    select: for<'batch> fn(&'batch NativeGenerationSpillFactBatch) -> &'batch [T],
+}
+
 async fn copy_typed_fact_rows<T>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    batches: &[(i64, &NativeGenerationSpillFactBatch)],
-    select: for<'batch> fn(&'batch NativeGenerationSpillFactBatch) -> &'batch [T],
+    scope: SpillScope<'_>,
+    request: TypedFactCopy<'_, T>,
 ) -> Result<(), StorageError>
 where
     T: SpillCopyRow + Sync,
 {
+    let TypedFactCopy { batches, select } = request;
+    let schema = scope.schema;
     let expected = batches.iter().try_fold(0_u64, |count, (_, batch)| {
         count.checked_add(usize_to_u64(select(batch).len()))
     });
@@ -2709,10 +2745,11 @@ where
     for (sequence, batch) in batches {
         for (ordinal, row) in select(batch).iter().enumerate() {
             copy.push(encode_spill_copy_row(
-                project_id,
-                generation_id,
-                *sequence,
-                ordinal,
+                scope,
+                SpillRowPosition {
+                    sequence: *sequence,
+                    ordinal,
+                },
                 row,
             ))
             .await?;
@@ -2721,13 +2758,20 @@ where
     copy.finish().await
 }
 
-fn encode_spill_copy_row<T: SpillCopyRow>(
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+/// Exact batch sequence and row ordinal of one encoded spill row.
+#[derive(Clone, Copy)]
+struct SpillRowPosition {
     sequence: i64,
     ordinal: usize,
+}
+
+fn encode_spill_copy_row<T: SpillCopyRow>(
+    scope: SpillScope<'_>,
+    position: SpillRowPosition,
     value: &T,
 ) -> Result<Vec<u8>, StorageError> {
+    let SpillRowPosition { sequence, ordinal } = position;
+    let (project_id, generation_id) = (scope.project_id, scope.generation_id);
     let ordinal = i32::try_from(ordinal).map_err(|_| StorageError::InvalidInput {
         field: "spill_row_ordinal",
     })?;
@@ -2754,12 +2798,10 @@ fn spill_identity_bucket(identity: &str) -> Result<u16, StorageError> {
 
 async fn insert_typed_fact_payloads(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    relation: NativeGenerationSpillRelation,
-    batches: &[(i64, &NativeGenerationSpillFactBatch)],
+    scope: SpillScope<'_>,
+    payloads: TypedFactPayloads<'_>,
 ) -> Result<(), StorageError> {
+    let TypedFactPayloads { relation, batches } = payloads;
     match relation {
         NativeGenerationSpillRelation::ExtractedFiles => Err(StorageError::InvalidInput {
             field: "spill_fact_relation",
@@ -2767,66 +2809,66 @@ async fn insert_typed_fact_payloads(
         NativeGenerationSpillRelation::Files => {
             copy_typed_fact_rows(
                 transaction,
-                schema,
-                project_id,
-                generation_id,
-                batches,
-                |batch| batch.tables.files.as_slice(),
+                scope,
+                TypedFactCopy {
+                    batches,
+                    select: |batch| batch.tables.files.as_slice(),
+                },
             )
             .await
         }
         NativeGenerationSpillRelation::Symbols => {
             copy_typed_fact_rows(
                 transaction,
-                schema,
-                project_id,
-                generation_id,
-                batches,
-                |batch| batch.tables.symbols.as_slice(),
+                scope,
+                TypedFactCopy {
+                    batches,
+                    select: |batch| batch.tables.symbols.as_slice(),
+                },
             )
             .await
         }
         NativeGenerationSpillRelation::Edges => {
             copy_typed_fact_rows(
                 transaction,
-                schema,
-                project_id,
-                generation_id,
-                batches,
-                |batch| batch.tables.edges.as_slice(),
+                scope,
+                TypedFactCopy {
+                    batches,
+                    select: |batch| batch.tables.edges.as_slice(),
+                },
             )
             .await
         }
         NativeGenerationSpillRelation::References => {
             copy_typed_fact_rows(
                 transaction,
-                schema,
-                project_id,
-                generation_id,
-                batches,
-                |batch| batch.tables.references.as_slice(),
+                scope,
+                TypedFactCopy {
+                    batches,
+                    select: |batch| batch.tables.references.as_slice(),
+                },
             )
             .await
         }
         NativeGenerationSpillRelation::NumericalSites => {
             copy_typed_fact_rows(
                 transaction,
-                schema,
-                project_id,
-                generation_id,
-                batches,
-                |batch| batch.tables.numerical_sites.as_slice(),
+                scope,
+                TypedFactCopy {
+                    batches,
+                    select: |batch| batch.tables.numerical_sites.as_slice(),
+                },
             )
             .await
         }
         NativeGenerationSpillRelation::Documents => {
             copy_typed_fact_rows(
                 transaction,
-                schema,
-                project_id,
-                generation_id,
-                batches,
-                |batch| batch.tables.documents.as_slice(),
+                scope,
+                TypedFactCopy {
+                    batches,
+                    select: |batch| batch.tables.documents.as_slice(),
+                },
             )
             .await
         }
@@ -2835,7 +2877,7 @@ async fn insert_typed_fact_payloads(
 
 async fn stream_spilled_digest<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    scope: SpilledDigestScope<'_>,
+    scope: SpillScope<'_>,
     cancelled: &mut Cancel,
     progress: &mut Progress,
 ) -> Result<(ContentDigest, NativeGenerationSpillFactCounts), StorageError>
@@ -2881,9 +2923,9 @@ where
 
 pub(crate) async fn canonical_fact_counts(
     connection: &mut sqlx_postgres::PgConnection,
-    scope: SpilledDigestScope<'_>,
+    scope: SpillScope<'_>,
 ) -> Result<NativeGenerationSpillFactCounts, StorageError> {
-    let SpilledDigestScope {
+    let SpillScope {
         schema,
         project_id,
         generation_id,
@@ -3005,9 +3047,7 @@ struct DigestEncodedRequest<'a> {
 
 async fn digest_encoded_relation<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    digest: &mut LogicalDigestBuilder,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
+    stream: &mut SpilledDigestStream<'_, Cancel, Progress>,
     request: DigestEncodedRequest<'_>,
 ) -> Result<(), StorageError>
 where
@@ -3019,7 +3059,7 @@ where
         .bind(request.project_id.as_str())
         .bind(request.generation_id.as_str())
         .fetch(&mut **transaction);
-    let mut pulse = DigestPulse::new(cancelled, progress);
+    let mut pulse = DigestPulse::new(stream.cancelled, stream.progress);
     while let Some(row) = rows
         .try_next()
         .await
@@ -3029,7 +3069,7 @@ where
         let encoded = row
             .try_get::<Vec<u8>, _>(0)
             .map_err(|_| corrupt("digest_row"))?;
-        digest.push_encoded_row(&encoded);
+        stream.digest.push_encoded_row(&encoded);
     }
     pulse.finish().await
 }
@@ -3053,9 +3093,9 @@ struct SpilledDigestStream<'stream, Cancel, Progress> {
     progress: &'stream mut Progress,
 }
 
-/// Exact project/generation fence and schema for one spilled digest pass.
+/// Exact schema and project/generation fence for one spilled operation.
 #[derive(Clone, Copy)]
-pub(crate) struct SpilledDigestScope<'scope> {
+pub(crate) struct SpillScope<'scope> {
     pub(crate) schema: &'scope str,
     pub(crate) project_id: &'scope ProjectId,
     pub(crate) generation_id: &'scope GenerationId,
@@ -3158,7 +3198,7 @@ fn encoded_relation_digests() -> [SpilledRelationDigest; 5] {
 async fn digest_spilled_relation<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
     stream: &mut SpilledDigestStream<'_, Cancel, Progress>,
-    request: (SpilledDigestScope<'_>, SpilledRelationDigest),
+    request: (SpillScope<'_>, SpilledRelationDigest),
 ) -> Result<(), StorageError>
 where
     Cancel: FnMut() -> bool,
@@ -3174,9 +3214,7 @@ where
     );
     digest_encoded_relation(
         transaction,
-        stream.digest,
-        stream.cancelled,
-        stream.progress,
+        stream,
         DigestEncodedRequest {
             project_id: scope.project_id,
             generation_id: scope.generation_id,
@@ -3190,14 +3228,14 @@ where
 async fn digest_spilled_documents<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
     stream: &mut SpilledDigestStream<'_, Cancel, Progress>,
-    scope: SpilledDigestScope<'_>,
+    scope: SpillScope<'_>,
 ) -> Result<(), StorageError>
 where
     Cancel: FnMut() -> bool,
     Progress: FnMut(u64) -> ProgressFuture,
     ProgressFuture: Future<Output = bool>,
 {
-    let SpilledDigestScope {
+    let SpillScope {
         schema,
         project_id,
         generation_id,
@@ -3234,9 +3272,7 @@ where
         );
         return digest_encoded_relation(
             transaction,
-            stream.digest,
-            stream.cancelled,
-            stream.progress,
+            stream,
             DigestEncodedRequest {
                 project_id,
                 generation_id,

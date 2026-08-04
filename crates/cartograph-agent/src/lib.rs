@@ -1333,10 +1333,12 @@ impl ProjectRuntime {
         let workers = select_worker_count(source.files, source.source_bytes, options.max_workers);
         let generation_storage = select_generation_storage(
             source_policy.generation_storage,
-            source.files,
-            source.source_bytes,
-            max_generation_bytes,
-            source.scip_overlay.is_some(),
+            GenerationStorageSignals {
+                files: source.files,
+                source_bytes: source.source_bytes,
+                maximum_generation_bytes: max_generation_bytes,
+                has_scip_overlay: source.scip_overlay.is_some(),
+            },
         )?;
         let project_id = self
             .database
@@ -1987,13 +1989,25 @@ impl ProjectSourcePolicy {
     }
 }
 
-fn select_generation_storage(
-    policy: GenerationStoragePolicy,
+/// Observed corpus size and overlay state one storage selection weighs.
+#[derive(Clone, Copy)]
+struct GenerationStorageSignals {
     files: usize,
     source_bytes: u64,
     maximum_generation_bytes: u64,
     has_scip_overlay: bool,
+}
+
+fn select_generation_storage(
+    policy: GenerationStoragePolicy,
+    signals: GenerationStorageSignals,
 ) -> Result<GenerationStorageSelection, ProjectError> {
+    let GenerationStorageSignals {
+        files,
+        source_bytes,
+        maximum_generation_bytes,
+        has_scip_overlay,
+    } = signals;
     match policy.preference {
         ProjectGenerationStorage::Memory => Ok(GenerationStorageSelection::Memory),
         ProjectGenerationStorage::Postgres if has_scip_overlay => Err(ProjectError::InvalidOptions),
@@ -2780,80 +2794,104 @@ mod tests {
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Memory),
-                AUTO_SPILL_MINIMUM_FILES,
-                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES,
+                    source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Memory)
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Postgres),
-                1,
-                1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Postgres(_))
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                AUTO_SPILL_MINIMUM_FILES - 1,
-                (DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR) - 1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES - 1,
+                    source_bytes: (DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR) - 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Memory)
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                AUTO_SPILL_MINIMUM_FILES,
-                1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES,
+                    source_bytes: 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
+            ),
+            Ok(GenerationStorageSelection::Postgres(_))
+        ));
+    }
+
+    #[test]
+    fn generation_storage_selection_honours_forced_preferences_and_overlay() {
+        let policy = |preference| GenerationStoragePolicy {
+            preference,
+            spill: NativeGenerationSpillPolicy::default(),
+        };
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Postgres(_))
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                1,
-                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Postgres(_))
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                1,
-                DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
-            ),
-            Ok(GenerationStorageSelection::Postgres(_))
-        ));
-        assert!(matches!(
-            select_generation_storage(
-                policy(ProjectGenerationStorage::Auto),
-                AUTO_SPILL_MINIMUM_FILES,
-                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
-                DEFAULT_MAX_GENERATION_BYTES,
-                true,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES,
+                    source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: true,
+                },
             ),
             Ok(GenerationStorageSelection::Memory)
         ));
         assert_eq!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Postgres),
-                1,
-                1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                true,
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: true,
+                },
             )
             .err(),
             Some(ProjectError::InvalidOptions)

@@ -1909,7 +1909,7 @@ async fn validate_spilled_prepare_authority(
     }
     let counts = canonical_fact_counts(
         connection,
-        crate::spill::SpilledDigestScope {
+        crate::spill::SpillScope {
             schema: quoted_schema,
             project_id: input.generation.project_id(),
             generation_id: input.generation.generation_id(),
@@ -2392,14 +2392,26 @@ async fn check_generation_fence(
     .await
 }
 
+/// Exact lease fence and staging generation one fence check applies to.
+#[derive(Clone, Copy)]
+pub(crate) struct StagingFenceTarget<'target> {
+    pub(crate) fence: &'target LeaseFence,
+    pub(crate) project_id: &'target ProjectId,
+    pub(crate) generation_id: &'target GenerationId,
+    pub(crate) sequence: i64,
+}
+
 pub(crate) async fn lock_staging_generation_fence(
     connection: &mut PgConnection,
     schema: &cartograph_config::DatabaseSchema,
-    fence: &LeaseFence,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    sequence: i64,
+    target: StagingFenceTarget<'_>,
 ) -> Result<(), StorageError> {
+    let StagingFenceTarget {
+        fence,
+        project_id,
+        generation_id,
+        sequence,
+    } = target;
     if !fence_matches_generation(fence, project_id, generation_id) {
         return Err(StorageError::LeaseFenceLost);
     }
@@ -2423,11 +2435,14 @@ pub(crate) async fn lock_staging_generation_fence(
 pub(crate) async fn check_staging_generation_fence(
     connection: &mut PgConnection,
     schema: &cartograph_config::DatabaseSchema,
-    fence: &LeaseFence,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    sequence: i64,
+    target: StagingFenceTarget<'_>,
 ) -> Result<(), StorageError> {
+    let StagingFenceTarget {
+        fence,
+        project_id,
+        generation_id,
+        sequence,
+    } = target;
     if !fence_matches_generation(fence, project_id, generation_id) {
         return Err(StorageError::LeaseFenceLost);
     }
