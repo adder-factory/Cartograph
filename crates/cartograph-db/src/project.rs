@@ -48,6 +48,8 @@ const DIRECT_PROJECT_TABLES: &[&str] = &[
     "mcp_macros",
     "symbol_similarity_edges",
     "symbol_similarity_builds",
+    "structural_findings",
+    "structural_finding_runs",
 ];
 
 /// Exact bounded deletion report for one PostgreSQL-backed project.

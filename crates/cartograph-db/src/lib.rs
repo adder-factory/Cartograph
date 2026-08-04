@@ -33,6 +33,7 @@ mod semantic;
 mod sessions;
 mod spill;
 mod storage;
+mod structural_findings;
 mod summary_priority;
 mod v1_import;
 
@@ -199,6 +200,7 @@ pub use storage::{
     GenerationDeduplicationAssessment, IndexStorageUsage, ParseCacheStorageUsage,
     StorageTotalsReport, StorageUsageReport, StorageWarning, TableStorageUsage,
 };
+pub use structural_findings::StructuralFindingRefresh;
 pub use summary_priority::{
     SummaryPriorityEnqueueReport, SummaryPriorityFailure, SummaryPriorityQueueStats,
 };

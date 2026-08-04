@@ -105,6 +105,7 @@ relations. Core relations:
 | `symbol_similarity_edges/symbol_similarity_builds` | Model-scoped materialized similarity with exact build provenance |
 | `native_parse_cache` | PostgreSQL-backed deterministic parse-result cache |
 | `summary_priority_queue` | Generation/evidence-fenced agent-demand summary priority |
+| `structural_finding_runs/structural_findings` | Generation-fenced detector relation with its exact input fingerprint |
 
 Generation foreign keys cascade only through explicit generation deletion.
 Ordinary indexes support identity/filter joins. BM25 ranking is intentionally

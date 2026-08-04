@@ -6,6 +6,14 @@ policy, and duplicate-code analysis. The detector path does not require an
 LLM. LLM-based dead-code judging is a separately labeled advisory workflow and
 never authorizes deletion.
 
+The complete detector relation is evaluated once per exact input fingerprint
+and stored generation-fenced, so repeated reads never re-evaluate it. The
+fingerprint covers the current generation, the superseded generation the growth
+detector compares against, imported coverage, materialised similarity, the
+calendar day bounding the `recently_grew` window, and the detector contract
+compiled into the binary. A detector-SQL change therefore invalidates every
+stored relation instead of serving findings the shipped rules no longer produce.
+
 The public detector names are:
 
 - size and complexity: `large_method`, `complex_method`,

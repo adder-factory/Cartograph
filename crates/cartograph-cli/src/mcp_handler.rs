@@ -15100,12 +15100,15 @@ async fn load_status_structural_readiness(
     let generation_id = status_generation_id(request)?;
     let biomarkers_enabled = request.source_settings.enable_biomarkers();
     let database = handler.runtime.database();
+    // The readiness probe only ever reads the stored relation. Evaluating every
+    // detector over a whole generation cannot fit a status budget, so an
+    // uncomputed relation is reported as an explicit pending state instead.
     let finding_stats_future = async {
         if !biomarkers_enabled {
             return Ok(None);
         }
         database
-            .current_structural_finding_stats_bounded(&request.project_id, STATUS_STORAGE_TIMEOUT)
+            .cached_current_structural_finding_stats(&request.project_id)
             .await
             .map(Some)
     };
@@ -15121,10 +15124,11 @@ async fn load_status_structural_readiness(
     );
     let layer_findings = status_layer_findings(biomarkers_enabled, layers)?;
     let biomarker_stats = match findings {
-        Ok(Some(findings)) => {
+        Ok(Some(Some(findings))) => {
             serde_json::to_value(merge_layer_finding_stats(findings, layer_findings.len())?)
                 .map_err(internal_error)?
         }
+        Ok(Some(None)) => status_biomarker_stats_pending(),
         Ok(None) => json!({"state": "disabled_by_project_config"}),
         Err(error) => status_biomarker_stats_unavailable(&error),
     };
@@ -15166,6 +15170,17 @@ async fn status_database_storage(handler: &CartographMcpHandler) -> Value {
             "detailCommand": "cartograph db usage --project-path <path>"
         }),
     }
+}
+
+/// Readiness state before the complete detector relation has been computed for
+/// the exact current inputs. Never confuse this with an empty finding set.
+fn status_biomarker_stats_pending() -> Value {
+    json!({
+        "state": "pending",
+        "reason": "not_computed",
+        "detailTool": BIOMARKERS_TOOL,
+        "currentGenerationFenced": true
+    })
 }
 
 fn status_biomarker_stats_unavailable(error: &StorageError) -> Value {

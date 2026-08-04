@@ -31,9 +31,9 @@ use cartograph_db::{
     FileTestImpactQuery, GroupedPathInput, GroupedSymbolQuery, InterchangeSnapshotRequest,
     IssueAttributionKind, IssueCommitSymbolPeerQuery, LeaseOwner, LeaseRequest, LeaseTarget,
     NativeParseCacheKey, NativeParseCacheKeyInput, SearchQuery, SemanticStorageError,
-    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
-    StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort, SymbolCoverageQuery,
-    SymbolIssuePeerQuery, SymbolIssueQuery,
+    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingRefresh,
+    StructuralFindingSeverity, StructuralHotspotCategory, StructuralHotspotQuery,
+    StructuralHotspotSort, SymbolCoverageQuery, SymbolIssuePeerQuery, SymbolIssueQuery,
 };
 use cartograph_domain::{
     ContentDigest, EdgeKind, GenerationDigestVersion, ModelId, NormalizedPath, ProjectOperation,
@@ -2443,6 +2443,87 @@ fn assert_clone_class_findings(findings: &[serde_json::Value]) {
     }
 }
 
+/// The readiness probe must never evaluate the detector cascade, and the stored
+/// relation must agree exactly with a live evaluation, recompute when any input
+/// fingerprint moves, and stay put when nothing changed.
+async fn assert_structural_finding_cache(
+    runtime: &ProjectRuntime,
+    indexed: &IndexReport,
+    settings: &DatabaseSettings,
+    schema: &str,
+) {
+    let database = runtime.database();
+    assert!(
+        database
+            .cached_current_structural_finding_stats(&indexed.project_id)
+            .await
+            .unwrap_or_else(|error| panic!("uncomputed cache read failed: {error}"))
+            .is_none(),
+        "readiness must report pending before the relation is computed"
+    );
+
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("first finding refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed
+    );
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("idempotent finding refresh failed: {error}")),
+        StructuralFindingRefresh::Current,
+        "an unchanged fingerprint must not recompute the relation"
+    );
+
+    let cached = database
+        .cached_current_structural_finding_stats(&indexed.project_id)
+        .await
+        .unwrap_or_else(|error| panic!("computed cache read failed: {error}"))
+        .unwrap_or_else(|| panic!("computed relation must be readable"));
+    let evaluated = database
+        .current_structural_finding_stats_bounded(&indexed.project_id, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|error| panic!("live finding evaluation failed: {error}"));
+    assert_eq!(
+        serde_json::to_value(&cached).ok(),
+        serde_json::to_value(&evaluated).ok(),
+        "stored findings must equal a live evaluation of the same generation"
+    );
+    assert!(
+        cached.total_findings() > 0,
+        "the fixture corpus must produce findings"
+    );
+
+    // A detector-contract change must invalidate a warm relation; otherwise a
+    // shipped rule change keeps serving findings the rules no longer produce.
+    let pool = cartograph_db::connect(settings)
+        .await
+        .unwrap_or_else(|error| panic!("cache fixture connection failed: {error}"));
+    let updated = query(AssertSqlSafe(format!(
+        r#"UPDATE "{schema}"."structural_finding_runs"
+            SET inputs_digest = repeat('0', 64)
+            WHERE project_id = CAST($1 AS uuid)"#
+    )))
+    .bind(indexed.project_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("cache fingerprint rewrite failed: {error}"))
+    .rows_affected();
+    pool.close().await;
+    assert_eq!(updated, 1);
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("stale fingerprint refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed,
+        "a moved input fingerprint must force a recomputation"
+    );
+}
+
 async fn assert_structural_finding_queries(runtime: &ProjectRuntime, indexed: &IndexReport) {
     let query = StructuralFindingQuery::new(10)
         .and_then(|query| query.with_finding(Some("dynamic_eval")))
@@ -2555,6 +2636,7 @@ async fn workspace_dependency_audit_combines_manifests_graph_scripts_and_dynamic
         assert_layer_analysis(&runtime, &indexed).await;
         assert_file_analysis(&runtime, &indexed).await;
         assert_dead_code_judgement(&runtime, &indexed).await;
+        assert_structural_finding_cache(&runtime, &indexed, &settings, &schema).await;
         let findings = structural_findings_json(&runtime, &indexed).await;
         assert_structural_finding_inventory(&findings);
         assert_structural_finding_queries(&runtime, &indexed).await;

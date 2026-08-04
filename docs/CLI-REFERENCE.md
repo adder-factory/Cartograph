@@ -210,13 +210,19 @@ requires backup plus the confirmed managed upgrade before HNSW maintenance.
 readable IEC units such as MiB and GiB. Structured JSON retains exact `*Bytes`
 integers and adds `databaseStorage.humanReadable` display strings; `db usage`
 retains the relation, cache, generation, and maintenance detail.
-Optional full-generation biomarker statistics have their own five-second
-status deadline and use serial PostgreSQL planning to avoid parallel-worker
-shared-memory spikes. If that lens is too expensive for a large graph,
-`featureReadiness.biomarkers` reports `state: unavailable` and `reason: timeout`;
-fresh generation, storage, numerical, and graph readiness remain
-available, and `cartograph biomarkers` is the explicit detail path with its
-separate insight deadline.
+Full-generation biomarker statistics are computed once per exact input
+fingerprint and then served from generation-fenced storage, so `status` only
+ever reads the stored relation and never evaluates the detector cascade behind
+its five-second deadline. The fingerprint covers the current generation, the
+superseded generation the growth detector compares against, imported coverage,
+materialised similarity, the calendar day bounding the growth window, and the
+detector contract compiled into the binary; any change recomputes the relation.
+Before the first computation `featureReadiness.biomarkers` reports
+`state: pending` and `reason: not_computed` — never an empty finding set — and
+`cartograph biomarkers` is the explicit path that computes it under the separate
+insight deadline. `state: unavailable` with `reason: timeout` or
+`reason: database_error` remains reserved for a storage read that genuinely
+failed.
 
 ## LLM credentials and local backend state
 

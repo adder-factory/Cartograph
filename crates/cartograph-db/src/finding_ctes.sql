@@ -1,15 +1,15 @@
-WITH RECURSIVE current AS (
-                SELECT current_generation_id AS generation_id
-                FROM {schema}."projects"
-                WHERE project_id = CAST($1 AS uuid)
-            ), code_documents AS MATERIALIZED (
+WITH RECURSIVE code_documents AS MATERIALIZED (
                 SELECT DISTINCT ON (documents.symbol_id)
                        documents.symbol_id,
                        documents.metadata,
                        documents.document_kind
                 FROM {schema}."search_documents" AS documents
-                JOIN current ON current.generation_id = documents.generation_id
                 WHERE documents.project_id = CAST($1 AS uuid)
+                  AND documents.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND documents.symbol_id IS NOT NULL
                   AND documents.document_kind IN ('symbol', 'test')
                 ORDER BY documents.symbol_id,
@@ -18,11 +18,15 @@ WITH RECURSIVE current AS (
             ), population AS (
                 SELECT GREATEST(COUNT(*) - 1, 1)::double precision AS possible_peers
                 FROM {schema}."symbols" AS symbols
-                JOIN current ON current.generation_id = symbols.generation_id
                 JOIN code_documents AS population_document
                   ON population_document.symbol_id = symbols.symbol_id
                  AND population_document.document_kind = 'symbol'
                 WHERE symbols.project_id = CAST($1 AS uuid)
+                  AND symbols.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND symbols.symbol_kind NOT IN ('file', 'import', 'parameter')
             ), previous AS (
                 SELECT generations.generation_id, generations.published_at
@@ -50,8 +54,12 @@ WITH RECURSIVE current AS (
                            WHERE edges.edge_kind IN ('field_access', 'def_use')
                        )::bigint AS data_dependencies
                 FROM {schema}."edges" AS edges
-                JOIN current ON current.generation_id = edges.generation_id
                 WHERE edges.project_id = CAST($1 AS uuid)
+                  AND edges.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND edges.edge_kind <> 'contains'
                   AND edges.target_symbol_id <> edges.source_symbol_id
                   AND NOT EXISTS (
@@ -68,8 +76,12 @@ WITH RECURSIVE current AS (
                 SELECT refs.owner_symbol_id AS symbol_id,
                        SUM(refs.site_count)::bigint AS sites
                 FROM {schema}."references" AS refs
-                JOIN current ON current.generation_id = refs.generation_id
                 WHERE refs.project_id = CAST($1 AS uuid)
+                  AND refs.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND refs.target_symbol_id IS NULL
                   AND refs.owner_symbol_id IS NOT NULL
                   AND refs.resolution_provenance NOT IN (
@@ -96,8 +108,12 @@ WITH RECURSIVE current AS (
                        ) AS simple_name,
                        SUM(refs.site_count)::bigint AS sites
                 FROM {schema}."references" AS refs
-                JOIN current ON current.generation_id = refs.generation_id
                 WHERE refs.project_id = CAST($1 AS uuid)
+                  AND refs.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND refs.target_symbol_id IS NULL
                   AND refs.reference_kind = 'calls'
                   AND refs.resolution_provenance = 'native-dynamic-unresolved'
@@ -106,11 +122,15 @@ WITH RECURSIVE current AS (
                 SELECT methods.symbol_id,
                        SUM(dynamic_method_calls.sites)::bigint AS sites
                 FROM {schema}."symbols" AS methods
-                JOIN current ON current.generation_id = methods.generation_id
                 JOIN dynamic_method_calls
                   ON dynamic_method_calls.simple_name = methods.simple_name
                  AND dynamic_method_calls.file_id <> methods.file_id
                 WHERE methods.project_id = CAST($1 AS uuid)
+                  AND methods.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND methods.symbol_kind = 'method'
                   AND methods.exported
                   AND methods.visibility = 'internal'
@@ -122,7 +142,6 @@ WITH RECURSIVE current AS (
                            WHERE source.file_id <> target.file_id
                        )::bigint AS external_edges
                 FROM {schema}."edges" AS edges
-                JOIN current ON current.generation_id = edges.generation_id
                 JOIN {schema}."symbols" AS source
                   ON source.project_id = edges.project_id
                  AND source.generation_id = edges.generation_id
@@ -132,17 +151,26 @@ WITH RECURSIVE current AS (
                  AND target.generation_id = edges.generation_id
                  AND target.symbol_id = edges.target_symbol_id
                 WHERE edges.project_id = CAST($1 AS uuid)
+                  AND edges.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND edges.edge_kind <> 'contains'
                 GROUP BY edges.target_symbol_id
             ), function_locals AS (
                 SELECT DISTINCT containment.target_symbol_id AS symbol_id
                 FROM {schema}."edges" AS containment
-                JOIN current ON current.generation_id = containment.generation_id
                 JOIN {schema}."symbols" AS owner
                   ON owner.project_id = containment.project_id
                  AND owner.generation_id = containment.generation_id
                  AND owner.symbol_id = containment.source_symbol_id
                 WHERE containment.project_id = CAST($1 AS uuid)
+                  AND containment.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND containment.edge_kind = 'contains'
                   AND owner.symbol_kind IN ('function', 'method', 'component')
             ), members AS (
@@ -164,7 +192,6 @@ WITH RECURSIVE current AS (
                                  ) >= 3.0
                        )::bigint AS complex_methods
                 FROM {schema}."symbols" AS parent
-                JOIN current ON current.generation_id = parent.generation_id
                 LEFT JOIN {schema}."edges" AS containment
                   ON containment.project_id = parent.project_id
                  AND containment.generation_id = parent.generation_id
@@ -180,12 +207,16 @@ WITH RECURSIVE current AS (
                  AND child_documents.symbol_id = child.symbol_id
                  AND child_documents.document_kind = 'symbol'
                 WHERE parent.project_id = CAST($1 AS uuid)
+                  AND parent.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                 GROUP BY parent.symbol_id
             ), production_clone_symbols AS (
                 SELECT symbols.*, files.normalized_path,
                        search.metadata AS search_metadata
                 FROM {schema}."symbols" AS symbols
-                JOIN current ON current.generation_id = symbols.generation_id
                 JOIN {schema}."files" AS files
                   ON files.project_id = symbols.project_id
                  AND files.generation_id = symbols.generation_id
@@ -196,6 +227,11 @@ WITH RECURSIVE current AS (
                  AND search.symbol_id = symbols.symbol_id
                  AND search.document_kind = 'symbol'
                 WHERE symbols.project_id = CAST($1 AS uuid)
+                  AND symbols.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND symbols.symbol_kind IN ('function', 'method', 'component')
                   AND COALESCE(
                         (search.metadata ->> 'duplicate_detection_enabled')::boolean,
@@ -264,7 +300,6 @@ WITH RECURSIVE current AS (
                        edges.target_symbol_id AS target_symbol_id,
                        MAX(edges.score) AS score
                 FROM {schema}."symbol_similarity_edges" AS edges
-                JOIN current ON current.generation_id = edges.generation_id
                 JOIN {schema}."symbol_similarity_builds" AS builds
                   ON builds.project_id = edges.project_id
                  AND builds.generation_id = edges.generation_id
@@ -278,6 +313,11 @@ WITH RECURSIVE current AS (
                  AND target.generation_id = edges.generation_id
                  AND target.symbol_id = edges.target_symbol_id
                 WHERE edges.project_id = CAST($1 AS uuid)
+                  AND edges.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND edges.score >= 0.95
                   AND edges.score <= 1.0
                   AND edges.source_symbol_id <> edges.target_symbol_id
@@ -331,7 +371,6 @@ WITH RECURSIVE current AS (
             ), source_classes AS (
                 SELECT methods.symbol_id, containers.symbol_id AS class_id
                 FROM {schema}."symbols" AS methods
-                JOIN current ON current.generation_id = methods.generation_id
                 JOIN {schema}."edges" AS containment
                   ON containment.project_id = methods.project_id
                  AND containment.generation_id = methods.generation_id
@@ -342,12 +381,16 @@ WITH RECURSIVE current AS (
                  AND containers.generation_id = containment.generation_id
                  AND containers.symbol_id = containment.source_symbol_id
                 WHERE methods.project_id = CAST($1 AS uuid)
+                  AND methods.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND methods.symbol_kind = 'method'
                   AND containers.symbol_kind IN ('class','struct','trait')
             ), field_classes AS (
                 SELECT fields.symbol_id AS field_id, containers.symbol_id AS class_id
                 FROM {schema}."symbols" AS fields
-                JOIN current ON current.generation_id = fields.generation_id
                 JOIN {schema}."edges" AS containment
                   ON containment.project_id = fields.project_id
                  AND containment.generation_id = fields.generation_id
@@ -358,6 +401,11 @@ WITH RECURSIVE current AS (
                  AND containers.generation_id = containment.generation_id
                  AND containers.symbol_id = containment.source_symbol_id
                 WHERE fields.project_id = CAST($1 AS uuid)
+                  AND fields.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND fields.symbol_kind IN ('field','property','method')
                   AND containers.symbol_kind IN ('class','struct','trait','interface')
             ), feature_envy_accesses AS (
@@ -367,10 +415,14 @@ WITH RECURSIVE current AS (
                        field_classes.class_id AS field_class_id,
                        refs.site_count
                 FROM {schema}."references" AS refs
-                JOIN current ON current.generation_id = refs.generation_id
                 JOIN source_classes ON source_classes.symbol_id = refs.owner_symbol_id
                 JOIN field_classes ON field_classes.field_id = refs.target_symbol_id
                 WHERE refs.project_id = CAST($1 AS uuid)
+                  AND refs.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND refs.reference_kind = 'field_access'
             ), feature_envy AS (
                 SELECT symbol_id,
@@ -399,8 +451,12 @@ WITH RECURSIVE current AS (
                 SELECT DISTINCT ON (coverage.symbol_id)
                        coverage.symbol_id, coverage.coverage_fraction
                 FROM {schema}."symbol_coverage" AS coverage
-                JOIN current ON current.generation_id = coverage.generation_id
                 WHERE coverage.project_id = CAST($1 AS uuid)
+                  AND coverage.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND coverage.lines_found > 0
                 ORDER BY coverage.symbol_id,
                          coverage.coverage_fraction DESC NULLS LAST,
@@ -568,7 +624,6 @@ WITH RECURSIVE current AS (
                        COALESCE((documents.metadata #>> ARRAY['health','unvalidated_env'])::double precision, 0.0) AS unvalidated_env,
                        COALESCE((documents.metadata #>> ARRAY['health','empty_body'])::double precision, 0.0) AS empty_body
                 FROM {schema}."symbols" AS symbols
-                JOIN current ON current.generation_id = symbols.generation_id
                 JOIN {schema}."files" AS files
                   ON files.project_id = symbols.project_id
                  AND files.generation_id = symbols.generation_id
@@ -604,6 +659,11 @@ WITH RECURSIVE current AS (
                   ON documents.symbol_id = symbols.symbol_id
                  AND documents.document_kind = 'symbol'
                 WHERE symbols.project_id = CAST($1 AS uuid)
+                  AND symbols.generation_id = (
+                      SELECT projects.current_generation_id
+                      FROM {schema}."projects" AS projects
+                      WHERE projects.project_id = CAST($1 AS uuid)
+                  )
                   AND symbols.symbol_kind NOT IN ('file', 'import', 'parameter')
             ), findings AS (
                 SELECT base.symbol_id, base.path, base.qualified_name,
