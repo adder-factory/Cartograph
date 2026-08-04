@@ -69,8 +69,36 @@ adds `.pyi` and `.toml` admission when an old explicit include list would
 otherwise hide v2's additive coverage. New configuration should use version 2.
 
 Discovery follows Git-compatible ignore behavior, then applies explicit
-Cartograph policy. A `.cartographignore` marker excludes its directory tree; at
-the project root it opts the entire checkout out of indexing.
+Cartograph policy. There are three ways to exclude a path, and all of them apply
+to `sync-if-dirty` and the managed Git hooks, because an exclusion that stops
+holding the moment the index refreshes is not an exclusion.
+
+- The `exclude` array in `.cartograph/config.json` is the durable, shared form.
+- `cartograph index --exclude <GLOB>` is repeatable and scoped to one run, for
+  experimenting before committing a pattern.
+- A `.cartographignore` file carrying patterns is honored with gitignore
+  semantics.
+
+Both `exclude` forms take globs — `benches/**`, `**/*_generated.rs` — and a `!`
+prefix re-includes a path an earlier exclusion matched, so excluding a directory
+to dodge one file does not throw away everything else in it:
+
+```json
+{ "exclude": ["benches/**", "!benches/src/lib.rs"] }
+```
+
+An *empty* `.cartographignore` keeps its original meaning: it excludes its whole
+directory tree, and at the project root it opts the entire checkout out of
+indexing. A `.cartographignore` with patterns is instead a gitignore-semantics
+ignore file, which means it also inherits git's own rule that a file cannot be
+re-included once a parent directory has been excluded — use the `exclude` array
+when you need that re-include.
+
+Exclusions are never silent. Native index metrics report `excluded_paths`, the
+files a configured exclusion skipped, and `excluded_trees`, the directory
+subtrees skipped without being descended into. A pruned tree is deliberately not
+expanded into a file count: walking it to produce one would defeat the pruning
+that keeps discovery bounded on vendored and generated directories.
 
 `generationStorage: "auto"` keeps the lower-latency memory path for small
 manifests and selects PostgreSQL spill when any of these conservative signals

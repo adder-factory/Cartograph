@@ -33,8 +33,8 @@ use cartograph_extract::{
     CloneTokenCount, CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX,
     DiscoveredSource, DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractError, ExtractedFile,
     ExtractedImportBinding, ExtractedNumericalSite, ExtractedReference, ImportBindingKind,
-    NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits,
-    SourceReadError, SourceReadOptions, SourceRoot, SourceSnapshot,
+    NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceExclusionEvidence,
+    SourceLimits, SourceReadError, SourceReadOptions, SourceRoot, SourceSnapshot,
     TYPE_QUERY_VALUE_RESOLUTION_PREFIX, is_test_source_path, native_extraction_reservation,
     native_extractor_contract_digest, native_read_reservation, substitute_module_alias,
 };
@@ -552,6 +552,8 @@ impl NativePipelineConfigError {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NativePipelineReport {
     discovered_files: u64,
+    excluded_paths: u64,
+    excluded_trees: u64,
     skipped_oversized_files: u64,
     source_bytes: u64,
     symbols: u64,
@@ -658,6 +660,21 @@ impl NativePipelineReport {
     #[must_use]
     pub const fn discovered_files(self) -> u64 {
         self.discovered_files
+    }
+
+    /// Paths a configured exclusion glob or `.cartographignore` pattern skipped.
+    ///
+    /// A partial index must never look complete, so this is reported even when
+    /// the exclusion was exactly what the project asked for.
+    #[must_use]
+    pub const fn excluded_paths(self) -> u64 {
+        self.excluded_paths
+    }
+
+    /// Directory subtrees skipped without being descended into.
+    #[must_use]
+    pub const fn excluded_trees(self) -> u64 {
+        self.excluded_trees
     }
 
     /// Supported files excluded before reads because their observed size exceeded policy.
@@ -986,10 +1003,12 @@ pub async fn build_native_generation_with_scip_and_cache(
         source_root,
         config,
     };
-    let discovered = run_discovery_stage(&stages).await?;
+    let (discovered, exclusions) = run_discovery_stage(&stages).await?;
     let (manifest, skipped_oversized_files) = run_read_stage(&stages, discovered).await?;
     let report_seed = NativePipelineReport {
         discovered_files: usize_to_u64(manifest.entries.len()),
+        excluded_paths: exclusions.excluded_paths(),
+        excluded_trees: exclusions.excluded_trees(),
         skipped_oversized_files,
         source_bytes: manifest.source_bytes,
         ..NativePipelineReport::default()
@@ -1062,10 +1081,12 @@ pub async fn build_native_generation_spilled(
         source_root,
         config,
     };
-    let discovered = run_discovery_stage(&stages).await?;
+    let (discovered, exclusions) = run_discovery_stage(&stages).await?;
     let (manifest, skipped_oversized_files) = run_read_stage(&stages, discovered).await?;
     let report_seed = NativePipelineReport {
         discovered_files: usize_to_u64(manifest.entries.len()),
+        excluded_paths: exclusions.excluded_paths(),
+        excluded_trees: exclusions.excluded_trees(),
         skipped_oversized_files,
         source_bytes: manifest.source_bytes,
         storage: NativeGenerationStorage::PostgreSql,
@@ -1106,7 +1127,7 @@ struct NativeStageContext<'a> {
 
 async fn run_discovery_stage(
     stages: &NativeStageContext<'_>,
-) -> Result<Vec<DiscoveredSource>, NativePipelineError> {
+) -> Result<(Vec<DiscoveredSource>, SourceExclusionEvidence), NativePipelineError> {
     let config = stages.config;
     let reservation = config
         .limits
@@ -1136,7 +1157,7 @@ async fn run_discovery_stage(
                 let (_, _, source_root) = item.into_parts();
                 block_in_place(move || {
                     source_root
-                        .discover_with_cancellation(SourceDiscoveryOptions::new(limits, || {
+                        .discover_with_evidence(SourceDiscoveryOptions::new(limits, || {
                             cancellation.is_cancelled()
                         }))
                         .map_err(|_| StageItemFailure)
@@ -1144,9 +1165,9 @@ async fn run_discovery_stage(
             },
         ),
         StageFold::new(
-            Vec::new(),
-            |discovered: &mut Vec<DiscoveredSource>,
-             output: StageOutput<u8, Vec<DiscoveredSource>>| {
+            (Vec::new(), SourceExclusionEvidence::default()),
+            |discovered: &mut (Vec<DiscoveredSource>, SourceExclusionEvidence),
+             output: StageOutput<u8, (Vec<DiscoveredSource>, SourceExclusionEvidence)>| {
                 let (_, output) = output.into_parts();
                 *discovered = output;
                 Ok(())
@@ -15190,7 +15211,7 @@ mod tests {
     async fn parse_project_through_native_stages(
         stages: &NativeStageContext<'_>,
     ) -> NativeFactAccumulator {
-        let discovered = run_discovery_stage(stages)
+        let (discovered, _) = run_discovery_stage(stages)
             .await
             .unwrap_or_else(|error| panic!("discovery failed: {error}"));
         let (manifest, _) = run_read_stage(stages, discovered)
@@ -19446,7 +19467,7 @@ export function secondClone(value: number) {
             source_root,
             config: config(SERIAL_WORKERS),
         };
-        let discovered = match run_discovery_stage(&stages).await {
+        let (discovered, _) = match run_discovery_stage(&stages).await {
             Ok(discovered) => discovered,
             Err(error) => panic!("discovery failed: {error}"),
         };

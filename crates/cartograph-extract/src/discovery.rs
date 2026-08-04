@@ -5,10 +5,17 @@ use std::{
     mem::size_of,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use cartograph_domain::NormalizedPath;
-use ignore::{DirEntry, WalkBuilder};
+use ignore::{
+    DirEntry, WalkBuilder,
+    gitignore::{Gitignore, GitignoreBuilder},
+};
 use thiserror::Error;
 
 use crate::{DiscoveryPolicy, SourceRoot};
@@ -23,6 +30,7 @@ const MIN_NESTED_DIRECTORY_SCAN_LIMIT: usize = 4_096;
 const NESTED_DIRECTORY_MULTIPLIER: usize = 64;
 const MAX_NESTED_DIRECTORY_SCAN_LIMIT: usize = 10_000_000;
 const MAX_GITMODULES_BYTES: u64 = 1024 * 1024;
+const MAX_IGNORE_MARKER_BYTES: u64 = 1024 * 1024;
 const TRACKED_PATH_OUTPUT_MULTIPLIER: u64 = 8;
 const MINIMUM_GIT_PATH_OUTPUT_BYTES: u64 = 1024 * 1024;
 
@@ -128,6 +136,35 @@ impl<Cancel> SourceDiscoveryOptions<Cancel> {
     }
 }
 
+/// Exact evidence that discovery skipped paths a project chose to exclude.
+///
+/// A partial index that looks complete is worse than a failed one, so an
+/// exclusion always reports itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceExclusionEvidence {
+    excluded_paths: u64,
+    excluded_trees: u64,
+}
+
+impl SourceExclusionEvidence {
+    /// Number of discovered files rejected by a configured exclusion glob or a
+    /// `.cartographignore` pattern.
+    #[must_use]
+    pub const fn excluded_paths(&self) -> u64 {
+        self.excluded_paths
+    }
+
+    /// Number of directory subtrees skipped without being descended into.
+    ///
+    /// A pruned tree is deliberately not expanded into a file count: walking it
+    /// to produce one would defeat the pruning that keeps discovery bounded on
+    /// vendored and generated directories.
+    #[must_use]
+    pub const fn excluded_trees(&self) -> u64 {
+        self.excluded_trees
+    }
+}
+
 impl SourceRoot {
     /// Discover supported native sources under Git-compatible ignore rules.
     /// # Errors
@@ -153,6 +190,22 @@ impl SourceRoot {
     where
         Cancel: FnMut() -> bool,
     {
+        self.discover_with_evidence(options)
+            .map(|(sources, _)| sources)
+    }
+
+    /// Discover sources and report exactly what configured exclusions skipped.
+    /// # Errors
+    ///
+    /// Returns an error on cancellation, unsafe/unreadable traversal, root
+    /// escape, or exceeded file/retained-manifest bounds.
+    pub fn discover_with_evidence<Cancel>(
+        &self,
+        options: SourceDiscoveryOptions<Cancel>,
+    ) -> Result<(Vec<DiscoveredSource>, SourceExclusionEvidence), SourceDiscoveryError>
+    where
+        Cancel: FnMut() -> bool,
+    {
         let SourceDiscoveryOptions {
             limits,
             mut cancelled,
@@ -161,8 +214,8 @@ impl SourceRoot {
             return Err(SourceDiscoveryError::Cancelled);
         }
         let root = self.canonical_path();
-        if root.join(CARTOGRAPH_IGNORE_MARKER).is_file() {
-            return Ok(Vec::new());
+        if has_ignore_marker(root) {
+            return Ok((Vec::new(), SourceExclusionEvidence::default()));
         }
         let policy = self.discovery_policy();
         let nested = find_nested_repositories(
@@ -235,6 +288,10 @@ struct SourceCollector<'a> {
     limits: DiscoveryLimits,
     sources: BTreeMap<NormalizedPath, DiscoveredSource>,
     retained_bytes: u64,
+    /// One compiled matcher per directory carrying a pattern `.cartographignore`.
+    marker_matchers: BTreeMap<PathBuf, Option<Gitignore>>,
+    excluded_paths: u64,
+    excluded_trees: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Copy)]
@@ -252,7 +309,41 @@ impl<'a> SourceCollector<'a> {
             limits,
             sources: BTreeMap::new(),
             retained_bytes: 0,
+            marker_matchers: BTreeMap::new(),
+            excluded_paths: 0,
+            excluded_trees: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Whether any ancestor `.cartographignore` pattern file ignores this path.
+    ///
+    /// The walker applies these rules itself, but git-tracked collection does
+    /// not go through the walker, so both paths must agree or an exclusion
+    /// silently stops holding for tracked files.
+    fn ignored_by_marker_patterns(&mut self, relative: &Path) -> bool {
+        let mut directory = self.project_root.to_path_buf();
+        let mut ancestors = vec![directory.clone()];
+        if let Some(parent) = relative.parent() {
+            for component in parent.components() {
+                directory.push(component);
+                ancestors.push(directory.clone());
+            }
+        }
+        let absolute = self.project_root.join(relative);
+        for ancestor in ancestors {
+            let matcher = self
+                .marker_matchers
+                .entry(ancestor.clone())
+                .or_insert_with(|| compile_ignore_marker(&ancestor));
+            if let Some(matcher) = matcher.as_ref()
+                && matcher
+                    .matched_path_or_any_parents(&absolute, false)
+                    .is_ignore()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn collect_walk<Cancel>(
@@ -274,12 +365,14 @@ impl<'a> SourceCollector<'a> {
             prefix: prefix.cloned(),
             policy: self.policy.clone(),
             nested_roots: nested_roots.clone(),
+            excluded_trees: Arc::clone(&self.excluded_trees),
         };
         builder
             .standard_filters(true)
             .hidden(false)
             .follow_links(false)
             .sort_by_file_name(std::cmp::Ord::cmp)
+            .add_custom_ignore_filename(CARTOGRAPH_IGNORE_MARKER)
             .filter_entry(move |entry| filter.includes(entry));
         for entry in builder.build() {
             if cancelled() {
@@ -340,11 +433,16 @@ impl<'a> SourceCollector<'a> {
 
     fn add(&mut self, raw: &str, byte_size: u64) -> Result<(), SourceDiscoveryError> {
         let path = NormalizedPath::parse(raw).map_err(|_| SourceDiscoveryError::InvalidPath)?;
-        if is_internal_path(&path)
-            || policy_excludes(self.policy, &path, false)
-            || !self.policy.supports_path(path.as_str())
-            || self.sources.contains_key(&path)
+        if is_internal_path(&path) || self.sources.contains_key(&path) {
+            return Ok(());
+        }
+        if policy_excludes(self.policy, &path, false)
+            || self.ignored_by_marker_patterns(Path::new(path.as_str()))
         {
+            self.excluded_paths = self.excluded_paths.saturating_add(1);
+            return Ok(());
+        }
+        if !self.policy.supports_path(path.as_str()) {
             return Ok(());
         }
         let source = DiscoveredSource::new(path.clone(), byte_size);
@@ -362,13 +460,21 @@ impl<'a> SourceCollector<'a> {
         Ok(())
     }
 
-    fn finish(self) -> Result<Vec<DiscoveredSource>, SourceDiscoveryError> {
+    fn finish(
+        self,
+    ) -> Result<(Vec<DiscoveredSource>, SourceExclusionEvidence), SourceDiscoveryError> {
         let mut output = Vec::new();
         output
             .try_reserve_exact(self.sources.len())
             .map_err(|_| SourceDiscoveryError::ResourceLimit)?;
         output.extend(self.sources.into_values());
-        Ok(output)
+        Ok((
+            output,
+            SourceExclusionEvidence {
+                excluded_paths: self.excluded_paths,
+                excluded_trees: self.excluded_trees.load(Ordering::Relaxed),
+            },
+        ))
     }
 }
 
@@ -589,6 +695,7 @@ struct WalkFilter {
     prefix: Option<NormalizedPath>,
     policy: DiscoveryPolicy,
     nested_roots: BTreeSet<NormalizedPath>,
+    excluded_trees: Arc<AtomicU64>,
 }
 
 impl WalkFilter {
@@ -615,7 +722,20 @@ impl WalkFilter {
         if is_directory && self.nested_roots.contains(&path) {
             return false;
         }
-        !policy_excludes(&self.policy, &path, is_directory)
+        // A `!` re-include can name a path inside an excluded directory, and a
+        // pruned directory is never descended into. When any negation is
+        // configured the walk keeps descending and every file is still filtered
+        // on admission, so `benches/**` plus `!benches/src/lib.rs` works.
+        if is_directory && self.policy.has_exclude_negations() {
+            return true;
+        }
+        if policy_excludes(&self.policy, &path, is_directory) {
+            if is_directory {
+                self.excluded_trees.fetch_add(1, Ordering::Relaxed);
+            }
+            return false;
+        }
+        true
     }
 }
 
@@ -659,8 +779,43 @@ fn under_ignore_marker(root: &Path, relative: &Path) -> bool {
     false
 }
 
+/// Compile a directory's pattern `.cartographignore` into a gitignore matcher.
+fn compile_ignore_marker(directory: &Path) -> Option<Gitignore> {
+    let marker = directory.join(CARTOGRAPH_IGNORE_MARKER);
+    let metadata = fs::metadata(&marker).ok()?;
+    if !metadata.is_file() || !ignore_marker_carries_patterns(&marker, metadata.len()) {
+        return None;
+    }
+    let mut builder = GitignoreBuilder::new(directory);
+    if builder.add(&marker).is_some() {
+        return None;
+    }
+    builder.build().ok()
+}
+
+/// Whether this directory carries an empty `.cartographignore` tree marker.
+///
+/// An empty marker keeps its v1 meaning: exclude this directory tree outright.
+/// A marker with patterns is instead honored as a gitignore-semantics ignore
+/// file, so a project can skip `benches/**` without losing the whole directory.
 fn has_ignore_marker(directory: &Path) -> bool {
-    fs::metadata(directory.join(CARTOGRAPH_IGNORE_MARKER)).is_ok_and(|metadata| metadata.is_file())
+    let marker = directory.join(CARTOGRAPH_IGNORE_MARKER);
+    fs::metadata(&marker).is_ok_and(|metadata| {
+        metadata.is_file() && !ignore_marker_carries_patterns(&marker, metadata.len())
+    })
+}
+
+/// Whether a marker file holds at least one non-comment pattern line.
+fn ignore_marker_carries_patterns(marker: &Path, byte_size: u64) -> bool {
+    if byte_size == 0 || byte_size > MAX_IGNORE_MARKER_BYTES {
+        return false;
+    }
+    fs::read_to_string(marker).is_ok_and(|contents| {
+        contents.lines().any(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with('#')
+        })
+    })
 }
 
 #[cfg(test)]
@@ -721,6 +876,111 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(paths, ["Cargo.toml", "src/a.tsx", "src/z.ts"]);
         assert!(sources.iter().all(|source| source.byte_size() > 0));
+    }
+
+    #[test]
+    fn exclusion_negation_rescues_a_path_inside_an_excluded_directory() {
+        let directory = match tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("could not create exclusion fixture: {error}"),
+        };
+        let root = directory.path();
+        assert!(fs::create_dir_all(root.join("benches/src")).is_ok());
+        assert!(fs::write(root.join("keep.ts"), "export const keep = 1;\n").is_ok());
+        assert!(fs::write(root.join("benches/harness.ts"), "export const bench = 1;\n").is_ok());
+        assert!(fs::write(root.join("benches/src/lib.ts"), "export const lib = 1;\n").is_ok());
+
+        let excluded = discover_with_excludes(root, &["benches/**".to_owned()]);
+        assert_eq!(excluded, ["keep.ts"], "an excluded tree must be skipped");
+
+        // Excluding a directory to dodge one file must not throw away the rest
+        // of it, so a `!` pattern re-includes a path inside that directory.
+        let rescued = discover_with_excludes(
+            root,
+            &["benches/**".to_owned(), "!benches/src/lib.ts".to_owned()],
+        );
+        assert_eq!(rescued, ["benches/src/lib.ts", "keep.ts"]);
+    }
+
+    #[test]
+    fn pattern_ignore_files_exclude_while_an_empty_marker_still_drops_the_tree() {
+        let directory = match tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("could not create marker fixture: {error}"),
+        };
+        let root = directory.path();
+        assert!(fs::create_dir_all(root.join("benches")).is_ok());
+        assert!(fs::write(root.join("keep.ts"), "export const keep = 1;\n").is_ok());
+        assert!(fs::write(root.join("benches/harness.ts"), "export const bench = 1;\n").is_ok());
+
+        // A marker carrying patterns is a gitignore-semantics ignore file.
+        assert!(
+            fs::write(
+                root.join(CARTOGRAPH_IGNORE_MARKER),
+                "# skip the harness\nbenches/**\n"
+            )
+            .is_ok()
+        );
+        assert_eq!(discover_with_excludes(root, &[]), ["keep.ts"]);
+
+        // An empty marker keeps its v1 meaning: drop this tree outright.
+        assert!(fs::write(root.join(CARTOGRAPH_IGNORE_MARKER), "\n").is_ok());
+        assert!(discover_with_excludes(root, &[]).is_empty());
+    }
+
+    #[test]
+    fn discovery_reports_what_configured_exclusions_skipped() {
+        let directory = match tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("could not create exclusion-evidence fixture: {error}"),
+        };
+        let root = directory.path();
+        assert!(fs::create_dir_all(root.join("vendored")).is_ok());
+        assert!(fs::write(root.join("keep.ts"), "export const keep = 1;\n").is_ok());
+        assert!(fs::write(root.join("vendored/copy.ts"), "export const copy = 1;\n").is_ok());
+
+        let policy = match DiscoveryPolicy::new(
+            &["vendored/**".to_owned()],
+            NestedRepositoryPolicy::new(false, false),
+        ) {
+            Ok(policy) => policy,
+            Err(error) => panic!("exclusion policy failed: {error}"),
+        };
+        let source_root = match SourceRoot::open_with_policy(root, policy) {
+            Ok(source_root) => source_root,
+            Err(error) => panic!("could not open exclusion root: {error}"),
+        };
+        let (sources, evidence) = match source_root
+            .discover_with_evidence(SourceDiscoveryOptions::new(limits(), || false))
+        {
+            Ok(result) => result,
+            Err(error) => panic!("discovery failed: {error}"),
+        };
+        assert_eq!(sources.len(), 1);
+        // A partial index must never look complete.
+        assert!(
+            evidence.excluded_trees() > 0 || evidence.excluded_paths() > 0,
+            "an exclusion must report itself"
+        );
+    }
+
+    fn discover_with_excludes(root: &Path, excludes: &[String]) -> Vec<String> {
+        let policy = match DiscoveryPolicy::new(excludes, NestedRepositoryPolicy::new(false, false))
+        {
+            Ok(policy) => policy,
+            Err(error) => panic!("exclusion policy failed: {error}"),
+        };
+        let source_root = match SourceRoot::open_with_policy(root, policy) {
+            Ok(source_root) => source_root,
+            Err(error) => panic!("could not open exclusion root: {error}"),
+        };
+        match source_root.discover(limits()) {
+            Ok(sources) => sources
+                .iter()
+                .map(|source| source.path().as_str().to_owned())
+                .collect(),
+            Err(error) => panic!("discovery failed: {error}"),
+        }
     }
 
     #[test]

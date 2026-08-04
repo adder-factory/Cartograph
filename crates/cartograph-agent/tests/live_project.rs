@@ -245,6 +245,7 @@ async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention()
             let runtime = ProjectRuntime::connect(project.path(), &settings)
                 .await
                 .unwrap_or_else(|error| panic!("contending runtime connect failed: {error}"));
+            let options = options.clone();
             tasks.push(tokio::spawn(async move {
                 let indexed = runtime.index(options).await;
                 (runtime, indexed)
@@ -282,7 +283,7 @@ async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention()
             .await
             .unwrap_or_else(|error| panic!("multi-runtime blocker lease did not release: {error}"));
         let published = coordinator
-            .index(options)
+            .index(options.clone())
             .await
             .unwrap_or_else(|error| panic!("multi-runtime recovery index failed: {error}"));
         assert!(published.published);
@@ -454,7 +455,7 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             .with_max_workers(4)
             .unwrap_or_else(|error| panic!("incremental worker options failed: {error}"))
             .with_history_refresh(false);
-        let first = initial_incremental_index(&runtime, options).await;
+        let first = initial_incremental_index(&runtime, options.clone()).await;
         let changed_contract = assert_incremental_cache_contract(&runtime, &first, &source).await;
 
         assert_incremental_contract_upgrade(
@@ -463,13 +464,18 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             &schema,
             &first,
             &changed_contract,
-            options,
+            options.clone(),
         )
         .await;
 
-        let recovered =
-            assert_incremental_corruption_recovery(&runtime, &settings, &schema, &source, options)
-                .await;
+        let recovered = assert_incremental_corruption_recovery(
+            &runtime,
+            &settings,
+            &schema,
+            &source,
+            options.clone(),
+        )
+        .await;
         assert_forced_incremental_rebuild(&runtime, options, &recovered).await;
         runtime.close().await;
     }
@@ -574,7 +580,7 @@ async fn assert_incremental_contract_upgrade(
     options: IndexOptions,
 ) {
     let unchanged = runtime
-        .index(options)
+        .index(options.clone())
         .await
         .unwrap_or_else(|error| panic!("incremental no-op failed: {error}"));
     assert!(!unchanged.published);
@@ -615,7 +621,7 @@ async fn assert_incremental_contract_upgrade(
         .unwrap_or_else(|error| panic!("stale-contract status failed: {error}"));
     assert!(!stale.fresh);
     let upgraded = runtime
-        .index(options)
+        .index(options.clone())
         .await
         .unwrap_or_else(|error| panic!("contract-upgrade index failed: {error}"));
     assert!(upgraded.published);
@@ -654,7 +660,7 @@ async fn assert_incremental_corruption_recovery(
     )
     .unwrap_or_else(|error| panic!("incremental service edit failed: {error}"));
     let changed = runtime
-        .index(options)
+        .index(options.clone())
         .await
         .unwrap_or_else(|error| panic!("one-file incremental index failed: {error}"));
     let metrics = changed
@@ -3607,7 +3613,7 @@ async fn oversized_synthesized_names_shorten_and_fatal_stages_preserve_the_gener
             .with_force(true)
             .with_history_refresh(false);
         let shortened = runtime
-            .index(options)
+            .index(options.clone())
             .await
             .unwrap_or_else(|error| panic!("oversized reference name must still publish: {error}"));
         assert!(
@@ -3701,7 +3707,7 @@ async fn profiled_index_skips_oversized_sources_without_weakening_the_published_
             .with_profile(true)
             .with_history_refresh(false);
         let first = runtime
-            .index(options)
+            .index(options.clone())
             .await
             .unwrap_or_else(|error| panic!("profile index failed: {error}"));
         let first_json = serde_json::to_value(&first)

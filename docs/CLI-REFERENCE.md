@@ -10,7 +10,7 @@ subcommand help remains the authority for every option and default.
 ## High-use coding forms
 
 ```text
-cartograph index [PROJECT]
+cartograph index [PROJECT] [--exclude GLOB]...
 cartograph status [PROJECT]
 cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid
 cartograph context <TASK> [--exact-name NAME] [--exact-path PATH] [--exact-reference TEXT]

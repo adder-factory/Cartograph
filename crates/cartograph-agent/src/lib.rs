@@ -208,13 +208,14 @@ pub(crate) fn trim_ascii_bytes(value: &[u8]) -> &[u8] {
 }
 
 /// User-controlled bounds for one full source index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexOptions {
     max_workers: u16,
     force: bool,
     max_source_bytes: Option<usize>,
     profile: bool,
     refresh_history: bool,
+    additional_excludes: Vec<String>,
 }
 
 impl Default for IndexOptions {
@@ -225,17 +226,35 @@ impl Default for IndexOptions {
             max_source_bytes: None,
             profile: false,
             refresh_history: true,
+            additional_excludes: Vec::new(),
         }
     }
 }
 
 impl IndexOptions {
+    /// Add run-scoped exclusion globs on top of the project's configured
+    /// `exclude` list. A `!` prefix re-includes a path an exclusion matched.
+    ///
+    /// These are deliberately not persisted: `--exclude` is for experimenting,
+    /// and the project config is what makes an exclusion survive and be shared.
+    #[must_use]
+    pub fn with_additional_excludes(mut self, patterns: Vec<String>) -> Self {
+        self.additional_excludes = patterns;
+        self
+    }
+
+    /// Run-scoped exclusion globs layered over the configured policy.
+    #[must_use]
+    pub fn additional_excludes(&self) -> &[String] {
+        &self.additional_excludes
+    }
+
     /// Cap the corpus-aware worker selector at a validated value in 1..=16.
     /// # Errors
     ///
     /// Returns [`ProjectError::InvalidOptions`] when `value` is zero or exceeds
     /// the maximum supported indexing worker count.
-    pub const fn with_max_workers(mut self, value: u16) -> Result<Self, ProjectError> {
+    pub fn with_max_workers(mut self, value: u16) -> Result<Self, ProjectError> {
         if value == 0 || value > MAX_CONFIGURED_WORKERS {
             return Err(ProjectError::InvalidOptions);
         }
@@ -255,7 +274,7 @@ impl IndexOptions {
     ///
     /// Returns [`ProjectError::InvalidOptions`] when `value` is zero or exceeds
     /// the hard per-file source byte ceiling.
-    pub const fn with_max_source_bytes(mut self, value: usize) -> Result<Self, ProjectError> {
+    pub fn with_max_source_bytes(mut self, value: usize) -> Result<Self, ProjectError> {
         if value == 0 || value > DEFAULT_MAX_SOURCE_BYTES {
             return Err(ProjectError::InvalidOptions);
         }
@@ -286,6 +305,14 @@ impl IndexOptions {
 pub struct NativeIndexMetrics {
     /// Supported files in the indexed source manifest.
     pub files: u64,
+    /// Paths a configured exclusion glob or `.cartographignore` pattern skipped.
+    ///
+    /// A partial index must never look complete, so an exclusion is reported
+    /// even when it is exactly what the project asked for.
+    pub excluded_paths: u64,
+    /// Directory subtrees skipped without being descended into. A pruned tree is
+    /// deliberately not expanded into a file count.
+    pub excluded_trees: u64,
     /// Supported files deliberately skipped because they exceeded maxFileSize.
     pub skipped_oversized_files: u64,
     /// Exact bytes read and hashed.
@@ -411,6 +438,8 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
         });
         Self {
             files: report.discovered_files(),
+            excluded_paths: report.excluded_paths(),
+            excluded_trees: report.excluded_trees(),
             skipped_oversized_files: report.skipped_oversized_files(),
             source_bytes: report.source_bytes(),
             symbols: report.symbols(),
@@ -697,7 +726,7 @@ struct IndexCompletion {
 }
 
 fn index_enrichment_policy(
-    options: IndexOptions,
+    options: &IndexOptions,
     source_settings: &ProjectSourceSettings,
 ) -> IndexEnrichmentPolicy {
     let churn_enabled = source_settings.enable_churn();
@@ -719,13 +748,14 @@ async fn run_core_index(
     cancellation: ProjectCancellation,
 ) -> Result<IndexReport, ProjectError> {
     let preparation_started = Instant::now();
+    let profile = options.profile;
     let preparation = runtime.prepare_index(options, cancellation.clone()).await?;
     let preparation_millis = monotonic_millis(preparation_started.elapsed());
     let mut report = match preparation {
         IndexPreparation::Unchanged(report) => *report,
         IndexPreparation::Pending(pending) => {
             runtime
-                .publish_index(*pending, cancellation, options.profile)
+                .publish_index(*pending, cancellation, profile)
                 .await?
         }
     };
@@ -866,7 +896,7 @@ async fn index_project_with_cancellation(
     let operation_started = Instant::now();
     let source_settings =
         load_project_source_settings(&runtime.root).map_err(|_| ProjectError::InvalidOptions)?;
-    let policy = index_enrichment_policy(options, &source_settings);
+    let policy = index_enrichment_policy(&options, &source_settings);
     let index = run_core_index(runtime, options, cancellation.clone());
     let history = prepare_optional_history(runtime, policy, cancellation.clone());
     let issue_history = prepare_optional_issue_history(runtime, policy, cancellation);
@@ -1271,7 +1301,8 @@ impl ProjectRuntime {
         options: IndexOptions,
         cancellation: ProjectCancellation,
     ) -> Result<IndexPreparation, ProjectError> {
-        let source_policy = project_source_policy(&self.root)?;
+        let source_policy =
+            project_source_policy_with_excludes(&self.root, options.additional_excludes())?;
         let max_source_bytes = options
             .max_source_bytes
             .or(source_policy.maximum_file_bytes)
@@ -1915,8 +1946,15 @@ impl SourceIndexPolicy {
 
 impl ProjectSourcePolicy {
     fn from_settings(settings: &ProjectSourceSettings) -> Result<Self, ProjectError> {
+        Self::from_settings_with_excludes(settings, settings.excludes())
+    }
+
+    fn from_settings_with_excludes(
+        settings: &ProjectSourceSettings,
+        excludes: &[String],
+    ) -> Result<Self, ProjectError> {
         let discovery = DiscoveryPolicy::new_with_languages(
-            settings.excludes(),
+            excludes,
             NestedRepositoryPolicy::new(
                 settings.index_submodules(),
                 settings.index_embedded_repositories(),
@@ -1981,8 +2019,22 @@ fn select_generation_storage(
 }
 
 fn project_source_policy(root: &Path) -> Result<ProjectSourcePolicy, ProjectError> {
+    project_source_policy_with_excludes(root, &[])
+}
+
+/// Resolve the source policy, layering run-scoped exclusion globs over the
+/// project's configured `exclude` list.
+fn project_source_policy_with_excludes(
+    root: &Path,
+    additional: &[String],
+) -> Result<ProjectSourcePolicy, ProjectError> {
     let settings = load_project_source_settings(root).map_err(|_| ProjectError::InvalidOptions)?;
-    ProjectSourcePolicy::from_settings(&settings)
+    if additional.is_empty() {
+        return ProjectSourcePolicy::from_settings(&settings);
+    }
+    let mut merged = settings.excludes().to_vec();
+    merged.extend_from_slice(additional);
+    ProjectSourcePolicy::from_settings_with_excludes(&settings, &merged)
 }
 
 fn source_revision(root: &Path) -> Result<SourceRevision, ProjectError> {
