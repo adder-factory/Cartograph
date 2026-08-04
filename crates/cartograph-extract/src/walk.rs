@@ -31,6 +31,7 @@ mod polyglot;
 mod prisma_family;
 mod references;
 mod schema;
+mod shader_family;
 mod shell_family;
 mod sql_family;
 pub(crate) mod syntax;
@@ -547,6 +548,7 @@ pub(super) struct PendingReference<'tree> {
 
 #[derive(Clone, Copy)]
 enum ExtractionFamily {
+    Shader,
     Shell,
     C,
     Managed,
@@ -572,6 +574,7 @@ const C_LANGUAGES: &[SourceLanguage] = &[
     SourceLanguage::Cuda,
     SourceLanguage::Glsl,
     SourceLanguage::Hlsl,
+    SourceLanguage::Metal,
 ];
 const MANAGED_LANGUAGES: &[SourceLanguage] = &[SourceLanguage::Java, SourceLanguage::CSharp];
 const JVM_DYNAMIC_LANGUAGES: &[SourceLanguage] = &[
@@ -636,6 +639,7 @@ fn extraction_family(language: SourceLanguage) -> ExtractionFamily {
     } else {
         match language {
             SourceLanguage::GraphQl => ExtractionFamily::GraphQl,
+            SourceLanguage::Wgsl => ExtractionFamily::Shader,
             SourceLanguage::Prisma => ExtractionFamily::Prisma,
             SourceLanguage::Sql => ExtractionFamily::Sql,
             _ => ExtractionFamily::Unsupported,
@@ -885,6 +889,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
 
     fn visit_declaration(&mut self, node: Node<'_>, depth: usize) -> Result<bool, ExtractError> {
         match extraction_family(self.context.snapshot.language()) {
+            ExtractionFamily::Shader => shader_family::visit_declaration(self, node, depth),
             ExtractionFamily::Shell => shell_family::visit_declaration(self, node, depth),
             ExtractionFamily::C => c_family::visit_declaration(self, node, depth),
             ExtractionFamily::Managed => managed_family::visit_declaration(self, node, depth),
@@ -903,6 +908,10 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
 
     fn visit_usage(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
         match extraction_family(self.context.snapshot.language()) {
+            ExtractionFamily::Shader => {
+                shader_family::capture_usage(self, node)?;
+                self.visit_named_children(node, depth)
+            }
             ExtractionFamily::Shell => {
                 shell_family::capture_usage(self, node)?;
                 self.visit_named_children(node, depth)
