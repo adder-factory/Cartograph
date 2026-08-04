@@ -41,6 +41,9 @@ pub(crate) const fn pipeline_failure_reason_code(
         (PipelineStage::Reduce, PipelineFailureReason::ReferenceNameTooLong) => {
             "reduce_reference_name_too_long"
         }
+        (PipelineStage::Reduce, PipelineFailureReason::CanonicalFieldRejected(_)) => {
+            "reduce_canonical_field_rejected"
+        }
         _ => pipeline_stage_failure_code(stage),
     }
 }

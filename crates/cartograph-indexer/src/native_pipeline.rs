@@ -21,8 +21,8 @@ use cartograph_db::{
     NativeGenerationSpillFactCounts, NativeGenerationSpillReport, NativeGenerationSpillRow,
     NativeGenerationSpillState, NativeParseCacheEntry, NativeParseCacheKey,
     NativeParseCacheKeyInput, NativeParseCacheRecord, NativeParseCacheWrite, NumericalSiteInput,
-    ReferenceInput, ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
-    apply_sampled_betweenness, validate_generation_facts,
+    ReferenceInput, ReferenceSpanPrecision, SearchDocumentInput, StorageError, SymbolInput,
+    apply_page_rank, apply_sampled_betweenness, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, NormalizedPath, ProjectId,
@@ -3275,6 +3275,11 @@ fn classify_spill_validation_error(error: GenerationValidationError) -> ResolveG
         GenerationValidationError::ReferenceNameTooLong => ResolveGenerationFailure {
             reason: Some(PipelineFailureReason::ReferenceNameTooLong),
         },
+        GenerationValidationError::Storage(StorageError::InvalidInput { field }) => {
+            ResolveGenerationFailure {
+                reason: Some(PipelineFailureReason::CanonicalFieldRejected(field)),
+            }
+        }
         GenerationValidationError::Storage(_) | GenerationValidationError::Cancelled => {
             ResolveGenerationFailure::unclassified()
         }
@@ -3577,6 +3582,9 @@ fn generation_validation_failure_reason(
         }
         GenerationValidationError::RetainedLimit => {
             Some(PipelineFailureReason::GenerationCapacityExceeded)
+        }
+        GenerationValidationError::Storage(StorageError::InvalidInput { field }) => {
+            Some(PipelineFailureReason::CanonicalFieldRejected(field))
         }
         GenerationValidationError::Storage(_) | GenerationValidationError::Cancelled => None,
     }
@@ -19308,15 +19316,45 @@ export function secondClone(value: number) {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pipeline_rejects_storage_oversized_names_and_signatures_before_returning() {
+        // A synthesized name past its bound is shortened rather than fatal, so
+        // one ordinary construct cannot cost the whole index (issue #119).
         let long_name = "n".repeat(2_049);
-        assert_storage_boundary_rejection(format!("export function {long_name}(): void {{}}\n"))
+        assert_oversized_name_is_shortened(format!("export function {long_name}(): void {{}}\n"))
             .await;
 
+        // A field with no safe shortening still fails, and now names itself.
         let long_type = "T".repeat(65_537);
         assert_storage_boundary_rejection(format!(
             "export function bounded(value: {long_type}): void {{}}\n"
         ))
         .await;
+    }
+
+    async fn assert_oversized_name_is_shortened(source: String) {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create storage-boundary fixture: {error}"));
+        assert!(fs::write(directory.path().join("oversized.ts"), source).is_ok());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open storage-boundary fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let generation = build_native_generation(&runner, source_root, config(SERIAL_WORKERS))
+            .await
+            .unwrap_or_else(|error| panic!("an over-long name must not be fatal: {error}"));
+        assert!(
+            generation
+                .facts
+                .symbols()
+                .iter()
+                .all(|symbol| symbol.qualified_name.len() <= 2_048),
+            "every stored qualified name must fit the canonical bound"
+        );
+        drop(cancellation);
+        let report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(report.all_joined);
+        assert!(!report.worker_failed);
     }
 
     async fn assert_storage_boundary_rejection(source: String) {
@@ -19328,10 +19366,15 @@ export function secondClone(value: number) {
         let (runner, tasks, cancellation) =
             test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
         let result = build_native_generation(&runner, source_root, config(SERIAL_WORKERS)).await;
-        assert!(matches!(
-            result,
-            Err(NativePipelineError::Validation { reason: None })
-        ));
+        let Err(NativePipelineError::Validation { reason }) = result else {
+            panic!("a source past a storage boundary must fail canonical validation");
+        };
+        // Naming the rejected field is what turns a whole-corpus bisection into
+        // a single run (issue #118).
+        assert!(
+            reason.is_some_and(|reason| reason.rejected_field().is_some()),
+            "a rejected bounded field must be named, not reported as a bare stage failure"
+        );
         drop(cancellation);
         let report = tasks
             .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
@@ -19341,7 +19384,7 @@ export function secondClone(value: number) {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pipeline_allowlists_oversized_reference_reason_without_retaining_source_text() {
+    async fn oversized_reference_names_are_shortened_without_retaining_source_text() {
         let directory = tempdir()
             .unwrap_or_else(|error| panic!("could not create reference-boundary fixture: {error}"));
         let long_target = "reference_target_".repeat(300);
@@ -19352,17 +19395,25 @@ export function secondClone(value: number) {
         let (runner, tasks, cancellation) =
             test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
         let result = build_native_generation(&runner, source_root, config(SERIAL_WORKERS)).await;
-        let Err(error) = result else {
-            panic!("oversized reference unexpectedly produced a generation");
-        };
-        assert_eq!(error.stage(), PipelineStage::Reduce);
-        assert_eq!(
-            error.reason(),
-            Some(PipelineFailureReason::ReferenceNameTooLong)
+        let facts = result.unwrap_or_else(|error| {
+            panic!("one over-long synthesized name must not discard the generation: {error}")
+        });
+        assert!(
+            facts
+                .facts
+                .references()
+                .iter()
+                .all(|reference| reference.reference_name.len() <= 4_096),
+            "every stored reference name must fit the canonical bound"
         );
-        let rendered = format!("{error:?} {error}");
-        assert!(!rendered.contains(&long_target));
-        assert!(!rendered.contains(&directory.path().to_string_lossy().to_string()));
+        assert!(
+            !facts
+                .facts
+                .references()
+                .iter()
+                .any(|reference| reference.reference_name == long_target),
+            "the unbounded original name must not be stored verbatim"
+        );
         drop(cancellation);
         let report = tasks
             .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)

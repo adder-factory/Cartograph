@@ -362,6 +362,11 @@ pub struct ExtractedImportBinding {
 pub enum DiagnosticCode {
     /// Tree-sitter recovered through one or more syntax-error nodes.
     SyntaxError,
+    /// A synthesized qualified or reference name exceeded its canonical byte
+    /// bound and was deterministically shortened so the generation stays
+    /// publishable. The shortened form keeps a `~` marker and a digest of the
+    /// exact original name.
+    CanonicalNameTruncated,
 }
 
 /// Bounded diagnostic that never embeds source text or project paths.

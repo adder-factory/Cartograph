@@ -18,11 +18,11 @@ use cartograph_agent::{
     FileSourceOptions, FileSourceRequest, GenerationRetentionStatus, HistoryIndexOptions,
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
     IndexOptions, IndexReport, LcovLoadOptions, NativeGenerationStorageMetrics,
-    PipelineFailureReason, PipelineStage, ProjectCancellation, ProjectError, ProjectRuntime,
-    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalClientRequest,
-    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportLimits,
-    ScipImportRequest, SourceContextOptions, SourceContextRequest, SourceSearchOptions,
-    TestEvidenceOptions, WorkingTreeOverlayRequest, judge_dead_code_candidates,
+    ProjectCancellation, ProjectError, ProjectRuntime, RenamePlanError, RenamePlanOptions,
+    RenamePlanRequest, RetrievalClientRequest, RetrievalOptions, RetrievalRequest, ReviewOptions,
+    ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceContextOptions,
+    SourceContextRequest, SourceSearchOptions, TestEvidenceOptions, WorkingTreeOverlayRequest,
+    judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
@@ -3589,12 +3589,14 @@ async fn file_drift_distinguishes_content_hash_from_mtime_threshold_semantics() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
-async fn closure_indexing_succeeds_and_reference_bound_failures_preserve_current_generation() {
+async fn oversized_synthesized_names_shorten_and_fatal_stages_preserve_the_generation() {
     let (schema, settings, project) = live_project_fixture("8");
     let source_path = project.path().join("repro.rs");
+    // A single ordinary construct used to synthesize a name past the canonical
+    // storage bound and discard the whole generation (issues #118 and #119).
     let long_target = "reference_target_".repeat(300);
-    let invalid_source = format!("pub fn trigger() {{ {long_target}(); }}\n");
-    std::fs::write(&source_path, &invalid_source)
+    let oversized_source = format!("pub fn trigger() {{ {long_target}(); }}\n");
+    std::fs::write(&source_path, &oversized_source)
         .unwrap_or_else(|error| panic!("reference-bound fixture failed: {error}"));
 
     {
@@ -3604,46 +3606,58 @@ async fn closure_indexing_succeeds_and_reference_bound_failures_preserve_current
         let options = IndexOptions::default()
             .with_force(true)
             .with_history_refresh(false);
-        let first_failure = runtime.index(options).await;
-        assert_eq!(
-            first_failure,
-            Err(ProjectError::IndexStageFailedWithReason {
-                stage: PipelineStage::Reduce,
-                reason: PipelineFailureReason::ReferenceNameTooLong,
-            })
-        );
-        let empty_status = runtime
-            .status()
-            .await
-            .unwrap_or_else(|error| panic!("empty-generation status failed: {error}"));
-        assert!(
-            empty_status
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.current.is_none())
-        );
-
-        let payload = "x".repeat(5_000);
-        let closure_source = format!(
-            "pub fn synthetic_trigger() -> usize {{\n    (|| {{\n        let payload = \"{payload}\";\n        payload.len()\n    }})()\n}}\n"
-        );
-        std::fs::write(&source_path, closure_source)
-            .unwrap_or_else(|error| panic!("closure fixture failed: {error}"));
-        let published = runtime
+        let shortened = runtime
             .index(options)
             .await
-            .unwrap_or_else(|error| panic!("closure index failed: {error}"));
-        assert!(published.published);
+            .unwrap_or_else(|error| panic!("oversized reference name must still publish: {error}"));
+        assert!(
+            shortened.published,
+            "one over-long synthesized name must never discard the generation"
+        );
 
-        std::fs::write(&source_path, &invalid_source)
-            .unwrap_or_else(|error| panic!("second reference-bound fixture failed: {error}"));
-        let second_failure = runtime.index(options).await;
-        assert_eq!(
-            second_failure,
-            Err(ProjectError::IndexStageFailedWithReason {
-                stage: PipelineStage::Reduce,
-                reason: PipelineFailureReason::ReferenceNameTooLong,
-            })
+        // The stored name is bounded, deterministic, and marked as shortened.
+        let pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("shortened-name connection failed: {error}"));
+        let widest: i64 = query(AssertSqlSafe(format!(
+            r#"SELECT COALESCE(MAX(octet_length(reference_name)), 0)::bigint
+                FROM "{schema}"."references"
+                WHERE project_id = CAST($1 AS uuid)"#
+        )))
+        .bind(shortened.project_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .and_then(|row| row.try_get::<i64, _>(0))
+        .unwrap_or_else(|error| panic!("shortened-name probe failed: {error}"));
+        pool.close().await;
+        assert!(
+            widest > 0 && widest <= 4_096,
+            "stored reference names must fit the canonical bound, saw {widest}"
+        );
+
+        let published_generation = shortened.generation_id.clone();
+
+        // A genuinely fatal stage must still leave the published generation visible.
+        let deep = format!(
+            "pub fn nested() {{{}{}}}\n",
+            "{ ".repeat(400),
+            "} ".repeat(400)
+        );
+        std::fs::write(&source_path, deep)
+            .unwrap_or_else(|error| panic!("nesting fixture failed: {error}"));
+        let fatal = runtime.index(options).await;
+        assert!(
+            fatal.is_err(),
+            "a source past the defensive nesting ceiling must fail the generation"
+        );
+        let rendered = match fatal {
+            Err(error) => error.to_string(),
+            Ok(_) => unreachable!("checked above"),
+        };
+        assert!(
+            !rendered.contains(&long_target)
+                && !rendered.contains(&project.path().to_string_lossy().to_string()),
+            "a failure must never render source text or a checkout path"
         );
         let retained = runtime
             .status()
@@ -3654,15 +3668,9 @@ async fn closure_indexing_succeeds_and_reference_bound_failures_preserve_current
                 .snapshot
                 .and_then(|snapshot| snapshot.current)
                 .map(|current| current.generation_id),
-            Some(published.generation_id)
+            Some(published_generation),
+            "a failed index must leave the previous generation visible"
         );
-        let rendered = match second_failure {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("second oversized reference unexpectedly indexed"),
-        };
-        assert!(rendered.contains("reduce/reference_name_too_long"));
-        assert!(!rendered.contains(&long_target));
-        assert!(!rendered.contains(&project.path().to_string_lossy().to_string()));
         runtime.close().await;
     }
     drop_schema(&settings, &schema).await;

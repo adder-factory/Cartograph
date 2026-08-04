@@ -121,7 +121,7 @@ fn collect_extraction_diagnostics(
     builder: &mut ExtractionBuilder<'_, '_>,
     input: WalkInput<'_>,
 ) -> Result<Vec<ExtractionDiagnostic>, ExtractError> {
-    let diagnostics = if input.parse_status == FileParseStatus::Partial {
+    let mut diagnostics = if input.parse_status == FileParseStatus::Partial {
         let diagnostics = collect_diagnostics(input.root, builder.context.cancelled)?;
         if diagnostics.is_empty() {
             vec![ExtractionDiagnostic {
@@ -134,6 +134,14 @@ fn collect_extraction_diagnostics(
     } else {
         Vec::new()
     };
+    // A shortened name keeps the generation publishable, but the file no longer
+    // carries the exact synthesized identity and must say so.
+    if builder.shortened_canonical_names {
+        diagnostics.push(ExtractionDiagnostic {
+            code: DiagnosticCode::CanonicalNameTruncated,
+            span: None,
+        });
+    }
     for _ in &diagnostics {
         builder
             .context
@@ -295,6 +303,9 @@ struct ExtractionBuilder<'source, 'cancel> {
     explicit_exports: BTreeSet<String>,
     explicit_default_exports: BTreeSet<String>,
     commonjs_shadowing: module_system::CommonJsShadowing,
+    /// Whether any synthesized name exceeded its canonical bound and had to be
+    /// deterministically shortened for this file.
+    shortened_canonical_names: bool,
 }
 
 fn owner_for_node(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> Option<SymbolId> {
@@ -857,6 +868,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             explicit_exports: BTreeSet::new(),
             explicit_default_exports: BTreeSet::new(),
             commonjs_shadowing: module_system::CommonJsShadowing::default(),
+            shortened_canonical_names: false,
         })
     }
 
@@ -1041,6 +1053,10 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     fn emit_symbol(&mut self, pending: PendingSymbol<'_>) -> Result<SymbolId, ExtractError> {
         self.context.ensure_active()?;
         let qualified_name = self.qualified_name(&pending.name)?;
+        let qualified_name = self.bound_canonical_name(
+            qualified_name,
+            crate::bounded_name::MAX_CANONICAL_QUALIFIED_NAME_BYTES,
+        );
         let id = self.identities.next(pending.kind, &qualified_name)?;
         self.reserve_parent_containment(&id)?;
         let symbol = self.extracted_symbol(pending, &id, qualified_name)?;
@@ -1162,6 +1178,19 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     }
 
     fn emit_reference(&mut self, reference: ExtractedReference) -> Result<(), ExtractError> {
+        let reference = ExtractedReference {
+            name: self.bound_canonical_name(
+                reference.name,
+                crate::bounded_name::MAX_CANONICAL_REFERENCE_NAME_BYTES,
+            ),
+            resolution_name: reference.resolution_name.map(|name| {
+                self.bound_canonical_name(
+                    name,
+                    crate::bounded_name::MAX_CANONICAL_REFERENCE_NAME_BYTES,
+                )
+            }),
+            ..reference
+        };
         self.context.budget.reserve_fact(
             reference_budget_bytes(&reference),
             [
@@ -1210,6 +1239,18 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         }
         qualified.push_str(name);
         Ok(qualified)
+    }
+
+    /// Shorten one synthesized name that exceeds its canonical storage bound,
+    /// recording that this file carries a shortened name.
+    fn bound_canonical_name(&mut self, name: String, limit: usize) -> String {
+        match crate::bounded_name::shortened_canonical_name(&name, limit) {
+            Some(shortened) => {
+                self.shortened_canonical_names = true;
+                shortened
+            }
+            None => name,
+        }
     }
 }
 

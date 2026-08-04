@@ -1,5 +1,6 @@
 //! Native source discovery and extraction for Cartograph v2.
 
+mod bounded_name;
 mod budget;
 mod custom;
 mod discovery;

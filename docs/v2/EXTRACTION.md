@@ -92,10 +92,22 @@ The walker emits:
 
 Immediately invoked Rust closures have no stable declaration target, so their
 source bodies are never retained as named call references. Calls inside the
-closure remain ordinary typed evidence. If another extracted reference still
-violates the canonical storage bound, reduction returns the allowlisted
-`reference_name_too_long` reason without rendering the name, source, project
-path, database URL, or driver text.
+closure remain ordinary typed evidence.
+
+A synthesized qualified or reference name that exceeds its canonical storage
+bound is shortened rather than fatal: one ordinary construct — a long method
+chain, or a re-export group naming a module's whole public surface — must never
+cost the whole index. The shortened form keeps a prefix cut on a character
+boundary, a `~` marker, and a digest of the exact original name, so it is
+deterministic across re-extraction and keeps distinct originals distinct. The
+file then carries a `canonical_name_truncated` diagnostic, so a shortened
+identity is never mistaken for the complete one.
+
+A bounded field with no safe shortening still fails canonical reduction, and the
+failure now names the exact rejected storage field —
+`canonical_field_rejected(<field>)` — without rendering the name, source,
+project path, database URL, or driver text. Naming the field is what turns a
+whole-corpus bisection into a single run.
 
 The same stable-target rule applies to immediately invoked Go function
 literals and Python lambdas. For an oversized Go call expression,
