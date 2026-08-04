@@ -392,6 +392,19 @@ nightly-only tools or diagnostic overrides to clear them. A separate scheduled
 latest-stable canary detects future compiler and Clippy changes without making
 production builds float away from the reviewed toolchain.
 
+The required GitHub workflow always starts on pull requests and `main` pushes;
+do not add trigger-level path filters because GitHub can leave required checks
+pending when an entire workflow is skipped. Its fail-closed classifier selects
+a documentation-only path only when every changed path is an approved Markdown
+document, fixture README, or reviewer instruction. Empty, mixed, source,
+test-code, dependency, workflow, bundled-skill, release-note, and unknown
+changes run the complete gate. Documentation-only
+validation runs the workflow contract and focused Rust documentation contract,
+reports the protected platform and PostgreSQL matrix contexts without starting
+their expensive work, and emits no release attestation. `workflow_dispatch`
+always runs the complete gate and must be used before releasing an exact `main`
+SHA that has only documentation-only validation.
+
 The live workflow additionally proves PostgreSQL/ParadeDB capabilities,
 migrations, deterministic COPY/publication, leases, fault handling,
 1/2/4/8/16-worker output identity, retrieval, migration, database maintenance,

@@ -6,41 +6,12 @@ on:
     # Tag pushes are owned by release.yml, which verifies this workflow's exact-SHA
     # main attestation instead of rerunning the complete live suite. Feature
     # branches are covered by pull_request below, avoiding duplicate PR gates.
+    # Required checks must not use path filters: GitHub leaves a path-filtered
+    # required workflow pending. The classify job selects the lightweight docs
+    # contract or the complete release gate instead.
     branches:
       - main
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - clippy.toml
-      - rust-toolchain.toml
-      - 'crates/**'
-      - 'deploy/paradedb/**'
-      - 'deny.toml'
-      - 'scripts/*rust-release*'
-      - 'scripts/pull-pinned-image.sh'
-      - '.github/workflows/v2-rust.yml'
-      - '.github/workflows/release.yml'
-      - '.github/workflows/stable-canary.yml'
-      - '.github/dependabot.yml'
-      - 'scripts/sonar-rust.sh'
-      - sonar-project.properties
   pull_request:
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - clippy.toml
-      - rust-toolchain.toml
-      - 'crates/**'
-      - 'deploy/paradedb/**'
-      - 'deny.toml'
-      - 'scripts/*rust-release*'
-      - 'scripts/pull-pinned-image.sh'
-      - '.github/workflows/v2-rust.yml'
-      - '.github/workflows/release.yml'
-      - '.github/workflows/stable-canary.yml'
-      - '.github/dependabot.yml'
-      - 'scripts/sonar-rust.sh'
-      - sonar-project.properties
 
 permissions:
   contents: read
@@ -50,11 +21,88 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  classify:
+    name: Classify validation scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Select fail-closed validation scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          force_full() {
+            printf '%s\n' 'full=true' 'docs_only=false' >>"$GITHUB_OUTPUT"
+          }
+
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              force_full
+              exit 0
+              ;;
+            push)
+              base="$PUSH_BASE_SHA"
+              head="$EVENT_SHA"
+              diff_range="$base..$head"
+              ;;
+            pull_request)
+              base="$PR_BASE_SHA"
+              head="$PR_HEAD_SHA"
+              diff_range="$base...$head"
+              ;;
+            *)
+              force_full
+              exit 0
+              ;;
+          esac
+
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" =~ ^0+$ ||
+                ! "$head" =~ ^[0-9a-f]{40}$ ||
+                "$(git cat-file -t "$base" 2>/dev/null || true)" != commit ||
+                "$(git cat-file -t "$head" 2>/dev/null || true)" != commit ]]; then
+            force_full
+            exit 0
+          fi
+
+          git diff --no-renames --name-only -z "$diff_range" |
+            scripts/classify-v2-ci-change.sh >>"$GITHUB_OUTPUT"
+
   quality:
     name: format + clippy + rustdoc + unit + PostgreSQL-only
+    needs: classify
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      - name: Require successful change classification
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          FULL_GATE: ${{ needs.classify.outputs.full }}
+          DOCS_ONLY: ${{ needs.classify.outputs.docs_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CLASSIFY_RESULT" == success ]]
+          if [[ "$FULL_GATE" == true ]]; then
+            [[ "$DOCS_ONLY" == false ]]
+          else
+            [[ "$FULL_GATE" == false && "$DOCS_ONLY" == true ]]
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve pinned Rust toolchain
@@ -79,21 +127,32 @@ jobs:
       - name: Release workflow contract
         run: scripts/test-rust-release-workflow.sh
 
+      - name: Documentation contract
+        if: needs.classify.outputs.docs_only == 'true'
+        run: >-
+          cargo test --locked -p cartograph-cli --bin cartograph
+          tests::documentation_contract:: -- --nocapture
+
       - name: Formatting
+        if: needs.classify.outputs.full == 'true'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: needs.classify.outputs.full == 'true'
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Strict public API documentation
+        if: needs.classify.outputs.full == 'true'
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --workspace --all-features --no-deps
 
       - name: Unit tests
+        if: needs.classify.outputs.full == 'true'
         run: cargo test --locked --workspace --all-features
 
       - name: Dependency advisories, licenses, bans, and sources
+        if: needs.classify.outputs.full == 'true'
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           rust-version: '1.97.1'
@@ -101,6 +160,7 @@ jobs:
           arguments: --all-features
 
       - name: Native dependency shape
+        if: needs.classify.outputs.full == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -127,6 +187,7 @@ jobs:
           echo 'Native dependency graph is PostgreSQL-only and standardized on ring.'
 
       - name: No SQLite runtime source
+        if: needs.classify.outputs.full == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -174,6 +235,7 @@ jobs:
           echo 'No SQLite runtime source found.'
 
       - name: No executable TypeScript, Bun, Node, or browser-viewer runtime
+        if: needs.classify.outputs.full == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -200,6 +262,7 @@ jobs:
 
       - name: Save Rust dependency cache
         if: >-
+          needs.classify.outputs.full == 'true' &&
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
           steps.rust-cache.outputs.cache-hit != 'true'
@@ -214,6 +277,8 @@ jobs:
 
   windows-portability:
     name: Windows strict compile portability
+    needs: classify
+    if: needs.classify.outputs.full == 'true'
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -258,6 +323,8 @@ jobs:
 
   macos-portability:
     name: macOS strict compile portability
+    needs: classify
+    if: needs.classify.outputs.full == 'true'
     runs-on: macos-26
     timeout-minutes: 25
     steps:
@@ -298,6 +365,8 @@ jobs:
 
   linux-release-portability:
     name: Linux x64 Debian 13 current stable
+    needs: classify
+    if: needs.classify.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -314,6 +383,7 @@ jobs:
 
   paradedb:
     name: PostgreSQL 18 + ParadeDB + pgvector (${{ matrix.shard }})
+    needs: classify
     strategy:
       fail-fast: false
       matrix:
@@ -329,12 +399,19 @@ jobs:
       CARTOGRAPH_TEST_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
       CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.25.0@sha256:6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7
     steps:
+      - name: Documentation-only required-check fast path
+        if: needs.classify.outputs.docs_only == 'true'
+        run: echo 'Live PostgreSQL validation is not required for documentation-only changes.'
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.classify.outputs.full == 'true'
 
       - name: Resolve pinned Rust toolchain
+        if: needs.classify.outputs.full == 'true'
         run: rustup show active-toolchain
 
       - name: Restore Rust dependency cache
+        if: needs.classify.outputs.full == 'true'
         id: rust-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -348,9 +425,11 @@ jobs:
             cartograph-rust-${{ runner.os }}-v2-ubuntu-
 
       - name: Pull pinned ParadeDB image with bounded retries
+        if: needs.classify.outputs.full == 'true'
         run: scripts/pull-pinned-image.sh "$CARTOGRAPH_PARADEDB_IMAGE"
 
       - name: Start pinned ParadeDB service on loopback
+        if: needs.classify.outputs.full == 'true'
         id: start_paradedb
         run: >-
           docker run --detach --pull never
@@ -366,6 +445,7 @@ jobs:
           "$CARTOGRAPH_PARADEDB_IMAGE"
 
       - name: Wait for completed PostgreSQL bootstrap and health
+        if: needs.classify.outputs.full == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -393,6 +473,7 @@ jobs:
           exit 1
 
       - name: Initialize required extensions
+        if: needs.classify.outputs.full == 'true'
         run: >-
           docker exec cartograph-v2-ci-postgres
           psql --username cartograph --dbname cartograph --set ON_ERROR_STOP=1
@@ -400,6 +481,7 @@ jobs:
           --command 'CREATE EXTENSION IF NOT EXISTS vector;'
 
       - name: Capture clean schema baseline
+        if: needs.classify.outputs.full == 'true'
         id: schema_baseline
         shell: bash
         run: |
@@ -412,6 +494,7 @@ jobs:
           test -s /tmp/cartograph-schema-baseline.txt
 
       - name: Verify loopback-only publication
+        if: needs.classify.outputs.full == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -422,73 +505,73 @@ jobs:
           fi
 
       - name: Rust database doctor
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: |
           cargo run --locked --quiet -p cartograph-cli -- doctor
           cargo run --locked --quiet -p cartograph-cli -- doctor --format json
 
       - name: Live capability integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_capabilities -- --ignored --nocapture
 
       - name: Generation-safe schema and BM25 integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_generation -- --ignored --nocapture
 
       - name: Storage observability, retention, and online compaction integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_storage_lifecycle -- --ignored --nocapture
 
       - name: COPY ingestion and deterministic digest integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_ingest -- --ignored --nocapture
 
       - name: Project operation lease integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_leases -- --ignored --nocapture
 
       - name: Semantic model, pgvector, HNSW, readiness, and retention integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_semantic -- --include-ignored --nocapture --test-threads=1
 
       - name: V1 PostgreSQL import, rollback, resume, and retention integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_v1_import_retention -- --ignored --nocapture --test-threads=1
 
       - name: Project purge fencing and physical-relation cleanup integration test
-        if: matrix.shard == 'database'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'database'
         run: >-
           cargo test --locked --quiet -p cartograph-db
           --test live_project_purge -- --ignored --nocapture --test-threads=1
 
       - name: Lease-owned indexer supervisor integration test
-        if: matrix.shard == 'runtime'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-indexer
           --test live_supervisor -- --ignored --nocapture --test-threads=1
 
       - name: Agent runtime index, hybrid retrieval, no-op, freshness, and review integration test
-        if: matrix.shard == 'runtime'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-agent
           --test live_project -- --ignored --nocapture --test-threads=1
 
       - name: Candidate binary self-indexes this repository
-        if: matrix.shard == 'operations'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'operations'
         env:
           CARTOGRAPH_DATABASE_SCHEMA: cartograph_ci_self_index
         shell: bash
@@ -514,42 +597,46 @@ jobs:
             /tmp/cartograph-self-context.json >/dev/null
 
       - name: Native CLI/MCP summary, role, graph, history, session, and watcher integration tests
-        if: matrix.shard == 'runtime'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-cli
           -- --ignored --nocapture --test-threads=1
 
       - name: Locked native patch-task evaluation and repeatability gate
-        if: matrix.shard == 'runtime'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'runtime'
         run: >-
           cargo test --locked --quiet -p cartograph-agent
           --test patch_task_evaluation -- --include-ignored --nocapture --test-threads=1
 
       - name: Frozen 1/2/4/8/16-worker determinism and scaling benchmark
-        if: matrix.shard == 'operations'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'operations'
         run: cargo bench --locked -p cartograph-indexer --bench index_scaling
 
       - name: Managed database lifecycle integration test
-        if: matrix.shard == 'operations'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'operations'
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib
           managed::tests:: -- --ignored --nocapture --test-threads=1
 
       - name: Managed backup, restore, upgrade, rollback, and derived-index test
-        if: matrix.shard == 'operations'
+        if: needs.classify.outputs.full == 'true' && matrix.shard == 'operations'
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib
           managed::maintenance::tests:: -- --ignored --nocapture --test-threads=1
 
       - name: Remove named self-index fixture schema
-        if: always() && matrix.shard == 'operations' && steps.start_paradedb.outcome == 'success'
+        if: >-
+          always() && needs.classify.outputs.full == 'true' &&
+          matrix.shard == 'operations' && steps.start_paradedb.outcome == 'success'
         run: >-
           docker exec cartograph-v2-ci-postgres
           psql --username cartograph --dbname cartograph --set ON_ERROR_STOP=1
           --command 'DROP SCHEMA IF EXISTS cartograph_ci_self_index CASCADE;'
 
       - name: Assert live tests left zero PostgreSQL schemas
-        if: always() && steps.schema_baseline.outcome == 'success'
+        if: >-
+          always() && needs.classify.outputs.full == 'true' &&
+          steps.schema_baseline.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -564,7 +651,7 @@ jobs:
           fi
 
       - name: ParadeDB logs on failure
-        if: failure()
+        if: needs.classify.outputs.full == 'true' && failure()
         shell: bash
         run: |
           if docker inspect cartograph-v2-ci-postgres >/dev/null 2>&1; then
@@ -572,15 +659,17 @@ jobs:
           fi
 
       - name: Stop ParadeDB service
-        if: always()
+        if: always() && needs.classify.outputs.full == 'true'
         run: docker rm --force --volumes cartograph-v2-ci-postgres 2>/dev/null || true
 
   attest-main-gate:
     name: Attest exact-SHA green main gate
     if: >-
+      needs.classify.outputs.full == 'true' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs:
+      - classify
       - quality
       - windows-portability
       - macos-portability

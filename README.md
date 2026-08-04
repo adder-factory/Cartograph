@@ -474,11 +474,19 @@ cargo deny --all-features check
 ```
 
 The complete live PostgreSQL/ParadeDB gate is defined in
-[`v2-rust.yml`](.github/workflows/v2-rust.yml). A successful exact-SHA main run
-emits a GitHub-attested gate manifest. Release tags verify that immutable
+[`v2-rust.yml`](.github/workflows/v2-rust.yml). Documentation-only changes run a
+focused documentation contract while the Windows, macOS, Linux release, live
+PostgreSQL, and benchmark work stays skipped. Any source, dependency, workflow,
+release-note, or mixed change fails closed to the complete gate. A manual
+workflow dispatch also runs the complete gate.
+
+A successful complete exact-SHA main run emits a GitHub-attested gate manifest;
+the documentation-only path does not. Release tags verify that immutable
 evidence instead of rerunning the live suite, then build and smoke macOS 26
-arm64, current Linux arm64/x64, and current Windows x64 archives before checksums,
-provenance, and immutable publication.
+arm64, current Linux arm64/x64, and current Windows x64 archives before
+checksums, provenance, and immutable publication. Run the complete workflow
+manually before releasing an exact main SHA that has only documentation-only
+validation.
 
 ## License
 

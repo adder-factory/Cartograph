@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VALIDATION="$ROOT/.github/workflows/v2-rust.yml"
 RELEASE="$ROOT/.github/workflows/release.yml"
 STABLE_CANARY="$ROOT/.github/workflows/stable-canary.yml"
+CHANGE_CLASSIFIER="$ROOT/scripts/classify-v2-ci-change.sh"
+DOCUMENTATION_CONTRACT="$ROOT/crates/cartograph-cli/src/tests/documentation_contract.rs"
 PULL_HELPER="$ROOT/scripts/pull-pinned-image.sh"
 SMOKE_HELPER="$ROOT/scripts/smoke-rust-release.sh"
 UNIX_BUILD_HELPER="$ROOT/scripts/build-rust-release.sh"
@@ -43,6 +45,9 @@ grep -Fq 'actions/attest-build-provenance@' "$VALIDATION" || fail 'main-gate pro
 # shellcheck disable=SC2016
 grep -Fq 'v2-main-gate-${{ github.sha }}' "$VALIDATION" || fail 'main-gate artifact is not SHA-bound'
 grep -Eq '^  pull_request:$' "$VALIDATION" || fail 'pull-request validation trigger is missing'
+if grep -Eq '^    paths(-ignore)?:' "$VALIDATION"; then
+  fail 'required validation workflow must classify jobs instead of path-filtering the workflow'
+fi
 push_branches="$(awk '
   /^  push:$/ { in_push = 1; next }
   in_push && /^    branches:$/ { in_branches = 1; next }
@@ -51,11 +56,165 @@ push_branches="$(awk '
   in_push && in_branches { print }
 ' "$VALIDATION" | sed '/^[[:space:]]*$/d')"
 [[ "$push_branches" == '      - main' ]] || fail 'push validation must be scoped only to main'
+grep -Fq 'classify:' "$VALIDATION" || fail 'validation scope classifier job is missing'
+grep -Fq 'name: Classify validation scope' "$VALIDATION" || \
+  fail 'validation scope classifier name changed'
+grep -Fq 'fetch-depth: 0' "$VALIDATION" || \
+  fail 'change classifier cannot inspect the complete event diff'
+grep -Fq "git diff --no-renames --name-only -z \"\$diff_range\"" "$VALIDATION" || \
+  fail 'change classifier is not NUL-safe or does not expose deletions separately'
+[[ -x "$CHANGE_CLASSIFIER" ]] || fail 'change classifier is missing or not executable'
+[[ -f "$DOCUMENTATION_CONTRACT" ]] || fail 'documentation contract source is missing'
+for documentation_test in \
+  public_cli_reference_tracks_commands_targets_and_affected_forms \
+  public_mcp_inventory_and_bundled_skill_track_current_contracts \
+  release_docs_identify_current_audit_and_historical_benchmarks; do
+  grep -Fq "fn $documentation_test()" "$DOCUMENTATION_CONTRACT" || \
+    fail "documentation contract test is missing: $documentation_test"
+done
+
+job_ids="$(awk '
+  $0 == "jobs:" { in_jobs = 1; next }
+  in_jobs && /^  [[:alnum:]_-]+:$/ {
+    job = $0
+    sub(/^  /, "", job)
+    sub(/:$/, "", job)
+    print job
+  }
+' "$VALIDATION")"
+expected_job_ids=$'classify\nquality\nwindows-portability\nmacos-portability\nlinux-release-portability\nparadedb\nattest-main-gate'
+[[ "$job_ids" == "$expected_job_ids" ]] || \
+  fail 'validation jobs changed without an explicit documentation-scope contract'
+
+classify_paths() {
+  if (( $# > 0 )); then
+    printf '%s\0' "$@"
+  fi | "$CHANGE_CLASSIFIER"
+}
+
+assert_scope() {
+  local expected="$1"
+  shift
+  local actual
+  actual="$(classify_paths "$@")"
+  [[ "$actual" == "$expected" ]] || \
+    fail "unexpected validation scope for paths: $*"
+}
+
+docs_scope=$'full=false\ndocs_only=true'
+full_scope=$'full=true\ndocs_only=false'
+assert_scope "$docs_scope" README.md ACKNOWLEDGEMENTS.md docs/CONFIGURATION.md
+assert_scope "$docs_scope" docs/v2/ARCHITECTURE.md
+assert_scope "$docs_scope" crates/example/tests/fixtures/corpus/README.md
+assert_scope "$full_scope"
+assert_scope "$full_scope" 'docs/path with spaces/example.rs'
+assert_scope "$full_scope" docs/releases/v9.9.9.md
+assert_scope "$full_scope" crates/cartograph-cli/src/main.rs
+assert_scope "$full_scope" crates/cartograph-cli/src/tests/documentation_contract.rs
+assert_scope "$full_scope" crates/cartograph-cli/assets/cartograph-skill.md
+assert_scope "$full_scope" .github/workflows/v2-rust.yml
+assert_scope "$full_scope" docs/CONFIGURATION.md Cargo.lock
+
+quality_block="$(job_block "$VALIDATION" quality)"
+grep -Fq 'needs: classify' <<<"$quality_block" || \
+  fail 'required quality result does not depend on change classification'
+if grep -Eq '^    (container|services):' <<<"$quality_block"; then
+  fail 'documentation-only quality job cannot allocate a container or service'
+fi
+grep -Fq 'if: always()' <<<"$quality_block" || \
+  fail 'required quality result can disappear when classification fails'
+grep -Fq 'name: Documentation contract' <<<"$quality_block" || \
+  fail 'documentation-only validation is missing'
+grep -Fq 'tests::documentation_contract::' <<<"$quality_block" || \
+  fail 'documentation-only validation does not run the isolated contract tests'
+
+validate_quality_step() {
+  local step="$1"
+  [[ -n "$step" ]] || return 0
+  if grep -Eq \
+      'name: (Require successful change classification|Resolve pinned Rust toolchain|Restore Rust dependency cache|Fetch locked dependencies|Release workflow contract)' \
+      <<<"$step" || grep -Fq -- '- uses: actions/checkout@' <<<"$step"; then
+    return 0
+  fi
+  if grep -Fq 'name: Documentation contract' <<<"$step"; then
+    grep -Fq "needs.classify.outputs.docs_only == 'true'" <<<"$step" || \
+      fail 'documentation contract lost its docs-only condition'
+  elif ! grep -Fq "needs.classify.outputs.full == 'true'" <<<"$step"; then
+    fail "quality step is not explicitly scoped: $(head -n 1 <<<"$step")"
+  fi
+}
+
+in_quality_steps=false
+quality_step=''
+while IFS= read -r line; do
+  if [[ "$line" == '    steps:' ]]; then
+    in_quality_steps=true
+    continue
+  fi
+  [[ "$in_quality_steps" == true ]] || continue
+  if [[ "$line" == '      - '* ]]; then
+    validate_quality_step "$quality_step"
+    quality_step="$line"$'\n'
+  else
+    quality_step+="$line"$'\n'
+  fi
+done <<<"$quality_block"
+validate_quality_step "$quality_step"
+
 for parallel_job in windows-portability macos-portability linux-release-portability paradedb; do
   if job_block "$VALIDATION" "$parallel_job" | grep -Fq 'needs: quality'; then
     fail "independent gate $parallel_job is serialized behind quality"
   fi
 done
+for skipped_job in windows-portability macos-portability linux-release-portability; do
+  skipped_block="$(job_block "$VALIDATION" "$skipped_job")"
+  grep -Fq 'needs: classify' <<<"$skipped_block" || \
+    fail "documentation-only scope cannot control $skipped_job"
+  grep -Fq "if: needs.classify.outputs.full == 'true'" <<<"$skipped_block" || \
+    fail "documentation-only scope does not skip $skipped_job"
+done
+paradedb_block="$(job_block "$VALIDATION" paradedb)"
+grep -Fq 'needs: classify' <<<"$paradedb_block" || \
+  fail 'live PostgreSQL matrix does not depend on change classification'
+if grep -Eq '^    (container|services):' <<<"$paradedb_block"; then
+  fail 'documentation-only PostgreSQL contexts cannot allocate a container or service'
+fi
+grep -Fq 'name: Documentation-only required-check fast path' <<<"$paradedb_block" || \
+  fail 'live PostgreSQL required contexts disappear for documentation-only changes'
+grep -Fq "if: needs.classify.outputs.docs_only == 'true'" <<<"$paradedb_block" || \
+  fail 'live PostgreSQL documentation fast path is not scope-gated'
+
+validate_paradedb_step() {
+  local step="$1"
+  [[ -n "$step" ]] || return 0
+  if grep -Fq 'name: Documentation-only required-check fast path' <<<"$step"; then
+    grep -Fq "needs.classify.outputs.docs_only == 'true'" <<<"$step" || \
+      fail 'live PostgreSQL documentation fast path lost its docs-only condition'
+  elif ! grep -Fq "needs.classify.outputs.full == 'true'" <<<"$step"; then
+    fail "live PostgreSQL step is not full-gate scoped: $(head -n 1 <<<"$step")"
+  fi
+}
+
+in_paradedb_steps=false
+paradedb_step=''
+while IFS= read -r line; do
+  if [[ "$line" == '    steps:' ]]; then
+    in_paradedb_steps=true
+    continue
+  fi
+  [[ "$in_paradedb_steps" == true ]] || continue
+  if [[ "$line" == '      - '* ]]; then
+    validate_paradedb_step "$paradedb_step"
+    paradedb_step="$line"$'\n'
+  else
+    paradedb_step+="$line"$'\n'
+  fi
+done <<<"$paradedb_block"
+validate_paradedb_step "$paradedb_step"
+
+attestation_block="$(job_block "$VALIDATION" attest-main-gate)"
+grep -Fq "needs.classify.outputs.full == 'true'" <<<"$attestation_block" || \
+  fail 'documentation-only validation can create release gate attestation'
 grep -Fq 'cargo doc --locked --workspace --all-features --no-deps' "$VALIDATION" || \
   fail 'strict all-feature rustdoc validation is missing'
 grep -Fq 'cargo test --locked --workspace --all-features' "$VALIDATION" || \
