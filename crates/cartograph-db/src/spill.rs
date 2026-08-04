@@ -1932,9 +1932,11 @@ impl NativeGenerationSpill {
         }
         let (digest, counts) = stream_spilled_digest(
             &mut transaction,
-            &schema,
-            &self.project_id,
-            &self.generation_id,
+            SpilledDigestScope {
+                schema: &schema,
+                project_id: &self.project_id,
+                generation_id: &self.generation_id,
+            },
             &mut cancelled,
             &mut progress,
         )
@@ -2795,9 +2797,7 @@ async fn insert_typed_fact_payloads(
 
 async fn stream_spilled_digest<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    scope: SpilledDigestScope<'_>,
     cancelled: &mut Cancel,
     progress: &mut Progress,
 ) -> Result<(ContentDigest, NativeGenerationSpillFactCounts), StorageError>
@@ -2806,83 +2806,50 @@ where
     Progress: FnMut(u64) -> ProgressFuture,
     ProgressFuture: Future<Output = bool>,
 {
-    let counts = canonical_fact_counts(transaction, schema, project_id, generation_id).await?;
+    let counts = canonical_fact_counts(transaction, scope).await?;
     let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
-    digest.begin_files(counts.files);
-    digest_spilled_files(
-        transaction,
-        schema,
-        project_id,
-        generation_id,
-        &mut digest,
+    let mut stream = SpilledDigestStream {
+        digest: &mut digest,
         cancelled,
         progress,
-    )
-    .await?;
-    digest.begin_symbols(counts.symbols);
-    digest_spilled_symbols(
-        transaction,
-        schema,
-        project_id,
-        generation_id,
-        &mut digest,
-        cancelled,
-        progress,
-    )
-    .await?;
-    digest.begin_edges(counts.edges);
-    digest_spilled_edges(
-        transaction,
-        schema,
-        project_id,
-        generation_id,
-        &mut digest,
-        cancelled,
-        progress,
-    )
-    .await?;
-    digest.begin_references(counts.references);
-    digest_spilled_references(
-        transaction,
-        schema,
-        project_id,
-        generation_id,
-        &mut digest,
-        cancelled,
-        progress,
-    )
-    .await?;
-    digest.begin_numerical_sites(counts.numerical_sites);
-    digest_spilled_numerical_sites(
-        transaction,
-        schema,
-        project_id,
-        generation_id,
-        &mut digest,
-        cancelled,
-        progress,
-    )
-    .await?;
-    digest.begin_documents(counts.documents);
-    digest_spilled_documents(
-        transaction,
-        schema,
-        project_id,
-        generation_id,
-        &mut digest,
-        cancelled,
-        progress,
-    )
-    .await?;
+    };
+    // Relation order is part of the digest and must match `encoded_relation_digests`.
+    let begins: [fn(&mut LogicalDigestBuilder, u64); 5] = [
+        LogicalDigestBuilder::begin_files,
+        LogicalDigestBuilder::begin_symbols,
+        LogicalDigestBuilder::begin_edges,
+        LogicalDigestBuilder::begin_references,
+        LogicalDigestBuilder::begin_numerical_sites,
+    ];
+    let totals = [
+        counts.files,
+        counts.symbols,
+        counts.edges,
+        counts.references,
+        counts.numerical_sites,
+    ];
+    for ((begin, total), relation) in begins
+        .into_iter()
+        .zip(totals)
+        .zip(encoded_relation_digests())
+    {
+        begin(stream.digest, total);
+        digest_spilled_relation(transaction, &mut stream, (scope, relation)).await?;
+    }
+    stream.digest.begin_documents(counts.documents);
+    digest_spilled_documents(transaction, &mut stream, scope).await?;
     Ok((digest.finish(), counts))
 }
 
 pub(crate) async fn canonical_fact_counts(
     connection: &mut sqlx_postgres::PgConnection,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    scope: SpilledDigestScope<'_>,
 ) -> Result<NativeGenerationSpillFactCounts, StorageError> {
+    let SpilledDigestScope {
+        schema,
+        project_id,
+        generation_id,
+    } = scope;
     let sql = format!(
         r#"SELECT
             (SELECT count(*) FROM {schema}."files"
@@ -3029,235 +2996,154 @@ where
     pulse.finish().await
 }
 
-async fn digest_spilled_files<Cancel, Progress, ProgressFuture>(
-    transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    digest: &mut LogicalDigestBuilder,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
-) -> Result<(), StorageError>
-where
-    Cancel: FnMut() -> bool,
-    Progress: FnMut(u64) -> ProgressFuture,
-    ProgressFuture: Future<Output = bool>,
-{
-    let sql = digest_relation_sql(
-        schema,
-        "files",
-        &[
-            digest_text_sql("file_id::text"),
-            digest_text_sql("normalized_path"),
-            digest_text_sql("language"),
-            digest_text_sql("content_hash"),
-            "int8send(byte_size)".to_owned(),
-            digest_text_sql("parse_status"),
-        ],
-        "file_id",
-    );
-    digest_encoded_relation(
-        transaction,
-        digest,
-        cancelled,
-        progress,
-        DigestEncodedRequest {
-            project_id,
-            generation_id,
-            sql,
+/// One canonical relation in the exact order the logical digest consumes it.
+///
+/// The five encoded relations differ only by relation name, encoded columns, and
+/// order key, so they are described rather than copied. The descriptions and
+/// their order are part of the generation digest and must not be reordered.
+struct SpilledRelationDigest {
+    relation: &'static str,
+    columns: Vec<String>,
+    order_key: &'static str,
+    operation: &'static str,
+}
+
+/// Mutable digest sinks threaded through one streaming pass.
+struct SpilledDigestStream<'stream, Cancel, Progress> {
+    digest: &'stream mut LogicalDigestBuilder,
+    cancelled: &'stream mut Cancel,
+    progress: &'stream mut Progress,
+}
+
+/// Exact project/generation fence and schema for one spilled digest pass.
+#[derive(Clone, Copy)]
+pub(crate) struct SpilledDigestScope<'scope> {
+    pub(crate) schema: &'scope str,
+    pub(crate) project_id: &'scope ProjectId,
+    pub(crate) generation_id: &'scope GenerationId,
+}
+
+fn encoded_relation_digests() -> [SpilledRelationDigest; 5] {
+    [
+        SpilledRelationDigest {
+            relation: "files",
+            columns: vec![
+                digest_text_sql("file_id::text"),
+                digest_text_sql("normalized_path"),
+                digest_text_sql("language"),
+                digest_text_sql("content_hash"),
+                "int8send(byte_size)".to_owned(),
+                digest_text_sql("parse_status"),
+            ],
+            order_key: "file_id",
             operation: "spill-digest-files",
         },
-    )
-    .await
-}
-
-async fn digest_spilled_symbols<Cancel, Progress, ProgressFuture>(
-    transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    digest: &mut LogicalDigestBuilder,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
-) -> Result<(), StorageError>
-where
-    Cancel: FnMut() -> bool,
-    Progress: FnMut(u64) -> ProgressFuture,
-    ProgressFuture: Future<Output = bool>,
-{
-    let sql = digest_relation_sql(
-        schema,
-        "symbols",
-        &[
-            digest_text_sql("symbol_id::text"),
-            digest_text_sql("file_id::text"),
-            digest_text_sql("symbol_kind"),
-            digest_text_sql("qualified_name"),
-            digest_text_sql("signature"),
-            "int8send(start_byte)".to_owned(),
-            "int8send(end_byte)".to_owned(),
-            "int4send(start_line)".to_owned(),
-            "int4send(end_line)".to_owned(),
-            digest_text_sql("structural_digest"),
-            digest_optional_text_sql("visibility"),
-            digest_boolean_sql("exported"),
-            digest_boolean_sql("default_export"),
-            digest_boolean_sql("async_symbol"),
-            digest_boolean_sql("static_member"),
-            digest_boolean_sql("declaration_only"),
-        ],
-        "symbol_id",
-    );
-    digest_encoded_relation(
-        transaction,
-        digest,
-        cancelled,
-        progress,
-        DigestEncodedRequest {
-            project_id,
-            generation_id,
-            sql,
+        SpilledRelationDigest {
+            relation: "symbols",
+            columns: vec![
+                digest_text_sql("symbol_id::text"),
+                digest_text_sql("file_id::text"),
+                digest_text_sql("symbol_kind"),
+                digest_text_sql("qualified_name"),
+                digest_text_sql("signature"),
+                "int8send(start_byte)".to_owned(),
+                "int8send(end_byte)".to_owned(),
+                "int4send(start_line)".to_owned(),
+                "int4send(end_line)".to_owned(),
+                digest_text_sql("structural_digest"),
+                digest_optional_text_sql("visibility"),
+                digest_boolean_sql("exported"),
+                digest_boolean_sql("default_export"),
+                digest_boolean_sql("async_symbol"),
+                digest_boolean_sql("static_member"),
+                digest_boolean_sql("declaration_only"),
+            ],
+            order_key: "symbol_id",
             operation: "spill-digest-symbols",
         },
-    )
-    .await
-}
-
-async fn digest_spilled_edges<Cancel, Progress, ProgressFuture>(
-    transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    digest: &mut LogicalDigestBuilder,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
-) -> Result<(), StorageError>
-where
-    Cancel: FnMut() -> bool,
-    Progress: FnMut(u64) -> ProgressFuture,
-    ProgressFuture: Future<Output = bool>,
-{
-    let sql = digest_relation_sql(
-        schema,
-        "edges",
-        &[
-            digest_text_sql("source_symbol_id::text"),
-            digest_text_sql("target_symbol_id::text"),
-            digest_text_sql("edge_kind"),
-            "float4send(confidence)".to_owned(),
-            digest_text_sql("provenance"),
-            "int4send(site_count::integer)".to_owned(),
-        ],
-        "source_symbol_id, target_symbol_id, edge_kind COLLATE \"C\", provenance COLLATE \"C\"",
-    );
-    digest_encoded_relation(
-        transaction,
-        digest,
-        cancelled,
-        progress,
-        DigestEncodedRequest {
-            project_id,
-            generation_id,
-            sql,
+        SpilledRelationDigest {
+            relation: "edges",
+            columns: vec![
+                digest_text_sql("source_symbol_id::text"),
+                digest_text_sql("target_symbol_id::text"),
+                digest_text_sql("edge_kind"),
+                "float4send(confidence)".to_owned(),
+                digest_text_sql("provenance"),
+                "int4send(site_count::integer)".to_owned(),
+            ],
+            order_key: "source_symbol_id, target_symbol_id, edge_kind COLLATE \"C\", provenance COLLATE \"C\"",
             operation: "spill-digest-edges",
         },
-    )
-    .await
-}
-
-async fn digest_spilled_references<Cancel, Progress, ProgressFuture>(
-    transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    digest: &mut LogicalDigestBuilder,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
-) -> Result<(), StorageError>
-where
-    Cancel: FnMut() -> bool,
-    Progress: FnMut(u64) -> ProgressFuture,
-    ProgressFuture: Future<Output = bool>,
-{
-    let sql = digest_relation_sql(
-        schema,
-        "references",
-        &[
-            digest_text_sql("file_id::text"),
-            digest_optional_text_sql("owner_symbol_id::text"),
-            digest_optional_text_sql("target_symbol_id::text"),
-            digest_text_sql("reference_name"),
-            digest_text_sql("reference_kind"),
-            "int8send(start_byte)".to_owned(),
-            "int8send(end_byte)".to_owned(),
-            "float4send(confidence)".to_owned(),
-            digest_text_sql("resolution_provenance"),
-            "int4send(site_count::integer)".to_owned(),
-            digest_text_sql("span_precision"),
-        ],
-        "file_id, owner_symbol_id NULLS FIRST, target_symbol_id NULLS FIRST, reference_name COLLATE \"C\", reference_kind COLLATE \"C\", start_byte, end_byte, resolution_provenance COLLATE \"C\"",
-    );
-    digest_encoded_relation(
-        transaction,
-        digest,
-        cancelled,
-        progress,
-        DigestEncodedRequest {
-            project_id,
-            generation_id,
-            sql,
+        SpilledRelationDigest {
+            relation: "references",
+            columns: vec![
+                digest_text_sql("file_id::text"),
+                digest_optional_text_sql("owner_symbol_id::text"),
+                digest_optional_text_sql("target_symbol_id::text"),
+                digest_text_sql("reference_name"),
+                digest_text_sql("reference_kind"),
+                "int8send(start_byte)".to_owned(),
+                "int8send(end_byte)".to_owned(),
+                "float4send(confidence)".to_owned(),
+                digest_text_sql("resolution_provenance"),
+                "int4send(site_count::integer)".to_owned(),
+                digest_text_sql("span_precision"),
+            ],
+            order_key: "file_id, owner_symbol_id NULLS FIRST, target_symbol_id NULLS FIRST, reference_name COLLATE \"C\", reference_kind COLLATE \"C\", start_byte, end_byte, resolution_provenance COLLATE \"C\"",
             operation: "spill-digest-references",
         },
-    )
-    .await
+        SpilledRelationDigest {
+            relation: "numerical_sites",
+            columns: vec![
+                digest_text_sql("numerical_site_id::text"),
+                digest_text_sql("file_id::text"),
+                digest_optional_text_sql("owner_symbol_id::text"),
+                "int8send(start_byte)".to_owned(),
+                "int8send(end_byte)".to_owned(),
+                "int4send(start_line)".to_owned(),
+                "int4send(end_line)".to_owned(),
+                digest_text_sql("operation"),
+                digest_text_sql("hazard"),
+                digest_text_sql("precision"),
+                digest_text_sql("expression_digest"),
+                "int4send(confidence_ppm)".to_owned(),
+                digest_text_sql("provenance"),
+                digest_text_sql("evidence_level"),
+                digest_text_sql("unknowns"),
+            ],
+            order_key: "numerical_site_id",
+            operation: "spill-digest-numerical-sites",
+        },
+    ]
 }
 
-async fn digest_spilled_numerical_sites<Cancel, Progress, ProgressFuture>(
+async fn digest_spilled_relation<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    digest: &mut LogicalDigestBuilder,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
+    stream: &mut SpilledDigestStream<'_, Cancel, Progress>,
+    request: (SpilledDigestScope<'_>, SpilledRelationDigest),
 ) -> Result<(), StorageError>
 where
     Cancel: FnMut() -> bool,
     Progress: FnMut(u64) -> ProgressFuture,
     ProgressFuture: Future<Output = bool>,
 {
+    let (scope, relation) = request;
     let sql = digest_relation_sql(
-        schema,
-        "numerical_sites",
-        &[
-            digest_text_sql("numerical_site_id::text"),
-            digest_text_sql("file_id::text"),
-            digest_optional_text_sql("owner_symbol_id::text"),
-            "int8send(start_byte)".to_owned(),
-            "int8send(end_byte)".to_owned(),
-            "int4send(start_line)".to_owned(),
-            "int4send(end_line)".to_owned(),
-            digest_text_sql("operation"),
-            digest_text_sql("hazard"),
-            digest_text_sql("precision"),
-            digest_text_sql("expression_digest"),
-            "int4send(confidence_ppm)".to_owned(),
-            digest_text_sql("provenance"),
-            digest_text_sql("evidence_level"),
-            digest_text_sql("unknowns"),
-        ],
-        "numerical_site_id",
+        scope.schema,
+        relation.relation,
+        &relation.columns,
+        relation.order_key,
     );
     digest_encoded_relation(
         transaction,
-        digest,
-        cancelled,
-        progress,
+        stream.digest,
+        stream.cancelled,
+        stream.progress,
         DigestEncodedRequest {
-            project_id,
-            generation_id,
+            project_id: scope.project_id,
+            generation_id: scope.generation_id,
             sql,
-            operation: "spill-digest-numerical-sites",
+            operation: relation.operation,
         },
     )
     .await
@@ -3265,18 +3151,19 @@ where
 
 async fn digest_spilled_documents<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    digest: &mut LogicalDigestBuilder,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
+    stream: &mut SpilledDigestStream<'_, Cancel, Progress>,
+    scope: SpilledDigestScope<'_>,
 ) -> Result<(), StorageError>
 where
     Cancel: FnMut() -> bool,
     Progress: FnMut(u64) -> ProgressFuture,
     ProgressFuture: Future<Output = bool>,
 {
+    let SpilledDigestScope {
+        schema,
+        project_id,
+        generation_id,
+    } = scope;
     let missing_sql = format!(
         r#"SELECT 1 FROM {schema}."search_documents"
             WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
@@ -3309,9 +3196,9 @@ where
         );
         return digest_encoded_relation(
             transaction,
-            digest,
-            cancelled,
-            progress,
+            stream.digest,
+            stream.cancelled,
+            stream.progress,
             DigestEncodedRequest {
                 project_id,
                 generation_id,
@@ -3332,7 +3219,7 @@ where
         .bind(project_id.as_str())
         .bind(generation_id.as_str())
         .fetch(&mut **transaction);
-    let mut pulse = DigestPulse::new(cancelled, progress);
+    let mut pulse = DigestPulse::new(stream.cancelled, stream.progress);
     while let Some(row) = rows
         .try_next()
         .await
@@ -3344,7 +3231,7 @@ where
         let metadata = serde_json::from_str(&raw_metadata).map_err(|_| corrupt("metadata"))?;
         let metadata_json =
             canonical_stored_metadata(&metadata).map_err(|_| corrupt("metadata"))?;
-        digest.push_document(&CanonicalSearchDocument {
+        stream.digest.push_document(&CanonicalSearchDocument {
             document_id: parse_document_id(&row, 0)?,
             file_id: parse_optional_file_id(&row, 1)?,
             symbol_id: parse_optional_symbol_id(&row, 2, "symbol_id")?,

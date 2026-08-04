@@ -2839,12 +2839,16 @@ async fn spill_resolved_files(
         }
         schedule_spilled_resolution_page(
             &page,
-            &mut input_sequence,
-            worker_count,
-            config,
-            cancellation,
-            &mut tasks,
-            &mut fold,
+            SpilledResolutionSchedule {
+                worker_count,
+                config,
+                cancellation,
+            },
+            &mut SpilledResolutionProgress {
+                input_sequence: &mut input_sequence,
+                tasks: &mut tasks,
+                fold: &mut fold,
+            },
         )
         .await?;
         cursor = page.next();
@@ -2863,17 +2867,38 @@ async fn spill_resolved_files(
     }
 }
 
-async fn schedule_spilled_resolution_page(
-    page: &NativeGenerationExtractedPage,
-    input_sequence: &mut u64,
+/// Fixed per-run scheduling policy for one spilled resolution pass.
+#[derive(Clone, Copy)]
+struct SpilledResolutionSchedule<'schedule> {
     worker_count: usize,
     config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    tasks: &mut JoinSet<Result<ResolvedFileFacts, ResolveGenerationFailure>>,
-    fold: &mut SpilledResolutionFold<'_>,
+    cancellation: &'schedule StageCancellation,
+}
+
+/// Mutable scheduling state advanced across every loaded page.
+struct SpilledResolutionProgress<'progress, 'fold> {
+    input_sequence: &'progress mut u64,
+    tasks: &'progress mut JoinSet<Result<ResolvedFileFacts, ResolveGenerationFailure>>,
+    fold: &'progress mut SpilledResolutionFold<'fold>,
+}
+
+async fn schedule_spilled_resolution_page(
+    page: &NativeGenerationExtractedPage,
+    schedule: SpilledResolutionSchedule<'_>,
+    progress: &mut SpilledResolutionProgress<'_, '_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledResolutionSchedule {
+        worker_count,
+        config,
+        cancellation,
+    } = schedule;
+    let SpilledResolutionProgress {
+        input_sequence,
+        tasks,
+        fold,
+    } = progress;
     for (sequence, row) in page.rows() {
-        require_spilled_resolution_sequence(*sequence, *input_sequence, cancellation)?;
+        require_spilled_resolution_sequence(*sequence, **input_sequence, cancellation)?;
         let extracted = serde_json::from_slice::<ExtractedFile>(row.payload())
             .map_err(|_| ResolveGenerationFailure::unclassified())?;
         let mut file = NativeFileFacts::from_extracted(extracted)
@@ -2886,7 +2911,7 @@ async fn schedule_spilled_resolution_page(
         tasks.spawn_blocking(move || {
             resolve_file_facts(sequence, file, index.as_ref(), config, &worker_cancellation)
         });
-        *input_sequence = input_sequence
+        **input_sequence = input_sequence
             .checked_add(1)
             .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
         if tasks.len() >= worker_count {

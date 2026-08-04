@@ -1909,9 +1909,11 @@ async fn validate_spilled_prepare_authority(
     }
     let counts = canonical_fact_counts(
         connection,
-        quoted_schema,
-        input.generation.project_id(),
-        input.generation.generation_id(),
+        crate::spill::SpilledDigestScope {
+            schema: quoted_schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+        },
     )
     .await?;
     if counts != input.digest.counts() {
