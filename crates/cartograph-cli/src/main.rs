@@ -3049,7 +3049,7 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
             .map_err(|error| error.to_string())?;
     }
     let result = runtime.index(options).await;
-    let report = result.map_err(|error| error.to_string())?;
+    let report = result.map_err(error_codes::direct_index_failure_message)?;
     print_index_report(&report, format)?;
     runtime.close().await;
     Ok(ExitCode::SUCCESS)
@@ -3080,7 +3080,7 @@ async fn run_sync_if_dirty(
     let report = runtime
         .index(options)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(error_codes::direct_index_failure_message)?;
     if !quiet {
         if report.published {
             println!("Synced changed source into a new generation");

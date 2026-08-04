@@ -38,6 +38,8 @@ const MAXIMUM_PROBE_BYTES: usize = 1024 * 1024;
 const MAXIMUM_PROBE_MODELS: usize = 128;
 const MAXIMUM_PROJECT_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAXIMUM_PROJECT_GENERATION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAXIMUM_PROJECT_SPILL_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+const MAXIMUM_PROJECT_SPILL_ROWS: u64 = 10_000_000_000;
 const MAXIMUM_PROJECT_EXCLUDES: usize = 4_096;
 const MAXIMUM_PROJECT_EXCLUDE_BYTES: usize = 4_096;
 const OPENAI_CLOUD_ENDPOINT: &str = "https://api.openai.com";
@@ -152,11 +154,38 @@ impl ProjectLlmProvider {
 pub struct ProjectSourceSettings {
     maximum_file_bytes: Option<usize>,
     maximum_generation_bytes: Option<u64>,
+    generation_storage: ProjectGenerationStorage,
+    maximum_spill_bytes: Option<u64>,
+    maximum_spill_rows: Option<u64>,
     languages: Vec<SourceLanguage>,
     includes: Option<Vec<String>>,
     excludes: Vec<String>,
     features: SourceFeatureFlags,
     duplicate_code_allowlist: Vec<String>,
+}
+
+/// Project preference for native generation working-set ownership.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectGenerationStorage {
+    /// Select PostgreSQL spill only when the immutable source manifest is large.
+    #[default]
+    Auto,
+    /// Retain the complete canonicalization payload in Rust memory.
+    Memory,
+    /// Use generation-fenced PostgreSQL spill regardless of manifest size.
+    Postgres,
+}
+
+impl ProjectGenerationStorage {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "memory" => Some(Self::Memory),
+            "postgres" => Some(Self::Postgres),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +240,9 @@ impl std::fmt::Debug for ProjectSourceSettings {
             .debug_struct("ProjectSourceSettings")
             .field("maximum_file_bytes", &self.maximum_file_bytes)
             .field("maximum_generation_bytes", &self.maximum_generation_bytes)
+            .field("generation_storage", &self.generation_storage)
+            .field("maximum_spill_bytes", &self.maximum_spill_bytes)
+            .field("maximum_spill_rows", &self.maximum_spill_rows)
             .field("configured_languages", &self.languages.len())
             .field(
                 "include_patterns",
@@ -261,6 +293,24 @@ impl ProjectSourceSettings {
     #[must_use]
     pub const fn maximum_generation_bytes(&self) -> Option<u64> {
         self.maximum_generation_bytes
+    }
+
+    /// Requested memory/PostgreSQL working-set strategy.
+    #[must_use]
+    pub const fn generation_storage(&self) -> ProjectGenerationStorage {
+        self.generation_storage
+    }
+
+    /// Explicit logical PostgreSQL spill byte quota.
+    #[must_use]
+    pub const fn maximum_spill_bytes(&self) -> Option<u64> {
+        self.maximum_spill_bytes
+    }
+
+    /// Explicit unordered PostgreSQL spill row quota.
+    #[must_use]
+    pub const fn maximum_spill_rows(&self) -> Option<u64> {
+        self.maximum_spill_rows
     }
 
     /// Empty means every native language; otherwise this is the canonical
@@ -1056,6 +1106,8 @@ fn parse_project_source_settings(
     .map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
     let maximum_generation_bytes =
         optional_bounded_config_u64(root, "maxGenerationBytes", MAXIMUM_PROJECT_GENERATION_BYTES)?;
+    let (generation_storage, maximum_spill_bytes, maximum_spill_rows) =
+        parse_generation_storage(root)?;
     let languages = root
         .get("languages")
         .map(parse_project_languages)
@@ -1137,12 +1189,33 @@ fn parse_project_source_settings(
     Ok(ProjectSourceSettings {
         maximum_file_bytes,
         maximum_generation_bytes,
+        generation_storage,
+        maximum_spill_bytes,
+        maximum_spill_rows,
         languages,
         includes,
         excludes,
         features,
         duplicate_code_allowlist,
     })
+}
+
+fn parse_generation_storage(
+    root: &Map<String, Value>,
+) -> Result<(ProjectGenerationStorage, Option<u64>, Option<u64>), ProjectLlmConfigError> {
+    let storage = root
+        .get("generationStorage")
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(ProjectGenerationStorage::parse)
+                .ok_or(ProjectLlmConfigError::InvalidConfig)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let bytes = optional_bounded_config_u64(root, "maxSpillBytes", MAXIMUM_PROJECT_SPILL_BYTES)?;
+    let rows = optional_bounded_config_u64(root, "maxSpillRows", MAXIMUM_PROJECT_SPILL_ROWS)?;
+    Ok((storage, bytes, rows))
 }
 
 fn optional_bounded_config_u64(
@@ -2703,13 +2776,19 @@ mod tests {
             .unwrap_or_else(|error| panic!("config directory failed: {error}"));
         fs::write(
             root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
-            r#"{"maxFileSize":4096,"maxGenerationBytes":8589934592,"languages":["typescript","rust","rust"],"exclude":["private/**"],"extractDocstrings":false,"trackCallSites":false,"indexSubmodules":false,"indexEmbeddedRepos":true,"enableCentrality":false,"enableBetweenness":false,"enableChurn":false,"enableCoChange":false,"enableBiomarkers":false,"enableIssueHistory":false,"enableConfigRefs":false,"enableSqlRefs":false,"enableBuildContextRefs":false,"enableStringImports":false,"duplicateCodePartialClones":true,"duplicateCodeAllowlist":["generated/**","vendor-copy/**"],"llm":{"apiKey":"do-not-render"}}"#,
+            r#"{"maxFileSize":4096,"maxGenerationBytes":8589934592,"generationStorage":"postgres","maxSpillBytes":137438953472,"maxSpillRows":1000000000,"languages":["typescript","rust","rust"],"exclude":["private/**"],"extractDocstrings":false,"trackCallSites":false,"indexSubmodules":false,"indexEmbeddedRepos":true,"enableCentrality":false,"enableBetweenness":false,"enableChurn":false,"enableCoChange":false,"enableBiomarkers":false,"enableIssueHistory":false,"enableConfigRefs":false,"enableSqlRefs":false,"enableBuildContextRefs":false,"enableStringImports":false,"duplicateCodePartialClones":true,"duplicateCodeAllowlist":["generated/**","vendor-copy/**"],"llm":{"apiKey":"do-not-render"}}"#,
         )
         .unwrap_or_else(|error| panic!("source config fixture failed: {error}"));
         let settings = load_project_source_settings(root.path())
             .unwrap_or_else(|error| panic!("source settings failed: {error}"));
         assert_eq!(settings.maximum_file_bytes(), Some(4096));
         assert_eq!(settings.maximum_generation_bytes(), Some(8_589_934_592));
+        assert_eq!(
+            settings.generation_storage(),
+            ProjectGenerationStorage::Postgres
+        );
+        assert_eq!(settings.maximum_spill_bytes(), Some(137_438_953_472));
+        assert_eq!(settings.maximum_spill_rows(), Some(1_000_000_000));
         assert_eq!(
             settings.languages(),
             [SourceLanguage::Rust, SourceLanguage::TypeScript]
@@ -2744,6 +2823,16 @@ mod tests {
             r#"{"exclude":"not-an-array"}"#,
         )
         .unwrap_or_else(|error| panic!("invalid source config fixture failed: {error}"));
+        assert_eq!(
+            load_project_source_settings(root.path()),
+            Err(ProjectLlmConfigError::InvalidConfig)
+        );
+
+        fs::write(
+            root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
+            r#"{"generationStorage":"unbounded"}"#,
+        )
+        .unwrap_or_else(|error| panic!("invalid spill config fixture failed: {error}"));
         assert_eq!(
             load_project_source_settings(root.path()),
             Err(ProjectLlmConfigError::InvalidConfig)

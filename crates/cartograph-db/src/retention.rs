@@ -18,8 +18,17 @@ const MAXIMUM_STALE_STAGING_AGE: Duration = Duration::from_hours(24);
 const DEFAULT_STALE_READY_AGE: Duration = Duration::from_hours(24);
 const MAXIMUM_STALE_READY_AGE: Duration = Duration::from_hours(720);
 const POST_RETENTION_VACUUM_ROW_THRESHOLD: u64 = 100_000;
-const RETENTION_ROW_TABLES: [&str; 16] = [
+const RETENTION_ROW_TABLES: [&str; 25] = [
     "index_generations",
+    "native_generation_spills",
+    "native_generation_spill_batches",
+    "native_generation_spill_rows",
+    "native_generation_spill_files",
+    "native_generation_spill_symbols",
+    "native_generation_spill_edges",
+    "native_generation_spill_references",
+    "native_generation_spill_numerical_sites",
+    "native_generation_spill_documents",
     "files",
     "symbols",
     "edges",

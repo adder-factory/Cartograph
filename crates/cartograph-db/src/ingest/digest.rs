@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use blake3::Hasher;
 use cartograph_domain::{ContentDigest, GenerationDigestVersion};
 
@@ -13,6 +15,7 @@ const DIGEST_V9_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v7";
 const DIGEST_V10_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v8";
 const DIGEST_V11_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v9";
 const DIGEST_V12_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v10";
+const DIGEST_V13_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v11";
 
 pub(super) fn logical_digest<Cancel>(
     facts: &ValidatedFactTables,
@@ -22,21 +25,60 @@ pub(super) fn logical_digest<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    let domain = match version {
-        GenerationDigestVersion::V12 => DIGEST_V12_DOMAIN,
-        GenerationDigestVersion::V11 => DIGEST_V11_DOMAIN,
-        GenerationDigestVersion::V10 => DIGEST_V10_DOMAIN,
-        GenerationDigestVersion::V9 => DIGEST_V9_DOMAIN,
-        GenerationDigestVersion::V8 => DIGEST_V8_DOMAIN,
-        GenerationDigestVersion::V7 => DIGEST_V7_DOMAIN,
-        _ => DIGEST_V1_TO_V6_DOMAIN,
-    };
-    let mut digest = CanonicalDigest::new(domain);
-    digest_files(&mut digest, &facts.files, &mut cancelled)?;
-    digest_symbols(&mut digest, &facts.symbols, &mut cancelled)?;
-    digest_edges(&mut digest, &facts.edges, &mut cancelled)?;
-    digest_references(&mut digest, &facts.references, &mut cancelled)?;
-    if matches!(
+    let mut digest = LogicalDigestBuilder::new(version);
+    digest.begin_files(usize_to_u64(facts.files.len()));
+    push_digest_rows(&facts.files, &mut cancelled, |file| digest.push_file(file))?;
+    digest.begin_symbols(usize_to_u64(facts.symbols.len()));
+    push_digest_rows(&facts.symbols, &mut cancelled, |symbol| {
+        digest.push_symbol(symbol);
+    })?;
+    digest.begin_edges(usize_to_u64(facts.edges.len()));
+    push_digest_rows(&facts.edges, &mut cancelled, |edge| digest.push_edge(edge))?;
+    digest.begin_references(usize_to_u64(facts.references.len()));
+    push_digest_rows(&facts.references, &mut cancelled, |reference| {
+        digest.push_reference(reference);
+    })?;
+    if digest_includes_numerical_sites(version) {
+        digest.begin_numerical_sites(usize_to_u64(facts.numerical_sites.len()));
+        push_digest_rows(&facts.numerical_sites, &mut cancelled, |site| {
+            digest.push_numerical_site(site);
+        })?;
+    }
+    digest.begin_documents(usize_to_u64(facts.documents.len()));
+    push_digest_rows(&facts.documents, &mut cancelled, |document| {
+        digest.push_document(document);
+    })?;
+    require_digest_not_cancelled(&mut cancelled)?;
+    Ok(digest.finish())
+}
+
+fn push_digest_rows<Row, Cancel, Push>(
+    rows: &[Row],
+    cancelled: &mut Cancel,
+    mut push: Push,
+) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+    Push: FnMut(&Row),
+{
+    for row in rows {
+        if cancelled() {
+            return Err(());
+        }
+        push(row);
+    }
+    Ok(())
+}
+
+fn require_digest_not_cancelled<Cancel>(cancelled: &mut Cancel) -> Result<(), ()>
+where
+    Cancel: FnMut() -> bool,
+{
+    if cancelled() { Err(()) } else { Ok(()) }
+}
+
+const fn digest_includes_numerical_sites(version: GenerationDigestVersion) -> bool {
+    matches!(
         version,
         GenerationDigestVersion::V7
             | GenerationDigestVersion::V8
@@ -44,230 +86,217 @@ where
             | GenerationDigestVersion::V10
             | GenerationDigestVersion::V11
             | GenerationDigestVersion::V12
-    ) {
-        digest_numerical_sites(&mut digest, &facts.numerical_sites, &mut cancelled)?;
-    }
-    digest_documents(&mut digest, &facts.documents, &mut cancelled)?;
-    if cancelled() {
-        Err(())
-    } else {
-        Ok(digest.finish())
-    }
+            | GenerationDigestVersion::V13
+    )
 }
 
-fn digest_numerical_sites<Cancel>(
-    digest: &mut CanonicalDigest,
-    sites: &[NumericalSiteInput],
-    cancelled: &mut Cancel,
-) -> Result<(), ()>
-where
-    Cancel: FnMut() -> bool,
-{
-    digest.section("numerical_sites", sites.len());
-    for site in sites {
-        if cancelled() {
-            return Err(());
-        }
-        digest.text(site.site_id.as_str());
-        digest.text(site.file_id.as_str());
-        digest.optional_text(
-            site.owner_symbol_id
-                .as_ref()
-                .map(cartograph_domain::SymbolId::as_str),
-        );
-        digest.u64(site.start_byte);
-        digest.u64(site.end_byte);
-        digest.u32(site.start_line);
-        digest.u32(site.end_line);
-        digest.text(&site.operation);
-        digest.text(&site.hazard);
-        digest.text(&site.precision);
-        digest.text(site.expression_digest.as_str());
-        digest.u32(site.confidence_ppm);
-        digest.text(&site.provenance);
-        digest.text(&site.evidence_level);
-        digest.text(&site.unknowns);
-    }
-    Ok(())
+pub(crate) struct LogicalDigestBuilder {
+    digest: CanonicalDigest,
 }
 
-fn digest_files<Cancel>(
-    digest: &mut CanonicalDigest,
-    files: &[FileInput],
-    cancelled: &mut Cancel,
-) -> Result<(), ()>
-where
-    Cancel: FnMut() -> bool,
-{
-    digest.section("files", files.len());
-    for file in files {
-        if cancelled() {
-            return Err(());
+impl LogicalDigestBuilder {
+    pub(crate) fn new(version: GenerationDigestVersion) -> Self {
+        let domain = match version {
+            GenerationDigestVersion::V13 => DIGEST_V13_DOMAIN,
+            GenerationDigestVersion::V12 => DIGEST_V12_DOMAIN,
+            GenerationDigestVersion::V11 => DIGEST_V11_DOMAIN,
+            GenerationDigestVersion::V10 => DIGEST_V10_DOMAIN,
+            GenerationDigestVersion::V9 => DIGEST_V9_DOMAIN,
+            GenerationDigestVersion::V8 => DIGEST_V8_DOMAIN,
+            GenerationDigestVersion::V7 => DIGEST_V7_DOMAIN,
+            _ => DIGEST_V1_TO_V6_DOMAIN,
+        };
+        Self {
+            digest: CanonicalDigest::new(domain),
         }
-        digest.text(file.file_id.as_str());
-        digest.text(&file.normalized_path);
-        digest.text(&file.language);
-        digest.text(file.content_hash.as_str());
-        digest.u64(file.byte_size);
-        digest.text(file.parse_status.as_str());
     }
-    Ok(())
-}
 
-fn digest_symbols<Cancel>(
-    digest: &mut CanonicalDigest,
-    symbols: &[SymbolInput],
-    cancelled: &mut Cancel,
-) -> Result<(), ()>
-where
-    Cancel: FnMut() -> bool,
-{
-    digest.section("symbols", symbols.len());
-    for symbol in symbols {
-        if cancelled() {
-            return Err(());
-        }
-        digest.text(symbol.symbol_id.as_str());
-        digest.text(symbol.file_id.as_str());
-        digest.text(&symbol.symbol_kind);
-        digest.text(&symbol.qualified_name);
-        digest.text(&symbol.signature);
-        digest.u64(symbol.start_byte);
-        digest.u64(symbol.end_byte);
-        digest.u32(symbol.start_line);
-        digest.u32(symbol.end_line);
-        digest.text(symbol.structural_digest.as_str());
-        digest.optional_text(symbol.visibility.map(cartograph_domain::Visibility::as_str));
-        digest.boolean(symbol.export.exported);
-        digest.boolean(symbol.export.default_export);
-        digest.boolean(symbol.execution.async_symbol);
-        digest.boolean(symbol.execution.static_member);
-        digest.boolean(symbol.declaration_only);
+    pub(crate) fn begin_files(&mut self, count: u64) {
+        self.digest.section("files", count);
     }
-    Ok(())
-}
 
-fn digest_edges<Cancel>(
-    digest: &mut CanonicalDigest,
-    edges: &[EdgeInput],
-    cancelled: &mut Cancel,
-) -> Result<(), ()>
-where
-    Cancel: FnMut() -> bool,
-{
-    digest.section("edges", edges.len());
-    for edge in edges {
-        if cancelled() {
-            return Err(());
-        }
-        digest.text(edge.source_symbol_id.as_str());
-        digest.text(edge.target_symbol_id.as_str());
-        digest.text(edge.kind.as_str());
-        digest.u32(edge.confidence.to_bits());
-        digest.text(&edge.provenance);
-        digest.u32(edge.site_count);
+    pub(crate) fn push_file(&mut self, file: &FileInput) {
+        self.digest.text(file.file_id.as_str());
+        self.digest.text(&file.normalized_path);
+        self.digest.text(&file.language);
+        self.digest.text(file.content_hash.as_str());
+        self.digest.u64(file.byte_size);
+        self.digest.text(file.parse_status.as_str());
     }
-    Ok(())
-}
 
-fn digest_references<Cancel>(
-    digest: &mut CanonicalDigest,
-    references: &[ReferenceInput],
-    cancelled: &mut Cancel,
-) -> Result<(), ()>
-where
-    Cancel: FnMut() -> bool,
-{
-    digest.section("references", references.len());
-    for reference in references {
-        if cancelled() {
-            return Err(());
-        }
-        digest.text(reference.file_id.as_str());
-        digest.optional_text(
+    pub(crate) fn begin_symbols(&mut self, count: u64) {
+        self.digest.section("symbols", count);
+    }
+
+    pub(crate) fn push_symbol(&mut self, symbol: &SymbolInput) {
+        self.digest.text(symbol.symbol_id.as_str());
+        self.digest.text(symbol.file_id.as_str());
+        self.digest.text(&symbol.symbol_kind);
+        self.digest.text(&symbol.qualified_name);
+        self.digest.text(&symbol.signature);
+        self.digest.u64(symbol.start_byte);
+        self.digest.u64(symbol.end_byte);
+        self.digest.u32(symbol.start_line);
+        self.digest.u32(symbol.end_line);
+        self.digest.text(symbol.structural_digest.as_str());
+        self.digest
+            .optional_text(symbol.visibility.map(cartograph_domain::Visibility::as_str));
+        self.digest.boolean(symbol.export.exported);
+        self.digest.boolean(symbol.export.default_export);
+        self.digest.boolean(symbol.execution.async_symbol);
+        self.digest.boolean(symbol.execution.static_member);
+        self.digest.boolean(symbol.declaration_only);
+    }
+
+    pub(crate) fn begin_edges(&mut self, count: u64) {
+        self.digest.section("edges", count);
+    }
+
+    pub(crate) fn push_edge(&mut self, edge: &EdgeInput) {
+        self.digest.text(edge.source_symbol_id.as_str());
+        self.digest.text(edge.target_symbol_id.as_str());
+        self.digest.text(edge.kind.as_str());
+        self.digest.u32(edge.confidence.to_bits());
+        self.digest.text(&edge.provenance);
+        self.digest.u32(edge.site_count);
+    }
+
+    pub(crate) fn begin_references(&mut self, count: u64) {
+        self.digest.section("references", count);
+    }
+
+    pub(crate) fn push_reference(&mut self, reference: &ReferenceInput) {
+        self.digest.text(reference.file_id.as_str());
+        self.digest.optional_text(
             reference
                 .owner_symbol_id
                 .as_ref()
                 .map(cartograph_domain::SymbolId::as_str),
         );
-        digest.optional_text(
+        self.digest.optional_text(
             reference
                 .target_symbol_id
                 .as_ref()
                 .map(cartograph_domain::SymbolId::as_str),
         );
-        digest.text(&reference.reference_name);
-        digest.text(&reference.reference_kind);
-        digest.u64(reference.start_byte);
-        digest.u64(reference.end_byte);
-        digest.u32(reference.confidence.to_bits());
-        digest.text(&reference.resolution_provenance);
-        digest.u32(reference.site_count);
-        digest.text(reference.span_precision.as_str());
+        self.digest.text(&reference.reference_name);
+        self.digest.text(&reference.reference_kind);
+        self.digest.u64(reference.start_byte);
+        self.digest.u64(reference.end_byte);
+        self.digest.u32(reference.confidence.to_bits());
+        self.digest.text(&reference.resolution_provenance);
+        self.digest.u32(reference.site_count);
+        self.digest.text(reference.span_precision.as_str());
     }
-    Ok(())
-}
 
-fn digest_documents<Cancel>(
-    digest: &mut CanonicalDigest,
-    documents: &[CanonicalSearchDocument],
-    cancelled: &mut Cancel,
-) -> Result<(), ()>
-where
-    Cancel: FnMut() -> bool,
-{
-    digest.section("search_documents", documents.len());
-    for document in documents {
-        if cancelled() {
-            return Err(());
-        }
-        digest.text(document.document_id.as_str());
-        digest.optional_text(
+    pub(crate) fn begin_numerical_sites(&mut self, count: u64) {
+        self.digest.section("numerical_sites", count);
+    }
+
+    pub(crate) fn push_numerical_site(&mut self, site: &NumericalSiteInput) {
+        self.digest.text(site.site_id.as_str());
+        self.digest.text(site.file_id.as_str());
+        self.digest.optional_text(
+            site.owner_symbol_id
+                .as_ref()
+                .map(cartograph_domain::SymbolId::as_str),
+        );
+        self.digest.u64(site.start_byte);
+        self.digest.u64(site.end_byte);
+        self.digest.u32(site.start_line);
+        self.digest.u32(site.end_line);
+        self.digest.text(&site.operation);
+        self.digest.text(&site.hazard);
+        self.digest.text(&site.precision);
+        self.digest.text(site.expression_digest.as_str());
+        self.digest.u32(site.confidence_ppm);
+        self.digest.text(&site.provenance);
+        self.digest.text(&site.evidence_level);
+        self.digest.text(&site.unknowns);
+    }
+
+    pub(crate) fn begin_documents(&mut self, count: u64) {
+        self.digest.section("search_documents", count);
+    }
+
+    pub(crate) fn push_document(&mut self, document: &CanonicalSearchDocument) {
+        self.digest.text(document.document_id.as_str());
+        self.digest.optional_text(
             document
                 .file_id
                 .as_ref()
                 .map(cartograph_domain::FileId::as_str),
         );
-        digest.optional_text(
+        self.digest.optional_text(
             document
                 .symbol_id
                 .as_ref()
                 .map(cartograph_domain::SymbolId::as_str),
         );
-        digest.text(&document.path);
-        digest.text(&document.language);
-        digest.text(document.kind.as_str());
-        digest.text(&document.qualified_name);
-        digest.text(&document.code);
-        digest.text(&document.natural_text);
-        digest.text(&document.metadata_json);
+        self.digest.text(&document.path);
+        self.digest.text(&document.language);
+        self.digest.text(document.kind.as_str());
+        self.digest.text(&document.qualified_name);
+        self.digest.text(&document.code);
+        self.digest.text(&document.natural_text);
+        self.digest.text(&document.metadata_json);
     }
-    Ok(())
+
+    pub(crate) fn push_encoded_row(&mut self, row: &[u8]) {
+        self.digest.encoded_bytes = self
+            .digest
+            .encoded_bytes
+            .saturating_add(usize_to_u64(row.len()));
+        self.digest.hasher.update(row);
+    }
+
+    pub(crate) fn finish(self) -> ContentDigest {
+        self.digest.finish().0
+    }
+
+    pub(crate) fn finish_with_encoded_bytes(self) -> (ContentDigest, u64) {
+        self.digest.finish()
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 struct CanonicalDigest {
     hasher: Hasher,
+    encoded_bytes: u64,
 }
 
 impl CanonicalDigest {
     fn new(domain: &[u8]) -> Self {
         let mut hasher = Hasher::new();
         hasher.update(domain);
-        Self { hasher }
+        Self {
+            hasher,
+            encoded_bytes: 0,
+        }
     }
 
-    fn section(&mut self, name: &str, count: usize) {
+    fn section(&mut self, name: &str, count: u64) {
         self.text(name);
         self.text(&count.to_string());
     }
 
     fn text(&mut self, value: &str) {
-        self.hasher.update(value.len().to_string().as_bytes());
+        let length = value.len().to_string();
+        self.encoded_bytes = self
+            .encoded_bytes
+            .saturating_add(usize_to_u64(length.len()))
+            .saturating_add(1)
+            .saturating_add(usize_to_u64(value.len()));
+        self.hasher.update(length.as_bytes());
         self.hasher.update(&[0]);
         self.hasher.update(value.as_bytes());
     }
 
     fn optional_text(&mut self, value: Option<&str>) {
+        self.encoded_bytes = self.encoded_bytes.saturating_add(1);
         match value {
             Some(value) => {
                 self.hasher.update(&[1]);
@@ -280,18 +309,28 @@ impl CanonicalDigest {
     }
 
     fn u64(&mut self, value: u64) {
+        self.encoded_bytes = self
+            .encoded_bytes
+            .saturating_add(usize_to_u64(size_of::<u64>()));
         self.hasher.update(&value.to_be_bytes());
     }
 
     fn u32(&mut self, value: u32) {
+        self.encoded_bytes = self
+            .encoded_bytes
+            .saturating_add(usize_to_u64(size_of::<u32>()));
         self.hasher.update(&value.to_be_bytes());
     }
 
     fn boolean(&mut self, value: bool) {
+        self.encoded_bytes = self.encoded_bytes.saturating_add(1);
         self.hasher.update(&[u8::from(value)]);
     }
 
-    fn finish(self) -> ContentDigest {
-        ContentDigest::from_bytes(*self.hasher.finalize().as_bytes())
+    fn finish(self) -> (ContentDigest, u64) {
+        (
+            ContentDigest::from_bytes(*self.hasher.finalize().as_bytes()),
+            self.encoded_bytes,
+        )
     }
 }

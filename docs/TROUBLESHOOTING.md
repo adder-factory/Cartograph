@@ -100,6 +100,52 @@ matches the generation owning the symbol's line range. On stale or racing
 source, metadata remains but the excerpt is omitted rather than slicing the
 wrong bytes. Re-index and retry.
 
+## Native generation reaches its capacity bound
+
+Inspect the exact stage/reason and the returned native metrics. A
+`generation_capacity_exceeded` result is a real admission boundary, not a
+database-health diagnosis. With the default `generationStorage: "auto"`, large
+source manifests select PostgreSQL spill automatically. For a dense smaller
+manifest, force it in `.cartograph/config.json`:
+
+```json
+{
+  "generationStorage": "postgres",
+  "maxSpillBytes": 137438953472,
+  "maxSpillRows": 1000000000
+}
+```
+
+Before raising quotas, verify PostgreSQL data/WAL/temporary-disk headroom;
+logical spill bytes are not physical storage estimates. A spill-specific byte
+or row limit leaves the current generation visible and the failed staging work
+eligible for bounded cleanup. Lease loss, cancellation, and a byte-different
+retry also fail closed. Exact retained retries reuse immutable batches and the
+durable canonical partition cursor.
+
+PostgreSQL spill does not make every native structure unlimited. Resolution
+lookups, clone profiles, and the centrality graph retain a separate compact
+bound based on `maxGenerationBytes`. If that bound is named, raise it only with
+observed host headroom or reduce the admitted source/features. A configured SCIP
+overlay currently selects the memory path in `auto`; forcing `postgres` with
+that overlay is rejected until streamed replacement parity is available.
+
+## Native stage reports `progress_stalled`
+
+The supervisor cancels an operation when its active stage produces no durable
+work inside the configured progress watchdog. Direct CLI, MCP admin, and
+auto-sync output retain a qualified privacy-safe reason such as
+`parse_progress_stalled`, `resolve_progress_stalled`, or
+`relational_merge_progress_stalled`; source paths, SQL, database URLs, and
+driver text are not included. This differs from `*_deadline_exceeded`: a
+deadline is an item or whole-stage execution horizon, while a progress stall
+means the watchdog observed no completed work checkpoint.
+
+Inspect the named stage, bounded database logs, host memory/CPU, and PostgreSQL
+I/O or lock pressure. Retry only after identifying transient resource pressure
+or a fixed defect. The prior generation remains visible, and a failed staging
+generation is handled by normal bounded cleanup.
+
 ## Semantic search is skipped
 
 Hybrid mode requires a reachable OpenAI-compatible embedding endpoint and a

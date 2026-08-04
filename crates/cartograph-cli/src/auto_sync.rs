@@ -20,7 +20,7 @@ use tokio::{
     time::{Instant, MissedTickBehavior},
 };
 
-use crate::error_codes::{pipeline_failure_reason_code, pipeline_stage_failure_code};
+use crate::error_codes::project_index_failure_code;
 
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(750);
 const MINIMUM_DEBOUNCE_MILLIS: u64 = 50;
@@ -438,19 +438,9 @@ fn retry_interval(attempts: u8) -> Duration {
 }
 
 const fn project_error_code(error: ProjectError) -> &'static str {
-    match error {
-        ProjectError::BeginGenerationFailed => "generation_start_failed",
-        ProjectError::SourceScanFailed => "source_scan_failed",
-        ProjectError::IndexStageFailed { stage } => pipeline_stage_failure_code(stage),
-        ProjectError::IndexStageFailedWithReason { stage, reason } => {
-            pipeline_failure_reason_code(stage, reason)
-        }
-        ProjectError::IndexLeaseFailed => "lease_failed",
-        ProjectError::IndexPublicationFailed => "publication_failed",
-        ProjectError::IndexCleanupFailed => "index_cleanup_failed",
-        ProjectError::ScipOverlayInvalid => "scip_overlay_invalid",
-        ProjectError::RequestCancelled => "request_cancelled",
-        _ => "index_failed",
+    match project_index_failure_code(error) {
+        Some(code) => code,
+        None => "index_failed",
     }
 }
 
@@ -672,6 +662,20 @@ mod tests {
                 reason: PipelineFailureReason::GenerationCapacityExceeded,
             }),
             "resolve_generation_capacity_exceeded"
+        );
+        assert_eq!(
+            project_error_code(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Resolve,
+                reason: PipelineFailureReason::DeadlineExceeded,
+            }),
+            "resolve_deadline_exceeded"
+        );
+        assert_eq!(
+            project_error_code(ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Resolve,
+                reason: PipelineFailureReason::ProgressStalled,
+            }),
+            "resolve_progress_stalled"
         );
         assert_eq!(
             project_error_code(ProjectError::IndexStageFailedWithReason {

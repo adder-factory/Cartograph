@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, mem::size_of, thread};
+use std::{collections::HashMap, mem::size_of, thread};
 
 use cartograph_domain::{EdgeKind, GenerationId, ProjectId, SymbolId};
 use num_traits::ToPrimitive as _;
@@ -312,8 +312,8 @@ impl PageRankGraph {
             .symbols
             .iter()
             .enumerate()
-            .map(|(index, symbol)| (symbol.symbol_id.as_str().to_owned(), index))
-            .collect::<BTreeMap<_, _>>();
+            .map(|(index, symbol)| (symbol.symbol_id.as_str(), index))
+            .collect::<HashMap<_, _>>();
         let admitted = facts
             .edges
             .iter()
@@ -544,8 +544,8 @@ impl BetweennessGraph {
             .symbols
             .iter()
             .enumerate()
-            .map(|(index, symbol)| (symbol.symbol_id.as_str().to_owned(), index))
-            .collect::<BTreeMap<_, _>>();
+            .map(|(index, symbol)| (symbol.symbol_id.as_str(), index))
+            .collect::<HashMap<_, _>>();
         let admitted = facts
             .edges
             .iter()
@@ -634,6 +634,7 @@ fn compute_source_shard(graph: &BetweennessGraph, sources: &[usize]) -> Vec<f64>
         predecessor_head: vec![usize::MAX; node_count],
         predecessor_next: vec![usize::MAX; predecessor_capacity],
         predecessor_node: vec![0; predecessor_capacity],
+        visited_count: 0,
     };
     for source in sources {
         scratch.accumulate(graph, *source);
@@ -651,14 +652,18 @@ struct BrandesScratch {
     predecessor_head: Vec<usize>,
     predecessor_next: Vec<usize>,
     predecessor_node: Vec<usize>,
+    visited_count: usize,
 }
 
 impl BrandesScratch {
     fn accumulate(&mut self, graph: &BetweennessGraph, source: usize) {
-        self.distance.fill(-1);
-        self.path_count.fill(0.0);
-        self.dependency.fill(0.0);
-        self.predecessor_head.fill(usize::MAX);
+        for index in 0..self.visited_count {
+            let node = self.queue[index];
+            self.distance[node] = -1;
+            self.path_count[node] = 0.0;
+            self.dependency[node] = 0.0;
+            self.predecessor_head[node] = usize::MAX;
+        }
         self.distance[source] = 0;
         self.path_count[source] = 1.0;
         let mut predecessor_top = 0;
@@ -703,6 +708,7 @@ impl BrandesScratch {
                 self.centrality[node] += self.dependency[node];
             }
         }
+        self.visited_count = queue_tail;
     }
 }
 

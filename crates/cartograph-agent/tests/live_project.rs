@@ -17,12 +17,12 @@ use cartograph_agent::{
     DiffReviewOptions, EmbeddingClientRequest, EmbeddingOptions, FileDriftOptions,
     FileSourceOptions, FileSourceRequest, GenerationRetentionStatus, HistoryIndexOptions,
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
-    IndexOptions, IndexReport, LcovLoadOptions, PipelineFailureReason, PipelineStage,
-    ProjectCancellation, ProjectError, ProjectRuntime, RenamePlanError, RenamePlanOptions,
-    RenamePlanRequest, RetrievalClientRequest, RetrievalOptions, RetrievalRequest, ReviewOptions,
-    ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceContextOptions,
-    SourceContextRequest, SourceSearchOptions, TestEvidenceOptions, WorkingTreeOverlayRequest,
-    judge_dead_code_candidates,
+    IndexOptions, IndexReport, LcovLoadOptions, NativeGenerationStorageMetrics,
+    PipelineFailureReason, PipelineStage, ProjectCancellation, ProjectError, ProjectRuntime,
+    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalClientRequest,
+    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportLimits,
+    ScipImportRequest, SourceContextOptions, SourceContextRequest, SourceSearchOptions,
+    TestEvidenceOptions, WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
@@ -59,6 +59,154 @@ const HISTORY_THIRD_PATH: &str = "src/c.ts";
 
 fn scores_match(actual: f64, expected: f64) -> bool {
     (actual - expected).abs() <= SCORE_TOLERANCE
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn forced_postgres_generation_storage_publishes_and_reports_spill() {
+    let (schema, settings, project) = live_project_fixture("8");
+    std::fs::create_dir_all(project.path().join(".cartograph"))
+        .unwrap_or_else(|error| panic!("spill config directory failed: {error}"));
+    std::fs::write(
+        project.path().join(".cartograph/config.json"),
+        r#"{"generationStorage":"postgres","maxSpillBytes":67108864,"maxSpillRows":1000000,"enableChurn":false,"enableCoChange":false,"enableIssueHistory":false}"#,
+    )
+    .unwrap_or_else(|error| panic!("spill config failed: {error}"));
+    std::fs::write(
+        project.path().join("service.ts"),
+        "export function spillTarget(value: number): number { return value + 1; }\nexport function spillCaller(): number { return spillTarget(4); }\n",
+    )
+    .unwrap_or_else(|error| panic!("spill source fixture failed: {error}"));
+
+    {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("spill runtime connect failed: {error}"));
+        let report = runtime
+            .index(IndexOptions::default().with_history_refresh(false))
+            .await
+            .unwrap_or_else(|error| panic!("forced spill index failed: {error}"));
+        assert!(report.published);
+        let native = report
+            .native
+            .as_ref()
+            .unwrap_or_else(|| panic!("forced spill metrics were missing"));
+        assert_eq!(
+            native.generation_storage,
+            NativeGenerationStorageMetrics::Postgres
+        );
+        let spill = native
+            .spill
+            .unwrap_or_else(|| panic!("forced spill accounting was missing"));
+        assert_eq!(spill.extracted_files, 1);
+        assert!(spill.raw_rows > spill.extracted_files);
+        assert!(spill.logical_bytes > 0);
+        let exact = runtime
+            .database()
+            .exact_current_symbols_by_name(ExactTextLookup::new(
+                CurrentGenerationLookup::new(&report.project_id, &report.generation_id),
+                "spillTarget",
+                10,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("forced spill lookup failed: {error}"));
+        assert_eq!(exact.len(), 1);
+        runtime.close().await;
+    }
+
+    drop_schema(&settings, &schema).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn empty_graph_memory_and_forced_postgres_paths_publish_identical_facts() {
+    let (schema, settings, project) = live_project_fixture("8");
+    let config_directory = project.path().join(".cartograph");
+    std::fs::create_dir_all(&config_directory)
+        .unwrap_or_else(|error| panic!("empty graph config directory failed: {error}"));
+    let config_path = config_directory.join("config.json");
+    std::fs::write(
+        &config_path,
+        r#"{"generationStorage":"memory","enableChurn":false,"enableCoChange":false,"enableIssueHistory":false}"#,
+    )
+    .unwrap_or_else(|error| panic!("empty memory config failed: {error}"));
+
+    let memory = {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("empty memory runtime connect failed: {error}"));
+        let report = runtime
+            .index(IndexOptions::default().with_history_refresh(false))
+            .await
+            .unwrap_or_else(|error| panic!("empty memory index failed: {error}"));
+        runtime.close().await;
+        report
+    };
+    let memory_native = memory
+        .native
+        .as_ref()
+        .unwrap_or_else(|| panic!("empty memory metrics were missing"));
+    assert_eq!(
+        memory_native.generation_storage,
+        NativeGenerationStorageMetrics::Memory
+    );
+    assert_eq!(memory_native.spill, None);
+
+    std::fs::write(
+        &config_path,
+        r#"{"generationStorage":"postgres","maxSpillBytes":67108864,"maxSpillRows":1000000,"enableChurn":false,"enableCoChange":false,"enableIssueHistory":false}"#,
+    )
+    .unwrap_or_else(|error| panic!("empty spill config failed: {error}"));
+    let spilled = {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("empty spill runtime connect failed: {error}"));
+        let report = runtime
+            .index(
+                IndexOptions::default()
+                    .with_force(true)
+                    .with_history_refresh(false),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("empty forced spill index failed: {error}"));
+        runtime.close().await;
+        report
+    };
+    let spilled_native = spilled
+        .native
+        .as_ref()
+        .unwrap_or_else(|| panic!("empty spill metrics were missing"));
+    assert_eq!(
+        spilled_native.generation_storage,
+        NativeGenerationStorageMetrics::Postgres
+    );
+    let spill = spilled_native
+        .spill
+        .unwrap_or_else(|| panic!("empty spill accounting was missing"));
+    assert_eq!(spill.extracted_files, 0);
+    assert_eq!(spill.raw_rows, 0);
+    assert_eq!(spill.logical_bytes, 0);
+
+    let logical_projection = |native: &cartograph_agent::NativeIndexMetrics| {
+        (
+            native.files,
+            native.source_bytes,
+            native.symbols,
+            native.numerical_sites,
+            native.resolved_references,
+            native.unresolved_references,
+            native.diagnostics,
+        )
+    };
+    assert_eq!(logical_projection(memory_native), (0, 0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        logical_projection(memory_native),
+        logical_projection(spilled_native)
+    );
+    assert_eq!(memory.source_revision, spilled.source_revision);
+    assert_eq!(memory.content_digest, spilled.content_digest);
+
+    drop_schema(&settings, &schema).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -441,7 +589,7 @@ async fn assert_incremental_contract_upgrade(
            WHERE project_id = CAST($2 AS uuid) AND state = 'current'"#
     );
     let downgraded = query(AssertSqlSafe(downgrade_generation))
-        .bind(GenerationDigestVersion::V4.database_value())
+        .bind(GenerationDigestVersion::V12.database_value())
         .bind(first.project_id.as_str())
         .execute(&pool)
         .await

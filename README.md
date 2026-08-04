@@ -285,7 +285,9 @@ The architecture has a few hard boundaries:
 - **One durable store:** PostgreSQL 18 owns canonical project and generation
   state. ParadeDB BM25 and model-scoped HNSW are rebuildable derived indexes.
 - **Atomic publication:** incomplete or unhealthy generations never become
-  current. Readers query one verified immutable generation.
+  current. Readers query one verified immutable generation. Large builds can
+  use generation-fenced PostgreSQL spill and deterministic partitioned
+  reduction without exposing staging rows.
 - **Deterministic concurrency:** 1, 2, 4, 8, and 16-worker builds reduce to the
   same logical digest and ordered evidence.
 - **Optional generation:** exact lookup, BM25, graph, review, freshness, and

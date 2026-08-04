@@ -132,6 +132,40 @@ heartbeats, exact fencing tokens, bounded statement deadlines, and rollback on
 lost/expired ownership. Re-indexing an identical supported-source manifest is a
 no-op unless `--force` is explicit.
 
+Large native generations can use a staging-only PostgreSQL spill in the same
+database/schema. The spill tables are children of one immutable generation and
+are inaccessible to current-generation readers. Every mutation rechecks the
+exact index lease and generation sequence. File-local extraction payloads are
+streamed in bounded batches. Cacheable payloads are stored once in the
+immutable parse cache and spill rows retain foreign-key-protected references;
+an inline digest-checked payload is used only when cache publication is
+unavailable. Resolver output is row-validated and COPY-published into typed raw
+files/symbols/edges/references/numerical-sites/documents tables without a JSONB
+fact-batch intermediary.
+
+After resolution seals exact raw counts, Cartograph reduces 64 UUID partitions
+per typed relation in four-partition transaction groups. Each transaction
+detects identity conflicts, proves the group's file/symbol/span
+cross-relations, aggregates edge multiplicity/confidence, inserts canonical
+generation rows, removes those raw rows, and advances a durable cursor. The
+document relation uses an indexed exact duplicate-identity probe, so large
+text fields are compared only when two raw rows claim the same document ID.
+This changes no conflict semantics and avoids materializing unique document
+text into a `DISTINCT` aggregate. The
+canonical V13 digest streams exact canonical row bytes from PostgreSQL in the
+same table/key order as the memory reducer. The final ready transaction checks
+the lease/state, the durable `canonicalized` phase that only validated groups
+can reach, digest capability, and canonical counts, builds the generation
+search relation, removes the spill run, and marks the generation ready.
+Publication remains the later short current-pointer swap.
+
+The project settings `generationStorage`, `maxSpillBytes`, and `maxSpillRows`
+control selection and logical quotas. Defaults are `auto`, 128 GiB, and one
+billion rows; hard maxima are 1 TiB and ten billion rows. Logical bytes exclude
+PostgreSQL/WAL/index/temporary-space amplification. An abandoned generation is
+removed through the ordinary generation cascade/retention path; never delete
+individual spill relations manually.
+
 ## Derived BM25 and vector state
 
 Relational graph/search-document rows are source-of-truth data. ParadeDB BM25

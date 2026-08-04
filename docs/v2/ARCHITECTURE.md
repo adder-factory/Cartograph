@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-03 (`v2.1.10`)
+Last implementation review: 2026-08-04 (`v2.1.11`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,9 +59,16 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns thirty-one versions. Migration
-31 admits generation digest V12 for stable bounded Go and Python anonymous
-call-target normalization; migration 30 admits generation digest V11 for
+The append-only migration ledger currently owns thirty-six versions. Migration
+36 admits generation digest V13 for named TypeScript/JavaScript construction
+targets. Migration 35 retains canonical search-document metadata text for exact
+SQL-streamed V13 digests; migration 34 lets generation spill reference immutable parse-cache
+payloads without storing a second copy; migration 33 adds the fenced symbol
+identity lookup used by streamed centrality updates; migration 32 adds
+generation-fenced native extraction/fact spill and deterministic PostgreSQL
+canonical reduction. Migration 31 admits generation digest V12 for stable
+bounded Go and Python anonymous call-target normalization; migration 30 admits
+generation digest V11 for
 anonymous Rust call-target normalization;
 migration 29 admits generation digest V10
 for call-target-precise secret exposure and incomplete-implementation evidence;
@@ -174,8 +181,11 @@ envelopes, cooperative cancellation, stage/item/operation deadlines, and
 retained-worker cleanup.
 
 ```text
-discover -> read/hash -> parse/extract -> resolve -> optional SCIP overlay -> deterministic reduce
-         -> COPY canonical staging rows -> relation/digest validation
+discover -> read/hash -> parse/extract
+         -> memory: retained facts -> resolve -> reduce -> bounded canonical COPY
+         -> postgres: bounded cache-backed parse spill -> compact resolution preparation
+                      -> per-file resolve -> typed COPY -> partitioned canonical rows
+         -> exact relation/digest validation
          -> populate generation search table -> build/verify BM25
          -> scoped planner statistics -> ready
          -> validate exact relation again -> publish
@@ -218,12 +228,53 @@ work, database faults, lease uncertainty/takeover, caller-future drop, child/tas
 reaping, rollback, and publication cleanup. The committed worker matrices must
 retain identical digest, rows, edge kinds, diagnostics, and ordered BM25 IDs.
 
-The native parse/resolve/reduce path remains deliberately memory-bounded; it is
-not an arbitrary-size spill pipeline. The default canonical-output ceiling is
-1 GiB, project configuration can explicitly raise it through 8 GiB, and the
-largest resolve/reduce worker reservation is four times that ceiling. Database
-COPY batching removes statement-size/deadline scaling from publication but does
-not erase this native working-set boundary.
+Native construction has two physical working-set strategies with one logical
+output contract. Small manifests use the original in-memory reducer. Large or
+explicitly selected manifests lazily form parse batches as the bounded
+scheduler admits them behind the exact generation/lease fence. Each batch is
+capped at 64 files and 64 MiB of combined source, except that one larger file
+remains indivisible; item deadlines therefore cannot expire while still
+waiting in an unmaterialized manifest tail. Cacheable extraction payloads are written once and
+referenced from the spill; inline and cached rows retain one
+representation-independent logical batch identity. Resolver workers COPY
+validated typed fact groups under independent row, logical-byte, and
+retained-memory bounds. PostgreSQL then reduces files, symbols, edges,
+references, numerical sites, and documents through 64 deterministic UUID
+partitions per relation, committing four contiguous partitions at a time. A
+completed raw group is deleted in the same transaction that inserts its
+canonical rows and advances the durable cursor.
+PostgreSQL may spill grouping/sorting to its configured temporary storage;
+Rust never reloads the complete canonical payload to compute the digest.
+
+The PostgreSQL path retains deterministic identity with the memory path:
+batch-local validation uses the same field contract, global conflicts and edge
+multiplicity are reduced under database constraints, and each canonical
+partition group proves its file/symbol/span cross-relations before its raw
+evidence is removed. The durable completed phase makes a redundant final
+generation-wide relation scan unnecessary. The V13 digest is streamed as exact
+canonical row bytes in the memory reducer's table/key order. Centrality uses
+the same pre-dedup calls/reference graph and is patched onto fenced raw symbols
+before sealing. Exact batch replay and the canonical cursor make an interrupted
+retained operation idempotent; changed bytes, quotas, phase misuse,
+cancellation, or lease loss fail closed.
+
+The streamed Resolve item reports work-derived progress after exact extracted
+pages, committed fact batches, completed derived passes, centrality work, and
+committed score batches. The supervisor therefore observes advancing durable
+work before the outer item finishes; it does not use timer-only keepalives. A
+real no-progress cancellation retains the active stage and the stable
+`progress_stalled` reason in the public failure.
+
+This is a hybrid rather than an unlimited-memory claim. Project-wide resolution
+lookups, clone profiles, and the centrality graph remain compact native
+structures with explicit bounds derived from `maxGenerationBytes`. The whole
+database spill has independent logical byte/row quotas, and physical
+heap/index/WAL/temporary-disk use remains an operator capacity concern. COPY
+batching continues to bound the memory path's publication statements.
+Every spill transaction acquires the exact mutation fence before work and runs
+one joined database-clock lease plus staging-generation check immediately before
+commit. The final check executes under the transaction's already-held advisory
+locks, preserving the expiry fence without repeating lock round trips.
 
 ## SCIP interchange without a visual viewer
 

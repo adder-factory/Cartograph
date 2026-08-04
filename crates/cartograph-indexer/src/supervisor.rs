@@ -61,6 +61,10 @@ pub struct PipelineFailure {
 /// Stable credential-safe detail for a pipeline failure whose cause is actionable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PipelineFailureReason {
+    /// A bounded item or whole-stage execution horizon elapsed.
+    DeadlineExceeded,
+    /// The supervisor observed no durable stage progress inside its watchdog horizon.
+    ProgressStalled,
     /// The configured in-memory generation ceiling rejected bounded work.
     GenerationCapacityExceeded,
     /// One source syntax tree exceeded the extractor's defensive nesting ceiling.
@@ -76,6 +80,8 @@ impl PipelineFailureReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::ProgressStalled => "progress_stalled",
             Self::GenerationCapacityExceeded => "generation_capacity_exceeded",
             Self::ExtractionNestingLimitExceeded => "extraction_nesting_limit_exceeded",
             Self::ExtractionOutputLimitExceeded => "extraction_output_limit_exceeded",

@@ -31,6 +31,7 @@ mod search;
 mod search_relation;
 mod semantic;
 mod sessions;
+mod spill;
 mod storage;
 mod summary_priority;
 mod v1_import;
@@ -86,8 +87,8 @@ pub use generation::{
     GenerationRecoveryRequest, NewGeneration, NewProject, ObservedGeneration, ObservedLease,
     OperationReconciliation, PrepareGenerationError, PrepareGenerationMetrics,
     PrepareGenerationMetricsSnapshot, PrepareGenerationMutation, PrepareGenerationProgress,
-    PublishGenerationError, ReadyGeneration, RecoverableGeneration, StagedGeneration,
-    TerminalGenerationMutation,
+    PublishGenerationError, ReadyGeneration, RecoverableGeneration, SpilledGenerationContents,
+    StagedGeneration, TerminalGenerationMutation,
 };
 pub use history::{
     FileCochangeFact, FileCochangeMetrics, FileCochangeQuery, FileCochangeRecord, FileHistoryFact,
@@ -137,7 +138,8 @@ pub use numerical::{
     NumericalSitePage, NumericalSiteQuery, NumericalSiteRecord, NumericalSiteStats,
 };
 pub use parse_cache::{
-    MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheBudgetPressure, NativeParseCacheError,
+    MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheBatchWrite,
+    NativeParseCacheBudgetPressure, NativeParseCacheEntry, NativeParseCacheError,
     NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheRecord,
     NativeParseCacheRetentionCapacity, NativeParseCacheRetentionPolicy,
     NativeParseCacheRetentionPolicyInput, NativeParseCacheRetentionReport,
@@ -181,6 +183,15 @@ pub use sessions::{
     McpMacroRecord, McpMacroStep, McpSessionCallsQuery, McpSessionKind, McpSessionLookup,
     McpSessionRecord, McpToolCallData, McpToolCallInput, McpToolCallRecord, McpToolCallWrite,
     McpToolUsage, McpTraceUsage, NewMcpMacro, NewMcpSession,
+};
+pub use spill::{
+    NativeGenerationExtractedCursor, NativeGenerationExtractedPage, NativeGenerationSpill,
+    NativeGenerationSpillCachedRow, NativeGenerationSpillCanonicalProgress,
+    NativeGenerationSpillCentralityScore, NativeGenerationSpillDigestReport,
+    NativeGenerationSpillExtractedBatch, NativeGenerationSpillExtractedRow,
+    NativeGenerationSpillFactBatch, NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy,
+    NativeGenerationSpillRelation, NativeGenerationSpillReport, NativeGenerationSpillRow,
+    NativeGenerationSpillState, NativeGenerationSpillWrite,
 };
 use sqlx_core::{pool::PoolOptions, query::query};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgSslMode, Postgres};

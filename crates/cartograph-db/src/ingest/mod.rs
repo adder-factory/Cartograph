@@ -13,8 +13,13 @@ pub use validate::{
     validate_generation_facts,
 };
 
-pub(crate) use validate::validate_generation_facts_for_v1_import;
+pub(crate) use validate::{
+    canonical_stored_metadata, validate_generation_facts_for_v1_import, validate_spill_fact_batch,
+};
 
 pub(crate) use copy::{
-    CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations, copy_generation_facts,
+    CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations, CountedTextCopy, TextRow,
+    copy_generation_facts,
 };
+pub(crate) use digest::LogicalDigestBuilder;
+pub(crate) use model::ValidatedFactTables;

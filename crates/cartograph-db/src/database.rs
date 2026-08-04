@@ -103,6 +103,18 @@ pub enum StorageError {
     /// A project reached the hard bound for retained generation search relations.
     #[error("Cartograph project search relation limit is reached")]
     SearchRelationLimitReached,
+    /// A generation spill exhausted its explicit row or logical-byte quota.
+    #[error("Cartograph native generation spill exceeded its {resource} limit")]
+    GenerationSpillLimitReached {
+        /// Stable quota name; source and database details are intentionally omitted.
+        resource: &'static str,
+    },
+    /// A repeated spill batch disagreed with the already durable deterministic batch.
+    #[error("Cartograph native generation spill batch conflicts with durable state")]
+    GenerationSpillConflict,
+    /// Cooperative cancellation stopped spill reduction or digest traversal.
+    #[error("Cartograph native generation spill was cancelled")]
+    GenerationSpillCancelled,
 }
 
 pub(crate) fn quoted_schema(schema: &DatabaseSchema) -> String {

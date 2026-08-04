@@ -1,10 +1,11 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use cartograph_domain::{
     ContentDigest, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage,
 };
 use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
+use sqlx_postgres::PgRow;
 use thiserror::Error;
 
 use crate::{
@@ -23,6 +24,9 @@ const DEFAULT_RETAINED_CONTRACTS: u16 = 2;
 const DEFAULT_RETAINED_ROWS: u64 = 20_000;
 const DEFAULT_RETAINED_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_RETENTION_DELETIONS: u32 = 10_000;
+const MAXIMUM_CACHE_BATCH_ENTRIES: usize = 256;
+const MAXIMUM_CACHE_BATCH_LOAD_BYTES: i64 = 64 * 1024 * 1024;
+const MAXIMUM_CACHE_BATCH_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 /// Maximum serialized facts retained for one immutable source file.
 pub const MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
@@ -147,6 +151,29 @@ pub enum NativeParseCacheWrite {
     Inserted,
     /// Represents the already present native parse cache write.
     AlreadyPresent,
+}
+
+/// One owned immutable parse-cache row for bounded bulk publication.
+pub struct NativeParseCacheEntry {
+    key: NativeParseCacheKey,
+    payload: Vec<u8>,
+}
+
+impl NativeParseCacheEntry {
+    /// Bind one exact cache identity to its serialized extraction payload.
+    #[must_use]
+    pub fn new(key: NativeParseCacheKey, payload: Vec<u8>) -> Self {
+        Self { key, payload }
+    }
+}
+
+/// Insert/no-op counts from one atomic bounded cache publication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeParseCacheBatchWrite {
+    /// Newly inserted immutable rows.
+    pub inserted: u64,
+    /// Exact rows that were already present and only had usage refreshed.
+    pub already_present: u64,
 }
 
 /// Cross-contract row and byte ceilings for one project's native parse cache.
@@ -338,6 +365,160 @@ pub enum NativeParseCacheError {
     },
 }
 
+struct CacheKeyArrays {
+    project_ids: Vec<String>,
+    contracts: Vec<String>,
+    path_digests: Vec<String>,
+    languages: Vec<String>,
+    content_hashes: Vec<String>,
+    paths: Vec<String>,
+}
+
+struct CacheStoreBatch {
+    keys: CacheKeyArrays,
+    source_bytes: Vec<i64>,
+    payloads: Vec<Vec<u8>>,
+    payload_digests: Vec<String>,
+    row_count: usize,
+}
+
+impl CacheKeyArrays {
+    fn new(keys: &[NativeParseCacheKey]) -> Result<Self, NativeParseCacheError> {
+        let mut arrays = Self {
+            project_ids: Vec::new(),
+            contracts: Vec::new(),
+            path_digests: Vec::new(),
+            languages: Vec::new(),
+            content_hashes: Vec::new(),
+            paths: Vec::new(),
+        };
+        arrays
+            .project_ids
+            .try_reserve_exact(keys.len())
+            .map_err(|_| database_error("key-batch-reserve"))?;
+        arrays
+            .contracts
+            .try_reserve_exact(keys.len())
+            .map_err(|_| database_error("key-batch-reserve"))?;
+        arrays
+            .path_digests
+            .try_reserve_exact(keys.len())
+            .map_err(|_| database_error("key-batch-reserve"))?;
+        arrays
+            .languages
+            .try_reserve_exact(keys.len())
+            .map_err(|_| database_error("key-batch-reserve"))?;
+        arrays
+            .content_hashes
+            .try_reserve_exact(keys.len())
+            .map_err(|_| database_error("key-batch-reserve"))?;
+        arrays
+            .paths
+            .try_reserve_exact(keys.len())
+            .map_err(|_| database_error("key-batch-reserve"))?;
+        for key in keys {
+            arrays.project_ids.push(key.project_id.as_str().to_owned());
+            arrays
+                .contracts
+                .push(key.extractor_contract_digest.as_str().to_owned());
+            arrays.path_digests.push(path_digest(&key.path));
+            arrays.languages.push(key.language.as_str().to_owned());
+            arrays
+                .content_hashes
+                .push(key.content_hash.as_str().to_owned());
+            arrays.paths.push(key.path.as_str().to_owned());
+        }
+        Ok(arrays)
+    }
+}
+
+fn validate_cache_key_batch(keys: &[NativeParseCacheKey]) -> Result<(), NativeParseCacheError> {
+    if keys.is_empty() || keys.len() > MAXIMUM_CACHE_BATCH_ENTRIES {
+        return Err(NativeParseCacheError::InvalidInput { field: "keys" });
+    }
+    let mut unique = BTreeSet::new();
+    for key in keys {
+        validate_key(key)?;
+        if !unique.insert((
+            key.project_id.as_str(),
+            key.extractor_contract_digest.as_str(),
+            key.path.as_str(),
+            key.language.as_str(),
+            key.content_hash.as_str(),
+        )) {
+            return Err(NativeParseCacheError::InvalidInput { field: "keys" });
+        }
+    }
+    Ok(())
+}
+
+fn prepare_cache_store_batch(
+    entries: Vec<NativeParseCacheEntry>,
+) -> Result<CacheStoreBatch, NativeParseCacheError> {
+    if entries.is_empty() || entries.len() > MAXIMUM_CACHE_BATCH_ENTRIES {
+        return Err(NativeParseCacheError::InvalidInput { field: "entries" });
+    }
+    let mut unique_paths = BTreeSet::new();
+    let mut total_payload_bytes = 0_usize;
+    for entry in &entries {
+        validate_key(&entry.key)?;
+        if entry.payload.is_empty() || entry.payload.len() > MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES {
+            return Err(NativeParseCacheError::InvalidInput { field: "payload" });
+        }
+        total_payload_bytes = total_payload_bytes
+            .checked_add(entry.payload.len())
+            .filter(|bytes| *bytes <= MAXIMUM_CACHE_BATCH_PAYLOAD_BYTES)
+            .ok_or(NativeParseCacheError::InvalidInput { field: "payload" })?;
+        if !unique_paths.insert((
+            entry.key.project_id.as_str(),
+            entry.key.extractor_contract_digest.as_str(),
+            entry.key.path.as_str(),
+        )) {
+            return Err(NativeParseCacheError::InvalidInput { field: "entries" });
+        }
+    }
+    let owned_keys = entries
+        .iter()
+        .map(|entry| entry.key.clone())
+        .collect::<Vec<_>>();
+    validate_cache_key_batch(&owned_keys)?;
+    let keys = CacheKeyArrays::new(&owned_keys)?;
+    drop(unique_paths);
+    let row_count = entries.len();
+    let mut source_bytes = Vec::new();
+    let mut payloads = Vec::new();
+    let mut payload_digests = Vec::new();
+    source_bytes
+        .try_reserve_exact(row_count)
+        .map_err(|_| database_error("store-batch-reserve"))?;
+    payloads
+        .try_reserve_exact(row_count)
+        .map_err(|_| database_error("store-batch-reserve"))?;
+    payload_digests
+        .try_reserve_exact(row_count)
+        .map_err(|_| database_error("store-batch-reserve"))?;
+    for entry in entries {
+        source_bytes.push(i64::try_from(entry.key.source_bytes).map_err(|_| {
+            NativeParseCacheError::InvalidInput {
+                field: "source_bytes",
+            }
+        })?);
+        payload_digests.push(
+            ContentDigest::from_bytes(*blake3::hash(&entry.payload).as_bytes())
+                .as_str()
+                .to_owned(),
+        );
+        payloads.push(entry.payload);
+    }
+    Ok(CacheStoreBatch {
+        keys,
+        source_bytes,
+        payloads,
+        payload_digests,
+        row_count,
+    })
+}
+
 impl CartographDatabase {
     /// Load one exact path/content/extractor result and refresh its usage
     /// timestamp at most once per bounded touch interval.
@@ -408,6 +589,92 @@ impl CartographDatabase {
                 .map_err(|_| database_error("touch"))?;
         }
         Ok(Some(record))
+    }
+
+    /// Load a bounded ordered group of exact cache identities in one round trip.
+    ///
+    /// The returned vector preserves input order and refreshes stale usage timestamps
+    /// in the same statement without exposing cache contents through errors.
+    /// # Errors
+    ///
+    /// Returns an error when the group is empty/oversized/duplicated, a key is
+    /// invalid, or PostgreSQL returns incomplete or corrupt stored metadata.
+    pub async fn load_native_parse_cache_batch(
+        &self,
+        keys: &[NativeParseCacheKey],
+    ) -> Result<Vec<Option<NativeParseCacheRecord>>, NativeParseCacheError> {
+        validate_cache_key_batch(keys)?;
+        let input = CacheKeyArrays::new(keys)?;
+        let touch_interval_millis = i64::try_from(CACHE_USAGE_TOUCH_INTERVAL.as_millis())
+            .map_err(|_| database_error("load-batch"))?;
+        let schema = quoted_schema(&self.schema);
+        let statement = format!(
+            r#"WITH input AS (
+                    SELECT project_id, extractor_contract_digest, path_digest,
+                           language, content_hash, normalized_path, ordinality
+                    FROM unnest(
+                        CAST($1 AS uuid[]), CAST($2 AS text[]), CAST($3 AS text[]),
+                        CAST($4 AS text[]), CAST($5 AS text[]), CAST($6 AS text[])
+                    ) WITH ORDINALITY AS rows(
+                        project_id, extractor_contract_digest, path_digest,
+                        language, content_hash, normalized_path, ordinality
+                    )
+                ), matched AS (
+                    SELECT input.ordinality, cache.payload, cache.payload_digest,
+                           cache.source_bytes
+                    FROM input
+                    LEFT JOIN {schema}."native_parse_cache" AS cache
+                      ON cache.project_id = input.project_id
+                     AND cache.extractor_contract_digest = input.extractor_contract_digest
+                     AND cache.path_digest = input.path_digest
+                     AND cache.language = input.language
+                     AND cache.content_hash = input.content_hash
+                     AND cache.normalized_path = input.normalized_path
+                ), stats AS (
+                    SELECT COALESCE(sum(octet_length(payload)), 0) AS payload_bytes
+                    FROM matched
+                ), touched AS (
+                    UPDATE {schema}."native_parse_cache" AS cache
+                    SET last_used_at = clock_timestamp()
+                    FROM input
+                    WHERE cache.project_id = input.project_id
+                      AND cache.extractor_contract_digest = input.extractor_contract_digest
+                      AND cache.path_digest = input.path_digest
+                      AND cache.language = input.language
+                      AND cache.content_hash = input.content_hash
+                      AND cache.normalized_path = input.normalized_path
+                      AND cache.last_used_at <= clock_timestamp() - $7 * interval '1 millisecond'
+                    RETURNING 1
+                )
+                SELECT matched.ordinality, matched.payload, matched.payload_digest,
+                       matched.source_bytes, (SELECT count(*) FROM touched)
+                FROM matched CROSS JOIN stats
+                WHERE stats.payload_bytes <= $8
+                ORDER BY matched.ordinality"#
+        );
+        let rows = query(AssertSqlSafe(statement))
+            .bind(input.project_ids)
+            .bind(input.contracts)
+            .bind(input.path_digests)
+            .bind(input.languages)
+            .bind(input.content_hashes)
+            .bind(input.paths)
+            .bind(touch_interval_millis)
+            .bind(MAXIMUM_CACHE_BATCH_LOAD_BYTES)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| database_error("load-batch"))?;
+        if rows.len() != keys.len() {
+            return Err(NativeParseCacheError::CorruptStoredValue);
+        }
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(rows.len())
+            .map_err(|_| database_error("load-batch-reserve"))?;
+        for (index, row) in rows.iter().enumerate() {
+            records.push(decode_batch_record(row, index)?);
+        }
+        Ok(records)
     }
 
     /// Persist one immutable extraction result and discard older content for the same path.
@@ -504,6 +771,110 @@ impl CartographDatabase {
             NativeParseCacheWrite::Inserted
         } else {
             NativeParseCacheWrite::AlreadyPresent
+        })
+    }
+
+    /// Persist a bounded group of immutable extraction results atomically.
+    ///
+    /// Obsolete content for every included path is removed once, then exact rows
+    /// are inserted or usage-refreshed through one array-backed statement.
+    /// # Errors
+    ///
+    /// Returns an error when the group, key, payload, same-path identity, existing
+    /// immutable payload, or complete PostgreSQL transaction is invalid.
+    pub async fn store_native_parse_cache_batch(
+        &self,
+        entries: Vec<NativeParseCacheEntry>,
+    ) -> Result<NativeParseCacheBatchWrite, NativeParseCacheError> {
+        let batch = prepare_cache_store_batch(entries)?;
+        let input = batch.keys;
+        let schema = quoted_schema(&self.schema);
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("store-batch-begin"))?;
+        set_local_statement_timeout(&mut transaction, CACHE_OPERATION_TIMEOUT)
+            .await
+            .map_err(|()| database_error("store-batch-timeout"))?;
+        let prune = format!(
+            r#"DELETE FROM {schema}."native_parse_cache" AS cache
+               USING unnest(
+                   CAST($1 AS uuid[]), CAST($2 AS text[]), CAST($3 AS text[]),
+                   CAST($4 AS text[]), CAST($5 AS text[]), CAST($6 AS text[])
+               ) AS input(
+                   project_id, extractor_contract_digest, path_digest,
+                   normalized_path, language, content_hash
+               )
+               WHERE cache.project_id = input.project_id
+                 AND cache.extractor_contract_digest = input.extractor_contract_digest
+                 AND cache.path_digest = input.path_digest
+                 AND cache.normalized_path = input.normalized_path
+                 AND (cache.language <> input.language OR cache.content_hash <> input.content_hash)"#
+        );
+        query(AssertSqlSafe(prune))
+            .bind(&input.project_ids)
+            .bind(&input.contracts)
+            .bind(&input.path_digests)
+            .bind(&input.paths)
+            .bind(&input.languages)
+            .bind(&input.content_hashes)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| database_error("store-batch-prune"))?;
+        let insert = format!(
+            r#"INSERT INTO {schema}."native_parse_cache" (
+                   project_id, extractor_contract_digest, path_digest, normalized_path,
+                   language, content_hash, source_bytes, payload, payload_digest
+               )
+               SELECT project_id, extractor_contract_digest, path_digest, normalized_path,
+                      language, content_hash, source_bytes, payload, payload_digest
+               FROM unnest(
+                   CAST($1 AS uuid[]), CAST($2 AS text[]), CAST($3 AS text[]),
+                   CAST($4 AS text[]), CAST($5 AS text[]), CAST($6 AS text[]),
+                   CAST($7 AS bigint[]), CAST($8 AS bytea[]), CAST($9 AS text[])
+               ) AS input(
+                   project_id, extractor_contract_digest, path_digest, normalized_path,
+                   language, content_hash, source_bytes, payload, payload_digest
+               )
+               ON CONFLICT (
+                   project_id, extractor_contract_digest, path_digest, language, content_hash
+               ) DO UPDATE SET last_used_at = clock_timestamp()
+                 WHERE {schema}."native_parse_cache".normalized_path = EXCLUDED.normalized_path
+                   AND {schema}."native_parse_cache".payload_digest = EXCLUDED.payload_digest
+                   AND {schema}."native_parse_cache".source_bytes = EXCLUDED.source_bytes
+               RETURNING (xmax = 0) AS inserted"#
+        );
+        let rows = query(AssertSqlSafe(insert))
+            .bind(&input.project_ids)
+            .bind(&input.contracts)
+            .bind(&input.path_digests)
+            .bind(&input.paths)
+            .bind(&input.languages)
+            .bind(&input.content_hashes)
+            .bind(batch.source_bytes)
+            .bind(batch.payloads)
+            .bind(batch.payload_digests)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|_| database_error("store-batch"))?;
+        if rows.len() != batch.row_count {
+            return Err(NativeParseCacheError::PayloadConflict);
+        }
+        let inserted = rows.iter().try_fold(0_u64, |count, row| {
+            row.try_get::<bool, _>(0)
+                .ok()
+                .and_then(|value| count.checked_add(u64::from(value)))
+        });
+        let inserted = inserted.ok_or(NativeParseCacheError::CorruptStoredValue)?;
+        let total = u64::try_from(rows.len()).map_err(|_| database_error("store-batch-count"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("store-batch-commit"))?;
+        Ok(NativeParseCacheBatchWrite {
+            inserted,
+            already_present: total.saturating_sub(inserted),
         })
     }
 
@@ -610,6 +981,15 @@ const NATIVE_PARSE_CACHE_RETENTION_SQL: &str = r#"WITH recent_contracts AS MATER
         FROM {schema}."native_parse_cache" AS cache
         INNER JOIN recent_contracts USING (extractor_contract_digest)
         WHERE cache.project_id = $1::uuid
+          AND NOT EXISTS (
+              SELECT 1
+              FROM {schema}."native_generation_spill_rows" AS spill
+              WHERE spill.project_id = cache.project_id
+                AND spill.cache_extractor_contract_digest = cache.extractor_contract_digest
+                AND spill.cache_path_digest = cache.path_digest
+                AND spill.cache_language = cache.language
+                AND spill.cache_content_hash = cache.content_hash
+          )
     ), candidates AS MATERIALIZED (
         SELECT cache.project_id, cache.extractor_contract_digest,
                cache.path_digest, cache.language, cache.content_hash,
@@ -620,6 +1000,15 @@ const NATIVE_PARSE_CACHE_RETENTION_SQL: &str = r#"WITH recent_contracts AS MATER
           AND NOT EXISTS (
               SELECT 1 FROM recent_contracts
               WHERE recent_contracts.extractor_contract_digest = cache.extractor_contract_digest
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM {schema}."native_generation_spill_rows" AS spill
+              WHERE spill.project_id = cache.project_id
+                AND spill.cache_extractor_contract_digest = cache.extractor_contract_digest
+                AND spill.cache_path_digest = cache.path_digest
+                AND spill.cache_language = cache.language
+                AND spill.cache_content_hash = cache.content_hash
           )
         UNION ALL
         SELECT optional.project_id, optional.extractor_contract_digest,
@@ -791,6 +1180,45 @@ fn validate_key(key: &NativeParseCacheKey) -> Result<(), NativeParseCacheError> 
         })
 }
 
+fn decode_batch_record(
+    row: &PgRow,
+    index: usize,
+) -> Result<Option<NativeParseCacheRecord>, NativeParseCacheError> {
+    let ordinal = row
+        .try_get::<i64, _>(0)
+        .ok()
+        .and_then(|value| usize::try_from(value).ok());
+    if ordinal != Some(index.saturating_add(1)) {
+        return Err(NativeParseCacheError::CorruptStoredValue);
+    }
+    let payload = row
+        .try_get::<Option<Vec<u8>>, _>(1)
+        .map_err(|_| NativeParseCacheError::CorruptStoredValue)?;
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    if payload.is_empty() || payload.len() > MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES {
+        return Err(NativeParseCacheError::CorruptStoredValue);
+    }
+    let payload_digest = row
+        .try_get::<Option<String>, _>(2)
+        .ok()
+        .flatten()
+        .and_then(|value| ContentDigest::parse(&value).ok())
+        .ok_or(NativeParseCacheError::CorruptStoredValue)?;
+    let source_bytes = row
+        .try_get::<Option<i64>, _>(3)
+        .ok()
+        .flatten()
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(NativeParseCacheError::CorruptStoredValue)?;
+    Ok(Some(NativeParseCacheRecord {
+        payload,
+        payload_digest,
+        source_bytes,
+    }))
+}
+
 fn decode_record(
     row: &sqlx_postgres::PgRow,
 ) -> Result<NativeParseCacheRecord, NativeParseCacheError> {
@@ -817,7 +1245,7 @@ fn decode_record(
     })
 }
 
-fn path_digest(path: &NormalizedPath) -> String {
+pub(crate) fn path_digest(path: &NormalizedPath) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PATH_DIGEST_DOMAIN);
     hasher.update(path.as_str().as_bytes());

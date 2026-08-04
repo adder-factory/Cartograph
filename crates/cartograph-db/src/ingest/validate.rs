@@ -254,6 +254,28 @@ where
     )
 }
 
+pub(crate) fn validate_spill_fact_batch<Cancel>(
+    facts: GenerationFacts,
+    limits: GenerationValidationLimits,
+    cancelled: Cancel,
+) -> Result<(ValidatedFactTables, u64), GenerationValidationError>
+where
+    Cancel: FnMut() -> bool,
+{
+    let mut control = ValidationControl::new(limits, cancelled);
+    control.admit(&facts)?;
+    let tables = ValidatedFactTables {
+        files: reduce_files(facts.files, &mut control)?,
+        symbols: reduce_symbols(facts.symbols, &mut control)?,
+        edges: reduce_edges(facts.edges, &mut control)?,
+        references: reduce_references(facts.references, &mut control)?,
+        numerical_sites: reduce_numerical_sites(facts.numerical_sites, &mut control)?,
+        documents: reduce_documents(facts.documents, &mut control)?,
+    };
+    control.poll()?;
+    Ok((tables, control.input_bytes))
+}
+
 pub(crate) fn validate_generation_facts_for_v1_import<Cancel>(
     facts: GenerationFacts,
     limits: GenerationValidationLimits,
@@ -1009,6 +1031,17 @@ where
     let mut output = BoundedJsonWriter::new(control);
     write_canonical_json(value, &mut output, 0)?;
     String::from_utf8(output.into_bytes()).map_err(|_| invalid("metadata").into())
+}
+
+pub(crate) fn canonical_stored_metadata(
+    value: &Value,
+) -> Result<String, GenerationValidationError> {
+    let limits = GenerationValidationLimits {
+        maximum_output_bytes: usize_to_u64(MAX_METADATA_BYTES),
+        maximum_working_bytes: usize_to_u64(MAX_METADATA_BYTES).saturating_mul(8),
+    };
+    let mut control = ValidationControl::new(limits, || false);
+    canonical_json(value, &mut control)
 }
 
 fn write_canonical_json<Cancel>(

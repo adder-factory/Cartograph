@@ -25,6 +25,7 @@ use crate::{
         GenerationSearchBuild, rebuild_generation_search_relation,
         require_generation_search_relation,
     },
+    spill::{NativeGenerationSpillDigestReport, canonical_fact_counts},
 };
 
 const MAX_ROOT_IDENTITY_BYTES: usize = 4_096;
@@ -450,10 +451,27 @@ pub struct GenerationContents {
     progress: Option<PrepareGenerationProgress>,
 }
 
+/// Complete database-reduced output required before a spilled generation can become ready.
+pub struct SpilledGenerationContents {
+    generation: StagedGeneration,
+    digest: NativeGenerationSpillDigestReport,
+    metrics: Option<PrepareGenerationMetrics>,
+    progress: Option<PrepareGenerationProgress>,
+}
+
 struct PrepareTransactionInput<'a> {
     schema: &'a cartograph_config::DatabaseSchema,
     generation: &'a StagedGeneration,
     facts: CanonicalGenerationFacts,
+    fence: &'a LeaseFence,
+    metrics: Option<&'a PrepareGenerationMetrics>,
+    progress: Option<&'a PrepareGenerationProgress>,
+}
+
+struct SpilledPrepareTransactionInput<'a> {
+    schema: &'a cartograph_config::DatabaseSchema,
+    generation: &'a StagedGeneration,
+    digest: &'a NativeGenerationSpillDigestReport,
     fence: &'a LeaseFence,
     metrics: Option<&'a PrepareGenerationMetrics>,
     progress: Option<&'a PrepareGenerationProgress>,
@@ -754,6 +772,36 @@ impl GenerationContents {
     }
 }
 
+impl SpilledGenerationContents {
+    /// Consume a staging token and attach its exact streamed digest capability.
+    #[must_use]
+    pub const fn new(
+        generation: StagedGeneration,
+        digest: NativeGenerationSpillDigestReport,
+    ) -> Self {
+        Self {
+            generation,
+            digest,
+            metrics: None,
+            progress: None,
+        }
+    }
+
+    /// Attach an observer for relation validation and final preparation.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: PrepareGenerationMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Attach monotonic supervised progress without changing persistence behavior.
+    #[must_use]
+    pub fn with_progress(mut self, progress: PrepareGenerationProgress) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+}
+
 impl CartographDatabase {
     /// Create or refresh a stable project row and return its branded identity.
     /// # Errors
@@ -1004,6 +1052,108 @@ impl CartographDatabase {
             return Err(PrepareGenerationError {
                 generation,
                 error: database_error("prepare-commit"),
+            });
+        }
+        Ok(ReadyGeneration {
+            project_id: generation.project_id,
+            generation_id: generation.generation_id,
+            sequence: generation.sequence,
+            content_digest,
+            digest_version,
+        })
+    }
+
+    /// Validate already canonicalized spill rows and move the exact generation to ready.
+    /// # Errors
+    ///
+    /// Returns an error with the staging token when the digest capability belongs to
+    /// another generation, the lease/state changed, relation validation fails, or the
+    /// final bounded transaction cannot commit.
+    pub async fn prepare_spilled_generation(
+        &self,
+        contents: SpilledGenerationContents,
+        fence: &LeaseFence,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        self.prepare_spilled_generation_inner(contents, LeaseMutationOptions::unbounded(fence))
+            .await
+    }
+
+    /// Finalize an already canonicalized spill under a PostgreSQL statement deadline.
+    /// # Errors
+    ///
+    /// Returns an error with the staging token when the deadline/fence is invalid,
+    /// canonical rows or their digest disagree, or ready publication cannot commit.
+    pub async fn prepare_spilled_generation_bounded(
+        &self,
+        contents: SpilledGenerationContents,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        self.prepare_spilled_generation_inner(contents, mutation.0)
+            .await
+    }
+
+    async fn prepare_spilled_generation_inner(
+        &self,
+        contents: SpilledGenerationContents,
+        mutation: LeaseMutationOptions<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        let fence = mutation.fence;
+        let SpilledGenerationContents {
+            generation,
+            digest,
+            metrics,
+            progress,
+        } = contents;
+        if !fence_matches_generation(fence, generation.project_id(), generation.generation_id())
+            || !digest.matches(generation.project_id(), generation.generation_id())
+        {
+            return Err(PrepareGenerationError {
+                generation,
+                error: StorageError::LeaseFenceLost,
+            });
+        }
+        let content_digest = digest.digest().clone();
+        let digest_version = GenerationDigestVersion::CURRENT;
+        let Ok(mut transaction) = self.pool.begin().await else {
+            return Err(PrepareGenerationError {
+                generation,
+                error: database_error("prepare-spilled-begin"),
+            });
+        };
+        if let Some(statement_timeout) = mutation.statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            let error = match transaction.rollback().await {
+                Ok(()) => database_error("prepare-spilled-statement-timeout"),
+                Err(_) => database_error("prepare-spilled-rollback"),
+            };
+            return Err(PrepareGenerationError { generation, error });
+        }
+        let result = prepare_spilled_transaction(
+            &mut transaction,
+            SpilledPrepareTransactionInput {
+                schema: &self.schema,
+                generation: &generation,
+                digest: &digest,
+                fence,
+                metrics: metrics.as_ref(),
+                progress: progress.as_ref(),
+            },
+        )
+        .await;
+        if let Err(error) = result {
+            let error = match transaction.rollback().await {
+                Ok(()) => error,
+                Err(_) => database_error("prepare-spilled-rollback"),
+            };
+            return Err(PrepareGenerationError { generation, error });
+        }
+        if transaction.commit().await.is_err() {
+            return Err(PrepareGenerationError {
+                generation,
+                error: database_error("prepare-spilled-commit"),
             });
         }
         Ok(ReadyGeneration {
@@ -1687,6 +1837,148 @@ async fn prepare_transaction(
     Ok(())
 }
 
+async fn prepare_spilled_transaction(
+    connection: &mut PgConnection,
+    input: SpilledPrepareTransactionInput<'_>,
+) -> Result<(), StorageError> {
+    let quoted_schema = crate::database::quoted_schema(input.schema);
+    let validation_started = Instant::now();
+    validate_spilled_prepare_authority(connection, &input, &quoted_schema).await?;
+    if let Some(metrics) = input.metrics {
+        metrics.record_relation_validation(validation_started.elapsed());
+    }
+    finalize_spilled_prepare(connection, &input, &quoted_schema).await
+}
+
+async fn validate_spilled_prepare_authority(
+    connection: &mut PgConnection,
+    input: &SpilledPrepareTransactionInput<'_>,
+    quoted_schema: &str,
+) -> Result<(), StorageError> {
+    validate_generation_state(
+        connection,
+        GenerationStateRequirement {
+            quoted_schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+            sequence: input.generation.sequence(),
+            required: GenerationState::Staging,
+        },
+        FenceCheck::Observe,
+    )
+    .await?;
+    lock_generation_mutation(connection, input.schema, input.fence).await?;
+    check_generation_fence(connection, input.schema, input.fence).await?;
+    validate_generation_state(
+        connection,
+        GenerationStateRequirement {
+            quoted_schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+            sequence: input.generation.sequence(),
+            required: GenerationState::Staging,
+        },
+        FenceCheck::Observe,
+    )
+    .await?;
+    let spill_sql = format!(
+        r#"SELECT phase
+            FROM {quoted_schema}."native_generation_spills"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND generation_sequence = $3
+            FOR UPDATE"#
+    );
+    let phase = audited_query(spill_sql)
+        .bind(input.generation.project_id().as_str())
+        .bind(input.generation.generation_id().as_str())
+        .bind(input.generation.sequence())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| database_error("prepare-spilled-read-run"))?
+        .ok_or(StorageError::GenerationNotFound)?
+        .try_get::<String, _>(0)
+        .map_err(|_| StorageError::CorruptStoredValue {
+            field: "native_generation_spill_phase",
+        })?;
+    if phase != "canonicalized" {
+        return Err(StorageError::InvalidGenerationTransition {
+            actual: phase,
+            requested: "canonicalized",
+        });
+    }
+    let counts = canonical_fact_counts(
+        connection,
+        quoted_schema,
+        input.generation.project_id(),
+        input.generation.generation_id(),
+    )
+    .await?;
+    if counts != input.digest.counts() {
+        return Err(StorageError::GenerationSpillConflict);
+    }
+    Ok(())
+}
+
+async fn finalize_spilled_prepare(
+    connection: &mut PgConnection,
+    input: &SpilledPrepareTransactionInput<'_>,
+    quoted_schema: &str,
+) -> Result<(), StorageError> {
+    advance_prepare_progress(input.progress);
+    rebuild_generation_search_relation(
+        connection,
+        GenerationSearchBuild {
+            schema: input.schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+            content_digest: input.digest.digest(),
+        },
+    )
+    .await?;
+    advance_prepare_progress(input.progress);
+    carry_forward_unchanged_generation_evidence(
+        connection,
+        GenerationEvidenceCarry {
+            quoted_schema,
+            generation: input.generation,
+            content_digest: input.digest.digest(),
+            digest_version: GenerationDigestVersion::CURRENT,
+        },
+    )
+    .await?;
+    advance_prepare_progress(input.progress);
+    analyze_copied_relations(connection, input.schema).await?;
+    advance_prepare_progress(input.progress);
+    let delete_spill = format!(
+        r#"DELETE FROM {quoted_schema}."native_generation_spills"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)"#
+    );
+    let deleted = audited_query(delete_spill)
+        .bind(input.generation.project_id().as_str())
+        .bind(input.generation.generation_id().as_str())
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("prepare-spilled-cleanup"))?;
+    if deleted.rows_affected() != 1 {
+        return Err(StorageError::GenerationSpillConflict);
+    }
+    mark_generation_ready(
+        connection,
+        ReadyTransition {
+            schema: input.schema,
+            generation: input.generation,
+            fence: input.fence,
+            content_digest: input.digest.digest(),
+            digest_version: GenerationDigestVersion::CURRENT,
+        },
+    )
+    .await?;
+    advance_prepare_progress(input.progress);
+    Ok(())
+}
+
 fn advance_prepare_progress(progress: Option<&PrepareGenerationProgress>) {
     if let Some(progress) = progress {
         progress.advance();
@@ -2096,6 +2388,77 @@ async fn check_generation_fence(
         FenceValidation::new(schema, fence, FenceCheck::Observe),
     )
     .await
+}
+
+pub(crate) async fn lock_staging_generation_fence(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    fence: &LeaseFence,
+    project_id: &ProjectId,
+    generation_id: &GenerationId,
+    sequence: i64,
+) -> Result<(), StorageError> {
+    if !fence_matches_generation(fence, project_id, generation_id) {
+        return Err(StorageError::LeaseFenceLost);
+    }
+    lock_generation_mutation(connection, schema, fence).await?;
+    check_generation_fence(connection, schema, fence).await?;
+    let quoted_schema = crate::database::quoted_schema(schema);
+    validate_generation_state(
+        connection,
+        GenerationStateRequirement {
+            quoted_schema: &quoted_schema,
+            project_id,
+            generation_id,
+            sequence,
+            required: GenerationState::Staging,
+        },
+        FenceCheck::Observe,
+    )
+    .await
+}
+
+pub(crate) async fn check_staging_generation_fence(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    fence: &LeaseFence,
+    project_id: &ProjectId,
+    generation_id: &GenerationId,
+    sequence: i64,
+) -> Result<(), StorageError> {
+    if !fence_matches_generation(fence, project_id, generation_id) {
+        return Err(StorageError::LeaseFenceLost);
+    }
+    let quoted_schema = crate::database::quoted_schema(schema);
+    let sql = format!(
+        r#"SELECT 1
+            FROM {quoted_schema}."project_operation_leases" AS leases
+            INNER JOIN {quoted_schema}."index_generations" AS generations
+              ON generations.project_id = leases.project_id
+             AND generations.generation_id = leases.generation_id
+            WHERE leases.project_id = CAST($1 AS uuid)
+              AND leases.operation = $2
+              AND leases.lease_id = CAST($3 AS uuid)
+              AND leases.generation_id = CAST($4 AS uuid)
+              AND leases.expires_at > clock_timestamp()
+              AND generations.generation_sequence = $5
+              AND generations.state = 'staging'"#
+    );
+    let live = audited_query(sql)
+        .bind(project_id.as_str())
+        .bind(fence.target().operation().as_str())
+        .bind(fence.lease_id().as_str())
+        .bind(generation_id.as_str())
+        .bind(sequence)
+        .fetch_optional(connection)
+        .await
+        .map_err(|_| database_error("check-staging-generation-fence"))?
+        .is_some();
+    if live {
+        Ok(())
+    } else {
+        Err(StorageError::LeaseFenceLost)
+    }
 }
 
 async fn require_generation_fence(

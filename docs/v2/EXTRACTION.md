@@ -52,7 +52,8 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V12 fences stable bounded Go and Python anonymous call-target
+contract. Contract V13 fences named TypeScript and JavaScript construction
+targets; contract V12 fenced stable bounded Go and Python anonymous call-target
 normalization; contract V11 fenced anonymous Rust call-target normalization;
 contract V10 fenced call-target-precise
 secret exposure and incomplete-implementation evidence; contract V9 fenced JSX executable-line
@@ -174,22 +175,37 @@ The indexer converts extracted files into canonical facts:
 - deterministic row ordering and logical digest;
 - literal row/count/byte admission reports.
 
-Resolution output is reduced in stable order before PostgreSQL. Parallel worker
-completion order cannot affect IDs, rows, digest, or BM25 document identity.
-The unordered resolver payload is charged to the separate working-set bound;
-the smaller configured generation ceiling is enforced on canonical output.
-Applying the output ceiling to both would incorrectly reject dense inputs that
-reduce safely.
+Resolution output has one stable logical reduction contract and two physical
+paths. The memory path reduces in Rust before bounded COPY. The PostgreSQL path
+lazily forms parse work as it enters the bounded scheduler, admitting at most
+64 files and 64 MiB of combined source per item. A single larger source remains
+indivisible, and queued work receives its deadline only when admitted. The path
+references immutable cached payloads when possible, validates file-local
+output, and COPY-publishes typed
+unordered facts behind the exact staging/lease fence. It reduces 64
+deterministic UUID partitions for each of the six canonical relations in
+four-partition transaction groups. Each group proves conflicts and
+cross-relations before atomically replacing raw evidence with canonical rows.
+Parallel worker completion order cannot affect IDs, rows, digest, or BM25
+document identity. Extracted batch identity and file/byte windows use logical
+payload digests rather than inline-versus-cache storage, so either
+representation replays idempotently; different bytes for an existing sequence
+fail closed.
+
+One spill parse item reuses one `NativeExtractor` per encountered language,
+matching the extractor's reusable-parser contract while keeping the item and
+payload bounds unchanged. Hot AST cancellation polls read monotonic watch
+versions atomically and retain exact parent/stage/deadline behavior.
 
 ## Parallel pipeline
 
 ```text
 discover
   -> bounded read/hash
-  -> tree-sitter parse/extract
-  -> module/reference resolve
-  -> canonical reduce/digest
-  -> PostgreSQL COPY/validate/publish
+  -> bounded tree-sitter parse/extract batches -> cache-backed spill
+  -> compact resolution preparation -> parallel per-file resolve -> typed COPY
+  -> memory canonical reduce, or PostgreSQL partitioned reduce
+  -> exact streamed digest / publish
 ```
 
 The supervisor and stage runner enforce:
@@ -209,11 +225,21 @@ The supervisor and stage runner enforce:
   caller future is dropped;
 - exact lease ownership and rollback before publication.
 
-The in-memory generation is hard-capped. V2 does not claim an unbounded corpus
-or spill-to-disk reducer; oversize input is rejected before unsafe allocation
-or publication. PostgreSQL COPY uses bounded multi-statement batches, but parse,
-resolve, and canonical reduce still require their explicitly reserved native
-working sets.
+`generationStorage: "auto"` keeps small projects on the memory path and selects
+PostgreSQL for a large file count, indexed-source size, or conservative
+source-to-generation expansion estimate. PostgreSQL spill removes the complete
+extraction/resolver/canonical payload from Rust memory and applies independent
+logical byte/row quotas. Parsing, fact publication, canonical reduction, and
+digesting all make durable bounded progress rather than retaining a generation
+payload. Resolve also advances supervision only after exact pages, committed
+fact/score batches, and completed deterministic derived work, so one large
+outer work item cannot hide healthy progress. The project-wide resolution
+lookup, clone profile, and centrality graph remain explicitly bounded compact
+native structures because exact cross-file resolution needs the full
+declaration domain; an extreme graph can still be rejected before unsafe
+allocation or publication. Persistent SCIP replacement overlays remain on the
+memory path until their per-file replacement contract has an equivalent
+streamed implementation.
 
 ## Search document boundary
 

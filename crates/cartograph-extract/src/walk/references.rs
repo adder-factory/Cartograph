@@ -345,23 +345,13 @@ pub(super) fn capture_invocation(
         })?;
         return Ok(());
     }
-    let (name_node, reference_node) = match invocation {
-        InvocationKind::Call
-            if matches!(
-                builder.context.snapshot.language(),
-                SourceLanguage::TypeScript
-                    | SourceLanguage::Tsx
-                    | SourceLanguage::JavaScript
-                    | SourceLanguage::Jsx
-            ) =>
-        {
-            let Some(name) = normalized_javascript_call_target(target, 0) else {
-                return Ok(());
-            };
-            (name, name)
-        }
-        InvocationKind::Call => (target, target),
-        InvocationKind::Construction => (target, node),
+    let Some((name_node, reference_node)) = invocation_reference_nodes(
+        builder.context.snapshot.language(),
+        invocation,
+        target,
+        node,
+    ) else {
+        return Ok(());
     };
     let owner = builder.owners.last().cloned();
     push_node_reference(
@@ -373,6 +363,31 @@ pub(super) fn capture_invocation(
             span: reference_node,
         },
     )
+}
+
+fn invocation_reference_nodes<'tree>(
+    language: SourceLanguage,
+    invocation: InvocationKind,
+    target: Node<'tree>,
+    expression: Node<'tree>,
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    let javascript = matches!(
+        language,
+        SourceLanguage::TypeScript
+            | SourceLanguage::Tsx
+            | SourceLanguage::JavaScript
+            | SourceLanguage::Jsx
+    );
+    match (invocation, javascript) {
+        (InvocationKind::Call, true) => {
+            normalized_javascript_call_target(target, 0).map(|name| (name, name))
+        }
+        (InvocationKind::Call, false) => Some((target, target)),
+        (InvocationKind::Construction, true) => {
+            normalized_javascript_construction_target(target, 0).map(|name| (name, expression))
+        }
+        (InvocationKind::Construction, false) => Some((target, expression)),
+    }
 }
 
 fn anonymous_call_target(language: SourceLanguage, target: Node<'_>, depth: usize) -> bool {
@@ -487,6 +502,28 @@ fn normalized_javascript_call_target(target: Node<'_>, depth: usize) -> Option<N
         }
         // The inner call already records its statically known target. The value it returns is
         // dynamically callable, while arrow/function IIFEs have no stable declaration target.
+        _ => None,
+    }
+}
+
+fn normalized_javascript_construction_target(target: Node<'_>, depth: usize) -> Option<Node<'_>> {
+    if depth > 64 {
+        return None;
+    }
+    match target.kind() {
+        "identifier" => Some(target),
+        "member_expression" if static_javascript_member_chain(target, 0) => Some(target),
+        "parenthesized_expression" => {
+            let mut children = named_children(target);
+            let child = children.next()?;
+            if children.next().is_some() {
+                return None;
+            }
+            normalized_javascript_construction_target(child, depth.saturating_add(1))
+        }
+        // Anonymous classes, calls returning constructors, and computed member
+        // expressions have no exact declaration target. Their named type usages are
+        // still captured independently by the normal type-reference walk.
         _ => None,
     }
 }

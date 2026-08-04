@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// One source-file fact staged into an immutable generation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FileInput {
     /// Stable identity derived independently of worker scheduling.
     pub file_id: FileId,
@@ -26,7 +26,7 @@ pub struct FileInput {
 }
 
 /// One code-symbol fact tied to a staged file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SymbolInput {
     /// Stable structural symbol identity.
     pub symbol_id: SymbolId,
@@ -69,7 +69,7 @@ pub struct SymbolInput {
 }
 
 /// One resolved structural graph edge.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EdgeInput {
     /// Origin symbol.
     pub source_symbol_id: SymbolId,
@@ -119,7 +119,7 @@ impl ReferenceSpanPrecision {
 }
 
 /// One source span that refers to an optional resolved symbol.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ReferenceInput {
     /// File containing the reference.
     pub file_id: FileId,
@@ -146,7 +146,7 @@ pub struct ReferenceInput {
 }
 
 /// One immutable, privacy-safe static numerical evidence site.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NumericalSiteInput {
     /// Stable site identity derived independently of worker scheduling.
     pub site_id: NumericalSiteId,
@@ -181,7 +181,7 @@ pub struct NumericalSiteInput {
 }
 
 /// Search document staged as part of one immutable generation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SearchDocumentInput {
     /// Stable logical identity, independent of `ParadeDB`'s bigint key field.
     pub document_id: DocumentId,
@@ -275,27 +275,27 @@ pub enum GenerationMemoryModelError {
 }
 
 /// Validated, canonical search document ready for deterministic persistence.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CanonicalSearchDocument {
-    pub(super) document_id: DocumentId,
-    pub(super) file_id: Option<FileId>,
-    pub(super) symbol_id: Option<SymbolId>,
-    pub(super) path: String,
-    pub(super) language: String,
-    pub(super) kind: DocumentKind,
-    pub(super) qualified_name: String,
-    pub(super) code: String,
-    pub(super) natural_text: String,
-    pub(super) metadata_json: String,
+    pub(crate) document_id: DocumentId,
+    pub(crate) file_id: Option<FileId>,
+    pub(crate) symbol_id: Option<SymbolId>,
+    pub(crate) path: String,
+    pub(crate) language: String,
+    pub(crate) kind: DocumentKind,
+    pub(crate) qualified_name: String,
+    pub(crate) code: String,
+    pub(crate) natural_text: String,
+    pub(crate) metadata_json: String,
 }
 
-pub(super) struct ValidatedFactTables {
-    pub(super) files: Vec<FileInput>,
-    pub(super) symbols: Vec<SymbolInput>,
-    pub(super) edges: Vec<EdgeInput>,
-    pub(super) references: Vec<ReferenceInput>,
-    pub(super) numerical_sites: Vec<NumericalSiteInput>,
-    pub(super) documents: Vec<CanonicalSearchDocument>,
+pub(crate) struct ValidatedFactTables {
+    pub(crate) files: Vec<FileInput>,
+    pub(crate) symbols: Vec<SymbolInput>,
+    pub(crate) edges: Vec<EdgeInput>,
+    pub(crate) references: Vec<ReferenceInput>,
+    pub(crate) numerical_sites: Vec<NumericalSiteInput>,
+    pub(crate) documents: Vec<CanonicalSearchDocument>,
 }
 
 /// Storage-validated, deterministically reduced generation payload.

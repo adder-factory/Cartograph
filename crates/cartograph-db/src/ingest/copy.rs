@@ -6,7 +6,6 @@ use std::{
 
 use cartograph_config::DatabaseSchema;
 use cartograph_domain::{GenerationId, ProjectId};
-use sqlx_core::error::Error as SqlxError;
 use sqlx_postgres::{PgConnection, PgCopyIn};
 
 use crate::{StorageError, database::quoted_schema, generation::PrepareGenerationProgress};
@@ -237,7 +236,7 @@ const NUMERICAL_SITES_LAYOUT: CopyTableLayout = CopyTableLayout {
 const DOCUMENTS_LAYOUT: CopyTableLayout = CopyTableLayout {
     copied_table: CopiedTable::Documents,
     table: "search_documents",
-    columns: "project_id, generation_id, document_id, file_id, symbol_id, path, language, document_kind, qualified_name, code, natural_text, metadata",
+    columns: "project_id, generation_id, document_id, file_id, symbol_id, path, language, document_kind, qualified_name, code, natural_text, metadata, metadata_json",
     operation: "copy-search-documents",
 };
 
@@ -378,49 +377,152 @@ where
     if expected_rows == 0 {
         return Ok(());
     }
-    // The only dynamic identifier is a validated, double-quoted
-    // DatabaseSchema; table names and column lists are compile-time literals.
-    let mut copy = connection
-        .copy_in_raw(&spec.statement)
-        .await
-        .map_err(|_| database_error(spec.operation))?;
-    if stream_rows(&mut copy, rows).await.is_err() {
-        let _ = copy.abort(COPY_ABORT_MESSAGE).await;
-        return Err(database_error(spec.operation));
-    }
-    let copied = copy
-        .finish()
-        .await
-        .map_err(|_| database_error(spec.operation))?;
-    let expected =
+    let expected_rows =
         u64::try_from(expected_rows).map_err(|_| database_error("copy-row-count-overflow"))?;
-    if copied != expected {
-        return Err(database_error("copy-row-count-mismatch"));
-    }
-    Ok(())
+    copy_text_rows_counted(
+        connection,
+        &spec.statement,
+        spec.operation,
+        expected_rows,
+        rows.map(Ok),
+    )
+    .await
 }
 
-async fn stream_rows<I>(copy: &mut PgCopyIn<&mut PgConnection>, rows: I) -> Result<(), SqlxError>
+pub(crate) async fn copy_text_rows_counted<I>(
+    connection: &mut PgConnection,
+    statement: &str,
+    operation: &'static str,
+    expected_rows: u64,
+    rows: I,
+) -> Result<(), StorageError>
 where
-    I: IntoIterator<Item = Vec<u8>> + Send,
+    I: IntoIterator<Item = Result<Vec<u8>, StorageError>> + Send,
     I::IntoIter: Send,
 {
-    let mut chunk = Vec::with_capacity(COPY_CHUNK_BYTES);
+    if expected_rows == 0 {
+        return Ok(());
+    }
+    let mut copy = CountedTextCopy::begin(connection, statement, operation, expected_rows).await?;
     for row in rows {
-        if !chunk.is_empty() && chunk.len().saturating_add(row.len()) > COPY_CHUNK_BYTES {
-            copy.send(chunk.as_slice()).await?;
-            chunk.clear();
+        copy.push(row).await?;
+    }
+    copy.finish().await
+}
+
+pub(crate) struct CountedTextCopy<'connection> {
+    copy: Option<PgCopyIn<&'connection mut PgConnection>>,
+    operation: &'static str,
+    expected_rows: u64,
+    streamed_rows: u64,
+    chunk: Vec<u8>,
+}
+
+impl<'connection> CountedTextCopy<'connection> {
+    pub(crate) async fn begin(
+        connection: &'connection mut PgConnection,
+        statement: &str,
+        operation: &'static str,
+        expected_rows: u64,
+    ) -> Result<Self, StorageError> {
+        if expected_rows == 0 {
+            return Err(StorageError::InvalidInput {
+                field: "copy_expected_rows",
+            });
+        }
+        // The only dynamic identifier is a validated, double-quoted
+        // DatabaseSchema; table names and column lists are compile-time literals.
+        let copy = connection
+            .copy_in_raw(statement)
+            .await
+            .map_err(|_| database_error(operation))?;
+        Ok(Self {
+            copy: Some(copy),
+            operation,
+            expected_rows,
+            streamed_rows: 0,
+            chunk: Vec::with_capacity(COPY_CHUNK_BYTES),
+        })
+    }
+
+    pub(crate) async fn push(
+        &mut self,
+        row: Result<Vec<u8>, StorageError>,
+    ) -> Result<(), StorageError> {
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                self.abort().await;
+                return Err(error);
+            }
+        };
+        if self.streamed_rows >= self.expected_rows {
+            self.abort().await;
+            return Err(database_error("copy-row-count-mismatch"));
+        }
+        if !self.chunk.is_empty() && self.chunk.len().saturating_add(row.len()) > COPY_CHUNK_BYTES {
+            self.flush_chunk().await?;
         }
         if row.len() > COPY_CHUNK_BYTES {
-            copy.send(row.as_slice()).await?;
+            self.send(row.as_slice()).await?;
         } else {
-            chunk.extend_from_slice(&row);
+            self.chunk.extend_from_slice(&row);
+        }
+        self.streamed_rows = self.streamed_rows.saturating_add(1);
+        Ok(())
+    }
+
+    pub(crate) async fn finish(mut self) -> Result<(), StorageError> {
+        if self.streamed_rows != self.expected_rows {
+            self.abort().await;
+            return Err(database_error("copy-row-count-mismatch"));
+        }
+        self.flush_chunk().await?;
+        let copy = self
+            .copy
+            .take()
+            .ok_or_else(|| database_error(self.operation))?;
+        let copied = copy
+            .finish()
+            .await
+            .map_err(|_| database_error(self.operation))?;
+        if copied != self.expected_rows {
+            return Err(database_error("copy-row-count-mismatch"));
+        }
+        Ok(())
+    }
+
+    async fn flush_chunk(&mut self) -> Result<(), StorageError> {
+        if self.chunk.is_empty() {
+            return Ok(());
+        }
+        let mut chunk = mem::take(&mut self.chunk);
+        let result = self.send(chunk.as_slice()).await;
+        chunk.clear();
+        self.chunk = chunk;
+        result
+    }
+
+    async fn send(&mut self, bytes: &[u8]) -> Result<(), StorageError> {
+        let result = match self.copy.as_mut() {
+            Some(copy) => copy
+                .send(bytes)
+                .await
+                .map(|_| ())
+                .map_err(|_| database_error(self.operation)),
+            None => Err(database_error(self.operation)),
+        };
+        if result.is_err() {
+            self.abort().await;
+        }
+        result
+    }
+
+    async fn abort(&mut self) {
+        if let Some(copy) = self.copy.take() {
+            let _ = copy.abort(COPY_ABORT_MESSAGE).await;
         }
     }
-    if !chunk.is_empty() {
-        copy.send(chunk.as_slice()).await?;
-    }
-    Ok(())
 }
 
 fn encode_file(context: &CopyGenerationContext, file: &FileInput) -> Vec<u8> {
@@ -560,28 +662,29 @@ fn encode_document(context: &CopyGenerationContext, document: &CanonicalSearchDo
     row.text(&document.code);
     row.text(&document.natural_text);
     row.text(&document.metadata_json);
+    row.text(&document.metadata_json);
     row.finish()
 }
 
-struct TextRow {
+pub(crate) struct TextRow {
     bytes: Vec<u8>,
     needs_delimiter: bool,
 }
 
 impl TextRow {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             bytes: Vec::new(),
             needs_delimiter: false,
         }
     }
 
-    fn text(&mut self, value: &str) {
+    pub(crate) fn text(&mut self, value: &str) {
         self.delimiter();
         escape_text(value, &mut self.bytes);
     }
 
-    fn optional_text(&mut self, value: Option<&str>) {
+    pub(crate) fn optional_text(&mut self, value: Option<&str>) {
         if let Some(value) = value {
             self.text(value);
         } else {
@@ -590,11 +693,11 @@ impl TextRow {
         }
     }
 
-    fn number(&mut self, value: impl Display) {
+    pub(crate) fn number(&mut self, value: impl Display) {
         self.text(&value.to_string());
     }
 
-    fn optional_number(&mut self, value: Option<impl Display>) {
+    pub(crate) fn optional_number(&mut self, value: Option<impl Display>) {
         if let Some(value) = value {
             self.number(value);
         } else {
@@ -610,7 +713,7 @@ impl TextRow {
         self.needs_delimiter = true;
     }
 
-    fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         self.bytes.push(b'\n');
         self.bytes
     }

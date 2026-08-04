@@ -29,7 +29,7 @@ Its length-delimited fixture/config fingerprint is
 Each item performs 32 deterministic BLAKE3 analysis rounds before producing
 typed file, symbol, relationship, reference, and search-document facts.
 
-Those two fingerprints, the logical generation digest, all five row counts,
+Those two fingerprints, the logical generation digest, all six row counts,
 and the ordered BM25 document IDs are committed constants in the benchmark.
 The first run cannot adopt a changed workload as a new baseline. A corpus,
 configuration, reducer, schema, or retrieval change must deliberately update
@@ -70,11 +70,13 @@ stage or end-to-end duration. Stage time covers the bounded parallel Parse
 stage plus the one-item supervised canonical Reduce stage. Their reservations
 are sequential, so peak bytes are the larger live reservation, not their sum.
 This historical digest-v4 run measured the then-current five table streams.
-The current V7 harness measures six streams by adding `numerical_sites` (zero
+The current V13 harness measures six streams by adding `numerical_sites` (zero
 rows in this synthetic TypeScript workload), including bounded row encoding,
-but still excludes validation, fencing, the ready transition, publication, and
-the verification queries. New timings must be published as a fresh audit rather
-than mixed into the historical table below.
+validation, fencing, the ready transition, publication, and verification
+queries. Its independently reproduced frozen V13 digest is
+`13beef40a8fe509a49efd474d96ec5266a77d694d87f011ae947fd3cf7243842`.
+New timings must be published as a fresh audit rather than mixed into the
+historical table below.
 
 | Workers | Window | Stage p50 / p95 | COPY p50 / p95 | End-to-end p50 / p95 | Stage items/s | End-to-end items/s | Peak items | Peak reserved bytes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

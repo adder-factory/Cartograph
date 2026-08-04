@@ -12,13 +12,20 @@ use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationContents,
     GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
-    LeaseRequest, LeaseTarget, NewGeneration, NewProject, NumericalSiteInput,
+    LeaseRequest, LeaseTarget, NativeGenerationExtractedCursor, NativeGenerationSpill,
+    NativeGenerationSpillCachedRow, NativeGenerationSpillExtractedBatch,
+    NativeGenerationSpillFactBatch, NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy,
+    NativeGenerationSpillRow, NativeGenerationSpillState, NativeGenerationSpillWrite,
+    NativeParseCacheBatchWrite, NativeParseCacheEntry, NativeParseCacheKey,
+    NativeParseCacheKeyInput, NewGeneration, NewProject, NumericalSiteInput,
     PrepareGenerationMetrics, ProjectLease, ReadyGeneration, RecoverableGeneration, ReferenceInput,
-    SearchDocumentInput, StorageError, SymbolInput, validate_generation_facts,
+    SearchDocumentInput, SpilledGenerationContents, StagedGeneration, StorageError, SymbolInput,
+    validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus,
-    GenerationDigestVersion, GenerationId, NumericalSiteId, ProjectId, ProjectOperation, SymbolId,
+    GenerationDigestVersion, GenerationId, NormalizedPath, NumericalSiteId, ProjectId,
+    ProjectOperation, SourceLanguage, SymbolId,
 };
 use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -50,7 +57,7 @@ const STRUCTURAL_HASH_ONE: &str =
 const STRUCTURAL_HASH_TWO: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "8a76aca5bc4dc3682546a0d1b1cc481c230105a0a2eece5b0c95d1c339f005b0";
+    "10ec927a3c35274f8629adc49da6fc4edb546d751e24e2d3b409d945a9a7c198";
 const SINGLE_WORKER: u16 = 1;
 const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;
@@ -70,6 +77,1015 @@ const INDIVIDUAL_COPY_ROW_COUNT: i64 = 1;
 const TEST_LEASE_DURATION: Duration = Duration::from_secs(30);
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn native_generation_spill_is_fenced_idempotent_and_partition_reduced() {
+    let fixture = open_fixture().await;
+    let mut run = begin_spill_test(&fixture).await;
+    exercise_spill_parse_resume(&fixture, &mut run).await;
+    let canonical_expected = exercise_spill_fact_resume(&fixture, &mut run).await;
+    complete_spill_and_prepare(&fixture, run, &canonical_expected).await;
+    assert_spill_partition_rejects_missing_edge_target(&fixture).await;
+    assert_spill_partition_rejects_conflicting_document(&fixture).await;
+    assert_spill_quota_and_fence(&fixture).await;
+    assert_parse_cache_batch_round_trip(&fixture).await;
+    drop(fixture.database);
+    drop_schema(&fixture.pool, &fixture.schema).await;
+    fixture.pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn native_generation_spill_rechecks_lease_immediately_before_commit() {
+    let append_fixture = open_fixture().await;
+    assert_expired_lease_rolls_back_spill_append(&append_fixture).await;
+    drop(append_fixture.database);
+    drop_schema(&append_fixture.pool, &append_fixture.schema).await;
+    append_fixture.pool.close().await;
+
+    let cursor_fixture = open_fixture().await;
+    assert_expired_lease_rolls_back_canonical_cursor(&cursor_fixture).await;
+    drop(cursor_fixture.database);
+    drop_schema(&cursor_fixture.pool, &cursor_fixture.schema).await;
+    cursor_fixture.pool.close().await;
+}
+
+async fn assert_expired_lease_rolls_back_spill_append(fixture: &DatabaseFixture) {
+    let run = begin_spill_test(fixture).await;
+    install_spill_lease_expiry_trigger(fixture).await;
+    assert_eq!(
+        run.spill
+            .append_extracted_batch(extracted_spill_batch())
+            .await,
+        Err(StorageError::LeaseFenceLost)
+    );
+    remove_spill_lease_expiry_trigger(fixture).await;
+    let report = run
+        .spill
+        .report()
+        .await
+        .unwrap_or_else(|error| panic!("rolled-back spill report was unavailable: {error}"));
+    assert_eq!(report.logical_bytes, 0);
+    assert_eq!(report.raw_rows, 0);
+    assert_eq!(report.extracted_files, 0);
+    assert_eq!(
+        spill_opaque_counts(fixture, run.staged.generation_id()).await,
+        (0, 0)
+    );
+    fail_spill_test_run(fixture, run).await;
+}
+
+async fn assert_expired_lease_rolls_back_canonical_cursor(fixture: &DatabaseFixture) {
+    let run = begin_spill_test(fixture).await;
+    run.spill
+        .append_extracted_batch(extracted_spill_batch())
+        .await
+        .unwrap_or_else(|error| panic!("cursor fixture parse batch failed: {error}"));
+    run.spill
+        .finish_parsing(1)
+        .await
+        .unwrap_or_else(|error| panic!("cursor fixture parse phase did not seal: {error}"));
+    let limits = GenerationValidationLimits::new(
+        TEST_VALIDATION_OUTPUT_BYTES,
+        TEST_VALIDATION_WORKING_BYTES,
+    )
+    .unwrap_or_else(|error| panic!("cursor fixture limits were invalid: {error}"));
+    let batch = NativeGenerationSpillFactBatch::new(
+        0,
+        GenerationFacts {
+            files: vec![file_one()],
+            symbols: vec![symbol_one()],
+            documents: vec![document_one(false)],
+            ..GenerationFacts::default()
+        },
+        limits,
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("cursor fixture fact batch was invalid: {error}"));
+    let counts = batch.counts();
+    run.spill
+        .append_fact_batch(batch)
+        .await
+        .unwrap_or_else(|error| panic!("cursor fixture facts did not stage: {error}"));
+    run.spill
+        .seal_resolution(counts)
+        .await
+        .unwrap_or_else(|error| panic!("cursor fixture facts did not seal: {error}"));
+    let before = spill_cursor_snapshot(fixture, run.staged.generation_id()).await;
+    install_spill_lease_expiry_trigger(fixture).await;
+    assert_eq!(
+        run.spill.canonicalize_next().await,
+        Err(StorageError::LeaseFenceLost)
+    );
+    remove_spill_lease_expiry_trigger(fixture).await;
+    let after = spill_cursor_snapshot(fixture, run.staged.generation_id()).await;
+    assert_eq!(after, before);
+    fail_spill_test_run(fixture, run).await;
+}
+
+async fn install_spill_lease_expiry_trigger(fixture: &DatabaseFixture) {
+    let statements = [
+        format!(
+            r#"CREATE FUNCTION "{schema}".expire_spill_lease_before_commit()
+                RETURNS trigger LANGUAGE plpgsql AS $body$
+                BEGIN
+                    UPDATE "{schema}".project_operation_leases
+                    SET acquired_at = clock_timestamp() - interval '3 seconds',
+                        heartbeat_at = clock_timestamp() - interval '2 seconds',
+                        expires_at = clock_timestamp() - interval '1 second'
+                    WHERE project_id = NEW.project_id
+                      AND generation_id = NEW.generation_id
+                      AND operation = 'index';
+                    PERFORM pg_sleep(0.05);
+                    RETURN NEW;
+                END
+                $body$"#,
+            schema = fixture.schema,
+        ),
+        format!(
+            r#"CREATE TRIGGER expire_spill_lease_before_commit
+                BEFORE UPDATE ON "{schema}".native_generation_spills
+                FOR EACH ROW EXECUTE FUNCTION
+                    "{schema}".expire_spill_lease_before_commit()"#,
+            schema = fixture.schema,
+        ),
+    ];
+    for statement in statements {
+        query(AssertSqlSafe(statement))
+            .execute(&fixture.pool)
+            .await
+            .unwrap_or_else(|error| panic!("could not install spill lease expiry: {error}"));
+    }
+}
+
+async fn remove_spill_lease_expiry_trigger(fixture: &DatabaseFixture) {
+    let statements = [
+        format!(
+            r#"DROP TRIGGER expire_spill_lease_before_commit
+                ON "{}".native_generation_spills"#,
+            fixture.schema,
+        ),
+        format!(
+            r#"DROP FUNCTION "{}".expire_spill_lease_before_commit()"#,
+            fixture.schema,
+        ),
+    ];
+    for statement in statements {
+        query(AssertSqlSafe(statement))
+            .execute(&fixture.pool)
+            .await
+            .unwrap_or_else(|error| panic!("could not remove spill lease expiry: {error}"));
+    }
+}
+
+async fn spill_opaque_counts(
+    fixture: &DatabaseFixture,
+    generation_id: &GenerationId,
+) -> (i64, i64) {
+    let statement = format!(
+        r#"SELECT
+              (SELECT count(*) FROM "{schema}".native_generation_spill_batches
+               WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
+              (SELECT count(*) FROM "{schema}".native_generation_spill_rows
+               WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid))"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(generation_id.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("spill rollback counts were unavailable: {error}"));
+    (
+        row.try_get::<i64, _>(0)
+            .unwrap_or_else(|error| panic!("spill batch count was invalid: {error}")),
+        row.try_get::<i64, _>(1)
+            .unwrap_or_else(|error| panic!("spill row count was invalid: {error}")),
+    )
+}
+
+async fn spill_cursor_snapshot(
+    fixture: &DatabaseFixture,
+    generation_id: &GenerationId,
+) -> (String, Option<String>, i32, i64, i64, i64) {
+    let statement = format!(
+        r#"SELECT spill.phase, spill.canonical_relation, spill.canonical_partition,
+                  spill.canonical_rows,
+                  (SELECT count(*) FROM "{schema}".native_generation_spill_files AS raw
+                   WHERE raw.project_id = spill.project_id
+                     AND raw.generation_id = spill.generation_id),
+                  (SELECT count(*) FROM "{schema}".files AS canonical
+                   WHERE canonical.project_id = spill.project_id
+                     AND canonical.generation_id = spill.generation_id)
+            FROM "{schema}".native_generation_spills AS spill
+            WHERE spill.project_id = CAST($1 AS uuid)
+              AND spill.generation_id = CAST($2 AS uuid)"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(generation_id.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("spill cursor snapshot was unavailable: {error}"));
+    (
+        row.try_get::<String, _>(0)
+            .unwrap_or_else(|error| panic!("spill phase was invalid: {error}")),
+        row.try_get::<Option<String>, _>(1)
+            .unwrap_or_else(|error| panic!("spill relation was invalid: {error}")),
+        row.try_get::<i32, _>(2)
+            .unwrap_or_else(|error| panic!("spill partition was invalid: {error}")),
+        row.try_get::<i64, _>(3)
+            .unwrap_or_else(|error| panic!("spill canonical count was invalid: {error}")),
+        row.try_get::<i64, _>(4)
+            .unwrap_or_else(|error| panic!("spill raw count was invalid: {error}")),
+        row.try_get::<i64, _>(5)
+            .unwrap_or_else(|error| panic!("spill published count was invalid: {error}")),
+    )
+}
+
+async fn fail_spill_test_run(fixture: &DatabaseFixture, run: SpillTestRun) {
+    fixture
+        .database
+        .fail_generation(
+            RecoverableGeneration::Staged(run.staged),
+            &run.lease.fence(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("spill rollback generation did not fail: {error}"));
+    assert!(fixture.database.release_lease(&run.lease).await.is_ok());
+}
+
+async fn assert_spill_partition_rejects_missing_edge_target(fixture: &DatabaseFixture) {
+    let run = begin_spill_test(fixture).await;
+    run.spill
+        .append_extracted_batch(extracted_spill_batch())
+        .await
+        .unwrap_or_else(|error| panic!("invalid-relation parse batch failed early: {error}"));
+    run.spill
+        .finish_parsing(1)
+        .await
+        .unwrap_or_else(|error| panic!("invalid-relation parse phase did not seal: {error}"));
+    let mut missing_target = edge();
+    missing_target.source_symbol_id = symbol_id(SYMBOL_ONE);
+    missing_target.target_symbol_id = symbol_id(SYMBOL_TWO);
+    let facts = GenerationFacts {
+        files: vec![file_one()],
+        symbols: vec![symbol_one()],
+        edges: vec![missing_target],
+        ..GenerationFacts::default()
+    };
+    let limits = GenerationValidationLimits::new(
+        TEST_VALIDATION_OUTPUT_BYTES,
+        TEST_VALIDATION_WORKING_BYTES,
+    )
+    .unwrap_or_else(|error| panic!("invalid-relation limits were invalid: {error}"));
+    let batch = NativeGenerationSpillFactBatch::new(0, facts, limits, || false)
+        .unwrap_or_else(|error| panic!("cross-batch relation was rejected too early: {error}"));
+    let counts = batch.counts();
+    run.spill
+        .append_fact_batch(batch)
+        .await
+        .unwrap_or_else(|error| panic!("invalid-relation fact batch did not stage: {error}"));
+    run.spill
+        .seal_resolution(counts)
+        .await
+        .unwrap_or_else(|error| panic!("invalid-relation facts did not seal: {error}"));
+    let mut rejected = false;
+    for _ in 0..64 {
+        match run.spill.canonicalize_next().await {
+            Err(StorageError::GenerationSpillConflict) => {
+                rejected = true;
+                break;
+            }
+            Err(error) => panic!("invalid relation failed with the wrong error: {error}"),
+            Ok(progress) if progress.complete => {
+                panic!("missing edge target reached canonical completion")
+            }
+            Ok(_) => {}
+        }
+    }
+    assert!(
+        rejected,
+        "missing edge target was not rejected by its partition"
+    );
+    assert!(
+        fixture
+            .database
+            .fail_generation(
+                RecoverableGeneration::Staged(run.staged),
+                &run.lease.fence(),
+            )
+            .await
+            .is_ok()
+    );
+    assert!(fixture.database.release_lease(&run.lease).await.is_ok());
+}
+
+async fn assert_spill_partition_rejects_conflicting_document(fixture: &DatabaseFixture) {
+    let run = begin_spill_test(fixture).await;
+    run.spill
+        .append_extracted_batch(extracted_spill_batch())
+        .await
+        .unwrap_or_else(|error| panic!("document-conflict parse batch failed early: {error}"));
+    run.spill
+        .finish_parsing(1)
+        .await
+        .unwrap_or_else(|error| panic!("document-conflict parse phase did not seal: {error}"));
+    let limits = GenerationValidationLimits::new(
+        TEST_VALIDATION_OUTPUT_BYTES,
+        TEST_VALIDATION_WORKING_BYTES,
+    )
+    .unwrap_or_else(|error| panic!("document-conflict limits were invalid: {error}"));
+    let first = NativeGenerationSpillFactBatch::new(
+        0,
+        GenerationFacts {
+            files: vec![file_one()],
+            symbols: vec![symbol_one()],
+            documents: vec![document_one(false)],
+            ..GenerationFacts::default()
+        },
+        limits,
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("first document-conflict batch was invalid: {error}"));
+    let mut conflicting_document = document_one(false);
+    conflicting_document.natural_text.push_str(" conflicting");
+    let second = NativeGenerationSpillFactBatch::new(
+        1,
+        GenerationFacts {
+            documents: vec![conflicting_document],
+            ..GenerationFacts::default()
+        },
+        limits,
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("second document-conflict batch was invalid: {error}"));
+    run.spill
+        .append_fact_batch(first)
+        .await
+        .unwrap_or_else(|error| panic!("first document-conflict batch did not stage: {error}"));
+    run.spill
+        .append_fact_batch(second)
+        .await
+        .unwrap_or_else(|error| panic!("second document-conflict batch did not stage: {error}"));
+    run.spill
+        .seal_resolution(NativeGenerationSpillFactCounts {
+            files: 1,
+            symbols: 1,
+            documents: 2,
+            ..NativeGenerationSpillFactCounts::default()
+        })
+        .await
+        .unwrap_or_else(|error| panic!("document-conflict facts did not seal: {error}"));
+    let mut rejected = false;
+    for _ in 0..96 {
+        match run.spill.canonicalize_next().await {
+            Err(StorageError::GenerationSpillConflict) => {
+                rejected = true;
+                break;
+            }
+            Err(error) => panic!("document conflict failed with the wrong error: {error}"),
+            Ok(progress) if progress.complete => {
+                panic!("conflicting document reached canonical completion")
+            }
+            Ok(_) => {}
+        }
+    }
+    assert!(
+        rejected,
+        "conflicting document was not rejected by its partition"
+    );
+    assert!(
+        fixture
+            .database
+            .fail_generation(
+                RecoverableGeneration::Staged(run.staged),
+                &run.lease.fence(),
+            )
+            .await
+            .is_ok()
+    );
+    assert!(fixture.database.release_lease(&run.lease).await.is_ok());
+}
+
+async fn assert_parse_cache_batch_round_trip(fixture: &DatabaseFixture) {
+    let contract = digest(CONTENT_HASH_REJECTED);
+    let first_key = parse_cache_key(
+        &fixture.project,
+        &contract,
+        "src/cache-first.rs",
+        CONTENT_HASH_ONE,
+        5,
+    );
+    let second_key = parse_cache_key(
+        &fixture.project,
+        &contract,
+        "src/cache-second.rs",
+        CONTENT_HASH_TWO,
+        6,
+    );
+    let entries = || {
+        vec![
+            NativeParseCacheEntry::new(first_key.clone(), b"first".to_vec()),
+            NativeParseCacheEntry::new(second_key.clone(), b"second".to_vec()),
+        ]
+    };
+    assert_eq!(
+        fixture
+            .database
+            .store_native_parse_cache_batch(entries())
+            .await
+            .unwrap_or_else(|error| panic!("parse-cache batch did not commit: {error}")),
+        NativeParseCacheBatchWrite {
+            inserted: 2,
+            already_present: 0,
+        }
+    );
+    assert_eq!(
+        fixture
+            .database
+            .store_native_parse_cache_batch(entries())
+            .await
+            .unwrap_or_else(|error| panic!("parse-cache retry failed: {error}")),
+        NativeParseCacheBatchWrite {
+            inserted: 0,
+            already_present: 2,
+        }
+    );
+    let loaded = fixture
+        .database
+        .load_native_parse_cache_batch(&[second_key, first_key])
+        .await
+        .unwrap_or_else(|error| panic!("parse-cache batch was unavailable: {error}"));
+    assert_eq!(
+        loaded
+            .iter()
+            .map(|record| {
+                record
+                    .as_ref()
+                    .map(cartograph_db::NativeParseCacheRecord::payload)
+            })
+            .collect::<Vec<_>>(),
+        vec![Some(b"second".as_slice()), Some(b"first".as_slice())]
+    );
+}
+
+fn parse_cache_key(
+    project_id: &ProjectId,
+    contract: &ContentDigest,
+    path: &str,
+    content_hash: &str,
+    source_bytes: u64,
+) -> NativeParseCacheKey {
+    NativeParseCacheKey::new(NativeParseCacheKeyInput {
+        project_id: project_id.clone(),
+        extractor_contract_digest: contract.clone(),
+        path: NormalizedPath::parse(path)
+            .unwrap_or_else(|error| panic!("parse-cache path was invalid: {error}")),
+        language: SourceLanguage::Rust,
+        content_hash: digest(content_hash),
+        source_bytes,
+    })
+}
+
+struct SpillTestRun {
+    staged: StagedGeneration,
+    lease: ProjectLease,
+    policy: NativeGenerationSpillPolicy,
+    spill: NativeGenerationSpill,
+}
+
+async fn begin_spill_test(fixture: &DatabaseFixture) -> SpillTestRun {
+    let staged = fixture
+        .database
+        .begin_generation(NewGeneration::new(
+            fixture.project.clone(),
+            REVISION,
+            PARALLEL_WORKERS,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("spill generation did not begin: {error}"));
+    let lease = acquire_generation_lease(fixture, staged.generation_id()).await;
+    let policy = NativeGenerationSpillPolicy::new(64 * 1024 * 1024, 1_000_000)
+        .unwrap_or_else(|error| panic!("spill policy was invalid: {error}"));
+    let spill = NativeGenerationSpill::new(
+        fixture.database.clone(),
+        &staged,
+        lease.fence(),
+        policy,
+        TEST_LEASE_DURATION,
+    )
+    .unwrap_or_else(|error| panic!("spill authority was invalid: {error}"));
+    let report = spill
+        .initialize()
+        .await
+        .unwrap_or_else(|error| panic!("spill did not initialize: {error}"));
+    assert_eq!(report.raw_rows, 0);
+    SpillTestRun {
+        staged,
+        lease,
+        policy,
+        spill,
+    }
+}
+
+fn extracted_spill_batch() -> NativeGenerationSpillExtractedBatch {
+    let first = NativeGenerationSpillRow::new(vec![1], br#"{"file":"first"}"#.to_vec())
+        .unwrap_or_else(|error| panic!("extracted row was invalid: {error}"));
+    NativeGenerationSpillExtractedBatch::new(0, vec![first.into()])
+        .unwrap_or_else(|error| panic!("extracted batch was invalid: {error}"))
+}
+
+async fn cached_extracted_spill_batch(
+    fixture: &DatabaseFixture,
+) -> NativeGenerationSpillExtractedBatch {
+    let payload = br#"{"file":"second"}"#.to_vec();
+    let contract = digest(CONTENT_HASH_REJECTED);
+    let key = parse_cache_key(
+        &fixture.project,
+        &contract,
+        "src/cached-spill.rs",
+        CONTENT_HASH_TWO,
+        6,
+    );
+    fixture
+        .database
+        .store_native_parse_cache(&key, &payload)
+        .await
+        .unwrap_or_else(|error| panic!("cached spill payload did not commit: {error}"));
+    let payload_digest = ContentDigest::from_bytes(*blake3::hash(&payload).as_bytes());
+    let row = NativeGenerationSpillCachedRow::new(
+        vec![2],
+        key,
+        payload_digest,
+        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+    )
+    .unwrap_or_else(|error| panic!("cached extracted row was invalid: {error}"));
+    NativeGenerationSpillExtractedBatch::new(1, vec![row.into()])
+        .unwrap_or_else(|error| panic!("cached extracted batch was invalid: {error}"))
+}
+
+async fn representation_independent_batches(
+    fixture: &DatabaseFixture,
+    sequence: u64,
+    sort_key: u8,
+    path: &str,
+    content_hash: &str,
+    payload: &[u8],
+) -> (
+    NativeGenerationSpillExtractedBatch,
+    NativeGenerationSpillExtractedBatch,
+) {
+    let contract = digest(CONTENT_HASH_REJECTED);
+    let key = parse_cache_key(
+        &fixture.project,
+        &contract,
+        path,
+        content_hash,
+        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+    );
+    fixture
+        .database
+        .store_native_parse_cache(&key, payload)
+        .await
+        .unwrap_or_else(|error| panic!("replay cache payload did not commit: {error}"));
+    let inline = NativeGenerationSpillRow::new(vec![sort_key], payload.to_vec())
+        .unwrap_or_else(|error| panic!("inline replay row was invalid: {error}"));
+    let cached = NativeGenerationSpillCachedRow::new(
+        vec![sort_key],
+        key,
+        ContentDigest::from_bytes(*blake3::hash(payload).as_bytes()),
+        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+    )
+    .unwrap_or_else(|error| panic!("cached replay row was invalid: {error}"));
+    (
+        NativeGenerationSpillExtractedBatch::new(sequence, vec![inline.into()])
+            .unwrap_or_else(|error| panic!("inline replay batch was invalid: {error}")),
+        NativeGenerationSpillExtractedBatch::new(sequence, vec![cached.into()])
+            .unwrap_or_else(|error| panic!("cached replay batch was invalid: {error}")),
+    )
+}
+
+async fn assert_representation_independent_replay(
+    fixture: &DatabaseFixture,
+    spill: &NativeGenerationSpill,
+) {
+    let (inline_first, cached_retry) = representation_independent_batches(
+        fixture,
+        2,
+        4,
+        "src/inline-first.rs",
+        CONTENT_HASH_ONE,
+        br#"{"file":"inline-first"}"#,
+    )
+    .await;
+    assert_eq!(
+        spill
+            .append_extracted_batch(inline_first)
+            .await
+            .unwrap_or_else(|error| panic!("inline-first replay did not commit: {error}")),
+        NativeGenerationSpillWrite::Inserted
+    );
+    assert_eq!(
+        spill
+            .append_extracted_batch(cached_retry)
+            .await
+            .unwrap_or_else(|error| panic!("inline-to-cached replay failed: {error}")),
+        NativeGenerationSpillWrite::AlreadyPresent
+    );
+    let (inline_retry, cached_first) = representation_independent_batches(
+        fixture,
+        3,
+        5,
+        "src/cached-first.rs",
+        CONTENT_HASH_REJECTED,
+        br#"{"file":"cached-first"}"#,
+    )
+    .await;
+    assert_eq!(
+        spill
+            .append_extracted_batch(cached_first)
+            .await
+            .unwrap_or_else(|error| panic!("cached-first replay did not commit: {error}")),
+        NativeGenerationSpillWrite::Inserted
+    );
+    assert_eq!(
+        spill
+            .append_extracted_batch(inline_retry)
+            .await
+            .unwrap_or_else(|error| panic!("cached-to-inline replay failed: {error}")),
+        NativeGenerationSpillWrite::AlreadyPresent
+    );
+}
+
+async fn exercise_spill_parse_resume(fixture: &DatabaseFixture, run: &mut SpillTestRun) {
+    assert_eq!(
+        run.spill
+            .append_extracted_batch(extracted_spill_batch())
+            .await
+            .unwrap_or_else(|error| panic!("extracted batch did not commit: {error}")),
+        NativeGenerationSpillWrite::Inserted
+    );
+    assert_eq!(
+        run.spill
+            .append_extracted_batch(cached_extracted_spill_batch(fixture).await)
+            .await
+            .unwrap_or_else(|error| panic!("cached extracted batch did not commit: {error}")),
+        NativeGenerationSpillWrite::Inserted
+    );
+    run.spill = NativeGenerationSpill::new(
+        fixture.database.clone(),
+        &run.staged,
+        run.lease.fence(),
+        run.policy,
+        TEST_LEASE_DURATION,
+    )
+    .unwrap_or_else(|error| panic!("resumed parse authority was invalid: {error}"));
+    let resumed = run
+        .spill
+        .initialize()
+        .await
+        .unwrap_or_else(|error| panic!("parse spill did not resume: {error}"));
+    assert_eq!(resumed.state, NativeGenerationSpillState::Parsing);
+    assert_eq!(
+        run.spill
+            .append_extracted_batch(extracted_spill_batch())
+            .await
+            .unwrap_or_else(|error| panic!("extracted retry did not commit: {error}")),
+        NativeGenerationSpillWrite::AlreadyPresent
+    );
+    assert_representation_independent_replay(fixture, &run.spill).await;
+    assert_eq!(
+        run.spill
+            .append_extracted_batch(cached_extracted_spill_batch(fixture).await)
+            .await
+            .unwrap_or_else(|error| panic!("cached extracted retry failed: {error}")),
+        NativeGenerationSpillWrite::AlreadyPresent
+    );
+    let overlapping = NativeGenerationSpillExtractedBatch::new(
+        1,
+        vec![
+            NativeGenerationSpillRow::new(vec![3], br#"{"file":"overlap"}"#.to_vec())
+                .unwrap_or_else(|error| panic!("overlap row was invalid: {error}"))
+                .into(),
+        ],
+    )
+    .unwrap_or_else(|error| panic!("overlap batch was invalid: {error}"));
+    assert_eq!(
+        run.spill.append_extracted_batch(overlapping).await,
+        Err(StorageError::GenerationSpillConflict)
+    );
+    run.spill
+        .finish_parsing(4)
+        .await
+        .unwrap_or_else(|error| panic!("parse spill did not seal: {error}"));
+    let first_page = run
+        .spill
+        .load_extracted_page(NativeGenerationExtractedCursor::default(), 1)
+        .await
+        .unwrap_or_else(|error| panic!("batched extraction page was unavailable: {error}"));
+    assert_eq!(
+        first_page
+            .rows()
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
+    let second_page = run
+        .spill
+        .load_extracted_page(first_page.next(), 1)
+        .await
+        .unwrap_or_else(|error| panic!("second extraction page was unavailable: {error}"));
+    assert_eq!(
+        second_page
+            .rows()
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(second_page.rows()[0].1.payload(), br#"{"file":"second"}"#);
+}
+
+async fn exercise_spill_fact_resume(
+    fixture: &DatabaseFixture,
+    run: &mut SpillTestRun,
+) -> CanonicalGenerationFacts {
+    let limits = GenerationValidationLimits::new(
+        TEST_VALIDATION_OUTPUT_BYTES,
+        TEST_VALIDATION_WORKING_BYTES,
+    )
+    .unwrap_or_else(|error| panic!("spill validation limits were invalid: {error}"));
+    let expected = canonical(generation_facts(false));
+    let (first_facts, second_facts) = spill_fact_partitions();
+    let first = NativeGenerationSpillFactBatch::new(1, first_facts, limits, || false)
+        .unwrap_or_else(|error| panic!("fact spill batch was invalid: {error}"));
+    let first_counts = first.counts();
+    let second = NativeGenerationSpillFactBatch::new(2, second_facts, limits, || false)
+        .unwrap_or_else(|error| panic!("second fact spill batch was invalid: {error}"));
+    let counts = combined_fact_counts(first_counts, second.counts());
+    assert_eq!(
+        run.spill
+            .append_fact_batches(vec![first, second])
+            .await
+            .unwrap_or_else(|error| panic!("fact spill batches did not commit: {error}")),
+        vec![
+            NativeGenerationSpillWrite::Inserted,
+            NativeGenerationSpillWrite::Inserted
+        ]
+    );
+    let (first_retry_facts, second_retry_facts) = spill_fact_partitions();
+    let first_retry = NativeGenerationSpillFactBatch::new(1, first_retry_facts, limits, || false)
+        .unwrap_or_else(|error| panic!("retry fact spill batch was invalid: {error}"));
+    let second_retry = NativeGenerationSpillFactBatch::new(2, second_retry_facts, limits, || false)
+        .unwrap_or_else(|error| panic!("second retry fact spill batch was invalid: {error}"));
+    assert_eq!(
+        run.spill
+            .append_fact_batches(vec![first_retry, second_retry])
+            .await
+            .unwrap_or_else(|error| panic!("fact spill retry failed: {error}")),
+        vec![
+            NativeGenerationSpillWrite::AlreadyPresent,
+            NativeGenerationSpillWrite::AlreadyPresent
+        ]
+    );
+    run.spill
+        .seal_resolution(counts)
+        .await
+        .unwrap_or_else(|error| panic!("resolver spill did not seal: {error}"));
+    for _ in 0..8 {
+        let progress = run
+            .spill
+            .canonicalize_next()
+            .await
+            .unwrap_or_else(|error| panic!("initial spill partition failed: {error}"));
+        assert!(!progress.complete);
+    }
+    run.spill = NativeGenerationSpill::new(
+        fixture.database.clone(),
+        &run.staged,
+        run.lease.fence(),
+        run.policy,
+        TEST_LEASE_DURATION,
+    )
+    .unwrap_or_else(|error| panic!("resumed reduction authority was invalid: {error}"));
+    assert_spill_resume_replay(&run.spill, limits).await;
+    expected
+}
+
+async fn assert_spill_resume_replay(
+    spill: &NativeGenerationSpill,
+    limits: GenerationValidationLimits,
+) {
+    let resumed = spill
+        .initialize()
+        .await
+        .unwrap_or_else(|error| panic!("canonical spill did not resume: {error}"));
+    assert_eq!(resumed.state, NativeGenerationSpillState::Canonicalizing);
+    spill
+        .finish_parsing(4)
+        .await
+        .unwrap_or_else(|error| panic!("resumed parse seal was not idempotent: {error}"));
+    let (retry_facts, _) = spill_fact_partitions();
+    let retry = NativeGenerationSpillFactBatch::new(1, retry_facts, limits, || false)
+        .unwrap_or_else(|error| panic!("sealed fact retry was invalid: {error}"));
+    assert_eq!(
+        spill
+            .append_fact_batch(retry)
+            .await
+            .unwrap_or_else(|error| panic!("sealed fact retry failed: {error}")),
+        NativeGenerationSpillWrite::AlreadyPresent
+    );
+}
+
+async fn complete_spill_and_prepare(
+    fixture: &DatabaseFixture,
+    run: SpillTestRun,
+    expected: &CanonicalGenerationFacts,
+) {
+    let mut complete = false;
+    for _ in 0..400 {
+        let progress = run
+            .spill
+            .canonicalize_next()
+            .await
+            .unwrap_or_else(|error| panic!("spill canonicalization failed: {error}"));
+        if progress.complete {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete, "spill canonicalization did not complete");
+    assert_spill_canonical_counts(
+        fixture,
+        run.staged.generation_id(),
+        canonical_fact_counts(expected),
+    )
+    .await;
+    assert_eq!(
+        run.spill
+            .compute_digest(|| false, |_| async { false })
+            .await,
+        Err(StorageError::GenerationSpillCancelled)
+    );
+    let digest = run
+        .spill
+        .compute_digest(|| false, |_| async { true })
+        .await
+        .unwrap_or_else(|error| panic!("spill digest failed: {error}"));
+    assert_eq!(digest.digest(), expected.digest());
+    assert_spill_digest_counts(digest.counts(), expected);
+    let ready = fixture
+        .database
+        .prepare_spilled_generation(
+            SpilledGenerationContents::new(run.staged, digest),
+            &run.lease.fence(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("spilled generation did not become ready: {error}"));
+    assert_eq!(ready.content_digest(), expected.digest());
+    assert!(fixture.database.release_lease(&run.lease).await.is_ok());
+}
+
+fn assert_spill_digest_counts(
+    counts: NativeGenerationSpillFactCounts,
+    expected: &CanonicalGenerationFacts,
+) {
+    assert_eq!(counts.files, expected.files().len() as u64);
+    assert_eq!(counts.symbols, expected.symbols().len() as u64);
+    assert_eq!(counts.edges, expected.edges().len() as u64);
+    assert_eq!(counts.references, expected.references().len() as u64);
+    assert_eq!(
+        counts.numerical_sites,
+        expected.numerical_sites().len() as u64
+    );
+    assert_eq!(counts.documents, expected.documents().len() as u64);
+}
+
+fn combined_fact_counts(
+    first: NativeGenerationSpillFactCounts,
+    second: NativeGenerationSpillFactCounts,
+) -> NativeGenerationSpillFactCounts {
+    NativeGenerationSpillFactCounts {
+        files: first.files + second.files,
+        symbols: first.symbols + second.symbols,
+        edges: first.edges + second.edges,
+        references: first.references + second.references,
+        numerical_sites: first.numerical_sites + second.numerical_sites,
+        documents: first.documents + second.documents,
+    }
+}
+
+fn canonical_fact_counts(expected: &CanonicalGenerationFacts) -> NativeGenerationSpillFactCounts {
+    NativeGenerationSpillFactCounts {
+        files: expected.files().len() as u64,
+        symbols: expected.symbols().len() as u64,
+        edges: expected.edges().len() as u64,
+        references: expected.references().len() as u64,
+        numerical_sites: expected.numerical_sites().len() as u64,
+        documents: expected.documents().len() as u64,
+    }
+}
+
+async fn assert_spill_quota_and_fence(fixture: &DatabaseFixture) {
+    let staged = fixture
+        .database
+        .begin_generation(NewGeneration::new(
+            fixture.project.clone(),
+            "2222222222222222222222222222222222222222",
+            SINGLE_WORKER,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("quota generation did not begin: {error}"));
+    let lease = acquire_generation_lease(fixture, staged.generation_id()).await;
+    let spill = NativeGenerationSpill::new(
+        fixture.database.clone(),
+        &staged,
+        lease.fence(),
+        NativeGenerationSpillPolicy::new(1, 1)
+            .unwrap_or_else(|error| panic!("quota policy was invalid: {error}")),
+        TEST_LEASE_DURATION,
+    )
+    .unwrap_or_else(|error| panic!("quota authority was invalid: {error}"));
+    spill
+        .initialize()
+        .await
+        .unwrap_or_else(|error| panic!("quota spill did not initialize: {error}"));
+    let oversized = || {
+        NativeGenerationSpillExtractedBatch::new(
+            0,
+            vec![
+                NativeGenerationSpillRow::new(vec![1], vec![2])
+                    .unwrap_or_else(|error| panic!("quota row was invalid: {error}"))
+                    .into(),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("quota batch was invalid: {error}"))
+    };
+    assert!(matches!(
+        spill.append_extracted_batch(oversized()).await,
+        Err(StorageError::GenerationSpillLimitReached { resource: "bytes" })
+    ));
+    assert_eq!(
+        spill
+            .report()
+            .await
+            .unwrap_or_else(|error| panic!("quota report was unavailable: {error}"))
+            .raw_rows,
+        0
+    );
+    assert!(fixture.database.release_lease(&lease).await.is_ok());
+    assert_eq!(
+        spill.append_extracted_batch(oversized()).await,
+        Err(StorageError::LeaseFenceLost)
+    );
+}
+
+async fn assert_spill_canonical_counts(
+    fixture: &DatabaseFixture,
+    generation_id: &GenerationId,
+    expected: cartograph_db::NativeGenerationSpillFactCounts,
+) {
+    let statement = format!(
+        r#"SELECT
+            (SELECT count(*) FROM "{schema}"."files"
+              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
+            (SELECT count(*) FROM "{schema}"."symbols"
+              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
+            (SELECT count(*) FROM "{schema}"."edges"
+              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
+            (SELECT count(*) FROM "{schema}"."references"
+              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
+            (SELECT count(*) FROM "{schema}"."numerical_sites"
+              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
+            (SELECT count(*) FROM "{schema}"."search_documents"
+              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid))"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(generation_id.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("canonical spill counts were unavailable: {error}"));
+    let actual = [
+        row.try_get::<i64, _>(0).ok(),
+        row.try_get::<i64, _>(1).ok(),
+        row.try_get::<i64, _>(2).ok(),
+        row.try_get::<i64, _>(3).ok(),
+        row.try_get::<i64, _>(4).ok(),
+        row.try_get::<i64, _>(5).ok(),
+    ];
+    assert_eq!(actual[0], i64::try_from(expected.files).ok());
+    assert_eq!(actual[1], i64::try_from(expected.symbols).ok());
+    assert_eq!(actual[2], i64::try_from(expected.edges).ok());
+    assert_eq!(actual[3], i64::try_from(expected.references).ok());
+    assert_eq!(actual[4], i64::try_from(expected.numerical_sites).ok());
+    assert_eq!(actual[5], i64::try_from(expected.documents).ok());
+}
 
 #[tokio::test]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
@@ -545,6 +1561,19 @@ fn generation_facts(reversed: bool) -> GenerationFacts {
         numerical_sites,
         documents,
     }
+}
+
+fn spill_fact_partitions() -> (GenerationFacts, GenerationFacts) {
+    let mut facts = generation_facts(false);
+    let first = GenerationFacts {
+        files: vec![facts.files.remove(0)],
+        symbols: vec![facts.symbols.remove(0)],
+        edges: Vec::new(),
+        references: Vec::new(),
+        numerical_sites: vec![facts.numerical_sites.remove(0)],
+        documents: vec![facts.documents.remove(0)],
+    };
+    (first, facts)
 }
 
 fn file_one() -> FileInput {

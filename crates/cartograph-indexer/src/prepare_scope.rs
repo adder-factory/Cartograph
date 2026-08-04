@@ -4,8 +4,10 @@ use std::{
 };
 
 use cartograph_db::{
-    CartographDatabase, GenerationContents, LeaseFence, PrepareGenerationError,
-    PrepareGenerationMutation, PrepareGenerationProgress, ReadyGeneration,
+    CartographDatabase, GenerationContents, LeaseFence, NativeGenerationSpill,
+    NativeGenerationSpillPolicy, PrepareGenerationError, PrepareGenerationMutation,
+    PrepareGenerationProgress, ReadyGeneration, SpilledGenerationContents, StagedGeneration,
+    StorageError,
 };
 use thiserror::Error;
 use tokio::{
@@ -86,6 +88,32 @@ impl PrepareScope {
         }
     }
 
+    pub(crate) async fn prepare_spilled(
+        &self,
+        contents: SpilledGenerationContents,
+    ) -> Result<ReadyGeneration, SupervisedPrepareError> {
+        let receiver = self.start_spilled(contents)?;
+        match receiver.await {
+            Ok(Ok(ready)) => Ok(ready),
+            Ok(Err(error)) => Err(SupervisedPrepareError::Database(error)),
+            Err(_) => Err(SupervisedPrepareError::ResultUnavailable),
+        }
+    }
+
+    pub(crate) fn spill(
+        &self,
+        generation: &StagedGeneration,
+        policy: NativeGenerationSpillPolicy,
+    ) -> Result<NativeGenerationSpill, StorageError> {
+        NativeGenerationSpill::new(
+            self.database.clone(),
+            generation,
+            self.fence.clone(),
+            policy,
+            self.statement_timeout,
+        )
+    }
+
     fn start(
         &self,
         contents: GenerationContents,
@@ -111,6 +139,41 @@ impl PrepareScope {
         registry.handle = Some(tokio::spawn(async move {
             let result = database
                 .prepare_generation_bounded(
+                    contents,
+                    PrepareGenerationMutation::new(&fence, statement_timeout),
+                )
+                .await;
+            let _ = sender.send(result);
+        }));
+        registry.state = PrepareState::Running;
+        Ok(receiver)
+    }
+
+    fn start_spilled(
+        &self,
+        contents: SpilledGenerationContents,
+    ) -> Result<
+        oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
+        SupervisedPrepareError,
+    > {
+        let mut registry = self
+            .registry
+            .lock()
+            .map_err(|_| SupervisedPrepareError::ResultUnavailable)?;
+        match registry.state {
+            PrepareState::Open => {}
+            PrepareState::Running => return Err(SupervisedPrepareError::AlreadyStarted),
+            PrepareState::Closed => return Err(SupervisedPrepareError::ScopeClosed),
+        }
+        let database = self.database.clone();
+        let fence = self.fence.clone();
+        let statement_timeout = self.statement_timeout;
+        let progress = self.progress.clone();
+        let contents = contents.with_progress(progress);
+        let (sender, receiver) = oneshot::channel();
+        registry.handle = Some(tokio::spawn(async move {
+            let result = database
+                .prepare_spilled_generation_bounded(
                     contents,
                     PrepareGenerationMutation::new(&fence, statement_timeout),
                 )

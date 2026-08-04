@@ -26,8 +26,9 @@ use cartograph_db::{
     CartographDatabase, GenerationContents, GenerationRecoveryRequest, GenerationRetentionPolicy,
     GenerationRetentionReport, GenerationRetentionRequest, HistoryRefreshReport,
     IssueHistoryRefreshReport, LeaseError, LeaseRequest, LeaseTarget, MigrationError,
-    NativeParseCacheRetentionPolicy, NativeParseCacheRetentionReport,
-    NativeParseCacheRetentionRequest, NewGeneration, NewProject, ProjectSnapshot, StagedGeneration,
+    NativeGenerationSpillPolicy, NativeParseCacheRetentionPolicy, NativeParseCacheRetentionReport,
+    NativeParseCacheRetentionRequest, NewGeneration, NewProject, ProjectSnapshot,
+    SpilledGenerationContents, StagedGeneration,
 };
 use cartograph_domain::{
     ContentDigest, GenerationDigestVersion, NormalizedPath, ProjectId, ProjectOperation,
@@ -38,14 +39,17 @@ use cartograph_extract::{
     SourceReadError, SourceReadOptions, SourceRoot, native_extractor_contract_digest,
 };
 use cartograph_indexer::{
-    IndexerSupervisor, NativeGenerationBuild, NativeParseCache, NativePipelineConfig,
-    NativePipelineDeadlines, NativePipelineLimits, NativePipelineParallelism, NativePipelineReport,
-    NativeRetainedLimits, PipelineFailure, PipelineStageTiming, ScipOverlayInput, StageCapacity,
-    SupervisorConfig, SupervisorContext, SupervisorError, SupervisorRequest,
+    IndexerSupervisor, NativeGenerationBuild, NativeGenerationStorage, NativeParseCache,
+    NativePipelineConfig, NativePipelineDeadlines, NativePipelineLimits, NativePipelineParallelism,
+    NativePipelineReport, NativeRetainedLimits, PipelineFailure, PipelineStageTiming,
+    ScipOverlayInput, StageCapacity, SupervisorConfig, SupervisorContext, SupervisorError,
+    SupervisorRequest, build_native_generation_spilled,
     build_native_generation_with_scip_and_cache,
 };
 pub use cartograph_indexer::{PipelineFailureReason, PipelineStage};
-use cartograph_llm::{ProjectSourceSettings, load_project_source_settings};
+use cartograph_llm::{
+    ProjectGenerationStorage, ProjectSourceSettings, load_project_source_settings,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Semaphore, oneshot, watch};
@@ -154,6 +158,9 @@ const DEFAULT_MAX_PATH_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_GENERATION_BYTES: u64 = 1024 * 1024 * 1024;
+const AUTO_SPILL_MINIMUM_FILES: usize = 10_000;
+const AUTO_SPILL_MINIMUM_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const AUTO_SPILL_EXPANSION_FACTOR: u64 = 16;
 const DEFAULT_MAX_SUPERVISOR_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_SUPERVISOR_TASKS: usize = 128;
 const MAX_CONFIGURED_WORKERS: u16 = 16;
@@ -303,6 +310,37 @@ pub struct NativeIndexMetrics {
     pub scip_overlay: Option<ScipOverlayMetrics>,
     /// PostgreSQL incremental parse-cache evidence.
     pub parse_cache: NativeParseCacheMetrics,
+    /// Working-set strategy selected for native construction.
+    pub generation_storage: NativeGenerationStorageMetrics,
+    /// Fixed-size durable spill accounting, absent for memory construction.
+    pub spill: Option<NativeGenerationSpillMetrics>,
+}
+
+/// Public native working-set strategy used by one completed build.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeGenerationStorageMetrics {
+    /// Complete generation canonicalization stayed in Rust memory.
+    #[default]
+    Memory,
+    /// Bulky extraction and resolved facts were reduced in PostgreSQL.
+    Postgres,
+}
+
+/// Fixed-size quota and admitted-row evidence for PostgreSQL generation spill.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeGenerationSpillMetrics {
+    /// Sort-key plus serialized payload bytes admitted before canonical reduction.
+    pub logical_bytes: u64,
+    /// Raw extraction and fact rows admitted.
+    pub raw_rows: u64,
+    /// File-local extraction payloads durably retained.
+    pub extracted_files: u64,
+    /// Configured logical spill byte quota.
+    pub maximum_bytes: u64,
+    /// Configured raw spill row quota.
+    pub maximum_rows: u64,
 }
 
 /// Exact cache activity proving how much source was reparsed without weakening global resolution.
@@ -360,6 +398,17 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
             unresolved_links: overlay.unresolved_links(),
         });
         let parse_cache = report.parse_cache();
+        let generation_storage = match report.storage() {
+            NativeGenerationStorage::Memory => NativeGenerationStorageMetrics::Memory,
+            NativeGenerationStorage::PostgreSql => NativeGenerationStorageMetrics::Postgres,
+        };
+        let spill = report.spill().map(|spill| NativeGenerationSpillMetrics {
+            logical_bytes: spill.logical_bytes,
+            raw_rows: spill.raw_rows,
+            extracted_files: spill.extracted_files,
+            maximum_bytes: spill.maximum_bytes,
+            maximum_rows: spill.maximum_rows,
+        });
         Self {
             files: report.discovered_files(),
             skipped_oversized_files: report.skipped_oversized_files(),
@@ -383,6 +432,8 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
                 read_errors: parse_cache.read_errors(),
                 write_errors: parse_cache.write_errors(),
             },
+            generation_storage,
+            spill,
         }
     }
 }
@@ -1244,44 +1295,18 @@ impl ProjectRuntime {
             .project_snapshot_by_root(&self.root_identity)
             .await
             .map_err(|_| ProjectError::StatusFailed)?;
-        if !options.force
-            && let Some(current) = prior.as_ref().and_then(|project| project.current.as_ref())
-            && current.source_revision == source.digest.as_str()
-            && current.digest_version == GenerationDigestVersion::CURRENT
-        {
-            return Ok(IndexPreparation::Unchanged(Box::new(IndexReport {
-                project_id: prior
-                    .as_ref()
-                    .map(|project| project.project_id.clone())
-                    .ok_or(ProjectError::StatusFailed)?,
-                generation_id: current.generation_id.clone(),
-                source_revision: source.digest,
-                content_digest: current.content_digest.clone(),
-                workers: select_worker_count(
-                    source.files,
-                    source.source_bytes,
-                    options.max_workers,
-                ),
-                published: false,
-                publication: IndexPublication::Skipped {
-                    reason: "unchanged_current_generation",
-                    generation_remains_current: true,
-                },
-                native: None,
-                history: HistoryIndexStatus::Unavailable {
-                    reason: "not_attempted",
-                },
-                issue_history: IssueHistoryIndexStatus::Unavailable {
-                    reason: "not_attempted",
-                },
-                profile: options.profile.then(IndexProfile::default),
-                retention: GenerationRetentionStatus::Deferred {
-                    reason: "not_attempted",
-                },
-            })));
+        if let Some(unchanged) = unchanged_index_preparation(prior.as_ref(), &source, &options) {
+            return Ok(unchanged);
         }
 
         let workers = select_worker_count(source.files, source.source_bytes, options.max_workers);
+        let generation_storage = select_generation_storage(
+            source_policy.generation_storage,
+            source.files,
+            source.source_bytes,
+            max_generation_bytes,
+            source.scip_overlay.is_some(),
+        )?;
         let project_id = self
             .database
             .register_project(NewProject::new(
@@ -1311,6 +1336,7 @@ impl ProjectRuntime {
             parse_cache_reads: !options.force,
             discovery_policy: source_policy.discovery,
             index_policy: source_policy.index,
+            generation_storage,
             staged,
         })))
     }
@@ -1368,6 +1394,7 @@ impl ProjectRuntime {
             parse_cache_reads,
             discovery_policy,
             index_policy,
+            generation_storage,
             staged,
         } = pending;
         let target = cartograph_db::LeaseTarget::new(
@@ -1407,6 +1434,7 @@ impl ProjectRuntime {
         }
         let work = GenerationBuildWork {
             build,
+            generation_storage,
             staged,
             report_sender,
         };
@@ -1487,6 +1515,44 @@ enum IndexPreparation {
     Pending(Box<PendingIndex>),
 }
 
+fn unchanged_index_preparation(
+    prior: Option<&ProjectSnapshot>,
+    source: &SourceRevision,
+    options: &IndexOptions,
+) -> Option<IndexPreparation> {
+    let prior = prior?;
+    let current = prior.current.as_ref()?;
+    if options.force
+        || current.source_revision != source.digest.as_str()
+        || current.digest_version != GenerationDigestVersion::CURRENT
+    {
+        return None;
+    }
+    Some(IndexPreparation::Unchanged(Box::new(IndexReport {
+        project_id: prior.project_id.clone(),
+        generation_id: current.generation_id.clone(),
+        source_revision: source.digest.clone(),
+        content_digest: current.content_digest.clone(),
+        workers: select_worker_count(source.files, source.source_bytes, options.max_workers),
+        published: false,
+        publication: IndexPublication::Skipped {
+            reason: "unchanged_current_generation",
+            generation_remains_current: true,
+        },
+        native: None,
+        history: HistoryIndexStatus::Unavailable {
+            reason: "not_attempted",
+        },
+        issue_history: IssueHistoryIndexStatus::Unavailable {
+            reason: "not_attempted",
+        },
+        profile: options.profile.then(IndexProfile::default),
+        retention: GenerationRetentionStatus::Deferred {
+            reason: "not_attempted",
+        },
+    })))
+}
+
 struct PendingIndex {
     project_id: ProjectId,
     generation_id: cartograph_domain::GenerationId,
@@ -1498,6 +1564,7 @@ struct PendingIndex {
     parse_cache_reads: bool,
     discovery_policy: DiscoveryPolicy,
     index_policy: SourceIndexPolicy,
+    generation_storage: GenerationStorageSelection,
     staged: StagedGeneration,
 }
 
@@ -1512,6 +1579,15 @@ struct PreparedIndexPublication {
     request: SupervisorRequest,
     work: GenerationBuildWork,
     report_receiver: oneshot::Receiver<NativePipelineReport>,
+}
+
+fn progress_stalled_project_error(stage: Option<PipelineStage>) -> ProjectError {
+    stage.map_or(ProjectError::IndexFailed, |stage| {
+        ProjectError::IndexStageFailedWithReason {
+            stage,
+            reason: PipelineFailureReason::ProgressStalled,
+        }
+    })
 }
 
 impl PreparedIndexPublication {
@@ -1534,6 +1610,12 @@ impl PreparedIndexPublication {
             }
             Err(SupervisorError::PipelineWithReason { stage, reason }) => {
                 return Err(ProjectError::IndexStageFailedWithReason { stage, reason });
+            }
+            Err(SupervisorError::Cancelled {
+                reason: cartograph_indexer::CancellationReason::ProgressStalled,
+                ..
+            }) => {
+                return Err(progress_stalled_project_error(supervisor_status.stage()));
             }
             Err(SupervisorError::Lease { .. } | SupervisorError::OwnershipLost { .. }) => {
                 return Err(ProjectError::IndexLeaseFailed);
@@ -1578,6 +1660,7 @@ impl PreparedIndexPublication {
 
 struct GenerationBuildWork {
     build: NativeGenerationBuild,
+    generation_storage: GenerationStorageSelection,
     staged: StagedGeneration,
     report_sender: oneshot::Sender<NativePipelineReport>,
 }
@@ -1586,23 +1669,49 @@ async fn prepare_generation(
     context: SupervisorContext,
     work: GenerationBuildWork,
 ) -> Result<cartograph_db::ReadyGeneration, PipelineFailure> {
-    let native = build_native_generation_with_scip_and_cache(&context.stages(), work.build)
-        .await
-        .map_err(|error| native_pipeline_failure(&error))?;
-    let report = native.report();
-    let (facts, _) = native.into_parts();
-    work.report_sender
-        .send(report)
-        .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
-    context
-        .progress()
-        .begin_stage(PipelineStage::Copy)
-        .await
-        .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
-    context
-        .prepare_generation(GenerationContents::new(work.staged, facts))
-        .await
-        .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+    match work.generation_storage {
+        GenerationStorageSelection::Memory => {
+            let native = build_native_generation_with_scip_and_cache(&context.stages(), work.build)
+                .await
+                .map_err(|error| native_pipeline_failure(&error))?;
+            let report = native.report();
+            let (facts, _) = native.into_parts();
+            work.report_sender
+                .send(report)
+                .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+            context
+                .progress()
+                .begin_stage(PipelineStage::Copy)
+                .await
+                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+            context
+                .prepare_generation(GenerationContents::new(work.staged, facts))
+                .await
+                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+        }
+        GenerationStorageSelection::Postgres(policy) => {
+            let spill = context
+                .generation_spill(&work.staged, policy)
+                .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+            let native = build_native_generation_spilled(&context.stages(), work.build, spill)
+                .await
+                .map_err(|error| native_pipeline_failure(&error))?;
+            let report = native.report();
+            let (digest, _) = native.into_parts();
+            work.report_sender
+                .send(report)
+                .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+            context
+                .progress()
+                .begin_stage(PipelineStage::Copy)
+                .await
+                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+            context
+                .prepare_spilled_generation(SpilledGenerationContents::new(work.staged, digest))
+                .await
+                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+        }
+    }
 }
 
 fn native_pipeline_failure(error: &cartograph_indexer::NativePipelineError) -> PipelineFailure {
@@ -1691,7 +1800,20 @@ struct ProjectSourcePolicy {
     discovery: DiscoveryPolicy,
     maximum_file_bytes: Option<usize>,
     maximum_generation_bytes: Option<u64>,
+    generation_storage: GenerationStoragePolicy,
     index: SourceIndexPolicy,
+}
+
+#[derive(Clone, Copy)]
+struct GenerationStoragePolicy {
+    preference: ProjectGenerationStorage,
+    spill: NativeGenerationSpillPolicy,
+}
+
+#[derive(Clone, Copy)]
+enum GenerationStorageSelection {
+    Memory,
+    Postgres(NativeGenerationSpillPolicy),
 }
 
 /// Cheap, immutable source-policy snapshot used by filesystem watchers before
@@ -1810,8 +1932,51 @@ impl ProjectSourcePolicy {
             discovery,
             maximum_file_bytes: settings.maximum_file_bytes(),
             maximum_generation_bytes: settings.maximum_generation_bytes(),
+            generation_storage: GenerationStoragePolicy {
+                preference: settings.generation_storage(),
+                spill: NativeGenerationSpillPolicy::new(
+                    settings
+                        .maximum_spill_bytes()
+                        .unwrap_or_else(|| NativeGenerationSpillPolicy::default().maximum_bytes()),
+                    settings
+                        .maximum_spill_rows()
+                        .unwrap_or_else(|| NativeGenerationSpillPolicy::default().maximum_rows()),
+                )
+                .map_err(|_| ProjectError::InvalidOptions)?,
+            },
             index: SourceIndexPolicy::from_settings(settings),
         })
+    }
+}
+
+fn select_generation_storage(
+    policy: GenerationStoragePolicy,
+    files: usize,
+    source_bytes: u64,
+    maximum_generation_bytes: u64,
+    has_scip_overlay: bool,
+) -> Result<GenerationStorageSelection, ProjectError> {
+    match policy.preference {
+        ProjectGenerationStorage::Memory => Ok(GenerationStorageSelection::Memory),
+        ProjectGenerationStorage::Postgres if has_scip_overlay => Err(ProjectError::InvalidOptions),
+        ProjectGenerationStorage::Postgres => {
+            Ok(GenerationStorageSelection::Postgres(policy.spill))
+        }
+        ProjectGenerationStorage::Auto if has_scip_overlay => {
+            Ok(GenerationStorageSelection::Memory)
+        }
+        ProjectGenerationStorage::Auto => {
+            let estimated_generation_bytes =
+                source_bytes.saturating_mul(AUTO_SPILL_EXPANSION_FACTOR);
+            if files >= AUTO_SPILL_MINIMUM_FILES
+                || source_bytes >= AUTO_SPILL_MINIMUM_SOURCE_BYTES
+                || estimated_generation_bytes >= maximum_generation_bytes
+            {
+                Ok(GenerationStorageSelection::Postgres(policy.spill))
+            } else {
+                Ok(GenerationStorageSelection::Memory)
+            }
+        }
     }
 }
 
@@ -2401,7 +2566,10 @@ mod tests {
             },
         ));
         assert_eq!(parse.stage(), PipelineStage::Parse);
-        assert_eq!(parse.reason(), None);
+        assert_eq!(
+            parse.reason(),
+            Some(PipelineFailureReason::DeadlineExceeded)
+        );
 
         let bounded =
             native_pipeline_failure(&cartograph_indexer::NativePipelineError::Validation {
@@ -2443,6 +2611,26 @@ mod tests {
         assert_eq!(
             public.to_string(),
             "Cartograph index operation failed during reduce/reference_name_too_long; the previous generation remains visible"
+        );
+    }
+
+    #[test]
+    fn progress_stalls_preserve_the_observed_stage_and_stable_reason() {
+        let error = progress_stalled_project_error(Some(PipelineStage::Resolve));
+        assert_eq!(
+            error,
+            ProjectError::IndexStageFailedWithReason {
+                stage: PipelineStage::Resolve,
+                reason: PipelineFailureReason::ProgressStalled,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "Cartograph index operation failed during resolve/progress_stalled; the previous generation remains visible"
+        );
+        assert_eq!(
+            progress_stalled_project_error(None),
+            ProjectError::IndexFailed
         );
     }
 
@@ -2528,6 +2716,95 @@ mod tests {
         assert_eq!(
             select_worker_count(OVERSIZED_CORPUS, u64::MAX, CALLER_CAP),
             CALLER_CAP.min(hardware)
+        );
+    }
+
+    #[test]
+    fn generation_storage_selection_is_forced_or_manifest_aware() {
+        let policy = |preference| GenerationStoragePolicy {
+            preference,
+            spill: NativeGenerationSpillPolicy::default(),
+        };
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Memory),
+                AUTO_SPILL_MINIMUM_FILES,
+                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                DEFAULT_MAX_GENERATION_BYTES,
+                false,
+            ),
+            Ok(GenerationStorageSelection::Memory)
+        ));
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Postgres),
+                1,
+                1,
+                DEFAULT_MAX_GENERATION_BYTES,
+                false,
+            ),
+            Ok(GenerationStorageSelection::Postgres(_))
+        ));
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                AUTO_SPILL_MINIMUM_FILES - 1,
+                (DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR) - 1,
+                DEFAULT_MAX_GENERATION_BYTES,
+                false,
+            ),
+            Ok(GenerationStorageSelection::Memory)
+        ));
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                AUTO_SPILL_MINIMUM_FILES,
+                1,
+                DEFAULT_MAX_GENERATION_BYTES,
+                false,
+            ),
+            Ok(GenerationStorageSelection::Postgres(_))
+        ));
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                1,
+                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                DEFAULT_MAX_GENERATION_BYTES,
+                false,
+            ),
+            Ok(GenerationStorageSelection::Postgres(_))
+        ));
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                1,
+                DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR,
+                DEFAULT_MAX_GENERATION_BYTES,
+                false,
+            ),
+            Ok(GenerationStorageSelection::Postgres(_))
+        ));
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                AUTO_SPILL_MINIMUM_FILES,
+                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                DEFAULT_MAX_GENERATION_BYTES,
+                true,
+            ),
+            Ok(GenerationStorageSelection::Memory)
+        ));
+        assert_eq!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Postgres),
+                1,
+                1,
+                DEFAULT_MAX_GENERATION_BYTES,
+                true,
+            )
+            .err(),
+            Some(ProjectError::InvalidOptions)
         );
     }
 

@@ -896,6 +896,31 @@ fn dynamic_and_shadowed_module_syntax_does_not_invent_bindings() {
 }
 
 #[test]
+fn javascript_construction_references_require_a_stable_named_target() {
+    let file = extract(
+        "src/construction.ts",
+        r"
+interface Contract { run(): void }
+class Widget {}
+const direct = new Widget();
+const qualified = new namespace.Widget();
+const anonymous = new class implements Contract { run() {} };
+const computed = new constructors[name]();
+",
+    );
+    let instantiations = file
+        .references
+        .iter()
+        .filter(|reference| reference.kind == ReferenceKind::Instantiates)
+        .map(|reference| reference.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(instantiations, vec!["Widget", "namespace.Widget"]);
+    assert!(file.references.iter().any(|reference| {
+        reference.kind == ReferenceKind::TypeOf && reference.name == "Contract"
+    }));
+}
+
+#[test]
 fn symbol_health_metrics_are_ast_scoped_privacy_safe_and_agent_focused() {
     let file = extract(
         "src/risky.ts",

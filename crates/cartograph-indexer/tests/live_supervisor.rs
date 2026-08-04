@@ -19,9 +19,10 @@ use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, CurrentGenerationLookup, GenerationContents,
     GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
-    LeaseRequest, LeaseTarget, NewGeneration, NewProject, PrepareGenerationMetrics,
-    ReadyGeneration, SearchDocumentInput, SearchQuery, StructuralFindingQuery,
-    StructuralFindingSeverity, validate_generation_facts,
+    LeaseRequest, LeaseTarget, NativeGenerationSpillPolicy, NewGeneration, NewProject,
+    PrepareGenerationMetrics, ReadyGeneration, SearchDocumentInput, SearchQuery,
+    SpilledGenerationContents, StructuralFindingQuery, StructuralFindingSeverity,
+    validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, GenerationId, GenerationState, ProjectId,
@@ -29,12 +30,13 @@ use cartograph_domain::{
 };
 use cartograph_extract::{DiscoveryLimits, SourceLimits, SourceRoot};
 use cartograph_indexer::{
-    CancellationReason, IndexerSupervisor, NativePipelineConfig, NativePipelineDeadlines,
-    NativePipelineLimits, NativePipelineParallelism, NativeRetainedLimits, PipelineFailure,
+    CancellationReason, IndexerSupervisor, NativeGenerationBuild, NativeGenerationStorage,
+    NativeParseCache, NativePipelineConfig, NativePipelineDeadlines, NativePipelineLimits,
+    NativePipelineParallelism, NativePipelineReport, NativeRetainedLimits, PipelineFailure,
     PipelineStage, StageCapacity, StageDeadlinePolicy, StageEnvelope, StageExecution, StageFold,
     StageItemBudget, StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageSequence,
     StageWorkItem, StageWorkload, SupervisorConfig, SupervisorError, SupervisorRequest,
-    SupervisorState, build_native_generation,
+    SupervisorState, build_native_generation, build_native_generation_spilled,
 };
 use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -120,6 +122,7 @@ const ABORT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(100);
 const ISOLATED_ABORT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const ISOLATED_ABORT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(250);
 const ABORT_PROGRESS_TIMEOUT: Duration = Duration::from_millis(400);
+const BLOCKED_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(1);
 const ABORT_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 const ABORT_COPY_TIMEOUT: Duration = Duration::from_millis(100);
 const ABORT_RESULT_BOUND: Duration = Duration::from_secs(2);
@@ -151,6 +154,10 @@ const NATIVE_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const NATIVE_MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const NATIVE_MAX_GENERATION_BYTES: u64 = 32 * 1024 * 1024;
 const NATIVE_STAGE_TIMEOUT: Duration = Duration::from_secs(3);
+const SPILL_PARITY_STAGE_TIMEOUT: Duration = Duration::from_secs(30);
+const SPILL_PARITY_OPERATION_TIMEOUT: Duration = Duration::from_mins(1);
+const SPILL_PARITY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10);
+const SPILL_PARITY_LEASE_DURATION: Duration = Duration::from_secs(30);
 const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
 const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 14;
 const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
@@ -837,6 +844,230 @@ async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
     fixture.close().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn postgres_spill_matches_memory_digest_centrality_and_publication() {
+    let directory = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("could not create spill parity fixture: {error}"));
+    write_native_live_project(directory.path());
+    let fixture = open_fixture().await;
+
+    let memory_staged = begin_generation(&fixture).await;
+    let memory_generation_id = memory_staged.generation_id().clone();
+    let memory_target = target(&fixture.project, &memory_generation_id);
+    let memory_source = open_parity_source(directory.path(), "memory");
+    let memory_supervisor = IndexerSupervisor::new(fixture.database.clone(), boundary_config());
+    let (memory_report_sender, memory_report_receiver) = oneshot::channel();
+    let memory_current = memory_supervisor
+        .run(
+            request_with_duration(memory_target, BOUNDARY_LEASE_DURATION),
+            move |context| async move {
+                let native = build_native_generation(
+                    &context.stages(),
+                    memory_source,
+                    native_pipeline_config(),
+                )
+                .await
+                .map_err(|error| {
+                    error.reason().map_or_else(
+                        || PipelineFailure::new(error.stage()),
+                        |reason| PipelineFailure::with_reason(error.stage(), reason),
+                    )
+                })?;
+                let report = native.report();
+                let (facts, _) = native.into_parts();
+                memory_report_sender
+                    .send(report)
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+                context
+                    .progress()
+                    .begin_stage(PipelineStage::Copy)
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                context
+                    .prepare_generation(GenerationContents::new(memory_staged, facts))
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("memory parity generation failed: {error}"));
+    let memory_report = memory_report_receiver
+        .await
+        .unwrap_or_else(|error| panic!("memory parity report missing: {error}"));
+    let spill_staged = begin_generation(&fixture).await;
+    let spill_generation_id = spill_staged.generation_id().clone();
+    let spill_target = target(&fixture.project, &spill_generation_id);
+    let spill_source = open_parity_source(directory.path(), "spill");
+    let spill_build = cold_spill_build(&fixture, spill_source);
+    let spill_supervisor =
+        IndexerSupervisor::new(fixture.database.clone(), spill_parity_supervisor_config());
+    let (spill_report_sender, spill_report_receiver) = oneshot::channel();
+    let spill_current = spill_supervisor
+        .run(
+            request_with_duration(spill_target, SPILL_PARITY_LEASE_DURATION),
+            move |context| async move {
+                let spill = context
+                    .generation_spill(&spill_staged, NativeGenerationSpillPolicy::default())
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+                let native = build_native_generation_spilled(&context.stages(), spill_build, spill)
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+                let report = native.report();
+                let (digest, _) = native.into_parts();
+                spill_report_sender
+                    .send(report)
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Reduce))?;
+                context
+                    .progress()
+                    .begin_stage(PipelineStage::Copy)
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                context
+                    .prepare_spilled_generation(SpilledGenerationContents::new(
+                        spill_staged,
+                        digest,
+                    ))
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("spill parity generation failed: {error}"));
+    let spill_report = spill_report_receiver
+        .await
+        .unwrap_or_else(|error| panic!("spill parity report missing: {error}"));
+    assert_eq!(
+        memory_current.content_digest(),
+        spill_current.content_digest()
+    );
+    let parity_ids = (&memory_generation_id, &spill_generation_id);
+    let parity_reports = (&memory_report, &spill_report);
+    assert_spill_parity_evidence(&fixture, parity_ids, parity_reports).await;
+    assert_spill_progress_observable(&memory_supervisor, &spill_supervisor).await;
+
+    fixture.close().await;
+}
+
+async fn assert_spill_progress_observable(
+    memory_supervisor: &IndexerSupervisor,
+    spill_supervisor: &IndexerSupervisor,
+) {
+    let memory_status = memory_supervisor.status().await;
+    let spill_status = spill_supervisor.status().await;
+    assert!(
+        spill_status.completed_items() > memory_status.completed_items(),
+        "streamed resolution must report exact page and committed-batch progress before its outer work item completes"
+    );
+}
+
+fn open_parity_source(path: &std::path::Path, strategy: &str) -> SourceRoot {
+    SourceRoot::open(path)
+        .unwrap_or_else(|error| panic!("could not open {strategy} parity source: {error}"))
+}
+
+fn cold_spill_build(fixture: &DatabaseFixture, source: SourceRoot) -> NativeGenerationBuild {
+    let cache =
+        NativeParseCache::new(fixture.database.clone(), fixture.project.clone()).with_reads(false);
+    NativeGenerationBuild::new(source, native_spill_pipeline_config()).with_parse_cache(cache)
+}
+
+async fn assert_spill_parity_evidence(
+    fixture: &DatabaseFixture,
+    generation_ids: (&GenerationId, &GenerationId),
+    reports: (&NativePipelineReport, &NativePipelineReport),
+) {
+    let (memory_generation_id, spill_generation_id) = generation_ids;
+    assert_native_report_parity(reports.0, reports.1);
+    assert_spilled_centrality_matches_memory(fixture, memory_generation_id, spill_generation_id)
+        .await;
+    assert_native_retrieval_and_coverage(fixture, spill_generation_id).await;
+    assert_spill_work_was_collected(fixture, spill_generation_id).await;
+}
+
+fn assert_native_report_parity(memory: &NativePipelineReport, spill: &NativePipelineReport) {
+    assert_eq!(memory.storage(), NativeGenerationStorage::Memory);
+    assert_eq!(spill.storage(), NativeGenerationStorage::PostgreSql);
+    assert!(memory.spill().is_none());
+    assert!(spill.spill().is_some());
+    assert_eq!(memory.discovered_files(), spill.discovered_files());
+    assert_eq!(memory.source_bytes(), spill.source_bytes());
+    assert_eq!(memory.symbols(), spill.symbols());
+    assert_eq!(memory.numerical_sites(), spill.numerical_sites());
+    assert_eq!(memory.resolved_references(), spill.resolved_references());
+    assert_eq!(
+        memory.unresolved_references(),
+        spill.unresolved_references()
+    );
+    assert_eq!(memory.diagnostics(), spill.diagnostics());
+    let cache = spill.parse_cache();
+    assert_eq!(cache.hits(), 0);
+    assert_eq!(cache.misses(), 0);
+    assert_eq!(cache.bypassed(), spill.discovered_files());
+    assert_eq!(cache.parsed_files(), spill.discovered_files());
+    assert_eq!(cache.writes(), spill.discovered_files());
+    assert_eq!(cache.corruptions(), 0);
+    assert_eq!(cache.read_errors(), 0);
+    assert_eq!(cache.write_errors(), 0);
+}
+
+async fn assert_spilled_centrality_matches_memory(
+    fixture: &DatabaseFixture,
+    memory_generation_id: &GenerationId,
+    spill_generation_id: &GenerationId,
+) {
+    let statement = format!(
+        r#"SELECT NOT EXISTS (
+                (SELECT symbol_id, betweenness, pagerank
+                   FROM "{schema}"."symbols"
+                  WHERE project_id = CAST($1 AS uuid)
+                    AND generation_id = CAST($2 AS uuid)
+                 EXCEPT
+                 SELECT symbol_id, betweenness, pagerank
+                   FROM "{schema}"."symbols"
+                  WHERE project_id = CAST($1 AS uuid)
+                    AND generation_id = CAST($3 AS uuid))
+                UNION ALL
+                (SELECT symbol_id, betweenness, pagerank
+                   FROM "{schema}"."symbols"
+                  WHERE project_id = CAST($1 AS uuid)
+                    AND generation_id = CAST($3 AS uuid)
+                 EXCEPT
+                 SELECT symbol_id, betweenness, pagerank
+                   FROM "{schema}"."symbols"
+                  WHERE project_id = CAST($1 AS uuid)
+                    AND generation_id = CAST($2 AS uuid))
+            ) AS identical"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(memory_generation_id.as_str())
+        .bind(spill_generation_id.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not compare centrality: {error}"));
+    assert!(row.try_get::<bool, _>("identical").unwrap_or(false));
+}
+
+async fn assert_spill_work_was_collected(fixture: &DatabaseFixture, generation_id: &GenerationId) {
+    let statement = format!(
+        r#"SELECT NOT EXISTS (
+                SELECT 1 FROM "{schema}"."native_generation_spills"
+                 WHERE project_id = CAST($1 AS uuid)
+                   AND generation_id = CAST($2 AS uuid)
+            ) AS collected"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .bind(generation_id.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not inspect spill cleanup: {error}"));
+    assert!(row.try_get::<bool, _>("collected").unwrap_or(false));
+}
+
 async fn assert_native_retrieval_and_coverage(
     fixture: &DatabaseFixture,
     generation_id: &GenerationId,
@@ -1324,6 +1555,14 @@ async fn assert_native_edge_kind(
 }
 
 fn native_pipeline_config() -> NativePipelineConfig {
+    native_pipeline_config_with_timeout(NATIVE_STAGE_TIMEOUT)
+}
+
+fn native_spill_pipeline_config() -> NativePipelineConfig {
+    native_pipeline_config_with_timeout(SPILL_PARITY_STAGE_TIMEOUT)
+}
+
+fn native_pipeline_config_with_timeout(stage_timeout: Duration) -> NativePipelineConfig {
     let discovery = match DiscoveryLimits::new(NATIVE_MAX_FILES, NATIVE_MAX_PATH_BYTES) {
         Ok(discovery) => discovery,
         Err(error) => panic!("native test discovery limits were invalid: {error}"),
@@ -1344,8 +1583,8 @@ fn native_pipeline_config() -> NativePipelineConfig {
         Err(error) => panic!("native test pipeline parallelism was invalid: {error}"),
     };
     let deadlines = match NativePipelineDeadlines::new(
-        NATIVE_STAGE_TIMEOUT,
-        NATIVE_STAGE_TIMEOUT,
+        stage_timeout,
+        stage_timeout,
         STANDARD_CANCELLATION_GRACE,
     ) {
         Ok(deadlines) => deadlines,
@@ -1572,7 +1811,7 @@ async fn blocked_supervised_copy_rolls_back_backend_query_and_advisory_locks() {
     {
         panic!("COPY table lock failed: {error}");
     }
-    let supervisor = IndexerSupervisor::new(fixture.database.clone(), abort_config());
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), blocked_copy_config());
     let result = tokio::time::timeout(
         ABORT_RESULT_BOUND,
         supervisor.run(request(target.clone()), move |context| async move {
@@ -1592,14 +1831,11 @@ async fn blocked_supervised_copy_rolls_back_backend_query_and_advisory_locks() {
     let result = result.unwrap_or_else(|error| {
         panic!("blocked supervised COPY exceeded its absolute deadline: {error}")
     });
-    assert!(
-        matches!(
-            result,
-            Err(SupervisorError::Pipeline {
-                stage: PipelineStage::Copy
-            })
-        ),
-        "unexpected blocked COPY result: {result:?}"
+    let expected_copy_failure = matches!(
+        &result,
+        Err(SupervisorError::Pipeline {
+            stage: PipelineStage::Copy
+        })
     );
     assert_no_active_schema_work(&fixture).await;
     assert_generation_advisories_available(&fixture, &target).await;
@@ -1611,6 +1847,10 @@ async fn blocked_supervised_copy_rolls_back_backend_query_and_advisory_locks() {
     ));
 
     fixture.close().await;
+    assert!(
+        expected_copy_failure,
+        "unexpected blocked COPY result: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -2735,6 +2975,15 @@ fn boundary_config() -> SupervisorConfig {
         .with_copy_timeout(BOUNDARY_COPY_TIMEOUT)
 }
 
+fn spill_parity_supervisor_config() -> SupervisorConfig {
+    SupervisorConfig::new(SPILL_PARITY_OPERATION_TIMEOUT)
+        .with_heartbeat_interval(BOUNDARY_HEARTBEAT_INTERVAL)
+        .with_heartbeat_timeout(BOUNDARY_HEARTBEAT_TIMEOUT)
+        .with_progress_timeout(SPILL_PARITY_PROGRESS_TIMEOUT)
+        .with_cancellation_grace(BOUNDARY_CANCELLATION_GRACE)
+        .with_copy_timeout(BOUNDARY_COPY_TIMEOUT)
+}
+
 fn uncertain_config() -> SupervisorConfig {
     SupervisorConfig::new(UNCERTAIN_OPERATION_TIMEOUT)
         .with_heartbeat_interval(UNCERTAIN_HEARTBEAT_INTERVAL)
@@ -2767,6 +3016,15 @@ fn abort_config() -> SupervisorConfig {
         .with_heartbeat_interval(ISOLATED_ABORT_HEARTBEAT_INTERVAL)
         .with_heartbeat_timeout(ISOLATED_ABORT_HEARTBEAT_TIMEOUT)
         .with_progress_timeout(ABORT_PROGRESS_TIMEOUT)
+        .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
+        .with_copy_timeout(ABORT_COPY_TIMEOUT)
+}
+
+fn blocked_copy_config() -> SupervisorConfig {
+    SupervisorConfig::new(ABORT_OPERATION_TIMEOUT)
+        .with_heartbeat_interval(ISOLATED_ABORT_HEARTBEAT_INTERVAL)
+        .with_heartbeat_timeout(ISOLATED_ABORT_HEARTBEAT_TIMEOUT)
+        .with_progress_timeout(BLOCKED_COPY_PROGRESS_TIMEOUT)
         .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
         .with_copy_timeout(ABORT_COPY_TIMEOUT)
 }

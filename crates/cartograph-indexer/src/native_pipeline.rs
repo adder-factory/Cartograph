@@ -1,17 +1,27 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
-    mem::size_of,
-    sync::{Arc, Mutex},
+    iter::Peekable,
+    mem::{size_of, take},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use cartograph_db::{
     CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationFacts,
     GenerationMemoryModelError, GenerationValidationError, GenerationValidationLimits,
-    GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES, NativeParseCacheKey,
-    NativeParseCacheKeyInput, NativeParseCacheWrite, NumericalSiteInput, ReferenceInput,
-    ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
+    GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
+    NativeGenerationExtractedCursor, NativeGenerationExtractedPage, NativeGenerationSpill,
+    NativeGenerationSpillCachedRow, NativeGenerationSpillCentralityScore,
+    NativeGenerationSpillDigestReport, NativeGenerationSpillExtractedBatch,
+    NativeGenerationSpillExtractedRow, NativeGenerationSpillFactBatch,
+    NativeGenerationSpillFactCounts, NativeGenerationSpillReport, NativeGenerationSpillRow,
+    NativeGenerationSpillState, NativeParseCacheEntry, NativeParseCacheKey,
+    NativeParseCacheKeyInput, NativeParseCacheRecord, NativeParseCacheWrite, NumericalSiteInput,
+    ReferenceInput, ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
     apply_sampled_betweenness, validate_generation_facts,
 };
 use cartograph_domain::{
@@ -24,9 +34,9 @@ use cartograph_extract::{
     DiscoveredSource, DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractError, ExtractedFile,
     ExtractedImportBinding, ExtractedNumericalSite, ExtractedReference, ImportBindingKind,
     NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits,
-    SourceReadError, SourceReadOptions, SourceRoot, TYPE_QUERY_VALUE_RESOLUTION_PREFIX,
-    is_test_source_path, native_extraction_reservation, native_extractor_contract_digest,
-    native_read_reservation, substitute_module_alias,
+    SourceReadError, SourceReadOptions, SourceRoot, SourceSnapshot,
+    TYPE_QUERY_VALUE_RESOLUTION_PREFIX, is_test_source_path, native_extraction_reservation,
+    native_extractor_contract_digest, native_read_reservation, substitute_module_alias,
 };
 use cartograph_scip::{
     ScipOverlayReport, ScipOverlayRequest, apply_scip_overlay_with_cancellation,
@@ -36,7 +46,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
     runtime::{Handle, RuntimeFlavor},
-    task::block_in_place,
+    task::{JoinSet, block_in_place},
     time::Instant,
 };
 
@@ -130,11 +140,25 @@ const DUPLICATE_PARTIAL_DEFAULT_OVERLAP_PPM: u32 = 950_000;
 const DUPLICATE_PARTIAL_WIDER_OVERLAP_PPM: u32 = 800_000;
 const DUPLICATE_IDENTIFIER_MINIMUM_OVERLAP_PPM: u32 = 500_000;
 const DUPLICATE_SAME_FILE_IDENTIFIER_OVERLAP_PPM: u32 = 100_000;
+const CLONE_PREFILTER_BUCKETS: usize = 16;
+const CLONE_PREFILTER_SHIFT: u32 = 60;
 const MAXIMUM_LISTED_CLONE_PEERS: usize = 10;
 const MAXIMUM_TYPESCRIPT_ALIAS_CONFIGS: usize = 256;
 const MAXIMUM_TYPESCRIPT_PATH_MAPPINGS: usize = 256;
 const MAXIMUM_TYPESCRIPT_PATH_SUBSTITUTIONS: usize = 32;
 const MAXIMUM_TYPESCRIPT_PATH_TEXT_BYTES: usize = 4_096;
+const SPILLED_EXTRACTION_PAGE_BYTES: u64 = 32 * 1024 * 1024;
+const SPILLED_PARSE_BATCH_FILES: usize = 64;
+const SPILLED_PARSE_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+const SPILLED_PARSE_BATCH_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;
+const SPILLED_PARSE_CACHE_WRITE_BYTES: usize = 64 * 1024 * 1024;
+const SPILLED_RESOLVE_TRANSACTION_BATCHES: usize = 256;
+const SPILLED_RESOLVE_TRANSACTION_BYTES: u64 = 64 * 1024 * 1024;
+const SPILLED_RESOLVE_TRANSACTION_ROWS: u64 = 200_000;
+const SPILLED_RESOLVE_TRANSACTION_RETAINED_BYTES: u64 = 512 * 1024 * 1024;
+const SPILLED_REDUCTION_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;
+const SPILLED_CENTRALITY_UPDATE_ROWS: usize = 100_000;
+const MAXIMUM_PROJECT_NON_VISIBLE_LANGUAGES: usize = 12;
 /// PostgreSQL-backed path/content cache policy for one complete native build.
 #[derive(Clone)]
 pub struct NativeParseCache {
@@ -541,6 +565,18 @@ pub struct NativePipelineReport {
     scip_overlay: Option<ScipOverlayReport>,
     overlay_high_water_bytes: u64,
     parse_cache: NativeParseCacheReport,
+    storage: NativeGenerationStorage,
+    spill: Option<NativeGenerationSpillReport>,
+}
+
+/// Physical working-set strategy used before atomic generation publication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeGenerationStorage {
+    /// Retain and canonically reduce one complete native generation in Rust memory.
+    #[default]
+    Memory,
+    /// Spill file-local and resolved facts behind the exact staging fence in PostgreSQL.
+    PostgreSql,
 }
 
 /// Exact per-file incremental parsing evidence for one complete graph build.
@@ -701,6 +737,18 @@ impl NativePipelineReport {
     pub const fn parse_cache(self) -> NativeParseCacheReport {
         self.parse_cache
     }
+
+    /// Physical working-set strategy used for this build.
+    #[must_use]
+    pub const fn storage(self) -> NativeGenerationStorage {
+        self.storage
+    }
+
+    /// Fixed-size PostgreSQL spill accounting, absent for the memory path.
+    #[must_use]
+    pub const fn spill(self) -> Option<NativeGenerationSpillReport> {
+        self.spill
+    }
 }
 
 /// Canonical database facts plus fixed-size build accounting.
@@ -744,6 +792,37 @@ impl NativeGeneration {
     }
 }
 
+/// PostgreSQL-canonicalized native generation plus fixed-size build accounting.
+pub struct NativeSpilledGeneration {
+    digest: NativeGenerationSpillDigestReport,
+    report: NativePipelineReport,
+}
+
+impl fmt::Debug for NativeSpilledGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeSpilledGeneration")
+            .field("report", &self.report)
+            .field("digest", self.digest.digest())
+            .field("counts", &self.digest.counts())
+            .finish()
+    }
+}
+
+impl NativeSpilledGeneration {
+    /// Fixed-size discovery, extraction, resolution, and spill accounting.
+    #[must_use]
+    pub const fn report(&self) -> NativePipelineReport {
+        self.report
+    }
+
+    /// Split the exact streamed digest capability from its public build report.
+    #[must_use]
+    pub fn into_parts(self) -> (NativeGenerationSpillDigestReport, NativePipelineReport) {
+        (self.digest, self.report)
+    }
+}
+
 /// Native project ingestion failed without embedding paths, source, or credentials.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NativePipelineError {
@@ -767,6 +846,12 @@ pub enum NativePipelineError {
         /// Stable actionable reason, when the failure matched an allowlisted boundary.
         reason: Option<PipelineFailureReason>,
     },
+    /// Generation-fenced PostgreSQL spill failed without retaining driver details.
+    #[error("native pipeline database spill failed during {stage}")]
+    Spill {
+        /// Exact native stage whose bounded spill operation failed.
+        stage: PipelineStage,
+    },
     /// A supposedly single-output stage violated its internal contract.
     #[error("native pipeline {stage} stage output was incomplete")]
     Incomplete {
@@ -782,7 +867,9 @@ impl NativePipelineError {
         match self {
             Self::Runtime => PipelineStage::Discover,
             Self::Stage(error) => error.stage(),
-            Self::StageWithReason { stage, .. } | Self::Incomplete { stage } => *stage,
+            Self::StageWithReason { stage, .. }
+            | Self::Spill { stage }
+            | Self::Incomplete { stage } => *stage,
             Self::Validation { .. } => PipelineStage::Reduce,
         }
     }
@@ -793,7 +880,14 @@ impl NativePipelineError {
         match self {
             Self::StageWithReason { reason, .. } => Some(*reason),
             Self::Validation { reason } => *reason,
-            Self::Runtime | Self::Stage(_) | Self::Incomplete { .. } => None,
+            Self::Stage(
+                StageRunError::StageDeadline { .. }
+                | StageRunError::Item {
+                    kind: StageFailureKind::Deadline,
+                    ..
+                },
+            ) => Some(PipelineFailureReason::DeadlineExceeded),
+            Self::Runtime | Self::Stage(_) | Self::Spill { .. } | Self::Incomplete { .. } => None,
         }
     }
 }
@@ -933,6 +1027,74 @@ pub async fn build_native_generation_with_scip_and_cache(
             ..report_seed
         },
         facts,
+    })
+}
+
+/// Build a native generation through generation-fenced PostgreSQL spill and reduction.
+///
+/// File-local extraction payloads and resolved relation batches are durable and retry-safe.
+/// PostgreSQL performs the generation-wide canonical reduction in deterministic partitions,
+/// after which the exact logical digest is streamed from canonical rows. The staging generation
+/// remains invisible and this capability cannot publish it.
+/// # Errors
+///
+/// Returns an error if the runtime, source, parser, resolver, spill quota/fence, canonical
+/// reduction, or digest contract fails. Persistent SCIP overlays are not admitted by this path.
+pub async fn build_native_generation_spilled(
+    runner: &StageRunner,
+    request: NativeGenerationBuild,
+    spill: NativeGenerationSpill,
+) -> Result<NativeSpilledGeneration, NativePipelineError> {
+    let NativeGenerationBuild {
+        source_root,
+        config,
+        scip_overlay,
+        parse_cache,
+    } = request;
+    if scip_overlay.is_some() {
+        return Err(NativePipelineError::Spill {
+            stage: PipelineStage::Overlay,
+        });
+    }
+    require_multithread_runtime()?;
+    let stages = NativeStageContext {
+        runner,
+        source_root,
+        config,
+    };
+    let discovered = run_discovery_stage(&stages).await?;
+    let (manifest, skipped_oversized_files) = run_read_stage(&stages, discovered).await?;
+    let report_seed = NativePipelineReport {
+        discovered_files: usize_to_u64(manifest.entries.len()),
+        skipped_oversized_files,
+        source_bytes: manifest.source_bytes,
+        storage: NativeGenerationStorage::PostgreSql,
+        ..NativePipelineReport::default()
+    };
+    let (extracted, parse_cache) =
+        run_spilled_parse_stage(&stages, manifest.entries, parse_cache, spill).await?;
+    let resolved = run_spilled_resolve_stage(&stages, extracted).await?;
+    let spill = resolved.spill;
+    let digest = run_spilled_reduce_stage(&stages, spill.clone()).await?;
+    let spill_report = spill
+        .report()
+        .await
+        .map_err(|error| spill_pipeline_error(PipelineStage::Reduce, &error))?;
+    let counts = digest.counts();
+    Ok(NativeSpilledGeneration {
+        report: NativePipelineReport {
+            symbols: counts.symbols,
+            numerical_sites: counts.numerical_sites,
+            resolved_references: resolved.report.resolved,
+            unresolved_references: resolved.report.unresolved,
+            diagnostics: resolved.report.diagnostics,
+            resolve_high_water_bytes: resolved.report.charged_high_water_bytes,
+            validation_high_water_bytes: SPILLED_REDUCTION_RESERVATION_BYTES,
+            parse_cache,
+            spill: Some(spill_report),
+            ..report_seed
+        },
+        digest,
     })
 }
 
@@ -1096,7 +1258,7 @@ async fn run_parse_stage(
                 async move {
                     let cancellation = item.cancellation();
                     let (sequence, _, manifest) = item.into_parts();
-                    let result = parse_manifest_entry_with_cache(
+                    let parsed = parse_manifest_entry_with_cache(
                         ParseManifestRequest {
                             source_root: &source_root,
                             manifest,
@@ -1105,7 +1267,7 @@ async fn run_parse_stage(
                         cancellation,
                     )
                     .await;
-                    match result {
+                    match parsed {
                         Ok(parsed) => Ok(parsed),
                         Err(failure) => {
                             if let Some(reason) = failure.reason()
@@ -1158,6 +1320,793 @@ async fn run_parse_stage(
                 None => Err(NativePipelineError::Stage(error)),
             }
         }
+    }
+}
+
+#[derive(Clone)]
+struct SpilledNativeFacts {
+    spill: NativeGenerationSpill,
+    state: NativeGenerationSpillState,
+    files: u64,
+    diagnostics: u64,
+}
+
+struct SpilledParseStageAccumulator {
+    files: u64,
+    diagnostics: u64,
+    cache: NativeParseCacheReport,
+}
+
+impl SpilledParseStageAccumulator {
+    const fn new() -> Self {
+        Self {
+            files: 0,
+            diagnostics: 0,
+            cache: NativeParseCacheReport {
+                hits: 0,
+                misses: 0,
+                bypassed: 0,
+                parsed_files: 0,
+                writes: 0,
+                corruptions: 0,
+                read_errors: 0,
+                write_errors: 0,
+            },
+        }
+    }
+
+    fn push(&mut self, parsed: &SpilledParsedManifestBatch) -> Result<(), StageItemFailure> {
+        self.files = self
+            .files
+            .checked_add(parsed.files)
+            .ok_or(StageItemFailure)?;
+        self.diagnostics = self
+            .diagnostics
+            .checked_add(parsed.diagnostics)
+            .ok_or(StageItemFailure)?;
+        self.cache.add(parsed.cache);
+        Ok(())
+    }
+}
+
+struct SpilledParseManifestEntry {
+    sequence: u64,
+    manifest: SourceManifestEntry,
+}
+
+struct SpilledParseManifestBatch {
+    entries: Vec<SpilledParseManifestEntry>,
+}
+
+struct SpilledParsedManifestBatch {
+    files: u64,
+    diagnostics: u64,
+    cache: NativeParseCacheReport,
+}
+
+struct SpilledParseEnvelopeIterator {
+    entries: Peekable<std::vec::IntoIter<SourceManifestEntry>>,
+    file_sequence: u64,
+    batch_sequence: u64,
+    item_timeout: Duration,
+    stage_deadline: Instant,
+    failed: Arc<AtomicBool>,
+}
+
+impl SpilledParseEnvelopeIterator {
+    fn fail(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+}
+
+impl Iterator for SpilledParseEnvelopeIterator {
+    type Item = StageEnvelope<u64, SpilledParseManifestBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.peek()?;
+        let mut batch = Vec::new();
+        if batch.try_reserve_exact(SPILLED_PARSE_BATCH_FILES).is_err() {
+            self.fail();
+            return None;
+        }
+        let mut maximum_reservation = 0_u64;
+        let mut source_bytes = 0_u64;
+        while batch.len() < SPILLED_PARSE_BATCH_FILES {
+            let Some(next) = self.entries.peek() else {
+                break;
+            };
+            let Some(next_source_bytes) = source_bytes.checked_add(next.byte_size) else {
+                self.fail();
+                return None;
+            };
+            if !batch.is_empty() && next_source_bytes > SPILLED_PARSE_BATCH_BYTES {
+                break;
+            }
+            let Some(reservation) = native_extraction_reservation(next.byte_size) else {
+                self.fail();
+                return None;
+            };
+            let Some(manifest) = self.entries.next() else {
+                self.fail();
+                return None;
+            };
+            let sequence = self.file_sequence;
+            let Some(next_file_sequence) = self.file_sequence.checked_add(1) else {
+                self.fail();
+                return None;
+            };
+            self.file_sequence = next_file_sequence;
+            maximum_reservation = maximum_reservation.max(reservation);
+            source_bytes = next_source_bytes;
+            batch.push(SpilledParseManifestEntry { sequence, manifest });
+            if source_bytes > SPILLED_PARSE_BATCH_BYTES {
+                break;
+            }
+        }
+        let Some(first) = batch.first() else {
+            self.fail();
+            return None;
+        };
+        let Some(reserved_bytes) =
+            maximum_reservation.checked_add(SPILLED_PARSE_BATCH_RESERVATION_BYTES)
+        else {
+            self.fail();
+            return None;
+        };
+        let sequence = self.batch_sequence;
+        let Some(next_batch_sequence) = self.batch_sequence.checked_add(1) else {
+            self.fail();
+            return None;
+        };
+        self.batch_sequence = next_batch_sequence;
+        let item_deadline = planned_item_deadline(self.item_timeout, self.stage_deadline);
+        Some(StageEnvelope::new(
+            StageItemMeta::new(
+                StageSequence::new(sequence),
+                first.sequence,
+                StageItemBudget::new(reserved_bytes, source_bytes, item_deadline),
+            ),
+            SpilledParseManifestBatch { entries: batch },
+        ))
+    }
+}
+
+fn spilled_parse_envelopes(
+    manifest: Vec<SourceManifestEntry>,
+    config: NativePipelineConfig,
+    stage_deadline: Instant,
+) -> (SpilledParseEnvelopeIterator, Arc<AtomicBool>) {
+    let failed = Arc::new(AtomicBool::new(false));
+    (
+        SpilledParseEnvelopeIterator {
+            entries: manifest.into_iter().peekable(),
+            file_sequence: 0,
+            batch_sequence: 0,
+            item_timeout: config.deadlines.item_timeout,
+            stage_deadline,
+            failed: Arc::clone(&failed),
+        },
+        failed,
+    )
+}
+
+async fn run_spilled_parse_stage(
+    stages: &NativeStageContext<'_>,
+    manifest: Vec<SourceManifestEntry>,
+    parse_cache: Option<NativeParseCache>,
+    spill: NativeGenerationSpill,
+) -> Result<(SpilledNativeFacts, NativeParseCacheReport), NativePipelineError> {
+    let expected_files = usize_to_u64(manifest.len());
+    let initial = spill
+        .initialize()
+        .await
+        .map_err(|error| spill_pipeline_error(PipelineStage::Parse, &error))?;
+    let config = stages.config;
+    let deadline = config.stage_deadlines();
+    let (envelopes, envelope_failure) =
+        spilled_parse_envelopes(manifest, config, deadline.deadline());
+    let source_root = stages.source_root.clone();
+    let worker_cache = parse_cache;
+    let worker_spill = spill.clone();
+    let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
+    let worker_failure_reasons = Arc::clone(&failure_reasons);
+    let execution = StageExecution::new(
+        StageRunConfig::new(
+            PipelineStage::Parse,
+            config.parallelism.parse_capacity,
+            deadline,
+        ),
+        StageWorkload::new(
+            envelopes,
+            move |item: StageWorkItem<u64, SpilledParseManifestBatch>| {
+                let source_root = source_root.clone();
+                let parse_cache = worker_cache.clone();
+                let spill = worker_spill.clone();
+                let failure_reasons = Arc::clone(&worker_failure_reasons);
+                async move {
+                    let cancellation = item.cancellation();
+                    let (sequence, _, batch) = item.into_parts();
+                    let result = stream_spilled_parse_batch(
+                        &spill,
+                        &source_root,
+                        parse_cache.as_ref(),
+                        batch,
+                        cancellation,
+                    )
+                    .await;
+                    match result {
+                        Ok(parsed) => Ok(parsed),
+                        Err(failure) => {
+                            if let Some(reason) = failure.reason()
+                                && let Ok(mut retained) = failure_reasons.lock()
+                            {
+                                retained.insert(sequence, reason);
+                            }
+                            Err(StageItemFailure)
+                        }
+                    }
+                }
+            },
+        ),
+        StageFold::new(
+            SpilledParseStageAccumulator::new(),
+            |state: &mut SpilledParseStageAccumulator,
+             output: StageOutput<u64, SpilledParsedManifestBatch>| {
+                let (_, parsed) = output.into_parts();
+                state.push(&parsed)
+            },
+        ),
+    );
+    let result = stages.runner.execute(execution).await;
+    if envelope_failure.load(Ordering::Acquire) {
+        return Err(NativePipelineError::StageWithReason {
+            stage: PipelineStage::Parse,
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+        });
+    }
+    let state =
+        result.map_err(|error| classify_spilled_parse_stage_error(error, &failure_reasons))?;
+    if state.files != expected_files {
+        return Err(NativePipelineError::Incomplete {
+            stage: PipelineStage::Parse,
+        });
+    }
+    spill
+        .finish_parsing(expected_files)
+        .await
+        .map_err(|error| spill_pipeline_error(PipelineStage::Parse, &error))?;
+    Ok((
+        SpilledNativeFacts {
+            spill,
+            state: match initial.state {
+                NativeGenerationSpillState::Parsing => NativeGenerationSpillState::Resolving,
+                state => state,
+            },
+            files: state.files,
+            diagnostics: state.diagnostics,
+        },
+        state.cache,
+    ))
+}
+
+fn classify_spilled_parse_stage_error(
+    error: StageRunError,
+    failure_reasons: &Mutex<BTreeMap<StageSequence, PipelineFailureReason>>,
+) -> NativePipelineError {
+    let reason = match &error {
+        StageRunError::Item { sequence, .. } => failure_reasons
+            .lock()
+            .ok()
+            .and_then(|retained| retained.get(sequence).copied()),
+        _ => None,
+    };
+    match reason {
+        Some(reason) => NativePipelineError::StageWithReason {
+            stage: PipelineStage::Parse,
+            reason,
+        },
+        None => NativePipelineError::Stage(error),
+    }
+}
+
+struct SpilledParseTransaction<'spill> {
+    spill: &'spill NativeGenerationSpill,
+    start_sequence: Option<u64>,
+    rows: Vec<NativeGenerationSpillExtractedRow>,
+    logical_bytes: u64,
+}
+
+impl<'spill> SpilledParseTransaction<'spill> {
+    fn new(spill: &'spill NativeGenerationSpill) -> Result<Self, ParseManifestFailure> {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(SPILLED_PARSE_BATCH_FILES)
+            .map_err(|_| ParseManifestFailure::unclassified())?;
+        Ok(Self {
+            spill,
+            start_sequence: None,
+            rows,
+            logical_bytes: 0,
+        })
+    }
+
+    async fn push_inline(
+        &mut self,
+        sequence: u64,
+        file_id: &FileId,
+        payload: Vec<u8>,
+    ) -> Result<(), ParseManifestFailure> {
+        let sort_key = file_id.as_str().as_bytes().to_vec();
+        let row_bytes = usize_to_u64(sort_key.len()).saturating_add(usize_to_u64(payload.len()));
+        self.prepare_push(sequence, row_bytes).await?;
+        self.rows.push(
+            NativeGenerationSpillRow::new(sort_key, payload)
+                .map_err(|error| ParseManifestFailure::from_spill(&error))?
+                .into(),
+        );
+        self.finish_push(row_bytes).await
+    }
+
+    async fn push_cached(
+        &mut self,
+        sequence: u64,
+        file_id: &FileId,
+        key: NativeParseCacheKey,
+        payload_digest: ContentDigest,
+        payload_bytes: u64,
+    ) -> Result<(), ParseManifestFailure> {
+        let sort_key = file_id.as_str().as_bytes().to_vec();
+        let row_bytes = usize_to_u64(sort_key.len()).saturating_add(payload_bytes);
+        self.prepare_push(sequence, row_bytes).await?;
+        self.rows.push(
+            NativeGenerationSpillCachedRow::new(sort_key, key, payload_digest, payload_bytes)
+                .map_err(|error| ParseManifestFailure::from_spill(&error))?
+                .into(),
+        );
+        self.finish_push(row_bytes).await
+    }
+
+    async fn prepare_push(
+        &mut self,
+        sequence: u64,
+        row_bytes: u64,
+    ) -> Result<(), ParseManifestFailure> {
+        if self.pending_rows() > 0
+            && (self.pending_rows() == SPILLED_PARSE_BATCH_FILES
+                || self.logical_bytes.saturating_add(row_bytes) > SPILLED_PARSE_BATCH_BYTES)
+        {
+            self.flush().await?;
+        }
+        let start = self.start_sequence.get_or_insert(sequence);
+        if start.saturating_add(usize_to_u64(self.pending_rows())) != sequence {
+            return Err(ParseManifestFailure::unclassified());
+        }
+        Ok(())
+    }
+
+    async fn finish_push(&mut self, row_bytes: u64) -> Result<(), ParseManifestFailure> {
+        self.logical_bytes = self.logical_bytes.saturating_add(row_bytes);
+        if self.pending_rows() == SPILLED_PARSE_BATCH_FILES
+            || self.logical_bytes >= SPILLED_PARSE_BATCH_BYTES
+        {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    fn pending_rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    async fn finish(mut self) -> Result<(), ParseManifestFailure> {
+        self.flush().await
+    }
+
+    async fn flush(&mut self) -> Result<(), ParseManifestFailure> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        let sequence = self
+            .start_sequence
+            .take()
+            .ok_or_else(ParseManifestFailure::unclassified)?;
+        self.logical_bytes = 0;
+        let rows = take(&mut self.rows);
+        self.rows
+            .try_reserve_exact(SPILLED_PARSE_BATCH_FILES)
+            .map_err(|_| ParseManifestFailure::unclassified())?;
+        let batch = NativeGenerationSpillExtractedBatch::new(sequence, rows)
+            .map_err(|error| ParseManifestFailure::from_spill(&error))?;
+        self.spill
+            .append_extracted_batch(batch)
+            .await
+            .map_err(|error| ParseManifestFailure::from_spill(&error))?;
+        Ok(())
+    }
+}
+
+struct PendingSpilledParseCacheWrite {
+    sequence: u64,
+    file_id: FileId,
+    key: NativeParseCacheKey,
+    payload: Vec<u8>,
+    payload_digest: ContentDigest,
+}
+
+impl PendingSpilledParseCacheWrite {
+    fn new(sequence: u64, file_id: FileId, key: NativeParseCacheKey, payload: Vec<u8>) -> Self {
+        let payload_digest = ContentDigest::from_bytes(*blake3::hash(&payload).as_bytes());
+        Self {
+            sequence,
+            file_id,
+            key,
+            payload,
+            payload_digest,
+        }
+    }
+}
+
+struct SpilledParseBatchContext<'input, 'spill> {
+    source_root: &'input SourceRoot,
+    parse_cache: Option<&'input NativeParseCache>,
+    cancellation: &'input StageCancellation,
+    extractors: SpilledExtractorPool,
+    transaction: SpilledParseTransaction<'spill>,
+    output: SpilledParsedManifestBatch,
+    cache_writes: Vec<PendingSpilledParseCacheWrite>,
+    cache_write_bytes: usize,
+}
+
+impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
+    fn new(
+        spill: &'spill NativeGenerationSpill,
+        source_root: &'input SourceRoot,
+        parse_cache: Option<&'input NativeParseCache>,
+        cancellation: &'input StageCancellation,
+        capacity: usize,
+    ) -> Result<Self, ParseManifestFailure> {
+        let mut cache_writes = Vec::new();
+        cache_writes
+            .try_reserve_exact(capacity)
+            .map_err(|_| ParseManifestFailure::unclassified())?;
+        Ok(Self {
+            source_root,
+            parse_cache,
+            cancellation,
+            extractors: SpilledExtractorPool::default(),
+            transaction: SpilledParseTransaction::new(spill)?,
+            output: SpilledParsedManifestBatch {
+                files: 0,
+                diagnostics: 0,
+                cache: NativeParseCacheReport::default(),
+            },
+            cache_writes,
+            cache_write_bytes: 0,
+        })
+    }
+
+    async fn process(
+        &mut self,
+        entry: SpilledParseManifestEntry,
+        key: Option<&NativeParseCacheKey>,
+        cached: Option<NativeParseCacheRecord>,
+        cache_read_failed: bool,
+    ) -> Result<(), ParseManifestFailure> {
+        let mut metrics = NativeParseCacheReport::default();
+        if let Some((file, payload_digest, payload_bytes)) = self
+            .cached_file(
+                &entry.manifest,
+                key,
+                cached,
+                cache_read_failed,
+                &mut metrics,
+            )
+            .await?
+        {
+            record_spilled_parse_output(&mut self.output, &file, metrics)?;
+            self.flush_cache_writes().await?;
+            let Some(key) = key else {
+                return Err(ParseManifestFailure::unclassified());
+            };
+            self.transaction
+                .push_cached(
+                    entry.sequence,
+                    &file.file_id,
+                    key.clone(),
+                    payload_digest,
+                    payload_bytes,
+                )
+                .await?;
+            return Ok(());
+        }
+        if self.cancellation.is_cancelled() {
+            return Err(ParseManifestFailure::unclassified());
+        }
+        metrics.parsed_files = 1;
+        let parse_cancellation = self.cancellation.clone();
+        let source_root = self.source_root;
+        let manifest = entry.manifest;
+        let extractors = &mut self.extractors;
+        let file = block_in_place(move || {
+            extractors.extract(source_root, &manifest, || parse_cancellation.is_cancelled())
+        })?;
+        if self.cancellation.is_cancelled() {
+            return Err(ParseManifestFailure::unclassified());
+        }
+        let payload =
+            serde_json::to_vec(&file).map_err(|_| ParseManifestFailure::unclassified())?;
+        let cacheable = self.parse_cache.is_some()
+            && key.is_some()
+            && payload.len() <= MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES;
+        if self.parse_cache.is_some() && !cacheable {
+            metrics.write_errors = 1;
+        }
+        record_spilled_parse_output(&mut self.output, &file, metrics)?;
+        if cacheable {
+            return self
+                .queue_cache_write(entry.sequence, file.file_id, key, payload)
+                .await;
+        }
+        self.flush_cache_writes().await?;
+        self.transaction
+            .push_inline(entry.sequence, &file.file_id, payload)
+            .await
+    }
+
+    async fn cached_file(
+        &self,
+        manifest: &SourceManifestEntry,
+        key: Option<&NativeParseCacheKey>,
+        cached: Option<NativeParseCacheRecord>,
+        cache_read_failed: bool,
+        metrics: &mut NativeParseCacheReport,
+    ) -> Result<Option<(ExtractedFile, ContentDigest, u64)>, ParseManifestFailure> {
+        let (Some(cache), Some(key)) = (self.parse_cache, key) else {
+            return Ok(None);
+        };
+        if !cache.read_enabled {
+            metrics.bypassed = 1;
+        } else if cache_read_failed {
+            metrics.misses = 1;
+            metrics.read_errors = 1;
+        } else if let Some(record) = cached {
+            if let Some(file) = decode_cached_file(manifest, &record) {
+                revalidate_manifest(self.source_root, manifest, self.cancellation)
+                    .map_err(|_| ParseManifestFailure::unclassified())?;
+                metrics.hits = 1;
+                return Ok(Some((
+                    file,
+                    record.payload_digest().clone(),
+                    usize_to_u64(record.payload().len()),
+                )));
+            }
+            metrics.misses = 1;
+            metrics.corruptions = 1;
+            let _ = cache.database.evict_native_parse_cache(key).await;
+        } else {
+            metrics.misses = 1;
+        }
+        Ok(None)
+    }
+
+    async fn queue_cache_write(
+        &mut self,
+        sequence: u64,
+        file_id: FileId,
+        key: Option<&NativeParseCacheKey>,
+        payload: Vec<u8>,
+    ) -> Result<(), ParseManifestFailure> {
+        let Some(key) = key else {
+            return Err(ParseManifestFailure::unclassified());
+        };
+        if !self.cache_writes.is_empty()
+            && self.cache_write_bytes.saturating_add(payload.len())
+                > SPILLED_PARSE_CACHE_WRITE_BYTES
+        {
+            self.flush_cache_writes().await?;
+        }
+        self.cache_write_bytes = self.cache_write_bytes.saturating_add(payload.len());
+        self.cache_writes.push(PendingSpilledParseCacheWrite::new(
+            sequence,
+            file_id,
+            key.clone(),
+            payload,
+        ));
+        if self.cache_write_bytes >= SPILLED_PARSE_CACHE_WRITE_BYTES {
+            self.flush_cache_writes().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_cache_writes(&mut self) -> Result<(), ParseManifestFailure> {
+        if self.cache_writes.is_empty() {
+            return Ok(());
+        }
+        let Some(cache) = self.parse_cache else {
+            return Err(ParseManifestFailure::unclassified());
+        };
+        flush_spilled_parse_cache_writes(
+            cache,
+            &mut self.cache_writes,
+            &mut self.cache_write_bytes,
+            &mut self.output.cache,
+            &mut self.transaction,
+        )
+        .await
+    }
+
+    async fn finish(mut self) -> Result<SpilledParsedManifestBatch, ParseManifestFailure> {
+        self.flush_cache_writes().await?;
+        self.transaction.finish().await?;
+        Ok(self.output)
+    }
+}
+
+async fn stream_spilled_parse_batch(
+    spill: &NativeGenerationSpill,
+    source_root: &SourceRoot,
+    parse_cache: Option<&NativeParseCache>,
+    batch: SpilledParseManifestBatch,
+    cancellation: StageCancellation,
+) -> Result<SpilledParsedManifestBatch, ParseManifestFailure> {
+    let entries = batch.entries;
+    let (cache_keys, cached, cache_read_failed) =
+        load_spilled_parse_cache(parse_cache, &entries).await;
+    let mut context = SpilledParseBatchContext::new(
+        spill,
+        source_root,
+        parse_cache,
+        &cancellation,
+        entries.len(),
+    )?;
+    for (index, (entry, cached)) in entries.into_iter().zip(cached).enumerate() {
+        let key = cache_keys.as_ref().and_then(|keys| keys.get(index));
+        context
+            .process(entry, key, cached, cache_read_failed)
+            .await?;
+    }
+    context.finish().await
+}
+
+async fn load_spilled_parse_cache(
+    cache: Option<&NativeParseCache>,
+    entries: &[SpilledParseManifestEntry],
+) -> (
+    Option<Vec<NativeParseCacheKey>>,
+    Vec<Option<NativeParseCacheRecord>>,
+    bool,
+) {
+    let keys = cache.map(|cache| {
+        entries
+            .iter()
+            .map(|entry| cache.key(&entry.manifest))
+            .collect::<Vec<_>>()
+    });
+    match (cache, keys.as_ref()) {
+        (Some(cache), Some(keys)) if cache.read_enabled => {
+            match cache.database.load_native_parse_cache_batch(keys).await {
+                Ok(records) => (Some(keys.clone()), records, false),
+                Err(_) => (
+                    Some(keys.clone()),
+                    (0..entries.len()).map(|_| None).collect(),
+                    true,
+                ),
+            }
+        }
+        _ => (keys, (0..entries.len()).map(|_| None).collect(), false),
+    }
+}
+
+fn record_spilled_parse_output(
+    output: &mut SpilledParsedManifestBatch,
+    file: &ExtractedFile,
+    metrics: NativeParseCacheReport,
+) -> Result<(), ParseManifestFailure> {
+    output.files = output
+        .files
+        .checked_add(1)
+        .ok_or_else(ParseManifestFailure::unclassified)?;
+    output.diagnostics = output
+        .diagnostics
+        .checked_add(usize_to_u64(file.diagnostics.len()))
+        .ok_or_else(ParseManifestFailure::unclassified)?;
+    output.cache.add(metrics);
+    Ok(())
+}
+
+async fn flush_spilled_parse_cache_writes(
+    cache: &NativeParseCache,
+    writes: &mut Vec<PendingSpilledParseCacheWrite>,
+    logical_bytes: &mut usize,
+    report: &mut NativeParseCacheReport,
+    transaction: &mut SpilledParseTransaction<'_>,
+) -> Result<(), ParseManifestFailure> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let pending = take(writes);
+    let pending_rows = usize_to_u64(pending.len());
+    *logical_bytes = 0;
+    let cache_entries = pending
+        .iter()
+        .map(|write| NativeParseCacheEntry::new(write.key.clone(), write.payload.clone()))
+        .collect();
+    if let Ok(written) = cache
+        .database
+        .store_native_parse_cache_batch(cache_entries)
+        .await
+    {
+        report.writes = report.writes.saturating_add(written.inserted);
+        for write in pending {
+            transaction
+                .push_cached(
+                    write.sequence,
+                    &write.file_id,
+                    write.key,
+                    write.payload_digest,
+                    usize_to_u64(write.payload.len()),
+                )
+                .await?;
+        }
+    } else {
+        report.write_errors = report.write_errors.saturating_add(pending_rows);
+        for write in pending {
+            transaction
+                .push_inline(write.sequence, &write.file_id, write.payload)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn visit_spilled_native_files<State, Visit>(
+    source: &SpilledNativeFacts,
+    state: &mut State,
+    cancellation: &StageCancellation,
+    progress: &StageRunner,
+    mut visit: Visit,
+) -> Result<(), StageItemFailure>
+where
+    Visit: FnMut(&mut State, NativeFileFacts) -> Result<(), StageItemFailure>,
+{
+    let mut cursor = NativeGenerationExtractedCursor::default();
+    let mut expected_sequence = 0_u64;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(StageItemFailure);
+        }
+        let page = source
+            .spill
+            .load_extracted_page(cursor, SPILLED_EXTRACTION_PAGE_BYTES)
+            .await
+            .map_err(|_| StageItemFailure)?;
+        if page.is_empty() {
+            break;
+        }
+        let completed_items = usize_to_u64(page.rows().len());
+        let completed_bytes = page.rows().iter().try_fold(0_u64, |total, (_, row)| {
+            total.checked_add(usize_to_u64(row.payload().len()))
+        });
+        let completed_bytes = completed_bytes.ok_or(StageItemFailure)?;
+        for (sequence, row) in page.rows() {
+            if *sequence != expected_sequence || cancellation.is_cancelled() {
+                return Err(StageItemFailure);
+            }
+            let extracted = serde_json::from_slice::<ExtractedFile>(row.payload())
+                .map_err(|_| StageItemFailure)?;
+            let file = NativeFileFacts::from_extracted(extracted)?;
+            visit(state, file)?;
+            expected_sequence = expected_sequence.checked_add(1).ok_or(StageItemFailure)?;
+        }
+        progress
+            .advance_progress(completed_items, completed_bytes)
+            .await
+            .map_err(|_| StageItemFailure)?;
+        cursor = page.next();
+    }
+    if expected_sequence == source.files {
+        Ok(())
+    } else {
+        Err(StageItemFailure)
     }
 }
 
@@ -1221,8 +2170,46 @@ impl ParseManifestFailure {
         Self { reason }
     }
 
+    fn from_spill(error: &cartograph_db::StorageError) -> Self {
+        let reason = if spill_capacity_error(error) {
+            Some(PipelineFailureReason::GenerationCapacityExceeded)
+        } else {
+            None
+        };
+        Self { reason }
+    }
+
     const fn reason(self) -> Option<PipelineFailureReason> {
         self.reason
+    }
+}
+
+fn spill_pipeline_error(
+    stage: PipelineStage,
+    error: &cartograph_db::StorageError,
+) -> NativePipelineError {
+    if spill_capacity_error(error) {
+        NativePipelineError::StageWithReason {
+            stage,
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+        }
+    } else {
+        NativePipelineError::Spill { stage }
+    }
+}
+
+fn spill_capacity_error(error: &cartograph_db::StorageError) -> bool {
+    match error {
+        cartograph_db::StorageError::GenerationSpillLimitReached { .. } => true,
+        cartograph_db::StorageError::InvalidInput { field } => matches!(
+            *field,
+            "spill_payload"
+                | "spill_batch_rows"
+                | "spill_batch_bytes"
+                | "spill_fact_batch_rows"
+                | "spill_fact_batch_bytes"
+        ),
+        _ => false,
     }
 }
 
@@ -1342,7 +2329,7 @@ async fn run_resolve_stage(
 ) -> Result<(GenerationFacts, ResolutionReport), NativePipelineError> {
     let config = stages.config;
     let deadline = config.stage_deadlines();
-    let item_deadline = planned_item_deadline(config.deadlines.item_timeout, deadline.deadline());
+    let item_deadline = deadline.deadline();
     let inputs = [StageEnvelope::new(
         StageItemMeta::new(
             StageSequence::new(0),
@@ -1422,6 +2409,875 @@ async fn run_resolve_stage(
             }
         }
         Err(error) => Err(NativePipelineError::Stage(error)),
+    }
+}
+
+struct SpilledResolutionOutput {
+    spill: NativeGenerationSpill,
+    report: ResolutionReport,
+}
+
+struct SpilledResolutionState {
+    clone_evidence: CloneEvidenceMap,
+    index: Arc<ResolutionIndex>,
+    report: ResolutionReport,
+    counts: NativeGenerationSpillFactCounts,
+    high_water: u64,
+    centrality_enabled: bool,
+    centrality: GenerationFacts,
+    centrality_budget: ResolveBudget,
+    validation_limits: GenerationValidationLimits,
+}
+
+struct ResolvedFileFacts {
+    sequence: u64,
+    facts: GenerationFacts,
+    report: ResolutionReport,
+    high_water: u64,
+}
+
+struct SpilledFactTransaction<'spill> {
+    spill: &'spill NativeGenerationSpill,
+    progress: &'spill StageRunner,
+    batches: Vec<NativeGenerationSpillFactBatch>,
+    logical_bytes: u64,
+    row_count: u64,
+    retained_bytes: u64,
+}
+
+impl<'spill> SpilledFactTransaction<'spill> {
+    fn new(spill: &'spill NativeGenerationSpill, progress: &'spill StageRunner) -> Self {
+        Self {
+            spill,
+            progress,
+            batches: Vec::new(),
+            logical_bytes: 0,
+            row_count: 0,
+            retained_bytes: 0,
+        }
+    }
+
+    async fn push(
+        &mut self,
+        batch: NativeGenerationSpillFactBatch,
+    ) -> Result<(), ResolveGenerationFailure> {
+        let next_bytes = self
+            .logical_bytes
+            .checked_add(batch.logical_bytes())
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        let next_rows = self
+            .row_count
+            .checked_add(batch.row_count())
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        let next_retained = self
+            .retained_bytes
+            .checked_add(batch.retained_bytes())
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        if !self.batches.is_empty()
+            && (self.batches.len() >= SPILLED_RESOLVE_TRANSACTION_BATCHES
+                || next_bytes > SPILLED_RESOLVE_TRANSACTION_BYTES
+                || next_rows > SPILLED_RESOLVE_TRANSACTION_ROWS
+                || next_retained > SPILLED_RESOLVE_TRANSACTION_RETAINED_BYTES)
+        {
+            self.flush().await?;
+        }
+        self.logical_bytes = self
+            .logical_bytes
+            .checked_add(batch.logical_bytes())
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        self.row_count = self
+            .row_count
+            .checked_add(batch.row_count())
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(batch.retained_bytes())
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        self.batches
+            .try_reserve(1)
+            .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+        self.batches.push(batch);
+        if self.batches.len() >= SPILLED_RESOLVE_TRANSACTION_BATCHES {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<(), ResolveGenerationFailure> {
+        if self.batches.is_empty() {
+            return Ok(());
+        }
+        let batches = take(&mut self.batches);
+        let expected = batches.len();
+        let completed_items = usize_to_u64(expected);
+        let completed_bytes = self.logical_bytes;
+        self.logical_bytes = 0;
+        self.row_count = 0;
+        self.retained_bytes = 0;
+        let writes = self
+            .spill
+            .append_fact_batches(batches)
+            .await
+            .map_err(|error| classify_spill_resolve_error(&error))?;
+        if writes.len() != expected {
+            return Err(ResolveGenerationFailure::unclassified());
+        }
+        self.progress
+            .advance_progress(completed_items, completed_bytes)
+            .await
+            .map_err(|_| ResolveGenerationFailure::unclassified())?;
+        Ok(())
+    }
+}
+
+struct SpilledResolutionFold<'context> {
+    state: &'context mut SpilledResolutionState,
+    transaction: SpilledFactTransaction<'context>,
+    completed: BTreeMap<u64, ResolvedFileFacts>,
+    next_sequence: u64,
+    cancellation: &'context StageCancellation,
+}
+
+impl<'context> SpilledResolutionFold<'context> {
+    fn new(
+        spill: &'context NativeGenerationSpill,
+        state: &'context mut SpilledResolutionState,
+        cancellation: &'context StageCancellation,
+        progress: &'context StageRunner,
+    ) -> Self {
+        Self {
+            state,
+            transaction: SpilledFactTransaction::new(spill, progress),
+            completed: BTreeMap::new(),
+            next_sequence: 0,
+            cancellation,
+        }
+    }
+
+    async fn collect_next(
+        &mut self,
+        tasks: &mut JoinSet<Result<ResolvedFileFacts, ResolveGenerationFailure>>,
+    ) -> Result<(), ResolveGenerationFailure> {
+        let resolved = tasks
+            .join_next()
+            .await
+            .ok_or_else(ResolveGenerationFailure::unclassified)?
+            .map_err(|_| ResolveGenerationFailure::unclassified())??;
+        if self.completed.insert(resolved.sequence, resolved).is_some() {
+            return Err(ResolveGenerationFailure::unclassified());
+        }
+        while let Some(resolved) = self.completed.remove(&self.next_sequence) {
+            self.commit_resolved(resolved).await?;
+        }
+        Ok(())
+    }
+
+    async fn commit_resolved(
+        &mut self,
+        resolved: ResolvedFileFacts,
+    ) -> Result<(), ResolveGenerationFailure> {
+        if resolved.sequence != self.next_sequence || self.cancellation.is_cancelled() {
+            return Err(ResolveGenerationFailure::unclassified());
+        }
+        self.state.report.resolved = self
+            .state
+            .report
+            .resolved
+            .checked_add(resolved.report.resolved)
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        self.state.report.unresolved = self
+            .state
+            .report
+            .unresolved
+            .checked_add(resolved.report.unresolved)
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        self.state.high_water = self.state.high_water.max(resolved.high_water);
+        if self.state.centrality_enabled {
+            append_spilled_centrality_facts(
+                &mut self.state.centrality,
+                &resolved.facts,
+                &mut self.state.centrality_budget,
+            )
+            .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+        }
+        let batch = NativeGenerationSpillFactBatch::new(
+            resolved.sequence,
+            resolved.facts,
+            self.state.validation_limits,
+            || self.cancellation.is_cancelled(),
+        )
+        .map_err(classify_spill_validation_error)?;
+        add_spill_fact_counts(&mut self.state.counts, batch.counts())?;
+        self.transaction.push(batch).await?;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        Ok(())
+    }
+
+    async fn finish(mut self) -> Result<u64, ResolveGenerationFailure> {
+        if !self.completed.is_empty() {
+            return Err(ResolveGenerationFailure::unclassified());
+        }
+        self.transaction.flush().await?;
+        Ok(self.next_sequence)
+    }
+}
+
+async fn run_spilled_resolve_stage(
+    stages: &NativeStageContext<'_>,
+    source: SpilledNativeFacts,
+) -> Result<SpilledResolutionOutput, NativePipelineError> {
+    let config = stages.config;
+    let deadline = config.stage_deadlines();
+    let item_deadline = deadline.deadline();
+    let inputs = [StageEnvelope::new(
+        StageItemMeta::new(
+            StageSequence::new(0),
+            0_u8,
+            StageItemBudget::new(
+                resolve_reservation(config.limits.retained.max_generation_bytes)?,
+                source.files,
+                item_deadline,
+            ),
+        ),
+        source,
+    )];
+    let source_root = stages.source_root.clone();
+    let progress = stages.runner.clone();
+    let failure_reason = Arc::new(Mutex::new(None));
+    let worker_failure_reason = Arc::clone(&failure_reason);
+    let execution = StageExecution::new(
+        StageRunConfig::new(PipelineStage::Resolve, StageCapacity::new(1, 0), deadline),
+        StageWorkload::new(
+            inputs,
+            move |item: StageWorkItem<u8, SpilledNativeFacts>| {
+                let source_root = source_root.clone();
+                let progress = progress.clone();
+                let failure_reason = Arc::clone(&worker_failure_reason);
+                async move {
+                    let cancellation = item.cancellation();
+                    let (_, _, source) = item.into_parts();
+                    match resolve_spilled_generation(
+                        source,
+                        source_root,
+                        config,
+                        &cancellation,
+                        &progress,
+                    )
+                    .await
+                    {
+                        Ok(output) => Ok(output),
+                        Err(failure) => {
+                            if let Some(reason) = failure.reason()
+                                && let Ok(mut retained) = failure_reason.lock()
+                            {
+                                *retained = Some(reason);
+                            }
+                            Err(StageItemFailure)
+                        }
+                    }
+                }
+            },
+        ),
+        StageFold::new(
+            None,
+            |resolved: &mut Option<SpilledResolutionOutput>,
+             output: StageOutput<u8, SpilledResolutionOutput>| {
+                let (_, output) = output.into_parts();
+                *resolved = Some(output);
+                Ok(())
+            },
+        ),
+    );
+    match stages.runner.execute(execution).await {
+        Ok(output) => output.ok_or(NativePipelineError::Incomplete {
+            stage: PipelineStage::Resolve,
+        }),
+        Err(error @ StageRunError::Item { .. }) => {
+            let reason = failure_reason.lock().ok().and_then(|retained| *retained);
+            match reason {
+                Some(reason) => Err(NativePipelineError::StageWithReason {
+                    stage: PipelineStage::Resolve,
+                    reason,
+                }),
+                None => Err(NativePipelineError::Stage(error)),
+            }
+        }
+        Err(error) => Err(NativePipelineError::Stage(error)),
+    }
+}
+
+async fn resolve_spilled_generation(
+    source: SpilledNativeFacts,
+    source_root: SourceRoot,
+    config: NativePipelineConfig,
+    cancellation: &StageCancellation,
+    progress: &StageRunner,
+) -> Result<SpilledResolutionOutput, ResolveGenerationFailure> {
+    if cancellation.is_cancelled() {
+        return Err(ResolveGenerationFailure::unclassified());
+    }
+    let mut state =
+        initialize_spilled_resolution(&source, &source_root, config, cancellation, progress)
+            .await?;
+    spill_resolved_files(&source, &mut state, config, cancellation, progress).await?;
+    spill_derived_generation_facts(&source, &mut state, config, cancellation, progress).await?;
+    if state.centrality_enabled {
+        apply_spilled_centrality(
+            &source.spill,
+            &mut state.centrality,
+            config.evidence_policy().centrality,
+            cancellation,
+            progress,
+        )
+        .await?;
+        state.high_water = state.high_water.max(state.centrality_budget.charged_bytes);
+    }
+    source
+        .spill
+        .seal_resolution(state.counts)
+        .await
+        .map_err(|error| classify_spill_resolve_error(&error))?;
+    state.report.retained_bytes = state.high_water;
+    state.report.charged_high_water_bytes = state.high_water;
+    Ok(SpilledResolutionOutput {
+        spill: source.spill,
+        report: state.report,
+    })
+}
+
+async fn initialize_spilled_resolution(
+    source: &SpilledNativeFacts,
+    source_root: &SourceRoot,
+    config: NativePipelineConfig,
+    cancellation: &StageCancellation,
+    progress: &StageRunner,
+) -> Result<SpilledResolutionState, ResolveGenerationFailure> {
+    let maximum_bytes = config.limits.retained.max_generation_bytes;
+    let (clone_evidence, index, preparation_high_water) = build_spilled_resolution_preparation(
+        source,
+        source_root,
+        config.clone_policy(),
+        maximum_bytes,
+        cancellation,
+        progress,
+    )
+    .await
+    .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+    let evidence = config.evidence_policy();
+    let centrality_enabled = source.state == NativeGenerationSpillState::Resolving
+        && (evidence.centrality.page_rank || evidence.centrality.betweenness);
+    let centrality_limit = maximum_bytes
+        .checked_mul(RESOLVE_WORKING_MULTIPLIER)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    let centrality_budget = ResolveBudget::new(0, centrality_limit)
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+    let validation_limits = generation_validation_limits(maximum_bytes, PipelineStage::Resolve)
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+    Ok(SpilledResolutionState {
+        clone_evidence,
+        index: Arc::new(index),
+        report: ResolutionReport {
+            diagnostics: source.diagnostics,
+            ..ResolutionReport::default()
+        },
+        counts: NativeGenerationSpillFactCounts::default(),
+        high_water: preparation_high_water,
+        centrality_enabled,
+        centrality: GenerationFacts::default(),
+        centrality_budget,
+        validation_limits,
+    })
+}
+
+async fn spill_resolved_files(
+    source: &SpilledNativeFacts,
+    state: &mut SpilledResolutionState,
+    config: NativePipelineConfig,
+    cancellation: &StageCancellation,
+    progress: &StageRunner,
+) -> Result<(), ResolveGenerationFailure> {
+    let mut cursor = NativeGenerationExtractedCursor::default();
+    let mut input_sequence = 0_u64;
+    let worker_count = config.parallelism.parse_capacity.workers();
+    let mut tasks = JoinSet::new();
+    let mut fold = SpilledResolutionFold::new(&source.spill, state, cancellation, progress);
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(ResolveGenerationFailure::unclassified());
+        }
+        let page = source
+            .spill
+            .load_extracted_page(cursor, SPILLED_EXTRACTION_PAGE_BYTES)
+            .await
+            .map_err(|error| classify_spill_resolve_error(&error))?;
+        if page.is_empty() {
+            break;
+        }
+        schedule_spilled_resolution_page(
+            &page,
+            &mut input_sequence,
+            worker_count,
+            config,
+            cancellation,
+            &mut tasks,
+            &mut fold,
+        )
+        .await?;
+        cursor = page.next();
+    }
+    while !tasks.is_empty() {
+        fold.collect_next(&mut tasks).await?;
+    }
+    if input_sequence != source.files || !fold.state.clone_evidence.is_empty() {
+        return Err(ResolveGenerationFailure::unclassified());
+    }
+    let resolved_files = fold.finish().await?;
+    if resolved_files == source.files {
+        Ok(())
+    } else {
+        Err(ResolveGenerationFailure::unclassified())
+    }
+}
+
+async fn schedule_spilled_resolution_page(
+    page: &NativeGenerationExtractedPage,
+    input_sequence: &mut u64,
+    worker_count: usize,
+    config: NativePipelineConfig,
+    cancellation: &StageCancellation,
+    tasks: &mut JoinSet<Result<ResolvedFileFacts, ResolveGenerationFailure>>,
+    fold: &mut SpilledResolutionFold<'_>,
+) -> Result<(), ResolveGenerationFailure> {
+    for (sequence, row) in page.rows() {
+        require_spilled_resolution_sequence(*sequence, *input_sequence, cancellation)?;
+        let extracted = serde_json::from_slice::<ExtractedFile>(row.payload())
+            .map_err(|_| ResolveGenerationFailure::unclassified())?;
+        let mut file = NativeFileFacts::from_extracted(extracted)
+            .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+        apply_clone_evidence(&mut file, &mut fold.state.clone_evidence)
+            .map_err(|_| ResolveGenerationFailure::unclassified())?;
+        let index = Arc::clone(&fold.state.index);
+        let worker_cancellation = cancellation.clone();
+        let sequence = *sequence;
+        tasks.spawn_blocking(move || {
+            resolve_file_facts(sequence, file, index.as_ref(), config, &worker_cancellation)
+        });
+        *input_sequence = input_sequence
+            .checked_add(1)
+            .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        if tasks.len() >= worker_count {
+            fold.collect_next(tasks).await?;
+        }
+    }
+    Ok(())
+}
+
+fn require_spilled_resolution_sequence(
+    actual: u64,
+    expected: u64,
+    cancellation: &StageCancellation,
+) -> Result<(), ResolveGenerationFailure> {
+    if actual != expected || cancellation.is_cancelled() {
+        Err(ResolveGenerationFailure::unclassified())
+    } else {
+        Ok(())
+    }
+}
+
+fn resolve_file_facts(
+    sequence: u64,
+    file: NativeFileFacts,
+    index: &ResolutionIndex,
+    config: NativePipelineConfig,
+    cancellation: &StageCancellation,
+) -> Result<ResolvedFileFacts, ResolveGenerationFailure> {
+    let maximum_bytes = config.limits.retained.max_generation_bytes;
+    let mut facts = GenerationFacts::default();
+    let mut report = ResolutionReport::default();
+    let working_limit = maximum_bytes
+        .checked_mul(RESOLVE_WORKING_MULTIPLIER)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    let mut budget = ResolveBudget::new(0, working_limit)
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+    {
+        let mut output = ResolutionOutput {
+            index,
+            facts: &mut facts,
+            report: &mut report,
+            budget: &mut budget,
+        };
+        output
+            .append_file(file, &mut || cancellation.is_cancelled())
+            .map_err(|_| classify_resolve_failure(output.budget))?;
+    }
+    if !config.evidence_policy().retention.call_sites {
+        facts.references.clear();
+    }
+    Ok(ResolvedFileFacts {
+        sequence,
+        facts,
+        report,
+        high_water: budget.charged_bytes,
+    })
+}
+
+async fn spill_derived_generation_facts(
+    source: &SpilledNativeFacts,
+    state: &mut SpilledResolutionState,
+    config: NativePipelineConfig,
+    cancellation: &StageCancellation,
+    progress: &StageRunner,
+) -> Result<(), ResolveGenerationFailure> {
+    let maximum_bytes = config.limits.retained.max_generation_bytes;
+    let mut derived_sequence = source.files;
+    for derive in [
+        append_spilled_framework_edges as SpilledDerivedFacts,
+        append_spilled_go_edges,
+        append_spilled_reexport_edges,
+        append_spilled_test_edges,
+    ] {
+        let (facts, charged) = derive(&state.index, cancellation, maximum_bytes)
+            .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+        state.high_water = state.high_water.max(charged);
+        if !generation_facts_are_empty(&facts) {
+            if state.centrality_enabled {
+                append_spilled_centrality_facts(
+                    &mut state.centrality,
+                    &facts,
+                    &mut state.centrality_budget,
+                )
+                .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+            }
+            let batch = NativeGenerationSpillFactBatch::new(
+                derived_sequence,
+                facts,
+                state.validation_limits,
+                || cancellation.is_cancelled(),
+            )
+            .map_err(classify_spill_validation_error)?;
+            add_spill_fact_counts(&mut state.counts, batch.counts())?;
+            source
+                .spill
+                .append_fact_batch(batch)
+                .await
+                .map_err(|error| classify_spill_resolve_error(&error))?;
+            derived_sequence = derived_sequence
+                .checked_add(1)
+                .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+        }
+        progress
+            .advance_progress(1, 0)
+            .await
+            .map_err(|_| ResolveGenerationFailure::unclassified())?;
+    }
+    Ok(())
+}
+
+fn append_spilled_centrality_facts(
+    centrality: &mut GenerationFacts,
+    facts: &GenerationFacts,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    centrality
+        .symbols
+        .try_reserve(facts.symbols.len())
+        .map_err(|_| StageItemFailure)?;
+    for symbol in &facts.symbols {
+        budget.charge(
+            usize_to_u64(size_of::<SymbolInput>())
+                .saturating_add(usize_to_u64(symbol.symbol_id.as_str().len()))
+                .saturating_add(usize_to_u64(symbol.file_id.as_str().len())),
+        )?;
+        centrality.symbols.push(SymbolInput {
+            symbol_id: symbol.symbol_id.clone(),
+            file_id: symbol.file_id.clone(),
+            symbol_kind: String::new(),
+            qualified_name: String::new(),
+            signature: String::new(),
+            start_byte: 0,
+            end_byte: 0,
+            start_line: 1,
+            end_line: 1,
+            structural_digest: symbol.structural_digest.clone(),
+            visibility: None,
+            export: SymbolExportFlags::default(),
+            execution: SymbolExecutionFlags::default(),
+            declaration_only: false,
+            betweenness_ppb: None,
+            pagerank_ppb: None,
+        });
+    }
+    let admitted_edges = facts
+        .edges
+        .iter()
+        .filter(|edge| matches!(edge.kind, EdgeKind::Calls | EdgeKind::References))
+        .count();
+    centrality
+        .edges
+        .try_reserve(admitted_edges)
+        .map_err(|_| StageItemFailure)?;
+    for edge in facts
+        .edges
+        .iter()
+        .filter(|edge| matches!(edge.kind, EdgeKind::Calls | EdgeKind::References))
+    {
+        budget.charge(
+            usize_to_u64(size_of::<EdgeInput>())
+                .saturating_add(usize_to_u64(edge.source_symbol_id.as_str().len()))
+                .saturating_add(usize_to_u64(edge.target_symbol_id.as_str().len())),
+        )?;
+        centrality.edges.push(EdgeInput {
+            source_symbol_id: edge.source_symbol_id.clone(),
+            target_symbol_id: edge.target_symbol_id.clone(),
+            kind: edge.kind,
+            confidence: 0.0,
+            provenance: String::new(),
+            site_count: 1,
+        });
+    }
+    Ok(())
+}
+
+async fn apply_spilled_centrality(
+    spill: &NativeGenerationSpill,
+    facts: &mut GenerationFacts,
+    policy: NativeCentralityPolicy,
+    cancellation: &StageCancellation,
+    progress: &StageRunner,
+) -> Result<(), ResolveGenerationFailure> {
+    if policy.page_rank {
+        let report = apply_page_rank(facts, || cancellation.is_cancelled())
+            .map_err(|_| ResolveGenerationFailure::unclassified())?;
+        if report.iterations > 0 {
+            progress
+                .advance_progress(usize_to_u64(report.iterations), 0)
+                .await
+                .map_err(|_| ResolveGenerationFailure::unclassified())?;
+        }
+    }
+    if policy.betweenness {
+        let report = apply_sampled_betweenness(facts, || cancellation.is_cancelled())
+            .map_err(|_| ResolveGenerationFailure::unclassified())?;
+        let completed = report.sample_count.max(report.nodes_scored);
+        if completed > 0 {
+            progress
+                .advance_progress(usize_to_u64(completed), 0)
+                .await
+                .map_err(|_| ResolveGenerationFailure::unclassified())?;
+        }
+    }
+    let mut scores = Vec::new();
+    scores
+        .try_reserve(facts.symbols.len())
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+    for symbol in &facts.symbols {
+        scores.push(
+            NativeGenerationSpillCentralityScore::new(
+                symbol.symbol_id.clone(),
+                symbol.betweenness_ppb,
+                symbol.pagerank_ppb,
+            )
+            .map_err(|_| ResolveGenerationFailure::unclassified())?,
+        );
+    }
+    scores
+        .sort_unstable_by(|left, right| left.symbol_id().as_str().cmp(right.symbol_id().as_str()));
+    for batch in scores.chunks(SPILLED_CENTRALITY_UPDATE_ROWS) {
+        if cancellation.is_cancelled() {
+            return Err(ResolveGenerationFailure::unclassified());
+        }
+        spill
+            .apply_centrality_scores(batch)
+            .await
+            .map_err(|error| classify_spill_resolve_error(&error))?;
+        progress
+            .advance_progress(usize_to_u64(batch.len()), 0)
+            .await
+            .map_err(|_| ResolveGenerationFailure::unclassified())?;
+    }
+    Ok(())
+}
+
+type SpilledDerivedFacts = fn(
+    &ResolutionIndex,
+    &StageCancellation,
+    u64,
+) -> Result<(GenerationFacts, u64), StageItemFailure>;
+
+fn append_spilled_framework_edges(
+    index: &ResolutionIndex,
+    cancellation: &StageCancellation,
+    maximum_bytes: u64,
+) -> Result<(GenerationFacts, u64), StageItemFailure> {
+    derive_spilled_facts(
+        index,
+        cancellation,
+        maximum_bytes,
+        SpilledDerivedFactKind::Framework,
+    )
+}
+
+fn append_spilled_go_edges(
+    index: &ResolutionIndex,
+    cancellation: &StageCancellation,
+    maximum_bytes: u64,
+) -> Result<(GenerationFacts, u64), StageItemFailure> {
+    derive_spilled_facts(
+        index,
+        cancellation,
+        maximum_bytes,
+        SpilledDerivedFactKind::Go,
+    )
+}
+
+fn append_spilled_reexport_edges(
+    index: &ResolutionIndex,
+    cancellation: &StageCancellation,
+    maximum_bytes: u64,
+) -> Result<(GenerationFacts, u64), StageItemFailure> {
+    derive_spilled_facts(
+        index,
+        cancellation,
+        maximum_bytes,
+        SpilledDerivedFactKind::Reexport,
+    )
+}
+
+fn append_spilled_test_edges(
+    index: &ResolutionIndex,
+    cancellation: &StageCancellation,
+    maximum_bytes: u64,
+) -> Result<(GenerationFacts, u64), StageItemFailure> {
+    derive_spilled_facts(
+        index,
+        cancellation,
+        maximum_bytes,
+        SpilledDerivedFactKind::Test,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SpilledDerivedFactKind {
+    Framework,
+    Go,
+    Reexport,
+    Test,
+}
+
+fn derive_spilled_facts(
+    index: &ResolutionIndex,
+    cancellation: &StageCancellation,
+    maximum_bytes: u64,
+    kind: SpilledDerivedFactKind,
+) -> Result<(GenerationFacts, u64), StageItemFailure> {
+    let working_limit = maximum_bytes
+        .checked_mul(RESOLVE_WORKING_MULTIPLIER)
+        .ok_or(StageItemFailure)?;
+    let mut facts = GenerationFacts::default();
+    let mut budget = ResolveBudget::new(0, working_limit)?;
+    let mut cancelled = || cancellation.is_cancelled();
+    match kind {
+        SpilledDerivedFactKind::Framework => {
+            append_framework_bridge_edges(ResolutionMutation {
+                index,
+                facts: &mut facts,
+                budget: &mut budget,
+                cancelled: &mut cancelled,
+            })?;
+        }
+        SpilledDerivedFactKind::Go => {
+            append_go_structural_edges(GoStructuralEdges {
+                index,
+                facts: &mut facts,
+                budget: &mut budget,
+                cancelled: &mut cancelled,
+            })?;
+        }
+        SpilledDerivedFactKind::Reexport => {
+            append_module_reexport_edges(ResolutionMutation {
+                index,
+                facts: &mut facts,
+                budget: &mut budget,
+                cancelled: &mut cancelled,
+            })?;
+        }
+        SpilledDerivedFactKind::Test => {
+            append_test_subject_edges(ResolutionMutation {
+                index,
+                facts: &mut facts,
+                budget: &mut budget,
+                cancelled: &mut cancelled,
+            })?;
+        }
+    }
+    Ok((facts, budget.charged_bytes))
+}
+
+fn generation_facts_are_empty(facts: &GenerationFacts) -> bool {
+    facts.files.is_empty()
+        && facts.symbols.is_empty()
+        && facts.edges.is_empty()
+        && facts.references.is_empty()
+        && facts.numerical_sites.is_empty()
+        && facts.documents.is_empty()
+}
+
+fn add_spill_fact_counts(
+    total: &mut NativeGenerationSpillFactCounts,
+    addition: NativeGenerationSpillFactCounts,
+) -> Result<(), ResolveGenerationFailure> {
+    total.files = total
+        .files
+        .checked_add(addition.files)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    total.symbols = total
+        .symbols
+        .checked_add(addition.symbols)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    total.edges = total
+        .edges
+        .checked_add(addition.edges)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    total.references = total
+        .references
+        .checked_add(addition.references)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    total.numerical_sites = total
+        .numerical_sites
+        .checked_add(addition.numerical_sites)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    total.documents = total
+        .documents
+        .checked_add(addition.documents)
+        .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
+    Ok(())
+}
+
+fn classify_spill_resolve_error(error: &cartograph_db::StorageError) -> ResolveGenerationFailure {
+    if spill_capacity_error(error) {
+        ResolveGenerationFailure::generation_capacity_exceeded()
+    } else {
+        ResolveGenerationFailure::unclassified()
+    }
+}
+
+fn classify_spill_validation_error(error: GenerationValidationError) -> ResolveGenerationFailure {
+    match error {
+        GenerationValidationError::RetainedLimit => {
+            ResolveGenerationFailure::generation_capacity_exceeded()
+        }
+        GenerationValidationError::Storage(error) if spill_capacity_error(&error) => {
+            ResolveGenerationFailure::generation_capacity_exceeded()
+        }
+        GenerationValidationError::ReferenceNameTooLong => ResolveGenerationFailure {
+            reason: Some(PipelineFailureReason::ReferenceNameTooLong),
+        },
+        GenerationValidationError::Storage(_) | GenerationValidationError::Cancelled => {
+            ResolveGenerationFailure::unclassified()
+        }
     }
 }
 
@@ -1639,6 +3495,79 @@ async fn run_reduce_stage(
     })
 }
 
+async fn run_spilled_reduce_stage(
+    stages: &NativeStageContext<'_>,
+    spill: NativeGenerationSpill,
+) -> Result<NativeGenerationSpillDigestReport, NativePipelineError> {
+    let config = stages.config;
+    let deadline = config.stage_deadlines();
+    let item_deadline = deadline.deadline();
+    let inputs = [StageEnvelope::new(
+        StageItemMeta::new(
+            StageSequence::new(0),
+            0_u8,
+            StageItemBudget::new(SPILLED_REDUCTION_RESERVATION_BYTES, 0, item_deadline),
+        ),
+        spill,
+    )];
+    let progress = stages.runner.clone();
+    let execution = StageExecution::new(
+        StageRunConfig::new(PipelineStage::Reduce, StageCapacity::new(1, 0), deadline),
+        StageWorkload::new(
+            inputs,
+            move |item: StageWorkItem<u8, NativeGenerationSpill>| {
+                let progress = progress.clone();
+                async move {
+                    let cancellation = item.cancellation();
+                    let (_, _, spill) = item.into_parts();
+                    loop {
+                        if cancellation.is_cancelled() {
+                            return Err(StageItemFailure);
+                        }
+                        let partition = spill
+                            .canonicalize_next()
+                            .await
+                            .map_err(|_| StageItemFailure)?;
+                        progress
+                            .advance_progress(1, 0)
+                            .await
+                            .map_err(|_| StageItemFailure)?;
+                        if partition.complete {
+                            break;
+                        }
+                    }
+                    let digest_progress = progress.clone();
+                    spill
+                        .compute_digest(|| cancellation.is_cancelled(), move |rows| {
+                            let digest_progress = digest_progress.clone();
+                            async move {
+                                digest_progress.advance_progress(rows, 0).await.is_ok()
+                            }
+                        })
+                        .await
+                        .map_err(|_| StageItemFailure)
+                }
+            },
+        ),
+        StageFold::new(
+            None,
+            |digest: &mut Option<NativeGenerationSpillDigestReport>,
+             output: StageOutput<u8, NativeGenerationSpillDigestReport>| {
+                let (_, output) = output.into_parts();
+                *digest = Some(output);
+                Ok(())
+            },
+        ),
+    );
+    stages
+        .runner
+        .execute(execution)
+        .await?
+        .ok_or(NativePipelineError::Incomplete {
+            stage: PipelineStage::Reduce,
+        })
+}
+
 fn generation_validation_failure_reason(
     error: &GenerationValidationError,
 ) -> Option<PipelineFailureReason> {
@@ -1822,6 +3751,22 @@ fn parse_manifest_entry<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
+    let snapshot = read_manifest_snapshot(source_root, manifest, &mut cancelled)?;
+    let mut extractor =
+        NativeExtractor::new(snapshot.language()).map_err(ParseManifestFailure::from_extract)?;
+    extractor
+        .extract_with_cancellation(&snapshot, cancelled)
+        .map_err(ParseManifestFailure::from_extract)
+}
+
+fn read_manifest_snapshot<Cancel>(
+    source_root: &SourceRoot,
+    manifest: &SourceManifestEntry,
+    cancelled: &mut Cancel,
+) -> Result<SourceSnapshot, ParseManifestFailure>
+where
+    Cancel: FnMut() -> bool,
+{
     let ceiling = exact_limit_ceiling(manifest.byte_size)
         .map_err(|_| ParseManifestFailure::unclassified())?;
     let exact_limits = exact_source_limits(manifest.byte_size, ceiling)
@@ -1829,7 +3774,7 @@ where
     let snapshot = source_root
         .read_with_cancellation(
             &manifest.path,
-            SourceReadOptions::new(exact_limits, &mut cancelled),
+            SourceReadOptions::new(exact_limits, cancelled),
         )
         .map_err(|_| ParseManifestFailure::unclassified())?;
     if snapshot.byte_size() != manifest.byte_size
@@ -1839,11 +3784,48 @@ where
     {
         return Err(ParseManifestFailure::unclassified());
     }
-    let mut extractor =
-        NativeExtractor::new(snapshot.language()).map_err(ParseManifestFailure::from_extract)?;
-    extractor
-        .extract_with_cancellation(&snapshot, cancelled)
-        .map_err(ParseManifestFailure::from_extract)
+    Ok(snapshot)
+}
+
+#[derive(Default)]
+struct SpilledExtractorPool {
+    extractors: HashMap<SourceLanguage, NativeExtractor>,
+    #[cfg(test)]
+    initializations: usize,
+}
+
+impl SpilledExtractorPool {
+    fn extract<Cancel>(
+        &mut self,
+        source_root: &SourceRoot,
+        manifest: &SourceManifestEntry,
+        mut cancelled: Cancel,
+    ) -> Result<ExtractedFile, ParseManifestFailure>
+    where
+        Cancel: FnMut() -> bool,
+    {
+        let snapshot = read_manifest_snapshot(source_root, manifest, &mut cancelled)?;
+        let language = snapshot.language();
+        if !self.extractors.contains_key(&language) {
+            self.extractors
+                .try_reserve(1)
+                .map_err(|_| ParseManifestFailure::unclassified())?;
+            let extractor =
+                NativeExtractor::new(language).map_err(ParseManifestFailure::from_extract)?;
+            if self.extractors.insert(language, extractor).is_some() {
+                return Err(ParseManifestFailure::unclassified());
+            }
+            #[cfg(test)]
+            {
+                self.initializations = self.initializations.saturating_add(1);
+            }
+        }
+        self.extractors
+            .get_mut(&language)
+            .ok_or_else(ParseManifestFailure::unclassified)?
+            .extract_with_cancellation(&snapshot, cancelled)
+            .map_err(ParseManifestFailure::from_extract)
+    }
 }
 
 fn exact_source_limits(
@@ -1885,7 +3867,33 @@ impl NativeFactAccumulator {
             .checked_add(usize_to_u64(extracted.diagnostics.len()))
             .ok_or(StageItemFailure)?;
         let file = NativeFileFacts::from_extracted(extracted)?;
+        self.push_native(file, diagnostics)
+    }
+
+    fn push_native(
+        &mut self,
+        file: NativeFileFacts,
+        diagnostics: u64,
+    ) -> Result<(), StageItemFailure> {
         let file_bytes = file.modeled_retained_bytes();
+        self.push_native_measured(file, diagnostics, file_bytes)
+    }
+
+    fn push_compact_clone(
+        &mut self,
+        file: NativeFileFacts,
+        diagnostics: u64,
+    ) -> Result<(), StageItemFailure> {
+        let file_bytes = file.modeled_owned_bytes();
+        self.push_native_measured(file, diagnostics, file_bytes)
+    }
+
+    fn push_native_measured(
+        &mut self,
+        file: NativeFileFacts,
+        diagnostics: u64,
+        file_bytes: u64,
+    ) -> Result<(), StageItemFailure> {
         let minimum_retained = self
             .retained_bytes
             .checked_add(file_bytes)
@@ -1917,6 +3925,23 @@ impl NativeFactAccumulator {
         self.diagnostics = diagnostics;
         Ok(())
     }
+}
+
+fn compact_clone_file(mut file: NativeFileFacts) -> NativeFileFacts {
+    file.containments = Vec::new();
+    file.references = Vec::new();
+    file.numerical_sites = Vec::new();
+    file.import_bindings = Vec::new();
+    file.test_search_text = String::new();
+    for symbol in &mut file.symbols {
+        symbol.name = String::new();
+        symbol.input.symbol_kind = String::new();
+        symbol.input.qualified_name = String::new();
+        symbol.input.signature = String::new();
+        symbol.docstring = None;
+        symbol.body_search_text = String::new();
+    }
+    file
 }
 
 struct NativeFileFacts {
@@ -1980,7 +4005,7 @@ impl NativeFileFacts {
         })
     }
 
-    fn modeled_retained_bytes(&self) -> u64 {
+    fn modeled_owned_bytes(&self) -> u64 {
         let mut bytes = usize_to_u64(size_of::<Self>())
             .saturating_add(modeled_file_input_bytes(&self.file))
             .saturating_add(vector_capacity_bytes(&self.symbols))
@@ -2034,7 +4059,12 @@ impl NativeFileFacts {
                 .saturating_add(usize_to_u64(binding.imported_name.capacity()))
                 .saturating_add(usize_to_u64(binding.local_name.capacity()));
         }
-        bytes.saturating_add(self.anticipated_output_bytes())
+        bytes
+    }
+
+    fn modeled_retained_bytes(&self) -> u64 {
+        self.modeled_owned_bytes()
+            .saturating_add(self.anticipated_output_bytes())
     }
 
     fn anticipated_output_bytes(&self) -> u64 {
@@ -2280,14 +4310,53 @@ struct TestFileEvidence {
     has_inline_tests: bool,
 }
 
-type CandidateMap = BTreeMap<String, Vec<ResolutionCandidate>>;
-type DefaultExportMap = BTreeMap<FileId, Vec<ResolutionCandidate>>;
-type ParentMap = BTreeMap<SymbolId, SymbolId>;
-type ModulePathMap = BTreeMap<String, Vec<FileId>>;
+type CandidateMap = HashMap<String, ResolutionCandidateBucket>;
+type DefaultExportMap = HashMap<FileId, Vec<ResolutionCandidate>>;
+type ParentMap = HashMap<SymbolId, SymbolId>;
+type ModulePathMap = HashMap<String, Vec<FileId>>;
 type FileResolutionContextMap = BTreeMap<FileId, ResolutionFileContext>;
-type FileSymbolMap = BTreeMap<FileId, SymbolId>;
-type FileExportMap = BTreeMap<FileId, BTreeMap<String, Option<ProjectExport>>>;
-type RustPackageMap = BTreeMap<String, Option<RustPackageRoot>>;
+type FileSymbolMap = HashMap<FileId, SymbolId>;
+type FileOrdinalMap = HashMap<FileId, u64>;
+type FileExportMap = HashMap<FileId, BTreeMap<String, Option<ProjectExport>>>;
+type RustPackageMap = HashMap<String, Option<RustPackageRoot>>;
+
+#[derive(Clone, Copy)]
+struct ResolutionCandidateRange {
+    file_ordinal: u64,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Default)]
+struct ResolutionCandidateBucket {
+    candidates: Vec<ResolutionCandidate>,
+    by_file: Vec<ResolutionCandidateRange>,
+    globally_visible: Vec<usize>,
+    non_visible_by_language: HashMap<String, Vec<usize>>,
+}
+
+impl ResolutionCandidateBucket {
+    fn as_slice(&self) -> &[ResolutionCandidate] {
+        &self.candidates
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &ResolutionCandidate> {
+        self.candidates.iter()
+    }
+
+    fn for_file(&self, file_ordinal: u64) -> &[ResolutionCandidate] {
+        let Ok(range_index) = self
+            .by_file
+            .binary_search_by_key(&file_ordinal, |range| range.file_ordinal)
+        else {
+            return &[];
+        };
+        let range = &self.by_file[range_index];
+        self.candidates
+            .get(range.start..range.end)
+            .unwrap_or_default()
+    }
+}
 
 struct ResolutionFileContext {
     path: String,
@@ -2308,7 +4377,7 @@ struct ModulePathIndex {
 
 #[derive(Default)]
 struct TypeScriptAliasIndex {
-    by_directory: BTreeMap<String, TypeScriptAliasConfig>,
+    by_directory: HashMap<String, TypeScriptAliasConfig>,
 }
 
 struct TypeScriptAliasConfig {
@@ -2325,10 +4394,12 @@ struct TypeScriptPathMapping {
 #[derive(Default)]
 struct ResolutionIndex {
     candidates: CandidateMap,
+    candidate_order: Vec<String>,
     default_exports: DefaultExportMap,
     parents: ParentMap,
     modules: ModulePathIndex,
     file_symbols: FileSymbolMap,
+    file_ordinals: FileOrdinalMap,
     exports: FileExportMap,
     re_exports: Vec<ProjectReExport>,
     rust_named_re_exports: Vec<RustNamedReExport>,
@@ -2598,7 +4669,7 @@ where
 {
     let mut containers = GoContainers::new();
     let mut owner_lookup = GoOwnerLookup::new();
-    for (key, candidates) in &index.candidates {
+    for (key, candidates) in ordered_resolution_candidates(index) {
         for candidate in candidates {
             if cancelled() {
                 return Err(StageItemFailure);
@@ -2685,7 +4756,7 @@ where
         owner_lookup,
         cancelled,
     } = input;
-    for (key, candidates) in &index.candidates {
+    for (key, candidates) in ordered_resolution_candidates(index) {
         for candidate in candidates {
             if cancelled() {
                 return Err(StageItemFailure);
@@ -4293,6 +6364,7 @@ struct CloneAnalysisCandidate {
     symbol_index: usize,
     language: SourceLanguage,
     profile: Option<CloneTokenProfile>,
+    prefilter: CloneProfilePrefilter,
     syntactic_claimed: bool,
     first_partial_band_hit: bool,
     partial_peer_count: u32,
@@ -4302,6 +6374,21 @@ struct CloneAnalysisCandidate {
     listed_peer_count: usize,
     partial_component_parent: usize,
     partial_component_rank: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CloneProfilePrefilter {
+    complete: [u32; CLONE_PREFILTER_BUCKETS],
+    identifiers: [u32; CLONE_PREFILTER_BUCKETS],
+}
+
+impl CloneProfilePrefilter {
+    fn from_profile(profile: &CloneTokenProfile) -> Self {
+        Self {
+            complete: clone_count_prefilter(profile.counts()),
+            identifiers: clone_count_prefilter(profile.identifier_counts()),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4377,6 +6464,162 @@ where
     })
 }
 
+struct CloneEvidencePatch {
+    duplicate_detection_enabled: bool,
+    near_clone_compatibility: NearCloneCompatibility,
+    partial_clone: Option<PartialCloneEvidence>,
+}
+
+type CloneEvidenceMap = BTreeMap<SymbolId, CloneEvidencePatch>;
+
+struct SpilledResolutionPreparation {
+    compact: NativeFactAccumulator,
+    index: ResolutionIndex,
+    budget: ResolveBudget,
+}
+
+async fn build_spilled_resolution_preparation(
+    source: &SpilledNativeFacts,
+    source_root: &SourceRoot,
+    policy: NativeClonePolicy,
+    maximum_bytes: u64,
+    cancellation: &StageCancellation,
+    progress: &StageRunner,
+) -> Result<(CloneEvidenceMap, ResolutionIndex, u64), StageItemFailure> {
+    let working_limit = maximum_bytes
+        .checked_mul(RESOLVE_WORKING_MULTIPLIER)
+        .ok_or(StageItemFailure)?;
+    let mut preparation = SpilledResolutionPreparation {
+        compact: NativeFactAccumulator::new(maximum_bytes),
+        index: ResolutionIndex::default(),
+        budget: ResolveBudget::new(0, working_limit)?,
+    };
+    visit_spilled_native_files(
+        source,
+        &mut preparation,
+        cancellation,
+        progress,
+        |state, file| {
+            let mut cancelled = || cancellation.is_cancelled();
+            index_resolution_file_metadata(ResolutionIndexFileInput {
+                index: &mut state.index,
+                file: &file,
+                budget: &mut state.budget,
+                cancelled: &mut cancelled,
+            })?;
+            let mut context = ResolutionIndexContext {
+                source_root,
+                budget: &mut state.budget,
+                cancelled: &mut cancelled,
+            };
+            index_typescript_alias_file(&mut state.index.modules, &file, &mut context)?;
+            let before = state.compact.retained_bytes;
+            let diagnostics = state.compact.diagnostics;
+            state
+                .compact
+                .push_compact_clone(compact_clone_file(file), diagnostics)?;
+            state
+                .budget
+                .charge(state.compact.retained_bytes.saturating_sub(before))
+        },
+    )
+    .await?;
+    visit_spilled_native_files(
+        source,
+        &mut preparation,
+        cancellation,
+        progress,
+        |state, file| {
+            let mut cancelled = || cancellation.is_cancelled();
+            index_rust_workspace_package_file(
+                &mut state.index,
+                &file,
+                &mut state.budget,
+                &mut cancelled,
+            )?;
+            index_resolution_file_symbols(ResolutionIndexFileInput {
+                index: &mut state.index,
+                file: &file,
+                budget: &mut state.budget,
+                cancelled: &mut cancelled,
+            })
+        },
+    )
+    .await?;
+    let mut cancelled = || cancellation.is_cancelled();
+    finalize_resolution_candidate_order(
+        &mut preparation.index,
+        &mut preparation.budget,
+        &mut cancelled,
+    )?;
+    analyze_partial_clones(
+        CloneAnalysisInput {
+            extracted: &mut preparation.compact,
+            source_root,
+            policy,
+            budget: &mut preparation.budget,
+        },
+        &mut cancelled,
+    )?;
+    let evidence =
+        finish_spilled_clone_evidence(preparation.compact, &mut preparation.budget, cancellation)?;
+    Ok((
+        evidence,
+        preparation.index,
+        preparation.budget.charged_bytes,
+    ))
+}
+
+fn finish_spilled_clone_evidence(
+    compact: NativeFactAccumulator,
+    budget: &mut ResolveBudget,
+    cancellation: &StageCancellation,
+) -> Result<CloneEvidenceMap, StageItemFailure> {
+    let mut evidence = CloneEvidenceMap::new();
+    for file in compact.files {
+        for mut symbol in file.symbols {
+            if cancellation.is_cancelled() {
+                return Err(StageItemFailure);
+            }
+            let patch_bytes = RESOLUTION_MAP_NODE_ALLOWANCE
+                .saturating_add(usize_to_u64(size_of::<CloneEvidencePatch>()))
+                .saturating_add(usize_to_u64(symbol.input.symbol_id.as_str().len()));
+            budget.charge(patch_bytes)?;
+            let symbol_id = symbol.input.symbol_id.clone();
+            if evidence
+                .insert(
+                    symbol_id,
+                    CloneEvidencePatch {
+                        duplicate_detection_enabled: symbol.duplicate_detection_enabled,
+                        near_clone_compatibility: symbol.near_clone_compatibility,
+                        partial_clone: symbol.partial_clone.take(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(StageItemFailure);
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+fn apply_clone_evidence(
+    file: &mut NativeFileFacts,
+    evidence: &mut CloneEvidenceMap,
+) -> Result<(), StageItemFailure> {
+    for symbol in &mut file.symbols {
+        let patch = evidence
+            .remove(&symbol.input.symbol_id)
+            .ok_or(StageItemFailure)?;
+        symbol.duplicate_detection_enabled = patch.duplicate_detection_enabled;
+        symbol.near_clone_compatibility = patch.near_clone_compatibility;
+        symbol.partial_clone = patch.partial_clone;
+        symbol.clone_token_profile = None;
+    }
+    Ok(())
+}
+
 fn collect_clone_candidates<Cancel>(
     input: CloneCandidateCollectionInput<'_>,
     cancelled: &mut Cancel,
@@ -4428,12 +6671,18 @@ where
                 symbol.clone_token_profile = None;
                 continue;
             }
+            let profile = symbol.clone_token_profile.take();
+            let prefilter = profile.as_ref().map_or_else(
+                CloneProfilePrefilter::default,
+                CloneProfilePrefilter::from_profile,
+            );
             let candidate_index = candidates.len();
             candidates.push(CloneAnalysisCandidate {
                 file_index,
                 symbol_index,
                 language,
-                profile: symbol.clone_token_profile.take(),
+                profile,
+                prefilter,
                 syntactic_claimed: false,
                 first_partial_band_hit: false,
                 partial_peer_count: 0,
@@ -4625,6 +6874,15 @@ where
                 > u64::from(left_total).saturating_mul(1_000_000)
             {
                 break;
+            }
+            if clone_prefilter_overlap_ppm(
+                &candidates[left_index].prefilter.complete,
+                &candidates[right_index].prefilter.complete,
+                left_total,
+                right_total,
+            ) < minimum_overlap_ppm
+            {
+                continue;
             }
             let overlap_ppm = clone_profile_overlap_ppm(
                 candidates[left_index]
@@ -4913,6 +7171,30 @@ fn clone_multiset_overlap_ppm(left: CloneProfileView<'_>, right: CloneProfileVie
     u32::try_from(intersection.saturating_mul(1_000_000) / maximum).unwrap_or(u32::MAX)
 }
 
+fn clone_count_prefilter(counts: &[CloneTokenCount]) -> [u32; CLONE_PREFILTER_BUCKETS] {
+    let mut buckets = [0_u32; CLONE_PREFILTER_BUCKETS];
+    for count in counts {
+        let bucket = usize::try_from(count.0 >> CLONE_PREFILTER_SHIFT).unwrap_or(0);
+        buckets[bucket] = buckets[bucket].saturating_add(count.1);
+    }
+    buckets
+}
+
+fn clone_prefilter_overlap_ppm(
+    left: &[u32; CLONE_PREFILTER_BUCKETS],
+    right: &[u32; CLONE_PREFILTER_BUCKETS],
+    left_total: u32,
+    right_total: u32,
+) -> u32 {
+    let intersection = left
+        .iter()
+        .zip(right)
+        .map(|(left, right)| u64::from((*left).min(*right)))
+        .sum::<u64>();
+    let maximum = u64::from(left_total.max(right_total)).max(1);
+    u32::try_from(intersection.saturating_mul(1_000_000) / maximum).unwrap_or(u32::MAX)
+}
+
 fn complete_clone_profile(profile: &CloneTokenProfile) -> CloneProfileView<'_> {
     CloneProfileView {
         counts: profile.counts(),
@@ -4944,6 +7226,20 @@ fn clone_candidates_semantically_compatible(
 ) -> bool {
     match (left.profile.as_ref(), right.profile.as_ref()) {
         (Some(left_profile), Some(right_profile)) => {
+            let minimum_overlap = if left.file_index == right.file_index {
+                DUPLICATE_SAME_FILE_IDENTIFIER_OVERLAP_PPM
+            } else {
+                DUPLICATE_IDENTIFIER_MINIMUM_OVERLAP_PPM
+            };
+            if clone_prefilter_overlap_ppm(
+                &left.prefilter.identifiers,
+                &right.prefilter.identifiers,
+                left_profile.identifier_tokens(),
+                right_profile.identifier_tokens(),
+            ) < minimum_overlap
+            {
+                return false;
+            }
             let overlap = clone_identifier_overlap_ppm(left_profile, right_profile);
             overlap >= DUPLICATE_IDENTIFIER_MINIMUM_OVERLAP_PPM
                 || (left.file_index == right.file_index
@@ -5127,7 +7423,7 @@ where
         budget,
         cancelled,
     } = input;
-    for (qualified_name, candidates) in &index.candidates {
+    for (qualified_name, candidates) in ordered_resolution_candidates(index) {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -5212,7 +7508,7 @@ where
         budget,
         cancelled,
     } = input;
-    for (name, candidates) in &index.candidates {
+    for (name, candidates) in ordered_resolution_candidates(index) {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -5327,7 +7623,7 @@ where
         budget,
         cancelled,
     } = input;
-    for (qualified_name, workspace_candidates) in &index.candidates {
+    for (qualified_name, workspace_candidates) in ordered_resolution_candidates(index) {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -5348,7 +7644,8 @@ where
             if source.kind != SymbolKind::Resource {
                 continue;
             }
-            for (package_qualified_name, package_candidates) in &index.candidates {
+            for (package_qualified_name, package_candidates) in ordered_resolution_candidates(index)
+            {
                 if cancelled() {
                     return Err(StageItemFailure);
                 }
@@ -5479,7 +7776,7 @@ where
         package_directory,
         cancelled,
     } = input;
-    for qualified_name in index.candidates.keys() {
+    for (qualified_name, _) in ordered_resolution_candidates(index) {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -5605,10 +7902,7 @@ where
         service_id,
         cancelled,
     } = input;
-    let candidates = index
-        .candidates
-        .get(service_id)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidates = resolution_candidates_for_file(index, service_id, file_id);
     select_candidate(
         candidates,
         |candidate| {
@@ -6003,7 +8297,201 @@ where
             cancelled: context.cancelled,
         })?;
     }
+    finalize_resolution_candidate_order(&mut index, context.budget, context.cancelled)?;
     Ok(index)
+}
+
+fn finalize_resolution_candidate_order<Cancel>(
+    index: &mut ResolutionIndex,
+    budget: &mut ResolveBudget,
+    cancelled: &mut Cancel,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let mut order = Vec::new();
+    order
+        .try_reserve_exact(index.candidates.len())
+        .map_err(|_| StageItemFailure)?;
+    for key in index.candidates.keys() {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        budget.charge(usize_to_u64(size_of::<String>()).saturating_add(usize_to_u64(key.len())))?;
+        order.push(try_clone_text(key)?);
+    }
+    order.sort_unstable();
+    index.candidate_order = order;
+    Ok(())
+}
+
+fn ordered_resolution_candidates(
+    index: &ResolutionIndex,
+) -> impl Iterator<Item = (&str, &[ResolutionCandidate])> {
+    index.candidate_order.iter().filter_map(|key| {
+        index
+            .candidates
+            .get(key)
+            .map(|candidates| (key.as_str(), candidates.as_slice()))
+    })
+}
+
+fn resolution_candidates_for_file<'a>(
+    index: &'a ResolutionIndex,
+    name: &str,
+    file_id: &FileId,
+) -> &'a [ResolutionCandidate] {
+    let Some(file_ordinal) = index.file_ordinals.get(file_id) else {
+        return &[];
+    };
+    index
+        .candidates
+        .get(name)
+        .map_or(&[] as &[ResolutionCandidate], |candidates| {
+            candidates.for_file(*file_ordinal)
+        })
+}
+
+struct ProjectResolutionCandidates<'a> {
+    bucket: &'a ResolutionCandidateBucket,
+    globally_visible_position: usize,
+    languages: [Option<&'a str>; MAXIMUM_PROJECT_NON_VISIBLE_LANGUAGES],
+    language_count: usize,
+    language_position: usize,
+    candidate_position: usize,
+}
+
+impl<'a> ProjectResolutionCandidates<'a> {
+    fn new(
+        bucket: &'a ResolutionCandidateBucket,
+        source: &'a ResolutionFileContext,
+        reference_name: &str,
+    ) -> Result<Self, StageItemFailure> {
+        let mut candidates = Self {
+            bucket,
+            globally_visible_position: 0,
+            languages: [None; MAXIMUM_PROJECT_NON_VISIBLE_LANGUAGES],
+            language_count: 0,
+            language_position: 0,
+            candidate_position: 0,
+        };
+        candidates.push_language(SourceLanguage::Properties.as_str())?;
+        candidates.push_bridge_languages(&source.language)?;
+        if same_language_framework_reference(source, reference_name) {
+            if javascript_family_name(&source.language) {
+                for language in ["javascript", "jsx", "typescript", "tsx"] {
+                    candidates.push_language(language)?;
+                }
+            } else {
+                candidates.push_language(&source.language)?;
+            }
+        }
+        if php_route_source(source) {
+            candidates.push_language(SourceLanguage::Php.as_str())?;
+        }
+        Ok(candidates)
+    }
+
+    fn push_bridge_languages(&mut self, source_language: &'a str) -> Result<(), StageItemFailure> {
+        let languages: &[&str] = if javascript_family_name(source_language) {
+            &["apex", "objc", "swift", "java", "kotlin"]
+        } else {
+            match source_language {
+                "svelte" | "vue" | "astro" | "html" => &["javascript", "jsx", "typescript", "tsx"],
+                "aura" | "visualforce" => &["apex"],
+                "apex" => &["aura", "visualforce"],
+                "xml" => &["java", "kotlin", "scala"],
+                "java" | "kotlin" | "scala" => &["xml"],
+                "swift" => &["objc"],
+                "objc" => &["swift"],
+                "rust" => &["rust"],
+                _ => &[],
+            }
+        };
+        for language in languages {
+            self.push_language(language)?;
+        }
+        Ok(())
+    }
+
+    fn push_language(&mut self, language: &'a str) -> Result<(), StageItemFailure> {
+        if self.languages[..self.language_count]
+            .iter()
+            .flatten()
+            .any(|retained| *retained == language)
+        {
+            return Ok(());
+        }
+        let slot = self
+            .languages
+            .get_mut(self.language_count)
+            .ok_or(StageItemFailure)?;
+        *slot = Some(language);
+        self.language_count = self.language_count.checked_add(1).ok_or(StageItemFailure)?;
+        Ok(())
+    }
+}
+
+impl<'a> Iterator for ProjectResolutionCandidates<'a> {
+    type Item = &'a ResolutionCandidate;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self
+            .bucket
+            .globally_visible
+            .get(self.globally_visible_position)
+        {
+            self.globally_visible_position = self.globally_visible_position.saturating_add(1);
+            return self.bucket.candidates.get(*index);
+        }
+        while self.language_position < self.language_count {
+            let language = self.languages[self.language_position]?;
+            let indices = self
+                .bucket
+                .non_visible_by_language
+                .get(language)
+                .map_or(&[] as &[usize], Vec::as_slice);
+            if let Some(index) = indices.get(self.candidate_position) {
+                self.candidate_position = self.candidate_position.saturating_add(1);
+                return self.bucket.candidates.get(*index);
+            }
+            self.language_position = self.language_position.saturating_add(1);
+            self.candidate_position = 0;
+        }
+        None
+    }
+}
+
+fn same_language_framework_reference(source: &ResolutionFileContext, reference_name: &str) -> bool {
+    match source.language.as_str() {
+        "javascript" | "jsx" | "typescript" | "tsx" => {
+            JAVASCRIPT_FRAMEWORK_RULES
+                .iter()
+                .any(|rule| rule.name.matches(reference_name))
+                || framework_pascal_case(reference_name)
+        }
+        "svelte" | "vue" | "astro" | "html" => true,
+        "java" | "kotlin" | "scala" => JVM_FRAMEWORK_RULES
+            .iter()
+            .any(|rule| rule.name.matches(reference_name)),
+        "ruby" => framework_pascal_case(reference_name),
+        "php" => {
+            PHP_FRAMEWORK_RULES
+                .iter()
+                .any(|rule| rule.name.matches(reference_name))
+                || php_route_source(source)
+        }
+        "csharp" => CSHARP_FRAMEWORK_RULES
+            .iter()
+            .any(|rule| rule.name.matches(reference_name)),
+        "python" => PYTHON_FRAMEWORK_RULES
+            .iter()
+            .any(|rule| rule.name.matches(reference_name)),
+        "swift" => SWIFT_FRAMEWORK_RULES
+            .iter()
+            .any(|rule| rule.name.matches(reference_name)),
+        _ => false,
+    }
 }
 
 fn index_typescript_aliases<Cancel>(
@@ -6316,6 +8804,7 @@ where
     if cancelled() {
         return Err(StageItemFailure);
     }
+    index_file_ordinal(&mut index.file_ordinals, &file.file, budget)?;
     index_file_symbol(&mut index.file_symbols, &file.file, budget)?;
     index_module_path(
         &mut index.modules,
@@ -6348,22 +8837,35 @@ where
         cancelled,
     } = input;
     for file in &extracted.files {
-        for symbol in &file.symbols {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            let Some((crate_name, root)) =
-                rust_workspace_package_root(&index.modules, &symbol.input.qualified_name)?
-            else {
-                continue;
-            };
-            insert_rust_workspace_package(RustWorkspacePackageInsertInput {
-                packages: &mut index.modules.rust_packages,
-                crate_name,
-                root,
-                budget,
-            })?;
+        index_rust_workspace_package_file(index, file, budget, cancelled)?;
+    }
+    Ok(())
+}
+
+fn index_rust_workspace_package_file<Cancel>(
+    index: &mut ResolutionIndex,
+    file: &NativeFileFacts,
+    budget: &mut ResolveBudget,
+    cancelled: &mut Cancel,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    for symbol in &file.symbols {
+        if cancelled() {
+            return Err(StageItemFailure);
         }
+        let Some((crate_name, root)) =
+            rust_workspace_package_root(&index.modules, &symbol.input.qualified_name)?
+        else {
+            continue;
+        };
+        insert_rust_workspace_package(RustWorkspacePackageInsertInput {
+            packages: &mut index.modules.rust_packages,
+            crate_name,
+            root,
+            budget,
+        })?;
     }
     Ok(())
 }
@@ -6456,6 +8958,10 @@ where
     if cancelled() {
         return Err(StageItemFailure);
     }
+    let file_ordinal = *index
+        .file_ordinals
+        .get(&file.file.file_id)
+        .ok_or(StageItemFailure)?;
     for symbol in &file.symbols {
         if cancelled() {
             return Err(StageItemFailure);
@@ -6470,6 +8976,8 @@ where
                 key: &symbol.name,
                 symbol,
                 parent_symbol_id: parent_symbol_id.as_ref(),
+                file_ordinal,
+                language: &file.file.language,
             },
             budget,
         )?;
@@ -6480,6 +8988,8 @@ where
                     key: &symbol.input.qualified_name,
                     symbol,
                     parent_symbol_id: parent_symbol_id.as_ref(),
+                    file_ordinal,
+                    language: &file.file.language,
                 },
                 budget,
             )?;
@@ -6494,6 +9004,8 @@ where
                     key: alias,
                     symbol,
                     parent_symbol_id: parent_symbol_id.as_ref(),
+                    file_ordinal,
+                    language: &file.file.language,
                 },
                 budget,
             )?;
@@ -6742,6 +9254,24 @@ fn index_file_symbol(
     Ok(())
 }
 
+fn index_file_ordinal(
+    ordinals: &mut FileOrdinalMap,
+    file: &FileInput,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    if ordinals.contains_key(&file.file_id) {
+        return Err(StageItemFailure);
+    }
+    let ordinal = usize_to_u64(ordinals.len());
+    budget.charge(
+        RESOLUTION_MAP_NODE_ALLOWANCE
+            .saturating_add(usize_to_u64(size_of::<(FileId, u64)>()))
+            .saturating_add(usize_to_u64(file.file_id.as_str().len())),
+    )?;
+    ordinals.insert(file.file_id.clone(), ordinal);
+    Ok(())
+}
+
 struct ResolutionOutput<'a> {
     index: &'a ResolutionIndex,
     facts: &'a mut GenerationFacts,
@@ -6758,7 +9288,175 @@ struct FileDocumentIdentity {
 struct FileResolutionContext<'a> {
     identity: &'a FileDocumentIdentity,
     file_symbol_id: &'a SymbolId,
-    import_bindings: &'a [ExtractedImportBinding],
+    import_bindings: &'a FileImportBindingIndex<'a>,
+}
+
+struct FileImportBindingIndex<'a> {
+    bindings: &'a [ExtractedImportBinding],
+    by_name: HashMap<&'a str, Vec<usize>>,
+    wildcards: Vec<usize>,
+}
+
+impl<'a> FileImportBindingIndex<'a> {
+    fn new(
+        bindings: &'a [ExtractedImportBinding],
+        budget: &mut ResolveBudget,
+    ) -> Result<Self, StageItemFailure> {
+        let mut index = Self {
+            bindings,
+            by_name: HashMap::new(),
+            wildcards: Vec::new(),
+        };
+        index
+            .by_name
+            .try_reserve(bindings.len())
+            .map_err(|_| StageItemFailure)?;
+        index
+            .wildcards
+            .try_reserve_exact(bindings.len())
+            .map_err(|_| StageItemFailure)?;
+        for (position, binding) in bindings.iter().enumerate() {
+            if binding.local_name == "*" {
+                budget.charge(usize_to_u64(size_of::<usize>()))?;
+                index.wildcards.push(position);
+            } else {
+                index.insert(binding.local_name.as_str(), position, budget)?;
+            }
+            index.insert(binding.imported_name.as_str(), position, budget)?;
+            index.insert(binding.module_specifier.as_str(), position, budget)?;
+        }
+        Ok(index)
+    }
+
+    fn insert(
+        &mut self,
+        name: &'a str,
+        position: usize,
+        budget: &mut ResolveBudget,
+    ) -> Result<(), StageItemFailure> {
+        if name.is_empty() || name == "*" {
+            return Ok(());
+        }
+        if !self.by_name.contains_key(name) {
+            budget.charge(
+                RESOLUTION_MAP_NODE_ALLOWANCE
+                    .saturating_add(usize_to_u64(size_of::<(&str, Vec<usize>)>())),
+            )?;
+            self.by_name.insert(name, Vec::new());
+        }
+        let positions = self.by_name.get_mut(name).ok_or(StageItemFailure)?;
+        if positions.last().copied() == Some(position) {
+            return Ok(());
+        }
+        budget.charge(usize_to_u64(size_of::<usize>()))?;
+        positions
+            .try_reserve_exact(1)
+            .map_err(|_| StageItemFailure)?;
+        positions.push(position);
+        Ok(())
+    }
+}
+
+struct ImportBindingScratch {
+    positions: Vec<usize>,
+    stamps: Vec<u32>,
+    generation: u32,
+}
+
+impl ImportBindingScratch {
+    fn new(bindings: usize, budget: &mut ResolveBudget) -> Result<Self, StageItemFailure> {
+        let retained = usize_to_u64(bindings).saturating_mul(usize_to_u64(
+            size_of::<usize>().saturating_add(size_of::<u32>()),
+        ));
+        budget.charge(retained)?;
+        let mut positions = Vec::new();
+        positions
+            .try_reserve_exact(bindings)
+            .map_err(|_| StageItemFailure)?;
+        let mut stamps = Vec::new();
+        stamps
+            .try_reserve_exact(bindings)
+            .map_err(|_| StageItemFailure)?;
+        stamps.resize(bindings, 0);
+        Ok(Self {
+            positions,
+            stamps,
+            generation: 0,
+        })
+    }
+
+    fn select<'a>(
+        &'a mut self,
+        index: &'a FileImportBindingIndex<'_>,
+        reference_name: &str,
+    ) -> ImportBindingSelection<'a> {
+        self.begin_selection();
+        self.extend(index.by_name.get(reference_name));
+        for prefix in import_binding_prefixes(reference_name) {
+            self.extend(index.by_name.get(prefix));
+        }
+        self.extend(Some(&index.wildcards));
+        self.positions.sort_unstable();
+        ImportBindingSelection {
+            bindings: index.bindings,
+            positions: &self.positions,
+        }
+    }
+
+    fn begin_selection(&mut self) {
+        self.positions.clear();
+        if let Some(next) = self.generation.checked_add(1) {
+            self.generation = next;
+        } else {
+            self.stamps.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    fn extend(&mut self, positions: Option<&Vec<usize>>) {
+        for position in positions.map_or(&[] as &[usize], Vec::as_slice) {
+            let Some(stamp) = self.stamps.get_mut(*position) else {
+                continue;
+            };
+            if *stamp != self.generation {
+                *stamp = self.generation;
+                self.positions.push(*position);
+            }
+        }
+    }
+}
+
+fn import_binding_prefixes(reference_name: &str) -> impl Iterator<Item = &str> {
+    reference_name
+        .char_indices()
+        .filter_map(|(position, character)| {
+            let separator = character == '.'
+                || character == ':'
+                    && reference_name.as_bytes().get(position.saturating_add(1)) == Some(&b':');
+            separator.then(|| &reference_name[..position])
+        })
+        .filter(|prefix| !prefix.is_empty())
+}
+
+#[derive(Clone, Copy)]
+struct ImportBindingSelection<'a> {
+    bindings: &'a [ExtractedImportBinding],
+    positions: &'a [usize],
+}
+
+impl<'a> ImportBindingSelection<'a> {
+    const fn empty() -> Self {
+        Self {
+            bindings: &[],
+            positions: &[],
+        }
+    }
+
+    fn iter(self) -> impl Iterator<Item = &'a ExtractedImportBinding> {
+        self.positions
+            .iter()
+            .map(|position| &self.bindings[*position])
+    }
 }
 
 struct ReferenceAppendRequest<'a, 'b> {
@@ -6833,10 +9531,13 @@ impl ResolutionOutput<'_> {
             },
             cancelled,
         )?;
+        let import_binding_index = FileImportBindingIndex::new(&import_bindings, self.budget)?;
+        let mut import_binding_scratch =
+            ImportBindingScratch::new(import_bindings.len(), self.budget)?;
         let context = FileResolutionContext {
             identity: &identity,
             file_symbol_id: &file_symbol_id,
-            import_bindings: &import_bindings,
+            import_bindings: &import_binding_index,
         };
         for reference in references {
             if cancelled() {
@@ -6847,6 +9548,7 @@ impl ResolutionOutput<'_> {
                     context: &context,
                     reference,
                 },
+                &mut import_binding_scratch,
                 cancelled,
             )?;
         }
@@ -6948,6 +9650,7 @@ impl ResolutionOutput<'_> {
     fn append_reference<Cancel>(
         &mut self,
         request: ReferenceAppendRequest<'_, '_>,
+        import_binding_scratch: &mut ImportBindingScratch,
         cancelled: &mut Cancel,
     ) -> Result<(), StageItemFailure>
     where
@@ -6977,6 +9680,7 @@ impl ResolutionOutput<'_> {
                     .as_deref()
                     .unwrap_or(&reference.name)
             });
+        let import_bindings = import_binding_scratch.select(context.import_bindings, lookup_name);
         let mut resolution = if rust_macro_name.is_some() {
             ReferenceResolution::unresolved(RUST_MACRO_UNRESOLVED_PROVENANCE)
         } else if let Some(lookup) = embedded_sql {
@@ -6988,7 +9692,7 @@ impl ResolutionOutput<'_> {
                     file_id: &context.identity.file_id,
                     file_path: &context.identity.path,
                     language: &context.identity.language,
-                    import_bindings: context.import_bindings,
+                    import_bindings,
                     owner: reference.owner.as_ref(),
                     name: lookup_name,
                     dynamic_dispatch: dynamic_dispatch_name.is_some(),
@@ -7206,6 +9910,8 @@ struct ResolutionCandidateInsertion<'a> {
     key: &'a str,
     symbol: &'a NativeSymbolFacts,
     parent_symbol_id: Option<&'a SymbolId>,
+    file_ordinal: u64,
+    language: &'a str,
 }
 
 #[derive(Clone, Copy)]
@@ -7439,28 +10145,31 @@ fn push_candidate(
         key,
         symbol,
         parent_symbol_id,
+        file_ordinal,
+        language,
     } = insertion;
     if !candidates.contains_key(key) {
         budget.charge(
             RESOLUTION_MAP_NODE_ALLOWANCE
-                .saturating_add(usize_to_u64(size_of::<(String, Vec<ResolutionCandidate>)>()))
+                .saturating_add(usize_to_u64(
+                    size_of::<(String, ResolutionCandidateBucket)>(),
+                ))
                 .saturating_add(usize_to_u64(key.len())),
         )?;
-        candidates.insert(try_clone_text(key)?, Vec::new());
+        candidates.insert(try_clone_text(key)?, ResolutionCandidateBucket::default());
     }
-    let entries = candidates.get_mut(key).ok_or(StageItemFailure)?;
-    budget.charge(
-        usize_to_u64(size_of::<ResolutionCandidate>())
-            .saturating_add(usize_to_u64(symbol.input.file_id.as_str().len()))
-            .saturating_add(usize_to_u64(symbol.input.symbol_id.as_str().len()))
-            .saturating_add(usize_to_u64(symbol.input.qualified_name.len()))
-            .saturating_add(usize_to_u64(symbol.input.signature.len()))
-            .saturating_add(
-                parent_symbol_id.map_or(0, |parent| usize_to_u64(parent.as_str().len())),
-            ),
+    let bucket = candidates.get_mut(key).ok_or(StageItemFailure)?;
+    let reservation = reserve_candidate_insertion(
+        bucket,
+        CandidateReservationInput {
+            symbol,
+            parent_symbol_id,
+            file_ordinal,
+            language,
+        },
+        budget,
     )?;
-    entries.try_reserve_exact(1).map_err(|_| StageItemFailure)?;
-    entries.push(ResolutionCandidate {
+    bucket.candidates.push(ResolutionCandidate {
         file_id: symbol.input.file_id.clone(),
         symbol_id: symbol.input.symbol_id.clone(),
         parent_symbol_id: parent_symbol_id.cloned(),
@@ -7473,6 +10182,177 @@ fn push_candidate(
         top_level: symbol.input.qualified_name == symbol.name,
         augmentation: symbol.augmentation,
     });
+    append_candidate_project_index(bucket, language, reservation)?;
+    append_candidate_file_range(bucket, file_ordinal, reservation)
+}
+
+#[derive(Clone, Copy)]
+struct CandidateReservation {
+    candidate_index: usize,
+    new_file_range: bool,
+    globally_visible: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CandidateReservationInput<'a> {
+    symbol: &'a NativeSymbolFacts,
+    parent_symbol_id: Option<&'a SymbolId>,
+    file_ordinal: u64,
+    language: &'a str,
+}
+
+fn reserve_candidate_insertion(
+    bucket: &mut ResolutionCandidateBucket,
+    input: CandidateReservationInput<'_>,
+    budget: &mut ResolveBudget,
+) -> Result<CandidateReservation, StageItemFailure> {
+    let CandidateReservationInput {
+        symbol,
+        parent_symbol_id: _,
+        file_ordinal,
+        language,
+    } = input;
+    let candidate_index = bucket.candidates.len();
+    let new_file_range = bucket
+        .by_file
+        .last()
+        .is_none_or(|range| range.file_ordinal != file_ordinal);
+    let globally_visible = symbol.export.exported || symbol.visibility == Some(Visibility::Public);
+    let new_language_bucket =
+        !globally_visible && !bucket.non_visible_by_language.contains_key(language);
+    let retained = candidate_reservation_bytes(input, new_file_range, new_language_bucket);
+    budget.charge(retained)?;
+    bucket
+        .candidates
+        .try_reserve_exact(1)
+        .map_err(|_| StageItemFailure)?;
+    if new_file_range {
+        bucket
+            .by_file
+            .try_reserve(1)
+            .map_err(|_| StageItemFailure)?;
+    }
+    reserve_candidate_project_index(bucket, language, globally_visible, new_language_bucket)?;
+    Ok(CandidateReservation {
+        candidate_index,
+        new_file_range,
+        globally_visible,
+    })
+}
+
+fn candidate_reservation_bytes(
+    input: CandidateReservationInput<'_>,
+    new_file_range: bool,
+    new_language_bucket: bool,
+) -> u64 {
+    let CandidateReservationInput {
+        symbol,
+        parent_symbol_id,
+        file_ordinal: _,
+        language,
+    } = input;
+    let file_range_bytes = if new_file_range {
+        usize_to_u64(size_of::<ResolutionCandidateRange>())
+    } else {
+        0
+    };
+    let language_bucket_bytes = new_language_bucket.then(|| {
+        RESOLUTION_MAP_NODE_ALLOWANCE
+            .saturating_add(usize_to_u64(size_of::<(String, Vec<usize>)>()))
+            .saturating_add(usize_to_u64(language.len()))
+    });
+    usize_to_u64(size_of::<ResolutionCandidate>())
+        .saturating_add(usize_to_u64(symbol.input.file_id.as_str().len()))
+        .saturating_add(usize_to_u64(symbol.input.symbol_id.as_str().len()))
+        .saturating_add(usize_to_u64(symbol.input.qualified_name.len()))
+        .saturating_add(usize_to_u64(symbol.input.signature.len()))
+        .saturating_add(parent_symbol_id.map_or(0, |parent| usize_to_u64(parent.as_str().len())))
+        .saturating_add(file_range_bytes)
+        .saturating_add(usize_to_u64(size_of::<usize>()))
+        .saturating_add(language_bucket_bytes.unwrap_or_default())
+}
+
+fn reserve_candidate_project_index(
+    bucket: &mut ResolutionCandidateBucket,
+    language: &str,
+    globally_visible: bool,
+    new_language_bucket: bool,
+) -> Result<(), StageItemFailure> {
+    if globally_visible {
+        return bucket
+            .globally_visible
+            .try_reserve_exact(1)
+            .map_err(|_| StageItemFailure);
+    }
+    if new_language_bucket {
+        bucket
+            .non_visible_by_language
+            .try_reserve(1)
+            .map_err(|_| StageItemFailure)?;
+        bucket
+            .non_visible_by_language
+            .insert(try_clone_text(language)?, Vec::new());
+    }
+    bucket
+        .non_visible_by_language
+        .get_mut(language)
+        .ok_or(StageItemFailure)?
+        .try_reserve_exact(1)
+        .map_err(|_| StageItemFailure)
+}
+
+fn append_candidate_project_index(
+    bucket: &mut ResolutionCandidateBucket,
+    language: &str,
+    reservation: CandidateReservation,
+) -> Result<(), StageItemFailure> {
+    if reservation.globally_visible {
+        bucket.globally_visible.push(reservation.candidate_index);
+    } else {
+        bucket
+            .non_visible_by_language
+            .get_mut(language)
+            .ok_or(StageItemFailure)?
+            .push(reservation.candidate_index);
+    }
+    Ok(())
+}
+
+fn append_candidate_file_range(
+    bucket: &mut ResolutionCandidateBucket,
+    file_ordinal: u64,
+    reservation: CandidateReservation,
+) -> Result<(), StageItemFailure> {
+    let next_index = reservation
+        .candidate_index
+        .checked_add(1)
+        .ok_or(StageItemFailure)?;
+    if let Some(range) = bucket.by_file.last_mut() {
+        if range.file_ordinal == file_ordinal {
+            if range.end != reservation.candidate_index {
+                return Err(StageItemFailure);
+            }
+            range.end = next_index;
+        } else {
+            if range.file_ordinal >= file_ordinal {
+                return Err(StageItemFailure);
+            }
+            bucket.by_file.push(ResolutionCandidateRange {
+                file_ordinal,
+                start: reservation.candidate_index,
+                end: next_index,
+            });
+        }
+    } else {
+        if !reservation.new_file_range {
+            return Err(StageItemFailure);
+        }
+        bucket.by_file.push(ResolutionCandidateRange {
+            file_ordinal,
+            start: reservation.candidate_index,
+            end: next_index,
+        });
+    }
     Ok(())
 }
 
@@ -7527,7 +10407,7 @@ struct ResolutionRequest<'a> {
     file_id: &'a FileId,
     file_path: &'a str,
     language: &'a str,
-    import_bindings: &'a [ExtractedImportBinding],
+    import_bindings: ImportBindingSelection<'a>,
     owner: Option<&'a SymbolId>,
     name: &'a str,
     dynamic_dispatch: bool,
@@ -7562,11 +10442,11 @@ struct AppleBridgeSelection<'context, 'request, 'candidate, Cancel> {
     cancelled: &'context mut Cancel,
 }
 
-struct FrameworkSelection<'context, 'request, 'candidate, Cancel> {
+struct FrameworkSelection<'context, 'request, Candidates, Cancel> {
     index: &'context ResolutionIndex,
     source: &'context ResolutionFileContext,
     request: &'context ResolutionRequest<'request>,
-    candidates: &'candidate [ResolutionCandidate],
+    candidates: Candidates,
     cancelled: &'context mut Cancel,
 }
 
@@ -7698,10 +10578,10 @@ fn resolve_embedded_sql<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    let candidates = index
-        .candidates
-        .get(lookup.table)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidates = index.candidates.get(lookup.table).map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     let candidate = select_candidate(
         candidates,
         |candidate| {
@@ -8238,10 +11118,7 @@ fn resolve_lexical<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
-    let candidates = index
-        .candidates
-        .get(request.name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidates = resolution_candidates_for_file(index, request.name, request.file_id);
     if let Some(candidate) = select_candidate(
         candidates,
         |candidate| {
@@ -8379,10 +11256,11 @@ where
     ) else {
         return Ok(None);
     };
-    let candidates = index
-        .candidates
-        .get(target_name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidates = resolution_candidates_for_file(index, target_name, module_file_id);
+    let project_candidates = index.candidates.get(target_name).map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     let mut candidate = select_candidate(
         candidates,
         |candidate| {
@@ -8399,7 +11277,7 @@ where
     )?;
     if candidate.is_none() && allow_unique_project_reexport {
         candidate = select_candidate(
-            candidates,
+            project_candidates,
             |candidate| {
                 rust_module_candidate_visible(RustCandidateVisibility {
                     index,
@@ -8536,7 +11414,7 @@ where
     }
     let mut bound = false;
     let mut matched = None;
-    for binding in request.import_bindings {
+    for binding in request.import_bindings.iter() {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -8590,7 +11468,7 @@ where
 {
     let mut matched: Option<SymbolId> = None;
     let mut bound = false;
-    for binding in request.import_bindings {
+    for binding in request.import_bindings.iter() {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -8646,12 +11524,13 @@ where
     if !c_include_family_name(request.language) {
         return Ok(ImportResolution::NotBound);
     }
-    let candidates = index
-        .candidates
-        .get(request.name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidate_bucket = index.candidates.get(request.name);
+    let candidates = candidate_bucket.map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     let mut included_candidate: Option<&ResolutionCandidate> = None;
-    for binding in request.import_bindings {
+    for binding in request.import_bindings.iter() {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -8723,10 +11602,10 @@ where
         request,
         declaration,
     } = query;
-    let candidates = index
-        .candidates
-        .get(&declaration.qualified_name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidates = index.candidates.get(&declaration.qualified_name).map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     select_candidate(
         candidates,
         |candidate| {
@@ -8903,10 +11782,11 @@ where
             .ok_or(StageItemFailure)?;
         rust_imported_target_name(imported_leaf, suffix)?
     };
-    let candidates = index
-        .candidates
-        .get(&target_name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidates = resolution_candidates_for_file(index, &target_name, module_file_id);
+    let project_candidates = index.candidates.get(&target_name).map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     let allow_unique_project_reexport = parent_specifier == "crate";
     let mut candidate = select_candidate(
         candidates,
@@ -8924,7 +11804,7 @@ where
     )?;
     if candidate.is_none() && allow_unique_project_reexport {
         candidate = select_candidate(
-            candidates,
+            project_candidates,
             |candidate| {
                 rust_module_candidate_visible(RustCandidateVisibility {
                     index,
@@ -8981,12 +11861,11 @@ where
         let Some(entry) = index.modules.files.get(&package.entry_file_id) else {
             return Err(StageItemFailure);
         };
-        let empty_bindings: &[ExtractedImportBinding] = &[];
         let target_request = ResolutionRequest {
             file_id: &package.entry_file_id,
             file_path: &entry.path,
             language: SourceLanguage::Rust.as_str(),
-            import_bindings: empty_bindings,
+            import_bindings: ImportBindingSelection::empty(),
             owner: None,
             name: re_export_target,
             dynamic_dispatch: false,
@@ -9001,10 +11880,10 @@ where
             return Ok(Some(target));
         }
     }
-    let candidates = index
-        .candidates
-        .get(public_name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidates = index.candidates.get(public_name).map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     let candidate = select_candidate(
         candidates,
         |candidate| {
@@ -9132,7 +12011,7 @@ where
     Cancel: FnMut() -> bool,
 {
     let mut scope = ImportScope::None;
-    for binding in reference.import_bindings {
+    for binding in reference.import_bindings.iter() {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -9198,7 +12077,7 @@ where
     Cancel: FnMut() -> bool,
 {
     let mut matched: Option<(&ExtractedImportBinding, &str)> = None;
-    for binding in reference.import_bindings {
+    for binding in reference.import_bindings.iter() {
         if cancelled() {
             return Err(StageItemFailure);
         }
@@ -9251,10 +12130,7 @@ fn import_resolution_candidates(query: ImportCandidatesQuery<'_>) -> &[Resolutio
             .get(module_file_id)
             .map_or(&[] as &[ResolutionCandidate], Vec::as_slice)
     } else {
-        index
-            .candidates
-            .get(imported_name)
-            .map_or(&[] as &[ResolutionCandidate], Vec::as_slice)
+        resolution_candidates_for_file(index, imported_name, module_file_id)
     }
 }
 
@@ -9827,10 +12703,11 @@ where
     })? {
         return Ok(Some(target));
     }
-    let candidates = index
-        .candidates
-        .get(request.name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let candidate_bucket = index.candidates.get(request.name);
+    let candidates = candidate_bucket.map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     if c_include_family_name(request.language)
         && candidates.iter().any(|candidate| {
             candidate.qualified_name == request.name
@@ -9841,34 +12718,36 @@ where
     }
     let rust_local_import = request.language == SourceLanguage::Rust.as_str()
         && reference_import_scope(index, request, cancelled)? == ImportScope::Local;
-    let candidate = select_candidate(
-        candidates,
-        |candidate| {
-            is_project_candidate(ProjectCandidateInput {
-                modules: &index.modules,
-                source,
-                source_file_id: request.file_id,
-                reference_name: request.name,
-                dynamic_dispatch: request.dynamic_dispatch,
-                rust_local_import,
-                candidate,
-            }) && reference_kind_candidate(request.kind, candidate)
-        },
-        cancelled,
-    )?;
-    if let Some(candidate) = candidate {
-        return Ok(Some(project_resolved_target(candidate)));
+    if let Some(candidate_bucket) = candidate_bucket {
+        let candidate = select_candidate(
+            ProjectResolutionCandidates::new(candidate_bucket, source, request.name)?,
+            |candidate| {
+                is_project_candidate(ProjectCandidateInput {
+                    modules: &index.modules,
+                    source,
+                    source_file_id: request.file_id,
+                    reference_name: request.name,
+                    dynamic_dispatch: request.dynamic_dispatch,
+                    rust_local_import,
+                    candidate,
+                }) && reference_kind_candidate(request.kind, candidate)
+            },
+            cancelled,
+        )?;
+        if let Some(candidate) = candidate {
+            return Ok(Some(project_resolved_target(candidate)));
+        }
+        if let Some(candidate) = select_framework_candidate(FrameworkSelection {
+            index,
+            source,
+            request,
+            candidates: ProjectResolutionCandidates::new(candidate_bucket, source, request.name)?,
+            cancelled,
+        })? {
+            return Ok(Some(framework_convention_target(candidate)));
+        }
     }
-    if let Some(candidate) = select_framework_candidate(FrameworkSelection {
-        index,
-        source,
-        request,
-        candidates,
-        cancelled,
-    })? {
-        return Ok(Some(framework_convention_target(candidate)));
-    }
-    if candidates.is_empty() && php_route_source(source) {
+    if candidate_bucket.is_none() && php_route_source(source) {
         for fallback_name in php_route_resolution_fallbacks(request.name)
             .into_iter()
             .flatten()
@@ -9876,13 +12755,9 @@ where
             if fallback_name == request.name {
                 continue;
             }
-            let fallback_candidates = index
-                .candidates
-                .get(&fallback_name)
-                .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
-            if fallback_candidates.is_empty() {
+            let Some(fallback_candidates) = index.candidates.get(&fallback_name) else {
                 continue;
-            }
+            };
             let fallback_request = ResolutionRequest {
                 file_id: request.file_id,
                 file_path: request.file_path,
@@ -9898,7 +12773,11 @@ where
                 index,
                 source,
                 request: &fallback_request,
-                candidates: fallback_candidates,
+                candidates: ProjectResolutionCandidates::new(
+                    fallback_candidates,
+                    source,
+                    &fallback_name,
+                )?,
                 cancelled,
             })? {
                 return Ok(Some(framework_convention_target(candidate)));
@@ -9927,10 +12806,10 @@ where
         _ => return Ok(None),
     };
     let direct_name = request.name.rsplit('.').next().unwrap_or(request.name);
-    let direct = index
-        .candidates
-        .get(direct_name)
-        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let direct = index.candidates.get(direct_name).map_or(
+        &[] as &[ResolutionCandidate],
+        ResolutionCandidateBucket::as_slice,
+    );
     if direct.iter().any(|candidate| {
         index
             .modules
@@ -9957,10 +12836,10 @@ where
     }
     let selector_candidates = swift_base_names_for_objc_selector(request.name);
     if let Some(literal) = selector_candidates[0].as_deref() {
-        let candidates = index
-            .candidates
-            .get(literal)
-            .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+        let candidates = index.candidates.get(literal).map_or(
+            &[] as &[ResolutionCandidate],
+            ResolutionCandidateBucket::as_slice,
+        );
         let mut has_objc_declaration = false;
         let exact = select_candidate(
             candidates,
@@ -9992,10 +12871,10 @@ where
         let Some(candidate_name) = candidate_name else {
             continue;
         };
-        let candidates = index
-            .candidates
-            .get(&candidate_name)
-            .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+        let candidates = index.candidates.get(&candidate_name).map_or(
+            &[] as &[ResolutionCandidate],
+            ResolutionCandidateBucket::as_slice,
+        );
         if let Some(candidate) = select_apple_bridge_candidate(AppleBridgeSelection {
             index,
             source,
@@ -10055,10 +12934,11 @@ fn apple_bridge_target(candidate: &ResolutionCandidate) -> ResolvedTarget {
     }
 }
 
-fn select_framework_candidate<'candidate, Cancel>(
-    input: FrameworkSelection<'_, '_, 'candidate, Cancel>,
+fn select_framework_candidate<'candidate, Candidates, Cancel>(
+    input: FrameworkSelection<'_, '_, Candidates, Cancel>,
 ) -> Result<Option<&'candidate ResolutionCandidate>, StageItemFailure>
 where
+    Candidates: IntoIterator<Item = &'candidate ResolutionCandidate>,
     Cancel: FnMut() -> bool,
 {
     let FrameworkSelection {
@@ -10944,12 +13824,13 @@ fn resolution_languages_compatible(source: &str, target: &str) -> bool {
         || (matches!(source, "c" | "cpp" | "cuda") && matches!(target, "c" | "cpp" | "cuda"))
 }
 
-fn select_candidate<'a, Eligible, Cancel>(
-    candidates: &'a [ResolutionCandidate],
+fn select_candidate<'a, Candidates, Eligible, Cancel>(
+    candidates: Candidates,
     mut eligible: Eligible,
     cancelled: &mut Cancel,
 ) -> Result<Option<&'a ResolutionCandidate>, StageItemFailure>
 where
+    Candidates: IntoIterator<Item = &'a ResolutionCandidate>,
     Eligible: FnMut(&ResolutionCandidate) -> bool,
     Cancel: FnMut() -> bool,
 {
@@ -11337,21 +14218,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "0dcc80c5f377a570b40707768e50b266cb761d8f554fc685d0ad486f639162b2";
+        "ead0174f920a3a2e9c62f98068c9b5c636ed93290943aaed10e5542c36e7dc01";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "5c906e90c421712b0a734d5b72db9afe4f5afafaa4b6a284d52e3c6b1995d21a";
+        "6b194944008d8037aedfd135edee6c1e08025b6199731fe2a137760018e3f04b";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "e1d2e2ffbc19febb65cf7fc5f184b8f7466c98c9251eb83c4395b1bed720bced";
+        "e180176dfb55f5828d0e3847f8e5089b79e5bd1d3e9b515ca0f784a14443d670";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 13;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "805f9da1e4fa1b04cd62fc6fd925c748cccac1120401dc1d335eb9703dd17161";
+        "cab3563cb1aaa8ab851339f18822d69a296333774d0a2e137b31402cb3f31343";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (13, 49, 44, 32, 49);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -12193,6 +15074,109 @@ mod tests {
                 Err(error) => panic!("test native pipeline deadlines were invalid: {error}"),
             };
         NativePipelineConfig::new(limits, parallelism, deadlines)
+    }
+
+    fn spilled_manifest_entry(index: u64, byte_size: u64) -> SourceManifestEntry {
+        let path = NormalizedPath::parse(&format!("src/spilled_{index}.ts"))
+            .unwrap_or_else(|error| panic!("spilled manifest path failed: {error}"));
+        let mut file_bytes = [0_u8; DOCUMENT_UUID_BYTES];
+        file_bytes[DOCUMENT_UUID_BYTES - size_of::<u64>()..].copy_from_slice(&index.to_be_bytes());
+        let mut digest_bytes = [0_u8; 32];
+        digest_bytes[32 - size_of::<u64>()..].copy_from_slice(&index.to_be_bytes());
+        SourceManifestEntry {
+            path,
+            language: SourceLanguage::TypeScript,
+            file_id: FileId::from_uuid_v8(file_bytes),
+            content_hash: ContentDigest::from_bytes(digest_bytes),
+            byte_size,
+        }
+    }
+
+    fn spilled_parse_test_config() -> NativePipelineConfig {
+        let mut config = config(SERIAL_WORKERS);
+        config.deadlines =
+            NativePipelineDeadlines::new(Duration::from_millis(500), TEST_TIMEOUT, CLEANUP_GRACE)
+                .unwrap_or_else(|error| panic!("spilled parse deadlines failed: {error}"));
+        config
+    }
+
+    #[test]
+    fn spilled_parse_envelopes_are_lazy_and_cap_each_batch_by_file_count() {
+        let manifest = (0..65)
+            .map(|index| spilled_manifest_entry(index, 1))
+            .collect::<Vec<_>>();
+        let stage_deadline = Instant::now() + TEST_TIMEOUT;
+        let (mut envelopes, failed) =
+            spilled_parse_envelopes(manifest, spilled_parse_test_config(), stage_deadline);
+        let first = envelopes
+            .next()
+            .unwrap_or_else(|| panic!("first spilled parse envelope was missing"));
+        assert_eq!(first.test_payload().entries.len(), 64);
+        assert_eq!(first.test_meta().budget().progress_bytes(), 64);
+        let first_deadline = first.test_meta().budget().deadline();
+
+        std::thread::sleep(Duration::from_millis(20));
+        let second = envelopes
+            .next()
+            .unwrap_or_else(|| panic!("second spilled parse envelope was missing"));
+        assert_eq!(second.test_payload().entries.len(), 1);
+        assert_eq!(second.test_meta().budget().progress_bytes(), 1);
+        assert!(second.test_meta().budget().deadline() > first_deadline);
+        assert!(envelopes.next().is_none());
+        assert!(!failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn spilled_parse_envelopes_cap_combined_source_bytes() {
+        let mebibyte = 1024_u64 * 1024;
+        let manifest = [40 * mebibyte, 30 * mebibyte, mebibyte]
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| spilled_manifest_entry(usize_to_u64(index), bytes))
+            .collect::<Vec<_>>();
+        let stage_deadline = Instant::now() + TEST_TIMEOUT;
+        let (mut envelopes, failed) =
+            spilled_parse_envelopes(manifest, spilled_parse_test_config(), stage_deadline);
+        let first = envelopes
+            .next()
+            .unwrap_or_else(|| panic!("first byte-bounded envelope was missing"));
+        assert_eq!(first.test_payload().entries.len(), 1);
+        assert_eq!(first.test_meta().budget().progress_bytes(), 40 * mebibyte);
+        let second = envelopes
+            .next()
+            .unwrap_or_else(|| panic!("second byte-bounded envelope was missing"));
+        assert_eq!(second.test_payload().entries.len(), 2);
+        assert_eq!(second.test_meta().budget().progress_bytes(), 31 * mebibyte);
+        assert!(envelopes.next().is_none());
+        assert!(!failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn spilled_parse_envelopes_keep_one_oversized_file_indivisible() {
+        let mebibyte = 1024_u64 * 1024;
+        let manifest = [70 * mebibyte, mebibyte]
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| spilled_manifest_entry(usize_to_u64(index), bytes))
+            .collect::<Vec<_>>();
+        let stage_deadline = Instant::now() + TEST_TIMEOUT;
+        let (mut envelopes, failed) =
+            spilled_parse_envelopes(manifest, spilled_parse_test_config(), stage_deadline);
+        let oversized = envelopes
+            .next()
+            .unwrap_or_else(|| panic!("oversized envelope was missing"));
+        assert_eq!(oversized.test_payload().entries.len(), 1);
+        assert_eq!(
+            oversized.test_meta().budget().progress_bytes(),
+            70 * mebibyte
+        );
+        let following = envelopes
+            .next()
+            .unwrap_or_else(|| panic!("post-oversized envelope was missing"));
+        assert_eq!(following.test_payload().entries.len(), 1);
+        assert_eq!(following.test_meta().budget().progress_bytes(), mebibyte);
+        assert!(envelopes.next().is_none());
+        assert!(!failed.load(Ordering::Acquire));
     }
 
     async fn parse_project_through_native_stages(
@@ -14944,6 +17928,7 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
                 symbol_index: 0,
                 language: SourceLanguage::TypeScript,
                 profile: None,
+                prefilter: CloneProfilePrefilter::default(),
                 syntactic_claimed: false,
                 first_partial_band_hit: false,
                 partial_peer_count: 0,
@@ -15339,6 +18324,43 @@ export function secondClone(value: number) {
             );
             assert!(matches!(result, Ok(None)), "{path}: {result:?}");
         }
+    }
+
+    #[test]
+    fn spilled_parse_batch_reuses_one_extractor_for_each_language() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create parser reuse fixture: {error}"));
+        for (path, source) in [
+            ("src/first.ts", "export function first() { return 1; }\n"),
+            ("src/second.ts", "export function second() { return 2; }\n"),
+        ] {
+            let target = directory.path().join(path);
+            fs::create_dir_all(
+                target
+                    .parent()
+                    .unwrap_or_else(|| panic!("parser reuse fixture had no parent: {path}")),
+            )
+            .unwrap_or_else(|error| panic!("could not create parser reuse parent: {error}"));
+            fs::write(target, source)
+                .unwrap_or_else(|error| panic!("could not write parser reuse fixture: {error}"));
+        }
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open parser reuse fixture: {error}"));
+        let mut pool = SpilledExtractorPool::default();
+        for path in ["src/first.ts", "src/second.ts"] {
+            let manifest = read_manifest_entry(
+                read_manifest_input(&source_root, directory.path(), path),
+                || false,
+            )
+            .unwrap_or_else(|_| panic!("could not read parser reuse manifest: {path}"))
+            .unwrap_or_else(|| panic!("parser reuse manifest was skipped: {path}"));
+            let extracted = pool
+                .extract(&source_root, &manifest, || false)
+                .unwrap_or_else(|_| panic!("could not extract parser reuse fixture: {path}"));
+            assert_eq!(extracted.language, SourceLanguage::TypeScript);
+        }
+        assert_eq!(pool.extractors.len(), 1);
+        assert_eq!(pool.initializations, 1);
     }
 
     #[test]
@@ -15901,6 +18923,84 @@ export function secondClone(value: number) {
                     && !document.metadata_json().contains(secret)
             }));
         }
+    }
+
+    #[test]
+    fn clone_prefilter_is_an_exact_comparison_upper_bound() {
+        let left = [
+            CloneTokenCount(0x0000_0000_0000_0001, 4),
+            CloneTokenCount(0x1000_0000_0000_0001, 6),
+        ];
+        let right = [
+            CloneTokenCount(0x0000_0000_0000_0001, 2),
+            CloneTokenCount(0x0000_0000_0000_0002, 8),
+        ];
+        let exact = clone_multiset_overlap_ppm(
+            CloneProfileView {
+                counts: &left,
+                total: 10,
+            },
+            CloneProfileView {
+                counts: &right,
+                total: 10,
+            },
+        );
+        let prefiltered = clone_prefilter_overlap_ppm(
+            &clone_count_prefilter(&left),
+            &clone_count_prefilter(&right),
+            10,
+            10,
+        );
+        assert_eq!(exact, 200_000);
+        assert_eq!(prefiltered, 400_000);
+        assert!(prefiltered >= exact);
+
+        let disjoint = [CloneTokenCount(0xf000_0000_0000_0001, 10)];
+        assert_eq!(
+            clone_prefilter_overlap_ppm(
+                &clone_count_prefilter(&left),
+                &clone_count_prefilter(&disjoint),
+                10,
+                10,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn compact_clone_accounting_excludes_unmaterialized_canonical_output() {
+        let build_compact = || {
+            let limits = SourceLimits::new(TEST_SOURCE_BYTES)
+                .unwrap_or_else(|error| panic!("source limits were invalid: {error}"));
+            let snapshot = cartograph_extract::SourceSnapshot::from_bytes(
+                "compact.ts",
+                b"export function alpha(): void { beta(); }\nexport function beta(): void {}\n",
+                limits,
+            )
+            .unwrap_or_else(|error| panic!("compact snapshot was rejected: {error}"));
+            let mut extractor = NativeExtractor::new(snapshot.language())
+                .unwrap_or_else(|error| panic!("native extractor was unavailable: {error}"));
+            let extracted = extractor
+                .extract(&snapshot)
+                .unwrap_or_else(|error| panic!("compact extraction failed: {error}"));
+            let file = NativeFileFacts::from_extracted(extracted)
+                .unwrap_or_else(|_| panic!("compact facts could not be normalized"));
+            compact_clone_file(file)
+        };
+        let compact = build_compact();
+        let owned = compact.modeled_owned_bytes();
+        assert!(compact.modeled_retained_bytes() > owned);
+        let maximum = owned.saturating_add(usize_to_u64(size_of::<NativeFileFacts>()));
+        let mut clone_accumulator = NativeFactAccumulator::new(maximum);
+        clone_accumulator
+            .push_compact_clone(compact, 0)
+            .unwrap_or_else(|_| panic!("retained compact clone bytes were overcharged"));
+        let mut canonical_accumulator = NativeFactAccumulator::new(maximum);
+        assert!(
+            canonical_accumulator
+                .push_native(build_compact(), 0)
+                .is_err()
+        );
     }
 
     #[test]

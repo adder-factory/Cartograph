@@ -127,6 +127,16 @@ impl<Key, Payload> StageEnvelope<Key, Payload> {
     pub const fn new(meta: StageItemMeta<Key>, payload: Payload) -> Self {
         Self { meta, payload }
     }
+
+    #[cfg(test)]
+    pub(crate) const fn test_meta(&self) -> &StageItemMeta<Key> {
+        &self.meta
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_payload(&self) -> &Payload {
+        &self.payload
+    }
 }
 
 /// Worker-facing item. Metadata cannot be rewritten by the worker.
@@ -168,14 +178,17 @@ impl<Key, Payload> StageWorkItem<Key, Payload> {
 pub struct StageCancellation {
     parent: watch::Receiver<bool>,
     stage: watch::Receiver<bool>,
+    initially_cancelled: bool,
     deadline: Instant,
 }
 
 impl StageCancellation {
     fn new(parent: watch::Receiver<bool>, stage: watch::Receiver<bool>, deadline: Instant) -> Self {
+        let initially_cancelled = *parent.borrow() || *stage.borrow();
         Self {
             parent,
             stage,
+            initially_cancelled,
             deadline,
         }
     }
@@ -183,11 +196,24 @@ impl StageCancellation {
     /// True after parent cancellation, sibling/stage failure, or the item deadline.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        *self.parent.borrow() || *self.stage.borrow() || self.deadline_elapsed()
+        self.initially_cancelled
+            || monotonic_watch_cancelled(&self.parent)
+            || monotonic_watch_cancelled(&self.stage)
+            || self.deadline_elapsed()
     }
 
     fn deadline_elapsed(&self) -> bool {
         Instant::now() >= self.deadline
+    }
+}
+
+fn monotonic_watch_cancelled(receiver: &watch::Receiver<bool>) -> bool {
+    // Stage/supervisor channels only transition from false to true. Tokio's
+    // version probe is an atomic load; the read-lock fallback is needed only
+    // after every sender has closed so the retained terminal value stays exact.
+    match receiver.has_changed() {
+        Ok(changed) => changed,
+        Err(_) => *receiver.borrow(),
     }
 }
 
@@ -871,6 +897,14 @@ impl StageRunner {
         }
     }
 
+    pub(crate) async fn advance_progress(
+        &self,
+        items: u64,
+        bytes: u64,
+    ) -> Result<(), ProgressError> {
+        self.progress.advance(items, bytes).await
+    }
+
     /// Run a lazily-fed bounded worker window and reduce outputs in input order.
     ///
     /// Dropping this future after it starts poisons the supervisor task scope and aborts
@@ -1529,6 +1563,45 @@ mod tests {
         })
         .await;
         assert!(completed.is_ok(), "stage test condition timed out");
+    }
+
+    #[test]
+    fn cancellation_probe_uses_monotonic_watch_versions_without_changing_closed_state() {
+        let (parent, parent_receiver) = watch::channel(false);
+        let (stage, stage_receiver) = watch::channel(false);
+        let cancellation = StageCancellation::new(
+            parent_receiver,
+            stage_receiver,
+            Instant::now() + TEST_TIMEOUT,
+        );
+        assert!(!cancellation.is_cancelled());
+        parent.send_replace(true);
+        assert!(cancellation.is_cancelled());
+
+        let (already_parent, already_parent_receiver) = watch::channel(true);
+        let (open_stage, open_stage_receiver) = watch::channel(false);
+        let already_cancelled = StageCancellation::new(
+            already_parent_receiver,
+            open_stage_receiver,
+            Instant::now() + TEST_TIMEOUT,
+        );
+        assert!(already_cancelled.is_cancelled());
+        drop(already_parent);
+        drop(open_stage);
+
+        let (closed_parent, closed_parent_receiver) = watch::channel(false);
+        let (closed_stage, closed_stage_receiver) = watch::channel(false);
+        let closed_but_not_cancelled = StageCancellation::new(
+            closed_parent_receiver,
+            closed_stage_receiver,
+            Instant::now() + TEST_TIMEOUT,
+        );
+        drop(closed_parent);
+        drop(closed_stage);
+        assert!(!closed_but_not_cancelled.is_cancelled());
+
+        drop(parent);
+        drop(stage);
     }
 
     #[tokio::test]

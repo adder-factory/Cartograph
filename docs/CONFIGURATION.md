@@ -14,6 +14,9 @@ The file is optional. A representative v2 configuration is:
   "exclude": ["vendor/**", "generated/**"],
   "maxFileSize": 5242880,
   "maxGenerationBytes": 1073741824,
+  "generationStorage": "auto",
+  "maxSpillBytes": 137438953472,
+  "maxSpillRows": 1000000000,
   "extractDocstrings": true,
   "trackCallSites": true,
   "enableCentrality": true,
@@ -40,7 +43,10 @@ The file is optional. A representative v2 configuration is:
 | `include` | Project-relative glob allowlist; omitted means all admitted paths | omitted |
 | `exclude` | Additional project-relative glob exclusions | `[]` plus built-in exclusions |
 | `maxFileSize` | Per-source byte ceiling, 1 byte through 32 MiB | runtime default |
-| `maxGenerationBytes` | Final canonical-generation byte ceiling, 1 byte through 8 GiB | 1 GiB |
+| `maxGenerationBytes` | Memory-path canonical ceiling and compact resolver working-set basis, 1 byte through 8 GiB | 1 GiB |
+| `generationStorage` | Native working-set strategy: `auto`, `memory`, or `postgres` | `auto` |
+| `maxSpillBytes` | Logical sort-key/payload quota for one incomplete PostgreSQL spill, through 1 TiB | 128 GiB |
+| `maxSpillRows` | Raw extraction/fact row quota for one incomplete PostgreSQL spill, through 10 billion | 1 billion |
 | `extractDocstrings` | Retain safe structural documentation evidence | `true` |
 | `trackCallSites` | Retain reference-site provenance | `true` |
 | `indexSubmodules` | Include Git submodules | `true` |
@@ -66,21 +72,47 @@ Discovery follows Git-compatible ignore behavior, then applies explicit
 Cartograph policy. A `.cartographignore` marker excludes its directory tree; at
 the project root it opts the entire checkout out of indexing.
 
-`maxGenerationBytes` bounds the reduced canonical generation that can be
-published; it is not a total-process-memory limit. Resolve and canonical
-validation admit separately measured unordered/temporary working sets of up to
-four times that value. Raising the option is therefore an explicit high-memory
-choice and should follow a typed `*_generation_capacity_exceeded` result plus
-observed host headroom. The default remains 1 GiB.
+`generationStorage: "auto"` keeps the lower-latency memory path for small
+manifests and selects PostgreSQL spill when any of these conservative signals
+is reached: 10,000 supported files, 64 MiB of indexed source, or a 16x source
+expansion estimate at or above `maxGenerationBytes`. `memory` and `postgres`
+force the respective path. The selected strategy and fixed-size spill
+accounting are returned in native index metrics. This physical working-set
+choice does not change the logical source digest, so changing it does not make
+an otherwise fresh generation stale; use `cartograph index --force` when you
+want to rebuild unchanged source with a different strategy.
 
-PostgreSQL publication is independently bounded: each canonical table starts a
-new COPY statement at 100,000 rows or before an encoded batch would exceed 64
-MiB; one independently bounded row is indivisible. The complete generation
-remains in one atomic transaction. This prevents one
-large COPY statement from consuming the whole database deadline, but it does
-not turn native parse/resolve/reduce into an unbounded spill-to-database
-pipeline. Extremely large corpora can still require an explicit generation
-ceiling or can fail safely before publication.
+On the memory path, `maxGenerationBytes` bounds the reduced canonical
+generation; resolve and validation have separately measured working allowances
+of up to four times that value. On the PostgreSQL path, bulky per-file
+extraction and resolved facts do not accumulate in one Rust generation payload.
+`maxGenerationBytes` instead remains the independent bound for a file-local
+batch plus the compact project-wide resolution, clone, and centrality indexes.
+`maxSpillBytes` and `maxSpillRows` bound the whole durable unordered payload.
+The byte value is logical payload accounting, not a prediction of PostgreSQL
+heap/index/WAL/temporary-disk use. Keep database storage and temporary-space
+headroom above it.
+
+The spill is tied to the exact staging generation and live lease. File-local
+parse batches either reference immutable cache payloads or retain a bounded
+inline fallback. Resolved typed relation batches are immutable and
+digest-fenced; exact replay is idempotent, while a different retry fails
+closed. PostgreSQL reduces six relations through 64 deterministic UUID
+partitions each, commits four contiguous partitions at a time, proves
+cross-relations within those transactions, can use its own temporary storage
+for grouping/sorting, and streams exact V13 row bytes from final canonical
+rows. The final ready transaction rechecks the fence, completed-validation
+phase (`canonicalized`), counts, and digest capability before it deletes spill
+state. Only the later short publication transaction changes the current pointer.
+
+The memory path still publishes with bounded COPY statements (100,000 rows or
+64 MiB of encoded data per statement). PostgreSQL spill writes canonical rows
+before ready and therefore skips that redundant COPY payload. Neither strategy
+removes the compact global resolution/clone/centrality bound; extreme symbol or
+call-graph cardinality can still fail safely with
+`generation_capacity_exceeded`. Persistent SCIP replacement overlays currently
+remain on the memory path in `auto`; forcing `postgres` while an overlay exists
+is rejected rather than silently changing overlay semantics.
 
 Dependency audit allowlists are read from `dependenciesAllowlist` or
 `analysis.dependenciesAllowlist`. Architecture-layer policy uses `layers` and

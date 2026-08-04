@@ -25,10 +25,11 @@ pub use native_extraction::{
     NativeExtractionStageConfig, NativeExtractionStageError, run_native_extraction_stage,
 };
 pub use native_pipeline::{
-    NativeGeneration, NativeGenerationBuild, NativeParseCache, NativeParseCacheReport,
-    NativePipelineConfig, NativePipelineConfigError, NativePipelineDeadlines, NativePipelineError,
-    NativePipelineLimits, NativePipelineParallelism, NativePipelineReport, NativeRetainedLimits,
-    ScipOverlayInput, build_native_generation, build_native_generation_with_scip,
+    NativeGeneration, NativeGenerationBuild, NativeGenerationStorage, NativeParseCache,
+    NativeParseCacheReport, NativePipelineConfig, NativePipelineConfigError,
+    NativePipelineDeadlines, NativePipelineError, NativePipelineLimits, NativePipelineParallelism,
+    NativePipelineReport, NativeRetainedLimits, NativeSpilledGeneration, ScipOverlayInput,
+    build_native_generation, build_native_generation_spilled, build_native_generation_with_scip,
     build_native_generation_with_scip_and_cache,
 };
 pub use prepare_scope::SupervisedPrepareError;

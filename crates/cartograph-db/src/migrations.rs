@@ -39,7 +39,12 @@ const BIOMARKER_PRECISION_DIGEST_V9_SCHEMA_VERSION: i64 = 28;
 const DETECTOR_PRECISION_DIGEST_V10_SCHEMA_VERSION: i64 = 29;
 const RUST_CLOSURE_CALL_TARGET_DIGEST_V11_SCHEMA_VERSION: i64 = 30;
 const GO_CALL_TARGET_DIGEST_V12_SCHEMA_VERSION: i64 = 31;
-const LATEST_SCHEMA_VERSION: i64 = GO_CALL_TARGET_DIGEST_V12_SCHEMA_VERSION;
+const NATIVE_GENERATION_SPILL_SCHEMA_VERSION: i64 = 32;
+const SPILL_CENTRALITY_LOOKUP_SCHEMA_VERSION: i64 = 33;
+const SPILL_PARSE_CACHE_REFERENCE_SCHEMA_VERSION: i64 = 34;
+const SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA_VERSION: i64 = 35;
+const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION: i64 = 36;
+const LATEST_SCHEMA_VERSION: i64 = JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 /// Latest append-only schema version understood by this native binary.
@@ -1174,7 +1179,365 @@ const GO_CALL_TARGET_DIGEST_V12_SCHEMA: Migration = Migration {
                 CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))"#],
 };
 
-const MIGRATIONS: [&Migration; 31] = [
+const NATIVE_GENERATION_SPILL_SCHEMA: Migration = Migration {
+    version: NATIVE_GENERATION_SPILL_SCHEMA_VERSION,
+    name: "generation_fenced_native_spill",
+    statements: &[
+        r#"CREATE TABLE {schema}."native_generation_spills" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            generation_sequence bigint NOT NULL CHECK (generation_sequence > 0),
+            phase text NOT NULL DEFAULT 'parsing'
+                CHECK (phase IN (
+                    'parsing', 'resolving', 'sealed', 'canonicalizing', 'canonicalized'
+                )),
+            maximum_bytes bigint NOT NULL CHECK (maximum_bytes > 0),
+            maximum_rows bigint NOT NULL CHECK (maximum_rows > 0),
+            logical_bytes bigint NOT NULL DEFAULT 0
+                CHECK (logical_bytes BETWEEN 0 AND maximum_bytes),
+            raw_rows bigint NOT NULL DEFAULT 0
+                CHECK (raw_rows BETWEEN 0 AND maximum_rows),
+            extracted_files bigint NOT NULL DEFAULT 0 CHECK (extracted_files >= 0),
+            canonical_relation text CHECK (canonical_relation IN (
+                'files', 'symbols', 'edges', 'references', 'numerical_sites', 'documents'
+            )),
+            canonical_partition integer NOT NULL DEFAULT 0
+                CHECK (canonical_partition BETWEEN 0 AND 64),
+            canonical_rows bigint NOT NULL DEFAULT 0 CHECK (canonical_rows >= 0),
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, generation_id),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_batches" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text NOT NULL CHECK (relation IN (
+                'extracted_files', 'files', 'symbols', 'edges', 'references',
+                'numerical_sites', 'documents'
+            )),
+            batch_sequence bigint NOT NULL CHECK (batch_sequence >= 0),
+            row_count integer NOT NULL CHECK (row_count BETWEEN 1 AND 100000),
+            logical_bytes bigint NOT NULL CHECK (logical_bytes > 0),
+            batch_digest text NOT NULL CHECK (batch_digest ~ '^[0-9a-f]{64}$'),
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, generation_id, relation, batch_sequence),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."native_generation_spills"(project_id, generation_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_rows" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text NOT NULL,
+            batch_sequence bigint NOT NULL,
+            row_ordinal integer NOT NULL CHECK (row_ordinal BETWEEN 0 AND 99999),
+            sort_key bytea NOT NULL CHECK (octet_length(sort_key) BETWEEN 1 AND 131072),
+            payload bytea NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 268435456),
+            payload_digest text NOT NULL CHECK (payload_digest ~ '^[0-9a-f]{64}$'),
+            logical_bytes bigint GENERATED ALWAYS AS (
+                octet_length(sort_key)::bigint + octet_length(payload)::bigint
+            ) STORED,
+            PRIMARY KEY (
+                project_id, generation_id, relation, batch_sequence, row_ordinal
+            ),
+            FOREIGN KEY (project_id, generation_id, relation, batch_sequence)
+                REFERENCES {schema}."native_generation_spill_batches"(
+                    project_id, generation_id, relation, batch_sequence
+                ) ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX native_generation_spill_rows_order_idx
+            ON {schema}."native_generation_spill_rows" (
+                project_id, generation_id, relation, sort_key,
+                batch_sequence, row_ordinal
+            )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_files" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text GENERATED ALWAYS AS ('files') STORED,
+            batch_sequence bigint NOT NULL,
+            row_ordinal integer NOT NULL CHECK (row_ordinal BETWEEN 0 AND 99999),
+            bucket smallint NOT NULL CHECK (bucket BETWEEN 0 AND 4095),
+            file_id uuid NOT NULL,
+            normalized_path text NOT NULL CHECK (length(normalized_path) BETWEEN 1 AND 4096),
+            language text NOT NULL CHECK (length(language) BETWEEN 1 AND 64),
+            content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+            byte_size bigint NOT NULL CHECK (byte_size >= 0),
+            parse_status text NOT NULL
+                CHECK (parse_status IN ('parsed', 'partial', 'failed', 'skipped')),
+            PRIMARY KEY (project_id, generation_id, batch_sequence, row_ordinal),
+            FOREIGN KEY (project_id, generation_id, relation, batch_sequence)
+                REFERENCES {schema}."native_generation_spill_batches"(
+                    project_id, generation_id, relation, batch_sequence
+                ) ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX native_generation_spill_files_reduce_idx
+            ON {schema}."native_generation_spill_files" (
+                project_id, generation_id, bucket, file_id,
+                batch_sequence, row_ordinal
+            )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_symbols" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text GENERATED ALWAYS AS ('symbols') STORED,
+            batch_sequence bigint NOT NULL,
+            row_ordinal integer NOT NULL CHECK (row_ordinal BETWEEN 0 AND 99999),
+            bucket smallint NOT NULL CHECK (bucket BETWEEN 0 AND 4095),
+            symbol_id uuid NOT NULL,
+            file_id uuid NOT NULL,
+            symbol_kind text NOT NULL CHECK (length(symbol_kind) BETWEEN 1 AND 64),
+            qualified_name text NOT NULL CHECK (length(qualified_name) BETWEEN 1 AND 2048),
+            signature text NOT NULL CHECK (length(signature) <= 65536),
+            start_byte bigint NOT NULL CHECK (start_byte >= 0),
+            end_byte bigint NOT NULL CHECK (end_byte >= start_byte),
+            start_line integer NOT NULL CHECK (start_line >= 1),
+            end_line integer NOT NULL CHECK (end_line >= start_line),
+            structural_digest text NOT NULL CHECK (structural_digest ~ '^[0-9a-f]{64}$'),
+            visibility text CHECK (
+                visibility IS NULL OR visibility IN ('public', 'private', 'protected', 'internal')
+            ),
+            exported boolean NOT NULL,
+            default_export boolean NOT NULL,
+            async_symbol boolean NOT NULL,
+            static_member boolean NOT NULL,
+            declaration_only boolean NOT NULL,
+            betweenness double precision CHECK (
+                betweenness IS NULL OR betweenness BETWEEN 0.0 AND 1.0
+            ),
+            pagerank double precision CHECK (pagerank IS NULL OR pagerank BETWEEN 0.0 AND 1.0),
+            PRIMARY KEY (project_id, generation_id, batch_sequence, row_ordinal),
+            FOREIGN KEY (project_id, generation_id, relation, batch_sequence)
+                REFERENCES {schema}."native_generation_spill_batches"(
+                    project_id, generation_id, relation, batch_sequence
+                ) ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX native_generation_spill_symbols_reduce_idx
+            ON {schema}."native_generation_spill_symbols" (
+                project_id, generation_id, bucket, symbol_id,
+                batch_sequence, row_ordinal
+            )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_edges" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text GENERATED ALWAYS AS ('edges') STORED,
+            batch_sequence bigint NOT NULL,
+            row_ordinal integer NOT NULL CHECK (row_ordinal BETWEEN 0 AND 99999),
+            bucket smallint NOT NULL CHECK (bucket BETWEEN 0 AND 4095),
+            source_symbol_id uuid NOT NULL,
+            target_symbol_id uuid NOT NULL,
+            edge_kind text NOT NULL CHECK (edge_kind IN (
+                'calls', 'imports', 'references', 'implements', 'extends', 'tests',
+                'type_of', 'returns', 'instantiates', 'overrides', 'decorates',
+                'field_access', 'def_use', 'exports', 'contains'
+            )),
+            confidence real NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+            provenance text NOT NULL CHECK (length(provenance) BETWEEN 1 AND 256),
+            site_count bigint NOT NULL CHECK (site_count BETWEEN 1 AND 100000000),
+            PRIMARY KEY (project_id, generation_id, batch_sequence, row_ordinal),
+            FOREIGN KEY (project_id, generation_id, relation, batch_sequence)
+                REFERENCES {schema}."native_generation_spill_batches"(
+                    project_id, generation_id, relation, batch_sequence
+                ) ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX native_generation_spill_edges_reduce_idx
+            ON {schema}."native_generation_spill_edges" (
+                project_id, generation_id, bucket, source_symbol_id,
+                target_symbol_id, edge_kind, provenance, batch_sequence, row_ordinal
+            )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_references" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text GENERATED ALWAYS AS ('references') STORED,
+            batch_sequence bigint NOT NULL,
+            row_ordinal integer NOT NULL CHECK (row_ordinal BETWEEN 0 AND 99999),
+            bucket smallint NOT NULL CHECK (bucket BETWEEN 0 AND 4095),
+            file_id uuid NOT NULL,
+            owner_symbol_id uuid,
+            target_symbol_id uuid,
+            reference_name text NOT NULL CHECK (length(reference_name) BETWEEN 1 AND 4096),
+            reference_kind text NOT NULL CHECK (length(reference_kind) BETWEEN 1 AND 64),
+            start_byte bigint NOT NULL CHECK (start_byte >= 0),
+            end_byte bigint NOT NULL CHECK (end_byte >= start_byte),
+            confidence real NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+            resolution_provenance text NOT NULL
+                CHECK (length(resolution_provenance) BETWEEN 1 AND 256),
+            site_count bigint NOT NULL CHECK (site_count BETWEEN 1 AND 100000000),
+            span_precision text NOT NULL
+                CHECK (span_precision IN ('exact', 'coarse_point', 'coarse_owner')),
+            PRIMARY KEY (project_id, generation_id, batch_sequence, row_ordinal),
+            FOREIGN KEY (project_id, generation_id, relation, batch_sequence)
+                REFERENCES {schema}."native_generation_spill_batches"(
+                    project_id, generation_id, relation, batch_sequence
+                ) ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX native_generation_spill_references_reduce_idx
+            ON {schema}."native_generation_spill_references" (
+                project_id, generation_id, bucket, file_id, owner_symbol_id,
+                target_symbol_id, reference_name, reference_kind, start_byte,
+                end_byte, resolution_provenance, batch_sequence, row_ordinal
+            )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_numerical_sites" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text GENERATED ALWAYS AS ('numerical_sites') STORED,
+            batch_sequence bigint NOT NULL,
+            row_ordinal integer NOT NULL CHECK (row_ordinal BETWEEN 0 AND 99999),
+            bucket smallint NOT NULL CHECK (bucket BETWEEN 0 AND 4095),
+            numerical_site_id uuid NOT NULL,
+            file_id uuid NOT NULL,
+            owner_symbol_id uuid,
+            start_byte bigint NOT NULL CHECK (start_byte >= 0),
+            end_byte bigint NOT NULL CHECK (end_byte >= start_byte),
+            start_line integer NOT NULL CHECK (start_line >= 1),
+            end_line integer NOT NULL CHECK (end_line >= start_line),
+            operation text NOT NULL CHECK (operation ~ '^[a-z0-9_]{1,64}$'),
+            hazard text NOT NULL CHECK (hazard ~ '^[a-z0-9_]{1,64}$'),
+            precision text NOT NULL CHECK (precision ~ '^[a-z0-9_]{1,64}$'),
+            expression_digest text NOT NULL CHECK (expression_digest ~ '^[0-9a-f]{64}$'),
+            confidence_ppm integer NOT NULL CHECK (confidence_ppm BETWEEN 0 AND 1000000),
+            provenance text NOT NULL CHECK (
+                length(provenance) BETWEEN 1 AND 256 AND provenance ~ '^[a-z0-9_]+$'
+            ),
+            evidence_level text NOT NULL
+                CHECK (evidence_level IN ('proven', 'heuristic', 'coverage_gap')),
+            unknowns text NOT NULL CHECK (length(unknowns) <= 256),
+            PRIMARY KEY (project_id, generation_id, batch_sequence, row_ordinal),
+            FOREIGN KEY (project_id, generation_id, relation, batch_sequence)
+                REFERENCES {schema}."native_generation_spill_batches"(
+                    project_id, generation_id, relation, batch_sequence
+                ) ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX native_generation_spill_numerical_reduce_idx
+            ON {schema}."native_generation_spill_numerical_sites" (
+                project_id, generation_id, bucket, numerical_site_id,
+                batch_sequence, row_ordinal
+            )"#,
+        r#"CREATE TABLE {schema}."native_generation_spill_documents" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            relation text GENERATED ALWAYS AS ('documents') STORED,
+            batch_sequence bigint NOT NULL,
+            row_ordinal integer NOT NULL CHECK (row_ordinal BETWEEN 0 AND 99999),
+            bucket smallint NOT NULL CHECK (bucket BETWEEN 0 AND 4095),
+            document_id uuid NOT NULL,
+            file_id uuid,
+            symbol_id uuid,
+            path text NOT NULL CHECK (length(path) BETWEEN 1 AND 4096),
+            language text NOT NULL CHECK (length(language) BETWEEN 1 AND 64),
+            document_kind text NOT NULL CHECK (
+                document_kind IN ('symbol', 'file', 'documentation', 'test', 'configuration')
+            ),
+            qualified_name text NOT NULL,
+            code text NOT NULL,
+            natural_text text NOT NULL,
+            metadata jsonb NOT NULL,
+            metadata_json text NOT NULL CHECK (octet_length(metadata_json) <= 65536),
+            CHECK (qualified_name <> '' OR code <> '' OR natural_text <> ''),
+            PRIMARY KEY (project_id, generation_id, batch_sequence, row_ordinal),
+            FOREIGN KEY (project_id, generation_id, relation, batch_sequence)
+                REFERENCES {schema}."native_generation_spill_batches"(
+                    project_id, generation_id, relation, batch_sequence
+                ) ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX native_generation_spill_documents_reduce_idx
+            ON {schema}."native_generation_spill_documents" (
+                project_id, generation_id, bucket, document_id,
+                batch_sequence, row_ordinal
+            )"#,
+        r#"ALTER TABLE {schema}."native_generation_spill_rows" SET (
+                autovacuum_vacuum_scale_factor = 0.01,
+                autovacuum_vacuum_threshold = 1000,
+                autovacuum_analyze_scale_factor = 0.02,
+                autovacuum_analyze_threshold = 1000
+            )"#,
+    ],
+};
+
+const SPILL_CENTRALITY_LOOKUP_SCHEMA: Migration = Migration {
+    version: SPILL_CENTRALITY_LOOKUP_SCHEMA_VERSION,
+    name: "spill_centrality_identity_lookup",
+    statements: &[r#"CREATE INDEX native_generation_spill_symbols_identity_idx
+            ON {schema}."native_generation_spill_symbols" (
+                project_id, generation_id, symbol_id
+            )"#],
+};
+
+const SPILL_PARSE_CACHE_REFERENCE_SCHEMA: Migration = Migration {
+    version: SPILL_PARSE_CACHE_REFERENCE_SCHEMA_VERSION,
+    name: "spill_parse_cache_payload_references",
+    statements: &[
+        r#"ALTER TABLE {schema}."native_generation_spill_rows"
+            ADD COLUMN cache_extractor_contract_digest text,
+            ADD COLUMN cache_path_digest text,
+            ADD COLUMN cache_language text,
+            ADD COLUMN cache_content_hash text,
+            ADD COLUMN cache_payload_bytes bigint"#,
+        r#"ALTER TABLE {schema}."native_generation_spill_rows"
+            ALTER COLUMN payload DROP NOT NULL"#,
+        r#"ALTER TABLE {schema}."native_generation_spill_rows"
+            DROP COLUMN logical_bytes"#,
+        r#"ALTER TABLE {schema}."native_generation_spill_rows"
+            ADD COLUMN logical_bytes bigint GENERATED ALWAYS AS (
+                octet_length(sort_key)::bigint
+                + COALESCE(octet_length(payload)::bigint, cache_payload_bytes)
+            ) STORED"#,
+        r#"ALTER TABLE {schema}."native_generation_spill_rows"
+            ADD CONSTRAINT native_generation_spill_rows_payload_source_check CHECK (
+                (payload IS NOT NULL
+                    AND cache_extractor_contract_digest IS NULL
+                    AND cache_path_digest IS NULL
+                    AND cache_language IS NULL
+                    AND cache_content_hash IS NULL
+                    AND cache_payload_bytes IS NULL)
+                OR
+                (payload IS NULL
+                    AND cache_extractor_contract_digest IS NOT NULL
+                    AND cache_path_digest IS NOT NULL
+                    AND cache_language IS NOT NULL
+                    AND cache_content_hash IS NOT NULL
+                    AND cache_payload_bytes BETWEEN 1 AND 268435456)
+            )"#,
+        r#"ALTER TABLE {schema}."native_generation_spill_rows"
+            ADD CONSTRAINT native_generation_spill_rows_cache_fk FOREIGN KEY (
+                project_id, cache_extractor_contract_digest, cache_path_digest,
+                cache_language, cache_content_hash
+            ) REFERENCES {schema}."native_parse_cache" (
+                project_id, extractor_contract_digest, path_digest, language, content_hash
+            )"#,
+        r#"CREATE INDEX native_generation_spill_rows_cache_idx
+            ON {schema}."native_generation_spill_rows" (
+                project_id, cache_extractor_contract_digest, cache_path_digest,
+                cache_language, cache_content_hash
+            ) WHERE payload IS NULL"#,
+    ],
+};
+
+const SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA: Migration = Migration {
+    version: SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA_VERSION,
+    name: "search_document_canonical_metadata_text",
+    statements: &[r#"ALTER TABLE {schema}."search_documents"
+            ADD COLUMN metadata_json text,
+            ADD CONSTRAINT search_documents_metadata_json_check CHECK (
+                metadata_json IS NULL
+                OR (
+                    octet_length(metadata_json) BETWEEN 2 AND 1048576
+                    AND CAST(metadata_json AS jsonb) = metadata
+                )
+            )"#],
+};
+
+const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA: Migration = Migration {
+    version: JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION,
+    name: "javascript_construction_target_digest_v13",
+    statements: &[r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))"#],
+};
+
+const MIGRATIONS: [&Migration; 36] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1206,6 +1569,11 @@ const MIGRATIONS: [&Migration; 31] = [
     &DETECTOR_PRECISION_DIGEST_V10_SCHEMA,
     &RUST_CLOSURE_CALL_TARGET_DIGEST_V11_SCHEMA,
     &GO_CALL_TARGET_DIGEST_V12_SCHEMA,
+    &NATIVE_GENERATION_SPILL_SCHEMA,
+    &SPILL_CENTRALITY_LOOKUP_SCHEMA,
+    &SPILL_PARSE_CACHE_REFERENCE_SCHEMA,
+    &SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA,
+    &JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1602,7 +1970,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 31] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 36] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -1634,9 +2002,14 @@ mod tests {
         DETECTOR_PRECISION_DIGEST_V10_SCHEMA_VERSION,
         RUST_CLOSURE_CALL_TARGET_DIGEST_V11_SCHEMA_VERSION,
         GO_CALL_TARGET_DIGEST_V12_SCHEMA_VERSION,
+        NATIVE_GENERATION_SPILL_SCHEMA_VERSION,
+        SPILL_CENTRALITY_LOOKUP_SCHEMA_VERSION,
+        SPILL_PARSE_CACHE_REFERENCE_SCHEMA_VERSION,
+        SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA_VERSION,
+        JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 31] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 36] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -1761,6 +2134,26 @@ mod tests {
             31,
             "a078b0076c3448fe6fee0fb99d0ddf0c2073dfc64be1ca860dea74b222714b46",
         ),
+        (
+            32,
+            "8402b1f6e0d9993dca0e7a08865be454e2f2545baf8d9fbc2726454315f7f34e",
+        ),
+        (
+            33,
+            "4b6f2ed64babea897343ce67e26d1832926259b8f40491f7ed2438416e05c56e",
+        ),
+        (
+            34,
+            "1e6aa1a62752dca9dfba79e5021161529c41bcdb95b3873711c977fde20941d5",
+        ),
+        (
+            35,
+            "7e3ca281ee6a770b484904e1d834574fc01323beea75f18a3f4124edf2376840",
+        ),
+        (
+            36,
+            "d6cd2cbb7c422e5738b5e32acea7eb200ccd90ab79a07c363f53f94e8ec9815e",
+        ),
     ];
 
     #[test]
@@ -1806,7 +2199,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            GO_CALL_TARGET_DIGEST_V12_SCHEMA_VERSION
+            JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION
         );
     }
 

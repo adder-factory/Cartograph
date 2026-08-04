@@ -2473,22 +2473,34 @@ enum AdminJobFailure {
     HnswCreateSharedMemoryUnavailable,
     InvalidOptions,
     DiscoverFailed,
+    DiscoverProgressStalled,
     ReadFailed,
+    ReadProgressStalled,
     ParseFailed,
+    ParseProgressStalled,
     ParseExtractionNestingLimitExceeded,
     ParseExtractionOutputLimitExceeded,
     ParseGenerationCapacityExceeded,
     ResolveFailed,
+    ResolveDeadlineExceeded,
     ResolveGenerationCapacityExceeded,
+    ResolveProgressStalled,
     OverlayFailed,
+    OverlayProgressStalled,
     ReduceFailed,
     ReduceGenerationCapacityExceeded,
     ReduceReferenceNameTooLong,
+    ReduceProgressStalled,
     CopyFailed,
+    CopyProgressStalled,
     RelationalMergeFailed,
+    RelationalMergeProgressStalled,
     Bm25Failed,
+    Bm25ProgressStalled,
     VectorFailed,
+    VectorProgressStalled,
     PublicationFailed,
+    PublicationProgressStalled,
     LeaseFailed,
     OperationFailed,
 }
@@ -2786,6 +2798,9 @@ const fn admin_job_reason_failure(
     reason: PipelineFailureReason,
 ) -> AdminJobFailure {
     match (stage, reason) {
+        (stage, PipelineFailureReason::ProgressStalled) => {
+            admin_job_progress_stalled_failure(stage)
+        }
         (PipelineStage::Parse, PipelineFailureReason::GenerationCapacityExceeded) => {
             AdminJobFailure::ParseGenerationCapacityExceeded
         }
@@ -2798,6 +2813,9 @@ const fn admin_job_reason_failure(
         (PipelineStage::Resolve, PipelineFailureReason::GenerationCapacityExceeded) => {
             AdminJobFailure::ResolveGenerationCapacityExceeded
         }
+        (PipelineStage::Resolve, PipelineFailureReason::DeadlineExceeded) => {
+            AdminJobFailure::ResolveDeadlineExceeded
+        }
         (PipelineStage::Reduce, PipelineFailureReason::GenerationCapacityExceeded) => {
             AdminJobFailure::ReduceGenerationCapacityExceeded
         }
@@ -2805,6 +2823,22 @@ const fn admin_job_reason_failure(
             AdminJobFailure::ReduceReferenceNameTooLong
         }
         _ => admin_job_stage_failure(stage),
+    }
+}
+
+const fn admin_job_progress_stalled_failure(stage: PipelineStage) -> AdminJobFailure {
+    match stage {
+        PipelineStage::Discover => AdminJobFailure::DiscoverProgressStalled,
+        PipelineStage::Read => AdminJobFailure::ReadProgressStalled,
+        PipelineStage::Parse => AdminJobFailure::ParseProgressStalled,
+        PipelineStage::Resolve => AdminJobFailure::ResolveProgressStalled,
+        PipelineStage::Overlay => AdminJobFailure::OverlayProgressStalled,
+        PipelineStage::Reduce => AdminJobFailure::ReduceProgressStalled,
+        PipelineStage::Copy => AdminJobFailure::CopyProgressStalled,
+        PipelineStage::RelationalMerge => AdminJobFailure::RelationalMergeProgressStalled,
+        PipelineStage::Bm25 => AdminJobFailure::Bm25ProgressStalled,
+        PipelineStage::Vector => AdminJobFailure::VectorProgressStalled,
+        PipelineStage::Publish => AdminJobFailure::PublicationProgressStalled,
     }
 }
 
@@ -25240,6 +25274,26 @@ mod tests {
             project_error_reason(capacity),
             "resolve_generation_capacity_exceeded"
         );
+
+        let deadline = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Resolve,
+            reason: PipelineFailureReason::DeadlineExceeded,
+        };
+        assert_eq!(
+            admin_job_failure(deadline),
+            AdminJobFailure::ResolveDeadlineExceeded
+        );
+        assert_eq!(project_error_reason(deadline), "resolve_deadline_exceeded");
+
+        let stalled = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Resolve,
+            reason: PipelineFailureReason::ProgressStalled,
+        };
+        assert_eq!(
+            admin_job_failure(stalled),
+            AdminJobFailure::ResolveProgressStalled
+        );
+        assert_eq!(project_error_reason(stalled), "resolve_progress_stalled");
 
         let parse_capacity = ProjectError::IndexStageFailedWithReason {
             stage: PipelineStage::Parse,

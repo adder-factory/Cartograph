@@ -35,7 +35,7 @@ const CORPUS_FINGERPRINT_DOMAIN: &[u8] = b"cartograph-v2-native-real-corpus-v1";
 const EXPECTED_CORPUS_FINGERPRINT: &str =
     "ab91088c482ed36d31759382283342654ce6958be4e601429b8181da531c5fc1";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "f21e41e59db9b4c69092575be53f350a6ef166f88bcee9ff93eb68df75be77df";
+    "2c751dc7fb228b52626173b9dd97cb365d1649789dd047143c012faab840be21";
 const EXPECTED_BM25_DOCUMENT_IDS: [&str; 5] = [
     "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
     "78f1eb97-24b2-8a80-ad44-6dd679456592",
@@ -73,7 +73,7 @@ const EXPECTED_SOURCE_BYTES: u64 = 1_052_564;
 const EXPECTED_RESOLVED_REFERENCES: u64 = 2_817;
 const EXPECTED_UNRESOLVED_REFERENCES: u64 = 11_068;
 const EXPECTED_MODELED_GENERATION_BYTES: u64 = 19_080_266;
-const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 104_360_970;
+const EXPECTED_RESOLVE_HIGH_WATER_BYTES: u64 = 108_005_583;
 const EXPECTED_VALIDATION_HIGH_WATER_BYTES: u64 = 139_294_310;
 const CORPUS_QUERY: &str = "detectSecretsHandling";
 const TAGS_CORPUS_QUERY: &str = "tagscanary";
@@ -969,7 +969,7 @@ async fn inspect_sample(request: SampleInspection<'_>) -> CorpusResult<SampleObs
             edge_kinds,
             bm25_document_ids,
             tags_bm25_document_ids,
-            native: native_report(completed.native),
+            native: native_report(&completed.native),
         },
         native_nanos: completed.native_nanos,
         supervised_pipeline_nanos: completed.supervised_pipeline_nanos,
@@ -1397,7 +1397,7 @@ fn hash_usize(hasher: &mut blake3::Hasher, value: usize) {
     hasher.update(&u64::try_from(value).unwrap_or(u64::MAX).to_le_bytes());
 }
 
-fn native_report(report: cartograph_indexer::NativePipelineReport) -> NativeReport {
+fn native_report(report: &cartograph_indexer::NativePipelineReport) -> NativeReport {
     NativeReport {
         discovered_files: report.discovered_files(),
         source_bytes: report.source_bytes(),

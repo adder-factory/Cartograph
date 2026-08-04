@@ -23,6 +23,40 @@ export CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS=120000
   256-file/5.86 MiB synthetic corpus selects 16.
 - More parse workers help only when corpus size and CPU justify them. Database
   COPY, derived-index build, and publication remain bounded phases.
+- Native generation storage defaults to `auto`. It selects PostgreSQL spill at
+  10,000 supported files, 64 MiB of indexed source, or when a conservative 16x
+  expansion estimate reaches `maxGenerationBytes`. Use
+  `generationStorage: "memory"` only when measured headroom favors the faster
+  in-memory reducer; use `"postgres"` to force the durable path for a known
+  dense corpus.
+- PostgreSQL spill trades database I/O, WAL, heap/index allocation, and
+  temporary-sort space for a much smaller Rust payload. `maxSpillBytes` is
+  logical accounting, not physical disk reservation. Measure `db usage`, free
+  space, temporary-file behavior, and stage timings before raising its 128 GiB
+  default.
+- The PostgreSQL path lazily admits at most 64 files and 64 MiB of combined
+  source per parse work item, whichever boundary is reached first. One file
+  above 64 MiB remains one indivisible item; later item deadlines start only
+  when the bounded scheduler admits them.
+  Each item reuses one tree-sitter extractor per encountered language instead
+  of rebuilding parser/query state for every file. Cooperative cancellation
+  still checks parent, sibling, and item-deadline state at every requested poll;
+  monotonic watch signals use their atomic version rather than a read lock.
+  Cacheable extraction payloads are written once to the immutable parse cache
+  and the staging generation retains a foreign-key-protected reference; an
+  inline payload is the bounded fallback when a cache write fails.
+- Resolver workers publish validated typed rows through bounded COPY groups.
+  A group is capped by rows, logical bytes, and retained Rust bytes, so faster
+  publication cannot become a hidden whole-generation allocation.
+- Spill reduction retains 64 deterministic UUID partitions for each of six
+  relations and commits four contiguous partitions per transaction. It checks
+  conflicts and cross-relation integrity before deleting those raw rows and
+  advancing the durable cursor. Exact retries resume from that cursor. Do not
+  manually delete raw rows or advance it.
+- Document conflict detection probes the typed reduction index for another row
+  with the same document identity. Large code/natural-text fields are compared
+  exactly only for an actual duplicate identity; unique documents are never
+  materialized into a generation-wide `DISTINCT` hash merely for validation.
 - Keep the database pool large enough for the selected operation but below the
   64-connection hard cap. Local agent use normally needs no manual change.
 - Do not increase timeouts to hide a lost lease, stale fence, blocked database,
@@ -64,7 +98,8 @@ Cleanup never removes current logs, valid process state, or any active backend.
 ## Measurement gates
 
 Committed reports under `docs/v2/benchmarks/` cover synthetic COPY/index
-scaling, native corpus 1/2/4/8/16-worker identity, and patch-task retrieval.
+scaling, native corpus 1/2/4/8/16-worker identity, patch-task retrieval, and
+the [large public corpus streaming run](v2/benchmarks/LARGE-PUBLIC-CORPUS-STREAMING.md).
 The benchmark executables live under `crates/cartograph-indexer/benches/` and
 Rust integration tests. Measure a representative corpus before changing
 defaults, and retain raw bounds/digests with the report.

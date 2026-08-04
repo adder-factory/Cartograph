@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use cartograph_db::{GenerationContents, ReadyGeneration};
+use cartograph_db::{
+    GenerationContents, NativeGenerationSpill, NativeGenerationSpillPolicy, ReadyGeneration,
+    SpilledGenerationContents, StagedGeneration, StorageError,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{
@@ -502,6 +505,21 @@ impl SupervisorContext {
         )
     }
 
+    /// Create spill-only authority for the exact generation owned by this supervisor.
+    ///
+    /// The returned capability rechecks the live lease and staging state on every
+    /// database transaction and cannot publish or terminalize the generation.
+    /// # Errors
+    ///
+    /// Returns an error when the staging token does not match this operation's fence.
+    pub fn generation_spill(
+        &self,
+        generation: &StagedGeneration,
+        policy: NativeGenerationSpillPolicy,
+    ) -> Result<NativeGenerationSpill, StorageError> {
+        self.prepares.spill(generation, policy)
+    }
+
     /// Run the operation's one retained, server-bounded prepare/COPY task.
     ///
     /// Publication and cleanup authority are deliberately absent from this
@@ -516,6 +534,18 @@ impl SupervisorContext {
         contents: GenerationContents,
     ) -> Result<ReadyGeneration, SupervisedPrepareError> {
         self.prepares.prepare(contents).await
+    }
+
+    /// Run the operation's one retained finalization task for database-spilled facts.
+    /// # Errors
+    ///
+    /// Returns an error if the lease fence is lost, canonical database facts fail
+    /// relation/digest validation, or the ready transition fails.
+    pub async fn prepare_spilled_generation(
+        &self,
+        contents: SpilledGenerationContents,
+    ) -> Result<ReadyGeneration, SupervisedPrepareError> {
+        self.prepares.prepare_spilled(contents).await
     }
 
     /// Spawn an admitted supervisor-owned worker with an explicit byte reservation.

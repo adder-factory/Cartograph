@@ -25,10 +25,10 @@ pub use models::{
 };
 pub use project_config::{
     LlmEndpointProbe, ProjectCredentialMigrationEntry, ProjectCredentialMigrationReport,
-    ProjectCredentialMigrationStatus, ProjectLlmConfigError, ProjectLlmCredentialSource,
-    ProjectLlmCredentialWriteAction, ProjectLlmCredentialWriteEntry, ProjectLlmProvider,
-    ProjectLlmTier, ProjectLlmTierConfig, ProjectLlmTierInput, ProjectLlmWriteReport,
-    ProjectSourceSettings, ProjectSummaryEagerLimit, ProjectSummarySettings,
+    ProjectCredentialMigrationStatus, ProjectGenerationStorage, ProjectLlmConfigError,
+    ProjectLlmCredentialSource, ProjectLlmCredentialWriteAction, ProjectLlmCredentialWriteEntry,
+    ProjectLlmProvider, ProjectLlmTier, ProjectLlmTierConfig, ProjectLlmTierInput,
+    ProjectLlmWriteReport, ProjectSourceSettings, ProjectSummaryEagerLimit, ProjectSummarySettings,
     load_exact_project_llm_tier, load_project_llm_tier, load_project_max_file_size,
     load_project_source_settings, load_project_summary_settings,
     migrate_project_inline_credentials, probe_openai_compatible_endpoint, tune_project_llm_tier,
