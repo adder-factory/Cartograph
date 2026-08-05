@@ -309,6 +309,126 @@ struct ExtractionBuilder<'source, 'cancel> {
     shortened_canonical_names: bool,
 }
 
+fn visit_container(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let (kind, body_kind) = match node.kind() {
+        "interface_declaration" => (SymbolKind::Interface, "interface_body"),
+        "class_declaration" | "abstract_class_declaration" => (SymbolKind::Class, "class_body"),
+        _ => return builder.visit_named_children(node, depth),
+    };
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let (exported, default_export) = export_flags(node);
+    let pending = PendingSymbol {
+        kind,
+        name: name.clone(),
+        span_node: node,
+        structural_node: node,
+        doc_anchor: node,
+        body_node: None,
+        declaration_only: false,
+        signature: None,
+        export: SymbolExportFlags::new(exported, default_export),
+        async_symbol: false,
+        static_member: false,
+        visibility: visibility(node, builder.context.source()),
+    };
+    let id = builder.emit_symbol(pending)?;
+    builder.owners.push(id.clone());
+    builder.qualifiers.push(name);
+    references::capture_heritage(builder, node, &id)?;
+    for child in named_children(node) {
+        if child.kind() == body_kind {
+            builder.visit(child, depth.saturating_add(1))?;
+        }
+    }
+
+    builder.qualifiers.pop();
+    builder.owners.pop();
+    Ok(())
+}
+
+fn visit_callable(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return builder.visit_named_children(node, depth);
+    };
+    let name = builder.context.owned_text(name_node)?;
+    let declared_kind = if matches!(
+        node.kind(),
+        "method_definition" | "method_signature" | "abstract_method_signature"
+    ) {
+        SymbolKind::Method
+    } else {
+        SymbolKind::Function
+    };
+    let component = declared_kind == SymbolKind::Function
+        && starts_uppercase(&name)
+        && contains_jsx(node, builder.context.cancelled)?;
+    let kind = if component {
+        SymbolKind::Component
+    } else {
+        declared_kind
+    };
+    let (exported, default_export) = export_flags(node);
+    let body = node.child_by_field_name("body");
+    let pending = PendingSymbol {
+        kind,
+        name: name.clone(),
+        span_node: node,
+        structural_node: node,
+        doc_anchor: node,
+        body_node: body,
+        declaration_only: body.is_none(),
+        signature: builder.context.callable_signature(node)?,
+        export: SymbolExportFlags::new(exported, default_export),
+        async_symbol: has_child_kind(node, "async"),
+        static_member: has_child_kind(node, "static"),
+        visibility: visibility(node, builder.context.source()),
+    };
+    let id = builder.emit_symbol(pending)?;
+    references::capture_callable_types(builder, node, &id)?;
+    builder.owners.push(id);
+    builder.qualifiers.push(name);
+    emit_javascript_callable_parameters(builder, node)?;
+    if let Some(body) = body {
+        builder.visit(body, depth.saturating_add(1))?;
+    }
+    builder.qualifiers.pop();
+    builder.owners.pop();
+    Ok(())
+}
+
+fn visit_bindings(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    declaration: Node<'_>,
+    depth: usize,
+) -> Result<(), ExtractError> {
+    let constant = has_child_kind(declaration, "const");
+    for declarator in
+        named_children(declaration).filter(|node| node.kind() == "variable_declarator")
+    {
+        visit_javascript_binding(
+            builder,
+            JavaScriptBindingVisit {
+                declaration,
+                declarator,
+                depth,
+                constant,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn owner_for_node(builder: &ExtractionBuilder<'_, '_>, node: Node<'_>) -> Option<SymbolId> {
     let start = u64::try_from(node.start_byte()).ok()?;
     let end = u64::try_from(node.end_byte()).ok()?;
@@ -654,15 +774,15 @@ fn visit_javascript_declaration(
 ) -> Result<bool, ExtractError> {
     match node.kind() {
         "interface_declaration" | "class_declaration" | "abstract_class_declaration" => {
-            builder.visit_container(node, depth)?;
+            visit_container(builder, node, depth)?;
         }
         "function_declaration"
         | "generator_function_declaration"
         | "function_signature"
         | "method_definition"
         | "method_signature"
-        | "abstract_method_signature" => builder.visit_callable(node, depth)?,
-        "lexical_declaration" | "variable_declaration" => builder.visit_bindings(node, depth)?,
+        | "abstract_method_signature" => visit_callable(builder, node, depth)?,
+        "lexical_declaration" | "variable_declaration" => visit_bindings(builder, node, depth)?,
         "import_statement" => declarations::visit_import(builder, node)?,
         "export_statement" => declarations::visit_export(builder, node, depth)?,
         "type_alias_declaration" => declarations::visit_type_alias(builder, node, depth)?,
@@ -947,114 +1067,6 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     fn visit_named_children(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
         for child in named_children(node) {
             self.visit(child, depth.saturating_add(1))?;
-        }
-        Ok(())
-    }
-
-    fn visit_container(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
-        let (kind, body_kind) = match node.kind() {
-            "interface_declaration" => (SymbolKind::Interface, "interface_body"),
-            "class_declaration" | "abstract_class_declaration" => (SymbolKind::Class, "class_body"),
-            _ => return self.visit_named_children(node, depth),
-        };
-        let Some(name_node) = node.child_by_field_name("name") else {
-            return self.visit_named_children(node, depth);
-        };
-        let name = self.context.owned_text(name_node)?;
-        let (exported, default_export) = export_flags(node);
-        let pending = PendingSymbol {
-            kind,
-            name: name.clone(),
-            span_node: node,
-            structural_node: node,
-            doc_anchor: node,
-            body_node: None,
-            declaration_only: false,
-            signature: None,
-            export: SymbolExportFlags::new(exported, default_export),
-            async_symbol: false,
-            static_member: false,
-            visibility: visibility(node, self.context.source()),
-        };
-        let id = self.emit_symbol(pending)?;
-        self.owners.push(id.clone());
-        self.qualifiers.push(name);
-        references::capture_heritage(self, node, &id)?;
-        for child in named_children(node) {
-            if child.kind() == body_kind {
-                self.visit(child, depth.saturating_add(1))?;
-            }
-        }
-
-        self.qualifiers.pop();
-        self.owners.pop();
-        Ok(())
-    }
-
-    fn visit_callable(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
-        let Some(name_node) = node.child_by_field_name("name") else {
-            return self.visit_named_children(node, depth);
-        };
-        let name = self.context.owned_text(name_node)?;
-        let declared_kind = if matches!(
-            node.kind(),
-            "method_definition" | "method_signature" | "abstract_method_signature"
-        ) {
-            SymbolKind::Method
-        } else {
-            SymbolKind::Function
-        };
-        let component = declared_kind == SymbolKind::Function
-            && starts_uppercase(&name)
-            && contains_jsx(node, self.context.cancelled)?;
-        let kind = if component {
-            SymbolKind::Component
-        } else {
-            declared_kind
-        };
-        let (exported, default_export) = export_flags(node);
-        let body = node.child_by_field_name("body");
-        let pending = PendingSymbol {
-            kind,
-            name: name.clone(),
-            span_node: node,
-            structural_node: node,
-            doc_anchor: node,
-            body_node: body,
-            declaration_only: body.is_none(),
-            signature: self.context.callable_signature(node)?,
-            export: SymbolExportFlags::new(exported, default_export),
-            async_symbol: has_child_kind(node, "async"),
-            static_member: has_child_kind(node, "static"),
-            visibility: visibility(node, self.context.source()),
-        };
-        let id = self.emit_symbol(pending)?;
-        references::capture_callable_types(self, node, &id)?;
-        self.owners.push(id);
-        self.qualifiers.push(name);
-        emit_javascript_callable_parameters(self, node)?;
-        if let Some(body) = body {
-            self.visit(body, depth.saturating_add(1))?;
-        }
-        self.qualifiers.pop();
-        self.owners.pop();
-        Ok(())
-    }
-
-    fn visit_bindings(&mut self, declaration: Node<'_>, depth: usize) -> Result<(), ExtractError> {
-        let constant = has_child_kind(declaration, "const");
-        for declarator in
-            named_children(declaration).filter(|node| node.kind() == "variable_declarator")
-        {
-            visit_javascript_binding(
-                self,
-                JavaScriptBindingVisit {
-                    declaration,
-                    declarator,
-                    depth,
-                    constant,
-                },
-            )?;
         }
         Ok(())
     }

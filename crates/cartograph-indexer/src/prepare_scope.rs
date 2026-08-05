@@ -34,6 +34,54 @@ pub enum SupervisedPrepareError {
     Database(#[from] PrepareGenerationError),
 }
 
+/// Generation contents that one prepare task can drive to a ready generation.
+///
+/// The memory and spilled paths differ only in which bounded database call they
+/// make, so the shared half lives in `spawn_prepare` and each contents type
+/// supplies just its own call.
+trait PreparableContents: Send + 'static {
+    /// Attach the scope's progress channel to these contents.
+    #[must_use]
+    fn with_prepare_progress(self, progress: PrepareGenerationProgress) -> Self;
+
+    /// Run the bounded prepare that matches this contents type.
+    fn prepare(
+        self,
+        database: CartographDatabase,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> impl Future<Output = Result<ReadyGeneration, PrepareGenerationError>> + Send;
+}
+
+impl PreparableContents for GenerationContents {
+    fn with_prepare_progress(self, progress: PrepareGenerationProgress) -> Self {
+        self.with_progress(progress)
+    }
+
+    async fn prepare(
+        self,
+        database: CartographDatabase,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        database.prepare_generation_bounded(self, mutation).await
+    }
+}
+
+impl PreparableContents for SpilledGenerationContents {
+    fn with_prepare_progress(self, progress: PrepareGenerationProgress) -> Self {
+        self.with_progress(progress)
+    }
+
+    async fn prepare(
+        self,
+        database: CartographDatabase,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        database
+            .prepare_spilled_generation_bounded(self, mutation)
+            .await
+    }
+}
+
 /// Cloned inputs one prepare task owns for its whole lifetime.
 struct PrepareLaunch {
     database: CartographDatabase,
@@ -101,7 +149,7 @@ impl PrepareScope {
         &self,
         contents: SpilledGenerationContents,
     ) -> Result<ReadyGeneration, SupervisedPrepareError> {
-        let receiver = self.start_spilled(contents)?;
+        let receiver = self.start(contents)?;
         match receiver.await {
             Ok(Ok(ready)) => Ok(ready),
             Ok(Err(error)) => Err(SupervisedPrepareError::Database(error)),
@@ -164,38 +212,21 @@ impl PrepareScope {
         Ok(receiver)
     }
 
-    fn start(
+    fn start<Contents>(
         &self,
-        contents: GenerationContents,
+        contents: Contents,
     ) -> Result<
         oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
         SupervisedPrepareError,
-    > {
+    >
+    where
+        Contents: PreparableContents,
+    {
         self.spawn_prepare(move |launch| async move {
-            let contents = contents.with_progress(launch.progress);
-            launch
-                .database
-                .prepare_generation_bounded(
-                    contents,
-                    PrepareGenerationMutation::new(&launch.fence, launch.statement_timeout),
-                )
-                .await
-        })
-    }
-
-    fn start_spilled(
-        &self,
-        contents: SpilledGenerationContents,
-    ) -> Result<
-        oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
-        SupervisedPrepareError,
-    > {
-        self.spawn_prepare(move |launch| async move {
-            let contents = contents.with_progress(launch.progress);
-            launch
-                .database
-                .prepare_spilled_generation_bounded(
-                    contents,
+            let contents = contents.with_prepare_progress(launch.progress);
+            contents
+                .prepare(
+                    launch.database,
                     PrepareGenerationMutation::new(&launch.fence, launch.statement_timeout),
                 )
                 .await

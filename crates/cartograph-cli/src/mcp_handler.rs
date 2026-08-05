@@ -2826,36 +2826,85 @@ const fn admin_job_reason_failure(
     }
 }
 
-const fn admin_job_progress_stalled_failure(stage: PipelineStage) -> AdminJobFailure {
-    match stage {
-        PipelineStage::Discover => AdminJobFailure::DiscoverProgressStalled,
-        PipelineStage::Read => AdminJobFailure::ReadProgressStalled,
-        PipelineStage::Parse => AdminJobFailure::ParseProgressStalled,
-        PipelineStage::Resolve => AdminJobFailure::ResolveProgressStalled,
-        PipelineStage::Overlay => AdminJobFailure::OverlayProgressStalled,
-        PipelineStage::Reduce => AdminJobFailure::ReduceProgressStalled,
-        PipelineStage::Copy => AdminJobFailure::CopyProgressStalled,
-        PipelineStage::RelationalMerge => AdminJobFailure::RelationalMergeProgressStalled,
-        PipelineStage::Bm25 => AdminJobFailure::Bm25ProgressStalled,
-        PipelineStage::Vector => AdminJobFailure::VectorProgressStalled,
-        PipelineStage::Publish => AdminJobFailure::PublicationProgressStalled,
+/// Every stage's admin-job failure pair in one place, so a new stage cannot be
+/// added to one lookup and forgotten in the other.
+const ADMIN_JOB_STAGE_FAILURES: [(PipelineStage, AdminJobFailure, AdminJobFailure); 11] = [
+    (
+        PipelineStage::Discover,
+        AdminJobFailure::DiscoverFailed,
+        AdminJobFailure::DiscoverProgressStalled,
+    ),
+    (
+        PipelineStage::Read,
+        AdminJobFailure::ReadFailed,
+        AdminJobFailure::ReadProgressStalled,
+    ),
+    (
+        PipelineStage::Parse,
+        AdminJobFailure::ParseFailed,
+        AdminJobFailure::ParseProgressStalled,
+    ),
+    (
+        PipelineStage::Resolve,
+        AdminJobFailure::ResolveFailed,
+        AdminJobFailure::ResolveProgressStalled,
+    ),
+    (
+        PipelineStage::Overlay,
+        AdminJobFailure::OverlayFailed,
+        AdminJobFailure::OverlayProgressStalled,
+    ),
+    (
+        PipelineStage::Reduce,
+        AdminJobFailure::ReduceFailed,
+        AdminJobFailure::ReduceProgressStalled,
+    ),
+    (
+        PipelineStage::Copy,
+        AdminJobFailure::CopyFailed,
+        AdminJobFailure::CopyProgressStalled,
+    ),
+    (
+        PipelineStage::RelationalMerge,
+        AdminJobFailure::RelationalMergeFailed,
+        AdminJobFailure::RelationalMergeProgressStalled,
+    ),
+    (
+        PipelineStage::Bm25,
+        AdminJobFailure::Bm25Failed,
+        AdminJobFailure::Bm25ProgressStalled,
+    ),
+    (
+        PipelineStage::Vector,
+        AdminJobFailure::VectorFailed,
+        AdminJobFailure::VectorProgressStalled,
+    ),
+    (
+        PipelineStage::Publish,
+        AdminJobFailure::PublicationFailed,
+        AdminJobFailure::PublicationProgressStalled,
+    ),
+];
+
+const fn admin_job_stage_entry(stage: PipelineStage) -> (AdminJobFailure, AdminJobFailure) {
+    let mut index = 0;
+    while index < ADMIN_JOB_STAGE_FAILURES.len() {
+        let (candidate, failed, stalled) = ADMIN_JOB_STAGE_FAILURES[index];
+        if candidate as u8 == stage as u8 {
+            return (failed, stalled);
+        }
+        index += 1;
     }
+    // The table above is exhaustive over PipelineStage by construction.
+    (ADMIN_JOB_STAGE_FAILURES[0].1, ADMIN_JOB_STAGE_FAILURES[0].2)
+}
+
+const fn admin_job_progress_stalled_failure(stage: PipelineStage) -> AdminJobFailure {
+    admin_job_stage_entry(stage).1
 }
 
 const fn admin_job_stage_failure(stage: PipelineStage) -> AdminJobFailure {
-    match stage {
-        PipelineStage::Discover => AdminJobFailure::DiscoverFailed,
-        PipelineStage::Read => AdminJobFailure::ReadFailed,
-        PipelineStage::Parse => AdminJobFailure::ParseFailed,
-        PipelineStage::Resolve => AdminJobFailure::ResolveFailed,
-        PipelineStage::Overlay => AdminJobFailure::OverlayFailed,
-        PipelineStage::Reduce => AdminJobFailure::ReduceFailed,
-        PipelineStage::Copy => AdminJobFailure::CopyFailed,
-        PipelineStage::RelationalMerge => AdminJobFailure::RelationalMergeFailed,
-        PipelineStage::Bm25 => AdminJobFailure::Bm25Failed,
-        PipelineStage::Vector => AdminJobFailure::VectorFailed,
-        PipelineStage::Publish => AdminJobFailure::PublicationFailed,
-    }
+    admin_job_stage_entry(stage).0
 }
 
 const fn project_purge_error(error: &ProjectPurgeError) -> ProjectError {
