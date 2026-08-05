@@ -1671,35 +1671,14 @@ impl NativeGenerationSpill {
                 requested: NativeGenerationSpillPhase::Sealed.as_str(),
             });
         }
-        let counts_sql = format!(
-            r#"SELECT
-                (SELECT count(*) FROM {schema}."native_generation_spill_files"
-                  WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-                (SELECT count(*) FROM {schema}."native_generation_spill_symbols"
-                  WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-                (SELECT count(*) FROM {schema}."native_generation_spill_edges"
-                  WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-                (SELECT count(*) FROM {schema}."native_generation_spill_references"
-                  WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-                (SELECT count(*) FROM {schema}."native_generation_spill_numerical_sites"
-                  WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-                (SELECT count(*) FROM {schema}."native_generation_spill_documents"
-                  WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid))"#
-        );
+        let counts_sql = fact_count_sql(&schema, "native_generation_spill_");
         let row = audited_query(counts_sql)
             .bind(self.project_id.as_str())
             .bind(self.generation_id.as_str())
             .fetch_one(&mut *transaction)
             .await
             .map_err(|_| database_error("spill-count-resolution"))?;
-        let actual = NativeGenerationSpillFactCounts {
-            files: read_u64(&row, 0, "spill_file_count")?,
-            symbols: read_u64(&row, 1, "spill_symbol_count")?,
-            edges: read_u64(&row, 2, "spill_edge_count")?,
-            references: read_u64(&row, 3, "spill_reference_count")?,
-            numerical_sites: read_u64(&row, 4, "spill_numerical_count")?,
-            documents: read_u64(&row, 5, "spill_document_count")?,
-        };
+        let actual = decode_fact_counts(&row)?;
         if actual != expected {
             return Err(StorageError::GenerationSpillConflict);
         }
@@ -2349,11 +2328,11 @@ impl NativeGenerationSpill {
             .try_get::<String, _>(0)
             .map_err(|_| corrupt("native_generation_spill_phase"))
             .and_then(|raw| NativeGenerationSpillPhase::parse(&raw))?;
-        let logical_bytes = read_u64(&row, 1, "spill_logical_bytes")?;
-        let raw_rows = read_u64(&row, 2, "spill_raw_rows")?;
-        let extracted_files = read_u64(&row, 3, "spill_extracted_files")?;
-        let maximum_bytes = read_u64(&row, 4, "maximum_spill_bytes")?;
-        let maximum_rows = read_u64(&row, 5, "maximum_spill_rows")?;
+        let logical_bytes = read_u64(&row, "logical_bytes", "spill_logical_bytes")?;
+        let raw_rows = read_u64(&row, "raw_rows", "spill_raw_rows")?;
+        let extracted_files = read_u64(&row, "extracted_files", "spill_extracted_files")?;
+        let maximum_bytes = read_u64(&row, "maximum_bytes", "maximum_spill_bytes")?;
+        let maximum_rows = read_u64(&row, "maximum_rows", "maximum_spill_rows")?;
         Ok((
             phase,
             NativeGenerationSpillReport {
@@ -2943,6 +2922,57 @@ where
     Ok((digest.finish(), counts))
 }
 
+/// The six canonical relations counted for one generation, with the column each
+/// count is read back through.
+const COUNTED_RELATIONS: [(&str, &str); 6] = [
+    ("files", "file_count"),
+    ("symbols", "symbol_count"),
+    ("edges", "edge_count"),
+    ("references", "reference_count"),
+    ("numerical_sites", "numerical_site_count"),
+    ("documents", "document_count"),
+];
+
+/// Count every canonical relation for one generation under a table prefix.
+///
+/// The spilled tables and the published tables hold the same six relations, so
+/// the projection is built once rather than copied per caller.
+fn fact_count_sql(schema: &str, prefix: &str) -> String {
+    let projection = COUNTED_RELATIONS
+        .iter()
+        .map(|(relation, column)| {
+            let table = if prefix.is_empty() {
+                match *relation {
+                    "documents" => "search_documents".to_owned(),
+                    other => other.to_owned(),
+                }
+            } else {
+                format!("{prefix}{relation}")
+            };
+            format!(
+                r#"(SELECT count(*) FROM {schema}."{table}"
+                  WHERE project_id = CAST($1 AS uuid)
+                    AND generation_id = CAST($2 AS uuid)) AS {column}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n            ");
+    format!("SELECT\n            {projection}")
+}
+
+fn decode_fact_counts(
+    row: &sqlx_postgres::PgRow,
+) -> Result<NativeGenerationSpillFactCounts, StorageError> {
+    Ok(NativeGenerationSpillFactCounts {
+        files: read_u64(row, "file_count", "spill_file_count")?,
+        symbols: read_u64(row, "symbol_count", "spill_symbol_count")?,
+        edges: read_u64(row, "edge_count", "spill_edge_count")?,
+        references: read_u64(row, "reference_count", "spill_reference_count")?,
+        numerical_sites: read_u64(row, "numerical_site_count", "spill_numerical_count")?,
+        documents: read_u64(row, "document_count", "spill_document_count")?,
+    })
+}
+
 pub(crate) async fn canonical_fact_counts(
     connection: &mut sqlx_postgres::PgConnection,
     scope: SpillScope<'_>,
@@ -2952,35 +2982,14 @@ pub(crate) async fn canonical_fact_counts(
         project_id,
         generation_id,
     } = scope;
-    let sql = format!(
-        r#"SELECT
-            (SELECT count(*) FROM {schema}."files"
-              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-            (SELECT count(*) FROM {schema}."symbols"
-              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-            (SELECT count(*) FROM {schema}."edges"
-              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-            (SELECT count(*) FROM {schema}."references"
-              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-            (SELECT count(*) FROM {schema}."numerical_sites"
-              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)),
-            (SELECT count(*) FROM {schema}."search_documents"
-              WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid))"#
-    );
+    let sql = fact_count_sql(schema, "");
     let row = audited_query(sql)
         .bind(project_id.as_str())
         .bind(generation_id.as_str())
         .fetch_one(connection)
         .await
         .map_err(|_| database_error("spill-read-canonical-counts"))?;
-    Ok(NativeGenerationSpillFactCounts {
-        files: read_u64(&row, 0, "spill_file_count")?,
-        symbols: read_u64(&row, 1, "spill_symbol_count")?,
-        edges: read_u64(&row, 2, "spill_edge_count")?,
-        references: read_u64(&row, 3, "spill_reference_count")?,
-        numerical_sites: read_u64(&row, 4, "spill_numerical_count")?,
-        documents: read_u64(&row, 5, "spill_document_count")?,
-    })
+    decode_fact_counts(&row)
 }
 
 struct DigestPulse<'a, Cancel, Progress> {
@@ -3806,11 +3815,14 @@ const fn next_fact_relation(
     }
 }
 
-fn read_u64(
+fn read_u64<Index>(
     row: &sqlx_postgres::PgRow,
-    index: usize,
+    index: Index,
     field: &'static str,
-) -> Result<u64, StorageError> {
+) -> Result<u64, StorageError>
+where
+    Index: sqlx_core::column::ColumnIndex<sqlx_postgres::PgRow>,
+{
     row.try_get::<i64, _>(index)
         .ok()
         .and_then(|value| u64::try_from(value).ok())
