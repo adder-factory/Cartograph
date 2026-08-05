@@ -1,10 +1,10 @@
 # Support Matrix
 
-Last implementation audit: 2026-08-04 (`v2.2.0`).
+Last implementation audit: 2026-08-04 (`v2.1.12`).
 
 Cartograph v2 supports all 73 v1.1.33 language modes, native TOML, 52
 dedicated textual game-scripting modes, and the WGSL and Metal shader modes
-added in v2.2.0: 128 modes total. The source of truth is
+added in v2.1.12: 128 modes total. The source of truth is
 `cartograph_domain::SourceLanguage::ALL`; native
 extractor strategy lives in `crates/cartograph-extract/src/language.rs`, and
 framework/cross-language enrichment lives in the focused Rust modules beside
