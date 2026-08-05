@@ -1092,8 +1092,15 @@ pub async fn build_native_generation_spilled(
         storage: NativeGenerationStorage::PostgreSql,
         ..NativePipelineReport::default()
     };
-    let (extracted, parse_cache) =
-        run_spilled_parse_stage(&stages, manifest.entries, parse_cache, spill).await?;
+    let (extracted, parse_cache) = run_spilled_parse_stage(
+        &stages,
+        SpilledParseStageInputs {
+            manifest: manifest.entries,
+            parse_cache,
+            spill,
+        },
+    )
+    .await?;
     let resolved = run_spilled_resolve_stage(&stages, extracted).await?;
     let spill = resolved.spill;
     let digest = run_spilled_reduce_stage(&stages, spill.clone()).await?;
@@ -1511,12 +1518,22 @@ fn spilled_parse_envelopes(
     )
 }
 
-async fn run_spilled_parse_stage(
-    stages: &NativeStageContext<'_>,
+/// Manifest, optional parse cache, and spill authority for one parse stage.
+struct SpilledParseStageInputs {
     manifest: Vec<SourceManifestEntry>,
     parse_cache: Option<NativeParseCache>,
     spill: NativeGenerationSpill,
+}
+
+async fn run_spilled_parse_stage(
+    stages: &NativeStageContext<'_>,
+    inputs: SpilledParseStageInputs,
 ) -> Result<(SpilledNativeFacts, NativeParseCacheReport), NativePipelineError> {
+    let SpilledParseStageInputs {
+        manifest,
+        parse_cache,
+        spill,
+    } = inputs;
     let expected_files = usize_to_u64(manifest.len());
     let initial = spill
         .initialize()
@@ -1766,7 +1783,12 @@ struct PendingSpilledParseCacheWrite {
 }
 
 impl PendingSpilledParseCacheWrite {
-    fn new(sequence: u64, file_id: FileId, key: NativeParseCacheKey, payload: Vec<u8>) -> Self {
+    fn new(write: ParsedFilePayload, key: NativeParseCacheKey) -> Self {
+        let ParsedFilePayload {
+            sequence,
+            file_id,
+            payload,
+        } = write;
         let payload_digest = ContentDigest::from_bytes(*blake3::hash(&payload).as_bytes());
         Self {
             sequence,
@@ -1792,10 +1814,13 @@ struct SpilledParseBatchContext<'input, 'spill> {
 impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     fn new(
         spill: &'spill NativeGenerationSpill,
-        inputs: SpilledParseInputs<'input>,
-        cancellation: &'input StageCancellation,
+        batch: SpilledParseBatchInputs<'input>,
         capacity: usize,
     ) -> Result<Self, ParseManifestFailure> {
+        let SpilledParseBatchInputs {
+            inputs,
+            cancellation,
+        } = batch;
         let SpilledParseInputs {
             source_root,
             parse_cache,
@@ -1963,10 +1988,12 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         }
         self.cache_write_bytes = self.cache_write_bytes.saturating_add(payload.len());
         self.cache_writes.push(PendingSpilledParseCacheWrite::new(
-            sequence,
-            file_id,
+            ParsedFilePayload {
+                sequence,
+                file_id,
+                payload,
+            },
             key.clone(),
-            payload,
         ));
         if self.cache_write_bytes >= SPILLED_PARSE_CACHE_WRITE_BYTES {
             self.flush_cache_writes().await?;
@@ -2023,12 +2050,14 @@ async fn stream_spilled_parse_batch(
         load_spilled_parse_cache(parse_cache, &entries).await;
     let mut context = SpilledParseBatchContext::new(
         spill,
-        SpilledParseInputs {
-            spill,
-            source_root,
-            parse_cache,
+        SpilledParseBatchInputs {
+            inputs: SpilledParseInputs {
+                spill,
+                source_root,
+                parse_cache,
+            },
+            cancellation: &cancellation,
         },
-        &cancellation,
         entries.len(),
     )?;
     for (index, (entry, cached)) in entries.into_iter().zip(cached).enumerate() {
@@ -2151,18 +2180,21 @@ async fn flush_spilled_parse_cache_writes(
 }
 
 async fn visit_spilled_native_files<State, Visit>(
-    source: &SpilledNativeFacts,
+    walk: SpilledFileWalk<'_>,
     state: &mut State,
-    observation: SpilledVisitObservation<'_>,
     mut visit: Visit,
 ) -> Result<(), StageItemFailure>
 where
     Visit: FnMut(&mut State, NativeFileFacts) -> Result<(), StageItemFailure>,
 {
-    let SpilledVisitObservation {
-        cancellation,
-        progress,
-    } = observation;
+    let SpilledFileWalk {
+        source,
+        observation:
+            SpilledVisitObservation {
+                cancellation,
+                progress,
+            },
+    } = walk;
     let mut cursor = NativeGenerationExtractedCursor::default();
     let mut expected_sequence = 0_u64;
     loop {
@@ -2637,9 +2669,12 @@ impl<'context> SpilledResolutionFold<'context> {
     fn new(
         spill: &'context NativeGenerationSpill,
         state: &'context mut SpilledResolutionState,
-        cancellation: &'context StageCancellation,
-        progress: &'context StageRunner,
+        observation: SpilledVisitObservation<'context>,
     ) -> Self {
+        let SpilledVisitObservation {
+            cancellation,
+            progress,
+        } = observation;
         Self {
             state,
             transaction: SpilledFactTransaction::new(spill, progress),
@@ -2823,6 +2858,26 @@ struct CandidateLanguageVisibility<'visibility> {
     new_language_bucket: bool,
 }
 
+/// The spilled facts one file walk reads, with its observation channel.
+#[derive(Clone, Copy)]
+struct SpilledFileWalk<'walk> {
+    source: &'walk SpilledNativeFacts,
+    observation: SpilledVisitObservation<'walk>,
+}
+
+/// Batch inputs paired with the cancellation they are observed under.
+#[derive(Clone, Copy)]
+struct SpilledParseBatchInputs<'inputs> {
+    inputs: SpilledParseInputs<'inputs>,
+    cancellation: &'inputs StageCancellation,
+}
+
+/// Resolution index and the budget its growth is charged against.
+struct ResolutionIndexTarget<'target> {
+    index: &'target mut ResolutionIndex,
+    budget: &'target mut ResolveBudget,
+}
+
 /// One parsed file's sequence, identity, and encoded payload.
 struct ParsedFilePayload {
     sequence: u64,
@@ -2988,7 +3043,14 @@ async fn spill_resolved_files(
     let mut input_sequence = 0_u64;
     let worker_count = config.parallelism.parse_capacity.workers();
     let mut tasks = JoinSet::new();
-    let mut fold = SpilledResolutionFold::new(&source.spill, state, cancellation, progress);
+    let mut fold = SpilledResolutionFold::new(
+        &source.spill,
+        state,
+        SpilledVisitObservation {
+            cancellation,
+            progress,
+        },
+    );
     loop {
         if cancellation.is_cancelled() {
             return Err(ResolveGenerationFailure::unclassified());
@@ -6695,12 +6757,14 @@ async fn build_spilled_resolution_preparation(
         budget: ResolveBudget::new(0, working_limit)?,
     };
     visit_spilled_native_files(
-        source,
-        &mut preparation,
-        SpilledVisitObservation {
-            cancellation,
-            progress,
+        SpilledFileWalk {
+            source,
+            observation: SpilledVisitObservation {
+                cancellation,
+                progress,
+            },
         },
+        &mut preparation,
         |state, file| {
             let mut cancelled = || cancellation.is_cancelled();
             index_resolution_file_metadata(ResolutionIndexFileInput {
@@ -6727,18 +6791,22 @@ async fn build_spilled_resolution_preparation(
     )
     .await?;
     visit_spilled_native_files(
-        source,
-        &mut preparation,
-        SpilledVisitObservation {
-            cancellation,
-            progress,
+        SpilledFileWalk {
+            source,
+            observation: SpilledVisitObservation {
+                cancellation,
+                progress,
+            },
         },
+        &mut preparation,
         |state, file| {
             let mut cancelled = || cancellation.is_cancelled();
             index_rust_workspace_package_file(
-                &mut state.index,
+                &mut ResolutionIndexTarget {
+                    index: &mut state.index,
+                    budget: &mut state.budget,
+                },
                 &file,
-                &mut state.budget,
                 &mut cancelled,
             )?;
             index_resolution_file_symbols(ResolutionIndexFileInput {
@@ -9046,20 +9114,24 @@ where
         cancelled,
     } = input;
     for file in &extracted.files {
-        index_rust_workspace_package_file(index, file, budget, cancelled)?;
+        index_rust_workspace_package_file(
+            &mut ResolutionIndexTarget { index, budget },
+            file,
+            cancelled,
+        )?;
     }
     Ok(())
 }
 
 fn index_rust_workspace_package_file<Cancel>(
-    index: &mut ResolutionIndex,
+    target: &mut ResolutionIndexTarget<'_>,
     file: &NativeFileFacts,
-    budget: &mut ResolveBudget,
     cancelled: &mut Cancel,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ResolutionIndexTarget { index, budget } = target;
     for symbol in &file.symbols {
         if cancelled() {
             return Err(StageItemFailure);

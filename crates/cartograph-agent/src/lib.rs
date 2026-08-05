@@ -1438,9 +1438,11 @@ impl ProjectRuntime {
         let source_root = SourceRoot::open_with_policy(&self.root, discovery_policy)
             .map_err(|_| ProjectError::ProjectRootUnavailable)?;
         let pipeline = pipeline_config(
-            workers,
-            max_source_bytes,
-            max_generation_bytes,
+            PipelineBounds {
+                workers,
+                max_source_bytes,
+                max_generation_bytes,
+            },
             index_policy,
         )?;
         let maximum_stage_reservation = pipeline
@@ -2443,12 +2445,23 @@ fn source_limits_with_max(max_source_bytes: usize) -> Result<SourceLimits, Proje
     SourceLimits::new(max_source_bytes).map_err(|_| ProjectError::InvalidOptions)
 }
 
-fn pipeline_config(
+/// Worker count and byte ceilings admitted for one native pipeline run.
+#[derive(Clone, Copy)]
+struct PipelineBounds {
     workers: u16,
     max_source_bytes: usize,
     max_generation_bytes: u64,
+}
+
+fn pipeline_config(
+    bounds: PipelineBounds,
     policy: SourceIndexPolicy,
 ) -> Result<NativePipelineConfig, ProjectError> {
+    let PipelineBounds {
+        workers,
+        max_source_bytes,
+        max_generation_bytes,
+    } = bounds;
     let retained = NativeRetainedLimits::new(DEFAULT_MAX_MANIFEST_BYTES, max_generation_bytes)
         .map_err(|_| ProjectError::InvalidOptions)?;
     let queue = usize::from(workers)

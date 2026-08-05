@@ -2182,14 +2182,16 @@ impl CartographDatabase {
         );
         let mut rows = self
             .bounded_serial_rows(
-                statement,
+                SerialRowRequest {
+                    statement,
+                    operation: "current-structural-finding-stats",
+                    statement_timeout,
+                },
                 |statement| {
                     statement
                         .bind(project_id.as_str())
                         .bind(generation.as_str())
                 },
-                "current-structural-finding-stats",
-                statement_timeout,
             )
             .await?;
         let row = rows
@@ -2210,11 +2212,14 @@ impl CartographDatabase {
 
     async fn bounded_serial_rows<'query>(
         &self,
-        statement: String,
+        request: SerialRowRequest,
         bind: impl FnOnce(PgQuery<'query>) -> PgQuery<'query>,
-        operation: &'static str,
-        statement_timeout: Duration,
     ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError> {
+        let SerialRowRequest {
+            statement,
+            operation,
+            statement_timeout,
+        } = request;
         // This full-generation aggregate can otherwise reserve one dynamic
         // shared-memory segment per PostgreSQL worker. Serial planning keeps
         // status bounded on large projects without weakening the query.
@@ -2228,6 +2233,13 @@ pub(crate) const FINDING_CTES_SQL_TEMPLATE: &str = include_str!("finding_ctes.sq
 
 pub(crate) fn finding_ctes(schema: &str) -> String {
     FINDING_CTES_SQL_TEMPLATE.replace("{schema}", schema)
+}
+
+/// One serially planned read with its audit label and deadline.
+struct SerialRowRequest {
+    statement: String,
+    operation: &'static str,
+    statement_timeout: Duration,
 }
 
 /// Exact published generation the cascade must fence on, if one exists.

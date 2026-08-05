@@ -346,8 +346,10 @@ pub(super) fn capture_invocation(
         return Ok(());
     }
     let Some((name_node, reference_node)) = invocation_reference_nodes(
-        builder.context.snapshot.language(),
-        invocation,
+        InvocationShape {
+            language: builder.context.snapshot.language(),
+            invocation,
+        },
         target,
         node,
     ) else {
@@ -365,12 +367,22 @@ pub(super) fn capture_invocation(
     )
 }
 
-fn invocation_reference_nodes<'tree>(
+/// Language and call form one invocation reference is resolved under.
+#[derive(Clone, Copy)]
+struct InvocationShape {
     language: SourceLanguage,
     invocation: InvocationKind,
+}
+
+fn invocation_reference_nodes<'tree>(
+    shape: InvocationShape,
     target: Node<'tree>,
     expression: Node<'tree>,
 ) -> Option<(Node<'tree>, Node<'tree>)> {
+    let InvocationShape {
+        language,
+        invocation,
+    } = shape;
     let javascript = matches!(
         language,
         SourceLanguage::TypeScript

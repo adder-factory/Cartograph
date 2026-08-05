@@ -18,8 +18,8 @@ pub(crate) use validate::{
 };
 
 pub(crate) use copy::{
-    CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations, CountedCopyRequest,
-    CountedTextCopy, TextRow, copy_generation_facts,
+    CopyGenerationAttempt, CopyGenerationContext, CopyGenerationRequest, CopyTableDurations,
+    CountedCopyRequest, CountedTextCopy, TextRow, copy_generation_facts,
 };
 pub(crate) use digest::LogicalDigestBuilder;
 pub(crate) use model::ValidatedFactTables;

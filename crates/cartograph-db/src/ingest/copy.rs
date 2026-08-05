@@ -23,6 +23,12 @@ const ASCII_BACKSPACE: u8 = 0x08;
 const ASCII_VERTICAL_TAB: u8 = 0x0b;
 const ASCII_FORM_FEED: u8 = 0x0c;
 
+/// One generation COPY attempt with its optional prepare-progress channel.
+pub(crate) struct CopyGenerationRequest<'request> {
+    pub(crate) context: CopyGenerationContext,
+    pub(crate) prepare_progress: Option<&'request PrepareGenerationProgress>,
+}
+
 /// Validated schema and generation identity repeated in every copied row.
 #[derive(Clone)]
 pub(crate) struct CopyGenerationContext {
@@ -253,10 +259,13 @@ struct CopyTablePlan<T, Encode> {
 
 pub(crate) async fn copy_generation_facts(
     connection: &mut PgConnection,
-    context: CopyGenerationContext,
+    request: CopyGenerationRequest<'_>,
     facts: CanonicalGenerationFacts,
-    prepare_progress: Option<&PrepareGenerationProgress>,
 ) -> CopyGenerationAttempt {
+    let CopyGenerationRequest {
+        context,
+        prepare_progress,
+    } = request;
     let ValidatedFactTables {
         files,
         symbols,

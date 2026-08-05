@@ -17,8 +17,8 @@ use crate::{
     CartographDatabase, CurrentGenerationLookup, LeaseFence, StorageError,
     database::audited_query,
     ingest::{
-        CanonicalGenerationFacts, CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations,
-        copy_generation_facts,
+        CanonicalGenerationFacts, CopyGenerationAttempt, CopyGenerationContext,
+        CopyGenerationRequest, CopyTableDurations, copy_generation_facts,
     },
     leases::project_lock_key,
     search_relation::{
@@ -2064,13 +2064,15 @@ async fn copy_and_validate_generation(
         result: copy_result,
     } = copy_generation_facts(
         connection,
-        CopyGenerationContext {
-            schema: input.schema.clone(),
-            project_id: input.generation.project_id().clone(),
-            generation_id: input.generation.generation_id().clone(),
+        CopyGenerationRequest {
+            context: CopyGenerationContext {
+                schema: input.schema.clone(),
+                project_id: input.generation.project_id().clone(),
+                generation_id: input.generation.generation_id().clone(),
+            },
+            prepare_progress: input.progress,
         },
         input.facts,
-        input.progress,
     )
     .await;
     if let Some(metrics) = input.metrics {
