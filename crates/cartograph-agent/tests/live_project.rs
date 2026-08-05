@@ -2452,6 +2452,62 @@ fn assert_clone_class_findings(findings: &[serde_json::Value]) {
 /// The readiness probe must never evaluate the detector cascade, and the stored
 /// relation must agree exactly with a live evaluation, recompute when any input
 /// fingerprint moves, and stay put when nothing changed.
+/// Coverage feeds `low_coverage` and the centrality percentile per symbol, so an
+/// import must move the input fingerprint. A re-import can redistribute hit
+/// lines between symbols while leaving project-wide totals identical, so an
+/// aggregate alone cannot fence this input.
+async fn assert_coverage_moves_the_finding_fingerprint(
+    database: &cartograph_db::CartographDatabase,
+    indexed: &IndexReport,
+    settings: &DatabaseSettings,
+    schema: &str,
+) {
+    let pool = cartograph_db::connect(settings)
+        .await
+        .unwrap_or_else(|error| panic!("coverage fixture connection failed: {error}"));
+    let coverage_rows = query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."coverage_sources" (
+                project_id, label, report_format, report_digest
+            )
+            VALUES (CAST($1 AS uuid), 'fingerprint-fixture', 'lcov', repeat('a', 64))"#
+    )))
+    .bind(indexed.project_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("coverage source insert failed: {error}"))
+    .rows_affected();
+    assert_eq!(coverage_rows, 1);
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("coverage-change refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed,
+        "an imported coverage report must move the input fingerprint"
+    );
+    let rewritten = query(AssertSqlSafe(format!(
+        r#"UPDATE "{schema}"."coverage_sources"
+            SET report_digest = repeat('b', 64)
+            WHERE project_id = CAST($1 AS uuid)
+              AND label = 'fingerprint-fixture'"#
+    )))
+    .bind(indexed.project_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("coverage digest rewrite failed: {error}"))
+    .rows_affected();
+    pool.close().await;
+    assert_eq!(rewritten, 1);
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("re-import refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed,
+        "a coverage re-import must move the fingerprint even when totals are unchanged"
+    );
+}
+
 async fn assert_structural_finding_cache(
     runtime: &ProjectRuntime,
     indexed: &IndexReport,
@@ -2502,6 +2558,8 @@ async fn assert_structural_finding_cache(
         cached.total_findings() > 0,
         "the fixture corpus must produce findings"
     );
+
+    assert_coverage_moves_the_finding_fingerprint(database, indexed, settings, schema).await;
 
     // A detector-contract change must invalidate a warm relation; otherwise a
     // shipped rule change keeps serving findings the rules no longer produce.

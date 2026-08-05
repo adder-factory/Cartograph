@@ -2000,6 +2000,10 @@ impl CartographDatabase {
         request: &StructuralFindingGroupQuery,
     ) -> Result<StructuralFindingGroup, StorageError> {
         validate_limit(request.per_finding_limit)?;
+        // Every sibling finding query reads the stored relation; this one backs
+        // the agent audit, which is the most detector-heavy consumer of all.
+        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
+            .await?;
         let Some(generation) = current_generation_for_findings(self, project_id).await? else {
             return Ok(StructuralFindingGroup {
                 findings: Vec::new(),
@@ -2008,10 +2012,10 @@ impl CartographDatabase {
         };
         let schema = quoted_schema(&self.schema);
         let statement = format!(
-            r"{}, ranked AS (
+            r#"WITH ranked AS (
                     SELECT symbol_id, path, qualified_name, finding, severity,
                            start_line, end_line, metric_name, metric,
-                           degree_centrality, outgoing, unresolved, detail,
+                           degree_centrality, outgoing_edges, unresolved_references, detail,
                            COUNT(*) OVER (PARTITION BY finding)::bigint AS detector_total,
                            ROW_NUMBER() OVER (
                                PARTITION BY finding
@@ -2023,8 +2027,10 @@ impl CartographDatabase {
                                         degree_centrality DESC, metric DESC,
                                         path, start_line, symbol_id
                            ) AS detector_rank
-                    FROM findings
-                    WHERE finding = ANY($3::text[])
+                    FROM {schema}."structural_findings" AS findings
+                    WHERE findings.project_id = CAST($1 AS uuid)
+                      AND findings.generation_id = CAST($2 AS uuid)
+                      AND finding = ANY($3::text[])
                       AND CASE severity
                             WHEN 'error' THEN 3
                             WHEN 'warning' THEN 2
@@ -2039,13 +2045,11 @@ impl CartographDatabase {
                 )
                 SELECT symbol_id::text AS symbol_id, path, qualified_name, finding, severity,
                        start_line, end_line, metric_name, metric,
-                       degree_centrality, outgoing::bigint AS outgoing_edges,
-                       unresolved::bigint AS unresolved_references,
+                       degree_centrality, outgoing_edges, unresolved_references,
                        detail::text AS detail, detector_total
                 FROM ranked
                 WHERE detector_rank <= $6
-                ORDER BY finding, detector_rank, path, start_line, symbol_id",
-            finding_ctes(&schema),
+                ORDER BY finding, detector_rank, path, start_line, symbol_id"#,
         );
         let rows = self
             .bounded_rows(

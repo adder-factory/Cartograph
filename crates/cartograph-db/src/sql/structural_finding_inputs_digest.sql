@@ -17,6 +17,24 @@ SELECT generations.current_generation_id::text AS generation_id,
                       )
                    || '|'
                    || (
+                          -- Per-symbol coverage fractions feed low_coverage and the
+                          -- centrality percentile, and a re-import can redistribute
+                          -- hit lines between symbols while leaving project-wide
+                          -- totals identical. The report digest changes on every
+                          -- import, so it is what actually fences this input; the
+                          -- aggregate only adds cheap corroboration.
+                          SELECT COALESCE(
+                                     string_agg(
+                                         sources.report_digest,
+                                         ',' ORDER BY sources.source_id
+                                     ),
+                                     ''
+                                 )
+                          FROM {schema}."coverage_sources" AS sources
+                          WHERE sources.project_id = CAST($1 AS uuid)
+                      )
+                   || '|'
+                   || (
                           SELECT COUNT(*)::text
                                  || ':'
                                  || COALESCE(SUM(coverage.lines_found), 0)::text
