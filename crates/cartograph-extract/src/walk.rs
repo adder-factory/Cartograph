@@ -741,6 +741,109 @@ const JAVASCRIPT_LANGUAGES: &[SourceLanguage] = &[
     SourceLanguage::Jsx,
 ];
 
+/// Declaration and usage entry points for one extraction family.
+///
+/// Pairing them keeps a family from being wired into one traversal and
+/// forgotten in the other, which would make its files look successfully empty.
+struct FamilySlice {
+    visit_declaration:
+        fn(&mut ExtractionBuilder<'_, '_>, Node<'_>, usize) -> Result<bool, ExtractError>,
+    visit_usage: fn(&mut ExtractionBuilder<'_, '_>, Node<'_>, usize) -> Result<(), ExtractError>,
+}
+
+/// Structural family slices for the walker-driven language families.
+const fn family_slice_structural(family: ExtractionFamily) -> Option<FamilySlice> {
+    let slice = match family {
+        ExtractionFamily::Shader => FamilySlice {
+            visit_declaration: shader_family::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                shader_family::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
+        ExtractionFamily::Shell => FamilySlice {
+            visit_declaration: shell_family::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                shell_family::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
+        ExtractionFamily::C => FamilySlice {
+            visit_declaration: c_family::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                c_family::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
+        ExtractionFamily::Managed => FamilySlice {
+            visit_declaration: managed_family::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                managed_family::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
+        ExtractionFamily::JvmDynamic => FamilySlice {
+            visit_declaration: jvm_dynamic_family::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                jvm_dynamic_family::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
+        _ => return None,
+    };
+    Some(slice)
+}
+
+/// Slices for the declarative, generic, and JavaScript-family languages.
+const fn family_slice_declarative(family: ExtractionFamily) -> Option<FamilySlice> {
+    let slice = match family {
+        ExtractionFamily::GraphQl => FamilySlice {
+            visit_declaration: graphql_family::visit_declaration,
+            visit_usage: |builder, node, depth| builder.visit_named_children(node, depth),
+        },
+        ExtractionFamily::Prisma => FamilySlice {
+            visit_declaration: prisma_family::visit_declaration,
+            visit_usage: |builder, node, depth| builder.visit_named_children(node, depth),
+        },
+        ExtractionFamily::Sql => FamilySlice {
+            visit_declaration: sql_family::visit_declaration,
+            visit_usage: |builder, node, depth| builder.visit_named_children(node, depth),
+        },
+        ExtractionFamily::Generic => FamilySlice {
+            visit_declaration: generic_family::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                generic_family::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
+        ExtractionFamily::Polyglot => FamilySlice {
+            visit_declaration: polyglot::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                polyglot::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
+        ExtractionFamily::JavaScript => FamilySlice {
+            visit_declaration: visit_javascript_declaration,
+            visit_usage: visit_javascript_usage,
+        },
+        _ => return None,
+    };
+    Some(slice)
+}
+
+/// Entry points for one extraction family, or `None` for unsupported source.
+///
+/// The families are split across two lookups for the same reason the grammar
+/// bindings are: one exhaustive match over every family would make this the
+/// single highest-fan-out symbol in the crate.
+const fn family_slice(family: ExtractionFamily) -> Option<FamilySlice> {
+    if let Some(slice) = family_slice_structural(family) {
+        return Some(slice);
+    }
+    family_slice_declarative(family)
+}
+
 fn extraction_family(language: SourceLanguage) -> ExtractionFamily {
     if SHELL_LANGUAGES.contains(&language) {
         ExtractionFamily::Shell
@@ -1008,60 +1111,19 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     }
 
     fn visit_declaration(&mut self, node: Node<'_>, depth: usize) -> Result<bool, ExtractError> {
-        match extraction_family(self.context.snapshot.language()) {
-            ExtractionFamily::Shader => shader_family::visit_declaration(self, node, depth),
-            ExtractionFamily::Shell => shell_family::visit_declaration(self, node, depth),
-            ExtractionFamily::C => c_family::visit_declaration(self, node, depth),
-            ExtractionFamily::Managed => managed_family::visit_declaration(self, node, depth),
-            ExtractionFamily::JvmDynamic => {
-                jvm_dynamic_family::visit_declaration(self, node, depth)
-            }
-            ExtractionFamily::GraphQl => graphql_family::visit_declaration(self, node, depth),
-            ExtractionFamily::Prisma => prisma_family::visit_declaration(self, node, depth),
-            ExtractionFamily::Sql => sql_family::visit_declaration(self, node, depth),
-            ExtractionFamily::Generic => generic_family::visit_declaration(self, node, depth),
-            ExtractionFamily::Polyglot => polyglot::visit_declaration(self, node, depth),
-            ExtractionFamily::JavaScript => visit_javascript_declaration(self, node, depth),
-            ExtractionFamily::Unsupported => Err(ExtractError::UnsupportedLanguage),
-        }
+        let family = extraction_family(self.context.snapshot.language());
+        let Some(slice) = family_slice(family) else {
+            return Err(ExtractError::UnsupportedLanguage);
+        };
+        (slice.visit_declaration)(self, node, depth)
     }
 
     fn visit_usage(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
-        match extraction_family(self.context.snapshot.language()) {
-            ExtractionFamily::Shader => {
-                shader_family::capture_usage(self, node)?;
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::Shell => {
-                shell_family::capture_usage(self, node)?;
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::C => {
-                c_family::capture_usage(self, node)?;
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::Managed => {
-                managed_family::capture_usage(self, node)?;
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::JvmDynamic => {
-                jvm_dynamic_family::capture_usage(self, node)?;
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::GraphQl | ExtractionFamily::Prisma | ExtractionFamily::Sql => {
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::Generic => {
-                generic_family::capture_usage(self, node)?;
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::Polyglot => {
-                polyglot::capture_usage(self, node)?;
-                self.visit_named_children(node, depth)
-            }
-            ExtractionFamily::JavaScript => visit_javascript_usage(self, node, depth),
-            ExtractionFamily::Unsupported => Err(ExtractError::UnsupportedLanguage),
-        }
+        let family = extraction_family(self.context.snapshot.language());
+        let Some(slice) = family_slice(family) else {
+            return Err(ExtractError::UnsupportedLanguage);
+        };
+        (slice.visit_usage)(self, node, depth)
     }
 
     fn visit_named_children(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {

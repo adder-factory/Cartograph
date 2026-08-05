@@ -22,6 +22,7 @@ use std::{
 };
 
 use cartograph_config::DatabaseSettings;
+use cartograph_db::NativeGenerationSpillReport;
 use cartograph_db::{
     CartographDatabase, GenerationContents, GenerationRecoveryRequest, GenerationRetentionPolicy,
     GenerationRetentionReport, GenerationRetentionRequest, HistoryRefreshReport,
@@ -50,6 +51,7 @@ pub use cartograph_indexer::{PipelineFailureReason, PipelineStage};
 use cartograph_llm::{
     ProjectGenerationStorage, ProjectSourceSettings, load_project_source_settings,
 };
+use cartograph_scip::ScipOverlayReport;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Semaphore, oneshot, watch};
@@ -412,9 +414,9 @@ pub struct ScipOverlayMetrics {
     pub unresolved_links: u64,
 }
 
-impl From<NativePipelineReport> for NativeIndexMetrics {
-    fn from(report: NativePipelineReport) -> Self {
-        let scip_overlay = report.scip_overlay().map(|overlay| ScipOverlayMetrics {
+impl From<ScipOverlayReport> for ScipOverlayMetrics {
+    fn from(overlay: ScipOverlayReport) -> Self {
+        Self {
             covered_documents: overlay.covered_documents(),
             skipped_documents: overlay.skipped_documents(),
             replaced_native_symbols: overlay.replaced_native_symbols(),
@@ -423,19 +425,31 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
             imported_references: overlay.imported_references(),
             exact_typed_edges: overlay.exact_typed_edges(),
             unresolved_links: overlay.unresolved_links(),
-        });
-        let parse_cache = report.parse_cache();
-        let generation_storage = match report.storage() {
-            NativeGenerationStorage::Memory => NativeGenerationStorageMetrics::Memory,
-            NativeGenerationStorage::PostgreSql => NativeGenerationStorageMetrics::Postgres,
-        };
-        let spill = report.spill().map(|spill| NativeGenerationSpillMetrics {
+        }
+    }
+}
+
+impl From<NativeGenerationSpillReport> for NativeGenerationSpillMetrics {
+    fn from(spill: NativeGenerationSpillReport) -> Self {
+        Self {
             logical_bytes: spill.logical_bytes,
             raw_rows: spill.raw_rows,
             extracted_files: spill.extracted_files,
             maximum_bytes: spill.maximum_bytes,
             maximum_rows: spill.maximum_rows,
-        });
+        }
+    }
+}
+
+impl From<NativePipelineReport> for NativeIndexMetrics {
+    fn from(report: NativePipelineReport) -> Self {
+        let scip_overlay = report.scip_overlay().map(ScipOverlayMetrics::from);
+        let parse_cache = report.parse_cache();
+        let generation_storage = match report.storage() {
+            NativeGenerationStorage::Memory => NativeGenerationStorageMetrics::Memory,
+            NativeGenerationStorage::PostgreSql => NativeGenerationStorageMetrics::Postgres,
+        };
+        let spill = report.spill().map(NativeGenerationSpillMetrics::from);
         Self {
             files: report.discovered_files(),
             excluded_paths: report.excluded_paths(),

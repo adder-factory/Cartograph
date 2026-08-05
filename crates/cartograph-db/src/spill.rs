@@ -916,7 +916,7 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-initialize-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
         let insert = format!(
             r#"INSERT INTO {schema}."native_generation_spills" (
                     project_id, generation_id, generation_sequence,
@@ -933,14 +933,13 @@ impl NativeGenerationSpill {
             .execute(&mut *transaction)
             .await
             .map_err(|_| database_error("spill-initialize"))?;
-        let (_, report) = self.load_run_for_update(&mut transaction).await?;
+        let (_, report) = load_run_for_update(self, &mut transaction).await?;
         if report.maximum_bytes != self.policy.maximum_bytes
             || report.maximum_rows != self.policy.maximum_rows
         {
             return Err(StorageError::GenerationSpillConflict);
         }
-        self.commit_transaction(transaction, "spill-initialize-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-initialize-commit").await?;
         Ok(report)
     }
 
@@ -955,403 +954,10 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-report-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (_, report) = self.load_run_for_update(&mut transaction).await?;
-        self.commit_transaction(transaction, "spill-report-commit")
-            .await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (_, report) = load_run_for_update(self, &mut transaction).await?;
+        commit_transaction(self, transaction, "spill-report-commit").await?;
         Ok(report)
-    }
-
-    async fn opaque_batch_exists(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        sequence: i64,
-        identity: SpillBatchIdentity<'_>,
-    ) -> Result<bool, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let sql = format!(
-            r#"SELECT row_count, logical_bytes, batch_digest
-                FROM {schema}."native_generation_spill_batches"
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)
-                  AND relation = $3
-                  AND batch_sequence = $4"#
-        );
-        let Some(row) = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(identity.relation.as_str())
-            .bind(sequence)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-read-batch"))?
-        else {
-            return Ok(false);
-        };
-        let row_count = row
-            .try_get::<i32, _>(0)
-            .map_err(|_| corrupt("spill_batch_row_count"))?;
-        let logical_bytes = row
-            .try_get::<i64, _>(1)
-            .map_err(|_| corrupt("spill_batch_logical_bytes"))?;
-        let digest = row
-            .try_get::<String, _>(2)
-            .map_err(|_| corrupt("spill_batch_digest"))?;
-        if usize::try_from(row_count).ok() != Some(identity.rows)
-            || u64::try_from(logical_bytes).ok() != Some(identity.logical_bytes)
-            || digest != identity.digest.as_str()
-        {
-            return Err(StorageError::GenerationSpillConflict);
-        }
-        Ok(true)
-    }
-
-    async fn existing_fact_batches(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        sequences: &[i64],
-    ) -> Result<StoredFactBatches, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let sql = format!(
-            r#"SELECT batch_sequence, relation, row_count, logical_bytes, batch_digest
-                FROM {schema}."native_generation_spill_batches"
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)
-                  AND batch_sequence = ANY(CAST($3 AS bigint[]))
-                  AND relation <> 'extracted_files'
-                ORDER BY batch_sequence, relation"#
-        );
-        let rows = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(sequences)
-            .fetch_all(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-read-fact-batches"))?;
-        let mut existing = StoredFactBatches::new();
-        for row in rows {
-            let sequence = row
-                .try_get::<i64, _>(0)
-                .map_err(|_| corrupt("spill_batch_sequence"))?;
-            let relation = row
-                .try_get::<String, _>(1)
-                .map_err(|_| corrupt("spill_batch_relation"))?;
-            let row_count = row
-                .try_get::<i32, _>(2)
-                .map_err(|_| corrupt("spill_batch_row_count"))?;
-            let logical_bytes = row
-                .try_get::<i64, _>(3)
-                .map_err(|_| corrupt("spill_batch_logical_bytes"))?;
-            let digest = row
-                .try_get::<String, _>(4)
-                .map_err(|_| corrupt("spill_batch_digest"))?;
-            existing.entry(sequence).or_default().insert(
-                relation,
-                StoredFactPayload {
-                    row_count,
-                    logical_bytes,
-                    digest,
-                },
-            );
-        }
-        Ok(existing)
-    }
-
-    async fn insert_batch_ledger(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        input: SpillBatchLedgerInput<'_>,
-    ) -> Result<(), StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let sql = format!(
-            r#"INSERT INTO {schema}."native_generation_spill_batches" (
-                    project_id, generation_id, relation, batch_sequence,
-                    row_count, logical_bytes, batch_digest
-                ) VALUES (CAST($1 AS uuid), CAST($2 AS uuid), $3, $4, $5, $6, $7)"#
-        );
-        audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(input.relation.as_str())
-            .bind(input.sequence)
-            .bind(
-                i32::try_from(input.rows).map_err(|_| StorageError::InvalidInput {
-                    field: "spill_batch_rows",
-                })?,
-            )
-            .bind(as_i64(input.logical_bytes, "spill_batch_bytes")?)
-            .bind(input.digest.as_str())
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-insert-batch"))?;
-        Ok(())
-    }
-
-    async fn insert_fact_batch_ledgers(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        batches: &[(i64, &NativeGenerationSpillFactBatch)],
-    ) -> Result<(), StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let payload_count = batches
-            .iter()
-            .try_fold(0_usize, |count, (_, batch)| {
-                count.checked_add(batch.payloads.len())
-            })
-            .ok_or(StorageError::InvalidInput {
-                field: "spill_fact_batches",
-            })?;
-        let mut relations = Vec::new();
-        let mut sequences = Vec::new();
-        let mut row_counts = Vec::new();
-        let mut logical_bytes = Vec::new();
-        let mut digests = Vec::new();
-        relations
-            .try_reserve_exact(payload_count)
-            .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
-        sequences
-            .try_reserve_exact(payload_count)
-            .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
-        row_counts
-            .try_reserve_exact(payload_count)
-            .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
-        logical_bytes
-            .try_reserve_exact(payload_count)
-            .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
-        digests
-            .try_reserve_exact(payload_count)
-            .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
-        for (sequence, batch) in batches {
-            for payload in &batch.payloads {
-                relations.push(payload.relation.as_str().to_owned());
-                sequences.push(*sequence);
-                row_counts.push(i32::try_from(payload.row_count).map_err(|_| {
-                    StorageError::InvalidInput {
-                        field: "spill_batch_rows",
-                    }
-                })?);
-                logical_bytes.push(as_i64(payload.logical_bytes, "spill_batch_bytes")?);
-                digests.push(payload.digest.as_str().to_owned());
-            }
-        }
-        let sql = format!(
-            r#"INSERT INTO {schema}."native_generation_spill_batches" (
-                    project_id, generation_id, relation, batch_sequence,
-                    row_count, logical_bytes, batch_digest
-                )
-                SELECT CAST($1 AS uuid), CAST($2 AS uuid), input.relation,
-                       input.batch_sequence, input.row_count, input.logical_bytes,
-                       input.batch_digest
-                FROM unnest(
-                    CAST($3 AS text[]), CAST($4 AS bigint[]), CAST($5 AS integer[]),
-                    CAST($6 AS bigint[]), CAST($7 AS text[])
-                ) AS input(
-                    relation, batch_sequence, row_count, logical_bytes, batch_digest
-                )"#
-        );
-        let inserted = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(relations)
-            .bind(sequences)
-            .bind(row_counts)
-            .bind(logical_bytes)
-            .bind(digests)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-insert-fact-batches"))?;
-        if inserted.rows_affected() != usize_to_u64(payload_count) {
-            return Err(database_error("spill-fact-ledger-count-mismatch"));
-        }
-        Ok(())
-    }
-
-    async fn ensure_opaque_batch_range_available(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        sequence: i64,
-        rows: usize,
-    ) -> Result<(), StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let sql = format!(
-            r#"SELECT EXISTS (
-                    SELECT 1
-                    FROM {schema}."native_generation_spill_batches"
-                    WHERE project_id = CAST($1 AS uuid)
-                      AND generation_id = CAST($2 AS uuid)
-                      AND relation = 'extracted_files'
-                      AND int8range(batch_sequence, batch_sequence + row_count, '[)')
-                          && int8range($3, $3 + $4, '[)')
-                )"#
-        );
-        let overlap = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(sequence)
-            .bind(i64::try_from(rows).map_err(|_| StorageError::InvalidInput {
-                field: "spill_batch_rows",
-            })?)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-read-batch-range"))?
-            .try_get::<bool, _>(0)
-            .map_err(|_| corrupt("spill_batch_range"))?;
-        if overlap {
-            Err(StorageError::GenerationSpillConflict)
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn insert_extracted_rows(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        sequence: i64,
-        batch: &NativeGenerationSpillExtractedBatch,
-    ) -> Result<(), StorageError> {
-        let arrays = extracted_row_arrays(batch)?;
-        let inline = self
-            .insert_inline_extracted_rows(transaction, sequence, arrays.inline)
-            .await?;
-        let cached = self
-            .insert_cached_extracted_rows(transaction, sequence, arrays.cached)
-            .await?;
-        if inline.saturating_add(cached) != usize_to_u64(batch.rows.len()) {
-            return Err(StorageError::GenerationSpillConflict);
-        }
-        Ok(())
-    }
-
-    async fn insert_inline_extracted_rows(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        sequence: i64,
-        arrays: InlineExtractedArrays,
-    ) -> Result<u64, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        if arrays.ordinals.is_empty() {
-            return Ok(0);
-        }
-        let sql = format!(
-            r#"INSERT INTO {schema}."native_generation_spill_rows" (
-                    project_id, generation_id, relation, batch_sequence,
-                    row_ordinal, sort_key, payload, payload_digest
-                )
-                SELECT CAST($1 AS uuid), CAST($2 AS uuid), 'extracted_files', $3,
-                       rows.row_ordinal, rows.sort_key, rows.payload, rows.payload_digest
-                FROM unnest(
-                    CAST($4 AS integer[]), CAST($5 AS bytea[]),
-                    CAST($6 AS bytea[]), CAST($7 AS text[])
-                ) AS rows(row_ordinal, sort_key, payload, payload_digest)"#
-        );
-        let inserted = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(sequence)
-            .bind(arrays.ordinals)
-            .bind(arrays.sort_keys)
-            .bind(arrays.payloads)
-            .bind(arrays.payload_digests)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-insert-rows"))?;
-        Ok(inserted.rows_affected())
-    }
-
-    async fn insert_cached_extracted_rows(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        sequence: i64,
-        arrays: CachedExtractedArrays,
-    ) -> Result<u64, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        if arrays.ordinals.is_empty() {
-            return Ok(0);
-        }
-        let sql = format!(
-            r#"INSERT INTO {schema}."native_generation_spill_rows" (
-                    project_id, generation_id, relation, batch_sequence,
-                    row_ordinal, sort_key, payload, payload_digest,
-                    cache_extractor_contract_digest, cache_path_digest,
-                    cache_language, cache_content_hash, cache_payload_bytes
-                )
-                SELECT CAST($1 AS uuid), CAST($2 AS uuid), 'extracted_files', $3,
-                       input.row_ordinal, input.sort_key, NULL, input.payload_digest,
-                       input.contract, input.path_digest, input.language,
-                       input.content_hash, cache.payload_bytes
-                FROM unnest(
-                    CAST($4 AS integer[]), CAST($5 AS bytea[]), CAST($6 AS text[]),
-                    CAST($7 AS text[]), CAST($8 AS text[]), CAST($9 AS text[]),
-                    CAST($10 AS text[]), CAST($11 AS bigint[]), CAST($12 AS text[]),
-                    CAST($13 AS bigint[])
-                ) AS input(
-                    row_ordinal, sort_key, contract, path_digest, normalized_path,
-                    language, content_hash, source_bytes, payload_digest, payload_bytes
-                )
-                INNER JOIN {schema}."native_parse_cache" AS cache
-                  ON cache.project_id = CAST($1 AS uuid)
-                 AND cache.extractor_contract_digest = input.contract
-                 AND cache.path_digest = input.path_digest
-                 AND cache.normalized_path = input.normalized_path
-                 AND cache.language = input.language
-                 AND cache.content_hash = input.content_hash
-                 AND cache.source_bytes = input.source_bytes
-                 AND cache.payload_digest = input.payload_digest
-                 AND cache.payload_bytes = input.payload_bytes"#
-        );
-        let inserted = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(sequence)
-            .bind(arrays.ordinals)
-            .bind(arrays.sort_keys)
-            .bind(arrays.contracts)
-            .bind(arrays.path_digests)
-            .bind(arrays.paths)
-            .bind(arrays.languages)
-            .bind(arrays.content_hashes)
-            .bind(arrays.source_bytes)
-            .bind(arrays.payload_digests)
-            .bind(arrays.payload_bytes)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-insert-cached-rows"))?;
-        Ok(inserted.rows_affected())
-    }
-
-    async fn increment_spill_totals(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        totals: SpillTotalsDelta,
-    ) -> Result<(), StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let SpillTotalsDelta {
-            logical_bytes,
-            rows,
-            extracted_files,
-        } = totals;
-        let sql = format!(
-            r#"UPDATE {schema}."native_generation_spills"
-                SET logical_bytes = logical_bytes + $3,
-                    raw_rows = raw_rows + $4,
-                    extracted_files = extracted_files + $5,
-                    updated_at = clock_timestamp()
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)"#
-        );
-        let updated = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(as_i64(logical_bytes, "spill_batch_bytes")?)
-            .bind(as_i64(rows, "spill_batch_rows")?)
-            .bind(as_i64(extracted_files, "spill_extracted_files")?)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-update-run"))?;
-        if updated.rows_affected() != 1 {
-            return Err(database_error("spill-update-run-count"));
-        }
-        Ok(())
     }
 
     /// Append one deterministic extracted-file batch under its exact fence and quota.
@@ -1384,24 +990,25 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-append-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, report) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, report) = load_run_for_update(self, &mut transaction).await?;
         let sequence = as_i64(batch.sequence, "spill_batch_sequence")?;
-        if self
-            .opaque_batch_exists(
-                &mut transaction,
-                sequence,
-                SpillBatchIdentity {
-                    relation: NativeGenerationSpillRelation::ExtractedFiles,
-                    rows: batch.rows.len(),
-                    logical_bytes: batch.logical_bytes,
-                    digest: &batch.digest,
-                },
-            )
-            .await?
+        if opaque_batch_exists(
+            &mut SpillWrite {
+                spill: self,
+                transaction: &mut transaction,
+            },
+            sequence,
+            SpillBatchIdentity {
+                relation: NativeGenerationSpillRelation::ExtractedFiles,
+                rows: batch.rows.len(),
+                logical_bytes: batch.logical_bytes,
+                digest: &batch.digest,
+            },
+        )
+        .await?
         {
-            self.commit_transaction(transaction, "spill-read-batch-commit")
-                .await?;
+            commit_transaction(self, transaction, "spill-read-batch-commit").await?;
             return Ok(NativeGenerationSpillWrite::AlreadyPresent);
         }
         if phase != NativeGenerationSpillPhase::Parsing {
@@ -1410,11 +1017,19 @@ impl NativeGenerationSpill {
                 requested: NativeGenerationSpillPhase::Parsing.as_str(),
             });
         }
-        self.ensure_opaque_batch_range_available(&mut transaction, sequence, batch.rows.len())
-            .await?;
+        ensure_opaque_batch_range_available(
+            &mut SpillWrite {
+                spill: self,
+                transaction: &mut transaction,
+            },
+            sequence,
+            batch.rows.len(),
+        )
+        .await?;
         let batch_rows = usize_to_u64(batch.rows.len());
         admit_spill_quota(report, batch.logical_bytes, batch_rows)?;
-        self.insert_batch_ledger(
+        insert_batch_ledger(
+            self,
             &mut transaction,
             SpillBatchLedgerInput {
                 relation: NativeGenerationSpillRelation::ExtractedFiles,
@@ -1425,9 +1040,17 @@ impl NativeGenerationSpill {
             },
         )
         .await?;
-        self.insert_extracted_rows(&mut transaction, sequence, &batch)
-            .await?;
-        self.increment_spill_totals(
+        insert_extracted_rows(
+            &mut SpillWrite {
+                spill: self,
+                transaction: &mut transaction,
+            },
+            sequence,
+            &batch,
+        )
+        .await?;
+        increment_spill_totals(
+            self,
             &mut transaction,
             SpillTotalsDelta {
                 logical_bytes: batch.logical_bytes,
@@ -1436,8 +1059,7 @@ impl NativeGenerationSpill {
             },
         )
         .await?;
-        self.commit_transaction(transaction, "spill-append-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-append-commit").await?;
         Ok(NativeGenerationSpillWrite::Inserted)
     }
 
@@ -1481,15 +1103,13 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-append-facts-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, report) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, report) = load_run_for_update(self, &mut transaction).await?;
         let sequences = batches
             .iter()
             .map(|batch| as_i64(batch.sequence, "spill_batch_sequence"))
             .collect::<Result<Vec<_>, _>>()?;
-        let existing = self
-            .existing_fact_batches(&mut transaction, &sequences)
-            .await?;
+        let existing = existing_fact_batches(self, &mut transaction, &sequences).await?;
         let mut writes = Vec::new();
         let mut admitted = Vec::new();
         writes
@@ -1527,8 +1147,7 @@ impl NativeGenerationSpill {
             writes.push(NativeGenerationSpillWrite::Inserted);
         }
         if !admitted.is_empty() {
-            self.insert_fact_batch_ledgers(&mut transaction, &admitted)
-                .await?;
+            insert_fact_batch_ledgers(self, &mut transaction, &admitted).await?;
             for relation in NativeGenerationSpillRelation::FACTS {
                 insert_typed_fact_payloads(
                     &mut transaction,
@@ -1544,7 +1163,8 @@ impl NativeGenerationSpill {
                 )
                 .await?;
             }
-            self.increment_spill_totals(
+            increment_spill_totals(
+                self,
                 &mut transaction,
                 SpillTotalsDelta {
                     logical_bytes: admitted_bytes,
@@ -1554,8 +1174,7 @@ impl NativeGenerationSpill {
             )
             .await?;
         }
-        self.commit_transaction(transaction, "spill-append-facts-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-append-facts-commit").await?;
         Ok(writes)
     }
 
@@ -1591,8 +1210,8 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-centrality-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, _) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, _) = load_run_for_update(self, &mut transaction).await?;
         if phase != NativeGenerationSpillPhase::Resolving {
             return Err(StorageError::InvalidGenerationTransition {
                 actual: phase.as_str().to_owned(),
@@ -1643,8 +1262,7 @@ impl NativeGenerationSpill {
         if updated.rows_affected() != usize_to_u64(scores.len()) {
             return Err(StorageError::GenerationSpillConflict);
         }
-        self.commit_transaction(transaction, "spill-centrality-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-centrality-commit").await?;
         Ok(())
     }
 
@@ -1665,16 +1283,15 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-seal-resolution-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, _) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, _) = load_run_for_update(self, &mut transaction).await?;
         if matches!(
             phase,
             NativeGenerationSpillPhase::Sealed
                 | NativeGenerationSpillPhase::Canonicalizing
                 | NativeGenerationSpillPhase::Canonicalized
         ) {
-            self.commit_transaction(transaction, "spill-seal-resolution-commit")
-                .await?;
+            commit_transaction(self, transaction, "spill-seal-resolution-commit").await?;
             return Ok(());
         }
         if phase != NativeGenerationSpillPhase::Resolving {
@@ -1711,175 +1328,8 @@ impl NativeGenerationSpill {
         if updated.rows_affected() != 1 {
             return Err(StorageError::GenerationSpillConflict);
         }
-        self.commit_transaction(transaction, "spill-seal-resolution-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-seal-resolution-commit").await?;
         Ok(())
-    }
-
-    async fn begin_canonicalization(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        phase: NativeGenerationSpillPhase,
-    ) -> Result<(), StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        if phase == NativeGenerationSpillPhase::Canonicalizing {
-            return Ok(());
-        }
-        if phase != NativeGenerationSpillPhase::Sealed {
-            return Err(StorageError::InvalidGenerationTransition {
-                actual: phase.as_str().to_owned(),
-                requested: NativeGenerationSpillPhase::Canonicalizing.as_str(),
-            });
-        }
-        let sql = format!(
-            r#"UPDATE {schema}."native_generation_spills"
-                SET phase = 'canonicalizing', updated_at = clock_timestamp()
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)
-                  AND phase = 'sealed'"#
-        );
-        let updated = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-begin-canonicalization"))?;
-        if updated.rows_affected() != 1 {
-            return Err(StorageError::GenerationSpillConflict);
-        }
-        Ok(())
-    }
-
-    async fn load_canonical_cursor(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    ) -> Result<NativeGenerationCanonicalCursor, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let sql = format!(
-            r#"SELECT canonical_relation, canonical_partition
-                FROM {schema}."native_generation_spills"
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)"#
-        );
-        let row = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-read-canonical-cursor"))?;
-        let relation = row
-            .try_get::<String, _>(0)
-            .map_err(|_| corrupt("spill_canonical_relation"))
-            .and_then(|raw| parse_fact_relation(&raw))?;
-        let partition = row
-            .try_get::<i32, _>(1)
-            .ok()
-            .and_then(|value| u16::try_from(value).ok())
-            .filter(|value| *value < CANONICAL_PARTITIONS)
-            .ok_or_else(|| corrupt("spill_canonical_partition"))?;
-        let lower_bucket = i32::from(partition) * i32::from(BUCKETS_PER_CANONICAL_PARTITION);
-        let partition_count = CANONICAL_PARTITIONS_PER_TRANSACTION
-            .min(CANONICAL_PARTITIONS.saturating_sub(partition));
-        Ok(NativeGenerationCanonicalCursor {
-            relation,
-            partition,
-            lower_bucket,
-            upper_bucket: lower_bucket
-                + i32::from(partition_count) * i32::from(BUCKETS_PER_CANONICAL_PARTITION)
-                - 1,
-        })
-    }
-
-    async fn reduce_canonical_partition(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        cursor: &NativeGenerationCanonicalCursor,
-    ) -> Result<u64, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let statements = canonical_partition_sql(&schema, cursor.relation);
-        if audited_query(statements.conflict)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(cursor.lower_bucket)
-            .bind(cursor.upper_bucket)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-detect-canonical-conflict"))?
-            .is_some()
-        {
-            return Err(StorageError::GenerationSpillConflict);
-        }
-        let inserted = audited_query(statements.insert)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(cursor.lower_bucket)
-            .bind(cursor.upper_bucket)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| StorageError::GenerationSpillConflict)?
-            .rows_affected();
-        let delete_sql = format!(
-            r#"DELETE FROM {schema}."{table}"
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)
-                  AND bucket BETWEEN $3 AND $4"#,
-            table = statements.raw_table,
-        );
-        audited_query(delete_sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(cursor.lower_bucket)
-            .bind(cursor.upper_bucket)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-delete-canonicalized-raw"))?;
-        Ok(inserted)
-    }
-
-    async fn advance_canonical_cursor(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        cursor: &NativeGenerationCanonicalCursor,
-        inserted: u64,
-    ) -> Result<bool, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let next_partition = cursor
-            .partition
-            .saturating_add(CANONICAL_PARTITIONS_PER_TRANSACTION)
-            .min(CANONICAL_PARTITIONS);
-        let next_relation = next_fact_relation(cursor.relation);
-        let complete = next_partition == CANONICAL_PARTITIONS && next_relation.is_none();
-        let (stored_relation, stored_partition, next_phase) =
-            if next_partition < CANONICAL_PARTITIONS {
-                (Some(cursor.relation), next_partition, "canonicalizing")
-            } else if let Some(next_relation) = next_relation {
-                (Some(next_relation), 0, "canonicalizing")
-            } else {
-                (None, CANONICAL_PARTITIONS, "canonicalized")
-            };
-        let sql = format!(
-            r#"UPDATE {schema}."native_generation_spills"
-                SET phase = $3, canonical_relation = $4, canonical_partition = $5,
-                    canonical_rows = canonical_rows + $6,
-                    updated_at = clock_timestamp()
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)
-                  AND phase = 'canonicalizing'"#
-        );
-        let updated = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(next_phase)
-            .bind(stored_relation.map(NativeGenerationSpillRelation::as_str))
-            .bind(i32::from(stored_partition))
-            .bind(as_i64(inserted, "spill_canonical_rows")?)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-advance-canonicalization"))?;
-        if updated.rows_affected() != 1 {
-            return Err(StorageError::GenerationSpillConflict);
-        }
-        Ok(complete)
     }
 
     /// Reduce one bounded contiguous hash-partition group into immutable generation tables.
@@ -1900,11 +1350,10 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-canonicalize-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, _) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, _) = load_run_for_update(self, &mut transaction).await?;
         if phase == NativeGenerationSpillPhase::Canonicalized {
-            self.commit_transaction(transaction, "spill-canonicalize-complete-commit")
-                .await?;
+            commit_transaction(self, transaction, "spill-canonicalize-complete-commit").await?;
             return Ok(NativeGenerationSpillCanonicalProgress {
                 relation: NativeGenerationSpillRelation::Documents,
                 partition: CANONICAL_PARTITIONS.saturating_sub(1),
@@ -1912,16 +1361,19 @@ impl NativeGenerationSpill {
                 complete: true,
             });
         }
-        self.begin_canonicalization(&mut transaction, phase).await?;
-        let cursor = self.load_canonical_cursor(&mut transaction).await?;
-        let inserted = self
-            .reduce_canonical_partition(&mut transaction, &cursor)
-            .await?;
-        let complete = self
-            .advance_canonical_cursor(&mut transaction, &cursor, inserted)
-            .await?;
-        self.commit_transaction(transaction, "spill-canonicalize-commit")
-            .await?;
+        begin_canonicalization(self, &mut transaction, phase).await?;
+        let cursor = load_canonical_cursor(self, &mut transaction).await?;
+        let inserted = reduce_canonical_partition(self, &mut transaction, &cursor).await?;
+        let complete = advance_canonical_cursor(
+            self,
+            &mut transaction,
+            ReducedPartition {
+                cursor: &cursor,
+                inserted,
+            },
+        )
+        .await?;
+        commit_transaction(self, transaction, "spill-canonicalize-commit").await?;
         Ok(NativeGenerationSpillCanonicalProgress {
             relation: cursor.relation,
             partition: cursor.partition,
@@ -1956,8 +1408,8 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-digest-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, _) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, _) = load_run_for_update(self, &mut transaction).await?;
         if phase != NativeGenerationSpillPhase::Canonicalized {
             return Err(StorageError::InvalidGenerationTransition {
                 actual: phase.as_str().to_owned(),
@@ -1980,8 +1432,7 @@ impl NativeGenerationSpill {
         if cancelled() {
             return Err(StorageError::GenerationSpillCancelled);
         }
-        self.commit_transaction(transaction, "spill-digest-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-digest-commit").await?;
         Ok(NativeGenerationSpillDigestReport {
             project_id: self.project_id.clone(),
             generation_id: self.generation_id.clone(),
@@ -2003,8 +1454,8 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-finish-parsing-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, report) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, report) = load_run_for_update(self, &mut transaction).await?;
         if matches!(
             phase,
             NativeGenerationSpillPhase::Resolving
@@ -2013,8 +1464,7 @@ impl NativeGenerationSpill {
                 | NativeGenerationSpillPhase::Canonicalized
         ) && report.extracted_files == expected_files
         {
-            self.commit_transaction(transaction, "spill-finish-parsing-commit")
-                .await?;
+            commit_transaction(self, transaction, "spill-finish-parsing-commit").await?;
             return Ok(());
         }
         if phase != NativeGenerationSpillPhase::Parsing || report.extracted_files != expected_files
@@ -2037,8 +1487,7 @@ impl NativeGenerationSpill {
         if result.rows_affected() != 1 {
             return Err(StorageError::GenerationSpillConflict);
         }
-        self.commit_transaction(transaction, "spill-finish-parsing-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-finish-parsing-commit").await?;
         Ok(())
     }
 
@@ -2065,8 +1514,8 @@ impl NativeGenerationSpill {
             .begin()
             .await
             .map_err(|_| database_error("spill-read-page-begin"))?;
-        self.prepare_transaction(&mut transaction).await?;
-        let (phase, _) = self.load_run_for_update(&mut transaction).await?;
+        prepare_transaction(self, &mut transaction).await?;
+        let (phase, _) = load_run_for_update(self, &mut transaction).await?;
         if !matches!(
             phase,
             NativeGenerationSpillPhase::Resolving
@@ -2087,271 +1536,841 @@ impl NativeGenerationSpill {
         let maximum_row_offset = i64::try_from(MAXIMUM_BATCH_ROWS.saturating_sub(1))
             .map_err(|_| database_error("spill-page-row-offset"))?;
         let minimum_batch_sequence = after.saturating_sub(maximum_row_offset).max(0);
-        let window = self
-            .select_extracted_page_window(
-                &mut transaction,
-                ExtractedPageCursor {
-                    after,
-                    minimum_batch_sequence,
-                },
-                maximum_bytes,
-            )
-            .await?;
+        let window = select_extracted_page_window(
+            &mut SpillWrite {
+                spill: self,
+                transaction: &mut transaction,
+            },
+            ExtractedPageCursor {
+                after,
+                minimum_batch_sequence,
+            },
+            maximum_bytes,
+        )
+        .await?;
         let Some(window) = window else {
-            self.commit_transaction(transaction, "spill-read-page-commit")
-                .await?;
+            commit_transaction(self, transaction, "spill-read-page-commit").await?;
             return Ok(NativeGenerationExtractedPage {
                 rows: Vec::new(),
                 next: cursor,
             });
         };
-        let decoded = self
-            .load_extracted_page_payloads(
-                &mut transaction,
-                ExtractedPageCursor {
-                    after,
-                    minimum_batch_sequence,
-                },
-                &window,
-            )
-            .await?;
+        let decoded = load_extracted_page_payloads(
+            &mut SpillWrite {
+                spill: self,
+                transaction: &mut transaction,
+            },
+            ExtractedPageCursor {
+                after,
+                minimum_batch_sequence,
+            },
+            &window,
+        )
+        .await?;
         let next = NativeGenerationExtractedCursor {
             sequence: decoded.last().map(|(sequence, _)| *sequence),
         };
-        self.commit_transaction(transaction, "spill-read-page-commit")
-            .await?;
+        commit_transaction(self, transaction, "spill-read-page-commit").await?;
         Ok(NativeGenerationExtractedPage {
             rows: decoded,
             next,
         })
     }
+}
 
-    async fn select_extracted_page_window(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        cursor: ExtractedPageCursor,
-        maximum_bytes: u64,
-    ) -> Result<Option<ExtractedPageWindow>, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let ExtractedPageCursor {
-            after,
-            minimum_batch_sequence,
-        } = cursor;
-        // Select only inline row metadata first. Keeping the TOAST-able payload out
-        // avoids carrying every remaining file through a cumulative page window.
-        let sql = format!(
-            r#"SELECT batch_sequence + row_ordinal::bigint AS row_sequence,
-                      logical_bytes
-               FROM {schema}."native_generation_spill_rows"
-               WHERE project_id = CAST($1 AS uuid)
-                 AND generation_id = CAST($2 AS uuid)
-                 AND relation = 'extracted_files'
-                 AND batch_sequence + row_ordinal::bigint > $3
-                 AND batch_sequence >= $4
-               ORDER BY batch_sequence, row_ordinal
-               LIMIT $5"#
-        );
-        let metadata = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(after)
-            .bind(minimum_batch_sequence)
-            .bind(MAXIMUM_PAGE_ROWS)
-            .fetch_all(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-read-page"))?;
-        let mut selected_bytes = 0_u64;
-        let mut row_count = 0_usize;
-        let mut end_sequence = None;
-        for row in metadata {
-            let sequence = row
-                .try_get::<i64, _>(0)
-                .ok()
-                .and_then(|value| u64::try_from(value).ok())
-                .ok_or_else(|| corrupt("spill_batch_sequence"))?;
-            let logical_bytes = row
-                .try_get::<i64, _>(1)
-                .ok()
-                .and_then(|value| u64::try_from(value).ok())
-                .filter(|value| *value > 0)
-                .ok_or_else(|| corrupt("spill_logical_bytes"))?;
-            let next_bytes = selected_bytes
-                .checked_add(logical_bytes)
-                .ok_or_else(|| corrupt("spill_logical_bytes"))?;
-            if end_sequence.is_some() && next_bytes > maximum_bytes {
-                break;
-            }
-            selected_bytes = next_bytes;
-            row_count = row_count
-                .checked_add(1)
-                .ok_or_else(|| corrupt("spill_page_rows"))?;
-            end_sequence = Some(sequence);
-        }
-        Ok(end_sequence.map(|end_sequence| ExtractedPageWindow {
-            end_sequence,
-            row_count,
-        }))
-    }
-
-    async fn load_extracted_page_payloads(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        cursor: ExtractedPageCursor,
-        window: &ExtractedPageWindow,
-    ) -> Result<Vec<(u64, NativeGenerationSpillRow)>, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let ExtractedPageCursor {
-            after,
-            minimum_batch_sequence,
-        } = cursor;
-        let sql = format!(
-            r#"SELECT batch_sequence + row_ordinal::bigint AS row_sequence,
-                      spill.sort_key, COALESCE(spill.payload, cache.payload),
-                      spill.payload_digest
-               FROM {schema}."native_generation_spill_rows" AS spill
-               LEFT JOIN {schema}."native_parse_cache" AS cache
-                 ON spill.payload IS NULL
-                AND cache.project_id = spill.project_id
-                AND cache.extractor_contract_digest = spill.cache_extractor_contract_digest
-                AND cache.path_digest = spill.cache_path_digest
-                AND cache.language = spill.cache_language
-                AND cache.content_hash = spill.cache_content_hash
-                AND cache.payload_digest = spill.payload_digest
-                AND cache.payload_bytes = spill.cache_payload_bytes
-               WHERE spill.project_id = CAST($1 AS uuid)
-                 AND spill.generation_id = CAST($2 AS uuid)
-                 AND spill.relation = 'extracted_files'
-                 AND spill.batch_sequence + spill.row_ordinal::bigint > $3
-                 AND spill.batch_sequence >= $4
-                 AND spill.batch_sequence <= $5
-                 AND spill.batch_sequence + spill.row_ordinal::bigint <= $5
-               ORDER BY spill.batch_sequence, spill.row_ordinal"#
-        );
-        let rows = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(after)
-            .bind(minimum_batch_sequence)
-            .bind(as_i64(window.end_sequence, "spill_page_cursor")?)
-            .fetch_all(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-read-page"))?;
-        if rows.len() != window.row_count {
-            return Err(corrupt("spill_page_rows"));
-        }
-        let mut decoded = Vec::new();
-        decoded
-            .try_reserve_exact(rows.len())
-            .map_err(|_| database_error("spill-read-page-reserve"))?;
-        for row in rows {
-            let sequence = row
-                .try_get::<i64, _>(0)
-                .ok()
-                .and_then(|value| u64::try_from(value).ok())
-                .ok_or_else(|| corrupt("spill_batch_sequence"))?;
-            let sort_key = row
-                .try_get::<Vec<u8>, _>(1)
-                .map_err(|_| corrupt("spill_sort_key"))?;
-            let payload = row
-                .try_get::<Vec<u8>, _>(2)
-                .map_err(|_| corrupt("spill_payload"))?;
-            let raw_digest = row
-                .try_get::<String, _>(3)
-                .map_err(|_| corrupt("spill_payload_digest"))?;
-            let spill_row = NativeGenerationSpillRow::new(sort_key, payload)?;
-            if spill_row.payload_digest.as_str() != raw_digest {
-                return Err(corrupt("spill_payload_digest"));
-            }
-            decoded.push((sequence, spill_row));
-        }
-        Ok(decoded)
-    }
-
-    async fn prepare_transaction(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    ) -> Result<(), StorageError> {
-        set_local_statement_timeout(transaction, self.statement_timeout)
-            .await
-            .map_err(|()| database_error("spill-statement-timeout"))?;
-        lock_staging_generation_fence(
-            transaction,
-            &self.database.schema,
-            StagingFenceTarget {
-                fence: &self.fence,
-                project_id: &self.project_id,
-                generation_id: &self.generation_id,
-                sequence: self.generation_sequence,
-            },
-        )
+/// Bounded PostgreSQL row admission and paging for one spilled generation.
+///
+/// These are the storage steps behind the public spill lifecycle; keeping them
+/// beside the type rather than on it keeps the type's own surface to the
+/// lifecycle callers actually use.
+async fn opaque_batch_exists(
+    write: &mut SpillWrite<'_, '_>,
+    sequence: i64,
+    identity: SpillBatchIdentity<'_>,
+) -> Result<bool, StorageError> {
+    let schema = crate::database::quoted_schema(&write.spill.database.schema);
+    let sql = format!(
+        r#"SELECT row_count, logical_bytes, batch_digest
+            FROM {schema}."native_generation_spill_batches"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND relation = $3
+              AND batch_sequence = $4"#
+    );
+    let Some(row) = audited_query(sql)
+        .bind(write.spill.project_id.as_str())
+        .bind(write.spill.generation_id.as_str())
+        .bind(identity.relation.as_str())
+        .bind(sequence)
+        .fetch_optional(&mut **write.transaction)
         .await
+        .map_err(|_| database_error("spill-read-batch"))?
+    else {
+        return Ok(false);
+    };
+    let row_count = row
+        .try_get::<i32, _>(0)
+        .map_err(|_| corrupt("spill_batch_row_count"))?;
+    let logical_bytes = row
+        .try_get::<i64, _>(1)
+        .map_err(|_| corrupt("spill_batch_logical_bytes"))?;
+    let digest = row
+        .try_get::<String, _>(2)
+        .map_err(|_| corrupt("spill_batch_digest"))?;
+    if usize::try_from(row_count).ok() != Some(identity.rows)
+        || u64::try_from(logical_bytes).ok() != Some(identity.logical_bytes)
+        || digest != identity.digest.as_str()
+    {
+        return Err(StorageError::GenerationSpillConflict);
     }
+    Ok(true)
+}
 
-    async fn commit_transaction(
-        &self,
-        mut transaction: sqlx_postgres::PgTransaction<'_>,
-        operation: &'static str,
-    ) -> Result<(), StorageError> {
-        check_staging_generation_fence(
-            &mut transaction,
-            &self.database.schema,
-            StagingFenceTarget {
-                fence: &self.fence,
-                project_id: &self.project_id,
-                generation_id: &self.generation_id,
-                sequence: self.generation_sequence,
+async fn existing_fact_batches(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    sequences: &[i64],
+) -> Result<StoredFactBatches, StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let sql = format!(
+        r#"SELECT batch_sequence, relation, row_count, logical_bytes, batch_digest
+            FROM {schema}."native_generation_spill_batches"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND batch_sequence = ANY(CAST($3 AS bigint[]))
+              AND relation <> 'extracted_files'
+            ORDER BY batch_sequence, relation"#
+    );
+    let rows = audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(sequences)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-read-fact-batches"))?;
+    let mut existing = StoredFactBatches::new();
+    for row in rows {
+        let sequence = row
+            .try_get::<i64, _>(0)
+            .map_err(|_| corrupt("spill_batch_sequence"))?;
+        let relation = row
+            .try_get::<String, _>(1)
+            .map_err(|_| corrupt("spill_batch_relation"))?;
+        let row_count = row
+            .try_get::<i32, _>(2)
+            .map_err(|_| corrupt("spill_batch_row_count"))?;
+        let logical_bytes = row
+            .try_get::<i64, _>(3)
+            .map_err(|_| corrupt("spill_batch_logical_bytes"))?;
+        let digest = row
+            .try_get::<String, _>(4)
+            .map_err(|_| corrupt("spill_batch_digest"))?;
+        existing.entry(sequence).or_default().insert(
+            relation,
+            StoredFactPayload {
+                row_count,
+                logical_bytes,
+                digest,
             },
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| database_error(operation))
+        );
     }
+    Ok(existing)
+}
 
-    async fn load_run_for_update(
-        &self,
-        transaction: &mut sqlx_postgres::PgTransaction<'_>,
-    ) -> Result<(NativeGenerationSpillPhase, NativeGenerationSpillReport), StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
-        let sql = format!(
-            r#"SELECT phase, logical_bytes, raw_rows, extracted_files,
-                       maximum_bytes, maximum_rows
-                FROM {schema}."native_generation_spills"
+async fn insert_batch_ledger(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    input: SpillBatchLedgerInput<'_>,
+) -> Result<(), StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let sql = format!(
+        r#"INSERT INTO {schema}."native_generation_spill_batches" (
+                project_id, generation_id, relation, batch_sequence,
+                row_count, logical_bytes, batch_digest
+            ) VALUES (CAST($1 AS uuid), CAST($2 AS uuid), $3, $4, $5, $6, $7)"#
+    );
+    audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(input.relation.as_str())
+        .bind(input.sequence)
+        .bind(
+            i32::try_from(input.rows).map_err(|_| StorageError::InvalidInput {
+                field: "spill_batch_rows",
+            })?,
+        )
+        .bind(as_i64(input.logical_bytes, "spill_batch_bytes")?)
+        .bind(input.digest.as_str())
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-insert-batch"))?;
+    Ok(())
+}
+
+async fn insert_fact_batch_ledgers(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    batches: &[(i64, &NativeGenerationSpillFactBatch)],
+) -> Result<(), StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let payload_count = batches
+        .iter()
+        .try_fold(0_usize, |count, (_, batch)| {
+            count.checked_add(batch.payloads.len())
+        })
+        .ok_or(StorageError::InvalidInput {
+            field: "spill_fact_batches",
+        })?;
+    let mut relations = Vec::new();
+    let mut sequences = Vec::new();
+    let mut row_counts = Vec::new();
+    let mut logical_bytes = Vec::new();
+    let mut digests = Vec::new();
+    relations
+        .try_reserve_exact(payload_count)
+        .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
+    sequences
+        .try_reserve_exact(payload_count)
+        .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
+    row_counts
+        .try_reserve_exact(payload_count)
+        .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
+    logical_bytes
+        .try_reserve_exact(payload_count)
+        .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
+    digests
+        .try_reserve_exact(payload_count)
+        .map_err(|_| database_error("spill-fact-ledger-reserve"))?;
+    for (sequence, batch) in batches {
+        for payload in &batch.payloads {
+            relations.push(payload.relation.as_str().to_owned());
+            sequences.push(*sequence);
+            row_counts.push(i32::try_from(payload.row_count).map_err(|_| {
+                StorageError::InvalidInput {
+                    field: "spill_batch_rows",
+                }
+            })?);
+            logical_bytes.push(as_i64(payload.logical_bytes, "spill_batch_bytes")?);
+            digests.push(payload.digest.as_str().to_owned());
+        }
+    }
+    let sql = format!(
+        r#"INSERT INTO {schema}."native_generation_spill_batches" (
+                project_id, generation_id, relation, batch_sequence,
+                row_count, logical_bytes, batch_digest
+            )
+            SELECT CAST($1 AS uuid), CAST($2 AS uuid), input.relation,
+                   input.batch_sequence, input.row_count, input.logical_bytes,
+                   input.batch_digest
+            FROM unnest(
+                CAST($3 AS text[]), CAST($4 AS bigint[]), CAST($5 AS integer[]),
+                CAST($6 AS bigint[]), CAST($7 AS text[])
+            ) AS input(
+                relation, batch_sequence, row_count, logical_bytes, batch_digest
+            )"#
+    );
+    let inserted = audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(relations)
+        .bind(sequences)
+        .bind(row_counts)
+        .bind(logical_bytes)
+        .bind(digests)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-insert-fact-batches"))?;
+    if inserted.rows_affected() != usize_to_u64(payload_count) {
+        return Err(database_error("spill-fact-ledger-count-mismatch"));
+    }
+    Ok(())
+}
+
+async fn ensure_opaque_batch_range_available(
+    write: &mut SpillWrite<'_, '_>,
+    sequence: i64,
+    rows: usize,
+) -> Result<(), StorageError> {
+    let schema = crate::database::quoted_schema(&write.spill.database.schema);
+    let sql = format!(
+        r#"SELECT EXISTS (
+                SELECT 1
+                FROM {schema}."native_generation_spill_batches"
                 WHERE project_id = CAST($1 AS uuid)
                   AND generation_id = CAST($2 AS uuid)
-                  AND generation_sequence = $3
-                FOR UPDATE"#
-        );
-        let row = audited_query(sql)
-            .bind(self.project_id.as_str())
-            .bind(self.generation_id.as_str())
-            .bind(self.generation_sequence)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|_| database_error("spill-read-run"))?
-            .ok_or(StorageError::GenerationNotFound)?;
-        let phase = row
-            .try_get::<String, _>(0)
-            .map_err(|_| corrupt("native_generation_spill_phase"))
-            .and_then(|raw| NativeGenerationSpillPhase::parse(&raw))?;
-        let logical_bytes = read_u64(&row, "logical_bytes", "spill_logical_bytes")?;
-        let raw_rows = read_u64(&row, "raw_rows", "spill_raw_rows")?;
-        let extracted_files = read_u64(&row, "extracted_files", "spill_extracted_files")?;
-        let maximum_bytes = read_u64(&row, "maximum_bytes", "maximum_spill_bytes")?;
-        let maximum_rows = read_u64(&row, "maximum_rows", "maximum_spill_rows")?;
-        Ok((
-            phase,
-            NativeGenerationSpillReport {
-                state: phase.into(),
-                logical_bytes,
-                raw_rows,
-                extracted_files,
-                maximum_bytes,
-                maximum_rows,
-            },
-        ))
+                  AND relation = 'extracted_files'
+                  AND int8range(batch_sequence, batch_sequence + row_count, '[)')
+                      && int8range($3, $3 + $4, '[)')
+            )"#
+    );
+    let overlap = audited_query(sql)
+        .bind(write.spill.project_id.as_str())
+        .bind(write.spill.generation_id.as_str())
+        .bind(sequence)
+        .bind(i64::try_from(rows).map_err(|_| StorageError::InvalidInput {
+            field: "spill_batch_rows",
+        })?)
+        .fetch_one(&mut **write.transaction)
+        .await
+        .map_err(|_| database_error("spill-read-batch-range"))?
+        .try_get::<bool, _>(0)
+        .map_err(|_| corrupt("spill_batch_range"))?;
+    if overlap {
+        Err(StorageError::GenerationSpillConflict)
+    } else {
+        Ok(())
     }
+}
+
+async fn insert_extracted_rows(
+    write: &mut SpillWrite<'_, '_>,
+    sequence: i64,
+    batch: &NativeGenerationSpillExtractedBatch,
+) -> Result<(), StorageError> {
+    let arrays = extracted_row_arrays(batch)?;
+    let inline = insert_inline_extracted_rows(write, sequence, arrays.inline).await?;
+    let cached = insert_cached_extracted_rows(write, sequence, arrays.cached).await?;
+    if inline.saturating_add(cached) != usize_to_u64(batch.rows.len()) {
+        return Err(StorageError::GenerationSpillConflict);
+    }
+    Ok(())
+}
+
+async fn insert_inline_extracted_rows(
+    write: &mut SpillWrite<'_, '_>,
+    sequence: i64,
+    arrays: InlineExtractedArrays,
+) -> Result<u64, StorageError> {
+    let schema = crate::database::quoted_schema(&write.spill.database.schema);
+    if arrays.ordinals.is_empty() {
+        return Ok(0);
+    }
+    let sql = format!(
+        r#"INSERT INTO {schema}."native_generation_spill_rows" (
+                project_id, generation_id, relation, batch_sequence,
+                row_ordinal, sort_key, payload, payload_digest
+            )
+            SELECT CAST($1 AS uuid), CAST($2 AS uuid), 'extracted_files', $3,
+                   rows.row_ordinal, rows.sort_key, rows.payload, rows.payload_digest
+            FROM unnest(
+                CAST($4 AS integer[]), CAST($5 AS bytea[]),
+                CAST($6 AS bytea[]), CAST($7 AS text[])
+            ) AS rows(row_ordinal, sort_key, payload, payload_digest)"#
+    );
+    let inserted = audited_query(sql)
+        .bind(write.spill.project_id.as_str())
+        .bind(write.spill.generation_id.as_str())
+        .bind(sequence)
+        .bind(arrays.ordinals)
+        .bind(arrays.sort_keys)
+        .bind(arrays.payloads)
+        .bind(arrays.payload_digests)
+        .execute(&mut **write.transaction)
+        .await
+        .map_err(|_| database_error("spill-insert-rows"))?;
+    Ok(inserted.rows_affected())
+}
+
+async fn insert_cached_extracted_rows(
+    write: &mut SpillWrite<'_, '_>,
+    sequence: i64,
+    arrays: CachedExtractedArrays,
+) -> Result<u64, StorageError> {
+    let schema = crate::database::quoted_schema(&write.spill.database.schema);
+    if arrays.ordinals.is_empty() {
+        return Ok(0);
+    }
+    let sql = format!(
+        r#"INSERT INTO {schema}."native_generation_spill_rows" (
+                project_id, generation_id, relation, batch_sequence,
+                row_ordinal, sort_key, payload, payload_digest,
+                cache_extractor_contract_digest, cache_path_digest,
+                cache_language, cache_content_hash, cache_payload_bytes
+            )
+            SELECT CAST($1 AS uuid), CAST($2 AS uuid), 'extracted_files', $3,
+                   input.row_ordinal, input.sort_key, NULL, input.payload_digest,
+                   input.contract, input.path_digest, input.language,
+                   input.content_hash, cache.payload_bytes
+            FROM unnest(
+                CAST($4 AS integer[]), CAST($5 AS bytea[]), CAST($6 AS text[]),
+                CAST($7 AS text[]), CAST($8 AS text[]), CAST($9 AS text[]),
+                CAST($10 AS text[]), CAST($11 AS bigint[]), CAST($12 AS text[]),
+                CAST($13 AS bigint[])
+            ) AS input(
+                row_ordinal, sort_key, contract, path_digest, normalized_path,
+                language, content_hash, source_bytes, payload_digest, payload_bytes
+            )
+            INNER JOIN {schema}."native_parse_cache" AS cache
+              ON cache.project_id = CAST($1 AS uuid)
+             AND cache.extractor_contract_digest = input.contract
+             AND cache.path_digest = input.path_digest
+             AND cache.normalized_path = input.normalized_path
+             AND cache.language = input.language
+             AND cache.content_hash = input.content_hash
+             AND cache.source_bytes = input.source_bytes
+             AND cache.payload_digest = input.payload_digest
+             AND cache.payload_bytes = input.payload_bytes"#
+    );
+    let inserted = audited_query(sql)
+        .bind(write.spill.project_id.as_str())
+        .bind(write.spill.generation_id.as_str())
+        .bind(sequence)
+        .bind(arrays.ordinals)
+        .bind(arrays.sort_keys)
+        .bind(arrays.contracts)
+        .bind(arrays.path_digests)
+        .bind(arrays.paths)
+        .bind(arrays.languages)
+        .bind(arrays.content_hashes)
+        .bind(arrays.source_bytes)
+        .bind(arrays.payload_digests)
+        .bind(arrays.payload_bytes)
+        .execute(&mut **write.transaction)
+        .await
+        .map_err(|_| database_error("spill-insert-cached-rows"))?;
+    Ok(inserted.rows_affected())
+}
+
+async fn increment_spill_totals(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    totals: SpillTotalsDelta,
+) -> Result<(), StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let SpillTotalsDelta {
+        logical_bytes,
+        rows,
+        extracted_files,
+    } = totals;
+    let sql = format!(
+        r#"UPDATE {schema}."native_generation_spills"
+            SET logical_bytes = logical_bytes + $3,
+                raw_rows = raw_rows + $4,
+                extracted_files = extracted_files + $5,
+                updated_at = clock_timestamp()
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)"#
+    );
+    let updated = audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(as_i64(logical_bytes, "spill_batch_bytes")?)
+        .bind(as_i64(rows, "spill_batch_rows")?)
+        .bind(as_i64(extracted_files, "spill_extracted_files")?)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-update-run"))?;
+    if updated.rows_affected() != 1 {
+        return Err(database_error("spill-update-run-count"));
+    }
+    Ok(())
+}
+
+async fn select_extracted_page_window(
+    write: &mut SpillWrite<'_, '_>,
+    cursor: ExtractedPageCursor,
+    maximum_bytes: u64,
+) -> Result<Option<ExtractedPageWindow>, StorageError> {
+    let schema = crate::database::quoted_schema(&write.spill.database.schema);
+    let ExtractedPageCursor {
+        after,
+        minimum_batch_sequence,
+    } = cursor;
+    // Select only inline row metadata first. Keeping the TOAST-able payload out
+    // avoids carrying every remaining file through a cumulative page window.
+    let sql = format!(
+        r#"SELECT batch_sequence + row_ordinal::bigint AS row_sequence,
+                  logical_bytes
+           FROM {schema}."native_generation_spill_rows"
+           WHERE project_id = CAST($1 AS uuid)
+             AND generation_id = CAST($2 AS uuid)
+             AND relation = 'extracted_files'
+             AND batch_sequence + row_ordinal::bigint > $3
+             AND batch_sequence >= $4
+           ORDER BY batch_sequence, row_ordinal
+           LIMIT $5"#
+    );
+    let metadata = audited_query(sql)
+        .bind(write.spill.project_id.as_str())
+        .bind(write.spill.generation_id.as_str())
+        .bind(after)
+        .bind(minimum_batch_sequence)
+        .bind(MAXIMUM_PAGE_ROWS)
+        .fetch_all(&mut **write.transaction)
+        .await
+        .map_err(|_| database_error("spill-read-page"))?;
+    let mut selected_bytes = 0_u64;
+    let mut row_count = 0_usize;
+    let mut end_sequence = None;
+    for row in metadata {
+        let sequence = row
+            .try_get::<i64, _>(0)
+            .ok()
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| corrupt("spill_batch_sequence"))?;
+        let logical_bytes = row
+            .try_get::<i64, _>(1)
+            .ok()
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| corrupt("spill_logical_bytes"))?;
+        let next_bytes = selected_bytes
+            .checked_add(logical_bytes)
+            .ok_or_else(|| corrupt("spill_logical_bytes"))?;
+        if end_sequence.is_some() && next_bytes > maximum_bytes {
+            break;
+        }
+        selected_bytes = next_bytes;
+        row_count = row_count
+            .checked_add(1)
+            .ok_or_else(|| corrupt("spill_page_rows"))?;
+        end_sequence = Some(sequence);
+    }
+    Ok(end_sequence.map(|end_sequence| ExtractedPageWindow {
+        end_sequence,
+        row_count,
+    }))
+}
+
+async fn load_extracted_page_payloads(
+    write: &mut SpillWrite<'_, '_>,
+    cursor: ExtractedPageCursor,
+    window: &ExtractedPageWindow,
+) -> Result<Vec<(u64, NativeGenerationSpillRow)>, StorageError> {
+    let schema = crate::database::quoted_schema(&write.spill.database.schema);
+    let ExtractedPageCursor {
+        after,
+        minimum_batch_sequence,
+    } = cursor;
+    let sql = format!(
+        r#"SELECT batch_sequence + row_ordinal::bigint AS row_sequence,
+                  spill.sort_key, COALESCE(spill.payload, cache.payload),
+                  spill.payload_digest
+           FROM {schema}."native_generation_spill_rows" AS spill
+           LEFT JOIN {schema}."native_parse_cache" AS cache
+             ON spill.payload IS NULL
+            AND cache.project_id = spill.project_id
+            AND cache.extractor_contract_digest = spill.cache_extractor_contract_digest
+            AND cache.path_digest = spill.cache_path_digest
+            AND cache.language = spill.cache_language
+            AND cache.content_hash = spill.cache_content_hash
+            AND cache.payload_digest = spill.payload_digest
+            AND cache.payload_bytes = spill.cache_payload_bytes
+           WHERE spill.project_id = CAST($1 AS uuid)
+             AND spill.generation_id = CAST($2 AS uuid)
+             AND spill.relation = 'extracted_files'
+             AND spill.batch_sequence + spill.row_ordinal::bigint > $3
+             AND spill.batch_sequence >= $4
+             AND spill.batch_sequence <= $5
+             AND spill.batch_sequence + spill.row_ordinal::bigint <= $5
+           ORDER BY spill.batch_sequence, spill.row_ordinal"#
+    );
+    let rows = audited_query(sql)
+        .bind(write.spill.project_id.as_str())
+        .bind(write.spill.generation_id.as_str())
+        .bind(after)
+        .bind(minimum_batch_sequence)
+        .bind(as_i64(window.end_sequence, "spill_page_cursor")?)
+        .fetch_all(&mut **write.transaction)
+        .await
+        .map_err(|_| database_error("spill-read-page"))?;
+    if rows.len() != window.row_count {
+        return Err(corrupt("spill_page_rows"));
+    }
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(rows.len())
+        .map_err(|_| database_error("spill-read-page-reserve"))?;
+    for row in rows {
+        let sequence = row
+            .try_get::<i64, _>(0)
+            .ok()
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| corrupt("spill_batch_sequence"))?;
+        let sort_key = row
+            .try_get::<Vec<u8>, _>(1)
+            .map_err(|_| corrupt("spill_sort_key"))?;
+        let payload = row
+            .try_get::<Vec<u8>, _>(2)
+            .map_err(|_| corrupt("spill_payload"))?;
+        let raw_digest = row
+            .try_get::<String, _>(3)
+            .map_err(|_| corrupt("spill_payload_digest"))?;
+        let spill_row = NativeGenerationSpillRow::new(sort_key, payload)?;
+        if spill_row.payload_digest.as_str() != raw_digest {
+            return Err(corrupt("spill_payload_digest"));
+        }
+        decoded.push((sequence, spill_row));
+    }
+    Ok(decoded)
+}
+
+async fn prepare_transaction(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+) -> Result<(), StorageError> {
+    set_local_statement_timeout(transaction, spill.statement_timeout)
+        .await
+        .map_err(|()| database_error("spill-statement-timeout"))?;
+    lock_staging_generation_fence(
+        transaction,
+        &spill.database.schema,
+        StagingFenceTarget {
+            fence: &spill.fence,
+            project_id: &spill.project_id,
+            generation_id: &spill.generation_id,
+            sequence: spill.generation_sequence,
+        },
+    )
+    .await
+}
+
+async fn commit_transaction(
+    spill: &NativeGenerationSpill,
+    mut transaction: sqlx_postgres::PgTransaction<'_>,
+    operation: &'static str,
+) -> Result<(), StorageError> {
+    check_staging_generation_fence(
+        &mut transaction,
+        &spill.database.schema,
+        StagingFenceTarget {
+            fence: &spill.fence,
+            project_id: &spill.project_id,
+            generation_id: &spill.generation_id,
+            sequence: spill.generation_sequence,
+        },
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| database_error(operation))
+}
+
+async fn load_run_for_update(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+) -> Result<(NativeGenerationSpillPhase, NativeGenerationSpillReport), StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let sql = format!(
+        r#"SELECT phase, logical_bytes, raw_rows, extracted_files,
+                   maximum_bytes, maximum_rows
+            FROM {schema}."native_generation_spills"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND generation_sequence = $3
+            FOR UPDATE"#
+    );
+    let row = audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(spill.generation_sequence)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-read-run"))?
+        .ok_or(StorageError::GenerationNotFound)?;
+    let phase = row
+        .try_get::<String, _>(0)
+        .map_err(|_| corrupt("native_generation_spill_phase"))
+        .and_then(|raw| NativeGenerationSpillPhase::parse(&raw))?;
+    let logical_bytes = read_u64(&row, "logical_bytes", "spill_logical_bytes")?;
+    let raw_rows = read_u64(&row, "raw_rows", "spill_raw_rows")?;
+    let extracted_files = read_u64(&row, "extracted_files", "spill_extracted_files")?;
+    let maximum_bytes = read_u64(&row, "maximum_bytes", "maximum_spill_bytes")?;
+    let maximum_rows = read_u64(&row, "maximum_rows", "maximum_spill_rows")?;
+    Ok((
+        phase,
+        NativeGenerationSpillReport {
+            state: phase.into(),
+            logical_bytes,
+            raw_rows,
+            extracted_files,
+            maximum_bytes,
+            maximum_rows,
+        },
+    ))
+}
+
+/// One spill with the open transaction its storage step runs inside.
+struct SpillWrite<'write, 'transaction> {
+    spill: &'write NativeGenerationSpill,
+    transaction: &'write mut sqlx_postgres::PgTransaction<'transaction>,
+}
+
+/// One reduced canonical partition and the rows it inserted.
+#[derive(Clone, Copy)]
+struct ReducedPartition<'partition> {
+    cursor: &'partition NativeGenerationCanonicalCursor,
+    inserted: u64,
+}
+
+/// Deterministic PostgreSQL-side canonical reduction for one spilled generation.
+///
+/// Canonicalisation walks a cursor over relations and partitions, which is a
+/// separate responsibility from admitting spill rows and reading them back.
+async fn begin_canonicalization(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    phase: NativeGenerationSpillPhase,
+) -> Result<(), StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    if phase == NativeGenerationSpillPhase::Canonicalizing {
+        return Ok(());
+    }
+    if phase != NativeGenerationSpillPhase::Sealed {
+        return Err(StorageError::InvalidGenerationTransition {
+            actual: phase.as_str().to_owned(),
+            requested: NativeGenerationSpillPhase::Canonicalizing.as_str(),
+        });
+    }
+    let sql = format!(
+        r#"UPDATE {schema}."native_generation_spills"
+            SET phase = 'canonicalizing', updated_at = clock_timestamp()
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND phase = 'sealed'"#
+    );
+    let updated = audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-begin-canonicalization"))?;
+    if updated.rows_affected() != 1 {
+        return Err(StorageError::GenerationSpillConflict);
+    }
+    Ok(())
+}
+
+async fn load_canonical_cursor(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+) -> Result<NativeGenerationCanonicalCursor, StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let sql = format!(
+        r#"SELECT canonical_relation, canonical_partition
+            FROM {schema}."native_generation_spills"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)"#
+    );
+    let row = audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-read-canonical-cursor"))?;
+    let relation = row
+        .try_get::<String, _>(0)
+        .map_err(|_| corrupt("spill_canonical_relation"))
+        .and_then(|raw| parse_fact_relation(&raw))?;
+    let partition = row
+        .try_get::<i32, _>(1)
+        .ok()
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value < CANONICAL_PARTITIONS)
+        .ok_or_else(|| corrupt("spill_canonical_partition"))?;
+    let lower_bucket = i32::from(partition) * i32::from(BUCKETS_PER_CANONICAL_PARTITION);
+    let partition_count =
+        CANONICAL_PARTITIONS_PER_TRANSACTION.min(CANONICAL_PARTITIONS.saturating_sub(partition));
+    Ok(NativeGenerationCanonicalCursor {
+        relation,
+        partition,
+        lower_bucket,
+        upper_bucket: lower_bucket
+            + i32::from(partition_count) * i32::from(BUCKETS_PER_CANONICAL_PARTITION)
+            - 1,
+    })
+}
+
+async fn reduce_canonical_partition(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    cursor: &NativeGenerationCanonicalCursor,
+) -> Result<u64, StorageError> {
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let statements = canonical_partition_sql(&schema, cursor.relation);
+    if audited_query(statements.conflict)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(cursor.lower_bucket)
+        .bind(cursor.upper_bucket)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-detect-canonical-conflict"))?
+        .is_some()
+    {
+        return Err(StorageError::GenerationSpillConflict);
+    }
+    let inserted = audited_query(statements.insert)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(cursor.lower_bucket)
+        .bind(cursor.upper_bucket)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| StorageError::GenerationSpillConflict)?
+        .rows_affected();
+    let delete_sql = format!(
+        r#"DELETE FROM {schema}."{table}"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND bucket BETWEEN $3 AND $4"#,
+        table = statements.raw_table,
+    );
+    audited_query(delete_sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(cursor.lower_bucket)
+        .bind(cursor.upper_bucket)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-delete-canonicalized-raw"))?;
+    Ok(inserted)
+}
+
+async fn advance_canonical_cursor(
+    spill: &NativeGenerationSpill,
+    transaction: &mut sqlx_postgres::PgTransaction<'_>,
+    reduced: ReducedPartition<'_>,
+) -> Result<bool, StorageError> {
+    let ReducedPartition { cursor, inserted } = reduced;
+    let schema = crate::database::quoted_schema(&spill.database.schema);
+    let next_partition = cursor
+        .partition
+        .saturating_add(CANONICAL_PARTITIONS_PER_TRANSACTION)
+        .min(CANONICAL_PARTITIONS);
+    let next_relation = next_fact_relation(cursor.relation);
+    let complete = next_partition == CANONICAL_PARTITIONS && next_relation.is_none();
+    let (stored_relation, stored_partition, next_phase) = if next_partition < CANONICAL_PARTITIONS {
+        (Some(cursor.relation), next_partition, "canonicalizing")
+    } else if let Some(next_relation) = next_relation {
+        (Some(next_relation), 0, "canonicalizing")
+    } else {
+        (None, CANONICAL_PARTITIONS, "canonicalized")
+    };
+    let sql = format!(
+        r#"UPDATE {schema}."native_generation_spills"
+            SET phase = $3, canonical_relation = $4, canonical_partition = $5,
+                canonical_rows = canonical_rows + $6,
+                updated_at = clock_timestamp()
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND phase = 'canonicalizing'"#
+    );
+    let updated = audited_query(sql)
+        .bind(spill.project_id.as_str())
+        .bind(spill.generation_id.as_str())
+        .bind(next_phase)
+        .bind(stored_relation.map(NativeGenerationSpillRelation::as_str))
+        .bind(i32::from(stored_partition))
+        .bind(as_i64(inserted, "spill_canonical_rows")?)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| database_error("spill-advance-canonicalization"))?;
+    if updated.rows_affected() != 1 {
+        return Err(StorageError::GenerationSpillConflict);
+    }
+    Ok(complete)
 }
 
 /// One canonical relation's contribution to a spilled batch digest.

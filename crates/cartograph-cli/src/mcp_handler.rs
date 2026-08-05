@@ -98,7 +98,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::auto_sync::{AutoSyncError, AutoSyncStatus, ProjectAutoSync};
 use crate::byte_format::format_binary_bytes;
-use crate::error_codes::{pipeline_failure_reason_code, pipeline_stage_failure_code};
+use crate::error_codes::index_stage_failure_code;
 use crate::host::{
     DiagnosticLocation, HostInspectionError, ProjectDiscoveryRequest, detect_install_targets,
     discover_projects,
@@ -13521,19 +13521,8 @@ const fn project_setup_error_reason(error: ProjectError) -> Option<&'static str>
 
 const fn project_index_error_reason(error: ProjectError) -> Option<&'static str> {
     match error {
-        ProjectError::BeginGenerationFailed => Some("generation_start_failed"),
-        ProjectError::SourceScanFailed => Some("source_scan_failed"),
         ProjectError::StatusFailed => Some("project_status_unavailable"),
-        ProjectError::IndexFailed => Some("index_failed"),
-        ProjectError::IndexStageFailed { stage } => Some(pipeline_stage_failure_code(stage)),
-        ProjectError::IndexStageFailedWithReason { stage, reason } => {
-            Some(pipeline_failure_reason_code(stage, reason))
-        }
-        ProjectError::IndexLeaseFailed => Some("lease_failed"),
-        ProjectError::IndexPublicationFailed => Some("publication_failed"),
-        ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
-        ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
-        _ => None,
+        other => index_stage_failure_code(other),
     }
 }
 

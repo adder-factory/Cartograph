@@ -113,11 +113,11 @@ const fn stage_codes(stage: PipelineStage) -> &'static StageCodes {
     &STAGE_CODES[0].1
 }
 
-pub(crate) const fn pipeline_stage_failure_code(stage: PipelineStage) -> &'static str {
+const fn pipeline_stage_failure_code(stage: PipelineStage) -> &'static str {
     stage_codes(stage).failed
 }
 
-pub(crate) const fn pipeline_failure_reason_code(
+const fn pipeline_failure_reason_code(
     stage: PipelineStage,
     reason: PipelineFailureReason,
 ) -> &'static str {
@@ -149,7 +149,11 @@ pub(crate) const fn pipeline_failure_reason_code(
     }
 }
 
-pub(crate) const fn project_index_failure_code(error: ProjectError) -> Option<&'static str> {
+/// Stable code for a failure of the index pipeline itself.
+///
+/// Callers layer their own surface-specific arms on top; the shared indexing
+/// vocabulary lives here so the CLI and the MCP admin surface cannot drift.
+pub(crate) const fn index_stage_failure_code(error: ProjectError) -> Option<&'static str> {
     match error {
         ProjectError::BeginGenerationFailed => Some("generation_start_failed"),
         ProjectError::SourceScanFailed => Some("source_scan_failed"),
@@ -162,8 +166,14 @@ pub(crate) const fn project_index_failure_code(error: ProjectError) -> Option<&'
         ProjectError::IndexPublicationFailed => Some("publication_failed"),
         ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
         ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
-        ProjectError::RequestCancelled => Some("request_cancelled"),
         _ => None,
+    }
+}
+
+pub(crate) const fn project_index_failure_code(error: ProjectError) -> Option<&'static str> {
+    match error {
+        ProjectError::RequestCancelled => Some("request_cancelled"),
+        other => index_stage_failure_code(other),
     }
 }
 
