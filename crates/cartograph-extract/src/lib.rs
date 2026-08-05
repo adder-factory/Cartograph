@@ -1,5 +1,6 @@
 //! Native source discovery and extraction for Cartograph v2.
 
+mod bounded_name;
 mod budget;
 mod custom;
 mod discovery;
@@ -31,7 +32,7 @@ pub use budget::{native_extraction_reservation, native_output_limit, native_read
 pub use cartograph_domain::{SymbolExecutionFlags, SymbolExportFlags, SymbolImplementationFlags};
 pub use discovery::{
     DiscoveredSource, DiscoveryLimits, DiscoveryLimitsError, SourceDiscoveryError,
-    SourceDiscoveryOptions,
+    SourceDiscoveryOptions, SourceExclusionEvidence,
 };
 pub use discovery_policy::{
     DiscoveryPolicy, DiscoveryPolicyError, NestedRepositoryPolicy, V1_DEFAULT_EXCLUDES,

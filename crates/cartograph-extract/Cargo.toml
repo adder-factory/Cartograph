@@ -73,6 +73,7 @@ tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-sfapex.workspace = true
 tree-sitter-typescript.workspace = true
+tree-sitter-wgsl-bevy.workspace = true
 unicode-ident.workspace = true
 
 [dev-dependencies]

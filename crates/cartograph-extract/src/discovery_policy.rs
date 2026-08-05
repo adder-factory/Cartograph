@@ -4,6 +4,7 @@ use cartograph_domain::{NormalizedPath, SourceLanguage};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use thiserror::Error;
 
+const EXCLUDE_NEGATION_PREFIX: char = '!';
 const MAXIMUM_CONFIGURED_EXCLUDES: usize = 4_096;
 const MAXIMUM_EXCLUDE_PATTERN_BYTES: usize = 4_096;
 const MAXIMUM_EXCLUDE_TOTAL_BYTES: usize = 4 * 1024 * 1024;
@@ -132,6 +133,8 @@ pub const V1_DEFAULT_EXCLUDES: &[&str] = &[
 pub struct DiscoveryPolicy {
     includes: Option<Arc<GlobSet>>,
     excludes: Arc<GlobSet>,
+    /// `!`-prefixed patterns that rescue a path an exclusion glob matched.
+    exclude_negations: Arc<GlobSet>,
     duplicate_code_allowlist: Option<Arc<GlobSet>>,
     duplicate_code_allowlist_patterns: usize,
     enabled_languages: Option<Arc<BTreeSet<SourceLanguage>>>,
@@ -211,6 +214,7 @@ impl DiscoveryPolicy {
         }
         let mut total = 0_usize;
         let mut builder = GlobSetBuilder::new();
+        let mut negations = GlobSetBuilder::new();
         for pattern in V1_DEFAULT_EXCLUDES
             .iter()
             .copied()
@@ -228,19 +232,30 @@ impl DiscoveryPolicy {
             if total > MAXIMUM_EXCLUDE_TOTAL_BYTES {
                 return Err(DiscoveryPolicyError::Limit);
             }
+            // A `!` prefix rescues paths an exclusion glob already matched, so
+            // excluding a directory does not throw away everything inside it.
+            let (target, pattern) = match pattern.strip_prefix(EXCLUDE_NEGATION_PREFIX) {
+                Some(remainder) if !remainder.is_empty() => (&mut negations, remainder),
+                Some(_) => return Err(DiscoveryPolicyError::InvalidPattern),
+                None => (&mut builder, pattern),
+            };
             let glob = GlobBuilder::new(pattern)
                 .literal_separator(true)
                 .backslash_escape(false)
                 .build()
                 .map_err(|_| DiscoveryPolicyError::InvalidPattern)?;
-            builder.add(glob);
+            target.add(glob);
         }
         let excludes = builder
+            .build()
+            .map_err(|_| DiscoveryPolicyError::InvalidPattern)?;
+        let exclude_negations = negations
             .build()
             .map_err(|_| DiscoveryPolicyError::InvalidPattern)?;
         Ok(Self {
             includes: None,
             excludes: Arc::new(excludes),
+            exclude_negations: Arc::new(exclude_negations),
             duplicate_code_allowlist: None,
             duplicate_code_allowlist_patterns: 0,
             enabled_languages: (!languages.is_empty())
@@ -387,7 +402,13 @@ impl DiscoveryPolicy {
     }
 
     pub(crate) fn excludes(&self, path: &str) -> bool {
-        self.excludes.is_match(path)
+        self.excludes.is_match(path) && !self.exclude_negations.is_match(path)
+    }
+
+    /// Whether any `!` re-include pattern is configured.
+    #[must_use]
+    pub fn has_exclude_negations(&self) -> bool {
+        !self.exclude_negations.is_empty()
     }
 
     pub(crate) fn supports_path(&self, path: &str) -> bool {

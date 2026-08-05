@@ -905,7 +905,7 @@ fn validate_chat_tier(tier: ProjectLlmTier) -> Result<(), ProjectLlmConfigError>
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 /// Errors produced while processing project LLM config.
 pub enum ProjectLlmConfigError {
     #[error("Cartograph project configuration path is unavailable")]
@@ -1095,17 +1095,26 @@ pub fn load_project_source_settings(
 fn parse_project_source_settings(
     root: &Map<String, Value>,
 ) -> Result<ProjectSourceSettings, ProjectLlmConfigError> {
-    let maximum_file_bytes = optional_bounded_config_u64(
+    let maximum_file_bytes = optional_bounded_u64(
         root,
         "maxFileSize",
-        u64::try_from(MAXIMUM_PROJECT_SOURCE_BYTES)
-            .map_err(|_| ProjectLlmConfigError::InvalidConfig)?,
+        BoundedU64Field {
+            maximum: u64::try_from(MAXIMUM_PROJECT_SOURCE_BYTES)
+                .map_err(|_| ProjectLlmConfigError::InvalidConfig)?,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
     )?
     .map(usize::try_from)
     .transpose()
     .map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
-    let maximum_generation_bytes =
-        optional_bounded_config_u64(root, "maxGenerationBytes", MAXIMUM_PROJECT_GENERATION_BYTES)?;
+    let maximum_generation_bytes = optional_bounded_u64(
+        root,
+        "maxGenerationBytes",
+        BoundedU64Field {
+            maximum: MAXIMUM_PROJECT_GENERATION_BYTES,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
+    )?;
     let (generation_storage, maximum_spill_bytes, maximum_spill_rows) =
         parse_generation_storage(root)?;
     let languages = root
@@ -1131,61 +1140,12 @@ fn parse_project_source_settings(
         .map(parse_project_excludes)
         .transpose()?
         .unwrap_or_default();
-    let extract_docstrings = optional_config_bool(root, "extractDocstrings")?.unwrap_or(true);
-    let track_call_sites = optional_config_bool(root, "trackCallSites")?.unwrap_or(true);
-    let index_submodules = optional_config_bool(root, "indexSubmodules")?.unwrap_or(true);
-    let index_embedded_repositories =
-        optional_config_bool(root, "indexEmbeddedRepos")?.unwrap_or(true) && index_submodules;
-    let enable_centrality = optional_config_bool(root, "enableCentrality")?.unwrap_or(true);
-    // v2 enables its bounded native implementation by default. The legacy
-    // `false` override remains authoritative for projects that prefer the
-    // indexing-cost tradeoff from v1.
-    let enable_betweenness = optional_config_bool(root, "enableBetweenness")?.unwrap_or(true);
-    let enable_churn = optional_config_bool(root, "enableChurn")?.unwrap_or(true);
-    let enable_co_change = optional_config_bool(root, "enableCoChange")?.unwrap_or(true);
-    let enable_biomarkers = optional_config_bool(root, "enableBiomarkers")?.unwrap_or(true);
-    let enable_issue_history = optional_config_bool(root, "enableIssueHistory")?.unwrap_or(true);
-    let enable_config_refs = optional_config_bool(root, "enableConfigRefs")?.unwrap_or(true);
-    let enable_sql_refs = optional_config_bool(root, "enableSqlRefs")?.unwrap_or(true);
-    let enable_build_context_refs =
-        optional_config_bool(root, "enableBuildContextRefs")?.unwrap_or(true);
-    let enable_string_imports = optional_config_bool(root, "enableStringImports")?.unwrap_or(true);
-    let duplicate_code_partial_clones =
-        optional_config_bool(root, "duplicateCodePartialClones")?.unwrap_or(false);
+    let features = parse_source_features(root)?;
     let duplicate_code_allowlist = root
         .get("duplicateCodeAllowlist")
         .map(parse_project_globs)
         .transpose()?
         .unwrap_or_default();
-    let mut features = SourceFeatureFlags::default();
-    for (feature, enabled) in [
-        (SourceFeature::ExtractDocstrings, extract_docstrings),
-        (SourceFeature::TrackCallSites, track_call_sites),
-        (SourceFeature::IndexSubmodules, index_submodules),
-        (
-            SourceFeature::IndexEmbeddedRepositories,
-            index_embedded_repositories,
-        ),
-        (SourceFeature::Centrality, enable_centrality),
-        (SourceFeature::Betweenness, enable_betweenness),
-        (SourceFeature::Churn, enable_churn),
-        (SourceFeature::CoChange, enable_co_change),
-        (SourceFeature::Biomarkers, enable_biomarkers),
-        (SourceFeature::IssueHistory, enable_issue_history),
-        (SourceFeature::ConfigReferences, enable_config_refs),
-        (SourceFeature::SqlReferences, enable_sql_refs),
-        (
-            SourceFeature::BuildContextReferences,
-            enable_build_context_refs,
-        ),
-        (SourceFeature::StringImports, enable_string_imports),
-        (
-            SourceFeature::DuplicateCodePartialClones,
-            duplicate_code_partial_clones,
-        ),
-    ] {
-        features.set(feature, enabled);
-    }
     Ok(ProjectSourceSettings {
         maximum_file_bytes,
         maximum_generation_bytes,
@@ -1198,6 +1158,56 @@ fn parse_project_source_settings(
         features,
         duplicate_code_allowlist,
     })
+}
+
+/// Every boolean source feature with its configuration key and v2 default.
+///
+/// v2 enables its bounded native implementations by default. A legacy `false`
+/// override remains authoritative for projects that prefer v1's indexing-cost
+/// tradeoff.
+const SOURCE_FEATURE_DEFAULTS: [(SourceFeature, &str, bool); 15] = [
+    (SourceFeature::ExtractDocstrings, "extractDocstrings", true),
+    (SourceFeature::TrackCallSites, "trackCallSites", true),
+    (SourceFeature::IndexSubmodules, "indexSubmodules", true),
+    (
+        SourceFeature::IndexEmbeddedRepositories,
+        "indexEmbeddedRepos",
+        true,
+    ),
+    (SourceFeature::Centrality, "enableCentrality", true),
+    (SourceFeature::Betweenness, "enableBetweenness", true),
+    (SourceFeature::Churn, "enableChurn", true),
+    (SourceFeature::CoChange, "enableCoChange", true),
+    (SourceFeature::Biomarkers, "enableBiomarkers", true),
+    (SourceFeature::IssueHistory, "enableIssueHistory", true),
+    (SourceFeature::ConfigReferences, "enableConfigRefs", true),
+    (SourceFeature::SqlReferences, "enableSqlRefs", true),
+    (
+        SourceFeature::BuildContextReferences,
+        "enableBuildContextRefs",
+        true,
+    ),
+    (SourceFeature::StringImports, "enableStringImports", true),
+    (
+        SourceFeature::DuplicateCodePartialClones,
+        "duplicateCodePartialClones",
+        false,
+    ),
+];
+
+fn parse_source_features(
+    root: &Map<String, Value>,
+) -> Result<SourceFeatureFlags, ProjectLlmConfigError> {
+    let mut features = SourceFeatureFlags::default();
+    for (feature, key, default) in SOURCE_FEATURE_DEFAULTS {
+        features.set(feature, optional_config_bool(root, key)?.unwrap_or(default));
+    }
+    // An embedded repository is only reachable through submodule indexing, so
+    // the two flags are conjunctive rather than independent.
+    if !features.enabled(SourceFeature::IndexSubmodules) {
+        features.set(SourceFeature::IndexEmbeddedRepositories, false);
+    }
+    Ok(features)
 }
 
 fn parse_generation_storage(
@@ -1213,24 +1223,23 @@ fn parse_generation_storage(
         })
         .transpose()?
         .unwrap_or_default();
-    let bytes = optional_bounded_config_u64(root, "maxSpillBytes", MAXIMUM_PROJECT_SPILL_BYTES)?;
-    let rows = optional_bounded_config_u64(root, "maxSpillRows", MAXIMUM_PROJECT_SPILL_ROWS)?;
+    let bytes = optional_bounded_u64(
+        root,
+        "maxSpillBytes",
+        BoundedU64Field {
+            maximum: MAXIMUM_PROJECT_SPILL_BYTES,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
+    )?;
+    let rows = optional_bounded_u64(
+        root,
+        "maxSpillRows",
+        BoundedU64Field {
+            maximum: MAXIMUM_PROJECT_SPILL_ROWS,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
+    )?;
     Ok((storage, bytes, rows))
-}
-
-fn optional_bounded_config_u64(
-    root: &Map<String, Value>,
-    key: &str,
-    maximum: u64,
-) -> Result<Option<u64>, ProjectLlmConfigError> {
-    root.get(key)
-        .map(|value| {
-            value
-                .as_u64()
-                .filter(|value| (1..=maximum).contains(value))
-                .ok_or(ProjectLlmConfigError::InvalidConfig)
-        })
-        .transpose()
 }
 
 fn parse_project_languages(value: &Value) -> Result<Vec<SourceLanguage>, ProjectLlmConfigError> {
@@ -1991,14 +2000,31 @@ struct TierRuntimeLimits {
 fn parse_tier_runtime_limits(
     value: &Map<String, Value>,
 ) -> Result<TierRuntimeLimits, ProjectLlmConfigError> {
-    let timeout_ms = optional_bounded_u64(value, "timeoutMs", MAXIMUM_TIMEOUT_MS)?;
-    let concurrency = optional_bounded_u64(value, "concurrency", u64::from(MAXIMUM_CONCURRENCY))?
-        .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
-        .transpose()?;
+    let timeout_ms = optional_bounded_u64(
+        value,
+        "timeoutMs",
+        BoundedU64Field {
+            maximum: MAXIMUM_TIMEOUT_MS,
+            invalid: ProjectLlmConfigError::InvalidTier,
+        },
+    )?;
+    let concurrency = optional_bounded_u64(
+        value,
+        "concurrency",
+        BoundedU64Field {
+            maximum: u64::from(MAXIMUM_CONCURRENCY),
+            invalid: ProjectLlmConfigError::InvalidTier,
+        },
+    )?
+    .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
+    .transpose()?;
     let summary_batch_size = optional_bounded_u64(
         value,
         "summaryBatchSize",
-        u64::from(MAXIMUM_SUMMARY_BATCH_SIZE),
+        BoundedU64Field {
+            maximum: u64::from(MAXIMUM_SUMMARY_BATCH_SIZE),
+            invalid: ProjectLlmConfigError::InvalidTier,
+        },
     )?
     .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
     .transpose()?;
@@ -2143,18 +2169,27 @@ fn optional_bool(
         .transpose()
 }
 
+/// Inclusive upper bound for a positive configuration integer, with the exact
+/// rejection its section reports.
+#[derive(Clone, Copy)]
+struct BoundedU64Field {
+    maximum: u64,
+    invalid: ProjectLlmConfigError,
+}
+
 fn optional_bounded_u64(
     object: &Map<String, Value>,
     key: &str,
-    maximum: u64,
+    field: BoundedU64Field,
 ) -> Result<Option<u64>, ProjectLlmConfigError> {
+    let BoundedU64Field { maximum, invalid } = field;
     object
         .get(key)
         .map(|value| {
             value
                 .as_u64()
                 .filter(|value| (1..=maximum).contains(value))
-                .ok_or(ProjectLlmConfigError::InvalidTier)
+                .ok_or(invalid)
         })
         .transpose()
 }

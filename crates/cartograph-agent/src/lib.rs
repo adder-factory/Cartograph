@@ -22,6 +22,7 @@ use std::{
 };
 
 use cartograph_config::DatabaseSettings;
+use cartograph_db::NativeGenerationSpillReport;
 use cartograph_db::{
     CartographDatabase, GenerationContents, GenerationRecoveryRequest, GenerationRetentionPolicy,
     GenerationRetentionReport, GenerationRetentionRequest, HistoryRefreshReport,
@@ -50,6 +51,7 @@ pub use cartograph_indexer::{PipelineFailureReason, PipelineStage};
 use cartograph_llm::{
     ProjectGenerationStorage, ProjectSourceSettings, load_project_source_settings,
 };
+use cartograph_scip::ScipOverlayReport;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Semaphore, oneshot, watch};
@@ -208,13 +210,14 @@ pub(crate) fn trim_ascii_bytes(value: &[u8]) -> &[u8] {
 }
 
 /// User-controlled bounds for one full source index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexOptions {
     max_workers: u16,
     force: bool,
     max_source_bytes: Option<usize>,
     profile: bool,
     refresh_history: bool,
+    additional_excludes: Vec<String>,
 }
 
 impl Default for IndexOptions {
@@ -225,17 +228,35 @@ impl Default for IndexOptions {
             max_source_bytes: None,
             profile: false,
             refresh_history: true,
+            additional_excludes: Vec::new(),
         }
     }
 }
 
 impl IndexOptions {
+    /// Add run-scoped exclusion globs on top of the project's configured
+    /// `exclude` list. A `!` prefix re-includes a path an exclusion matched.
+    ///
+    /// These are deliberately not persisted: `--exclude` is for experimenting,
+    /// and the project config is what makes an exclusion survive and be shared.
+    #[must_use]
+    pub fn with_additional_excludes(mut self, patterns: Vec<String>) -> Self {
+        self.additional_excludes = patterns;
+        self
+    }
+
+    /// Run-scoped exclusion globs layered over the configured policy.
+    #[must_use]
+    pub fn additional_excludes(&self) -> &[String] {
+        &self.additional_excludes
+    }
+
     /// Cap the corpus-aware worker selector at a validated value in 1..=16.
     /// # Errors
     ///
     /// Returns [`ProjectError::InvalidOptions`] when `value` is zero or exceeds
     /// the maximum supported indexing worker count.
-    pub const fn with_max_workers(mut self, value: u16) -> Result<Self, ProjectError> {
+    pub fn with_max_workers(mut self, value: u16) -> Result<Self, ProjectError> {
         if value == 0 || value > MAX_CONFIGURED_WORKERS {
             return Err(ProjectError::InvalidOptions);
         }
@@ -255,7 +276,7 @@ impl IndexOptions {
     ///
     /// Returns [`ProjectError::InvalidOptions`] when `value` is zero or exceeds
     /// the hard per-file source byte ceiling.
-    pub const fn with_max_source_bytes(mut self, value: usize) -> Result<Self, ProjectError> {
+    pub fn with_max_source_bytes(mut self, value: usize) -> Result<Self, ProjectError> {
         if value == 0 || value > DEFAULT_MAX_SOURCE_BYTES {
             return Err(ProjectError::InvalidOptions);
         }
@@ -286,6 +307,14 @@ impl IndexOptions {
 pub struct NativeIndexMetrics {
     /// Supported files in the indexed source manifest.
     pub files: u64,
+    /// Paths a configured exclusion glob or `.cartographignore` pattern skipped.
+    ///
+    /// A partial index must never look complete, so an exclusion is reported
+    /// even when it is exactly what the project asked for.
+    pub excluded_paths: u64,
+    /// Directory subtrees skipped without being descended into. A pruned tree is
+    /// deliberately not expanded into a file count.
+    pub excluded_trees: u64,
     /// Supported files deliberately skipped because they exceeded maxFileSize.
     pub skipped_oversized_files: u64,
     /// Exact bytes read and hashed.
@@ -385,9 +414,9 @@ pub struct ScipOverlayMetrics {
     pub unresolved_links: u64,
 }
 
-impl From<NativePipelineReport> for NativeIndexMetrics {
-    fn from(report: NativePipelineReport) -> Self {
-        let scip_overlay = report.scip_overlay().map(|overlay| ScipOverlayMetrics {
+impl From<ScipOverlayReport> for ScipOverlayMetrics {
+    fn from(overlay: ScipOverlayReport) -> Self {
+        Self {
             covered_documents: overlay.covered_documents(),
             skipped_documents: overlay.skipped_documents(),
             replaced_native_symbols: overlay.replaced_native_symbols(),
@@ -396,21 +425,35 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
             imported_references: overlay.imported_references(),
             exact_typed_edges: overlay.exact_typed_edges(),
             unresolved_links: overlay.unresolved_links(),
-        });
-        let parse_cache = report.parse_cache();
-        let generation_storage = match report.storage() {
-            NativeGenerationStorage::Memory => NativeGenerationStorageMetrics::Memory,
-            NativeGenerationStorage::PostgreSql => NativeGenerationStorageMetrics::Postgres,
-        };
-        let spill = report.spill().map(|spill| NativeGenerationSpillMetrics {
+        }
+    }
+}
+
+impl From<NativeGenerationSpillReport> for NativeGenerationSpillMetrics {
+    fn from(spill: NativeGenerationSpillReport) -> Self {
+        Self {
             logical_bytes: spill.logical_bytes,
             raw_rows: spill.raw_rows,
             extracted_files: spill.extracted_files,
             maximum_bytes: spill.maximum_bytes,
             maximum_rows: spill.maximum_rows,
-        });
+        }
+    }
+}
+
+impl From<NativePipelineReport> for NativeIndexMetrics {
+    fn from(report: NativePipelineReport) -> Self {
+        let scip_overlay = report.scip_overlay().map(ScipOverlayMetrics::from);
+        let parse_cache = report.parse_cache();
+        let generation_storage = match report.storage() {
+            NativeGenerationStorage::Memory => NativeGenerationStorageMetrics::Memory,
+            NativeGenerationStorage::PostgreSql => NativeGenerationStorageMetrics::Postgres,
+        };
+        let spill = report.spill().map(NativeGenerationSpillMetrics::from);
         Self {
             files: report.discovered_files(),
+            excluded_paths: report.excluded_paths(),
+            excluded_trees: report.excluded_trees(),
             skipped_oversized_files: report.skipped_oversized_files(),
             source_bytes: report.source_bytes(),
             symbols: report.symbols(),
@@ -697,7 +740,7 @@ struct IndexCompletion {
 }
 
 fn index_enrichment_policy(
-    options: IndexOptions,
+    options: &IndexOptions,
     source_settings: &ProjectSourceSettings,
 ) -> IndexEnrichmentPolicy {
     let churn_enabled = source_settings.enable_churn();
@@ -719,13 +762,14 @@ async fn run_core_index(
     cancellation: ProjectCancellation,
 ) -> Result<IndexReport, ProjectError> {
     let preparation_started = Instant::now();
+    let profile = options.profile;
     let preparation = runtime.prepare_index(options, cancellation.clone()).await?;
     let preparation_millis = monotonic_millis(preparation_started.elapsed());
     let mut report = match preparation {
         IndexPreparation::Unchanged(report) => *report,
         IndexPreparation::Pending(pending) => {
             runtime
-                .publish_index(*pending, cancellation, options.profile)
+                .publish_index(*pending, cancellation, profile)
                 .await?
         }
     };
@@ -866,7 +910,7 @@ async fn index_project_with_cancellation(
     let operation_started = Instant::now();
     let source_settings =
         load_project_source_settings(&runtime.root).map_err(|_| ProjectError::InvalidOptions)?;
-    let policy = index_enrichment_policy(options, &source_settings);
+    let policy = index_enrichment_policy(&options, &source_settings);
     let index = run_core_index(runtime, options, cancellation.clone());
     let history = prepare_optional_history(runtime, policy, cancellation.clone());
     let issue_history = prepare_optional_issue_history(runtime, policy, cancellation);
@@ -1271,7 +1315,8 @@ impl ProjectRuntime {
         options: IndexOptions,
         cancellation: ProjectCancellation,
     ) -> Result<IndexPreparation, ProjectError> {
-        let source_policy = project_source_policy(&self.root)?;
+        let source_policy =
+            project_source_policy_with_excludes(&self.root, options.additional_excludes())?;
         let max_source_bytes = options
             .max_source_bytes
             .or(source_policy.maximum_file_bytes)
@@ -1302,10 +1347,12 @@ impl ProjectRuntime {
         let workers = select_worker_count(source.files, source.source_bytes, options.max_workers);
         let generation_storage = select_generation_storage(
             source_policy.generation_storage,
-            source.files,
-            source.source_bytes,
-            max_generation_bytes,
-            source.scip_overlay.is_some(),
+            GenerationStorageSignals {
+                files: source.files,
+                source_bytes: source.source_bytes,
+                maximum_generation_bytes: max_generation_bytes,
+                has_scip_overlay: source.scip_overlay.is_some(),
+            },
         )?;
         let project_id = self
             .database
@@ -1405,9 +1452,11 @@ impl ProjectRuntime {
         let source_root = SourceRoot::open_with_policy(&self.root, discovery_policy)
             .map_err(|_| ProjectError::ProjectRootUnavailable)?;
         let pipeline = pipeline_config(
-            workers,
-            max_source_bytes,
-            max_generation_bytes,
+            PipelineBounds {
+                workers,
+                max_source_bytes,
+                max_generation_bytes,
+            },
             index_policy,
         )?;
         let maximum_stage_reservation = pipeline
@@ -1915,8 +1964,15 @@ impl SourceIndexPolicy {
 
 impl ProjectSourcePolicy {
     fn from_settings(settings: &ProjectSourceSettings) -> Result<Self, ProjectError> {
+        Self::from_settings_with_excludes(settings, settings.excludes())
+    }
+
+    fn from_settings_with_excludes(
+        settings: &ProjectSourceSettings,
+        excludes: &[String],
+    ) -> Result<Self, ProjectError> {
         let discovery = DiscoveryPolicy::new_with_languages(
-            settings.excludes(),
+            excludes,
             NestedRepositoryPolicy::new(
                 settings.index_submodules(),
                 settings.index_embedded_repositories(),
@@ -1949,13 +2005,25 @@ impl ProjectSourcePolicy {
     }
 }
 
-fn select_generation_storage(
-    policy: GenerationStoragePolicy,
+/// Observed corpus size and overlay state one storage selection weighs.
+#[derive(Clone, Copy)]
+struct GenerationStorageSignals {
     files: usize,
     source_bytes: u64,
     maximum_generation_bytes: u64,
     has_scip_overlay: bool,
+}
+
+fn select_generation_storage(
+    policy: GenerationStoragePolicy,
+    signals: GenerationStorageSignals,
 ) -> Result<GenerationStorageSelection, ProjectError> {
+    let GenerationStorageSignals {
+        files,
+        source_bytes,
+        maximum_generation_bytes,
+        has_scip_overlay,
+    } = signals;
     match policy.preference {
         ProjectGenerationStorage::Memory => Ok(GenerationStorageSelection::Memory),
         ProjectGenerationStorage::Postgres if has_scip_overlay => Err(ProjectError::InvalidOptions),
@@ -1981,8 +2049,22 @@ fn select_generation_storage(
 }
 
 fn project_source_policy(root: &Path) -> Result<ProjectSourcePolicy, ProjectError> {
+    project_source_policy_with_excludes(root, &[])
+}
+
+/// Resolve the source policy, layering run-scoped exclusion globs over the
+/// project's configured `exclude` list.
+fn project_source_policy_with_excludes(
+    root: &Path,
+    additional: &[String],
+) -> Result<ProjectSourcePolicy, ProjectError> {
     let settings = load_project_source_settings(root).map_err(|_| ProjectError::InvalidOptions)?;
-    ProjectSourcePolicy::from_settings(&settings)
+    if additional.is_empty() {
+        return ProjectSourcePolicy::from_settings(&settings);
+    }
+    let mut merged = settings.excludes().to_vec();
+    merged.extend_from_slice(additional);
+    ProjectSourcePolicy::from_settings_with_excludes(&settings, &merged)
 }
 
 fn source_revision(root: &Path) -> Result<SourceRevision, ProjectError> {
@@ -2377,12 +2459,23 @@ fn source_limits_with_max(max_source_bytes: usize) -> Result<SourceLimits, Proje
     SourceLimits::new(max_source_bytes).map_err(|_| ProjectError::InvalidOptions)
 }
 
-fn pipeline_config(
+/// Worker count and byte ceilings admitted for one native pipeline run.
+#[derive(Clone, Copy)]
+struct PipelineBounds {
     workers: u16,
     max_source_bytes: usize,
     max_generation_bytes: u64,
+}
+
+fn pipeline_config(
+    bounds: PipelineBounds,
     policy: SourceIndexPolicy,
 ) -> Result<NativePipelineConfig, ProjectError> {
+    let PipelineBounds {
+        workers,
+        max_source_bytes,
+        max_generation_bytes,
+    } = bounds;
     let retained = NativeRetainedLimits::new(DEFAULT_MAX_MANIFEST_BYTES, max_generation_bytes)
         .map_err(|_| ProjectError::InvalidOptions)?;
     let queue = usize::from(workers)
@@ -2728,80 +2821,104 @@ mod tests {
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Memory),
-                AUTO_SPILL_MINIMUM_FILES,
-                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES,
+                    source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Memory)
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Postgres),
-                1,
-                1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Postgres(_))
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                AUTO_SPILL_MINIMUM_FILES - 1,
-                (DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR) - 1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES - 1,
+                    source_bytes: (DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR) - 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Memory)
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                AUTO_SPILL_MINIMUM_FILES,
-                1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES,
+                    source_bytes: 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
+            ),
+            Ok(GenerationStorageSelection::Postgres(_))
+        ));
+    }
+
+    #[test]
+    fn generation_storage_selection_honours_forced_preferences_and_overlay() {
+        let policy = |preference| GenerationStoragePolicy {
+            preference,
+            spill: NativeGenerationSpillPolicy::default(),
+        };
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Postgres(_))
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                1,
-                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
             ),
             Ok(GenerationStorageSelection::Postgres(_))
         ));
         assert!(matches!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Auto),
-                1,
-                DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR,
-                DEFAULT_MAX_GENERATION_BYTES,
-                false,
-            ),
-            Ok(GenerationStorageSelection::Postgres(_))
-        ));
-        assert!(matches!(
-            select_generation_storage(
-                policy(ProjectGenerationStorage::Auto),
-                AUTO_SPILL_MINIMUM_FILES,
-                AUTO_SPILL_MINIMUM_SOURCE_BYTES,
-                DEFAULT_MAX_GENERATION_BYTES,
-                true,
+                GenerationStorageSignals {
+                    files: AUTO_SPILL_MINIMUM_FILES,
+                    source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: true,
+                },
             ),
             Ok(GenerationStorageSelection::Memory)
         ));
         assert_eq!(
             select_generation_storage(
                 policy(ProjectGenerationStorage::Postgres),
-                1,
-                1,
-                DEFAULT_MAX_GENERATION_BYTES,
-                true,
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: 1,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: true,
+                },
             )
             .err(),
             Some(ProjectError::InvalidOptions)

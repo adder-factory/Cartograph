@@ -1042,7 +1042,7 @@ impl StructuralFindingQuery {
 }
 
 /// Project-wide deterministic finding totals without a row-limit blind spot.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralFindingStats {
     analyzed_symbols: u64,
@@ -1891,36 +1891,19 @@ impl CartographDatabase {
         request: &StructuralFindingQuery,
     ) -> Result<Vec<StructuralFinding>, StorageError> {
         validate_limit(request.limit)?;
+        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
+            .await?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
-            r"{}
-                SELECT symbol_id::text AS symbol_id, path, qualified_name, finding, severity,
+            r"SELECT symbol_id::text AS symbol_id, path, qualified_name, finding, severity,
                        start_line, end_line, metric_name, metric,
-                       degree_centrality, outgoing::bigint AS outgoing_edges,
-                       unresolved::bigint AS unresolved_references, detail::text AS detail
-                FROM findings
-                WHERE ($3::text IS NULL OR finding = $3)
-                  AND CASE severity
-                        WHEN 'error' THEN 3
-                        WHEN 'warning' THEN 2
-                        ELSE 1
-                      END >= $4
-                  AND ($5::double precision IS NULL OR metric >= $5)
-                  AND ($6::double precision IS NULL OR metric <= $6)
-                  AND ($7::double precision IS NULL OR degree_centrality >= $7)
-                  AND ($8::text IS NULL OR LEFT(path, LENGTH($8)) <> $8)
-                  AND ($9::text[] IS NULL OR symbol_id::text = ANY($9))
-                  AND (NOT $10::boolean OR NOT (
-                      path ~* '(^|/)(fixtures?|test-beds?|__tests__|__mocks__|tests?|specs?|integration|testing|testlib)(/|$)'
-                      OR path ~* '(\.test\.|\.spec\.|_test\.|_spec\.)[a-z0-9]+$'
-                      OR path ~ '([A-Za-z](Test|Tests|TestCase|Spec))\.[a-z0-9]+$'
-                      OR path ~* '(^|/)(bench(es|marks?)?|scripts?|examples?|samples?|demos?)(/|$)'
-                  ))
-                  AND ($11::text IS NULL OR LEFT(path, LENGTH($11)) = $11)
+                       degree_centrality, outgoing_edges, unresolved_references,
+                       detail::text AS detail
+{filters}
                 ORDER BY CASE severity WHEN 'error' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END DESC,
                          degree_centrality DESC, metric DESC, path, start_line, finding
                 LIMIT $2",
-            finding_ctes(&schema),
+            filters = stored_finding_filters(&schema),
         );
         let symbol_ids = (!request.symbol_ids.is_empty()).then(|| {
             request
@@ -1963,31 +1946,14 @@ impl CartographDatabase {
         request: &StructuralFindingQuery,
     ) -> Result<u64, StorageError> {
         validate_limit(request.limit)?;
+        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
+            .await?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
-            r"{}
-                SELECT COUNT(*)::bigint
-                FROM findings
-                WHERE $2::bigint >= 0
-                  AND ($3::text IS NULL OR finding = $3)
-                  AND CASE severity
-                        WHEN 'error' THEN 3
-                        WHEN 'warning' THEN 2
-                        ELSE 1
-                      END >= $4
-                  AND ($5::double precision IS NULL OR metric >= $5)
-                  AND ($6::double precision IS NULL OR metric <= $6)
-                  AND ($7::double precision IS NULL OR degree_centrality >= $7)
-                  AND ($8::text IS NULL OR LEFT(path, LENGTH($8)) <> $8)
-                  AND ($9::text[] IS NULL OR symbol_id::text = ANY($9))
-                  AND (NOT $10::boolean OR NOT (
-                      path ~* '(^|/)(fixtures?|test-beds?|__tests__|__mocks__|tests?|specs?|integration|testing|testlib)(/|$)'
-                      OR path ~* '(\.test\.|\.spec\.|_test\.|_spec\.)[a-z0-9]+$'
-                      OR path ~ '([A-Za-z](Test|Tests|TestCase|Spec))\.[a-z0-9]+$'
-                      OR path ~* '(^|/)(bench(es|marks?)?|scripts?|examples?|samples?|demos?)(/|$)'
-                  ))
-                  AND ($11::text IS NULL OR LEFT(path, LENGTH($11)) = $11)",
-            finding_ctes(&schema),
+            r"SELECT COUNT(*)::bigint
+{filters}
+                  AND $2::bigint >= 0",
+            filters = stored_finding_filters(&schema),
         );
         let symbol_ids = (!request.symbol_ids.is_empty()).then(|| {
             request
@@ -2034,12 +2000,22 @@ impl CartographDatabase {
         request: &StructuralFindingGroupQuery,
     ) -> Result<StructuralFindingGroup, StorageError> {
         validate_limit(request.per_finding_limit)?;
+        // Every sibling finding query reads the stored relation; this one backs
+        // the agent audit, which is the most detector-heavy consumer of all.
+        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
+            .await?;
+        let Some(generation) = current_generation_for_findings(self, project_id).await? else {
+            return Ok(StructuralFindingGroup {
+                findings: Vec::new(),
+                counts: BTreeMap::new(),
+            });
+        };
         let schema = quoted_schema(&self.schema);
         let statement = format!(
-            r"{}, ranked AS (
+            r#"WITH ranked AS (
                     SELECT symbol_id, path, qualified_name, finding, severity,
                            start_line, end_line, metric_name, metric,
-                           degree_centrality, outgoing, unresolved, detail,
+                           degree_centrality, outgoing_edges, unresolved_references, detail,
                            COUNT(*) OVER (PARTITION BY finding)::bigint AS detector_total,
                            ROW_NUMBER() OVER (
                                PARTITION BY finding
@@ -2051,14 +2027,16 @@ impl CartographDatabase {
                                         degree_centrality DESC, metric DESC,
                                         path, start_line, symbol_id
                            ) AS detector_rank
-                    FROM findings
-                    WHERE finding = ANY($2::text[])
+                    FROM {schema}."structural_findings" AS findings
+                    WHERE findings.project_id = CAST($1 AS uuid)
+                      AND findings.generation_id = CAST($2 AS uuid)
+                      AND finding = ANY($3::text[])
                       AND CASE severity
                             WHEN 'error' THEN 3
                             WHEN 'warning' THEN 2
                             ELSE 1
-                          END >= $3
-                      AND (NOT $4::boolean OR NOT (
+                          END >= $4
+                      AND (NOT $5::boolean OR NOT (
                           path ~* '(^|/)(fixtures?|test-beds?|__tests__|__mocks__|tests?|specs?|integration|testing|testlib)(/|$)'
                           OR path ~* '(\.test\.|\.spec\.|_test\.|_spec\.)[a-z0-9]+$'
                           OR path ~ '([A-Za-z](Test|Tests|TestCase|Spec))\.[a-z0-9]+$'
@@ -2067,13 +2045,11 @@ impl CartographDatabase {
                 )
                 SELECT symbol_id::text AS symbol_id, path, qualified_name, finding, severity,
                        start_line, end_line, metric_name, metric,
-                       degree_centrality, outgoing::bigint AS outgoing_edges,
-                       unresolved::bigint AS unresolved_references,
+                       degree_centrality, outgoing_edges, unresolved_references,
                        detail::text AS detail, detector_total
                 FROM ranked
-                WHERE detector_rank <= $5
-                ORDER BY finding, detector_rank, path, start_line, symbol_id",
-            finding_ctes(&schema),
+                WHERE detector_rank <= $6
+                ORDER BY finding, detector_rank, path, start_line, symbol_id"#,
         );
         let rows = self
             .bounded_rows(
@@ -2081,6 +2057,7 @@ impl CartographDatabase {
                 |statement| {
                     statement
                         .bind(project_id.as_str())
+                        .bind(generation.as_str())
                         .bind(request.findings.clone())
                         .bind(request.minimum_severity.rank())
                         .bind(request.exclude_fixtures)
@@ -2114,12 +2091,42 @@ impl CartographDatabase {
         &self,
         project_id: &ProjectId,
     ) -> Result<StructuralFindingStats, StorageError> {
-        self.current_structural_finding_stats_bounded(project_id, DEFAULT_INSIGHT_TIMEOUT)
-            .await
+        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
+            .await?;
+        Ok(self
+            .cached_current_structural_finding_stats(project_id)
+            .await?
+            .unwrap_or_default())
     }
 
-    /// Aggregate every current-generation finding within a caller-selected
-    /// statement timeout no greater than the normal insight deadline.
+    /// Aggregate the stored finding relation without ever recomputing it.
+    ///
+    /// Returns `None` when the complete relation has not been computed for the
+    /// exact current input fingerprint, so a readiness probe can report an
+    /// explicit pending state instead of an unbounded recomputation.
+    /// # Errors
+    ///
+    /// Returns an error if the aggregate cannot be queried or a stored count is
+    /// malformed.
+    pub async fn cached_current_structural_finding_stats(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<StructuralFindingStats>, StorageError> {
+        let schema = quoted_schema(&self.schema);
+        let statement =
+            include_str!("sql/structural_finding_stats.sql").replace("{schema}", &schema);
+        let mut rows = self
+            .bounded_rows(
+                statement,
+                |statement| statement.bind(project_id.as_str()),
+                "cached-structural-finding-stats",
+            )
+            .await?;
+        rows.pop().map(|row| decode_finding_stats(&row)).transpose()
+    }
+
+    /// Aggregate every current-generation finding by evaluating the complete
+    /// detector relation within a caller-selected statement timeout.
     /// # Errors
     ///
     /// Returns an error if the timeout is zero or exceeds the insight bound,
@@ -2134,6 +2141,9 @@ impl CartographDatabase {
                 field: "statement_timeout",
             });
         }
+        let Some(generation) = current_generation_for_findings(self, project_id).await? else {
+            return Ok(StructuralFindingStats::default());
+        };
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r"{}, totals AS (
@@ -2172,10 +2182,16 @@ impl CartographDatabase {
         );
         let mut rows = self
             .bounded_serial_rows(
-                statement,
-                |statement| statement.bind(project_id.as_str()),
-                "current-structural-finding-stats",
-                statement_timeout,
+                SerialRowRequest {
+                    statement,
+                    operation: "current-structural-finding-stats",
+                    statement_timeout,
+                },
+                |statement| {
+                    statement
+                        .bind(project_id.as_str())
+                        .bind(generation.as_str())
+                },
             )
             .await?;
         let row = rows
@@ -2196,11 +2212,14 @@ impl CartographDatabase {
 
     async fn bounded_serial_rows<'query>(
         &self,
-        statement: String,
+        request: SerialRowRequest,
         bind: impl FnOnce(PgQuery<'query>) -> PgQuery<'query>,
-        operation: &'static str,
-        statement_timeout: Duration,
     ) -> Result<Vec<sqlx_postgres::PgRow>, StorageError> {
+        let SerialRowRequest {
+            statement,
+            operation,
+            statement_timeout,
+        } = request;
         // This full-generation aggregate can otherwise reserve one dynamic
         // shared-memory segment per PostgreSQL worker. Serial planning keeps
         // status bounded on large projects without weakening the query.
@@ -2210,10 +2229,55 @@ impl CartographDatabase {
     }
 }
 
-const FINDING_CTES_SQL_TEMPLATE: &str = include_str!("finding_ctes.sql");
+pub(crate) const FINDING_CTES_SQL_TEMPLATE: &str = include_str!("finding_ctes.sql");
 
-fn finding_ctes(schema: &str) -> String {
+pub(crate) fn finding_ctes(schema: &str) -> String {
     FINDING_CTES_SQL_TEMPLATE.replace("{schema}", schema)
+}
+
+/// One serially planned read with its audit label and deadline.
+struct SerialRowRequest {
+    statement: String,
+    operation: &'static str,
+    statement_timeout: Duration,
+}
+
+/// Exact published generation the cascade must fence on, if one exists.
+///
+/// Binding this as a parameter rather than spelling a subquery lets PostgreSQL
+/// plan with the column's real statistics; an opaque fence collapses the row
+/// estimate and the planner picks nested loops over the whole graph.
+async fn current_generation_for_findings(
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+) -> Result<Option<String>, StorageError> {
+    let schema = quoted_schema(&database.schema);
+    let statement = format!(
+        r#"SELECT projects.current_generation_id::text
+            FROM {schema}."projects" AS projects
+            WHERE projects.project_id = CAST($1 AS uuid)
+              AND projects.current_generation_id IS NOT NULL"#
+    );
+    let mut rows = database
+        .bounded_rows(
+            statement,
+            |statement| statement.bind(project_id.as_str()),
+            "current-finding-generation",
+        )
+        .await?;
+    rows.pop()
+        .map(|row| {
+            row.try_get::<String, _>(0)
+                .map_err(|_| StorageError::CorruptStoredValue {
+                    field: "generation_id",
+                })
+        })
+        .transpose()
+}
+
+/// Generation-fenced source and shared filter predicates for the stored relation.
+fn stored_finding_filters(schema: &str) -> String {
+    include_str!("sql/structural_finding_filters.sql").replace("{schema}", schema)
 }
 
 fn validate_limit(limit: u16) -> Result<(), StorageError> {

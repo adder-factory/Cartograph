@@ -1,13 +1,14 @@
 use std::{
+    future::Future,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use cartograph_db::{
     CartographDatabase, GenerationContents, LeaseFence, NativeGenerationSpill,
-    NativeGenerationSpillPolicy, PrepareGenerationError, PrepareGenerationMutation,
-    PrepareGenerationProgress, ReadyGeneration, SpilledGenerationContents, StagedGeneration,
-    StorageError,
+    NativeGenerationSpillPolicy, NativeGenerationSpillRequest, PrepareGenerationError,
+    PrepareGenerationMutation, PrepareGenerationProgress, ReadyGeneration,
+    SpilledGenerationContents, StagedGeneration, StorageError,
 };
 use thiserror::Error;
 use tokio::{
@@ -31,6 +32,62 @@ pub enum SupervisedPrepareError {
     /// PostgreSQL rejected validation, COPY, fencing, or the ready transition.
     #[error(transparent)]
     Database(#[from] PrepareGenerationError),
+}
+
+/// Generation contents that one prepare task can drive to a ready generation.
+///
+/// The memory and spilled paths differ only in which bounded database call they
+/// make, so the shared half lives in `spawn_prepare` and each contents type
+/// supplies just its own call.
+trait PreparableContents: Send + 'static {
+    /// Attach the scope's progress channel to these contents.
+    #[must_use]
+    fn with_prepare_progress(self, progress: PrepareGenerationProgress) -> Self;
+
+    /// Run the bounded prepare that matches this contents type.
+    fn prepare(
+        self,
+        database: CartographDatabase,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> impl Future<Output = Result<ReadyGeneration, PrepareGenerationError>> + Send;
+}
+
+impl PreparableContents for GenerationContents {
+    fn with_prepare_progress(self, progress: PrepareGenerationProgress) -> Self {
+        self.with_progress(progress)
+    }
+
+    async fn prepare(
+        self,
+        database: CartographDatabase,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        database.prepare_generation_bounded(self, mutation).await
+    }
+}
+
+impl PreparableContents for SpilledGenerationContents {
+    fn with_prepare_progress(self, progress: PrepareGenerationProgress) -> Self {
+        self.with_progress(progress)
+    }
+
+    async fn prepare(
+        self,
+        database: CartographDatabase,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        database
+            .prepare_spilled_generation_bounded(self, mutation)
+            .await
+    }
+}
+
+/// Cloned inputs one prepare task owns for its whole lifetime.
+struct PrepareLaunch {
+    database: CartographDatabase,
+    fence: LeaseFence,
+    statement_timeout: Duration,
+    progress: PrepareGenerationProgress,
 }
 
 #[derive(Clone)]
@@ -92,7 +149,7 @@ impl PrepareScope {
         &self,
         contents: SpilledGenerationContents,
     ) -> Result<ReadyGeneration, SupervisedPrepareError> {
-        let receiver = self.start_spilled(contents)?;
+        let receiver = self.start(contents)?;
         match receiver.await {
             Ok(Ok(ready)) => Ok(ready),
             Ok(Err(error)) => Err(SupervisedPrepareError::Database(error)),
@@ -108,19 +165,30 @@ impl PrepareScope {
         NativeGenerationSpill::new(
             self.database.clone(),
             generation,
-            self.fence.clone(),
-            policy,
-            self.statement_timeout,
+            NativeGenerationSpillRequest {
+                fence: self.fence.clone(),
+                policy,
+                statement_timeout: self.statement_timeout,
+            },
         )
     }
 
-    fn start(
+    /// Cloned launch inputs for one prepare task.
+    ///
+    /// Both prepare paths take the same registry lock, reject the same states,
+    /// and clone the same fields; only the contents type and the database call
+    /// differ, so the shared half lives here once.
+    fn spawn_prepare<Make, Task>(
         &self,
-        contents: GenerationContents,
+        make: Make,
     ) -> Result<
         oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
         SupervisedPrepareError,
-    > {
+    >
+    where
+        Make: FnOnce(PrepareLaunch) -> Task,
+        Task: Future<Output = Result<ReadyGeneration, PrepareGenerationError>> + Send + 'static,
+    {
         let mut registry = self
             .registry
             .lock()
@@ -130,58 +198,39 @@ impl PrepareScope {
             PrepareState::Running => return Err(SupervisedPrepareError::AlreadyStarted),
             PrepareState::Closed => return Err(SupervisedPrepareError::ScopeClosed),
         }
-        let database = self.database.clone();
-        let fence = self.fence.clone();
-        let statement_timeout = self.statement_timeout;
-        let progress = self.progress.clone();
-        let contents = contents.with_progress(progress);
+        let task = make(PrepareLaunch {
+            database: self.database.clone(),
+            fence: self.fence.clone(),
+            statement_timeout: self.statement_timeout,
+            progress: self.progress.clone(),
+        });
         let (sender, receiver) = oneshot::channel();
         registry.handle = Some(tokio::spawn(async move {
-            let result = database
-                .prepare_generation_bounded(
-                    contents,
-                    PrepareGenerationMutation::new(&fence, statement_timeout),
-                )
-                .await;
-            let _ = sender.send(result);
+            let _ = sender.send(task.await);
         }));
         registry.state = PrepareState::Running;
         Ok(receiver)
     }
 
-    fn start_spilled(
+    fn start<Contents>(
         &self,
-        contents: SpilledGenerationContents,
+        contents: Contents,
     ) -> Result<
         oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
         SupervisedPrepareError,
-    > {
-        let mut registry = self
-            .registry
-            .lock()
-            .map_err(|_| SupervisedPrepareError::ResultUnavailable)?;
-        match registry.state {
-            PrepareState::Open => {}
-            PrepareState::Running => return Err(SupervisedPrepareError::AlreadyStarted),
-            PrepareState::Closed => return Err(SupervisedPrepareError::ScopeClosed),
-        }
-        let database = self.database.clone();
-        let fence = self.fence.clone();
-        let statement_timeout = self.statement_timeout;
-        let progress = self.progress.clone();
-        let contents = contents.with_progress(progress);
-        let (sender, receiver) = oneshot::channel();
-        registry.handle = Some(tokio::spawn(async move {
-            let result = database
-                .prepare_spilled_generation_bounded(
-                    contents,
-                    PrepareGenerationMutation::new(&fence, statement_timeout),
+    >
+    where
+        Contents: PreparableContents,
+    {
+        self.spawn_prepare(move |launch| async move {
+            let contents = contents.with_prepare_progress(launch.progress);
+            contents
+                .prepare(
+                    launch.database,
+                    PrepareGenerationMutation::new(&launch.fence, launch.statement_timeout),
                 )
-                .await;
-            let _ = sender.send(result);
-        }));
-        registry.state = PrepareState::Running;
-        Ok(receiver)
+                .await
+        })
     }
 
     pub(crate) async fn close_and_reap(

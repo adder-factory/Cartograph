@@ -689,6 +689,9 @@ mod tests {
         for diagnostic in &file.diagnostics {
             let code = match diagnostic.code {
                 cartograph_extract::DiagnosticCode::SyntaxError => "syntax_error",
+                cartograph_extract::DiagnosticCode::CanonicalNameTruncated => {
+                    "canonical_name_truncated"
+                }
             };
             hash_text(hasher, code);
             match diagnostic.span {

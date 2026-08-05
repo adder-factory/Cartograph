@@ -1,12 +1,13 @@
 # Native language-coverage report
 
-Last release audit: 2026-08-04 (`v2.1.11`).
+Last release audit: 2026-08-04 (`v2.2.0`).
 
 Cartograph v2 production-admits all 73 v1.1.33 language modes and all 163 v1
 extensions, plus additive Python `.pyi`, native TOML, and 52 dedicated textual
-game-scripting modes: 126 modes total. Sixty-one modes use pinned native
-tree-sitter grammars and 65 mixed-markup, configuration, domain-specific, or
-game-scripting modes use bounded Rust structural scanners.
+game-scripting modes, and the WGSL and Metal shader modes added in v2.2.0:
+128 modes total. Sixty-two modes use pinned native tree-sitter grammars and 66
+mixed-markup, configuration, domain-specific, shader, or game-scripting modes
+use bounded Rust structural scanners or an existing family slice.
 
 The authoritative inventory is `cartograph_domain::SourceLanguage::ALL` plus
 the extension mapping in `cartograph-extract`. The human-readable inventory is

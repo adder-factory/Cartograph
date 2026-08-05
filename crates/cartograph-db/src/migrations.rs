@@ -44,7 +44,8 @@ const SPILL_CENTRALITY_LOOKUP_SCHEMA_VERSION: i64 = 33;
 const SPILL_PARSE_CACHE_REFERENCE_SCHEMA_VERSION: i64 = 34;
 const SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA_VERSION: i64 = 35;
 const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION: i64 = 36;
-const LATEST_SCHEMA_VERSION: i64 = JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION;
+const STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION: i64 = 37;
+const LATEST_SCHEMA_VERSION: i64 = STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 /// Latest append-only schema version understood by this native binary.
@@ -1537,7 +1538,55 @@ const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA: Migration = Migration {
                 CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))"#],
 };
 
-const MIGRATIONS: [&Migration; 36] = [
+const STRUCTURAL_FINDING_CACHE_SCHEMA: Migration = Migration {
+    version: STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION,
+    name: "structural_finding_generation_cache",
+    statements: &[
+        r#"CREATE TABLE {schema}."structural_finding_runs" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            inputs_digest text NOT NULL CHECK (inputs_digest ~ '^[0-9a-f]{64}$'),
+            analyzed_symbols bigint NOT NULL CHECK (analyzed_symbols >= 0),
+            computed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (project_id, generation_id),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE TABLE {schema}."structural_findings" (
+            project_id uuid NOT NULL,
+            generation_id uuid NOT NULL,
+            symbol_id uuid NOT NULL,
+            finding text NOT NULL CHECK (length(finding) BETWEEN 1 AND 128),
+            path text NOT NULL CHECK (length(path) BETWEEN 1 AND 4096),
+            qualified_name text NOT NULL CHECK (length(qualified_name) BETWEEN 1 AND 4096),
+            severity text NOT NULL CHECK (severity IN ('info', 'warning', 'error')),
+            start_line integer NOT NULL CHECK (start_line >= 0),
+            end_line integer NOT NULL CHECK (end_line >= start_line),
+            metric_name text NOT NULL CHECK (length(metric_name) BETWEEN 1 AND 128),
+            metric double precision NOT NULL,
+            degree_centrality double precision NOT NULL
+                CHECK (degree_centrality BETWEEN 0.0 AND 1.0),
+            outgoing_edges bigint NOT NULL CHECK (outgoing_edges >= 0),
+            unresolved_references bigint NOT NULL CHECK (unresolved_references >= 0),
+            detail jsonb,
+            PRIMARY KEY (project_id, generation_id, symbol_id, finding),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."structural_finding_runs"(project_id, generation_id)
+                ON DELETE CASCADE
+        )"#,
+        r#"CREATE INDEX structural_findings_ranked_idx
+            ON {schema}."structural_findings" (
+                project_id, generation_id, severity, degree_centrality DESC, metric DESC
+            )"#,
+        r#"CREATE INDEX structural_findings_detector_idx
+            ON {schema}."structural_findings" (
+                project_id, generation_id, finding
+            )"#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 37] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1574,6 +1623,7 @@ const MIGRATIONS: [&Migration; 36] = [
     &SPILL_PARSE_CACHE_REFERENCE_SCHEMA,
     &SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA,
     &JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA,
+    &STRUCTURAL_FINDING_CACHE_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -1970,7 +2020,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 36] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 37] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -2007,9 +2057,10 @@ mod tests {
         SPILL_PARSE_CACHE_REFERENCE_SCHEMA_VERSION,
         SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA_VERSION,
         JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION,
+        STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 36] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 37] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -2154,6 +2205,10 @@ mod tests {
             36,
             "d6cd2cbb7c422e5738b5e32acea7eb200ccd90ab79a07c363f53f94e8ec9815e",
         ),
+        (
+            37,
+            "0446eff6def9284dc72e231dcd1bec2c7562524a2142044133ea80716c7f9843",
+        ),
     ];
 
     #[test]
@@ -2199,7 +2254,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION
+            STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION
         );
     }
 

@@ -135,6 +135,12 @@ enum Command {
         /// Publish a new generation even when the live source digest is unchanged.
         #[arg(long)]
         force: bool,
+        /// Skip paths matching a glob for this run only, repeatable. A leading
+        /// `!` re-includes a path an earlier exclusion matched. Persist an
+        /// exclusion with the `exclude` array in .cartograph/config.json or a
+        /// .cartographignore file.
+        #[arg(long = "exclude", value_name = "GLOB")]
+        exclude: Vec<String>,
         /// Output format for humans or automation.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -1037,6 +1043,7 @@ struct IndexArguments {
     project_path: PathBuf,
     workers: Option<u16>,
     force: bool,
+    exclude: Vec<String>,
     format: OutputFormat,
     managed_database_port: Option<u16>,
 }
@@ -1269,12 +1276,14 @@ async fn run_index_command(command: Command) -> Result<ExitCode, String> {
             project_path,
             workers,
             force,
+            exclude,
             format,
         } => {
             run_index(IndexArguments {
                 project_path,
                 workers,
                 force,
+                exclude,
                 format,
                 managed_database_port: None,
             })
@@ -2670,6 +2679,7 @@ impl AgentInstallContext {
             project_path: self.project_path.clone(),
             workers: None,
             force: false,
+            exclude: Vec::new(),
             format: self.format,
             managed_database_port: self.managed_database_port,
         })
@@ -3034,6 +3044,7 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
         project_path,
         workers,
         force,
+        exclude,
         format,
         managed_database_port,
     } = arguments;
@@ -3042,7 +3053,9 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
     let runtime = ProjectRuntime::connect(&project_path, &settings)
         .await
         .map_err(|error| error.to_string())?;
-    let mut options = IndexOptions::default().with_force(force);
+    let mut options = IndexOptions::default()
+        .with_force(force)
+        .with_additional_excludes(exclude);
     if let Some(workers) = workers {
         options = options
             .with_max_workers(workers)
@@ -5951,11 +5964,13 @@ mod tests {
                 project_path,
                 workers,
                 force,
+                exclude,
                 format,
             } => {
                 assert_eq!(project_path, PathBuf::from("workspace"));
                 assert_eq!(workers, Some(4));
                 assert!(force);
+                assert!(exclude.is_empty());
                 assert!(matches!(format, OutputFormat::Json));
             }
             _ => panic!("index parsed as the wrong command"),

@@ -73,6 +73,10 @@ pub enum PipelineFailureReason {
     ExtractionOutputLimitExceeded,
     /// Canonical reduction rejected an extracted reference name above the storage bound.
     ReferenceNameTooLong,
+    /// Canonical reduction rejected one bounded field, named by its stable
+    /// storage field identifier so the failure is actionable without bisecting
+    /// the corpus by hand.
+    CanonicalFieldRejected(&'static str),
 }
 
 impl PipelineFailureReason {
@@ -86,13 +90,30 @@ impl PipelineFailureReason {
             Self::ExtractionNestingLimitExceeded => "extraction_nesting_limit_exceeded",
             Self::ExtractionOutputLimitExceeded => "extraction_output_limit_exceeded",
             Self::ReferenceNameTooLong => "reference_name_too_long",
+            Self::CanonicalFieldRejected(_) => "canonical_field_rejected",
+        }
+    }
+
+    /// Stable storage field identifier for a rejected bounded field.
+    #[must_use]
+    pub const fn rejected_field(self) -> Option<&'static str> {
+        match self {
+            Self::CanonicalFieldRejected(field) => Some(field),
+            _ => None,
         }
     }
 }
 
 impl fmt::Display for PipelineFailureReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.write_str(self.as_str())?;
+        // Naming the exact rejected field turns a whole-corpus bisection into a
+        // single run. The identifier is a fixed storage field name, never source
+        // text or a checkout path.
+        match self.rejected_field() {
+            Some(field) => write!(formatter, "({field})"),
+            None => Ok(()),
+        }
     }
 }
 

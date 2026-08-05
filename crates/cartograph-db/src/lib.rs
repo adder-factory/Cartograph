@@ -33,6 +33,7 @@ mod semantic;
 mod sessions;
 mod spill;
 mod storage;
+mod structural_findings;
 mod summary_priority;
 mod v1_import;
 
@@ -185,12 +186,13 @@ pub use sessions::{
     McpToolUsage, McpTraceUsage, NewMcpMacro, NewMcpSession,
 };
 pub use spill::{
-    NativeGenerationExtractedCursor, NativeGenerationExtractedPage, NativeGenerationSpill,
-    NativeGenerationSpillCachedRow, NativeGenerationSpillCanonicalProgress,
-    NativeGenerationSpillCentralityScore, NativeGenerationSpillDigestReport,
-    NativeGenerationSpillExtractedBatch, NativeGenerationSpillExtractedRow,
-    NativeGenerationSpillFactBatch, NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy,
-    NativeGenerationSpillRelation, NativeGenerationSpillReport, NativeGenerationSpillRow,
+    CachedRowPayload, FactBatchInput, NativeGenerationExtractedCursor,
+    NativeGenerationExtractedPage, NativeGenerationSpill, NativeGenerationSpillCachedRow,
+    NativeGenerationSpillCanonicalProgress, NativeGenerationSpillCentralityScore,
+    NativeGenerationSpillDigestReport, NativeGenerationSpillExtractedBatch,
+    NativeGenerationSpillExtractedRow, NativeGenerationSpillFactBatch,
+    NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy, NativeGenerationSpillRelation,
+    NativeGenerationSpillReport, NativeGenerationSpillRequest, NativeGenerationSpillRow,
     NativeGenerationSpillState, NativeGenerationSpillWrite,
 };
 use sqlx_core::{pool::PoolOptions, query::query};
@@ -199,6 +201,7 @@ pub use storage::{
     GenerationDeduplicationAssessment, IndexStorageUsage, ParseCacheStorageUsage,
     StorageTotalsReport, StorageUsageReport, StorageWarning, TableStorageUsage,
 };
+pub use structural_findings::StructuralFindingRefresh;
 pub use summary_priority::{
     SummaryPriorityEnqueueReport, SummaryPriorityFailure, SummaryPriorityQueueStats,
 };

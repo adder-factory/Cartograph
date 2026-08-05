@@ -21,6 +21,9 @@ pub enum ExtractionStrategy {
     ManagedFamily,
     /// Kotlin/Scala/Groovy structural extraction with JVM and dynamic-language semantics.
     JvmDynamicFamily,
+    /// WGSL shader extraction with stage-typed entry points, bindings, and
+    /// `naga_oil` module imports.
+    ShaderFamily,
     /// Grammar-backed conservative structural extraction for the remaining v1 language modes.
     GenericStructural,
     /// Bounded native scanners for custom, mixed-markup, and domain-specific v1 modes.
@@ -41,6 +44,7 @@ impl ExtractionStrategy {
                 | Self::ShellFamily
                 | Self::ManagedFamily
                 | Self::JvmDynamicFamily
+                | Self::ShaderFamily
                 | Self::GenericStructural
                 | Self::CustomStructural
         )
@@ -114,7 +118,9 @@ const fn strategy_for_language(language: SourceLanguage) -> ExtractionStrategy {
         | SourceLanguage::Cpp
         | SourceLanguage::Cuda
         | SourceLanguage::Glsl
-        | SourceLanguage::Hlsl => ExtractionStrategy::CFamily,
+        | SourceLanguage::Hlsl
+        | SourceLanguage::Metal => ExtractionStrategy::CFamily,
+        SourceLanguage::Wgsl => ExtractionStrategy::ShaderFamily,
         SourceLanguage::Bash
         | SourceLanguage::Fish
         | SourceLanguage::PowerShell
@@ -200,6 +206,7 @@ mod tests {
             SourceLanguage::Cuda,
             SourceLanguage::Glsl,
             SourceLanguage::Hlsl,
+            SourceLanguage::Metal,
             SourceLanguage::Bash,
             SourceLanguage::Fish,
             SourceLanguage::PowerShell,

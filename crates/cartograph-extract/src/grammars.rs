@@ -120,11 +120,13 @@ pub enum NativeGrammar {
     VisualBasic,
     /// Represents the verilog native grammar.
     Verilog,
+    /// Represents the wgsl native grammar, including `naga_oil` preprocessor imports.
+    Wgsl,
     /// Represents the yaml native grammar.
     Yaml,
 }
 
-const NATIVE_GRAMMAR_IDS: [&str; 57] = [
+const NATIVE_GRAMMAR_IDS: [&str; 58] = [
     "abap",
     "apex",
     "arkts",
@@ -181,10 +183,11 @@ const NATIVE_GRAMMAR_IDS: [&str; 57] = [
     "typescript",
     "vbnet",
     "verilog",
+    "wgsl",
     "yaml",
 ];
 
-const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 57] = [
+const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 58] = [
     || tree_sitter_abap_sqry::language(),
     || tree_sitter_sfapex::apex::LANGUAGE.into(),
     || tree_sitter_arkts::LANGUAGE.into(),
@@ -241,12 +244,13 @@ const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 57] = [
     || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
     || arborium_vb::language().into(),
     || arborium_verilog::language().into(),
+    || tree_sitter_wgsl_bevy::LANGUAGE.into(),
     || arborium_yaml::language().into(),
 ];
 
 impl NativeGrammar {
     /// Every admitted binding in stable language-id order.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 58] = [
         Self::Abap,
         Self::Apex,
         Self::ArkTs,
@@ -303,6 +307,7 @@ impl NativeGrammar {
         Self::TypeScript,
         Self::VisualBasic,
         Self::Verilog,
+        Self::Wgsl,
         Self::Yaml,
     ];
 
@@ -441,7 +446,9 @@ const fn grammar_group_f(language: SourceLanguage) -> Option<NativeGrammar> {
         SourceLanguage::Tsx => Some(NativeGrammar::Tsx),
         SourceLanguage::TypeScript => Some(NativeGrammar::TypeScript),
         SourceLanguage::VbNet => Some(NativeGrammar::VisualBasic),
+        SourceLanguage::Metal => Some(NativeGrammar::Cpp),
         SourceLanguage::Verilog => Some(NativeGrammar::Verilog),
+        SourceLanguage::Wgsl => Some(NativeGrammar::Wgsl),
         SourceLanguage::Yaml => Some(NativeGrammar::Yaml),
         _ => None,
     }

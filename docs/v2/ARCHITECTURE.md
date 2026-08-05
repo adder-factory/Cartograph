@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-04 (`v2.1.11`)
+Last implementation review: 2026-08-04 (`v2.2.0`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,7 +59,10 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns thirty-six versions. Migration
+The append-only migration ledger currently owns thirty-seven versions. Migration
+37 adds the generation-fenced structural finding relation and its input
+fingerprint, so a readiness probe reads stored findings instead of evaluating
+every detector over a whole generation. Migration
 36 admits generation digest V13 for named TypeScript/JavaScript construction
 targets. Migration 35 retains canonical search-document metadata text for exact
 SQL-streamed V13 digests; migration 34 lets generation spill reference immutable parse-cache
@@ -105,6 +108,7 @@ relations. Core relations:
 | `symbol_similarity_edges/symbol_similarity_builds` | Model-scoped materialized similarity with exact build provenance |
 | `native_parse_cache` | PostgreSQL-backed deterministic parse-result cache |
 | `summary_priority_queue` | Generation/evidence-fenced agent-demand summary priority |
+| `structural_finding_runs/structural_findings` | Generation-fenced detector relation with its exact input fingerprint |
 
 Generation foreign keys cascade only through explicit generation deletion.
 Ordinary indexes support identity/filter joins. BM25 ranking is intentionally

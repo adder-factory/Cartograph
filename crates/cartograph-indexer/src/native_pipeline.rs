@@ -11,9 +11,9 @@ use std::{
 };
 
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationFacts,
-    GenerationMemoryModelError, GenerationValidationError, GenerationValidationLimits,
-    GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
+    CachedRowPayload, CanonicalGenerationFacts, CartographDatabase, EdgeInput, FactBatchInput,
+    FileInput, GenerationFacts, GenerationMemoryModelError, GenerationValidationError,
+    GenerationValidationLimits, GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
     NativeGenerationExtractedCursor, NativeGenerationExtractedPage, NativeGenerationSpill,
     NativeGenerationSpillCachedRow, NativeGenerationSpillCentralityScore,
     NativeGenerationSpillDigestReport, NativeGenerationSpillExtractedBatch,
@@ -21,8 +21,8 @@ use cartograph_db::{
     NativeGenerationSpillFactCounts, NativeGenerationSpillReport, NativeGenerationSpillRow,
     NativeGenerationSpillState, NativeParseCacheEntry, NativeParseCacheKey,
     NativeParseCacheKeyInput, NativeParseCacheRecord, NativeParseCacheWrite, NumericalSiteInput,
-    ReferenceInput, ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, apply_page_rank,
-    apply_sampled_betweenness, validate_generation_facts,
+    ReferenceInput, ReferenceSpanPrecision, SearchDocumentInput, StorageError, SymbolInput,
+    apply_page_rank, apply_sampled_betweenness, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, NormalizedPath, ProjectId,
@@ -33,8 +33,8 @@ use cartograph_extract::{
     CloneTokenCount, CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX,
     DiscoveredSource, DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractError, ExtractedFile,
     ExtractedImportBinding, ExtractedNumericalSite, ExtractedReference, ImportBindingKind,
-    NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceLimits,
-    SourceReadError, SourceReadOptions, SourceRoot, SourceSnapshot,
+    NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceExclusionEvidence,
+    SourceLimits, SourceReadError, SourceReadOptions, SourceRoot, SourceSnapshot,
     TYPE_QUERY_VALUE_RESOLUTION_PREFIX, is_test_source_path, native_extraction_reservation,
     native_extractor_contract_digest, native_read_reservation, substitute_module_alias,
 };
@@ -552,6 +552,8 @@ impl NativePipelineConfigError {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NativePipelineReport {
     discovered_files: u64,
+    excluded_paths: u64,
+    excluded_trees: u64,
     skipped_oversized_files: u64,
     source_bytes: u64,
     symbols: u64,
@@ -658,6 +660,21 @@ impl NativePipelineReport {
     #[must_use]
     pub const fn discovered_files(self) -> u64 {
         self.discovered_files
+    }
+
+    /// Paths a configured exclusion glob or `.cartographignore` pattern skipped.
+    ///
+    /// A partial index must never look complete, so this is reported even when
+    /// the exclusion was exactly what the project asked for.
+    #[must_use]
+    pub const fn excluded_paths(self) -> u64 {
+        self.excluded_paths
+    }
+
+    /// Directory subtrees skipped without being descended into.
+    #[must_use]
+    pub const fn excluded_trees(self) -> u64 {
+        self.excluded_trees
     }
 
     /// Supported files excluded before reads because their observed size exceeded policy.
@@ -986,10 +1003,12 @@ pub async fn build_native_generation_with_scip_and_cache(
         source_root,
         config,
     };
-    let discovered = run_discovery_stage(&stages).await?;
+    let (discovered, exclusions) = run_discovery_stage(&stages).await?;
     let (manifest, skipped_oversized_files) = run_read_stage(&stages, discovered).await?;
     let report_seed = NativePipelineReport {
         discovered_files: usize_to_u64(manifest.entries.len()),
+        excluded_paths: exclusions.excluded_paths(),
+        excluded_trees: exclusions.excluded_trees(),
         skipped_oversized_files,
         source_bytes: manifest.source_bytes,
         ..NativePipelineReport::default()
@@ -1062,17 +1081,26 @@ pub async fn build_native_generation_spilled(
         source_root,
         config,
     };
-    let discovered = run_discovery_stage(&stages).await?;
+    let (discovered, exclusions) = run_discovery_stage(&stages).await?;
     let (manifest, skipped_oversized_files) = run_read_stage(&stages, discovered).await?;
     let report_seed = NativePipelineReport {
         discovered_files: usize_to_u64(manifest.entries.len()),
+        excluded_paths: exclusions.excluded_paths(),
+        excluded_trees: exclusions.excluded_trees(),
         skipped_oversized_files,
         source_bytes: manifest.source_bytes,
         storage: NativeGenerationStorage::PostgreSql,
         ..NativePipelineReport::default()
     };
-    let (extracted, parse_cache) =
-        run_spilled_parse_stage(&stages, manifest.entries, parse_cache, spill).await?;
+    let (extracted, parse_cache) = run_spilled_parse_stage(
+        &stages,
+        SpilledParseStageInputs {
+            manifest: manifest.entries,
+            parse_cache,
+            spill,
+        },
+    )
+    .await?;
     let resolved = run_spilled_resolve_stage(&stages, extracted).await?;
     let spill = resolved.spill;
     let digest = run_spilled_reduce_stage(&stages, spill.clone()).await?;
@@ -1106,7 +1134,7 @@ struct NativeStageContext<'a> {
 
 async fn run_discovery_stage(
     stages: &NativeStageContext<'_>,
-) -> Result<Vec<DiscoveredSource>, NativePipelineError> {
+) -> Result<(Vec<DiscoveredSource>, SourceExclusionEvidence), NativePipelineError> {
     let config = stages.config;
     let reservation = config
         .limits
@@ -1136,7 +1164,7 @@ async fn run_discovery_stage(
                 let (_, _, source_root) = item.into_parts();
                 block_in_place(move || {
                     source_root
-                        .discover_with_cancellation(SourceDiscoveryOptions::new(limits, || {
+                        .discover_with_evidence(SourceDiscoveryOptions::new(limits, || {
                             cancellation.is_cancelled()
                         }))
                         .map_err(|_| StageItemFailure)
@@ -1144,9 +1172,9 @@ async fn run_discovery_stage(
             },
         ),
         StageFold::new(
-            Vec::new(),
-            |discovered: &mut Vec<DiscoveredSource>,
-             output: StageOutput<u8, Vec<DiscoveredSource>>| {
+            (Vec::new(), SourceExclusionEvidence::default()),
+            |discovered: &mut (Vec<DiscoveredSource>, SourceExclusionEvidence),
+             output: StageOutput<u8, (Vec<DiscoveredSource>, SourceExclusionEvidence)>| {
                 let (_, output) = output.into_parts();
                 *discovered = output;
                 Ok(())
@@ -1490,12 +1518,22 @@ fn spilled_parse_envelopes(
     )
 }
 
-async fn run_spilled_parse_stage(
-    stages: &NativeStageContext<'_>,
+/// Manifest, optional parse cache, and spill authority for one parse stage.
+struct SpilledParseStageInputs {
     manifest: Vec<SourceManifestEntry>,
     parse_cache: Option<NativeParseCache>,
     spill: NativeGenerationSpill,
+}
+
+async fn run_spilled_parse_stage(
+    stages: &NativeStageContext<'_>,
+    inputs: SpilledParseStageInputs,
 ) -> Result<(SpilledNativeFacts, NativeParseCacheReport), NativePipelineError> {
+    let SpilledParseStageInputs {
+        manifest,
+        parse_cache,
+        spill,
+    } = inputs;
     let expected_files = usize_to_u64(manifest.len());
     let initial = spill
         .initialize()
@@ -1527,9 +1565,11 @@ async fn run_spilled_parse_stage(
                     let cancellation = item.cancellation();
                     let (sequence, _, batch) = item.into_parts();
                     let result = stream_spilled_parse_batch(
-                        &spill,
-                        &source_root,
-                        parse_cache.as_ref(),
+                        SpilledParseInputs {
+                            spill: &spill,
+                            source_root: &source_root,
+                            parse_cache: parse_cache.as_ref(),
+                        },
                         batch,
                         cancellation,
                     )
@@ -1650,17 +1690,27 @@ impl<'spill> SpilledParseTransaction<'spill> {
         &mut self,
         sequence: u64,
         file_id: &FileId,
-        key: NativeParseCacheKey,
-        payload_digest: ContentDigest,
-        payload_bytes: u64,
+        payload: CachedParsePayload,
     ) -> Result<(), ParseManifestFailure> {
+        let CachedParsePayload {
+            key,
+            payload_digest,
+            payload_bytes,
+        } = payload;
         let sort_key = file_id.as_str().as_bytes().to_vec();
         let row_bytes = usize_to_u64(sort_key.len()).saturating_add(payload_bytes);
         self.prepare_push(sequence, row_bytes).await?;
         self.rows.push(
-            NativeGenerationSpillCachedRow::new(sort_key, key, payload_digest, payload_bytes)
-                .map_err(|error| ParseManifestFailure::from_spill(&error))?
-                .into(),
+            NativeGenerationSpillCachedRow::new(
+                sort_key,
+                CachedRowPayload {
+                    key,
+                    payload_digest,
+                    payload_bytes,
+                },
+            )
+            .map_err(|error| ParseManifestFailure::from_spill(&error))?
+            .into(),
         );
         self.finish_push(row_bytes).await
     }
@@ -1733,7 +1783,12 @@ struct PendingSpilledParseCacheWrite {
 }
 
 impl PendingSpilledParseCacheWrite {
-    fn new(sequence: u64, file_id: FileId, key: NativeParseCacheKey, payload: Vec<u8>) -> Self {
+    fn new(write: ParsedFilePayload, key: NativeParseCacheKey) -> Self {
+        let ParsedFilePayload {
+            sequence,
+            file_id,
+            payload,
+        } = write;
         let payload_digest = ContentDigest::from_bytes(*blake3::hash(&payload).as_bytes());
         Self {
             sequence,
@@ -1759,11 +1814,18 @@ struct SpilledParseBatchContext<'input, 'spill> {
 impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     fn new(
         spill: &'spill NativeGenerationSpill,
-        source_root: &'input SourceRoot,
-        parse_cache: Option<&'input NativeParseCache>,
-        cancellation: &'input StageCancellation,
+        batch: SpilledParseBatchInputs<'input>,
         capacity: usize,
     ) -> Result<Self, ParseManifestFailure> {
+        let SpilledParseBatchInputs {
+            inputs,
+            cancellation,
+        } = batch;
+        let SpilledParseInputs {
+            source_root,
+            parse_cache,
+            ..
+        } = inputs;
         let mut cache_writes = Vec::new();
         cache_writes
             .try_reserve_exact(capacity)
@@ -1787,17 +1849,22 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     async fn process(
         &mut self,
         entry: SpilledParseManifestEntry,
-        key: Option<&NativeParseCacheKey>,
-        cached: Option<NativeParseCacheRecord>,
-        cache_read_failed: bool,
+        lookup: CachedParseLookup<'_>,
     ) -> Result<(), ParseManifestFailure> {
+        let CachedParseLookup {
+            key,
+            cached,
+            cache_read_failed,
+        } = lookup;
         let mut metrics = NativeParseCacheReport::default();
         if let Some((file, payload_digest, payload_bytes)) = self
             .cached_file(
                 &entry.manifest,
-                key,
-                cached,
-                cache_read_failed,
+                CachedParseLookup {
+                    key,
+                    cached,
+                    cache_read_failed,
+                },
                 &mut metrics,
             )
             .await?
@@ -1811,9 +1878,11 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
                 .push_cached(
                     entry.sequence,
                     &file.file_id,
-                    key.clone(),
-                    payload_digest,
-                    payload_bytes,
+                    CachedParsePayload {
+                        key: key.clone(),
+                        payload_digest,
+                        payload_bytes,
+                    },
                 )
                 .await?;
             return Ok(());
@@ -1843,7 +1912,14 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         record_spilled_parse_output(&mut self.output, &file, metrics)?;
         if cacheable {
             return self
-                .queue_cache_write(entry.sequence, file.file_id, key, payload)
+                .queue_cache_write(
+                    ParsedFilePayload {
+                        sequence: entry.sequence,
+                        file_id: file.file_id,
+                        payload,
+                    },
+                    key,
+                )
                 .await;
         }
         self.flush_cache_writes().await?;
@@ -1855,11 +1931,14 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     async fn cached_file(
         &self,
         manifest: &SourceManifestEntry,
-        key: Option<&NativeParseCacheKey>,
-        cached: Option<NativeParseCacheRecord>,
-        cache_read_failed: bool,
+        lookup: CachedParseLookup<'_>,
         metrics: &mut NativeParseCacheReport,
     ) -> Result<Option<(ExtractedFile, ContentDigest, u64)>, ParseManifestFailure> {
+        let CachedParseLookup {
+            key,
+            cached,
+            cache_read_failed,
+        } = lookup;
         let (Some(cache), Some(key)) = (self.parse_cache, key) else {
             return Ok(None);
         };
@@ -1890,11 +1969,14 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
 
     async fn queue_cache_write(
         &mut self,
-        sequence: u64,
-        file_id: FileId,
+        write: ParsedFilePayload,
         key: Option<&NativeParseCacheKey>,
-        payload: Vec<u8>,
     ) -> Result<(), ParseManifestFailure> {
+        let ParsedFilePayload {
+            sequence,
+            file_id,
+            payload,
+        } = write;
         let Some(key) = key else {
             return Err(ParseManifestFailure::unclassified());
         };
@@ -1906,10 +1988,12 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         }
         self.cache_write_bytes = self.cache_write_bytes.saturating_add(payload.len());
         self.cache_writes.push(PendingSpilledParseCacheWrite::new(
-            sequence,
-            file_id,
+            ParsedFilePayload {
+                sequence,
+                file_id,
+                payload,
+            },
             key.clone(),
-            payload,
         ));
         if self.cache_write_bytes >= SPILLED_PARSE_CACHE_WRITE_BYTES {
             self.flush_cache_writes().await?;
@@ -1926,9 +2010,11 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         };
         flush_spilled_parse_cache_writes(
             cache,
-            &mut self.cache_writes,
-            &mut self.cache_write_bytes,
-            &mut self.output.cache,
+            &mut PendingCacheWrites {
+                writes: &mut self.cache_writes,
+                logical_bytes: &mut self.cache_write_bytes,
+                report: &mut self.output.cache,
+            },
             &mut self.transaction,
         )
         .await
@@ -1941,27 +2027,50 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     }
 }
 
+/// Spill authority, source root, and optional parse cache for one batch.
+#[derive(Clone, Copy)]
+struct SpilledParseInputs<'inputs> {
+    spill: &'inputs NativeGenerationSpill,
+    source_root: &'inputs SourceRoot,
+    parse_cache: Option<&'inputs NativeParseCache>,
+}
+
 async fn stream_spilled_parse_batch(
-    spill: &NativeGenerationSpill,
-    source_root: &SourceRoot,
-    parse_cache: Option<&NativeParseCache>,
+    inputs: SpilledParseInputs<'_>,
     batch: SpilledParseManifestBatch,
     cancellation: StageCancellation,
 ) -> Result<SpilledParsedManifestBatch, ParseManifestFailure> {
+    let SpilledParseInputs {
+        spill,
+        source_root,
+        parse_cache,
+    } = inputs;
     let entries = batch.entries;
     let (cache_keys, cached, cache_read_failed) =
         load_spilled_parse_cache(parse_cache, &entries).await;
     let mut context = SpilledParseBatchContext::new(
         spill,
-        source_root,
-        parse_cache,
-        &cancellation,
+        SpilledParseBatchInputs {
+            inputs: SpilledParseInputs {
+                spill,
+                source_root,
+                parse_cache,
+            },
+            cancellation: &cancellation,
+        },
         entries.len(),
     )?;
     for (index, (entry, cached)) in entries.into_iter().zip(cached).enumerate() {
         let key = cache_keys.as_ref().and_then(|keys| keys.get(index));
         context
-            .process(entry, key, cached, cache_read_failed)
+            .process(
+                entry,
+                CachedParseLookup {
+                    key,
+                    cached,
+                    cache_read_failed,
+                },
+            )
             .await?;
     }
     context.finish().await
@@ -2013,19 +2122,29 @@ fn record_spilled_parse_output(
     Ok(())
 }
 
+/// Pending cache writes and the accounting they advance.
+struct PendingCacheWrites<'writes> {
+    writes: &'writes mut Vec<PendingSpilledParseCacheWrite>,
+    logical_bytes: &'writes mut usize,
+    report: &'writes mut NativeParseCacheReport,
+}
+
 async fn flush_spilled_parse_cache_writes(
     cache: &NativeParseCache,
-    writes: &mut Vec<PendingSpilledParseCacheWrite>,
-    logical_bytes: &mut usize,
-    report: &mut NativeParseCacheReport,
+    pending: &mut PendingCacheWrites<'_>,
     transaction: &mut SpilledParseTransaction<'_>,
 ) -> Result<(), ParseManifestFailure> {
+    let PendingCacheWrites {
+        writes,
+        logical_bytes,
+        report,
+    } = pending;
     if writes.is_empty() {
         return Ok(());
     }
-    let pending = take(writes);
+    let pending = take(*writes);
     let pending_rows = usize_to_u64(pending.len());
-    *logical_bytes = 0;
+    **logical_bytes = 0;
     let cache_entries = pending
         .iter()
         .map(|write| NativeParseCacheEntry::new(write.key.clone(), write.payload.clone()))
@@ -2041,9 +2160,11 @@ async fn flush_spilled_parse_cache_writes(
                 .push_cached(
                     write.sequence,
                     &write.file_id,
-                    write.key,
-                    write.payload_digest,
-                    usize_to_u64(write.payload.len()),
+                    CachedParsePayload {
+                        key: write.key,
+                        payload_digest: write.payload_digest,
+                        payload_bytes: usize_to_u64(write.payload.len()),
+                    },
                 )
                 .await?;
         }
@@ -2059,15 +2180,21 @@ async fn flush_spilled_parse_cache_writes(
 }
 
 async fn visit_spilled_native_files<State, Visit>(
-    source: &SpilledNativeFacts,
+    walk: SpilledFileWalk<'_>,
     state: &mut State,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
     mut visit: Visit,
 ) -> Result<(), StageItemFailure>
 where
     Visit: FnMut(&mut State, NativeFileFacts) -> Result<(), StageItemFailure>,
 {
+    let SpilledFileWalk {
+        source,
+        observation:
+            SpilledVisitObservation {
+                cancellation,
+                progress,
+            },
+    } = walk;
     let mut cursor = NativeGenerationExtractedCursor::default();
     let mut expected_sequence = 0_u64;
     loop {
@@ -2542,9 +2669,12 @@ impl<'context> SpilledResolutionFold<'context> {
     fn new(
         spill: &'context NativeGenerationSpill,
         state: &'context mut SpilledResolutionState,
-        cancellation: &'context StageCancellation,
-        progress: &'context StageRunner,
+        observation: SpilledVisitObservation<'context>,
     ) -> Self {
+        let SpilledVisitObservation {
+            cancellation,
+            progress,
+        } = observation;
         Self {
             state,
             transaction: SpilledFactTransaction::new(spill, progress),
@@ -2601,9 +2731,11 @@ impl<'context> SpilledResolutionFold<'context> {
             .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
         }
         let batch = NativeGenerationSpillFactBatch::new(
-            resolved.sequence,
-            resolved.facts,
-            self.state.validation_limits,
+            FactBatchInput {
+                sequence: resolved.sequence,
+                facts: resolved.facts,
+                limits: self.state.validation_limits,
+            },
             || self.cancellation.is_cancelled(),
         )
         .map_err(classify_spill_validation_error)?;
@@ -2662,9 +2794,11 @@ async fn run_spilled_resolve_stage(
                     match resolve_spilled_generation(
                         source,
                         source_root,
-                        config,
-                        &cancellation,
-                        &progress,
+                        SpilledStageContext {
+                            config,
+                            cancellation: &cancellation,
+                            progress: &progress,
+                        },
                     )
                     .await
                     {
@@ -2709,28 +2843,126 @@ async fn run_spilled_resolve_stage(
     }
 }
 
+/// Observation channel for one spilled file walk.
+#[derive(Clone, Copy)]
+struct SpilledVisitObservation<'observation> {
+    cancellation: &'observation StageCancellation,
+    progress: &'observation StageRunner,
+}
+
+/// Language visibility for one resolution-candidate reservation.
+#[derive(Clone, Copy)]
+struct CandidateLanguageVisibility<'visibility> {
+    language: &'visibility str,
+    globally_visible: bool,
+    new_language_bucket: bool,
+}
+
+/// The spilled facts one file walk reads, with its observation channel.
+#[derive(Clone, Copy)]
+struct SpilledFileWalk<'walk> {
+    source: &'walk SpilledNativeFacts,
+    observation: SpilledVisitObservation<'walk>,
+}
+
+/// Batch inputs paired with the cancellation they are observed under.
+#[derive(Clone, Copy)]
+struct SpilledParseBatchInputs<'inputs> {
+    inputs: SpilledParseInputs<'inputs>,
+    cancellation: &'inputs StageCancellation,
+}
+
+/// Resolution index and the budget its growth is charged against.
+struct ResolutionIndexTarget<'target> {
+    index: &'target mut ResolutionIndex,
+    budget: &'target mut ResolveBudget,
+}
+
+/// One parsed file's sequence, identity, and encoded payload.
+struct ParsedFilePayload {
+    sequence: u64,
+    file_id: FileId,
+    payload: Vec<u8>,
+}
+
+/// Working bound and cancellation for one derived-fact pass.
+#[derive(Clone, Copy)]
+struct DerivedFactBound<'bound> {
+    cancellation: &'bound StageCancellation,
+    maximum_bytes: u64,
+}
+
+/// One clone-prefilter histogram with its total token count.
+#[derive(Clone, Copy)]
+struct ClonePrefilter<'prefilter> {
+    buckets: &'prefilter [u32; CLONE_PREFILTER_BUCKETS],
+    total: u32,
+}
+
+/// Cache key and payload accounting for one cached parse result.
+struct CachedParsePayload {
+    key: NativeParseCacheKey,
+    payload_digest: ContentDigest,
+    payload_bytes: u64,
+}
+
+/// Cache lookup outcome for one manifest entry.
+struct CachedParseLookup<'lookup> {
+    key: Option<&'lookup NativeParseCacheKey>,
+    cached: Option<NativeParseCacheRecord>,
+    cache_read_failed: bool,
+}
+
+/// Resolution index, configuration, and cancellation for one file.
+#[derive(Clone, Copy)]
+struct SpilledFileResolution<'resolution> {
+    index: &'resolution ResolutionIndex,
+    config: NativePipelineConfig,
+    cancellation: &'resolution StageCancellation,
+}
+
+/// Clone policy, working bound, and observation channel for one preparation.
+#[derive(Clone, Copy)]
+struct ResolutionPreparationRequest<'request> {
+    policy: NativeClonePolicy,
+    maximum_bytes: u64,
+    cancellation: &'request StageCancellation,
+    progress: &'request StageRunner,
+}
+
+/// Fixed configuration, cancellation, and progress reporting for one spilled stage.
+#[derive(Clone, Copy)]
+struct SpilledStageContext<'context> {
+    config: NativePipelineConfig,
+    cancellation: &'context StageCancellation,
+    progress: &'context StageRunner,
+}
+
 async fn resolve_spilled_generation(
     source: SpilledNativeFacts,
     source_root: SourceRoot,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<SpilledResolutionOutput, ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     if cancellation.is_cancelled() {
         return Err(ResolveGenerationFailure::unclassified());
     }
-    let mut state =
-        initialize_spilled_resolution(&source, &source_root, config, cancellation, progress)
-            .await?;
-    spill_resolved_files(&source, &mut state, config, cancellation, progress).await?;
-    spill_derived_generation_facts(&source, &mut state, config, cancellation, progress).await?;
+    let mut state = initialize_spilled_resolution(&source, &source_root, context).await?;
+    spill_resolved_files(&source, &mut state, context).await?;
+    spill_derived_generation_facts(&source, &mut state, context).await?;
     if state.centrality_enabled {
         apply_spilled_centrality(
             &source.spill,
             &mut state.centrality,
-            config.evidence_policy().centrality,
-            cancellation,
-            progress,
+            SpilledCentralityRequest {
+                policy: config.evidence_policy().centrality,
+                cancellation,
+                progress,
+            },
         )
         .await?;
         state.high_water = state.high_water.max(state.centrality_budget.charged_bytes);
@@ -2751,18 +2983,23 @@ async fn resolve_spilled_generation(
 async fn initialize_spilled_resolution(
     source: &SpilledNativeFacts,
     source_root: &SourceRoot,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<SpilledResolutionState, ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let (clone_evidence, index, preparation_high_water) = build_spilled_resolution_preparation(
         source,
         source_root,
-        config.clone_policy(),
-        maximum_bytes,
-        cancellation,
-        progress,
+        ResolutionPreparationRequest {
+            policy: config.clone_policy(),
+            maximum_bytes,
+            cancellation,
+            progress,
+        },
     )
     .await
     .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
@@ -2795,15 +3032,25 @@ async fn initialize_spilled_resolution(
 async fn spill_resolved_files(
     source: &SpilledNativeFacts,
     state: &mut SpilledResolutionState,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     let mut cursor = NativeGenerationExtractedCursor::default();
     let mut input_sequence = 0_u64;
     let worker_count = config.parallelism.parse_capacity.workers();
     let mut tasks = JoinSet::new();
-    let mut fold = SpilledResolutionFold::new(&source.spill, state, cancellation, progress);
+    let mut fold = SpilledResolutionFold::new(
+        &source.spill,
+        state,
+        SpilledVisitObservation {
+            cancellation,
+            progress,
+        },
+    );
     loop {
         if cancellation.is_cancelled() {
             return Err(ResolveGenerationFailure::unclassified());
@@ -2818,12 +3065,16 @@ async fn spill_resolved_files(
         }
         schedule_spilled_resolution_page(
             &page,
-            &mut input_sequence,
-            worker_count,
-            config,
-            cancellation,
-            &mut tasks,
-            &mut fold,
+            SpilledResolutionSchedule {
+                worker_count,
+                config,
+                cancellation,
+            },
+            &mut SpilledResolutionProgress {
+                input_sequence: &mut input_sequence,
+                tasks: &mut tasks,
+                fold: &mut fold,
+            },
         )
         .await?;
         cursor = page.next();
@@ -2842,17 +3093,38 @@ async fn spill_resolved_files(
     }
 }
 
-async fn schedule_spilled_resolution_page(
-    page: &NativeGenerationExtractedPage,
-    input_sequence: &mut u64,
+/// Fixed per-run scheduling policy for one spilled resolution pass.
+#[derive(Clone, Copy)]
+struct SpilledResolutionSchedule<'schedule> {
     worker_count: usize,
     config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    tasks: &mut JoinSet<Result<ResolvedFileFacts, ResolveGenerationFailure>>,
-    fold: &mut SpilledResolutionFold<'_>,
+    cancellation: &'schedule StageCancellation,
+}
+
+/// Mutable scheduling state advanced across every loaded page.
+struct SpilledResolutionProgress<'progress, 'fold> {
+    input_sequence: &'progress mut u64,
+    tasks: &'progress mut JoinSet<Result<ResolvedFileFacts, ResolveGenerationFailure>>,
+    fold: &'progress mut SpilledResolutionFold<'fold>,
+}
+
+async fn schedule_spilled_resolution_page(
+    page: &NativeGenerationExtractedPage,
+    schedule: SpilledResolutionSchedule<'_>,
+    progress: &mut SpilledResolutionProgress<'_, '_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledResolutionSchedule {
+        worker_count,
+        config,
+        cancellation,
+    } = schedule;
+    let SpilledResolutionProgress {
+        input_sequence,
+        tasks,
+        fold,
+    } = progress;
     for (sequence, row) in page.rows() {
-        require_spilled_resolution_sequence(*sequence, *input_sequence, cancellation)?;
+        require_spilled_resolution_sequence(*sequence, **input_sequence, cancellation)?;
         let extracted = serde_json::from_slice::<ExtractedFile>(row.payload())
             .map_err(|_| ResolveGenerationFailure::unclassified())?;
         let mut file = NativeFileFacts::from_extracted(extracted)
@@ -2863,9 +3135,17 @@ async fn schedule_spilled_resolution_page(
         let worker_cancellation = cancellation.clone();
         let sequence = *sequence;
         tasks.spawn_blocking(move || {
-            resolve_file_facts(sequence, file, index.as_ref(), config, &worker_cancellation)
+            resolve_file_facts(
+                sequence,
+                file,
+                SpilledFileResolution {
+                    index: index.as_ref(),
+                    config,
+                    cancellation: &worker_cancellation,
+                },
+            )
         });
-        *input_sequence = input_sequence
+        **input_sequence = input_sequence
             .checked_add(1)
             .ok_or_else(ResolveGenerationFailure::generation_capacity_exceeded)?;
         if tasks.len() >= worker_count {
@@ -2890,10 +3170,13 @@ fn require_spilled_resolution_sequence(
 fn resolve_file_facts(
     sequence: u64,
     file: NativeFileFacts,
-    index: &ResolutionIndex,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
+    resolution: SpilledFileResolution<'_>,
 ) -> Result<ResolvedFileFacts, ResolveGenerationFailure> {
+    let SpilledFileResolution {
+        index,
+        config,
+        cancellation,
+    } = resolution;
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let mut facts = GenerationFacts::default();
     let mut report = ResolutionReport::default();
@@ -2927,20 +3210,25 @@ fn resolve_file_facts(
 async fn spill_derived_generation_facts(
     source: &SpilledNativeFacts,
     state: &mut SpilledResolutionState,
-    config: NativePipelineConfig,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    context: SpilledStageContext<'_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledStageContext {
+        config,
+        cancellation,
+        progress,
+    } = context;
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let mut derived_sequence = source.files;
-    for derive in [
-        append_spilled_framework_edges as SpilledDerivedFacts,
-        append_spilled_go_edges,
-        append_spilled_reexport_edges,
-        append_spilled_test_edges,
-    ] {
-        let (facts, charged) = derive(&state.index, cancellation, maximum_bytes)
-            .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+    for kind in SpilledDerivedFactKind::ALL {
+        let (facts, charged) = derive_spilled_facts(
+            &state.index,
+            DerivedFactBound {
+                cancellation,
+                maximum_bytes,
+            },
+            kind,
+        )
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
         state.high_water = state.high_water.max(charged);
         if !generation_facts_are_empty(&facts) {
             if state.centrality_enabled {
@@ -2952,9 +3240,11 @@ async fn spill_derived_generation_facts(
                 .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
             }
             let batch = NativeGenerationSpillFactBatch::new(
-                derived_sequence,
-                facts,
-                state.validation_limits,
+                FactBatchInput {
+                    sequence: derived_sequence,
+                    facts,
+                    limits: state.validation_limits,
+                },
                 || cancellation.is_cancelled(),
             )
             .map_err(classify_spill_validation_error)?;
@@ -3041,13 +3331,24 @@ fn append_spilled_centrality_facts(
     Ok(())
 }
 
+/// Centrality policy plus the observation channel for one spilled pass.
+#[derive(Clone, Copy)]
+struct SpilledCentralityRequest<'request> {
+    policy: NativeCentralityPolicy,
+    cancellation: &'request StageCancellation,
+    progress: &'request StageRunner,
+}
+
 async fn apply_spilled_centrality(
     spill: &NativeGenerationSpill,
     facts: &mut GenerationFacts,
-    policy: NativeCentralityPolicy,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    request: SpilledCentralityRequest<'_>,
 ) -> Result<(), ResolveGenerationFailure> {
+    let SpilledCentralityRequest {
+        policy,
+        cancellation,
+        progress,
+    } = request;
     if policy.page_rank {
         let report = apply_page_rank(facts, || cancellation.is_cancelled())
             .map_err(|_| ResolveGenerationFailure::unclassified())?;
@@ -3101,64 +3402,6 @@ async fn apply_spilled_centrality(
     Ok(())
 }
 
-type SpilledDerivedFacts = fn(
-    &ResolutionIndex,
-    &StageCancellation,
-    u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure>;
-
-fn append_spilled_framework_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Framework,
-    )
-}
-
-fn append_spilled_go_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Go,
-    )
-}
-
-fn append_spilled_reexport_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Reexport,
-    )
-}
-
-fn append_spilled_test_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Test,
-    )
-}
-
 #[derive(Clone, Copy)]
 enum SpilledDerivedFactKind {
     Framework,
@@ -3167,12 +3410,20 @@ enum SpilledDerivedFactKind {
     Test,
 }
 
+impl SpilledDerivedFactKind {
+    /// Derived fact kinds in the exact order the resolution stage appends them.
+    const ALL: [Self; 4] = [Self::Framework, Self::Go, Self::Reexport, Self::Test];
+}
+
 fn derive_spilled_facts(
     index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
+    bound: DerivedFactBound<'_>,
     kind: SpilledDerivedFactKind,
 ) -> Result<(GenerationFacts, u64), StageItemFailure> {
+    let DerivedFactBound {
+        cancellation,
+        maximum_bytes,
+    } = bound;
     let working_limit = maximum_bytes
         .checked_mul(RESOLVE_WORKING_MULTIPLIER)
         .ok_or(StageItemFailure)?;
@@ -3275,6 +3526,11 @@ fn classify_spill_validation_error(error: GenerationValidationError) -> ResolveG
         GenerationValidationError::ReferenceNameTooLong => ResolveGenerationFailure {
             reason: Some(PipelineFailureReason::ReferenceNameTooLong),
         },
+        GenerationValidationError::Storage(StorageError::InvalidInput { field }) => {
+            ResolveGenerationFailure {
+                reason: Some(PipelineFailureReason::CanonicalFieldRejected(field)),
+            }
+        }
         GenerationValidationError::Storage(_) | GenerationValidationError::Cancelled => {
             ResolveGenerationFailure::unclassified()
         }
@@ -3577,6 +3833,9 @@ fn generation_validation_failure_reason(
         }
         GenerationValidationError::RetainedLimit => {
             Some(PipelineFailureReason::GenerationCapacityExceeded)
+        }
+        GenerationValidationError::Storage(StorageError::InvalidInput { field }) => {
+            Some(PipelineFailureReason::CanonicalFieldRejected(field))
         }
         GenerationValidationError::Storage(_) | GenerationValidationError::Cancelled => None,
     }
@@ -6481,11 +6740,14 @@ struct SpilledResolutionPreparation {
 async fn build_spilled_resolution_preparation(
     source: &SpilledNativeFacts,
     source_root: &SourceRoot,
-    policy: NativeClonePolicy,
-    maximum_bytes: u64,
-    cancellation: &StageCancellation,
-    progress: &StageRunner,
+    preparation: ResolutionPreparationRequest<'_>,
 ) -> Result<(CloneEvidenceMap, ResolutionIndex, u64), StageItemFailure> {
+    let ResolutionPreparationRequest {
+        policy,
+        maximum_bytes,
+        cancellation,
+        progress,
+    } = preparation;
     let working_limit = maximum_bytes
         .checked_mul(RESOLVE_WORKING_MULTIPLIER)
         .ok_or(StageItemFailure)?;
@@ -6495,10 +6757,14 @@ async fn build_spilled_resolution_preparation(
         budget: ResolveBudget::new(0, working_limit)?,
     };
     visit_spilled_native_files(
-        source,
+        SpilledFileWalk {
+            source,
+            observation: SpilledVisitObservation {
+                cancellation,
+                progress,
+            },
+        },
         &mut preparation,
-        cancellation,
-        progress,
         |state, file| {
             let mut cancelled = || cancellation.is_cancelled();
             index_resolution_file_metadata(ResolutionIndexFileInput {
@@ -6525,16 +6791,22 @@ async fn build_spilled_resolution_preparation(
     )
     .await?;
     visit_spilled_native_files(
-        source,
+        SpilledFileWalk {
+            source,
+            observation: SpilledVisitObservation {
+                cancellation,
+                progress,
+            },
+        },
         &mut preparation,
-        cancellation,
-        progress,
         |state, file| {
             let mut cancelled = || cancellation.is_cancelled();
             index_rust_workspace_package_file(
-                &mut state.index,
+                &mut ResolutionIndexTarget {
+                    index: &mut state.index,
+                    budget: &mut state.budget,
+                },
                 &file,
-                &mut state.budget,
                 &mut cancelled,
             )?;
             index_resolution_file_symbols(ResolutionIndexFileInput {
@@ -6876,10 +7148,14 @@ where
                 break;
             }
             if clone_prefilter_overlap_ppm(
-                &candidates[left_index].prefilter.complete,
-                &candidates[right_index].prefilter.complete,
-                left_total,
-                right_total,
+                ClonePrefilter {
+                    buckets: &candidates[left_index].prefilter.complete,
+                    total: left_total,
+                },
+                ClonePrefilter {
+                    buckets: &candidates[right_index].prefilter.complete,
+                    total: right_total,
+                },
             ) < minimum_overlap_ppm
             {
                 continue;
@@ -7180,12 +7456,9 @@ fn clone_count_prefilter(counts: &[CloneTokenCount]) -> [u32; CLONE_PREFILTER_BU
     buckets
 }
 
-fn clone_prefilter_overlap_ppm(
-    left: &[u32; CLONE_PREFILTER_BUCKETS],
-    right: &[u32; CLONE_PREFILTER_BUCKETS],
-    left_total: u32,
-    right_total: u32,
-) -> u32 {
+fn clone_prefilter_overlap_ppm(left: ClonePrefilter<'_>, right: ClonePrefilter<'_>) -> u32 {
+    let (left_total, right_total) = (left.total, right.total);
+    let (left, right) = (left.buckets, right.buckets);
     let intersection = left
         .iter()
         .zip(right)
@@ -7232,10 +7505,14 @@ fn clone_candidates_semantically_compatible(
                 DUPLICATE_IDENTIFIER_MINIMUM_OVERLAP_PPM
             };
             if clone_prefilter_overlap_ppm(
-                &left.prefilter.identifiers,
-                &right.prefilter.identifiers,
-                left_profile.identifier_tokens(),
-                right_profile.identifier_tokens(),
+                ClonePrefilter {
+                    buckets: &left.prefilter.identifiers,
+                    total: left_profile.identifier_tokens(),
+                },
+                ClonePrefilter {
+                    buckets: &right.prefilter.identifiers,
+                    total: right_profile.identifier_tokens(),
+                },
             ) < minimum_overlap
             {
                 return false;
@@ -8837,20 +9114,24 @@ where
         cancelled,
     } = input;
     for file in &extracted.files {
-        index_rust_workspace_package_file(index, file, budget, cancelled)?;
+        index_rust_workspace_package_file(
+            &mut ResolutionIndexTarget { index, budget },
+            file,
+            cancelled,
+        )?;
     }
     Ok(())
 }
 
 fn index_rust_workspace_package_file<Cancel>(
-    index: &mut ResolutionIndex,
+    target: &mut ResolutionIndexTarget<'_>,
     file: &NativeFileFacts,
-    budget: &mut ResolveBudget,
     cancelled: &mut Cancel,
 ) -> Result<(), StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
+    let ResolutionIndexTarget { index, budget } = target;
     for symbol in &file.symbols {
         if cancelled() {
             return Err(StageItemFailure);
@@ -9459,6 +9740,43 @@ impl<'a> ImportBindingSelection<'a> {
     }
 }
 
+/// Resolution-name classification for one extracted reference.
+///
+/// A resolver prefix decides which lookup a reference gets, so the prefixes are
+/// stripped once here rather than being re-tested through the resolution path.
+struct ReferenceLookup<'reference> {
+    dynamic_dispatch_name: Option<&'reference str>,
+    rust_macro_name: Option<&'reference str>,
+    type_query_value_name: Option<&'reference str>,
+    embedded_sql: Option<EmbeddedSqlLookup<'reference>>,
+    lookup_name: &'reference str,
+}
+
+impl<'reference> ReferenceLookup<'reference> {
+    fn classify(reference: &'reference ExtractedReference) -> Self {
+        let resolution_name = reference.resolution_name.as_deref();
+        let dynamic_dispatch_name =
+            resolution_name.and_then(|name| name.strip_prefix(DYNAMIC_DISPATCH_RESOLUTION_PREFIX));
+        let rust_macro_name =
+            resolution_name.and_then(|name| name.strip_prefix(RUST_MACRO_RESOLUTION_PREFIX));
+        let type_query_value_name =
+            resolution_name.and_then(|name| name.strip_prefix(TYPE_QUERY_VALUE_RESOLUTION_PREFIX));
+        let embedded_sql = embedded_sql_lookup(resolution_name);
+        let lookup_name = dynamic_dispatch_name
+            .or(rust_macro_name)
+            .or(type_query_value_name)
+            .or_else(|| embedded_sql.as_ref().map(|lookup| lookup.table))
+            .unwrap_or_else(|| resolution_name.unwrap_or(&reference.name));
+        Self {
+            dynamic_dispatch_name,
+            rust_macro_name,
+            type_query_value_name,
+            embedded_sql,
+            lookup_name,
+        }
+    }
+}
+
 struct ReferenceAppendRequest<'a, 'b> {
     context: &'a FileResolutionContext<'b>,
     reference: ExtractedReference,
@@ -9657,29 +9975,14 @@ impl ResolutionOutput<'_> {
         Cancel: FnMut() -> bool,
     {
         let ReferenceAppendRequest { context, reference } = request;
-        let dynamic_dispatch_name = reference
-            .resolution_name
-            .as_deref()
-            .and_then(|name| name.strip_prefix(DYNAMIC_DISPATCH_RESOLUTION_PREFIX));
-        let rust_macro_name = reference
-            .resolution_name
-            .as_deref()
-            .and_then(|name| name.strip_prefix(RUST_MACRO_RESOLUTION_PREFIX));
-        let type_query_value_name = reference
-            .resolution_name
-            .as_deref()
-            .and_then(|name| name.strip_prefix(TYPE_QUERY_VALUE_RESOLUTION_PREFIX));
-        let embedded_sql = embedded_sql_lookup(reference.resolution_name.as_deref());
-        let lookup_name = dynamic_dispatch_name
-            .or(rust_macro_name)
-            .or(type_query_value_name)
-            .or_else(|| embedded_sql.as_ref().map(|lookup| lookup.table))
-            .unwrap_or_else(|| {
-                reference
-                    .resolution_name
-                    .as_deref()
-                    .unwrap_or(&reference.name)
-            });
+        let lookup = ReferenceLookup::classify(&reference);
+        let ReferenceLookup {
+            dynamic_dispatch_name,
+            rust_macro_name,
+            type_query_value_name,
+            embedded_sql,
+            lookup_name,
+        } = lookup;
         let import_bindings = import_binding_scratch.select(context.import_bindings, lookup_name);
         let mut resolution = if rust_macro_name.is_some() {
             ReferenceResolution::unresolved(RUST_MACRO_UNRESOLVED_PROVENANCE)
@@ -9712,19 +10015,7 @@ impl ResolutionOutput<'_> {
             target.confidence = DYNAMIC_DISPATCH_CONFIDENCE;
             target.provenance = DYNAMIC_DISPATCH_PROVENANCE;
         }
-        if resolution.target.is_some() {
-            self.report.resolved = self
-                .report
-                .resolved
-                .checked_add(1)
-                .ok_or(StageItemFailure)?;
-        } else {
-            self.report.unresolved = self
-                .report
-                .unresolved
-                .checked_add(1)
-                .ok_or(StageItemFailure)?;
-        }
+        self.count_resolution(resolution.target.is_some())?;
         let source_symbol_id = reference
             .owner
             .clone()
@@ -9750,6 +10041,17 @@ impl ResolutionOutput<'_> {
                 reference,
                 resolution,
             }));
+        Ok(())
+    }
+
+    /// Record exactly one resolved or unresolved reference outcome.
+    fn count_resolution(&mut self, resolved: bool) -> Result<(), StageItemFailure> {
+        let counter = if resolved {
+            &mut self.report.resolved
+        } else {
+            &mut self.report.unresolved
+        };
+        *counter = counter.checked_add(1).ok_or(StageItemFailure)?;
         Ok(())
     }
 
@@ -10232,7 +10534,14 @@ fn reserve_candidate_insertion(
             .try_reserve(1)
             .map_err(|_| StageItemFailure)?;
     }
-    reserve_candidate_project_index(bucket, language, globally_visible, new_language_bucket)?;
+    reserve_candidate_project_index(
+        bucket,
+        CandidateLanguageVisibility {
+            language,
+            globally_visible,
+            new_language_bucket,
+        },
+    )?;
     Ok(CandidateReservation {
         candidate_index,
         new_file_range,
@@ -10274,10 +10583,13 @@ fn candidate_reservation_bytes(
 
 fn reserve_candidate_project_index(
     bucket: &mut ResolutionCandidateBucket,
-    language: &str,
-    globally_visible: bool,
-    new_language_bucket: bool,
+    reservation: CandidateLanguageVisibility<'_>,
 ) -> Result<(), StageItemFailure> {
+    let CandidateLanguageVisibility {
+        language,
+        globally_visible,
+        new_language_bucket,
+    } = reservation;
     if globally_visible {
         return bucket
             .globally_visible
@@ -15182,7 +15494,7 @@ mod tests {
     async fn parse_project_through_native_stages(
         stages: &NativeStageContext<'_>,
     ) -> NativeFactAccumulator {
-        let discovered = run_discovery_stage(stages)
+        let (discovered, _) = run_discovery_stage(stages)
             .await
             .unwrap_or_else(|error| panic!("discovery failed: {error}"));
         let (manifest, _) = run_read_stage(stages, discovered)
@@ -18946,10 +19258,14 @@ export function secondClone(value: number) {
             },
         );
         let prefiltered = clone_prefilter_overlap_ppm(
-            &clone_count_prefilter(&left),
-            &clone_count_prefilter(&right),
-            10,
-            10,
+            ClonePrefilter {
+                buckets: &clone_count_prefilter(&left),
+                total: 10,
+            },
+            ClonePrefilter {
+                buckets: &clone_count_prefilter(&right),
+                total: 10,
+            },
         );
         assert_eq!(exact, 200_000);
         assert_eq!(prefiltered, 400_000);
@@ -18958,10 +19274,14 @@ export function secondClone(value: number) {
         let disjoint = [CloneTokenCount(0xf000_0000_0000_0001, 10)];
         assert_eq!(
             clone_prefilter_overlap_ppm(
-                &clone_count_prefilter(&left),
-                &clone_count_prefilter(&disjoint),
-                10,
-                10,
+                ClonePrefilter {
+                    buckets: &clone_count_prefilter(&left),
+                    total: 10,
+                },
+                ClonePrefilter {
+                    buckets: &clone_count_prefilter(&disjoint),
+                    total: 10,
+                },
             ),
             0
         );
@@ -19308,15 +19628,45 @@ export function secondClone(value: number) {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pipeline_rejects_storage_oversized_names_and_signatures_before_returning() {
+        // A synthesized name past its bound is shortened rather than fatal, so
+        // one ordinary construct cannot cost the whole index (issue #119).
         let long_name = "n".repeat(2_049);
-        assert_storage_boundary_rejection(format!("export function {long_name}(): void {{}}\n"))
+        assert_oversized_name_is_shortened(format!("export function {long_name}(): void {{}}\n"))
             .await;
 
+        // A field with no safe shortening still fails, and now names itself.
         let long_type = "T".repeat(65_537);
         assert_storage_boundary_rejection(format!(
             "export function bounded(value: {long_type}): void {{}}\n"
         ))
         .await;
+    }
+
+    async fn assert_oversized_name_is_shortened(source: String) {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create storage-boundary fixture: {error}"));
+        assert!(fs::write(directory.path().join("oversized.ts"), source).is_ok());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open storage-boundary fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let generation = build_native_generation(&runner, source_root, config(SERIAL_WORKERS))
+            .await
+            .unwrap_or_else(|error| panic!("an over-long name must not be fatal: {error}"));
+        assert!(
+            generation
+                .facts
+                .symbols()
+                .iter()
+                .all(|symbol| symbol.qualified_name.len() <= 2_048),
+            "every stored qualified name must fit the canonical bound"
+        );
+        drop(cancellation);
+        let report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(report.all_joined);
+        assert!(!report.worker_failed);
     }
 
     async fn assert_storage_boundary_rejection(source: String) {
@@ -19328,10 +19678,15 @@ export function secondClone(value: number) {
         let (runner, tasks, cancellation) =
             test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
         let result = build_native_generation(&runner, source_root, config(SERIAL_WORKERS)).await;
-        assert!(matches!(
-            result,
-            Err(NativePipelineError::Validation { reason: None })
-        ));
+        let Err(NativePipelineError::Validation { reason }) = result else {
+            panic!("a source past a storage boundary must fail canonical validation");
+        };
+        // Naming the rejected field is what turns a whole-corpus bisection into
+        // a single run (issue #118).
+        assert!(
+            reason.is_some_and(|reason| reason.rejected_field().is_some()),
+            "a rejected bounded field must be named, not reported as a bare stage failure"
+        );
         drop(cancellation);
         let report = tasks
             .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
@@ -19341,7 +19696,7 @@ export function secondClone(value: number) {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pipeline_allowlists_oversized_reference_reason_without_retaining_source_text() {
+    async fn oversized_reference_names_are_shortened_without_retaining_source_text() {
         let directory = tempdir()
             .unwrap_or_else(|error| panic!("could not create reference-boundary fixture: {error}"));
         let long_target = "reference_target_".repeat(300);
@@ -19352,17 +19707,25 @@ export function secondClone(value: number) {
         let (runner, tasks, cancellation) =
             test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
         let result = build_native_generation(&runner, source_root, config(SERIAL_WORKERS)).await;
-        let Err(error) = result else {
-            panic!("oversized reference unexpectedly produced a generation");
-        };
-        assert_eq!(error.stage(), PipelineStage::Reduce);
-        assert_eq!(
-            error.reason(),
-            Some(PipelineFailureReason::ReferenceNameTooLong)
+        let facts = result.unwrap_or_else(|error| {
+            panic!("one over-long synthesized name must not discard the generation: {error}")
+        });
+        assert!(
+            facts
+                .facts
+                .references()
+                .iter()
+                .all(|reference| reference.reference_name.len() <= 4_096),
+            "every stored reference name must fit the canonical bound"
         );
-        let rendered = format!("{error:?} {error}");
-        assert!(!rendered.contains(&long_target));
-        assert!(!rendered.contains(&directory.path().to_string_lossy().to_string()));
+        assert!(
+            !facts
+                .facts
+                .references()
+                .iter()
+                .any(|reference| reference.reference_name == long_target),
+            "the unbounded original name must not be stored verbatim"
+        );
         drop(cancellation);
         let report = tasks
             .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
@@ -19395,7 +19758,7 @@ export function secondClone(value: number) {
             source_root,
             config: config(SERIAL_WORKERS),
         };
-        let discovered = match run_discovery_stage(&stages).await {
+        let (discovered, _) = match run_discovery_stage(&stages).await {
             Ok(discovered) => discovered,
             Err(error) => panic!("discovery failed: {error}"),
         };

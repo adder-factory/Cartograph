@@ -311,6 +311,26 @@ impl GenerationDigestVersion {
     /// Current digest contract emitted by this Cartograph v2 binary.
     pub const CURRENT: Self = Self::V13;
 
+    /// Every admitted contract version in ascending order.
+    ///
+    /// A new version is added here and nowhere else; validation walks this list
+    /// rather than repeating one guarded arm per version.
+    pub const ALL: [Self; 13] = [
+        Self::V1,
+        Self::V2,
+        Self::V3,
+        Self::V4,
+        Self::V5,
+        Self::V6,
+        Self::V7,
+        Self::V8,
+        Self::V9,
+        Self::V10,
+        Self::V11,
+        Self::V12,
+        Self::V13,
+    ];
+
     /// Stable PostgreSQL `smallint` representation.
     #[must_use]
     pub const fn database_value(self) -> i16 {
@@ -324,22 +344,15 @@ impl GenerationDigestVersion {
     /// Returns [`InvalidGenerationDigestVersion`] when `value` does not name a
     /// supported digest contract.
     pub const fn from_database_value(value: i16) -> Result<Self, InvalidGenerationDigestVersion> {
-        match value {
-            candidate if candidate == Self::V1.database_value() => Ok(Self::V1),
-            candidate if candidate == Self::V2.database_value() => Ok(Self::V2),
-            candidate if candidate == Self::V3.database_value() => Ok(Self::V3),
-            candidate if candidate == Self::V4.database_value() => Ok(Self::V4),
-            candidate if candidate == Self::V5.database_value() => Ok(Self::V5),
-            candidate if candidate == Self::V6.database_value() => Ok(Self::V6),
-            candidate if candidate == Self::V7.database_value() => Ok(Self::V7),
-            candidate if candidate == Self::V8.database_value() => Ok(Self::V8),
-            candidate if candidate == Self::V9.database_value() => Ok(Self::V9),
-            candidate if candidate == Self::V10.database_value() => Ok(Self::V10),
-            candidate if candidate == Self::V11.database_value() => Ok(Self::V11),
-            candidate if candidate == Self::V12.database_value() => Ok(Self::V12),
-            candidate if candidate == Self::V13.database_value() => Ok(Self::V13),
-            _ => Err(InvalidGenerationDigestVersion),
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            let candidate = Self::ALL[index];
+            if candidate.database_value() == value {
+                return Ok(candidate);
+            }
+            index += 1;
         }
+        Err(InvalidGenerationDigestVersion)
     }
 }
 

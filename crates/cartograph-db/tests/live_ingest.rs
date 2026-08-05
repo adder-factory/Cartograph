@@ -10,11 +10,12 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationContents,
-    GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
-    LeaseRequest, LeaseTarget, NativeGenerationExtractedCursor, NativeGenerationSpill,
-    NativeGenerationSpillCachedRow, NativeGenerationSpillExtractedBatch,
-    NativeGenerationSpillFactBatch, NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy,
+    CachedRowPayload, CanonicalGenerationFacts, CartographDatabase, EdgeInput, FactBatchInput,
+    FileInput, GenerationContents, GenerationFacts, GenerationRecoveryRequest,
+    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget,
+    NativeGenerationExtractedCursor, NativeGenerationSpill, NativeGenerationSpillCachedRow,
+    NativeGenerationSpillExtractedBatch, NativeGenerationSpillFactBatch,
+    NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy, NativeGenerationSpillRequest,
     NativeGenerationSpillRow, NativeGenerationSpillState, NativeGenerationSpillWrite,
     NativeParseCacheBatchWrite, NativeParseCacheEntry, NativeParseCacheKey,
     NativeParseCacheKeyInput, NewGeneration, NewProject, NumericalSiteInput,
@@ -152,14 +153,16 @@ async fn assert_expired_lease_rolls_back_canonical_cursor(fixture: &DatabaseFixt
     )
     .unwrap_or_else(|error| panic!("cursor fixture limits were invalid: {error}"));
     let batch = NativeGenerationSpillFactBatch::new(
-        0,
-        GenerationFacts {
-            files: vec![file_one()],
-            symbols: vec![symbol_one()],
-            documents: vec![document_one(false)],
-            ..GenerationFacts::default()
+        FactBatchInput {
+            sequence: 0,
+            facts: GenerationFacts {
+                files: vec![file_one()],
+                symbols: vec![symbol_one()],
+                documents: vec![document_one(false)],
+                ..GenerationFacts::default()
+            },
+            limits,
         },
-        limits,
         || false,
     )
     .unwrap_or_else(|error| panic!("cursor fixture fact batch was invalid: {error}"));
@@ -341,8 +344,15 @@ async fn assert_spill_partition_rejects_missing_edge_target(fixture: &DatabaseFi
         TEST_VALIDATION_WORKING_BYTES,
     )
     .unwrap_or_else(|error| panic!("invalid-relation limits were invalid: {error}"));
-    let batch = NativeGenerationSpillFactBatch::new(0, facts, limits, || false)
-        .unwrap_or_else(|error| panic!("cross-batch relation was rejected too early: {error}"));
+    let batch = NativeGenerationSpillFactBatch::new(
+        FactBatchInput {
+            sequence: 0,
+            facts,
+            limits,
+        },
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("cross-batch relation was rejected too early: {error}"));
     let counts = batch.counts();
     run.spill
         .append_fact_batch(batch)
@@ -399,26 +409,30 @@ async fn assert_spill_partition_rejects_conflicting_document(fixture: &DatabaseF
     )
     .unwrap_or_else(|error| panic!("document-conflict limits were invalid: {error}"));
     let first = NativeGenerationSpillFactBatch::new(
-        0,
-        GenerationFacts {
-            files: vec![file_one()],
-            symbols: vec![symbol_one()],
-            documents: vec![document_one(false)],
-            ..GenerationFacts::default()
+        FactBatchInput {
+            sequence: 0,
+            facts: GenerationFacts {
+                files: vec![file_one()],
+                symbols: vec![symbol_one()],
+                documents: vec![document_one(false)],
+                ..GenerationFacts::default()
+            },
+            limits,
         },
-        limits,
         || false,
     )
     .unwrap_or_else(|error| panic!("first document-conflict batch was invalid: {error}"));
     let mut conflicting_document = document_one(false);
     conflicting_document.natural_text.push_str(" conflicting");
     let second = NativeGenerationSpillFactBatch::new(
-        1,
-        GenerationFacts {
-            documents: vec![conflicting_document],
-            ..GenerationFacts::default()
+        FactBatchInput {
+            sequence: 1,
+            facts: GenerationFacts {
+                documents: vec![conflicting_document],
+                ..GenerationFacts::default()
+            },
+            limits,
         },
-        limits,
         || false,
     )
     .unwrap_or_else(|error| panic!("second document-conflict batch was invalid: {error}"));
@@ -573,9 +587,11 @@ async fn begin_spill_test(fixture: &DatabaseFixture) -> SpillTestRun {
     let spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &staged,
-        lease.fence(),
-        policy,
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: lease.fence(),
+            policy,
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("spill authority was invalid: {error}"));
     let report = spill
@@ -618,9 +634,11 @@ async fn cached_extracted_spill_batch(
     let payload_digest = ContentDigest::from_bytes(*blake3::hash(&payload).as_bytes());
     let row = NativeGenerationSpillCachedRow::new(
         vec![2],
-        key,
-        payload_digest,
-        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        CachedRowPayload {
+            key,
+            payload_digest,
+            payload_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        },
     )
     .unwrap_or_else(|error| panic!("cached extracted row was invalid: {error}"));
     NativeGenerationSpillExtractedBatch::new(1, vec![row.into()])
@@ -655,9 +673,11 @@ async fn representation_independent_batches(
         .unwrap_or_else(|error| panic!("inline replay row was invalid: {error}"));
     let cached = NativeGenerationSpillCachedRow::new(
         vec![sort_key],
-        key,
-        ContentDigest::from_bytes(*blake3::hash(payload).as_bytes()),
-        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        CachedRowPayload {
+            key,
+            payload_digest: ContentDigest::from_bytes(*blake3::hash(payload).as_bytes()),
+            payload_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        },
     )
     .unwrap_or_else(|error| panic!("cached replay row was invalid: {error}"));
     (
@@ -738,9 +758,11 @@ async fn exercise_spill_parse_resume(fixture: &DatabaseFixture, run: &mut SpillT
     run.spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &run.staged,
-        run.lease.fence(),
-        run.policy,
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: run.lease.fence(),
+            policy: run.policy,
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("resumed parse authority was invalid: {error}"));
     let resumed = run
@@ -821,11 +843,25 @@ async fn exercise_spill_fact_resume(
     .unwrap_or_else(|error| panic!("spill validation limits were invalid: {error}"));
     let expected = canonical(generation_facts(false));
     let (first_facts, second_facts) = spill_fact_partitions();
-    let first = NativeGenerationSpillFactBatch::new(1, first_facts, limits, || false)
-        .unwrap_or_else(|error| panic!("fact spill batch was invalid: {error}"));
+    let first = NativeGenerationSpillFactBatch::new(
+        FactBatchInput {
+            sequence: 1,
+            facts: first_facts,
+            limits,
+        },
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("fact spill batch was invalid: {error}"));
     let first_counts = first.counts();
-    let second = NativeGenerationSpillFactBatch::new(2, second_facts, limits, || false)
-        .unwrap_or_else(|error| panic!("second fact spill batch was invalid: {error}"));
+    let second = NativeGenerationSpillFactBatch::new(
+        FactBatchInput {
+            sequence: 2,
+            facts: second_facts,
+            limits,
+        },
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("second fact spill batch was invalid: {error}"));
     let counts = combined_fact_counts(first_counts, second.counts());
     assert_eq!(
         run.spill
@@ -838,10 +874,24 @@ async fn exercise_spill_fact_resume(
         ]
     );
     let (first_retry_facts, second_retry_facts) = spill_fact_partitions();
-    let first_retry = NativeGenerationSpillFactBatch::new(1, first_retry_facts, limits, || false)
-        .unwrap_or_else(|error| panic!("retry fact spill batch was invalid: {error}"));
-    let second_retry = NativeGenerationSpillFactBatch::new(2, second_retry_facts, limits, || false)
-        .unwrap_or_else(|error| panic!("second retry fact spill batch was invalid: {error}"));
+    let first_retry = NativeGenerationSpillFactBatch::new(
+        FactBatchInput {
+            sequence: 1,
+            facts: first_retry_facts,
+            limits,
+        },
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("retry fact spill batch was invalid: {error}"));
+    let second_retry = NativeGenerationSpillFactBatch::new(
+        FactBatchInput {
+            sequence: 2,
+            facts: second_retry_facts,
+            limits,
+        },
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("second retry fact spill batch was invalid: {error}"));
     assert_eq!(
         run.spill
             .append_fact_batches(vec![first_retry, second_retry])
@@ -867,9 +917,11 @@ async fn exercise_spill_fact_resume(
     run.spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &run.staged,
-        run.lease.fence(),
-        run.policy,
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: run.lease.fence(),
+            policy: run.policy,
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("resumed reduction authority was invalid: {error}"));
     assert_spill_resume_replay(&run.spill, limits).await;
@@ -890,8 +942,15 @@ async fn assert_spill_resume_replay(
         .await
         .unwrap_or_else(|error| panic!("resumed parse seal was not idempotent: {error}"));
     let (retry_facts, _) = spill_fact_partitions();
-    let retry = NativeGenerationSpillFactBatch::new(1, retry_facts, limits, || false)
-        .unwrap_or_else(|error| panic!("sealed fact retry was invalid: {error}"));
+    let retry = NativeGenerationSpillFactBatch::new(
+        FactBatchInput {
+            sequence: 1,
+            facts: retry_facts,
+            limits,
+        },
+        || false,
+    )
+    .unwrap_or_else(|error| panic!("sealed fact retry was invalid: {error}"));
     assert_eq!(
         spill
             .append_fact_batch(retry)
@@ -1004,10 +1063,12 @@ async fn assert_spill_quota_and_fence(fixture: &DatabaseFixture) {
     let spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &staged,
-        lease.fence(),
-        NativeGenerationSpillPolicy::new(1, 1)
-            .unwrap_or_else(|error| panic!("quota policy was invalid: {error}")),
-        TEST_LEASE_DURATION,
+        NativeGenerationSpillRequest {
+            fence: lease.fence(),
+            policy: NativeGenerationSpillPolicy::new(1, 1)
+                .unwrap_or_else(|error| panic!("quota policy was invalid: {error}")),
+            statement_timeout: TEST_LEASE_DURATION,
+        },
     )
     .unwrap_or_else(|error| panic!("quota authority was invalid: {error}"));
     spill

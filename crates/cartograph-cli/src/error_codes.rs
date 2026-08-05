@@ -1,22 +1,123 @@
 use cartograph_agent::{PipelineFailureReason, PipelineStage, ProjectError};
 
-pub(crate) const fn pipeline_stage_failure_code(stage: PipelineStage) -> &'static str {
-    match stage {
-        PipelineStage::Discover => "discover_failed",
-        PipelineStage::Read => "read_failed",
-        PipelineStage::Parse => "parse_failed",
-        PipelineStage::Resolve => "resolve_failed",
-        PipelineStage::Overlay => "overlay_failed",
-        PipelineStage::Reduce => "reduce_failed",
-        PipelineStage::Copy => "copy_failed",
-        PipelineStage::RelationalMerge => "relational_merge_failed",
-        PipelineStage::Bm25 => "bm25_failed",
-        PipelineStage::Vector => "vector_failed",
-        PipelineStage::Publish => "publication_failed",
-    }
+/// Stable machine-readable codes one pipeline stage can report.
+struct StageCodes {
+    failed: &'static str,
+    deadline_exceeded: &'static str,
+    progress_stalled: &'static str,
 }
 
-pub(crate) const fn pipeline_failure_reason_code(
+/// Every stage's code family in one place, so a new stage cannot be added to
+/// one lookup and forgotten in another.
+const STAGE_CODES: [(PipelineStage, StageCodes); 11] = [
+    (
+        PipelineStage::Discover,
+        StageCodes {
+            failed: "discover_failed",
+            deadline_exceeded: "discover_deadline_exceeded",
+            progress_stalled: "discover_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Read,
+        StageCodes {
+            failed: "read_failed",
+            deadline_exceeded: "read_deadline_exceeded",
+            progress_stalled: "read_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Parse,
+        StageCodes {
+            failed: "parse_failed",
+            deadline_exceeded: "parse_deadline_exceeded",
+            progress_stalled: "parse_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Resolve,
+        StageCodes {
+            failed: "resolve_failed",
+            deadline_exceeded: "resolve_deadline_exceeded",
+            progress_stalled: "resolve_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Overlay,
+        StageCodes {
+            failed: "overlay_failed",
+            deadline_exceeded: "overlay_deadline_exceeded",
+            progress_stalled: "overlay_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Reduce,
+        StageCodes {
+            failed: "reduce_failed",
+            deadline_exceeded: "reduce_deadline_exceeded",
+            progress_stalled: "reduce_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Copy,
+        StageCodes {
+            failed: "copy_failed",
+            deadline_exceeded: "copy_deadline_exceeded",
+            progress_stalled: "copy_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::RelationalMerge,
+        StageCodes {
+            failed: "relational_merge_failed",
+            deadline_exceeded: "relational_merge_deadline_exceeded",
+            progress_stalled: "relational_merge_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Bm25,
+        StageCodes {
+            failed: "bm25_failed",
+            deadline_exceeded: "bm25_deadline_exceeded",
+            progress_stalled: "bm25_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Vector,
+        StageCodes {
+            failed: "vector_failed",
+            deadline_exceeded: "vector_deadline_exceeded",
+            progress_stalled: "vector_progress_stalled",
+        },
+    ),
+    (
+        PipelineStage::Publish,
+        StageCodes {
+            failed: "publication_failed",
+            deadline_exceeded: "publication_deadline_exceeded",
+            progress_stalled: "publication_progress_stalled",
+        },
+    ),
+];
+
+const fn stage_codes(stage: PipelineStage) -> &'static StageCodes {
+    let mut index = 0;
+    while index < STAGE_CODES.len() {
+        let (candidate, ref codes) = STAGE_CODES[index];
+        if candidate as u8 == stage as u8 {
+            return codes;
+        }
+        index += 1;
+    }
+    // Every stage is listed above; the table is exhaustive by construction.
+    &STAGE_CODES[0].1
+}
+
+const fn pipeline_stage_failure_code(stage: PipelineStage) -> &'static str {
+    stage_codes(stage).failed
+}
+
+const fn pipeline_failure_reason_code(
     stage: PipelineStage,
     reason: PipelineFailureReason,
 ) -> &'static str {
@@ -41,11 +142,18 @@ pub(crate) const fn pipeline_failure_reason_code(
         (PipelineStage::Reduce, PipelineFailureReason::ReferenceNameTooLong) => {
             "reduce_reference_name_too_long"
         }
+        (PipelineStage::Reduce, PipelineFailureReason::CanonicalFieldRejected(_)) => {
+            "reduce_canonical_field_rejected"
+        }
         _ => pipeline_stage_failure_code(stage),
     }
 }
 
-pub(crate) const fn project_index_failure_code(error: ProjectError) -> Option<&'static str> {
+/// Stable code for a failure of the index pipeline itself.
+///
+/// Callers layer their own surface-specific arms on top; the shared indexing
+/// vocabulary lives here so the CLI and the MCP admin surface cannot drift.
+pub(crate) const fn index_stage_failure_code(error: ProjectError) -> Option<&'static str> {
     match error {
         ProjectError::BeginGenerationFailed => Some("generation_start_failed"),
         ProjectError::SourceScanFailed => Some("source_scan_failed"),
@@ -58,8 +166,14 @@ pub(crate) const fn project_index_failure_code(error: ProjectError) -> Option<&'
         ProjectError::IndexPublicationFailed => Some("publication_failed"),
         ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
         ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
-        ProjectError::RequestCancelled => Some("request_cancelled"),
         _ => None,
+    }
+}
+
+pub(crate) const fn project_index_failure_code(error: ProjectError) -> Option<&'static str> {
+    match error {
+        ProjectError::RequestCancelled => Some("request_cancelled"),
+        other => index_stage_failure_code(other),
     }
 }
 
@@ -71,35 +185,11 @@ pub(crate) fn direct_index_failure_message(error: ProjectError) -> String {
 }
 
 const fn pipeline_deadline_code(stage: PipelineStage) -> &'static str {
-    match stage {
-        PipelineStage::Discover => "discover_deadline_exceeded",
-        PipelineStage::Read => "read_deadline_exceeded",
-        PipelineStage::Parse => "parse_deadline_exceeded",
-        PipelineStage::Resolve => "resolve_deadline_exceeded",
-        PipelineStage::Overlay => "overlay_deadline_exceeded",
-        PipelineStage::Reduce => "reduce_deadline_exceeded",
-        PipelineStage::Copy => "copy_deadline_exceeded",
-        PipelineStage::RelationalMerge => "relational_merge_deadline_exceeded",
-        PipelineStage::Bm25 => "bm25_deadline_exceeded",
-        PipelineStage::Vector => "vector_deadline_exceeded",
-        PipelineStage::Publish => "publication_deadline_exceeded",
-    }
+    stage_codes(stage).deadline_exceeded
 }
 
 const fn pipeline_progress_stalled_code(stage: PipelineStage) -> &'static str {
-    match stage {
-        PipelineStage::Discover => "discover_progress_stalled",
-        PipelineStage::Read => "read_progress_stalled",
-        PipelineStage::Parse => "parse_progress_stalled",
-        PipelineStage::Resolve => "resolve_progress_stalled",
-        PipelineStage::Overlay => "overlay_progress_stalled",
-        PipelineStage::Reduce => "reduce_progress_stalled",
-        PipelineStage::Copy => "copy_progress_stalled",
-        PipelineStage::RelationalMerge => "relational_merge_progress_stalled",
-        PipelineStage::Bm25 => "bm25_progress_stalled",
-        PipelineStage::Vector => "vector_progress_stalled",
-        PipelineStage::Publish => "publication_progress_stalled",
-    }
+    stage_codes(stage).progress_stalled
 }
 
 #[cfg(test)]

@@ -14,12 +14,38 @@ game-scripting modes. The
 implementation is divided into:
 
 - JavaScript/TypeScript, Rust/Python/Go, query-tag, C-family, shell, managed,
-  JVM-dynamic, and conservative grammar-backed structural walkers;
+  JVM-dynamic, shader, and conservative grammar-backed structural walkers;
 - parser-only structural file documents for CSS, embedded templates, JSDoc,
   JSON/Jupyter, and regex sources;
 - bounded custom scanners for Aura, BG3 Anubis/resources/stats, Liquid, Osiris,
   properties, Svelte, TOML, VB6, Visualforce, Vue, MyBatis XML, and the
   [researched game-scripting inventory](GAME-SCRIPTING-LANGUAGES.md).
+
+### GPU and shader sources
+
+Shaders are where a large share of a renderer's logic lives, and they are
+exactly the code that is hardest to navigate by text search. CUDA, GLSL, and
+HLSL parse through the C-family walker, and Metal reuses the same slice because
+its shading language is C++-based. WGSL has its own slice covering:
+
+- functions, structs and struct members, module-scope `var`/`override`
+  bindings, and type aliases;
+- entry points typed by pipeline stage, so a `@vertex`, `@fragment`, or
+  `@compute` function is a public boundary reachable from host code rather than
+  an ordinary internal function;
+- intra-file calls and declared-type edges, so callers/callees and impact work
+  inside a shader;
+- `naga_oil` `#define_import_path` and `#import module::path`, which form the
+  shader module graph.
+
+Two boundaries are explicit rather than silently absent. The pinned grammar
+accepts `#import module::path` but not the quoted-file form, so a quoted import
+yields a recoverable diagnostic and a partial parse instead of a file that looks
+successfully empty. And `@group`/`@binding` indices are not spelled into a
+signature, because a literal-bearing signature is rejected before persistence
+and would blank the declared type with it; a binding's declared type is carried
+as a typed reference edge. Correlating those indices with a host-side layout
+entry needs a structured channel and is not yet implemented.
 
 Unknown extensions are excluded by discovery and rejected when explicitly read.
 They do not produce a misleading “successful empty graph.” The v1 PostgreSQL
@@ -92,10 +118,22 @@ The walker emits:
 
 Immediately invoked Rust closures have no stable declaration target, so their
 source bodies are never retained as named call references. Calls inside the
-closure remain ordinary typed evidence. If another extracted reference still
-violates the canonical storage bound, reduction returns the allowlisted
-`reference_name_too_long` reason without rendering the name, source, project
-path, database URL, or driver text.
+closure remain ordinary typed evidence.
+
+A synthesized qualified or reference name that exceeds its canonical storage
+bound is shortened rather than fatal: one ordinary construct — a long method
+chain, or a re-export group naming a module's whole public surface — must never
+cost the whole index. The shortened form keeps a prefix cut on a character
+boundary, a `~` marker, and a digest of the exact original name, so it is
+deterministic across re-extraction and keeps distinct originals distinct. The
+file then carries a `canonical_name_truncated` diagnostic, so a shortened
+identity is never mistaken for the complete one.
+
+A bounded field with no safe shortening still fails canonical reduction, and the
+failure now names the exact rejected storage field —
+`canonical_field_rejected(<field>)` — without rendering the name, source,
+project path, database URL, or driver text. Naming the field is what turns a
+whole-corpus bisection into a single run.
 
 The same stable-target rule applies to immediately invoked Go function
 literals and Python lambdas. For an oversized Go call expression,

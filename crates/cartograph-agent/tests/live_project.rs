@@ -18,11 +18,11 @@ use cartograph_agent::{
     FileSourceOptions, FileSourceRequest, GenerationRetentionStatus, HistoryIndexOptions,
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
     IndexOptions, IndexReport, LcovLoadOptions, NativeGenerationStorageMetrics,
-    PipelineFailureReason, PipelineStage, ProjectCancellation, ProjectError, ProjectRuntime,
-    RenamePlanError, RenamePlanOptions, RenamePlanRequest, RetrievalClientRequest,
-    RetrievalOptions, RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportLimits,
-    ScipImportRequest, SourceContextOptions, SourceContextRequest, SourceSearchOptions,
-    TestEvidenceOptions, WorkingTreeOverlayRequest, judge_dead_code_candidates,
+    ProjectCancellation, ProjectError, ProjectRuntime, RenamePlanError, RenamePlanOptions,
+    RenamePlanRequest, RetrievalClientRequest, RetrievalOptions, RetrievalRequest, ReviewOptions,
+    ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceContextOptions,
+    SourceContextRequest, SourceSearchOptions, TestEvidenceOptions, WorkingTreeOverlayRequest,
+    judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
@@ -31,9 +31,9 @@ use cartograph_db::{
     FileTestImpactQuery, GroupedPathInput, GroupedSymbolQuery, InterchangeSnapshotRequest,
     IssueAttributionKind, IssueCommitSymbolPeerQuery, LeaseOwner, LeaseRequest, LeaseTarget,
     NativeParseCacheKey, NativeParseCacheKeyInput, SearchQuery, SemanticStorageError,
-    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
-    StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort, SymbolCoverageQuery,
-    SymbolIssuePeerQuery, SymbolIssueQuery,
+    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingRefresh,
+    StructuralFindingSeverity, StructuralHotspotCategory, StructuralHotspotQuery,
+    StructuralHotspotSort, SymbolCoverageQuery, SymbolIssuePeerQuery, SymbolIssueQuery,
 };
 use cartograph_domain::{
     ContentDigest, EdgeKind, GenerationDigestVersion, ModelId, NormalizedPath, ProjectOperation,
@@ -245,6 +245,7 @@ async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention()
             let runtime = ProjectRuntime::connect(project.path(), &settings)
                 .await
                 .unwrap_or_else(|error| panic!("contending runtime connect failed: {error}"));
+            let options = options.clone();
             tasks.push(tokio::spawn(async move {
                 let indexed = runtime.index(options).await;
                 (runtime, indexed)
@@ -282,7 +283,7 @@ async fn independent_runtimes_terminalize_pre_lease_losers_and_bound_retention()
             .await
             .unwrap_or_else(|error| panic!("multi-runtime blocker lease did not release: {error}"));
         let published = coordinator
-            .index(options)
+            .index(options.clone())
             .await
             .unwrap_or_else(|error| panic!("multi-runtime recovery index failed: {error}"));
         assert!(published.published);
@@ -454,7 +455,7 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             .with_max_workers(4)
             .unwrap_or_else(|error| panic!("incremental worker options failed: {error}"))
             .with_history_refresh(false);
-        let first = initial_incremental_index(&runtime, options).await;
+        let first = initial_incremental_index(&runtime, options.clone()).await;
         let changed_contract = assert_incremental_cache_contract(&runtime, &first, &source).await;
 
         assert_incremental_contract_upgrade(
@@ -463,13 +464,18 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
             &schema,
             &first,
             &changed_contract,
-            options,
+            options.clone(),
         )
         .await;
 
-        let recovered =
-            assert_incremental_corruption_recovery(&runtime, &settings, &schema, &source, options)
-                .await;
+        let recovered = assert_incremental_corruption_recovery(
+            &runtime,
+            &settings,
+            &schema,
+            &source,
+            options.clone(),
+        )
+        .await;
         assert_forced_incremental_rebuild(&runtime, options, &recovered).await;
         runtime.close().await;
     }
@@ -574,7 +580,7 @@ async fn assert_incremental_contract_upgrade(
     options: IndexOptions,
 ) {
     let unchanged = runtime
-        .index(options)
+        .index(options.clone())
         .await
         .unwrap_or_else(|error| panic!("incremental no-op failed: {error}"));
     assert!(!unchanged.published);
@@ -615,7 +621,7 @@ async fn assert_incremental_contract_upgrade(
         .unwrap_or_else(|error| panic!("stale-contract status failed: {error}"));
     assert!(!stale.fresh);
     let upgraded = runtime
-        .index(options)
+        .index(options.clone())
         .await
         .unwrap_or_else(|error| panic!("contract-upgrade index failed: {error}"));
     assert!(upgraded.published);
@@ -654,7 +660,7 @@ async fn assert_incremental_corruption_recovery(
     )
     .unwrap_or_else(|error| panic!("incremental service edit failed: {error}"));
     let changed = runtime
-        .index(options)
+        .index(options.clone())
         .await
         .unwrap_or_else(|error| panic!("one-file incremental index failed: {error}"));
     let metrics = changed
@@ -2443,6 +2449,145 @@ fn assert_clone_class_findings(findings: &[serde_json::Value]) {
     }
 }
 
+/// The readiness probe must never evaluate the detector cascade, and the stored
+/// relation must agree exactly with a live evaluation, recompute when any input
+/// fingerprint moves, and stay put when nothing changed.
+/// Coverage feeds `low_coverage` and the centrality percentile per symbol, so an
+/// import must move the input fingerprint. A re-import can redistribute hit
+/// lines between symbols while leaving project-wide totals identical, so an
+/// aggregate alone cannot fence this input.
+async fn assert_coverage_moves_the_finding_fingerprint(
+    database: &cartograph_db::CartographDatabase,
+    indexed: &IndexReport,
+    settings: &DatabaseSettings,
+    schema: &str,
+) {
+    let pool = cartograph_db::connect(settings)
+        .await
+        .unwrap_or_else(|error| panic!("coverage fixture connection failed: {error}"));
+    let coverage_rows = query(AssertSqlSafe(format!(
+        r#"INSERT INTO "{schema}"."coverage_sources" (
+                project_id, label, report_format, report_digest
+            )
+            VALUES (CAST($1 AS uuid), 'fingerprint-fixture', 'lcov', repeat('a', 64))"#
+    )))
+    .bind(indexed.project_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("coverage source insert failed: {error}"))
+    .rows_affected();
+    assert_eq!(coverage_rows, 1);
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("coverage-change refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed,
+        "an imported coverage report must move the input fingerprint"
+    );
+    let rewritten = query(AssertSqlSafe(format!(
+        r#"UPDATE "{schema}"."coverage_sources"
+            SET report_digest = repeat('b', 64)
+            WHERE project_id = CAST($1 AS uuid)
+              AND label = 'fingerprint-fixture'"#
+    )))
+    .bind(indexed.project_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("coverage digest rewrite failed: {error}"))
+    .rows_affected();
+    pool.close().await;
+    assert_eq!(rewritten, 1);
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("re-import refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed,
+        "a coverage re-import must move the fingerprint even when totals are unchanged"
+    );
+}
+
+async fn assert_structural_finding_cache(
+    runtime: &ProjectRuntime,
+    indexed: &IndexReport,
+    settings: &DatabaseSettings,
+    schema: &str,
+) {
+    let database = runtime.database();
+    assert!(
+        database
+            .cached_current_structural_finding_stats(&indexed.project_id)
+            .await
+            .unwrap_or_else(|error| panic!("uncomputed cache read failed: {error}"))
+            .is_none(),
+        "readiness must report pending before the relation is computed"
+    );
+
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("first finding refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed
+    );
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("idempotent finding refresh failed: {error}")),
+        StructuralFindingRefresh::Current,
+        "an unchanged fingerprint must not recompute the relation"
+    );
+
+    let cached = database
+        .cached_current_structural_finding_stats(&indexed.project_id)
+        .await
+        .unwrap_or_else(|error| panic!("computed cache read failed: {error}"))
+        .unwrap_or_else(|| panic!("computed relation must be readable"));
+    let evaluated = database
+        .current_structural_finding_stats_bounded(&indexed.project_id, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|error| panic!("live finding evaluation failed: {error}"));
+    assert_eq!(
+        serde_json::to_value(&cached).ok(),
+        serde_json::to_value(&evaluated).ok(),
+        "stored findings must equal a live evaluation of the same generation"
+    );
+    assert!(
+        cached.total_findings() > 0,
+        "the fixture corpus must produce findings"
+    );
+
+    assert_coverage_moves_the_finding_fingerprint(database, indexed, settings, schema).await;
+
+    // A detector-contract change must invalidate a warm relation; otherwise a
+    // shipped rule change keeps serving findings the rules no longer produce.
+    let pool = cartograph_db::connect(settings)
+        .await
+        .unwrap_or_else(|error| panic!("cache fixture connection failed: {error}"));
+    let updated = query(AssertSqlSafe(format!(
+        r#"UPDATE "{schema}"."structural_finding_runs"
+            SET inputs_digest = repeat('0', 64)
+            WHERE project_id = CAST($1 AS uuid)"#
+    )))
+    .bind(indexed.project_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("cache fingerprint rewrite failed: {error}"))
+    .rows_affected();
+    pool.close().await;
+    assert_eq!(updated, 1);
+    assert_eq!(
+        database
+            .refresh_current_structural_findings(&indexed.project_id, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|error| panic!("stale fingerprint refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed,
+        "a moved input fingerprint must force a recomputation"
+    );
+}
+
 async fn assert_structural_finding_queries(runtime: &ProjectRuntime, indexed: &IndexReport) {
     let query = StructuralFindingQuery::new(10)
         .and_then(|query| query.with_finding(Some("dynamic_eval")))
@@ -2555,6 +2700,7 @@ async fn workspace_dependency_audit_combines_manifests_graph_scripts_and_dynamic
         assert_layer_analysis(&runtime, &indexed).await;
         assert_file_analysis(&runtime, &indexed).await;
         assert_dead_code_judgement(&runtime, &indexed).await;
+        assert_structural_finding_cache(&runtime, &indexed, &settings, &schema).await;
         let findings = structural_findings_json(&runtime, &indexed).await;
         assert_structural_finding_inventory(&findings);
         assert_structural_finding_queries(&runtime, &indexed).await;
@@ -3507,12 +3653,14 @@ async fn file_drift_distinguishes_content_hash_from_mtime_threshold_semantics() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
-async fn closure_indexing_succeeds_and_reference_bound_failures_preserve_current_generation() {
+async fn oversized_synthesized_names_shorten_and_fatal_stages_preserve_the_generation() {
     let (schema, settings, project) = live_project_fixture("8");
     let source_path = project.path().join("repro.rs");
+    // A single ordinary construct used to synthesize a name past the canonical
+    // storage bound and discard the whole generation (issues #118 and #119).
     let long_target = "reference_target_".repeat(300);
-    let invalid_source = format!("pub fn trigger() {{ {long_target}(); }}\n");
-    std::fs::write(&source_path, &invalid_source)
+    let oversized_source = format!("pub fn trigger() {{ {long_target}(); }}\n");
+    std::fs::write(&source_path, &oversized_source)
         .unwrap_or_else(|error| panic!("reference-bound fixture failed: {error}"));
 
     {
@@ -3522,46 +3670,58 @@ async fn closure_indexing_succeeds_and_reference_bound_failures_preserve_current
         let options = IndexOptions::default()
             .with_force(true)
             .with_history_refresh(false);
-        let first_failure = runtime.index(options).await;
-        assert_eq!(
-            first_failure,
-            Err(ProjectError::IndexStageFailedWithReason {
-                stage: PipelineStage::Reduce,
-                reason: PipelineFailureReason::ReferenceNameTooLong,
-            })
-        );
-        let empty_status = runtime
-            .status()
+        let shortened = runtime
+            .index(options.clone())
             .await
-            .unwrap_or_else(|error| panic!("empty-generation status failed: {error}"));
+            .unwrap_or_else(|error| panic!("oversized reference name must still publish: {error}"));
         assert!(
-            empty_status
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.current.is_none())
+            shortened.published,
+            "one over-long synthesized name must never discard the generation"
         );
 
-        let payload = "x".repeat(5_000);
-        let closure_source = format!(
-            "pub fn synthetic_trigger() -> usize {{\n    (|| {{\n        let payload = \"{payload}\";\n        payload.len()\n    }})()\n}}\n"
-        );
-        std::fs::write(&source_path, closure_source)
-            .unwrap_or_else(|error| panic!("closure fixture failed: {error}"));
-        let published = runtime
-            .index(options)
+        // The stored name is bounded, deterministic, and marked as shortened.
+        let pool = cartograph_db::connect(&settings)
             .await
-            .unwrap_or_else(|error| panic!("closure index failed: {error}"));
-        assert!(published.published);
+            .unwrap_or_else(|error| panic!("shortened-name connection failed: {error}"));
+        let widest: i64 = query(AssertSqlSafe(format!(
+            r#"SELECT COALESCE(MAX(octet_length(reference_name)), 0)::bigint
+                FROM "{schema}"."references"
+                WHERE project_id = CAST($1 AS uuid)"#
+        )))
+        .bind(shortened.project_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .and_then(|row| row.try_get::<i64, _>(0))
+        .unwrap_or_else(|error| panic!("shortened-name probe failed: {error}"));
+        pool.close().await;
+        assert!(
+            widest > 0 && widest <= 4_096,
+            "stored reference names must fit the canonical bound, saw {widest}"
+        );
 
-        std::fs::write(&source_path, &invalid_source)
-            .unwrap_or_else(|error| panic!("second reference-bound fixture failed: {error}"));
-        let second_failure = runtime.index(options).await;
-        assert_eq!(
-            second_failure,
-            Err(ProjectError::IndexStageFailedWithReason {
-                stage: PipelineStage::Reduce,
-                reason: PipelineFailureReason::ReferenceNameTooLong,
-            })
+        let published_generation = shortened.generation_id.clone();
+
+        // A genuinely fatal stage must still leave the published generation visible.
+        let deep = format!(
+            "pub fn nested() {{{}{}}}\n",
+            "{ ".repeat(400),
+            "} ".repeat(400)
+        );
+        std::fs::write(&source_path, deep)
+            .unwrap_or_else(|error| panic!("nesting fixture failed: {error}"));
+        let fatal = runtime.index(options).await;
+        assert!(
+            fatal.is_err(),
+            "a source past the defensive nesting ceiling must fail the generation"
+        );
+        let rendered = match fatal {
+            Err(error) => error.to_string(),
+            Ok(_) => unreachable!("checked above"),
+        };
+        assert!(
+            !rendered.contains(&long_target)
+                && !rendered.contains(&project.path().to_string_lossy().to_string()),
+            "a failure must never render source text or a checkout path"
         );
         let retained = runtime
             .status()
@@ -3572,15 +3732,9 @@ async fn closure_indexing_succeeds_and_reference_bound_failures_preserve_current
                 .snapshot
                 .and_then(|snapshot| snapshot.current)
                 .map(|current| current.generation_id),
-            Some(published.generation_id)
+            Some(published_generation),
+            "a failed index must leave the previous generation visible"
         );
-        let rendered = match second_failure {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("second oversized reference unexpectedly indexed"),
-        };
-        assert!(rendered.contains("reduce/reference_name_too_long"));
-        assert!(!rendered.contains(&long_target));
-        assert!(!rendered.contains(&project.path().to_string_lossy().to_string()));
         runtime.close().await;
     }
     drop_schema(&settings, &schema).await;
@@ -3611,7 +3765,7 @@ async fn profiled_index_skips_oversized_sources_without_weakening_the_published_
             .with_profile(true)
             .with_history_refresh(false);
         let first = runtime
-            .index(options)
+            .index(options.clone())
             .await
             .unwrap_or_else(|error| panic!("profile index failed: {error}"));
         let first_json = serde_json::to_value(&first)

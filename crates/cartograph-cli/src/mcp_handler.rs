@@ -98,7 +98,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::auto_sync::{AutoSyncError, AutoSyncStatus, ProjectAutoSync};
 use crate::byte_format::format_binary_bytes;
-use crate::error_codes::{pipeline_failure_reason_code, pipeline_stage_failure_code};
+use crate::error_codes::index_stage_failure_code;
 use crate::host::{
     DiagnosticLocation, HostInspectionError, ProjectDiscoveryRequest, detect_install_targets,
     discover_projects,
@@ -2826,36 +2826,85 @@ const fn admin_job_reason_failure(
     }
 }
 
-const fn admin_job_progress_stalled_failure(stage: PipelineStage) -> AdminJobFailure {
-    match stage {
-        PipelineStage::Discover => AdminJobFailure::DiscoverProgressStalled,
-        PipelineStage::Read => AdminJobFailure::ReadProgressStalled,
-        PipelineStage::Parse => AdminJobFailure::ParseProgressStalled,
-        PipelineStage::Resolve => AdminJobFailure::ResolveProgressStalled,
-        PipelineStage::Overlay => AdminJobFailure::OverlayProgressStalled,
-        PipelineStage::Reduce => AdminJobFailure::ReduceProgressStalled,
-        PipelineStage::Copy => AdminJobFailure::CopyProgressStalled,
-        PipelineStage::RelationalMerge => AdminJobFailure::RelationalMergeProgressStalled,
-        PipelineStage::Bm25 => AdminJobFailure::Bm25ProgressStalled,
-        PipelineStage::Vector => AdminJobFailure::VectorProgressStalled,
-        PipelineStage::Publish => AdminJobFailure::PublicationProgressStalled,
+/// Every stage's admin-job failure pair in one place, so a new stage cannot be
+/// added to one lookup and forgotten in the other.
+const ADMIN_JOB_STAGE_FAILURES: [(PipelineStage, AdminJobFailure, AdminJobFailure); 11] = [
+    (
+        PipelineStage::Discover,
+        AdminJobFailure::DiscoverFailed,
+        AdminJobFailure::DiscoverProgressStalled,
+    ),
+    (
+        PipelineStage::Read,
+        AdminJobFailure::ReadFailed,
+        AdminJobFailure::ReadProgressStalled,
+    ),
+    (
+        PipelineStage::Parse,
+        AdminJobFailure::ParseFailed,
+        AdminJobFailure::ParseProgressStalled,
+    ),
+    (
+        PipelineStage::Resolve,
+        AdminJobFailure::ResolveFailed,
+        AdminJobFailure::ResolveProgressStalled,
+    ),
+    (
+        PipelineStage::Overlay,
+        AdminJobFailure::OverlayFailed,
+        AdminJobFailure::OverlayProgressStalled,
+    ),
+    (
+        PipelineStage::Reduce,
+        AdminJobFailure::ReduceFailed,
+        AdminJobFailure::ReduceProgressStalled,
+    ),
+    (
+        PipelineStage::Copy,
+        AdminJobFailure::CopyFailed,
+        AdminJobFailure::CopyProgressStalled,
+    ),
+    (
+        PipelineStage::RelationalMerge,
+        AdminJobFailure::RelationalMergeFailed,
+        AdminJobFailure::RelationalMergeProgressStalled,
+    ),
+    (
+        PipelineStage::Bm25,
+        AdminJobFailure::Bm25Failed,
+        AdminJobFailure::Bm25ProgressStalled,
+    ),
+    (
+        PipelineStage::Vector,
+        AdminJobFailure::VectorFailed,
+        AdminJobFailure::VectorProgressStalled,
+    ),
+    (
+        PipelineStage::Publish,
+        AdminJobFailure::PublicationFailed,
+        AdminJobFailure::PublicationProgressStalled,
+    ),
+];
+
+const fn admin_job_stage_entry(stage: PipelineStage) -> (AdminJobFailure, AdminJobFailure) {
+    let mut index = 0;
+    while index < ADMIN_JOB_STAGE_FAILURES.len() {
+        let (candidate, failed, stalled) = ADMIN_JOB_STAGE_FAILURES[index];
+        if candidate as u8 == stage as u8 {
+            return (failed, stalled);
+        }
+        index += 1;
     }
+    // The table above is exhaustive over PipelineStage by construction.
+    (ADMIN_JOB_STAGE_FAILURES[0].1, ADMIN_JOB_STAGE_FAILURES[0].2)
+}
+
+const fn admin_job_progress_stalled_failure(stage: PipelineStage) -> AdminJobFailure {
+    admin_job_stage_entry(stage).1
 }
 
 const fn admin_job_stage_failure(stage: PipelineStage) -> AdminJobFailure {
-    match stage {
-        PipelineStage::Discover => AdminJobFailure::DiscoverFailed,
-        PipelineStage::Read => AdminJobFailure::ReadFailed,
-        PipelineStage::Parse => AdminJobFailure::ParseFailed,
-        PipelineStage::Resolve => AdminJobFailure::ResolveFailed,
-        PipelineStage::Overlay => AdminJobFailure::OverlayFailed,
-        PipelineStage::Reduce => AdminJobFailure::ReduceFailed,
-        PipelineStage::Copy => AdminJobFailure::CopyFailed,
-        PipelineStage::RelationalMerge => AdminJobFailure::RelationalMergeFailed,
-        PipelineStage::Bm25 => AdminJobFailure::Bm25Failed,
-        PipelineStage::Vector => AdminJobFailure::VectorFailed,
-        PipelineStage::Publish => AdminJobFailure::PublicationFailed,
-    }
+    admin_job_stage_entry(stage).0
 }
 
 const fn project_purge_error(error: &ProjectPurgeError) -> ProjectError {
@@ -2881,7 +2930,7 @@ fn project_llm_overview(project_root: &std::path::Path) -> Result<Vec<Value>, To
         ProjectLlmTier::Reranker,
     ] {
         if let Some(config) =
-            load_project_llm_tier(project_root, tier).map_err(|error| project_llm_error(&error))?
+            load_project_llm_tier(project_root, tier).map_err(project_llm_error)?
         {
             configured.push(json!({
                 "tier": tier,
@@ -2930,24 +2979,23 @@ fn configured_llm_input(config: ConfiguredLlmInput<'_>) -> Result<ProjectLlmTier
         concurrency,
         clear_credentials,
     } = config;
-    let mut input = ProjectLlmTierInput::new(tier, endpoint, model)
-        .map_err(|error| project_llm_error(&error))?;
+    let mut input = ProjectLlmTierInput::new(tier, endpoint, model).map_err(project_llm_error)?;
     if let Some(api_key_env) = api_key_env {
         input = input
             .with_api_key_env(api_key_env)
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     } else if clear_credentials {
         input = input.without_credentials();
     }
     if let Some(timeout_ms) = timeout_ms {
         input = input
             .with_timeout_ms(timeout_ms)
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     }
     if let Some(concurrency) = concurrency {
         input = input
             .with_concurrency(concurrency)
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     }
     Ok(input)
 }
@@ -2960,12 +3008,12 @@ fn tune_provider_input(
     if let Some(timeout_ms) = timeout_ms {
         input = input
             .with_timeout_ms(timeout_ms)
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     }
     if let Some(concurrency) = concurrency {
         input = input
             .with_concurrency(concurrency)
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     }
     Ok(input)
 }
@@ -3000,7 +3048,7 @@ fn hybrid_claude_bridge_inputs(
         ProjectLlmTierInput::claude_bridge(ProjectLlmTier::Summarize, "claude-haiku-4-5")
             .and_then(|input| input.with_ask_model("claude-sonnet-4-6"))
             .and_then(|input| input.with_summary_batch_size(3))
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     let chat = [
         (ProjectLlmTier::Local, "claude-sonnet-4-6"),
         (ProjectLlmTier::Ask, "claude-sonnet-4-6"),
@@ -3009,7 +3057,7 @@ fn hybrid_claude_bridge_inputs(
     .into_iter()
     .map(|(tier, model)| {
         ProjectLlmTierInput::claude_bridge(tier, model)
-            .map_err(|error| project_llm_error(&error))
+            .map_err(project_llm_error)
             .and_then(|input| tune_provider_input(input, timeout_ms, concurrency))
     })
     .collect::<Result<Vec<_>, _>>()?;
@@ -3045,12 +3093,12 @@ fn hybrid_anthropic_inputs(
         concurrency,
     } = request;
     let make = |tier, model| -> Result<ProjectLlmTierInput, ToolError> {
-        let mut input = ProjectLlmTierInput::anthropic_api(tier, model)
-            .map_err(|error| project_llm_error(&error))?;
+        let mut input =
+            ProjectLlmTierInput::anthropic_api(tier, model).map_err(project_llm_error)?;
         if let Some(api_key_env) = api_key_env {
             input = input
                 .with_api_key_env(api_key_env)
-                .map_err(|error| project_llm_error(&error))?;
+                .map_err(project_llm_error)?;
         }
         tune_provider_input(input, timeout_ms, concurrency)
     };
@@ -3059,7 +3107,7 @@ fn hybrid_anthropic_inputs(
         make(ProjectLlmTier::Summarize, "claude-haiku-4-5")?
             .with_ask_model("claude-sonnet-4-6")
             .and_then(|input| input.with_summary_batch_size(3))
-            .map_err(|error| project_llm_error(&error))?,
+            .map_err(project_llm_error)?,
     );
     inputs.push(make(ProjectLlmTier::Local, "claude-sonnet-4-6")?);
     inputs.push(make(ProjectLlmTier::Ask, "claude-sonnet-4-6")?);
@@ -3230,7 +3278,7 @@ async fn detect_llm_endpoints() -> Result<Vec<Value>, ToolError> {
     let mut detected = Vec::new();
     while let Some(result) = tasks.join_next().await {
         let (label, endpoint, probe) = result.map_err(|_| ToolError::internal())?;
-        let probe = probe.map_err(|error| project_llm_error(&error))?;
+        let probe = probe.map_err(project_llm_error)?;
         if probe.reachable {
             detected.push(json!({
                 "label": label,
@@ -3265,7 +3313,7 @@ fn required_llm_tiers_missing(root: &Path) -> Result<BTreeSet<ProjectLlmTier>, T
     let mut missing = BTreeSet::new();
     for tier in [ProjectLlmTier::Embedding] {
         if load_project_llm_tier(root, tier)
-            .map_err(|error| project_llm_error(&error))?
+            .map_err(project_llm_error)?
             .is_none()
         {
             missing.insert(tier);
@@ -3355,8 +3403,7 @@ fn configured_summary_limit(limit: ProjectSummaryEagerLimit) -> SummarySweepLimi
 }
 
 fn project_summary_policy(project_root: &Path) -> Result<SummaryCandidatePolicy, ToolError> {
-    let settings =
-        load_project_summary_settings(project_root).map_err(|error| project_llm_error(&error))?;
+    let settings = load_project_summary_settings(project_root).map_err(project_llm_error)?;
     SummaryCandidatePolicy::new(
         settings.minimum_body_lines(),
         settings.minimum_body_lines_by_kind().clone(),
@@ -3631,7 +3678,7 @@ fn parse_admin_database_settings(
     Ok(Some(settings.with_require_ssl(require_ssl)))
 }
 
-fn project_llm_error(error: &ProjectLlmConfigError) -> ToolError {
+fn project_llm_error(error: ProjectLlmConfigError) -> ToolError {
     match error {
         ProjectLlmConfigError::InvalidConfig | ProjectLlmConfigError::InvalidTier => {
             invalid_arguments()
@@ -4794,7 +4841,7 @@ impl HistoryTools<'_> {
             current_project_for_evidence(self, cancellation.clone(), allow_stale).await?;
         let source_settings =
             load_project_source_settings(self.runtime.project_root_for_host_operations())
-                .map_err(|error| project_llm_error(&error))?;
+                .map_err(project_llm_error)?;
         let execution = HistoryExecution {
             arguments: &arguments,
             cancellation,
@@ -6252,7 +6299,7 @@ impl FindSourceTools<'_> {
         let query = parse_source_reference_query(arguments, axis)?;
         let source_settings =
             load_project_source_settings(self.runtime.project_root_for_host_operations())
-                .map_err(|error| project_llm_error(&error))?;
+                .map_err(project_llm_error)?;
         if !source_reference_enabled(&source_settings, axis)? {
             return fresh_json_result(
                 freshness,
@@ -7977,7 +8024,7 @@ impl InsightTools<'_> {
             current_project_for_evidence(self, cancellation, allow_stale).await?;
         let source_settings =
             load_project_source_settings(self.runtime.project_root_for_host_operations())
-                .map_err(|error| project_llm_error(&error))?;
+                .map_err(project_llm_error)?;
         if !source_settings.enable_biomarkers() {
             let evidence = json!({
                 "mode": mode.as_str(),
@@ -8241,7 +8288,7 @@ impl InsightTools<'_> {
             current_project_for_evidence(self, cancellation, input.allow_stale).await?;
         let source_settings =
             load_project_source_settings(self.runtime.project_root_for_host_operations())
-                .map_err(|error| project_llm_error(&error))?;
+                .map_err(project_llm_error)?;
         if !source_settings.enable_churn() || !source_settings.enable_centrality() {
             return fresh_json_result(
                 freshness,
@@ -8366,7 +8413,7 @@ impl InsightTools<'_> {
             current_project_for_evidence(self, cancellation.clone(), allow_stale).await?;
         let string_imports_enabled =
             load_project_source_settings(self.runtime.project_root_for_host_operations())
-                .map_err(|error| project_llm_error(&error))?
+                .map_err(project_llm_error)?
                 .enable_string_imports();
         if requested_source == ImportAuditSource::Literal && !string_imports_enabled {
             return fresh_json_result(
@@ -9861,7 +9908,7 @@ async fn prepare_admin_init(
     let maximum_source_bytes = parse_admin_max_file_size(arguments)?;
     if let Some(maximum_source_bytes) = maximum_source_bytes {
         run_mcp_config_io(|| write_project_max_file_size(&target_root.root, maximum_source_bytes))
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     }
     let index_requested = optional_bool(arguments, "index")?.unwrap_or(false);
     let verbose = optional_bool(arguments, "verbose")?.unwrap_or(false);
@@ -11303,7 +11350,7 @@ impl AdminCoreTools<'_> {
         let root = self.runtime.project_root_for_host_operations();
         let plan = build_llm_apply_plan(arguments, preset)?;
         run_mcp_config_io(|| write_project_llm_configuration(root, &plan.inputs, &plan.cleared))
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
         json_result(&json!({
             "applied": true,
             "preset": preset,
@@ -11322,7 +11369,7 @@ impl AdminCoreTools<'_> {
         )?;
         let root = self.runtime.project_root_for_host_operations();
         run_mcp_config_io(|| tune_project_llm_tier(root, tier, concurrency))
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
         json_result(&json!({
             "tier": tier,
             "concurrency": concurrency,
@@ -11427,7 +11474,7 @@ fn prepare_summarize_job(
     )?;
     let project_root = handler.runtime.project_root_for_host_operations();
     let summary_settings =
-        load_project_summary_settings(project_root).map_err(|error| project_llm_error(&error))?;
+        load_project_summary_settings(project_root).map_err(project_llm_error)?;
     let limit = if arguments.contains_key("limit") || arguments.contains_key("summarizeLimit") {
         parse_summary_sweep_limit(arguments)?
     } else {
@@ -12376,7 +12423,7 @@ fn build_post_index_enrichment_plan(
         .with_max_workers(workers.min(16))
         .map_err(|_| invalid_arguments())?;
     let summary_settings =
-        load_project_summary_settings(project_root).map_err(|error| project_llm_error(&error))?;
+        load_project_summary_settings(project_root).map_err(project_llm_error)?;
     let summary_policy = SummaryCandidatePolicy::new(
         summary_settings.minimum_body_lines(),
         summary_settings.minimum_body_lines_by_kind().clone(),
@@ -13474,19 +13521,8 @@ const fn project_setup_error_reason(error: ProjectError) -> Option<&'static str>
 
 const fn project_index_error_reason(error: ProjectError) -> Option<&'static str> {
     match error {
-        ProjectError::BeginGenerationFailed => Some("generation_start_failed"),
-        ProjectError::SourceScanFailed => Some("source_scan_failed"),
         ProjectError::StatusFailed => Some("project_status_unavailable"),
-        ProjectError::IndexFailed => Some("index_failed"),
-        ProjectError::IndexStageFailed { stage } => Some(pipeline_stage_failure_code(stage)),
-        ProjectError::IndexStageFailedWithReason { stage, reason } => {
-            Some(pipeline_failure_reason_code(stage, reason))
-        }
-        ProjectError::IndexLeaseFailed => Some("lease_failed"),
-        ProjectError::IndexPublicationFailed => Some("publication_failed"),
-        ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
-        ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
-        _ => None,
+        other => index_stage_failure_code(other),
     }
 }
 
@@ -15100,12 +15136,15 @@ async fn load_status_structural_readiness(
     let generation_id = status_generation_id(request)?;
     let biomarkers_enabled = request.source_settings.enable_biomarkers();
     let database = handler.runtime.database();
+    // The readiness probe only ever reads the stored relation. Evaluating every
+    // detector over a whole generation cannot fit a status budget, so an
+    // uncomputed relation is reported as an explicit pending state instead.
     let finding_stats_future = async {
         if !biomarkers_enabled {
             return Ok(None);
         }
         database
-            .current_structural_finding_stats_bounded(&request.project_id, STATUS_STORAGE_TIMEOUT)
+            .cached_current_structural_finding_stats(&request.project_id)
             .await
             .map(Some)
     };
@@ -15121,10 +15160,11 @@ async fn load_status_structural_readiness(
     );
     let layer_findings = status_layer_findings(biomarkers_enabled, layers)?;
     let biomarker_stats = match findings {
-        Ok(Some(findings)) => {
+        Ok(Some(Some(findings))) => {
             serde_json::to_value(merge_layer_finding_stats(findings, layer_findings.len())?)
                 .map_err(internal_error)?
         }
+        Ok(Some(None)) => status_biomarker_stats_pending(),
         Ok(None) => json!({"state": "disabled_by_project_config"}),
         Err(error) => status_biomarker_stats_unavailable(&error),
     };
@@ -15166,6 +15206,17 @@ async fn status_database_storage(handler: &CartographMcpHandler) -> Value {
             "detailCommand": "cartograph db usage --project-path <path>"
         }),
     }
+}
+
+/// Readiness state before the complete detector relation has been computed for
+/// the exact current inputs. Never confuse this with an empty finding set.
+fn status_biomarker_stats_pending() -> Value {
+    json!({
+        "state": "pending",
+        "reason": "not_computed",
+        "detailTool": BIOMARKERS_TOOL,
+        "currentGenerationFenced": true
+    })
 }
 
 fn status_biomarker_stats_unavailable(error: &StorageError) -> Value {
@@ -15277,7 +15328,7 @@ async fn status_tool(
     let options = parse_status_options(&arguments)?;
     let source_settings =
         load_project_source_settings(handler.runtime.project_root_for_host_operations())
-            .map_err(|error| project_llm_error(&error))?;
+            .map_err(project_llm_error)?;
     let summary_policy =
         project_summary_policy(handler.runtime.project_root_for_host_operations())?;
     let auto_sync = CoreTools(handler).auto_sync_status().await;
@@ -15803,7 +15854,7 @@ async fn node_tool(
     .await?;
     let biomarkers_enabled =
         load_project_source_settings(handler.runtime.project_root_for_host_operations())
-            .map_err(|error| project_llm_error(&error))?
+            .map_err(project_llm_error)?
             .enable_biomarkers();
     let centrality = load_node_centrality(NodeCentralityRequest {
         handler,
@@ -24292,7 +24343,7 @@ mod tests {
                 }
                 started.notify_one();
                 run_mcp_config_io(|| write_project_max_file_size(&project, 8 * 1024 * 1024))
-                    .map_err(|error| project_llm_error(&error))?;
+                    .map_err(project_llm_error)?;
                 Ok(ToolResult::text("configured"))
             })
         }

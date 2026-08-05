@@ -443,6 +443,7 @@ source_languages!(
     Lsl => { stable: "lsl", v1_extensions: [], additions: [".lsl"], native: true },
     Lua => { stable: "lua", v1_extensions: [".lua"], additions: [], native: true },
     Luau => { stable: "luau", v1_extensions: [".luau"], additions: [], native: true },
+    Metal => { stable: "metal", v1_extensions: [], additions: [".metal"], native: true },
     MinecraftFunction => { stable: "minecraft_function", v1_extensions: [], additions: [".mcfunction"], native: true },
     MiniScript => { stable: "miniscript", v1_extensions: [], additions: [".ms"], native: true },
     Nix => { stable: "nix", v1_extensions: [".nix"], additions: [], native: true },
@@ -494,6 +495,7 @@ source_languages!(
     Verse => { stable: "verse", v1_extensions: [], additions: [".verse"], native: true },
     Visualforce => { stable: "visualforce", v1_extensions: [".page", ".component"], additions: [], native: true },
     Vue => { stable: "vue", v1_extensions: [".vue"], additions: [], native: true },
+    Wgsl => { stable: "wgsl", v1_extensions: [], additions: [".wgsl"], native: true },
     WitcherScript => { stable: "witcher_script", v1_extensions: [], additions: [".ws"], native: true },
     Wren => { stable: "wren", v1_extensions: [], additions: [".wren"], native: true },
     WurstScript => { stable: "wurstscript", v1_extensions: [], additions: [".wurst"], native: true },
@@ -2024,7 +2026,7 @@ mod tests {
     fn language_registry_preserves_v1_contract_and_tracks_v2_additions_separately() {
         let stable_ids = SourceLanguage::ALL.map(SourceLanguage::as_str);
         assert!(stable_ids.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(stable_ids.into_iter().collect::<BTreeSet<_>>().len(), 126);
+        assert_eq!(stable_ids.into_iter().collect::<BTreeSet<_>>().len(), 128);
         assert_eq!(
             SourceLanguage::ALL
                 .into_iter()
@@ -2112,7 +2114,7 @@ mod tests {
             blake3::Hash::from_bytes(v2_language_additions_digest())
                 .to_hex()
                 .as_str(),
-            "2c17a1d31eccb245fa1af89365fac963f605ae60a97dd321e4e882340600cee4"
+            "37ff0f3d5a30704d62a355f56bb2cee219a23bb8c2a914da0ad33e0630da4400"
         );
     }
 

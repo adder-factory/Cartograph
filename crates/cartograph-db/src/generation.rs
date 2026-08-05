@@ -17,8 +17,8 @@ use crate::{
     CartographDatabase, CurrentGenerationLookup, LeaseFence, StorageError,
     database::audited_query,
     ingest::{
-        CanonicalGenerationFacts, CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations,
-        copy_generation_facts,
+        CanonicalGenerationFacts, CopyGenerationAttempt, CopyGenerationContext,
+        CopyGenerationRequest, CopyTableDurations, copy_generation_facts,
     },
     leases::project_lock_key,
     search_relation::{
@@ -1909,9 +1909,11 @@ async fn validate_spilled_prepare_authority(
     }
     let counts = canonical_fact_counts(
         connection,
-        quoted_schema,
-        input.generation.project_id(),
-        input.generation.generation_id(),
+        crate::spill::SpillScope {
+            schema: quoted_schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+        },
     )
     .await?;
     if counts != input.digest.counts() {
@@ -2062,13 +2064,15 @@ async fn copy_and_validate_generation(
         result: copy_result,
     } = copy_generation_facts(
         connection,
-        CopyGenerationContext {
-            schema: input.schema.clone(),
-            project_id: input.generation.project_id().clone(),
-            generation_id: input.generation.generation_id().clone(),
+        CopyGenerationRequest {
+            context: CopyGenerationContext {
+                schema: input.schema.clone(),
+                project_id: input.generation.project_id().clone(),
+                generation_id: input.generation.generation_id().clone(),
+            },
+            prepare_progress: input.progress,
         },
         input.facts,
-        input.progress,
     )
     .await;
     if let Some(metrics) = input.metrics {
@@ -2390,14 +2394,26 @@ async fn check_generation_fence(
     .await
 }
 
+/// Exact lease fence and staging generation one fence check applies to.
+#[derive(Clone, Copy)]
+pub(crate) struct StagingFenceTarget<'target> {
+    pub(crate) fence: &'target LeaseFence,
+    pub(crate) project_id: &'target ProjectId,
+    pub(crate) generation_id: &'target GenerationId,
+    pub(crate) sequence: i64,
+}
+
 pub(crate) async fn lock_staging_generation_fence(
     connection: &mut PgConnection,
     schema: &cartograph_config::DatabaseSchema,
-    fence: &LeaseFence,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    sequence: i64,
+    target: StagingFenceTarget<'_>,
 ) -> Result<(), StorageError> {
+    let StagingFenceTarget {
+        fence,
+        project_id,
+        generation_id,
+        sequence,
+    } = target;
     if !fence_matches_generation(fence, project_id, generation_id) {
         return Err(StorageError::LeaseFenceLost);
     }
@@ -2421,11 +2437,14 @@ pub(crate) async fn lock_staging_generation_fence(
 pub(crate) async fn check_staging_generation_fence(
     connection: &mut PgConnection,
     schema: &cartograph_config::DatabaseSchema,
-    fence: &LeaseFence,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
-    sequence: i64,
+    target: StagingFenceTarget<'_>,
 ) -> Result<(), StorageError> {
+    let StagingFenceTarget {
+        fence,
+        project_id,
+        generation_id,
+        sequence,
+    } = target;
     if !fence_matches_generation(fence, project_id, generation_id) {
         return Err(StorageError::LeaseFenceLost);
     }
