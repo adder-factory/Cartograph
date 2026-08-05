@@ -942,10 +942,10 @@ impl NativeGenerationSpill {
     async fn opaque_batch_exists(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         sequence: i64,
         identity: SpillBatchIdentity<'_>,
     ) -> Result<bool, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let sql = format!(
             r#"SELECT row_count, logical_bytes, batch_digest
                 FROM {schema}."native_generation_spill_batches"
@@ -986,9 +986,9 @@ impl NativeGenerationSpill {
     async fn existing_fact_batches(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         sequences: &[i64],
     ) -> Result<StoredFactBatches, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let sql = format!(
             r#"SELECT batch_sequence, relation, row_count, logical_bytes, batch_digest
                 FROM {schema}."native_generation_spill_batches"
@@ -1037,9 +1037,9 @@ impl NativeGenerationSpill {
     async fn insert_batch_ledger(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         input: SpillBatchLedgerInput<'_>,
     ) -> Result<(), StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let sql = format!(
             r#"INSERT INTO {schema}."native_generation_spill_batches" (
                     project_id, generation_id, relation, batch_sequence,
@@ -1067,9 +1067,9 @@ impl NativeGenerationSpill {
     async fn insert_fact_batch_ledgers(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         batches: &[(i64, &NativeGenerationSpillFactBatch)],
     ) -> Result<(), StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let payload_count = batches
             .iter()
             .try_fold(0_usize, |count, (_, batch)| {
@@ -1146,10 +1146,10 @@ impl NativeGenerationSpill {
     async fn ensure_opaque_batch_range_available(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         sequence: i64,
         rows: usize,
     ) -> Result<(), StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let sql = format!(
             r#"SELECT EXISTS (
                     SELECT 1
@@ -1183,16 +1183,15 @@ impl NativeGenerationSpill {
     async fn insert_extracted_rows(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         sequence: i64,
         batch: &NativeGenerationSpillExtractedBatch,
     ) -> Result<(), StorageError> {
         let arrays = extracted_row_arrays(batch)?;
         let inline = self
-            .insert_inline_extracted_rows(transaction, schema, sequence, arrays.inline)
+            .insert_inline_extracted_rows(transaction, sequence, arrays.inline)
             .await?;
         let cached = self
-            .insert_cached_extracted_rows(transaction, schema, sequence, arrays.cached)
+            .insert_cached_extracted_rows(transaction, sequence, arrays.cached)
             .await?;
         if inline.saturating_add(cached) != usize_to_u64(batch.rows.len()) {
             return Err(StorageError::GenerationSpillConflict);
@@ -1203,10 +1202,10 @@ impl NativeGenerationSpill {
     async fn insert_inline_extracted_rows(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         sequence: i64,
         arrays: InlineExtractedArrays,
     ) -> Result<u64, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         if arrays.ordinals.is_empty() {
             return Ok(0);
         }
@@ -1239,10 +1238,10 @@ impl NativeGenerationSpill {
     async fn insert_cached_extracted_rows(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         sequence: i64,
         arrays: CachedExtractedArrays,
     ) -> Result<u64, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         if arrays.ordinals.is_empty() {
             return Ok(0);
         }
@@ -1300,9 +1299,9 @@ impl NativeGenerationSpill {
     async fn increment_spill_totals(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         totals: SpillTotalsDelta,
     ) -> Result<(), StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let SpillTotalsDelta {
             logical_bytes,
             rows,
@@ -1356,7 +1355,6 @@ impl NativeGenerationSpill {
                 field: "spill_cache_project_id",
             });
         }
-        let schema = crate::database::quoted_schema(&self.database.schema);
         let mut transaction = self
             .database
             .pool
@@ -1369,7 +1367,6 @@ impl NativeGenerationSpill {
         if self
             .opaque_batch_exists(
                 &mut transaction,
-                &schema,
                 sequence,
                 SpillBatchIdentity {
                     relation: NativeGenerationSpillRelation::ExtractedFiles,
@@ -1390,18 +1387,12 @@ impl NativeGenerationSpill {
                 requested: NativeGenerationSpillPhase::Parsing.as_str(),
             });
         }
-        self.ensure_opaque_batch_range_available(
-            &mut transaction,
-            &schema,
-            sequence,
-            batch.rows.len(),
-        )
-        .await?;
+        self.ensure_opaque_batch_range_available(&mut transaction, sequence, batch.rows.len())
+            .await?;
         let batch_rows = usize_to_u64(batch.rows.len());
         admit_spill_quota(report, batch.logical_bytes, batch_rows)?;
         self.insert_batch_ledger(
             &mut transaction,
-            &schema,
             SpillBatchLedgerInput {
                 relation: NativeGenerationSpillRelation::ExtractedFiles,
                 sequence,
@@ -1411,11 +1402,10 @@ impl NativeGenerationSpill {
             },
         )
         .await?;
-        self.insert_extracted_rows(&mut transaction, &schema, sequence, &batch)
+        self.insert_extracted_rows(&mut transaction, sequence, &batch)
             .await?;
         self.increment_spill_totals(
             &mut transaction,
-            &schema,
             SpillTotalsDelta {
                 logical_bytes: batch.logical_bytes,
                 rows: batch_rows,
@@ -1475,7 +1465,7 @@ impl NativeGenerationSpill {
             .map(|batch| as_i64(batch.sequence, "spill_batch_sequence"))
             .collect::<Result<Vec<_>, _>>()?;
         let existing = self
-            .existing_fact_batches(&mut transaction, &schema, &sequences)
+            .existing_fact_batches(&mut transaction, &sequences)
             .await?;
         let mut writes = Vec::new();
         let mut admitted = Vec::new();
@@ -1514,7 +1504,7 @@ impl NativeGenerationSpill {
             writes.push(NativeGenerationSpillWrite::Inserted);
         }
         if !admitted.is_empty() {
-            self.insert_fact_batch_ledgers(&mut transaction, &schema, &admitted)
+            self.insert_fact_batch_ledgers(&mut transaction, &admitted)
                 .await?;
             for relation in NativeGenerationSpillRelation::FACTS {
                 insert_typed_fact_payloads(
@@ -1533,7 +1523,6 @@ impl NativeGenerationSpill {
             }
             self.increment_spill_totals(
                 &mut transaction,
-                &schema,
                 SpillTotalsDelta {
                     logical_bytes: admitted_bytes,
                     rows: admitted_rows,
@@ -1707,9 +1696,9 @@ impl NativeGenerationSpill {
     async fn begin_canonicalization(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         phase: NativeGenerationSpillPhase,
     ) -> Result<(), StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         if phase == NativeGenerationSpillPhase::Canonicalizing {
             return Ok(());
         }
@@ -1741,8 +1730,8 @@ impl NativeGenerationSpill {
     async fn load_canonical_cursor(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
     ) -> Result<NativeGenerationCanonicalCursor, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let sql = format!(
             r#"SELECT canonical_relation, canonical_partition
                 FROM {schema}."native_generation_spills"
@@ -1781,10 +1770,10 @@ impl NativeGenerationSpill {
     async fn reduce_canonical_partition(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         cursor: &NativeGenerationCanonicalCursor,
     ) -> Result<u64, StorageError> {
-        let statements = canonical_partition_sql(schema, cursor.relation);
+        let schema = crate::database::quoted_schema(&self.database.schema);
+        let statements = canonical_partition_sql(&schema, cursor.relation);
         if audited_query(statements.conflict)
             .bind(self.project_id.as_str())
             .bind(self.generation_id.as_str())
@@ -1827,10 +1816,10 @@ impl NativeGenerationSpill {
     async fn advance_canonical_cursor(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         cursor: &NativeGenerationCanonicalCursor,
         inserted: u64,
     ) -> Result<bool, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let next_partition = cursor
             .partition
             .saturating_add(CANONICAL_PARTITIONS_PER_TRANSACTION)
@@ -1882,7 +1871,6 @@ impl NativeGenerationSpill {
     pub async fn canonicalize_next(
         &self,
     ) -> Result<NativeGenerationSpillCanonicalProgress, StorageError> {
-        let schema = crate::database::quoted_schema(&self.database.schema);
         let mut transaction = self
             .database
             .pool
@@ -1901,16 +1889,13 @@ impl NativeGenerationSpill {
                 complete: true,
             });
         }
-        self.begin_canonicalization(&mut transaction, &schema, phase)
-            .await?;
-        let cursor = self
-            .load_canonical_cursor(&mut transaction, &schema)
-            .await?;
+        self.begin_canonicalization(&mut transaction, phase).await?;
+        let cursor = self.load_canonical_cursor(&mut transaction).await?;
         let inserted = self
-            .reduce_canonical_partition(&mut transaction, &schema, &cursor)
+            .reduce_canonical_partition(&mut transaction, &cursor)
             .await?;
         let complete = self
-            .advance_canonical_cursor(&mut transaction, &schema, &cursor, inserted)
+            .advance_canonical_cursor(&mut transaction, &cursor, inserted)
             .await?;
         self.commit_transaction(transaction, "spill-canonicalize-commit")
             .await?;
@@ -2049,7 +2034,6 @@ impl NativeGenerationSpill {
                 field: "spill_page_bytes",
             });
         }
-        let schema = crate::database::quoted_schema(&self.database.schema);
         let mut transaction = self
             .database
             .pool
@@ -2081,7 +2065,6 @@ impl NativeGenerationSpill {
         let window = self
             .select_extracted_page_window(
                 &mut transaction,
-                &schema,
                 ExtractedPageCursor {
                     after,
                     minimum_batch_sequence,
@@ -2100,7 +2083,6 @@ impl NativeGenerationSpill {
         let decoded = self
             .load_extracted_page_payloads(
                 &mut transaction,
-                &schema,
                 ExtractedPageCursor {
                     after,
                     minimum_batch_sequence,
@@ -2122,10 +2104,10 @@ impl NativeGenerationSpill {
     async fn select_extracted_page_window(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         cursor: ExtractedPageCursor,
         maximum_bytes: u64,
     ) -> Result<Option<ExtractedPageWindow>, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let ExtractedPageCursor {
             after,
             minimum_batch_sequence,
@@ -2189,10 +2171,10 @@ impl NativeGenerationSpill {
     async fn load_extracted_page_payloads(
         &self,
         transaction: &mut sqlx_postgres::PgTransaction<'_>,
-        schema: &str,
         cursor: ExtractedPageCursor,
         window: &ExtractedPageWindow,
     ) -> Result<Vec<(u64, NativeGenerationSpillRow)>, StorageError> {
+        let schema = crate::database::quoted_schema(&self.database.schema);
         let ExtractedPageCursor {
             after,
             minimum_batch_sequence,
