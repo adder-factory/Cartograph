@@ -395,12 +395,12 @@ impl NativeGenerationSpillFactBatch {
         }
         let (tables, retained_bytes) = validate_spill_fact_batch(facts, limits, cancelled)?;
         let payloads = [
-            encode_file_relation_payload(&tables.files)?,
-            encode_symbol_relation_payload(&tables.symbols)?,
-            encode_edge_relation_payload(&tables.edges)?,
-            encode_reference_relation_payload(&tables.references)?,
-            encode_numerical_relation_payload(&tables.numerical_sites)?,
-            encode_document_relation_payload(&tables.documents)?,
+            encode_relation_payload(&tables.files)?,
+            encode_relation_payload(&tables.symbols)?,
+            encode_relation_payload(&tables.edges)?,
+            encode_relation_payload(&tables.references)?,
+            encode_relation_payload(&tables.numerical_sites)?,
+            encode_relation_payload(&tables.documents)?,
         ]
         .into_iter()
         .flatten()
@@ -2368,25 +2368,41 @@ impl NativeGenerationSpill {
     }
 }
 
-fn encode_file_relation_payload(
-    rows: &[FileInput],
-) -> Result<Option<NativeGenerationSpillRelationPayload>, GenerationValidationError> {
-    let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
-    digest.begin_files(usize_to_u64(rows.len()));
-    for row in rows {
-        digest.push_file(row);
-    }
-    finish_relation_payload(NativeGenerationSpillRelation::Files, rows.len(), digest)
+/// One canonical relation's contribution to a spilled batch digest.
+///
+/// The begin/push order is part of the generation digest, so each relation owns
+/// its own sequence rather than having it copied per relation.
+trait SpillDigestRow {
+    const RELATION: NativeGenerationSpillRelation;
+
+    fn begin(digest: &mut LogicalDigestBuilder, rows: u64);
+    fn push(&self, digest: &mut LogicalDigestBuilder);
 }
 
-fn encode_symbol_relation_payload(
-    rows: &[SymbolInput],
-) -> Result<Option<NativeGenerationSpillRelationPayload>, GenerationValidationError> {
-    let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
-    digest.begin_symbols(usize_to_u64(rows.len()));
-    for row in rows {
-        digest.push_symbol(row);
-        for score in [row.betweenness_ppb, row.pagerank_ppb] {
+impl SpillDigestRow for FileInput {
+    const RELATION: NativeGenerationSpillRelation = NativeGenerationSpillRelation::Files;
+
+    fn begin(digest: &mut LogicalDigestBuilder, rows: u64) {
+        digest.begin_files(rows);
+    }
+
+    fn push(&self, digest: &mut LogicalDigestBuilder) {
+        digest.push_file(self);
+    }
+}
+
+impl SpillDigestRow for SymbolInput {
+    const RELATION: NativeGenerationSpillRelation = NativeGenerationSpillRelation::Symbols;
+
+    fn begin(digest: &mut LogicalDigestBuilder, rows: u64) {
+        digest.begin_symbols(rows);
+    }
+
+    fn push(&self, digest: &mut LogicalDigestBuilder) {
+        digest.push_symbol(self);
+        // Centrality scores are optional, so presence is encoded explicitly
+        // rather than being omitted from the digest stream.
+        for score in [self.betweenness_ppb, self.pagerank_ppb] {
             if let Some(score) = score {
                 let mut encoded = [0_u8; 5];
                 encoded[0] = 1;
@@ -2397,59 +2413,65 @@ fn encode_symbol_relation_payload(
             }
         }
     }
-    finish_relation_payload(NativeGenerationSpillRelation::Symbols, rows.len(), digest)
 }
 
-fn encode_edge_relation_payload(
-    rows: &[EdgeInput],
-) -> Result<Option<NativeGenerationSpillRelationPayload>, GenerationValidationError> {
-    let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
-    digest.begin_edges(usize_to_u64(rows.len()));
-    for row in rows {
-        digest.push_edge(row);
+impl SpillDigestRow for EdgeInput {
+    const RELATION: NativeGenerationSpillRelation = NativeGenerationSpillRelation::Edges;
+
+    fn begin(digest: &mut LogicalDigestBuilder, rows: u64) {
+        digest.begin_edges(rows);
     }
-    finish_relation_payload(NativeGenerationSpillRelation::Edges, rows.len(), digest)
+
+    fn push(&self, digest: &mut LogicalDigestBuilder) {
+        digest.push_edge(self);
+    }
 }
 
-fn encode_reference_relation_payload(
-    rows: &[ReferenceInput],
-) -> Result<Option<NativeGenerationSpillRelationPayload>, GenerationValidationError> {
-    let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
-    digest.begin_references(usize_to_u64(rows.len()));
-    for row in rows {
-        digest.push_reference(row);
+impl SpillDigestRow for ReferenceInput {
+    const RELATION: NativeGenerationSpillRelation = NativeGenerationSpillRelation::References;
+
+    fn begin(digest: &mut LogicalDigestBuilder, rows: u64) {
+        digest.begin_references(rows);
     }
-    finish_relation_payload(
-        NativeGenerationSpillRelation::References,
-        rows.len(),
-        digest,
-    )
+
+    fn push(&self, digest: &mut LogicalDigestBuilder) {
+        digest.push_reference(self);
+    }
 }
 
-fn encode_numerical_relation_payload(
-    rows: &[NumericalSiteInput],
-) -> Result<Option<NativeGenerationSpillRelationPayload>, GenerationValidationError> {
-    let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
-    digest.begin_numerical_sites(usize_to_u64(rows.len()));
-    for row in rows {
-        digest.push_numerical_site(row);
+impl SpillDigestRow for NumericalSiteInput {
+    const RELATION: NativeGenerationSpillRelation = NativeGenerationSpillRelation::NumericalSites;
+
+    fn begin(digest: &mut LogicalDigestBuilder, rows: u64) {
+        digest.begin_numerical_sites(rows);
     }
-    finish_relation_payload(
-        NativeGenerationSpillRelation::NumericalSites,
-        rows.len(),
-        digest,
-    )
+
+    fn push(&self, digest: &mut LogicalDigestBuilder) {
+        digest.push_numerical_site(self);
+    }
 }
 
-fn encode_document_relation_payload(
-    rows: &[CanonicalSearchDocument],
+impl SpillDigestRow for CanonicalSearchDocument {
+    const RELATION: NativeGenerationSpillRelation = NativeGenerationSpillRelation::Documents;
+
+    fn begin(digest: &mut LogicalDigestBuilder, rows: u64) {
+        digest.begin_documents(rows);
+    }
+
+    fn push(&self, digest: &mut LogicalDigestBuilder) {
+        digest.push_document(self);
+    }
+}
+
+fn encode_relation_payload<T: SpillDigestRow>(
+    rows: &[T],
 ) -> Result<Option<NativeGenerationSpillRelationPayload>, GenerationValidationError> {
     let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
-    digest.begin_documents(usize_to_u64(rows.len()));
+    T::begin(&mut digest, usize_to_u64(rows.len()));
     for row in rows {
-        digest.push_document(row);
+        row.push(&mut digest);
     }
-    finish_relation_payload(NativeGenerationSpillRelation::Documents, rows.len(), digest)
+    finish_relation_payload(T::RELATION, rows.len(), digest)
 }
 
 fn finish_relation_payload(

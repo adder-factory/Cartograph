@@ -905,7 +905,7 @@ fn validate_chat_tier(tier: ProjectLlmTier) -> Result<(), ProjectLlmConfigError>
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 /// Errors produced while processing project LLM config.
 pub enum ProjectLlmConfigError {
     #[error("Cartograph project configuration path is unavailable")]
@@ -1095,17 +1095,26 @@ pub fn load_project_source_settings(
 fn parse_project_source_settings(
     root: &Map<String, Value>,
 ) -> Result<ProjectSourceSettings, ProjectLlmConfigError> {
-    let maximum_file_bytes = optional_bounded_config_u64(
+    let maximum_file_bytes = optional_bounded_u64(
         root,
         "maxFileSize",
-        u64::try_from(MAXIMUM_PROJECT_SOURCE_BYTES)
-            .map_err(|_| ProjectLlmConfigError::InvalidConfig)?,
+        BoundedU64Field {
+            maximum: u64::try_from(MAXIMUM_PROJECT_SOURCE_BYTES)
+                .map_err(|_| ProjectLlmConfigError::InvalidConfig)?,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
     )?
     .map(usize::try_from)
     .transpose()
     .map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
-    let maximum_generation_bytes =
-        optional_bounded_config_u64(root, "maxGenerationBytes", MAXIMUM_PROJECT_GENERATION_BYTES)?;
+    let maximum_generation_bytes = optional_bounded_u64(
+        root,
+        "maxGenerationBytes",
+        BoundedU64Field {
+            maximum: MAXIMUM_PROJECT_GENERATION_BYTES,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
+    )?;
     let (generation_storage, maximum_spill_bytes, maximum_spill_rows) =
         parse_generation_storage(root)?;
     let languages = root
@@ -1214,24 +1223,23 @@ fn parse_generation_storage(
         })
         .transpose()?
         .unwrap_or_default();
-    let bytes = optional_bounded_config_u64(root, "maxSpillBytes", MAXIMUM_PROJECT_SPILL_BYTES)?;
-    let rows = optional_bounded_config_u64(root, "maxSpillRows", MAXIMUM_PROJECT_SPILL_ROWS)?;
+    let bytes = optional_bounded_u64(
+        root,
+        "maxSpillBytes",
+        BoundedU64Field {
+            maximum: MAXIMUM_PROJECT_SPILL_BYTES,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
+    )?;
+    let rows = optional_bounded_u64(
+        root,
+        "maxSpillRows",
+        BoundedU64Field {
+            maximum: MAXIMUM_PROJECT_SPILL_ROWS,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
+    )?;
     Ok((storage, bytes, rows))
-}
-
-fn optional_bounded_config_u64(
-    root: &Map<String, Value>,
-    key: &str,
-    maximum: u64,
-) -> Result<Option<u64>, ProjectLlmConfigError> {
-    root.get(key)
-        .map(|value| {
-            value
-                .as_u64()
-                .filter(|value| (1..=maximum).contains(value))
-                .ok_or(ProjectLlmConfigError::InvalidConfig)
-        })
-        .transpose()
 }
 
 fn parse_project_languages(value: &Value) -> Result<Vec<SourceLanguage>, ProjectLlmConfigError> {
@@ -1992,14 +2000,31 @@ struct TierRuntimeLimits {
 fn parse_tier_runtime_limits(
     value: &Map<String, Value>,
 ) -> Result<TierRuntimeLimits, ProjectLlmConfigError> {
-    let timeout_ms = optional_bounded_u64(value, "timeoutMs", MAXIMUM_TIMEOUT_MS)?;
-    let concurrency = optional_bounded_u64(value, "concurrency", u64::from(MAXIMUM_CONCURRENCY))?
-        .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
-        .transpose()?;
+    let timeout_ms = optional_bounded_u64(
+        value,
+        "timeoutMs",
+        BoundedU64Field {
+            maximum: MAXIMUM_TIMEOUT_MS,
+            invalid: ProjectLlmConfigError::InvalidTier,
+        },
+    )?;
+    let concurrency = optional_bounded_u64(
+        value,
+        "concurrency",
+        BoundedU64Field {
+            maximum: u64::from(MAXIMUM_CONCURRENCY),
+            invalid: ProjectLlmConfigError::InvalidTier,
+        },
+    )?
+    .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
+    .transpose()?;
     let summary_batch_size = optional_bounded_u64(
         value,
         "summaryBatchSize",
-        u64::from(MAXIMUM_SUMMARY_BATCH_SIZE),
+        BoundedU64Field {
+            maximum: u64::from(MAXIMUM_SUMMARY_BATCH_SIZE),
+            invalid: ProjectLlmConfigError::InvalidTier,
+        },
     )?
     .map(|value| u16::try_from(value).map_err(|_| ProjectLlmConfigError::InvalidTier))
     .transpose()?;
@@ -2144,18 +2169,27 @@ fn optional_bool(
         .transpose()
 }
 
+/// Inclusive upper bound for a positive configuration integer, with the exact
+/// rejection its section reports.
+#[derive(Clone, Copy)]
+struct BoundedU64Field {
+    maximum: u64,
+    invalid: ProjectLlmConfigError,
+}
+
 fn optional_bounded_u64(
     object: &Map<String, Value>,
     key: &str,
-    maximum: u64,
+    field: BoundedU64Field,
 ) -> Result<Option<u64>, ProjectLlmConfigError> {
+    let BoundedU64Field { maximum, invalid } = field;
     object
         .get(key)
         .map(|value| {
             value
                 .as_u64()
                 .filter(|value| (1..=maximum).contains(value))
-                .ok_or(ProjectLlmConfigError::InvalidTier)
+                .ok_or(invalid)
         })
         .transpose()
 }

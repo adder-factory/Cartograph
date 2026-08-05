@@ -3099,14 +3099,10 @@ async fn spill_derived_generation_facts(
     } = context;
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let mut derived_sequence = source.files;
-    for derive in [
-        append_spilled_framework_edges as SpilledDerivedFacts,
-        append_spilled_go_edges,
-        append_spilled_reexport_edges,
-        append_spilled_test_edges,
-    ] {
-        let (facts, charged) = derive(&state.index, cancellation, maximum_bytes)
-            .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+    for kind in SpilledDerivedFactKind::ALL {
+        let (facts, charged) =
+            derive_spilled_facts(&state.index, cancellation, maximum_bytes, kind)
+                .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
         state.high_water = state.high_water.max(charged);
         if !generation_facts_are_empty(&facts) {
             if state.centrality_enabled {
@@ -3278,70 +3274,17 @@ async fn apply_spilled_centrality(
     Ok(())
 }
 
-type SpilledDerivedFacts = fn(
-    &ResolutionIndex,
-    &StageCancellation,
-    u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure>;
-
-fn append_spilled_framework_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Framework,
-    )
-}
-
-fn append_spilled_go_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Go,
-    )
-}
-
-fn append_spilled_reexport_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Reexport,
-    )
-}
-
-fn append_spilled_test_edges(
-    index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
-) -> Result<(GenerationFacts, u64), StageItemFailure> {
-    derive_spilled_facts(
-        index,
-        cancellation,
-        maximum_bytes,
-        SpilledDerivedFactKind::Test,
-    )
-}
-
 #[derive(Clone, Copy)]
 enum SpilledDerivedFactKind {
     Framework,
     Go,
     Reexport,
     Test,
+}
+
+impl SpilledDerivedFactKind {
+    /// Derived fact kinds in the exact order the resolution stage appends them.
+    const ALL: [Self; 4] = [Self::Framework, Self::Go, Self::Reexport, Self::Test];
 }
 
 fn derive_spilled_facts(

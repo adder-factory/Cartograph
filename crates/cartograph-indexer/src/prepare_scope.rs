@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -31,6 +32,14 @@ pub enum SupervisedPrepareError {
     /// PostgreSQL rejected validation, COPY, fencing, or the ready transition.
     #[error(transparent)]
     Database(#[from] PrepareGenerationError),
+}
+
+/// Cloned inputs one prepare task owns for its whole lifetime.
+struct PrepareLaunch {
+    database: CartographDatabase,
+    fence: LeaseFence,
+    statement_timeout: Duration,
+    progress: PrepareGenerationProgress,
 }
 
 #[derive(Clone)]
@@ -116,13 +125,22 @@ impl PrepareScope {
         )
     }
 
-    fn start(
+    /// Cloned launch inputs for one prepare task.
+    ///
+    /// Both prepare paths take the same registry lock, reject the same states,
+    /// and clone the same fields; only the contents type and the database call
+    /// differ, so the shared half lives here once.
+    fn spawn_prepare<Make, Task>(
         &self,
-        contents: GenerationContents,
+        make: Make,
     ) -> Result<
         oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
         SupervisedPrepareError,
-    > {
+    >
+    where
+        Make: FnOnce(PrepareLaunch) -> Task,
+        Task: Future<Output = Result<ReadyGeneration, PrepareGenerationError>> + Send + 'static,
+    {
         let mut registry = self
             .registry
             .lock()
@@ -132,23 +150,37 @@ impl PrepareScope {
             PrepareState::Running => return Err(SupervisedPrepareError::AlreadyStarted),
             PrepareState::Closed => return Err(SupervisedPrepareError::ScopeClosed),
         }
-        let database = self.database.clone();
-        let fence = self.fence.clone();
-        let statement_timeout = self.statement_timeout;
-        let progress = self.progress.clone();
-        let contents = contents.with_progress(progress);
+        let task = make(PrepareLaunch {
+            database: self.database.clone(),
+            fence: self.fence.clone(),
+            statement_timeout: self.statement_timeout,
+            progress: self.progress.clone(),
+        });
         let (sender, receiver) = oneshot::channel();
         registry.handle = Some(tokio::spawn(async move {
-            let result = database
-                .prepare_generation_bounded(
-                    contents,
-                    PrepareGenerationMutation::new(&fence, statement_timeout),
-                )
-                .await;
-            let _ = sender.send(result);
+            let _ = sender.send(task.await);
         }));
         registry.state = PrepareState::Running;
         Ok(receiver)
+    }
+
+    fn start(
+        &self,
+        contents: GenerationContents,
+    ) -> Result<
+        oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
+        SupervisedPrepareError,
+    > {
+        self.spawn_prepare(move |launch| async move {
+            let contents = contents.with_progress(launch.progress);
+            launch
+                .database
+                .prepare_generation_bounded(
+                    contents,
+                    PrepareGenerationMutation::new(&launch.fence, launch.statement_timeout),
+                )
+                .await
+        })
     }
 
     fn start_spilled(
@@ -158,32 +190,16 @@ impl PrepareScope {
         oneshot::Receiver<Result<ReadyGeneration, PrepareGenerationError>>,
         SupervisedPrepareError,
     > {
-        let mut registry = self
-            .registry
-            .lock()
-            .map_err(|_| SupervisedPrepareError::ResultUnavailable)?;
-        match registry.state {
-            PrepareState::Open => {}
-            PrepareState::Running => return Err(SupervisedPrepareError::AlreadyStarted),
-            PrepareState::Closed => return Err(SupervisedPrepareError::ScopeClosed),
-        }
-        let database = self.database.clone();
-        let fence = self.fence.clone();
-        let statement_timeout = self.statement_timeout;
-        let progress = self.progress.clone();
-        let contents = contents.with_progress(progress);
-        let (sender, receiver) = oneshot::channel();
-        registry.handle = Some(tokio::spawn(async move {
-            let result = database
+        self.spawn_prepare(move |launch| async move {
+            let contents = contents.with_progress(launch.progress);
+            launch
+                .database
                 .prepare_spilled_generation_bounded(
                     contents,
-                    PrepareGenerationMutation::new(&fence, statement_timeout),
+                    PrepareGenerationMutation::new(&launch.fence, launch.statement_timeout),
                 )
-                .await;
-            let _ = sender.send(result);
-        }));
-        registry.state = PrepareState::Running;
-        Ok(receiver)
+                .await
+        })
     }
 
     pub(crate) async fn close_and_reap(
