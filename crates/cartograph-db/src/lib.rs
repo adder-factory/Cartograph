@@ -186,13 +186,14 @@ pub use sessions::{
     McpToolUsage, McpTraceUsage, NewMcpMacro, NewMcpSession,
 };
 pub use spill::{
-    NativeGenerationExtractedCursor, NativeGenerationExtractedPage, NativeGenerationSpill,
-    NativeGenerationSpillCachedRow, NativeGenerationSpillCanonicalProgress,
-    NativeGenerationSpillCentralityScore, NativeGenerationSpillDigestReport,
-    NativeGenerationSpillExtractedBatch, NativeGenerationSpillExtractedRow,
-    NativeGenerationSpillFactBatch, NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy,
-    NativeGenerationSpillRelation, NativeGenerationSpillReport, NativeGenerationSpillRequest,
-    NativeGenerationSpillRow, NativeGenerationSpillState, NativeGenerationSpillWrite,
+    CachedRowPayload, FactBatchInput, NativeGenerationExtractedCursor,
+    NativeGenerationExtractedPage, NativeGenerationSpill, NativeGenerationSpillCachedRow,
+    NativeGenerationSpillCanonicalProgress, NativeGenerationSpillCentralityScore,
+    NativeGenerationSpillDigestReport, NativeGenerationSpillExtractedBatch,
+    NativeGenerationSpillExtractedRow, NativeGenerationSpillFactBatch,
+    NativeGenerationSpillFactCounts, NativeGenerationSpillPolicy, NativeGenerationSpillRelation,
+    NativeGenerationSpillReport, NativeGenerationSpillRequest, NativeGenerationSpillRow,
+    NativeGenerationSpillState, NativeGenerationSpillWrite,
 };
 use sqlx_core::{pool::PoolOptions, query::query};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgSslMode, Postgres};

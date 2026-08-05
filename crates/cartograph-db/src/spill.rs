@@ -199,17 +199,27 @@ pub struct NativeGenerationSpillCachedRow {
     payload_bytes: u64,
 }
 
+/// Immutable parse-cache identity and accounting for one spilled row.
+pub struct CachedRowPayload {
+    /// Exact parse-cache key the row references.
+    pub key: NativeParseCacheKey,
+    /// Digest of the referenced immutable payload.
+    pub payload_digest: ContentDigest,
+    /// Byte size of the referenced payload.
+    pub payload_bytes: u64,
+}
+
 impl NativeGenerationSpillCachedRow {
     /// Bind one validated sort key to an already verified immutable cache record.
     /// # Errors
     ///
     /// Returns an error when the key or payload size violates spill row bounds.
-    pub fn new(
-        sort_key: Vec<u8>,
-        key: NativeParseCacheKey,
-        payload_digest: ContentDigest,
-        payload_bytes: u64,
-    ) -> Result<Self, StorageError> {
+    pub fn new(sort_key: Vec<u8>, payload: CachedRowPayload) -> Result<Self, StorageError> {
+        let CachedRowPayload {
+            key,
+            payload_digest,
+            payload_bytes,
+        } = payload;
         if sort_key.is_empty() || sort_key.len() > MAXIMUM_SORT_KEY_BYTES {
             return Err(StorageError::InvalidInput {
                 field: "spill_sort_key",
@@ -350,6 +360,16 @@ pub struct NativeGenerationSpillFactBatch {
     retained_bytes: u64,
 }
 
+/// One sequenced batch of generation facts with the bounds validating it.
+pub struct FactBatchInput {
+    /// Batch position inside the spilled generation.
+    pub sequence: u64,
+    /// Facts admitted into this batch.
+    pub facts: GenerationFacts,
+    /// Exact validation bounds applied to the batch.
+    pub limits: GenerationValidationLimits,
+}
+
 impl NativeGenerationSpillFactBatch {
     /// Exact logical bytes admitted by this independently validated batch.
     #[must_use]
@@ -379,14 +399,17 @@ impl NativeGenerationSpillFactBatch {
     /// Returns an error when validation is cancelled, a field is invalid, or
     /// the batch exceeds the independent row/encoded-byte boundary.
     pub fn new<Cancel>(
-        sequence: u64,
-        facts: GenerationFacts,
-        limits: GenerationValidationLimits,
+        input: FactBatchInput,
         cancelled: Cancel,
     ) -> Result<Self, GenerationValidationError>
     where
         Cancel: FnMut() -> bool,
     {
+        let FactBatchInput {
+            sequence,
+            facts,
+            limits,
+        } = input;
         if sequence > i64::MAX.unsigned_abs() {
             return Err(StorageError::InvalidInput {
                 field: "spill_batch_sequence",
@@ -1948,8 +1971,10 @@ impl NativeGenerationSpill {
                 project_id: &self.project_id,
                 generation_id: &self.generation_id,
             },
-            &mut cancelled,
-            &mut progress,
+            DigestObservation {
+                cancelled: &mut cancelled,
+                progress: &mut progress,
+            },
         )
         .await?;
         if cancelled() {
@@ -2861,14 +2886,17 @@ async fn insert_typed_fact_payloads(
 async fn stream_spilled_digest<Cancel, Progress, ProgressFuture>(
     transaction: &mut sqlx_postgres::PgTransaction<'_>,
     scope: SpillScope<'_>,
-    cancelled: &mut Cancel,
-    progress: &mut Progress,
+    observation: DigestObservation<'_, Cancel, Progress>,
 ) -> Result<(ContentDigest, NativeGenerationSpillFactCounts), StorageError>
 where
     Cancel: FnMut() -> bool,
     Progress: FnMut(u64) -> ProgressFuture,
     ProgressFuture: Future<Output = bool>,
 {
+    let DigestObservation {
+        cancelled,
+        progress,
+    } = observation;
     let counts = canonical_fact_counts(transaction, scope).await?;
     let mut digest = LogicalDigestBuilder::new(GenerationDigestVersion::CURRENT);
     let mut stream = SpilledDigestStream {
@@ -3041,7 +3069,13 @@ fn digest_boolean_sql(expression: &str) -> String {
     format!("decode(CASE WHEN ({expression}) THEN '01' ELSE '00' END, 'hex')")
 }
 
-fn digest_relation_sql(schema: &str, table: &str, fields: &[String], order: &str) -> String {
+fn digest_relation_sql(schema: &str, relation: &SpilledRelationDigest) -> String {
+    let SpilledRelationDigest {
+        relation: table,
+        columns: fields,
+        order_key: order,
+        ..
+    } = relation;
     let encoded = fields.join(" || ");
     format!(
         r#"SELECT {encoded} AS digest_row
@@ -3097,6 +3131,12 @@ struct SpilledRelationDigest {
     columns: Vec<String>,
     order_key: &'static str,
     operation: &'static str,
+}
+
+/// Cancellation and progress channel for one streaming digest pass.
+struct DigestObservation<'observation, Cancel, Progress> {
+    cancelled: &'observation mut Cancel,
+    progress: &'observation mut Progress,
 }
 
 /// Mutable digest sinks threaded through one streaming pass.
@@ -3219,12 +3259,7 @@ where
     ProgressFuture: Future<Output = bool>,
 {
     let (scope, relation) = request;
-    let sql = digest_relation_sql(
-        scope.schema,
-        relation.relation,
-        &relation.columns,
-        relation.order_key,
-    );
+    let sql = digest_relation_sql(scope.schema, &relation);
     digest_encoded_relation(
         transaction,
         stream,
@@ -3268,20 +3303,23 @@ where
     if missing.is_none() {
         let sql = digest_relation_sql(
             schema,
-            "search_documents",
-            &[
-                digest_text_sql("document_id::text"),
-                digest_optional_text_sql("file_id::text"),
-                digest_optional_text_sql("symbol_id::text"),
-                digest_text_sql("path"),
-                digest_text_sql("language"),
-                digest_text_sql("document_kind"),
-                digest_text_sql("qualified_name"),
-                digest_text_sql("code"),
-                digest_text_sql("natural_text"),
-                digest_text_sql("metadata_json"),
-            ],
-            "document_id",
+            &SpilledRelationDigest {
+                relation: "search_documents",
+                columns: vec![
+                    digest_text_sql("document_id::text"),
+                    digest_optional_text_sql("file_id::text"),
+                    digest_optional_text_sql("symbol_id::text"),
+                    digest_text_sql("path"),
+                    digest_text_sql("language"),
+                    digest_text_sql("document_kind"),
+                    digest_text_sql("qualified_name"),
+                    digest_text_sql("code"),
+                    digest_text_sql("natural_text"),
+                    digest_text_sql("metadata_json"),
+                ],
+                order_key: "document_id",
+                operation: "spill-digest-documents",
+            },
         );
         return digest_encoded_relation(
             transaction,

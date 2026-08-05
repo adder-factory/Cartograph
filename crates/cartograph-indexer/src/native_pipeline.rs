@@ -11,9 +11,9 @@ use std::{
 };
 
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, EdgeInput, FileInput, GenerationFacts,
-    GenerationMemoryModelError, GenerationValidationError, GenerationValidationLimits,
-    GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
+    CachedRowPayload, CanonicalGenerationFacts, CartographDatabase, EdgeInput, FactBatchInput,
+    FileInput, GenerationFacts, GenerationMemoryModelError, GenerationValidationError,
+    GenerationValidationLimits, GenerationValidationReport, MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES,
     NativeGenerationExtractedCursor, NativeGenerationExtractedPage, NativeGenerationSpill,
     NativeGenerationSpillCachedRow, NativeGenerationSpillCentralityScore,
     NativeGenerationSpillDigestReport, NativeGenerationSpillExtractedBatch,
@@ -1684,9 +1684,16 @@ impl<'spill> SpilledParseTransaction<'spill> {
         let row_bytes = usize_to_u64(sort_key.len()).saturating_add(payload_bytes);
         self.prepare_push(sequence, row_bytes).await?;
         self.rows.push(
-            NativeGenerationSpillCachedRow::new(sort_key, key, payload_digest, payload_bytes)
-                .map_err(|error| ParseManifestFailure::from_spill(&error))?
-                .into(),
+            NativeGenerationSpillCachedRow::new(
+                sort_key,
+                CachedRowPayload {
+                    key,
+                    payload_digest,
+                    payload_bytes,
+                },
+            )
+            .map_err(|error| ParseManifestFailure::from_spill(&error))?
+            .into(),
         );
         self.finish_push(row_bytes).await
     }
@@ -1817,10 +1824,13 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
     async fn process(
         &mut self,
         entry: SpilledParseManifestEntry,
-        key: Option<&NativeParseCacheKey>,
-        cached: Option<NativeParseCacheRecord>,
-        cache_read_failed: bool,
+        lookup: CachedParseLookup<'_>,
     ) -> Result<(), ParseManifestFailure> {
+        let CachedParseLookup {
+            key,
+            cached,
+            cache_read_failed,
+        } = lookup;
         let mut metrics = NativeParseCacheReport::default();
         if let Some((file, payload_digest, payload_bytes)) = self
             .cached_file(
@@ -1877,7 +1887,14 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         record_spilled_parse_output(&mut self.output, &file, metrics)?;
         if cacheable {
             return self
-                .queue_cache_write(entry.sequence, file.file_id, key, payload)
+                .queue_cache_write(
+                    ParsedFilePayload {
+                        sequence: entry.sequence,
+                        file_id: file.file_id,
+                        payload,
+                    },
+                    key,
+                )
                 .await;
         }
         self.flush_cache_writes().await?;
@@ -1927,11 +1944,14 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
 
     async fn queue_cache_write(
         &mut self,
-        sequence: u64,
-        file_id: FileId,
+        write: ParsedFilePayload,
         key: Option<&NativeParseCacheKey>,
-        payload: Vec<u8>,
     ) -> Result<(), ParseManifestFailure> {
+        let ParsedFilePayload {
+            sequence,
+            file_id,
+            payload,
+        } = write;
         let Some(key) = key else {
             return Err(ParseManifestFailure::unclassified());
         };
@@ -2014,7 +2034,14 @@ async fn stream_spilled_parse_batch(
     for (index, (entry, cached)) in entries.into_iter().zip(cached).enumerate() {
         let key = cache_keys.as_ref().and_then(|keys| keys.get(index));
         context
-            .process(entry, key, cached, cache_read_failed)
+            .process(
+                entry,
+                CachedParseLookup {
+                    key,
+                    cached,
+                    cache_read_failed,
+                },
+            )
             .await?;
     }
     context.finish().await
@@ -2669,9 +2696,11 @@ impl<'context> SpilledResolutionFold<'context> {
             .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
         }
         let batch = NativeGenerationSpillFactBatch::new(
-            resolved.sequence,
-            resolved.facts,
-            self.state.validation_limits,
+            FactBatchInput {
+                sequence: resolved.sequence,
+                facts: resolved.facts,
+                limits: self.state.validation_limits,
+            },
             || self.cancellation.is_cancelled(),
         )
         .map_err(classify_spill_validation_error)?;
@@ -2784,6 +2813,35 @@ async fn run_spilled_resolve_stage(
 struct SpilledVisitObservation<'observation> {
     cancellation: &'observation StageCancellation,
     progress: &'observation StageRunner,
+}
+
+/// Language visibility for one resolution-candidate reservation.
+#[derive(Clone, Copy)]
+struct CandidateLanguageVisibility<'visibility> {
+    language: &'visibility str,
+    globally_visible: bool,
+    new_language_bucket: bool,
+}
+
+/// One parsed file's sequence, identity, and encoded payload.
+struct ParsedFilePayload {
+    sequence: u64,
+    file_id: FileId,
+    payload: Vec<u8>,
+}
+
+/// Working bound and cancellation for one derived-fact pass.
+#[derive(Clone, Copy)]
+struct DerivedFactBound<'bound> {
+    cancellation: &'bound StageCancellation,
+    maximum_bytes: u64,
+}
+
+/// One clone-prefilter histogram with its total token count.
+#[derive(Clone, Copy)]
+struct ClonePrefilter<'prefilter> {
+    buckets: &'prefilter [u32; CLONE_PREFILTER_BUCKETS],
+    total: u32,
 }
 
 /// Cache key and payload accounting for one cached parse result.
@@ -3100,9 +3158,15 @@ async fn spill_derived_generation_facts(
     let maximum_bytes = config.limits.retained.max_generation_bytes;
     let mut derived_sequence = source.files;
     for kind in SpilledDerivedFactKind::ALL {
-        let (facts, charged) =
-            derive_spilled_facts(&state.index, cancellation, maximum_bytes, kind)
-                .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
+        let (facts, charged) = derive_spilled_facts(
+            &state.index,
+            DerivedFactBound {
+                cancellation,
+                maximum_bytes,
+            },
+            kind,
+        )
+        .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
         state.high_water = state.high_water.max(charged);
         if !generation_facts_are_empty(&facts) {
             if state.centrality_enabled {
@@ -3114,9 +3178,11 @@ async fn spill_derived_generation_facts(
                 .map_err(|_| ResolveGenerationFailure::generation_capacity_exceeded())?;
             }
             let batch = NativeGenerationSpillFactBatch::new(
-                derived_sequence,
-                facts,
-                state.validation_limits,
+                FactBatchInput {
+                    sequence: derived_sequence,
+                    facts,
+                    limits: state.validation_limits,
+                },
                 || cancellation.is_cancelled(),
             )
             .map_err(classify_spill_validation_error)?;
@@ -3289,10 +3355,13 @@ impl SpilledDerivedFactKind {
 
 fn derive_spilled_facts(
     index: &ResolutionIndex,
-    cancellation: &StageCancellation,
-    maximum_bytes: u64,
+    bound: DerivedFactBound<'_>,
     kind: SpilledDerivedFactKind,
 ) -> Result<(GenerationFacts, u64), StageItemFailure> {
+    let DerivedFactBound {
+        cancellation,
+        maximum_bytes,
+    } = bound;
     let working_limit = maximum_bytes
         .checked_mul(RESOLVE_WORKING_MULTIPLIER)
         .ok_or(StageItemFailure)?;
@@ -7011,10 +7080,14 @@ where
                 break;
             }
             if clone_prefilter_overlap_ppm(
-                &candidates[left_index].prefilter.complete,
-                &candidates[right_index].prefilter.complete,
-                left_total,
-                right_total,
+                ClonePrefilter {
+                    buckets: &candidates[left_index].prefilter.complete,
+                    total: left_total,
+                },
+                ClonePrefilter {
+                    buckets: &candidates[right_index].prefilter.complete,
+                    total: right_total,
+                },
             ) < minimum_overlap_ppm
             {
                 continue;
@@ -7315,12 +7388,9 @@ fn clone_count_prefilter(counts: &[CloneTokenCount]) -> [u32; CLONE_PREFILTER_BU
     buckets
 }
 
-fn clone_prefilter_overlap_ppm(
-    left: &[u32; CLONE_PREFILTER_BUCKETS],
-    right: &[u32; CLONE_PREFILTER_BUCKETS],
-    left_total: u32,
-    right_total: u32,
-) -> u32 {
+fn clone_prefilter_overlap_ppm(left: ClonePrefilter<'_>, right: ClonePrefilter<'_>) -> u32 {
+    let (left_total, right_total) = (left.total, right.total);
+    let (left, right) = (left.buckets, right.buckets);
     let intersection = left
         .iter()
         .zip(right)
@@ -7367,10 +7437,14 @@ fn clone_candidates_semantically_compatible(
                 DUPLICATE_IDENTIFIER_MINIMUM_OVERLAP_PPM
             };
             if clone_prefilter_overlap_ppm(
-                &left.prefilter.identifiers,
-                &right.prefilter.identifiers,
-                left_profile.identifier_tokens(),
-                right_profile.identifier_tokens(),
+                ClonePrefilter {
+                    buckets: &left.prefilter.identifiers,
+                    total: left_profile.identifier_tokens(),
+                },
+                ClonePrefilter {
+                    buckets: &right.prefilter.identifiers,
+                    total: right_profile.identifier_tokens(),
+                },
             ) < minimum_overlap
             {
                 return false;
@@ -10388,7 +10462,14 @@ fn reserve_candidate_insertion(
             .try_reserve(1)
             .map_err(|_| StageItemFailure)?;
     }
-    reserve_candidate_project_index(bucket, language, globally_visible, new_language_bucket)?;
+    reserve_candidate_project_index(
+        bucket,
+        CandidateLanguageVisibility {
+            language,
+            globally_visible,
+            new_language_bucket,
+        },
+    )?;
     Ok(CandidateReservation {
         candidate_index,
         new_file_range,
@@ -10430,10 +10511,13 @@ fn candidate_reservation_bytes(
 
 fn reserve_candidate_project_index(
     bucket: &mut ResolutionCandidateBucket,
-    language: &str,
-    globally_visible: bool,
-    new_language_bucket: bool,
+    reservation: CandidateLanguageVisibility<'_>,
 ) -> Result<(), StageItemFailure> {
+    let CandidateLanguageVisibility {
+        language,
+        globally_visible,
+        new_language_bucket,
+    } = reservation;
     if globally_visible {
         return bucket
             .globally_visible
@@ -19102,10 +19186,14 @@ export function secondClone(value: number) {
             },
         );
         let prefiltered = clone_prefilter_overlap_ppm(
-            &clone_count_prefilter(&left),
-            &clone_count_prefilter(&right),
-            10,
-            10,
+            ClonePrefilter {
+                buckets: &clone_count_prefilter(&left),
+                total: 10,
+            },
+            ClonePrefilter {
+                buckets: &clone_count_prefilter(&right),
+                total: 10,
+            },
         );
         assert_eq!(exact, 200_000);
         assert_eq!(prefiltered, 400_000);
@@ -19114,10 +19202,14 @@ export function secondClone(value: number) {
         let disjoint = [CloneTokenCount(0xf000_0000_0000_0001, 10)];
         assert_eq!(
             clone_prefilter_overlap_ppm(
-                &clone_count_prefilter(&left),
-                &clone_count_prefilter(&disjoint),
-                10,
-                10,
+                ClonePrefilter {
+                    buckets: &clone_count_prefilter(&left),
+                    total: 10,
+                },
+                ClonePrefilter {
+                    buckets: &clone_count_prefilter(&disjoint),
+                    total: 10,
+                },
             ),
             0
         );
