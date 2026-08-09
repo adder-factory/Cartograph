@@ -68,6 +68,17 @@ pub struct GenerationRetentionRequest<'a> {
     policy: GenerationRetentionPolicy,
     fence: &'a LeaseFence,
     statement_timeout: Duration,
+    post_retention_maintenance: PostRetentionMaintenancePolicy,
+}
+
+/// Post-commit maintenance policy for one bounded generation cleanup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PostRetentionMaintenancePolicy {
+    /// Run thresholded table-scoped vacuuming before returning to the caller.
+    #[default]
+    Immediate,
+    /// Leave dead-row reclamation to the schema's aggressive autovacuum policy.
+    DelegateToAutovacuum,
 }
 
 impl<'a> GenerationRetentionRequest<'a> {
@@ -82,7 +93,19 @@ impl<'a> GenerationRetentionRequest<'a> {
             policy,
             fence,
             statement_timeout,
+            post_retention_maintenance: PostRetentionMaintenancePolicy::Immediate,
         }
+    }
+
+    /// Select whether a large committed cascade runs synchronous table
+    /// maintenance or delegates reclamation to PostgreSQL autovacuum.
+    #[must_use]
+    pub const fn with_post_retention_maintenance(
+        mut self,
+        policy: PostRetentionMaintenancePolicy,
+    ) -> Self {
+        self.post_retention_maintenance = policy;
+        self
     }
 }
 
@@ -275,11 +298,38 @@ pub enum PostRetentionMaintenance {
         /// Number of PostgreSQL tables considered for post-retention analysis.
         tables_attempted: u64,
     },
+    /// PostgreSQL's configured background maintenance owns reclamation.
+    Delegated {
+        /// Stable background mechanism responsible for maintenance.
+        mechanism: &'static str,
+    },
     /// Represents the deferred post retention maintenance.
     Deferred {
         /// Stable reason the bounded maintenance step could not run.
         reason: &'static str,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostRetentionMaintenancePlan {
+    NotNeeded,
+    VacuumTables,
+    DelegateToAutovacuum,
+}
+
+const fn post_retention_maintenance_plan(
+    cascade_rows_removed: u64,
+    policy: PostRetentionMaintenancePolicy,
+) -> PostRetentionMaintenancePlan {
+    if cascade_rows_removed < POST_RETENTION_VACUUM_ROW_THRESHOLD {
+        return PostRetentionMaintenancePlan::NotNeeded;
+    }
+    match policy {
+        PostRetentionMaintenancePolicy::Immediate => PostRetentionMaintenancePlan::VacuumTables,
+        PostRetentionMaintenancePolicy::DelegateToAutovacuum => {
+            PostRetentionMaintenancePlan::DelegateToAutovacuum
+        }
+    }
 }
 
 /// Credential-safe generation-retention failure.
@@ -365,18 +415,29 @@ impl CartographDatabase {
                     .await
                     .map_err(|_| database_error("commit"))?;
                 let mut report = report;
-                if report.cascade_rows_removed >= POST_RETENTION_VACUUM_ROW_THRESHOLD {
-                    report.maintenance = match self
-                        .vacuum_retention_tables(request.statement_timeout)
-                        .await
-                    {
-                        Ok(tables_attempted) => {
-                            PostRetentionMaintenance::Completed { tables_attempted }
-                        }
-                        Err(()) => PostRetentionMaintenance::Deferred {
-                            reason: "table_maintenance_unavailable",
-                        },
-                    };
+                match post_retention_maintenance_plan(
+                    report.cascade_rows_removed,
+                    request.post_retention_maintenance,
+                ) {
+                    PostRetentionMaintenancePlan::NotNeeded => {}
+                    PostRetentionMaintenancePlan::DelegateToAutovacuum => {
+                        report.maintenance = PostRetentionMaintenance::Delegated {
+                            mechanism: "autovacuum",
+                        };
+                    }
+                    PostRetentionMaintenancePlan::VacuumTables => {
+                        report.maintenance = match self
+                            .vacuum_retention_tables(request.statement_timeout)
+                            .await
+                        {
+                            Ok(tables_attempted) => {
+                                PostRetentionMaintenance::Completed { tables_attempted }
+                            }
+                            Err(()) => PostRetentionMaintenance::Deferred {
+                                reason: "table_maintenance_unavailable",
+                            },
+                        };
+                    }
                 }
                 Ok(report)
             }
@@ -1019,7 +1080,9 @@ mod tests {
     use super::{
         CandidateWork, DEFAULT_STALE_STAGING_AGE, GenerationRetentionError,
         GenerationRetentionPolicy, INVALID_DELETE_BATCH, MAXIMUM_DELETE_BATCH,
-        MAXIMUM_STALE_STAGING_AGE, RetentionCandidate, select_bounded_candidate_work,
+        MAXIMUM_STALE_STAGING_AGE, POST_RETENTION_VACUUM_ROW_THRESHOLD, PostRetentionMaintenance,
+        PostRetentionMaintenancePlan, PostRetentionMaintenancePolicy, RetentionCandidate,
+        post_retention_maintenance_plan, select_bounded_candidate_work,
     };
 
     const TEST_RETAINED_SUPERSEDED: u32 = 2;
@@ -1061,6 +1124,41 @@ mod tests {
             policy.with_stale_staging_age(Duration::from_mins(1)),
             Ok(updated) if updated.stale_staging_age() == Duration::from_mins(1)
         ));
+    }
+
+    #[test]
+    fn automatic_retention_delegates_large_cascades_to_autovacuum() {
+        assert_eq!(
+            post_retention_maintenance_plan(
+                POST_RETENTION_VACUUM_ROW_THRESHOLD,
+                PostRetentionMaintenancePolicy::DelegateToAutovacuum,
+            ),
+            PostRetentionMaintenancePlan::DelegateToAutovacuum
+        );
+        let serialized = serde_json::to_value(PostRetentionMaintenance::Delegated {
+            mechanism: "autovacuum",
+        })
+        .unwrap_or_else(|error| panic!("delegated maintenance serialization failed: {error}"));
+        assert_eq!(serialized["state"], "delegated");
+        assert_eq!(serialized["mechanism"], "autovacuum");
+    }
+
+    #[test]
+    fn explicit_retention_preserves_thresholded_table_maintenance() {
+        assert_eq!(
+            post_retention_maintenance_plan(
+                POST_RETENTION_VACUUM_ROW_THRESHOLD - 1,
+                PostRetentionMaintenancePolicy::Immediate,
+            ),
+            PostRetentionMaintenancePlan::NotNeeded
+        );
+        assert_eq!(
+            post_retention_maintenance_plan(
+                POST_RETENTION_VACUUM_ROW_THRESHOLD,
+                PostRetentionMaintenancePolicy::Immediate,
+            ),
+            PostRetentionMaintenancePlan::VacuumTables
+        );
     }
 
     #[test]

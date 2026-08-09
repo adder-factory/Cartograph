@@ -23,6 +23,7 @@ use tokio::{
 use crate::error_codes::project_index_failure_code;
 
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(750);
+const MAXIMUM_EVENT_COALESCING_LATENCY: Duration = Duration::from_secs(2);
 const MINIMUM_DEBOUNCE_MILLIS: u64 = 50;
 const MAXIMUM_DEBOUNCE_MILLIS: u64 = 60_000;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -64,11 +65,15 @@ impl ProjectAutoSync {
             filter,
         })?;
         let task_state = state.clone();
+        let debounce = debounce_from_env();
         let task = tokio::spawn(run_auto_sync(AutoSyncTask {
             runtime,
             events: receiver,
             cancellation: cancellation_receiver,
-            debounce: debounce_from_env(),
+            event_debounce: EventDebounce {
+                quiet_window: debounce,
+                maximum_latency: maximum_debounce_latency(debounce),
+            },
             state: task_state,
             startup_reconciliation_enabled,
         }));
@@ -135,8 +140,21 @@ struct AutoSyncFailureStatus {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AutoSyncFailureState {
-    failed_revision: Option<ContentDigest>,
+    failed_revision: Option<FailedRevision>,
     status: AutoSyncFailureStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FailedRevision {
+    Known(ContentDigest),
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventSyncRoute {
+    DirectIndex,
+    CheckFreshness,
+    WaitForRetry,
 }
 
 impl AutoSyncState {
@@ -148,15 +166,36 @@ impl AutoSyncState {
     }
 
     fn automatic_attempt_allowed(&self, revision: &ContentDigest, now: u64) -> bool {
+        self.failure
+            .read()
+            .map_or(true, |failure| match failure.failed_revision.as_ref() {
+                Some(FailedRevision::Known(failed_revision)) if failed_revision != revision => true,
+                Some(_) => retry_allowed(failure.status, now),
+                None => true,
+            })
+    }
+
+    fn event_sync_route(&self, now: u64) -> EventSyncRoute {
+        self.failure
+            .read()
+            .map_or(EventSyncRoute::CheckFreshness, |failure| {
+                match failure.failed_revision.as_ref() {
+                    None => EventSyncRoute::DirectIndex,
+                    Some(FailedRevision::Known(_)) => EventSyncRoute::CheckFreshness,
+                    Some(FailedRevision::Unknown) if retry_allowed(failure.status, now) => {
+                        EventSyncRoute::CheckFreshness
+                    }
+                    Some(FailedRevision::Unknown) => EventSyncRoute::WaitForRetry,
+                }
+            })
+    }
+
+    fn reconciliation_probe_allowed(&self, now: u64) -> bool {
         self.failure.read().map_or(true, |failure| {
-            if failure.failed_revision.as_ref() != Some(revision) {
-                return true;
-            }
-            !failure.status.retry_suppressed
-                && failure
-                    .status
-                    .next_retry_at
-                    .is_none_or(|deadline| now >= deadline)
+            !matches!(
+                failure.failed_revision.as_ref(),
+                Some(FailedRevision::Unknown)
+            ) || retry_allowed(failure.status, now)
         })
     }
 
@@ -167,6 +206,14 @@ impl AutoSyncState {
     }
 
     fn record_index_failure(&self, revision: ContentDigest, error: ProjectError, now: u64) {
+        self.record_failure(FailedRevision::Known(revision), error, now);
+    }
+
+    fn record_unknown_failure(&self, error: ProjectError, now: u64) {
+        self.record_failure(FailedRevision::Unknown, error, now);
+    }
+
+    fn record_failure(&self, revision: FailedRevision, error: ProjectError, now: u64) {
         self.errors.fetch_add(1, Ordering::AcqRel);
         let Ok(mut failure) = self.failure.write() else {
             return;
@@ -176,7 +223,8 @@ impl AutoSyncState {
         } else {
             1
         };
-        let retry_suppressed = attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION;
+        let retry_suppressed = matches!(&revision, FailedRevision::Known(_))
+            && attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION;
         let next_retry_at = (!retry_suppressed).then(|| {
             now.saturating_add(
                 retry_interval(attempts)
@@ -198,6 +246,10 @@ impl AutoSyncState {
     }
 }
 
+fn retry_allowed(status: AutoSyncFailureStatus, now: u64) -> bool {
+    !status.retry_suppressed && status.next_retry_at.is_none_or(|deadline| now >= deadline)
+}
+
 /// Privacy-safe watcher health exposed through status without project paths.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,9 +269,9 @@ pub(crate) struct AutoSyncStatus {
     pub last_failure_at: Option<u64>,
     /// Unix-millisecond deadline for the next automatic retry of this revision.
     pub next_retry_at: Option<u64>,
-    /// Automatic attempts made for the unchanged failed source revision.
+    /// Automatic failures recorded for the current known or unavailable-revision bucket.
     pub failed_revision_attempts: u8,
-    /// True after the bounded retry budget is exhausted until source changes.
+    /// True after a known revision exhausts its retry budget until source changes.
     pub retry_suppressed: bool,
 }
 
@@ -317,9 +369,15 @@ struct AutoSyncTask {
     runtime: Arc<ProjectRuntime>,
     events: mpsc::Receiver<()>,
     cancellation: watch::Receiver<bool>,
-    debounce: Duration,
+    event_debounce: EventDebounce,
     state: Arc<AutoSyncState>,
     startup_reconciliation_enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EventDebounce {
+    quiet_window: Duration,
+    maximum_latency: Duration,
 }
 
 async fn run_auto_sync(input: AutoSyncTask) {
@@ -327,7 +385,7 @@ async fn run_auto_sync(input: AutoSyncTask) {
         runtime,
         mut events,
         mut cancellation,
-        debounce,
+        event_debounce,
         state,
         startup_reconciliation_enabled,
     } = input;
@@ -346,10 +404,14 @@ async fn run_auto_sync(input: AutoSyncTask) {
                 }
             }
             event = events.recv() => {
-                if event.is_none() || debounce_events(&mut events, &mut cancellation, debounce).await {
+                if event.is_none() || debounce_events(
+                    &mut events,
+                    &mut cancellation,
+                    event_debounce,
+                ).await {
                     break;
                 }
-                synchronize_if_stale(&runtime, &state).await;
+                synchronize_after_event(&runtime, &state).await;
             }
             () = &mut startup_reconciliation, if startup_reconciliation_pending => {
                 startup_reconciliation_pending = false;
@@ -365,31 +427,48 @@ async fn run_auto_sync(input: AutoSyncTask) {
 
 async fn reconcile(runtime: &ProjectRuntime, state: &AutoSyncState) {
     state.reconciliations.fetch_add(1, Ordering::AcqRel);
-    synchronize_if_stale(runtime, state).await;
+    if state.reconciliation_probe_allowed(unix_millis()) {
+        synchronize_if_stale(runtime, state).await;
+    }
 }
 
 async fn synchronize_if_stale(runtime: &ProjectRuntime, state: &AutoSyncState) {
+    let now = unix_millis();
     match runtime.status().await {
         Ok(status)
             if !status.fresh
-                && state.automatic_attempt_allowed(&status.live_source_revision, unix_millis()) =>
+                && state.automatic_attempt_allowed(&status.live_source_revision, now) =>
         {
-            synchronize(runtime, state, status.live_source_revision).await;
+            synchronize(runtime, state, Some(status.live_source_revision)).await;
         }
-        Ok(_) => {}
+        Ok(status) => {
+            if status.fresh {
+                state.record_index_success();
+            }
+        }
         Err(_) => {
-            state.errors.fetch_add(1, Ordering::AcqRel);
+            state.record_unknown_failure(ProjectError::StatusFailed, now);
         }
+    }
+}
+
+async fn synchronize_after_event(runtime: &ProjectRuntime, state: &AutoSyncState) {
+    match state.event_sync_route(unix_millis()) {
+        EventSyncRoute::DirectIndex => synchronize(runtime, state, None).await,
+        EventSyncRoute::CheckFreshness => synchronize_if_stale(runtime, state).await,
+        EventSyncRoute::WaitForRetry => {}
     }
 }
 
 async fn debounce_events(
     events: &mut mpsc::Receiver<()>,
     cancellation: &mut watch::Receiver<bool>,
-    debounce: Duration,
+    window: EventDebounce,
 ) -> bool {
-    let deadline = tokio::time::sleep(debounce);
+    let deadline = tokio::time::sleep(window.quiet_window);
+    let maximum_deadline = tokio::time::sleep(window.maximum_latency);
     tokio::pin!(deadline);
+    tokio::pin!(maximum_deadline);
     loop {
         tokio::select! {
             biased;
@@ -398,20 +477,25 @@ async fn debounce_events(
                     return true;
                 }
             }
+            () = &mut maximum_deadline => return false,
             () = &mut deadline => return false,
             event = events.recv() => {
                 if event.is_none() {
                     return true;
                 }
-                deadline.as_mut().reset(Instant::now() + debounce);
+                deadline.as_mut().reset(Instant::now() + window.quiet_window);
             }
         }
     }
 }
 
-async fn synchronize(runtime: &ProjectRuntime, state: &AutoSyncState, revision: ContentDigest) {
+async fn synchronize(
+    runtime: &ProjectRuntime,
+    state: &AutoSyncState,
+    revision: Option<ContentDigest>,
+) {
     state.sync_attempts.fetch_add(1, Ordering::AcqRel);
-    match runtime.index(IndexOptions::default()).await {
+    match runtime.index(IndexOptions::automatic()).await {
         Ok(report) => {
             if report.published {
                 state.publications.fetch_add(1, Ordering::AcqRel);
@@ -424,9 +508,25 @@ async fn synchronize(runtime: &ProjectRuntime, state: &AutoSyncState, revision: 
             state.record_index_success();
         }
         Err(error) => {
-            state.record_index_failure(revision, error, unix_millis());
+            let failed_revision = match revision {
+                Some(revision) => Some(revision),
+                None => runtime
+                    .status()
+                    .await
+                    .ok()
+                    .map(|status| status.live_source_revision),
+            };
+            if let Some(failed_revision) = failed_revision {
+                state.record_index_failure(failed_revision, error, unix_millis());
+            } else {
+                state.record_unknown_failure(error, unix_millis());
+            }
         }
     }
+}
+
+fn maximum_debounce_latency(debounce: Duration) -> Duration {
+    debounce.max(MAXIMUM_EVENT_COALESCING_LATENCY)
 }
 
 fn retry_interval(attempts: u8) -> Duration {
@@ -438,9 +538,12 @@ fn retry_interval(attempts: u8) -> Duration {
 }
 
 const fn project_error_code(error: ProjectError) -> &'static str {
-    match project_index_failure_code(error) {
-        Some(code) => code,
-        None => "index_failed",
+    match error {
+        ProjectError::StatusFailed => "status_failed",
+        other => match project_index_failure_code(other) {
+            Some(code) => code,
+            None => "index_failed",
+        },
     }
 }
 
@@ -574,6 +677,38 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn continuous_events_cannot_extend_debounce_past_the_hard_deadline() {
+        let quiet_window = Duration::from_millis(100);
+        let maximum_latency = Duration::from_millis(250);
+        let (sender, mut events) = mpsc::channel(1);
+        let (_cancellation_sender, mut cancellation) = watch::channel(false);
+        let producer = tokio::spawn(async move {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if sender.send(()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let started = Instant::now();
+
+        let cancelled = debounce_events(
+            &mut events,
+            &mut cancellation,
+            EventDebounce {
+                quiet_window,
+                maximum_latency,
+            },
+        )
+        .await;
+
+        assert!(!cancelled);
+        assert_eq!(Instant::now().duration_since(started), maximum_latency);
+        assert!(!producer.is_finished());
+        producer.abort();
+    }
+
     #[test]
     fn unchanged_failed_revision_uses_bounded_backoff_and_new_source_resets_it() {
         let state = AutoSyncState::default();
@@ -595,6 +730,7 @@ mod tests {
         assert_eq!(first.attempts, 1);
         assert!(!first.retry_suppressed);
         assert!(!state.automatic_attempt_allowed(&first_revision, now));
+        assert_eq!(state.event_sync_route(now), EventSyncRoute::CheckFreshness);
         now = first
             .next_retry_at
             .unwrap_or_else(|| panic!("first retry deadline was missing"));
@@ -621,11 +757,47 @@ mod tests {
         assert!(exhausted.retry_suppressed);
         assert_eq!(exhausted.next_retry_at, None);
         assert!(!state.automatic_attempt_allowed(&first_revision, u64::MAX));
+        assert_eq!(state.event_sync_route(now), EventSyncRoute::CheckFreshness);
         assert!(state.automatic_attempt_allowed(&next_revision, now));
 
         state.record_index_success();
         assert_eq!(state.failure_status(), AutoSyncFailureStatus::default());
         assert!(state.automatic_attempt_allowed(&first_revision, now));
+    }
+
+    #[test]
+    fn unavailable_revision_failures_throttle_events_without_blocking_recovery_forever() {
+        let state = AutoSyncState::default();
+        let mut now = 1_000_u64;
+
+        state.record_unknown_failure(ProjectError::StatusFailed, now);
+        let first = state.failure_status();
+        assert_eq!(first.last_error_code, Some("status_failed"));
+        assert_eq!(first.attempts, 1);
+        assert!(!first.retry_suppressed);
+        assert_eq!(state.event_sync_route(now), EventSyncRoute::WaitForRetry);
+        assert!(!state.reconciliation_probe_allowed(now));
+
+        now = first
+            .next_retry_at
+            .unwrap_or_else(|| panic!("unknown-revision retry deadline was missing"));
+        assert_eq!(state.event_sync_route(now), EventSyncRoute::CheckFreshness);
+        assert!(state.reconciliation_probe_allowed(now));
+
+        for expected_attempts in 2..=MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION.saturating_add(1) {
+            state.record_unknown_failure(ProjectError::StatusFailed, now);
+            let status = state.failure_status();
+            assert_eq!(status.attempts, expected_attempts);
+            assert!(!status.retry_suppressed);
+            now = status
+                .next_retry_at
+                .unwrap_or_else(|| panic!("bounded recovery probe deadline was missing"));
+        }
+        assert_eq!(state.event_sync_route(now), EventSyncRoute::CheckFreshness);
+
+        state.record_index_success();
+        assert_eq!(state.failure_status(), AutoSyncFailureStatus::default());
+        assert_eq!(state.event_sync_route(now), EventSyncRoute::DirectIndex);
     }
 
     #[test]
@@ -705,6 +877,7 @@ mod tests {
                 "generation_start_failed",
             ),
             (ProjectError::SourceScanFailed, "source_scan_failed"),
+            (ProjectError::StatusFailed, "status_failed"),
             (ProjectError::IndexLeaseFailed, "lease_failed"),
             (ProjectError::IndexPublicationFailed, "publication_failed"),
             (ProjectError::IndexCleanupFailed, "index_cleanup_failed"),

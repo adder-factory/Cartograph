@@ -28,8 +28,8 @@ use cartograph_db::{
     GenerationRetentionReport, GenerationRetentionRequest, HistoryRefreshReport,
     IssueHistoryRefreshReport, LeaseError, LeaseRequest, LeaseTarget, MigrationError,
     NativeGenerationSpillPolicy, NativeParseCacheRetentionPolicy, NativeParseCacheRetentionReport,
-    NativeParseCacheRetentionRequest, NewGeneration, NewProject, ProjectSnapshot,
-    SpilledGenerationContents, StagedGeneration,
+    NativeParseCacheRetentionRequest, NewGeneration, NewProject, PostRetentionMaintenancePolicy,
+    ProjectSnapshot, SpilledGenerationContents, StagedGeneration,
 };
 use cartograph_domain::{
     ContentDigest, GenerationDigestVersion, NormalizedPath, ProjectId, ProjectOperation,
@@ -195,6 +195,8 @@ const AUTOMATIC_RETENTION_LEASE_DURATION: Duration = Duration::from_mins(2);
 const AUTOMATIC_RETENTION_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATIC_RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTOMATIC_RETENTION_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+const AUTOMATIC_RETENTION_MAINTENANCE: PostRetentionMaintenancePolicy =
+    PostRetentionMaintenancePolicy::DelegateToAutovacuum;
 const OVERSIZED_SOURCE_DIGEST_DOMAIN: &[u8] = b"cartograph-v2-oversized-source-v1";
 
 pub(crate) fn trim_ascii_bytes(value: &[u8]) -> &[u8] {
@@ -234,6 +236,21 @@ impl Default for IndexOptions {
 }
 
 impl IndexOptions {
+    /// Low-resource policy for automatic background reconciliation.
+    ///
+    /// The structural graph remains complete, while the independent Git
+    /// history passes are left for an explicit index and native extraction is
+    /// capped at four workers to avoid competing with the editor or coding
+    /// agent that caused the change.
+    #[must_use]
+    pub fn automatic() -> Self {
+        Self {
+            max_workers: FOUR_WORKERS,
+            refresh_history: false,
+            ..Self::default()
+        }
+    }
+
     /// Add run-scoped exclusion globs on top of the project's configured
     /// `exclude` list. A `!` prefix re-includes a path an exclusion matched.
     ///
@@ -1014,11 +1031,10 @@ async fn maintain_generation_retention(
     let fence = lease.fence();
     let report = runtime
         .database
-        .cleanup_generations(GenerationRetentionRequest::new(
-            policy,
-            &fence,
-            AUTOMATIC_RETENTION_STATEMENT_TIMEOUT,
-        ))
+        .cleanup_generations(
+            GenerationRetentionRequest::new(policy, &fence, AUTOMATIC_RETENTION_STATEMENT_TIMEOUT)
+                .with_post_retention_maintenance(AUTOMATIC_RETENTION_MAINTENANCE),
+        )
         .await;
     let contract = native_extractor_contract_digest();
     let parse_cache = if report.is_ok() {
@@ -3277,6 +3293,22 @@ mod tests {
             IndexOptions::default()
                 .with_max_source_bytes(10 * 1024 * 1024)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn automatic_indexing_is_history_free_and_worker_bounded() {
+        let automatic = IndexOptions::automatic();
+
+        assert_eq!(automatic.max_workers, FOUR_WORKERS);
+        assert!(!automatic.refresh_history);
+        assert!(!automatic.force);
+        assert_eq!(automatic.max_source_bytes, None);
+        assert!(!automatic.profile);
+        assert!(automatic.additional_excludes.is_empty());
+        assert_eq!(
+            AUTOMATIC_RETENTION_MAINTENANCE,
+            PostRetentionMaintenancePolicy::DelegateToAutovacuum
         );
     }
 

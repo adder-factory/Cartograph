@@ -20,8 +20,8 @@ use super::{
         ContainerArchivePath, ContainerCreateSpec, ContainerInspection, DatabaseArchiveOperation,
         DatabaseArchiveRequest,
     },
-    initialize_managed_database, validate_configured_port, validate_destructive_confirmation,
-    validate_owned_container,
+    has_expected_resource_limits, initialize_managed_database, validate_configured_port,
+    validate_destructive_confirmation, validate_owned_container,
 };
 use crate::{CartographDatabase, connect};
 
@@ -403,6 +403,7 @@ impl ManagedDatabaseMaintenance<'_> {
         let credentials = self.database.credentials.load()?;
         if inspection.image == super::MANAGED_DATABASE_IMAGE
             && inspection.shared_memory_bytes >= super::MANAGED_DATABASE_SHARED_MEMORY_BYTES
+            && has_expected_resource_limits(&inspection)
         {
             let initialized = self
                 .initialize_supported_existing(&inspection, &credentials)
@@ -1026,8 +1027,8 @@ mod tests {
     const LIVE_SCHEMA: &str = "cartograph_managed_maintenance_test";
     const LIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
     const PREVIOUS_MANAGED_DATABASE_IMAGE: &str = concat!(
-        "paradedb/paradedb:0.24.3@sha256:",
-        "8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb"
+        "paradedb/paradedb:0.25.0@sha256:",
+        "6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7"
     );
 
     struct LiveDockerCleanup {

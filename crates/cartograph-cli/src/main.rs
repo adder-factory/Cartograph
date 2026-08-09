@@ -3024,7 +3024,7 @@ fn managed_mcp_preflight_error(status: &ManagedDatabaseStatus) -> Option<String>
                 .to_owned(),
         );
     }
-    if status.image_matches && status.hnsw_shared_memory_ready {
+    if status.image_matches && status.hnsw_shared_memory_ready && status.resource_limits_match {
         return (status.state != ManagedContainerState::Healthy).then(|| {
             format!(
                 "managed database is {}; run `cartograph db start --project-path <path> --port {}` and require doctor to pass before starting MCP",
@@ -3971,7 +3971,7 @@ fn print_managed_status(
                 .map_err(|_| "could not serialize the managed database status".to_owned())?
         ),
         OutputFormat::Text => println!(
-            "Managed database: {} ({}, loopback port {}, image {}, HNSW shared memory {})",
+            "Managed database: {} ({}, loopback port {}, image {}, HNSW shared memory {}, resource limits {})",
             managed_state_label(status.state),
             status.container_name,
             status.port,
@@ -3982,6 +3982,11 @@ fn print_managed_status(
             },
             if status.hnsw_shared_memory_ready {
                 "ready"
+            } else {
+                "upgrade required"
+            },
+            if status.resource_limits_match {
+                "bounded"
             } else {
                 "upgrade required"
             }
@@ -4620,6 +4625,26 @@ fn check_managed_database_status(status: &ManagedDatabaseStatus, checks: &mut Ve
         doctor_fail(
             "managed-hnsw-shared-memory",
             "Managed PostgreSQL shared memory is below the HNSW maintenance requirement."
+                .to_owned(),
+            "Create a backup, then run `cartograph db upgrade --confirm upgrade-managed-database --project-path <path>`."
+                .to_owned(),
+        )
+    });
+    checks.push(if status.resource_limits_match {
+        doctor_pass(
+            "managed-resource-limits",
+            format!(
+                "Managed PostgreSQL is bounded to {} memory bytes, {} reserved bytes, {} nano CPUs, and {} processes.",
+                status.memory_limit_bytes.unwrap_or_default(),
+                status.memory_reservation_bytes.unwrap_or_default(),
+                status.nano_cpus.unwrap_or_default(),
+                status.pids_limit.unwrap_or_default()
+            ),
+        )
+    } else {
+        doctor_fail(
+            "managed-resource-limits",
+            "Managed PostgreSQL does not match the supported CPU, memory, and process ceilings."
                 .to_owned(),
             "Create a backup, then run `cartograph db upgrade --confirm upgrade-managed-database --project-path <path>`."
                 .to_owned(),
@@ -5722,6 +5747,13 @@ mod tests {
                 image_matches: true,
                 shared_memory_bytes: Some(64 * 1_024 * 1_024),
                 hnsw_shared_memory_ready: false,
+                memory_limit_bytes: Some(cartograph_db::MANAGED_DATABASE_MEMORY_LIMIT_BYTES),
+                memory_reservation_bytes: Some(
+                    cartograph_db::MANAGED_DATABASE_MEMORY_RESERVATION_BYTES,
+                ),
+                nano_cpus: Some(cartograph_db::MANAGED_DATABASE_NANO_CPUS),
+                pids_limit: Some(cartograph_db::MANAGED_DATABASE_PIDS_LIMIT),
+                resource_limits_match: true,
             },
             &mut checks,
         );
@@ -5740,6 +5772,39 @@ mod tests {
     }
 
     #[test]
+    fn doctor_rejects_managed_database_without_resource_limits() {
+        let mut checks = Vec::new();
+        check_managed_database_status(
+            &ManagedDatabaseStatus {
+                container_name: "cartograph-v2-test".to_owned(),
+                state: ManagedContainerState::Healthy,
+                port: 55_432,
+                image_matches: true,
+                shared_memory_bytes: Some(cartograph_db::MANAGED_DATABASE_SHARED_MEMORY_BYTES),
+                hnsw_shared_memory_ready: true,
+                memory_limit_bytes: Some(0),
+                memory_reservation_bytes: Some(0),
+                nano_cpus: Some(0),
+                pids_limit: Some(0),
+                resource_limits_match: false,
+            },
+            &mut checks,
+        );
+
+        let resource_limits = checks
+            .iter()
+            .find(|check| check.id == "managed-resource-limits")
+            .unwrap_or_else(|| panic!("managed resource-limit check was missing"));
+        assert_eq!(resource_limits.status, DoctorStatus::Fail);
+        assert!(
+            resource_limits
+                .remediation
+                .as_deref()
+                .is_some_and(|message| message.contains("upgrade-managed-database"))
+        );
+    }
+
+    #[test]
     fn mcp_preflight_blocks_incompatible_managed_database_with_exact_recovery() {
         let status = ManagedDatabaseStatus {
             container_name: "cartograph-v2-test".to_owned(),
@@ -5748,6 +5813,11 @@ mod tests {
             image_matches: false,
             shared_memory_bytes: Some(64 * 1_024 * 1_024),
             hnsw_shared_memory_ready: false,
+            memory_limit_bytes: Some(0),
+            memory_reservation_bytes: Some(0),
+            nano_cpus: Some(0),
+            pids_limit: Some(0),
+            resource_limits_match: false,
         };
         let error = managed_mcp_preflight_error(&status)
             .unwrap_or_else(|| panic!("incompatible managed database passed MCP preflight"));
@@ -5764,6 +5834,11 @@ mod tests {
             image_matches: false,
             shared_memory_bytes: None,
             hnsw_shared_memory_ready: false,
+            memory_limit_bytes: None,
+            memory_reservation_bytes: None,
+            nano_cpus: None,
+            pids_limit: None,
+            resource_limits_match: false,
         };
         assert!(
             managed_mcp_preflight_error(&missing)
@@ -5774,6 +5849,13 @@ mod tests {
             image_matches: true,
             shared_memory_bytes: Some(cartograph_db::MANAGED_DATABASE_SHARED_MEMORY_BYTES),
             hnsw_shared_memory_ready: true,
+            memory_limit_bytes: Some(cartograph_db::MANAGED_DATABASE_MEMORY_LIMIT_BYTES),
+            memory_reservation_bytes: Some(
+                cartograph_db::MANAGED_DATABASE_MEMORY_RESERVATION_BYTES,
+            ),
+            nano_cpus: Some(cartograph_db::MANAGED_DATABASE_NANO_CPUS),
+            pids_limit: Some(cartograph_db::MANAGED_DATABASE_PIDS_LIMIT),
+            resource_limits_match: true,
             ..status.clone()
         };
         assert!(
@@ -5785,6 +5867,13 @@ mod tests {
             image_matches: true,
             shared_memory_bytes: Some(cartograph_db::MANAGED_DATABASE_SHARED_MEMORY_BYTES),
             hnsw_shared_memory_ready: true,
+            memory_limit_bytes: Some(cartograph_db::MANAGED_DATABASE_MEMORY_LIMIT_BYTES),
+            memory_reservation_bytes: Some(
+                cartograph_db::MANAGED_DATABASE_MEMORY_RESERVATION_BYTES,
+            ),
+            nano_cpus: Some(cartograph_db::MANAGED_DATABASE_NANO_CPUS),
+            pids_limit: Some(cartograph_db::MANAGED_DATABASE_PIDS_LIMIT),
+            resource_limits_match: true,
             ..status
         };
         assert!(managed_mcp_preflight_error(&healthy).is_none());

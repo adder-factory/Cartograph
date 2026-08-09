@@ -19,13 +19,21 @@ use crate::{CapabilityReport, CartographDatabase, MigrationReport, connect, prob
 
 /// Exact upstream multi-architecture image accepted by Cartograph v2.
 pub const MANAGED_DATABASE_IMAGE: &str = concat!(
-    "paradedb/paradedb:0.25.0@sha256:",
-    "6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7"
+    "paradedb/paradedb:0.25.1@sha256:",
+    "fcd662a9b32e683638e0a2c2d9fd313e433f07694ec70543b30de0d84a721c18"
 );
 /// Default loopback port for the first managed Cartograph database.
 pub const DEFAULT_MANAGED_DATABASE_PORT: u16 = 55_432;
 /// Deliberate Docker shared-memory allocation for bounded HNSW maintenance.
 pub const MANAGED_DATABASE_SHARED_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+/// Hard Docker memory ceiling for newly created managed databases.
+pub const MANAGED_DATABASE_MEMORY_LIMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Soft Docker memory reservation below the hard managed ceiling.
+pub const MANAGED_DATABASE_MEMORY_RESERVATION_BYTES: u64 = 1024 * 1024 * 1024;
+/// Four CPU cores expressed through Docker's nanosecond CPU quota field.
+pub const MANAGED_DATABASE_NANO_CPUS: u64 = 4_000_000_000;
+/// Process ceiling covering bounded PostgreSQL sessions and background workers.
+pub const MANAGED_DATABASE_PIDS_LIMIT: i64 = 256;
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const DEFAULT_MAINTENANCE_TIMEOUT: Duration = Duration::from_mins(15);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -127,6 +135,16 @@ pub struct ManagedDatabaseStatus {
     pub shared_memory_bytes: Option<u64>,
     /// Whether shared memory satisfies Cartograph's bounded HNSW build requirement.
     pub hnsw_shared_memory_ready: bool,
+    /// Docker hard memory ceiling, absent when no managed container exists.
+    pub memory_limit_bytes: Option<u64>,
+    /// Docker soft memory reservation, absent when no managed container exists.
+    pub memory_reservation_bytes: Option<u64>,
+    /// Docker CPU quota in nanoseconds, absent when no managed container exists.
+    pub nano_cpus: Option<u64>,
+    /// Docker process ceiling, absent when no managed container exists.
+    pub pids_limit: Option<i64>,
+    /// Whether every explicit managed resource limit matches the supported policy.
+    pub resource_limits_match: bool,
 }
 
 /// Result of a successful idempotent managed start.
@@ -566,6 +584,11 @@ impl ManagedDatabaseLifecycle<'_> {
                 image_matches: false,
                 shared_memory_bytes: None,
                 hnsw_shared_memory_ready: false,
+                memory_limit_bytes: None,
+                memory_reservation_bytes: None,
+                nano_cpus: None,
+                pids_limit: None,
+                resource_limits_match: false,
             });
         };
         validate_owned_container(&self.database.identity, &inspection, false)?;
@@ -579,6 +602,11 @@ impl ManagedDatabaseLifecycle<'_> {
             shared_memory_bytes: Some(inspection.shared_memory_bytes),
             hnsw_shared_memory_ready: inspection.shared_memory_bytes
                 >= MANAGED_DATABASE_SHARED_MEMORY_BYTES,
+            memory_limit_bytes: Some(inspection.memory_limit_bytes),
+            memory_reservation_bytes: Some(inspection.memory_reservation_bytes),
+            nano_cpus: Some(inspection.nano_cpus),
+            pids_limit: Some(inspection.pids_limit),
+            resource_limits_match: has_expected_resource_limits(&inspection),
         })
     }
 
@@ -889,6 +917,13 @@ fn validate_owned_container(
     Ok(())
 }
 
+const fn has_expected_resource_limits(inspection: &ContainerInspection) -> bool {
+    inspection.memory_limit_bytes == MANAGED_DATABASE_MEMORY_LIMIT_BYTES
+        && inspection.memory_reservation_bytes == MANAGED_DATABASE_MEMORY_RESERVATION_BYTES
+        && inspection.nano_cpus == MANAGED_DATABASE_NANO_CPUS
+        && inspection.pids_limit == MANAGED_DATABASE_PIDS_LIMIT
+}
+
 fn validate_configured_port(
     configured: u16,
     inspection: &ContainerInspection,
@@ -1192,6 +1227,7 @@ mod tests {
     const IDENTITY_TEST_PORT: u16 = 55_432;
     const TEST_DATABASE_PORT: u16 = 55_433;
     const TEST_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+    const PORT_SELECTION_ATTEMPTS: usize = 3;
     const RESTART_POLL_ATTEMPTS: usize = 20;
     const RESTART_POLL_INTERVAL: Duration = Duration::from_millis(50);
     const RESTARTING_FIXTURE_COMMAND: &str = "exit 17";
@@ -1278,6 +1314,10 @@ mod tests {
             host_ip: "127.0.0.1".to_owned(),
             host_port: "55432".to_owned(),
             shared_memory_bytes: MANAGED_DATABASE_SHARED_MEMORY_BYTES,
+            memory_limit_bytes: MANAGED_DATABASE_MEMORY_LIMIT_BYTES,
+            memory_reservation_bytes: MANAGED_DATABASE_MEMORY_RESERVATION_BYTES,
+            nano_cpus: MANAGED_DATABASE_NANO_CPUS,
+            pids_limit: MANAGED_DATABASE_PIDS_LIMIT,
             data_mount: None,
         };
 
@@ -1417,7 +1457,7 @@ mod tests {
         assert_foreign_volume_refusal(&database).await;
         assert_restarting_container_can_be_stopped(&database).await;
         assert_normal_lifecycle(&database).await;
-        assert_readiness_timeout_rolls_back(directory.path(), live_port).await;
+        assert_readiness_timeout_rolls_back(directory.path()).await;
         assert_existing_volume_without_password_is_refused(&database).await;
     }
 
@@ -1639,6 +1679,17 @@ mod tests {
             Some(MANAGED_DATABASE_SHARED_MEMORY_BYTES)
         );
         assert!(status.hnsw_shared_memory_ready);
+        assert_eq!(
+            status.memory_limit_bytes,
+            Some(MANAGED_DATABASE_MEMORY_LIMIT_BYTES)
+        );
+        assert_eq!(
+            status.memory_reservation_bytes,
+            Some(MANAGED_DATABASE_MEMORY_RESERVATION_BYTES)
+        );
+        assert_eq!(status.nano_cpus, Some(MANAGED_DATABASE_NANO_CPUS));
+        assert_eq!(status.pids_limit, Some(MANAGED_DATABASE_PIDS_LIMIT));
+        assert!(status.resource_limits_match);
         assert_container_metadata_uses_password_file(database);
 
         let available_storage = match database.lifecycle().available_storage_bytes().await {
@@ -1714,20 +1765,43 @@ mod tests {
         });
     }
 
-    async fn assert_readiness_timeout_rolls_back(project_root: &Path, port: u16) {
-        let zero_timeout = match ManagedDatabase::new(project_root, port) {
-            Ok(database) => database.with_startup_timeout(Duration::ZERO),
-            Err(error) => panic!("could not build timeout manager: {error}"),
-        };
-        assert!(matches!(
-            zero_timeout.lifecycle().start().await,
-            Err(ManagedDatabaseError::DatabaseStartupTimeout)
-        ));
-        let rolled_back = match zero_timeout.lifecycle().status().await {
-            Ok(status) => status,
-            Err(error) => panic!("rollback status failed: {error}"),
-        };
-        assert_eq!(rolled_back.state, ManagedContainerState::Stopped);
+    async fn assert_readiness_timeout_rolls_back(project_root: &Path) {
+        for attempt in 0..PORT_SELECTION_ATTEMPTS {
+            let timeout_root = project_root.join(format!("readiness-timeout-{attempt}"));
+            if let Err(error) = std::fs::create_dir(&timeout_root) {
+                panic!("could not create timeout project: {error}");
+            }
+            let zero_timeout = match ManagedDatabase::new(&timeout_root, available_loopback_port())
+            {
+                Ok(database) => database.with_startup_timeout(Duration::ZERO),
+                Err(error) => panic!("could not build timeout manager: {error}"),
+            };
+            let _cleanup = DockerCleanup {
+                container_name: zero_timeout.identity.container_name.clone(),
+                volume_name: zero_timeout.identity.volume_name.clone(),
+            };
+            let timeout_result = zero_timeout.lifecycle().start().await;
+            if matches!(
+                timeout_result,
+                Err(ManagedDatabaseError::PortUnavailable { .. })
+            ) {
+                continue;
+            }
+            assert!(
+                matches!(
+                    timeout_result,
+                    Err(ManagedDatabaseError::DatabaseStartupTimeout)
+                ),
+                "unexpected zero-timeout result: {timeout_result:?}"
+            );
+            let rolled_back = match zero_timeout.lifecycle().status().await {
+                Ok(status) => status,
+                Err(error) => panic!("rollback status failed: {error}"),
+            };
+            assert_eq!(rolled_back.state, ManagedContainerState::Stopped);
+            return;
+        }
+        panic!("could not reserve an isolated managed timeout port");
     }
 
     fn available_loopback_port() -> u16 {

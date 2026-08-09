@@ -30,7 +30,7 @@ abstention instead of presenting stale or incomplete data as certainty.
 
 > [!IMPORTANT]
 > Cartograph v2 is PostgreSQL-only. It requires PostgreSQL 18.4 or newer within
-> major version 18, ParadeDB `pg_search` 0.25.0, and pgvector 0.8.4 or newer
+> major version 18, ParadeDB `pg_search` 0.25.1, and pgvector 0.8.4 or newer
 > (0.8.6 recommended for external PostgreSQL).
 > There is no SQLite runtime, compatibility mode, importer, optional feature,
 > or fallback.
@@ -176,7 +176,7 @@ in a pinned Rust/Trixie container and executed in a separate pinned Debian 13
 runtime container before publication.
 
 For an external deployment, the database administrator installs PostgreSQL 18.4
-or newer within major version 18, `pg_search` 0.25.0, and pgvector 0.8.4 or
+or newer within major version 18, `pg_search` 0.25.1, and pgvector 0.8.4 or
 newer, and creates both extensions. Load the connection URL from the shell or a
 secret manager rather than a committed file:
 
@@ -381,6 +381,14 @@ cartograph db stop --project-path .
 Restore, upgrade, derived-index rebuild, removal, import, and prune can replace
 or delete state. They require the exact confirmation phrase shown by command
 help and are never implied by a diagnostic request.
+
+New or confirmed-replacement managed containers have explicit 2 GiB memory,
+four-CPU, and 256-process ceilings plus bounded PostgreSQL memory and worker
+settings. A 15-minute checkpoint interval, 4 GiB soft maximum WAL size, and
+512 MiB recycled-WAL floor absorb rapid generation COPY/BM25 bursts without
+weakening synchronous durability. `db status` reports the observed Docker
+limits and compatibility; an older owned container is never silently replaced
+and uses the normal backup-gated, confirmed `db upgrade` path.
 
 Default `status` output includes compact database/schema/heap/index/TOAST
 allocation in readable IEC units such as MiB and GiB. JSON and MCP retain the

@@ -91,8 +91,13 @@ cartograph context 'explain the primary request flow' --project-path .
 
 The managed lifecycle creates project-owned, loopback-only Docker resources
 using the pinned upstream ParadeDB image. PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.0, pgvector 0.8.4 or newer, preload, ParadeDB
-index access, BM25, and source-code tokenization are hard checks.
+version 18, `pg_search` 0.25.1, pgvector 0.8.4 or newer, preload, ParadeDB
+index access, BM25, and source-code tokenization are hard checks. Newly created
+containers also have explicit 2 GiB memory, four-CPU, and 256-process ceilings;
+their 15-minute checkpoint interval, 4 GiB soft maximum WAL size, and 512 MiB
+recycled-WAL floor bound repeated checkpoint pressure during indexing bursts.
+`cartograph db status` and `doctor` expose whether an older owned container needs
+the confirmed backup-and-upgrade path to adopt that policy.
 
 For external PostgreSQL, create both extensions and pass secrets through the
 process environment:

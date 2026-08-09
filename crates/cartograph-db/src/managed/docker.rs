@@ -7,7 +7,11 @@ use tokio::{process::Command, time::timeout};
 
 use crate::capabilities::{MANAGED_PGVECTOR_VERSION, SUPPORTED_PG_SEARCH_VERSION};
 
-use super::{MANAGED_DATABASE_SHARED_MEMORY_BYTES, ManagedDatabaseError, ManagedResourceIdentity};
+use super::{
+    MANAGED_DATABASE_MEMORY_LIMIT_BYTES, MANAGED_DATABASE_MEMORY_RESERVATION_BYTES,
+    MANAGED_DATABASE_NANO_CPUS, MANAGED_DATABASE_PIDS_LIMIT, MANAGED_DATABASE_SHARED_MEMORY_BYTES,
+    ManagedDatabaseError, ManagedResourceIdentity,
+};
 
 const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DOCKER_IMAGE_PULL_TIMEOUT: Duration = Duration::from_mins(15);
@@ -25,6 +29,9 @@ const ROLLBACK_STOP_POLICY: StopPolicy = StopPolicy {
 const DATABASE_USER: &str = "cartograph";
 const DATABASE_NAME: &str = "cartograph";
 const MAINTENANCE_DATABASE_NAME: &str = "postgres";
+// The application pool is capped at 64 per process. Leave regular-backend
+// headroom for a concurrent MCP/CLI process and PostgreSQL's reserved slots.
+const MANAGED_DATABASE_MAX_CONNECTIONS: u16 = 96;
 const CONTAINER_PASSWORD_PATH: &str = "/tmp/cartograph-postgres-password";
 const DATABASE_DATA_PATH: &str = "/var/lib/postgresql";
 const INSPECT_TEMPLATE: &str = concat!(
@@ -37,6 +44,10 @@ const INSPECT_TEMPLATE: &str = concat!(
     "{{(index . 0).HostIp}}\t{{(index . 0).HostPort}}",
     "{{else}}none\tnone{{end}}\t",
     "{{.HostConfig.ShmSize}}\t",
+    "{{.HostConfig.Memory}}\t",
+    "{{.HostConfig.MemoryReservation}}\t",
+    "{{.HostConfig.NanoCpus}}\t",
+    "{{with .HostConfig.PidsLimit}}{{.}}{{else}}0{{end}}\t",
     "{{json .Mounts}}"
 );
 const VOLUME_INSPECT_TEMPLATE: &str = concat!(
@@ -74,6 +85,10 @@ pub(super) struct ContainerInspection {
     pub(super) host_ip: String,
     pub(super) host_port: String,
     pub(super) shared_memory_bytes: u64,
+    pub(super) memory_limit_bytes: u64,
+    pub(super) memory_reservation_bytes: u64,
+    pub(super) nano_cpus: u64,
+    pub(super) pids_limit: i64,
     pub(super) data_mount: Option<ContainerMountInspection>,
 }
 
@@ -998,6 +1013,14 @@ fn create_container_arguments(spec: &ContainerCreateSpec<'_>) -> Vec<OsString> {
         format!("127.0.0.1:{}:5432", spec.port),
         "--shm-size".to_owned(),
         MANAGED_DATABASE_SHARED_MEMORY_BYTES.to_string(),
+        "--memory".to_owned(),
+        MANAGED_DATABASE_MEMORY_LIMIT_BYTES.to_string(),
+        "--memory-reservation".to_owned(),
+        MANAGED_DATABASE_MEMORY_RESERVATION_BYTES.to_string(),
+        "--cpus".to_owned(),
+        (MANAGED_DATABASE_NANO_CPUS / 1_000_000_000).to_string(),
+        "--pids-limit".to_owned(),
+        MANAGED_DATABASE_PIDS_LIMIT.to_string(),
         "--mount".to_owned(),
         format!(
             "type=volume,source={},target={DATABASE_DATA_PATH}/",
@@ -1016,6 +1039,31 @@ fn create_container_arguments(spec: &ContainerCreateSpec<'_>) -> Vec<OsString> {
         "--restart".to_owned(),
         "unless-stopped".to_owned(),
         spec.image.to_owned(),
+        "postgres".to_owned(),
+        "-c".to_owned(),
+        "shared_buffers=256MB".to_owned(),
+        "-c".to_owned(),
+        "effective_cache_size=1GB".to_owned(),
+        "-c".to_owned(),
+        "maintenance_work_mem=128MB".to_owned(),
+        "-c".to_owned(),
+        "autovacuum_work_mem=64MB".to_owned(),
+        "-c".to_owned(),
+        "work_mem=4MB".to_owned(),
+        "-c".to_owned(),
+        "checkpoint_timeout=15min".to_owned(),
+        "-c".to_owned(),
+        "max_wal_size=4GB".to_owned(),
+        "-c".to_owned(),
+        "min_wal_size=512MB".to_owned(),
+        "-c".to_owned(),
+        format!("max_connections={MANAGED_DATABASE_MAX_CONNECTIONS}"),
+        "-c".to_owned(),
+        "max_worker_processes=16".to_owned(),
+        "-c".to_owned(),
+        "max_parallel_workers=4".to_owned(),
+        "-c".to_owned(),
+        "max_parallel_maintenance_workers=2".to_owned(),
     ]
     .into_iter()
     .map(OsString::from)
@@ -1046,6 +1094,10 @@ fn parse_container_inspection(value: &str) -> Result<ContainerInspection, Manage
         host_ip,
         host_port,
         shared_memory_bytes,
+        memory_limit_bytes,
+        memory_reservation_bytes,
+        nano_cpus,
+        pids_limit,
         mounts,
     ] = fields.as_slice()
     else {
@@ -1055,6 +1107,18 @@ fn parse_container_inspection(value: &str) -> Result<ContainerInspection, Manage
         serde_json::from_str(mounts).map_err(|_| ManagedDatabaseError::DockerResponse)?;
     let shared_memory_bytes = shared_memory_bytes
         .parse::<u64>()
+        .map_err(|_| ManagedDatabaseError::DockerResponse)?;
+    let memory_limit_bytes = memory_limit_bytes
+        .parse::<u64>()
+        .map_err(|_| ManagedDatabaseError::DockerResponse)?;
+    let memory_reservation_bytes = memory_reservation_bytes
+        .parse::<u64>()
+        .map_err(|_| ManagedDatabaseError::DockerResponse)?;
+    let nano_cpus = nano_cpus
+        .parse::<u64>()
+        .map_err(|_| ManagedDatabaseError::DockerResponse)?;
+    let pids_limit = pids_limit
+        .parse::<i64>()
         .map_err(|_| ManagedDatabaseError::DockerResponse)?;
     let mut data_mounts = mounts
         .into_iter()
@@ -1072,6 +1136,10 @@ fn parse_container_inspection(value: &str) -> Result<ContainerInspection, Manage
         host_ip: (*host_ip).to_owned(),
         host_port: (*host_port).to_owned(),
         shared_memory_bytes,
+        memory_limit_bytes,
+        memory_reservation_bytes,
+        nano_cpus,
+        pids_limit,
         data_mount,
     })
 }
@@ -1169,12 +1237,54 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "io.cartograph.managed=true")
         );
+        for expected in [
+            "--memory",
+            "--memory-reservation",
+            "--cpus",
+            "--pids-limit",
+            "shared_buffers=256MB",
+            "effective_cache_size=1GB",
+            "maintenance_work_mem=128MB",
+            "autovacuum_work_mem=64MB",
+            "work_mem=4MB",
+            "checkpoint_timeout=15min",
+            "max_wal_size=4GB",
+            "min_wal_size=512MB",
+            "max_connections=96",
+            "max_worker_processes=16",
+            "max_parallel_workers=4",
+            "max_parallel_maintenance_workers=2",
+        ] {
+            assert!(
+                rendered.iter().any(|arg| arg == expected),
+                "managed create arguments omitted {expected}"
+            );
+        }
+        for (flag, value) in [
+            ("--memory", MANAGED_DATABASE_MEMORY_LIMIT_BYTES.to_string()),
+            (
+                "--memory-reservation",
+                MANAGED_DATABASE_MEMORY_RESERVATION_BYTES.to_string(),
+            ),
+            (
+                "--cpus",
+                (MANAGED_DATABASE_NANO_CPUS / 1_000_000_000).to_string(),
+            ),
+            ("--pids-limit", MANAGED_DATABASE_PIDS_LIMIT.to_string()),
+        ] {
+            assert!(
+                rendered
+                    .windows(2)
+                    .any(|pair| pair[0] == flag && pair[1] == value),
+                "managed create arguments did not bind {flag} to its supported value"
+            );
+        }
     }
 
     #[test]
     fn inspection_parser_preserves_owner_state_health_and_image() {
         let parsed = parse_container_inspection(
-            "true\t0123456789abcdef\trunning\thealthy\tparadedb/example@sha256:digest\t127.0.0.1\t55432\t268435456\t[{\"Type\":\"volume\",\"Name\":\"cartograph-v2-0123456789abcdef-data\",\"Destination\":\"/var/lib/postgresql\",\"RW\":true}]",
+            "true\t0123456789abcdef\trunning\thealthy\tparadedb/example@sha256:digest\t127.0.0.1\t55432\t268435456\t2147483648\t1073741824\t4000000000\t256\t[{\"Type\":\"volume\",\"Name\":\"cartograph-v2-0123456789abcdef-data\",\"Destination\":\"/var/lib/postgresql\",\"RW\":true}]",
         );
         let parsed = match parsed {
             Ok(parsed) => parsed,
@@ -1189,6 +1299,10 @@ mod tests {
         assert_eq!(parsed.host_ip, "127.0.0.1");
         assert_eq!(parsed.host_port, "55432");
         assert_eq!(parsed.shared_memory_bytes, 268_435_456);
+        assert_eq!(parsed.memory_limit_bytes, 2_147_483_648);
+        assert_eq!(parsed.memory_reservation_bytes, 1_073_741_824);
+        assert_eq!(parsed.nano_cpus, 4_000_000_000);
+        assert_eq!(parsed.pids_limit, 256);
         assert!(has_expected_data_mount(&parsed, &identity()));
     }
 

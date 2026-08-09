@@ -1,9 +1,9 @@
 # PostgreSQL storage and operations
 
 Cartograph v2 has one storage engine: PostgreSQL 18.4 or newer within major
-version 18 with ParadeDB `pg_search` 0.25.0 and pgvector 0.8.4 or newer.
+version 18 with ParadeDB `pg_search` 0.25.1 and pgvector 0.8.4 or newer.
 Pgvector 0.8.6 is recommended for external PostgreSQL; the managed upstream
-ParadeDB 0.25.0 image bundles 0.8.4. SQLite is not a backend, fallback,
+ParadeDB 0.25.1 image bundles 0.8.4. SQLite is not a backend, fallback,
 migration target, importer, feature, or test utility.
 
 ## Capability contract
@@ -63,7 +63,7 @@ cartograph db upgrade --project-path . \
 The upgrade starts the exact digest against the retained volume, updates
 `pg_search` and pgvector transactionally before calling extension-defined
 functions, and requires capability plus Cartograph migration proof before it
-discards the old container. ParadeDB 0.25.0 retains the legacy `bm25` access
+discards the old container. ParadeDB 0.25.1 retains the legacy `bm25` access
 method, so existing derived indexes remain valid and queryable; Cartograph
 creates replacement/new generation indexes with the current `paradedb` access
 method and accepts both catalog names during this upgrade boundary.
@@ -82,7 +82,7 @@ disabled there until private credential ACL behavior can be proved equivalent.
 ## External database
 
 The database administrator installs PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.0, and pgvector 0.8.4 or newer (0.8.6
+version 18, `pg_search` 0.25.1, and pgvector 0.8.4 or newer (0.8.6
 recommended), and creates the extensions. Supply secrets only through the
 process environment:
 
@@ -98,7 +98,7 @@ database backup, install the new extension binaries, restart PostgreSQL, and
 update both catalogs before running `cartograph doctor`:
 
 ```sql
-ALTER EXTENSION pg_search UPDATE TO '0.25.0';
+ALTER EXTENSION pg_search UPDATE TO '0.25.1';
 ALTER EXTENSION vector UPDATE TO '0.8.6';
 ```
 
@@ -272,6 +272,12 @@ touch `last_used_at` at most hourly rather than writing on every hit.
 This keeps routine watcher churn bounded. Explicit pruning remains separate
 from import, backup, physical compaction, and derived-index recovery and is
 available for larger audited batches after a verified backup:
+
+Automatic post-index cleanup delegates thresholded dead-row reclamation to the
+table-specific autovacuum policy instead of synchronously vacuuming every
+retention relation on the watcher hot path. Explicit `db prune` retains the
+thresholded, table-scoped synchronous maintenance result for operator-audited
+batches; neither path performs `VACUUM FULL` or database-wide `ANALYZE`.
 
 ```sh
 cartograph db prune \

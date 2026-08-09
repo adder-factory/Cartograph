@@ -211,6 +211,19 @@ while IFS= read -r line; do
   fi
 done <<<"$paradedb_block"
 validate_paradedb_step "$paradedb_step"
+for database_policy in \
+  '--memory 2147483648' \
+  '--memory-reservation 1073741824' \
+  '--cpus 4' \
+  '--pids-limit 256' \
+  '-c checkpoint_timeout=15min' \
+  '-c max_wal_size=4GB' \
+  '-c min_wal_size=512MB' \
+  '-c max_connections=96' \
+  '-c max_parallel_workers=4'; do
+  grep -Fq -- "$database_policy" <<<"$paradedb_block" || \
+    fail "live PostgreSQL matrix does not prove managed database policy: $database_policy"
+done
 
 attestation_block="$(job_block "$VALIDATION" attest-main-gate)"
 grep -Fq "needs.classify.outputs.full == 'true'" <<<"$attestation_block" || \
@@ -282,9 +295,9 @@ fi
 grep -Fq 'verify-main-gate:' "$RELEASE" || fail 'release main-gate verification job is missing'
 grep -Fq 'gh attestation verify' "$RELEASE" || fail 'release does not verify main-gate provenance'
 grep -Fq -- '--source-ref refs/heads/main' "$RELEASE" || fail 'release does not bind evidence to main'
-grep -Fq 'NOTES="docs/releases/$TAG.md"' "$RELEASE" || \
+grep -Fq "NOTES=\"docs/releases/\$TAG.md\"" "$RELEASE" || \
   fail 'release notes are not loaded from the tracked versioned file'
-grep -Fq -- '--notes-file "$NOTES"' "$RELEASE" || \
+grep -Fq -- "--notes-file \"\$NOTES\"" "$RELEASE" || \
   fail 'tracked release notes are not supplied to GitHub'
 if grep -Fq -- '--generate-notes' "$RELEASE"; then
   fail 'release publication can still replace detailed notes with generated changelog text'

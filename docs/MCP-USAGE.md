@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-04 (`v2.1.12`).
+Last release audit: 2026-08-08 (`v2.1.13`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -52,16 +52,25 @@ database or generation check: inspect the project-local registration, restart
 the host when it changes, then make a fresh MCP status and real query call to
 prove the loaded transport.
 
-Before serving, managed mode checks the owned image and HNSW shared-memory
-allocation. An incompatible container fails with exact backup and confirmed
-upgrade commands. Source catch-up starts through the native watcher after the
+Before serving, managed mode checks the owned image, HNSW shared-memory
+allocation, and explicit CPU/memory/process policy. An incompatible container
+fails with exact backup and confirmed upgrade commands. Source catch-up starts
+through the native watcher after the
 stdio server is ready, so modern `server/discover`/`tools/list` and the legacy
 `initialize` handshake do not wait for a full index; `autoSync` in
 `cartograph_status` exposes attempts, publications, no-ops, errors, stable
 stage-specific `lastErrorCode`, failure/retry times, unchanged-revision attempt
 count, and retry suppression. Failed unchanged revisions use bounded
 exponential backoff and stop after five automatic attempts until source changes.
+When PostgreSQL is unavailable before a revision can be recovered, watcher
+events share an unknown-revision backoff bucket and retain a capped recovery
+probe rather than retrying every event or becoming permanently suppressed.
 `--no-startup-sync` suppresses only the initial reconciliation.
+
+Watcher events use a 750 ms quiet window with a default two-second hard
+coalescing deadline, then call the indexer's own manifest/no-op fence directly.
+Automatic attempts cap native extraction at four workers and omit independent
+Git-history enrichment; explicit indexing refreshes those auxiliary channels.
 
 ## Profiles
 

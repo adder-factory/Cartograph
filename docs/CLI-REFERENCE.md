@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-04 (`v2.1.12`).
+Last release audit: 2026-08-08 (`v2.1.13`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -70,7 +70,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.12 top-level command advertised
+This inventory contains every non-hidden v2.1.13 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -204,8 +204,15 @@ override, while external PostgreSQL requires `--available-headroom-bytes`. See
 Without an explicit `--port` or `CARTOGRAPH_MANAGED_DATABASE_PORT`, managed
 commands inspect the deterministic project-owned container and reuse its actual
 loopback port before falling back to `55432`. New/replaced containers reserve
-256 MiB of Docker shared memory; `doctor` fails an older 64 MiB container and
-requires backup plus the confirmed managed upgrade before HNSW maintenance.
+256 MiB of Docker shared memory, use a 2 GiB hard memory limit with a 1 GiB
+reservation, are limited to four CPUs and 256 processes, and use bounded
+PostgreSQL memory/parallel-worker settings. A 15-minute checkpoint interval,
+4 GiB soft maximum WAL size, and 512 MiB recycled-WAL floor absorb bursty
+immutable-generation publication without repeated 1 GiB WAL checkpoints;
+durability remains fully synchronous. `doctor`, MCP preflight, and
+structured `db status` report both HNSW shared-memory and resource-policy
+compatibility. Older containers require backup plus the confirmed managed
+upgrade; status inspection never recreates them.
 `status` includes compact allocated database/schema/heap/index/TOAST totals in
 readable IEC units such as MiB and GiB. Structured JSON retains exact `*Bytes`
 integers and adds `databaseStorage.humanReadable` display strings; `db usage`

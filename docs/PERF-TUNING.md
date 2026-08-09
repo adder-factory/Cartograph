@@ -62,6 +62,14 @@ export CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS=120000
   materialized into a generation-wide `DISTINCT` hash merely for validation.
 - Keep the database pool large enough for the selected operation but below the
   64-connection hard cap. Local agent use normally needs no manual change.
+- Newly created managed databases keep synchronous durability while using a
+  15-minute checkpoint interval, 4 GiB soft `max_wal_size`, and 512 MiB
+  `min_wal_size`. Immutable-generation COPY and BM25 publication can otherwise
+  exhaust PostgreSQL's 1 GiB default repeatedly during rapid editor bursts,
+  forcing overlapping checkpoints and increasing foreground latency. The WAL
+  ceiling is soft and trades bounded local disk plus potentially longer crash
+  recovery for fewer full-page writes and checkpoint flushes; `db usage` and
+  free-space checks remain the operator boundary.
 - Do not increase timeouts to hide a lost lease, stale fence, blocked database,
   or oversized corpus. Inspect task/lease status and the failing phase first.
 - Semantic HNSW indexes are per model; unused model generations should be
@@ -73,16 +81,31 @@ Native MCP auto-sync uses a recursive OS watcher where available, debounces
 bursts, and periodically reconciles missed events. If native watching cannot be
 established it uses the bounded polling watcher. Status exposes watcher events,
 reconciliations, attempts, publications, and errors without project paths.
+The default 750 ms quiet window has a two-second hard coalescing deadline, so a
+continuous stream of editor writes cannot postpone the next attempt forever.
+If `CARTOGRAPH_WATCH_DEBOUNCE_MS` raises the quiet window above two seconds,
+that explicit quiet window is also the hard minimum latency bound.
 Watcher admission uses the same default/project include, exclude, and language
 policy as indexing, reloads after `config.json` changes, and ignores access-only,
 build-output, dependency-cache, and private `.cartograph` churn. Configuration
 and SCIP-overlay events remain explicit reconciliation triggers.
 
+An admitted filesystem event goes directly through the indexer's own complete
+manifest/no-op fence instead of performing a second full status manifest scan
+first. Automatic structural indexing is capped at four native workers and skips
+the independent Git churn, co-change, and issue-history refreshes. An explicit
+`cartograph index` retains the normal corpus-aware worker ceiling and refreshes
+those auxiliary Git channels. Periodic missed-event reconciliation still uses a
+complete status scan as its correctness boundary.
+
 An unchanged source revision that fails automatic indexing is not retried in a
 tight loop. Auto-sync records its stable stage code and uses exponential retry
 delays from 30 seconds through a 15-minute cap. After five failed automatic
-attempts, that revision is suppressed until the supported source revision
-changes. Explicit/manual index requests remain available. Structured status
+attempts, a known revision is suppressed until the supported source revision
+changes. If both indexing and status are unavailable, a typed unknown-revision
+failure bucket applies the same backoff to subsequent watcher events but keeps
+one bounded recovery probe at the capped interval instead of suppressing
+database recovery forever. Explicit/manual index requests remain available. Structured status
 exposes `lastErrorCode`, `lastFailureAt`, `nextRetryAt`,
 `failedRevisionAttempts`, and `retrySuppressed`; a new source revision clears
 the failed-revision state before the next bounded attempt.

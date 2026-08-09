@@ -127,12 +127,14 @@ pub use leases::{
     LeaseRequest, LeaseStatus, LeaseTarget, ProjectLease,
 };
 pub use managed::{
-    DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, MANAGED_DATABASE_SHARED_MEMORY_BYTES,
-    ManagedBackupReport, ManagedContainerState, ManagedDatabase, ManagedDatabaseArchives,
-    ManagedDatabaseError, ManagedDatabaseLifecycle, ManagedDatabaseMaintenance,
-    ManagedDatabaseStatus, ManagedDerivedIndexAvailability, ManagedDerivedIndexHealth,
-    ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedRemoveReport,
-    ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
+    DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, MANAGED_DATABASE_MEMORY_LIMIT_BYTES,
+    MANAGED_DATABASE_MEMORY_RESERVATION_BYTES, MANAGED_DATABASE_NANO_CPUS,
+    MANAGED_DATABASE_PIDS_LIMIT, MANAGED_DATABASE_SHARED_MEMORY_BYTES, ManagedBackupReport,
+    ManagedContainerState, ManagedDatabase, ManagedDatabaseArchives, ManagedDatabaseError,
+    ManagedDatabaseLifecycle, ManagedDatabaseMaintenance, ManagedDatabaseStatus,
+    ManagedDerivedIndexAvailability, ManagedDerivedIndexHealth, ManagedDestructiveConfirmation,
+    ManagedDestructiveOperation, ManagedRemoveReport, ManagedRestoreReport, ManagedStartReport,
+    ManagedUpgradeReport,
 };
 pub use migrations::{MigrationError, MigrationReport, latest_schema_version};
 pub use numerical::{
@@ -156,7 +158,7 @@ pub use qualified::{
 };
 pub use retention::{
     GenerationRetentionError, GenerationRetentionPolicy, GenerationRetentionReport,
-    GenerationRetentionRequest, PostRetentionMaintenance,
+    GenerationRetentionRequest, PostRetentionMaintenance, PostRetentionMaintenancePolicy,
 };
 pub use retrieval::{
     CurrentEntryPointPage, CurrentEntryPointsLookup, CurrentFileLookup, CurrentFileRecord,

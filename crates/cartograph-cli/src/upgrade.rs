@@ -926,6 +926,10 @@ fn managed_status_requires_upgrade(value: &serde_json::Value) -> bool {
             || value
                 .get("hnsw_shared_memory_ready")
                 .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            || value
+                .get("resource_limits_match")
+                .and_then(serde_json::Value::as_bool)
                 == Some(false))
 }
 
@@ -1892,22 +1896,32 @@ mod tests {
         assert!(!managed_status_requires_upgrade(&serde_json::json!({
             "state": "missing",
             "image_matches": false,
-            "hnsw_shared_memory_ready": false
+            "hnsw_shared_memory_ready": false,
+            "resource_limits_match": false
         })));
         assert!(!managed_status_requires_upgrade(&serde_json::json!({
             "state": "healthy",
             "image_matches": true,
-            "hnsw_shared_memory_ready": true
+            "hnsw_shared_memory_ready": true,
+            "resource_limits_match": true
         })));
         assert!(managed_status_requires_upgrade(&serde_json::json!({
             "state": "stopped",
             "image_matches": false,
-            "hnsw_shared_memory_ready": true
+            "hnsw_shared_memory_ready": true,
+            "resource_limits_match": true
         })));
         assert!(managed_status_requires_upgrade(&serde_json::json!({
             "state": "healthy",
             "image_matches": true,
-            "hnsw_shared_memory_ready": false
+            "hnsw_shared_memory_ready": false,
+            "resource_limits_match": true
+        })));
+        assert!(managed_status_requires_upgrade(&serde_json::json!({
+            "state": "healthy",
+            "image_matches": true,
+            "hnsw_shared_memory_ready": true,
+            "resource_limits_match": false
         })));
         assert!(!managed_status_requires_upgrade(&serde_json::json!({
             "state": "healthy"

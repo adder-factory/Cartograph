@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-04 (`v2.1.12`)
+Last implementation review: 2026-08-08 (`v2.1.13`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -54,7 +54,7 @@ about PostgreSQL or transport.
 Before migration or normal work, Cartograph proves:
 
 - PostgreSQL 18.4 or newer within major version 18;
-- `pg_search` 0.25.0, expected preload state, the `paradedb` access method, and exact
+- `pg_search` 0.25.1, expected preload state, the `paradedb` access method, and exact
   `pdb.source_code` token behavior;
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
@@ -362,6 +362,17 @@ containers reserve 256 MiB of shared memory and index creation sets
 allocation failure remains a distinct resumable HNSW phase rather than a
 generic embedding failure.
 
+New or confirmed-replacement managed containers also have a 2 GiB Docker memory
+ceiling, 1 GiB reservation, four-CPU quota, and 256-process ceiling. PostgreSQL
+starts with bounded buffer, per-operation memory, connection, and parallel-worker
+settings inside those limits. A 15-minute checkpoint interval, 4 GiB soft
+maximum WAL size, and 512 MiB recycled-WAL floor trade bounded disk and crash
+recovery time for fewer checkpoint/full-page-write cycles during generation
+bursts while keeping `fsync` and synchronous commit enabled. Read-only status
+surfaces the observed Docker values and whether they match the supported policy;
+adopting the policy for an older owned container remains a backup-gated,
+explicitly confirmed replacement.
+
 Before semantic Top-K, Cartograph proves the model is active, fingerprint and
 dimension match, current-generation document coverage is complete, HNSW exists,
 and a query probe succeeds. Readiness is one of `ready`, `not_configured`,
@@ -504,6 +515,10 @@ Every successful index or no-op reconciliation attempts bounded generation and
 parse-cache retention after publication/no-op detection. The current extractor
 contract is always cache-protected; one recent older contract plus independent
 row/logical-byte/deletion caps prevent unbounded parser-version accumulation.
+Automatic cleanup delegates thresholded relation reclamation to the tuned
+autovacuum policy, keeping synchronous 27-table vacuuming out of the watcher
+critical path. Explicit prune requests retain the thresholded table-scoped
+maintenance step and report whether it completed or was deferred.
 Pre-supervisor failures terminalize
 their exact staging generation under the same project advisory lock used by
 lease acquisition. A later batch can collect staging only when it is old,

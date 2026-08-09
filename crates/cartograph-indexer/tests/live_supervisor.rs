@@ -17,9 +17,9 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, CurrentGenerationLookup, GenerationContents,
-    GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits, LeaseOwner,
-    LeaseRequest, LeaseTarget, NativeGenerationSpillPolicy, NewGeneration, NewProject,
+    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, CurrentGenerationLookup,
+    GenerationContents, GenerationFacts, GenerationRecoveryRequest, GenerationValidationLimits,
+    LeaseOwner, LeaseRequest, LeaseTarget, NativeGenerationSpillPolicy, NewGeneration, NewProject,
     PrepareGenerationMetrics, ReadyGeneration, SearchDocumentInput, SearchQuery,
     SpilledGenerationContents, StructuralFindingQuery, StructuralFindingSeverity,
     validate_generation_facts,
@@ -2870,10 +2870,11 @@ async fn heartbeat_uncertainty_reaps_concurrent_copy_before_returning() {
     {
         panic!("combined uncertainty table lock failed: {error}");
     }
+    let (copy_gate, copy_control) = copy_start_barrier();
     let supervisor = IndexerSupervisor::new(fixture.database.clone(), long_copy_config());
     let runner = supervisor.clone();
     let request_target = target.clone();
-    let handle = tokio::spawn(async move {
+    let mut handle = tokio::spawn(async move {
         runner
             .run(request(request_target), move |context| async move {
                 context
@@ -2881,6 +2882,7 @@ async fn heartbeat_uncertainty_reaps_concurrent_copy_before_returning() {
                     .begin_stage(PipelineStage::Copy)
                     .await
                     .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                copy_gate.wait().await?;
                 context
                     .prepare_generation(GenerationContents::new(
                         staged,
@@ -2895,7 +2897,7 @@ async fn heartbeat_uncertainty_reaps_concurrent_copy_before_returning() {
             .await
     });
     wait_for_lease(&fixture.database, &target).await;
-    wait_for_schema_lock(&fixture.pool, &fixture.schema, "search_documents").await;
+    require_combined_copy_lock(copy_control, &supervisor, &fixture, &mut handle).await;
     let mut lease_lock = match fixture.pool.begin().await {
         Ok(transaction) => transaction,
         Err(error) => panic!("combined uncertainty lease-lock transaction failed: {error}"),
@@ -3244,6 +3246,23 @@ async fn release_copy_and_wait_for_schema_lock(
         .await
         .map_err(|error| format!("COPY lock observer failed: {error}"))?;
     Ok(())
+}
+
+async fn require_combined_copy_lock(
+    control: CopyStartControl,
+    supervisor: &IndexerSupervisor,
+    fixture: &DatabaseFixture,
+    handle: &mut tokio::task::JoinHandle<Result<CurrentGeneration, SupervisorError>>,
+) {
+    if let Err(error) =
+        release_copy_and_wait_for_schema_lock(control, supervisor, &fixture.pool, &fixture.schema)
+            .await
+    {
+        let outcome = (&mut *handle).await.unwrap_or_else(|join_error| {
+            panic!("combined uncertainty supervisor task failed: {join_error}")
+        });
+        panic!("{error}; supervisor outcome: {outcome:?}");
+    }
 }
 
 async fn wait_for_query_absent(pool: &sqlx_postgres::PgPool, schema: &str, query_fragment: &str) {
