@@ -7,6 +7,7 @@ use cartograph_db::{
 use cartograph_domain::{GenerationId, NormalizedPath, ProjectId, SourceLanguage};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use regex::{Regex, RegexBuilder};
+use regex_syntax::{Error as RegexSyntaxError, ParserBuilder as RegexSyntaxParserBuilder};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -29,7 +30,7 @@ const REGEX_SIZE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 pub struct SourceSearchOptions {
     pattern: String,
     case_sensitive: bool,
-    path_prefix: Option<NormalizedPath>,
+    path_filter: Option<NormalizedPath>,
     language: Option<SourceLanguage>,
     limit: u16,
 }
@@ -54,7 +55,7 @@ impl SourceSearchOptions {
         Ok(Self {
             pattern,
             case_sensitive: false,
-            path_prefix: None,
+            path_filter: None,
             language: None,
             limit,
         })
@@ -68,9 +69,9 @@ impl SourceSearchOptions {
     }
 
     #[must_use]
-    /// Sets the path prefix and returns the updated value.
-    pub fn with_path_prefix(mut self, path_prefix: Option<NormalizedPath>) -> Self {
-        self.path_prefix = path_prefix;
+    /// Restrict results to paths containing one literal normalized substring.
+    pub fn with_path_filter(mut self, path_filter: Option<NormalizedPath>) -> Self {
+        self.path_filter = path_filter;
         self
     }
 
@@ -157,14 +158,22 @@ impl SourceSearchReport {
 }
 
 /// Safe public failure classes for live source search.
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SourceSearchError {
     #[error("source search options are invalid")]
     /// Supplied options violate a documented bound or invariant.
     InvalidOptions,
-    #[error("source search regex is invalid")]
-    /// The supplied regular expression is invalid or exceeds its bound.
-    InvalidRegex,
+    #[error("source search regex is invalid at byte {offset}: {reason}")]
+    /// The supplied regular expression has one source-safe parser diagnostic.
+    InvalidRegex {
+        /// Fixed parser category that never includes the supplied pattern.
+        reason: String,
+        /// Zero-based byte offset of the invalid syntax.
+        offset: usize,
+    },
+    #[error("source search regex exceeds the compiled size bound")]
+    /// The expression parsed but exceeded the bounded compiled representation.
+    RegexTooLarge,
     #[error("source search storage is unavailable")]
     /// The required durable storage operation could not complete.
     StorageUnavailable,
@@ -204,13 +213,7 @@ impl ProjectRuntime {
         if cancellation.is_cancelled() {
             return Err(SourceSearchError::Cancelled);
         }
-        let regex = RegexBuilder::new(&options.pattern)
-            .case_insensitive(!options.case_sensitive)
-            .multi_line(false)
-            .size_limit(REGEX_SIZE_LIMIT_BYTES)
-            .dfa_size_limit(REGEX_SIZE_LIMIT_BYTES)
-            .build()
-            .map_err(|_| SourceSearchError::InvalidRegex)?;
+        let regex = compile_source_regex(&options)?;
         let generation = self
             .database
             .current_generation_record(project_id)
@@ -222,8 +225,8 @@ impl ProjectRuntime {
         if let Some(language) = options.language {
             surface_query = surface_query.with_language(language);
         }
-        if let Some(prefix) = options.path_prefix.as_ref() {
-            let postgres_regex = format!("^{}", regex::escape(prefix.as_str()));
+        if let Some(path_filter) = options.path_filter.as_ref() {
+            let postgres_regex = regex::escape(path_filter.as_str());
             surface_query = surface_query
                 .with_path_regex(Some(&postgres_regex))
                 .map_err(map_storage)?;
@@ -297,6 +300,45 @@ impl ProjectRuntime {
             regex_engine: "rust_regex_linear_time",
             attribution: "smallest_current_generation_enclosing_symbol",
         })
+    }
+}
+
+fn compile_source_regex(options: &SourceSearchOptions) -> Result<Regex, SourceSearchError> {
+    let mut syntax = RegexSyntaxParserBuilder::new();
+    syntax.case_insensitive(!options.case_sensitive);
+    syntax
+        .build()
+        .parse(&options.pattern)
+        .map_err(source_regex_syntax_error)?;
+    RegexBuilder::new(&options.pattern)
+        .case_insensitive(!options.case_sensitive)
+        .multi_line(false)
+        .size_limit(REGEX_SIZE_LIMIT_BYTES)
+        .dfa_size_limit(REGEX_SIZE_LIMIT_BYTES)
+        .build()
+        .map_err(|error| match error {
+            regex::Error::CompiledTooBig(_) => SourceSearchError::RegexTooLarge,
+            _ => SourceSearchError::InvalidRegex {
+                reason: "unsupported regex syntax".to_owned(),
+                offset: 0,
+            },
+        })
+}
+
+fn source_regex_syntax_error(error: RegexSyntaxError) -> SourceSearchError {
+    match error {
+        RegexSyntaxError::Parse(error) => SourceSearchError::InvalidRegex {
+            reason: error.kind().to_string(),
+            offset: error.span().start.offset,
+        },
+        RegexSyntaxError::Translate(error) => SourceSearchError::InvalidRegex {
+            reason: error.kind().to_string(),
+            offset: error.span().start.offset,
+        },
+        _ => SourceSearchError::InvalidRegex {
+            reason: "unsupported regex syntax".to_owned(),
+            offset: 0,
+        },
     }
 }
 
@@ -511,6 +553,23 @@ mod tests {
         assert!(SourceSearchOptions::new("x", 0).is_err());
         assert!(SourceSearchOptions::new("x", 501).is_err());
         assert!(SourceSearchOptions::new("x".repeat(1_025), 10).is_err());
+    }
+
+    #[test]
+    fn invalid_regex_diagnostic_is_precise_and_omits_the_pattern() {
+        let options = SourceSearchOptions::new("private_token(foo", 10)
+            .unwrap_or_else(|error| panic!("source search options failed: {error}"));
+        let error = compile_source_regex(&options)
+            .err()
+            .unwrap_or_else(|| panic!("invalid regex unexpectedly compiled"));
+        assert_eq!(
+            error,
+            SourceSearchError::InvalidRegex {
+                reason: "unclosed group".to_owned(),
+                offset: 13,
+            }
+        );
+        assert!(!error.to_string().contains("private_token"));
     }
 
     #[test]

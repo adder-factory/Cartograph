@@ -179,6 +179,7 @@ const CONTEXT_PREVIEW_LIMIT: usize = 8;
 const NODE_SYMBOL_ID_MAXIMUM_BYTES: usize = 64;
 const NODE_MAXIMUM_SYMBOLS: usize = 20;
 const NODE_LOW_TOKEN_MAXIMUM_SYMBOLS: usize = 8;
+const NODE_AMBIGUOUS_CANDIDATE_LIMIT: u16 = 10;
 const NODE_TRAVERSAL_MAXIMUM_NODES: u16 = 50;
 const NODE_RELATED_BIOMARKER_LIMIT: u16 = 5;
 const NODE_RELATED_TEST_LIMIT: u16 = 5;
@@ -1598,7 +1599,17 @@ struct NodeEvidencePolicy {
 struct NodeResolution {
     records: Vec<(String, CurrentSymbolRecord)>,
     unresolved: Vec<Value>,
+    ambiguous: Vec<Value>,
     deduplicated: usize,
+}
+
+enum NodeBatchNameResolution {
+    Resolved(CurrentSymbolRecord),
+    Unresolved,
+    Ambiguous {
+        candidates: Vec<CurrentSymbolRecord>,
+        truncated: bool,
+    },
 }
 
 struct NodeResolutionRequest<'context> {
@@ -6259,7 +6270,7 @@ impl FindSourceTools<'_> {
         let options = SourceSearchOptions::new(query, limit)
             .map_err(source_search_error)?
             .with_case_sensitive(optional_bool(arguments, "caseSensitive")?.unwrap_or(false))
-            .with_path_prefix(path_prefix)
+            .with_path_filter(path_prefix)
             .with_language(language);
         let report = self
             .runtime
@@ -15486,6 +15497,7 @@ async fn resolve_node_records(
 ) -> Result<NodeResolution, ToolError> {
     let mut records = Vec::new();
     let mut unresolved = Vec::new();
+    let mut ambiguous = Vec::new();
     let mut seen = BTreeSet::new();
     for requested in &request.parsed.requested {
         if request.cancellation.is_cancelled() {
@@ -15509,6 +15521,25 @@ async fn resolve_node_records(
                 .into_iter()
                 .next()
                 .ok_or_else(node_symbol_not_found_error)
+        } else if request.parsed.batch {
+            match resolve_node_batch_name(request.handler, request.project_id, requested).await? {
+                NodeBatchNameResolution::Resolved(symbol) => Ok(symbol),
+                NodeBatchNameResolution::Unresolved => Err(node_symbol_not_found_error()),
+                NodeBatchNameResolution::Ambiguous {
+                    candidates,
+                    truncated,
+                } => {
+                    ambiguous.push(json!({
+                        "requested": requested,
+                        "candidates": candidates
+                            .iter()
+                            .map(node_ambiguous_candidate)
+                            .collect::<Vec<_>>(),
+                        "truncated": truncated,
+                    }));
+                    continue;
+                }
+            }
         } else {
             resolve_unique_symbol(request.handler, request.project_id, requested).await
         };
@@ -15529,7 +15560,50 @@ async fn resolve_node_records(
     Ok(NodeResolution {
         records,
         unresolved,
+        ambiguous,
         deduplicated: seen.len(),
+    })
+}
+
+async fn resolve_node_batch_name(
+    handler: &CartographMcpHandler,
+    project_id: &ProjectId,
+    requested: &str,
+) -> Result<NodeBatchNameResolution, ToolError> {
+    let query_limit = NODE_AMBIGUOUS_CANDIDATE_LIMIT.saturating_add(1);
+    let mut matches = handler
+        .retrieval
+        .exact_name(
+            project_id,
+            ExactTextQuery::new(requested, query_limit).map_err(|_| invalid_arguments())?,
+        )
+        .await
+        .map_err(internal_error)?;
+    match matches.len() {
+        0 => Ok(NodeBatchNameResolution::Unresolved),
+        1 => matches
+            .pop()
+            .map(NodeBatchNameResolution::Resolved)
+            .ok_or_else(ToolError::internal),
+        _ => {
+            let truncated = matches.len() > usize::from(NODE_AMBIGUOUS_CANDIDATE_LIMIT);
+            matches.truncate(usize::from(NODE_AMBIGUOUS_CANDIDATE_LIMIT));
+            Ok(NodeBatchNameResolution::Ambiguous {
+                candidates: matches,
+                truncated,
+            })
+        }
+    }
+}
+
+fn node_ambiguous_candidate(symbol: &CurrentSymbolRecord) -> Value {
+    json!({
+        "symbolId": symbol.symbol_id(),
+        "qualifiedName": symbol.qualified_name(),
+        "symbolKind": symbol.symbol_kind(),
+        "path": symbol.path(),
+        "startLine": symbol.start_line(),
+        "endLine": symbol.end_line(),
     })
 }
 
@@ -15886,6 +15960,7 @@ async fn node_tool(
         &json!({
             "results": results,
             "unresolved": resolution.unresolved,
+            "ambiguous": resolution.ambiguous,
             "omittedByLowTokens": parsed.omitted_by_low_tokens,
             "deduplicated": resolution.deduplicated,
             "sourceDetail": parsed.detail,
@@ -17873,7 +17948,7 @@ fn find_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, ToolC
         "differentLanguage": {"type": "boolean"},
         "languageFilter": {"type": "string", "minLength": 1, "maxLength": FIND_FILTER_MAXIMUM_BYTES},
         "caseSensitive": {"type": "boolean", "description": "Content regex only; false by default."},
-        "pathFilter": {"type": "string", "minLength": 1, "maxLength": CONTEXT_ANCHOR_MAXIMUM_BYTES},
+        "pathFilter": {"type": "string", "minLength": 1, "maxLength": CONTEXT_ANCHOR_MAXIMUM_BYTES, "description": "Content search only: case-sensitive literal substring of a normalized project-relative path; not a glob or regex."},
         "language": {"type": "string", "minLength": 1, "maxLength": FIND_FILTER_MAXIMUM_BYTES, "description": "Content regex language filter."},
         "key": {"type": "string", "minLength": 1, "maxLength": CONTEXT_ANCHOR_MAXIMUM_BYTES, "description": "Exact environment variable, SQL relation, or build-context identifier."},
         "op": {"type": "string", "enum": ["read", "write", "ddl"], "description": "SQL reference operation filter."},
@@ -18208,7 +18283,7 @@ fn node_definition(annotations: ToolAnnotations) -> Result<ToolDefinition, ToolC
     });
     read_definition(ReadDefinition {
         name: NODE_TOOL,
-        description: "Resolve one symbol ID/name or up to 20 exact names, deduplicate matches, and return PageRank plus generation-fenced issue history and optional sampled betweenness, freshness-gated preview/full source, callers, callees, code-health findings, and affected tests. Low-token batches cap at eight with explicit omission; stale live-source requests are never confused with indexed source.",
+        description: "Resolve one symbol ID/name or up to 20 exact names, deduplicate matches, and return PageRank plus generation-fenced issue history and optional sampled betweenness, freshness-gated preview/full source, callers, callees, code-health findings, and affected tests. Batch requests preserve resolvable results and report bounded per-input unresolved and ambiguous candidate entries. Low-token batches cap at eight with explicit omission; stale live-source requests are never confused with indexed source.",
         schema,
         required: &[],
         annotations,
@@ -23996,9 +24071,17 @@ fn similar_error(error: &RetrievalError) -> ToolError {
 
 fn source_search_error(error: SourceSearchError) -> ToolError {
     match error {
-        SourceSearchError::InvalidOptions | SourceSearchError::InvalidRegex => safe_error(
+        SourceSearchError::InvalidOptions => safe_error(
             ToolErrorCode::InvalidArguments,
-            "Source search pattern or bounds are invalid",
+            "Source search bounds are invalid",
+        ),
+        SourceSearchError::InvalidRegex { reason, offset } => safe_error(
+            ToolErrorCode::InvalidArguments,
+            format!("Invalid content regex at byte {offset}: {reason}"),
+        ),
+        SourceSearchError::RegexTooLarge => safe_error(
+            ToolErrorCode::InvalidArguments,
+            "Content regex exceeds the bounded compiled size",
         ),
         SourceSearchError::StorageUnavailable => safe_error(
             ToolErrorCode::NotReady,
@@ -24216,7 +24299,7 @@ fn dead_code_judge_error(error: DeadCodeJudgeError) -> ToolError {
     }
 }
 
-fn safe_error(code: ToolErrorCode, message: &'static str) -> ToolError {
+fn safe_error(code: ToolErrorCode, message: impl Into<String>) -> ToolError {
     match ToolError::safe(code, message) {
         Ok(error) => error,
         Err(_) => ToolError::internal(),
@@ -27919,6 +28002,14 @@ pub fn target(value: u32) -> u32 {
             find["inputSchema"]["properties"]["query"]["maxLength"],
             CONTEXT_QUERY_MAXIMUM_BYTES
         );
+        assert!(
+            find["inputSchema"]["properties"]["pathFilter"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("literal substring")
+                        && description.contains("not a glob or regex")
+                })
+        );
         let entry_points = tools
             .iter()
             .find(|tool| tool["name"] == ENTRY_POINTS_TOOL)
@@ -28641,6 +28732,7 @@ pub fn target(value: u32) -> u32 {
         assert_eq!(exact["rows"].as_array().map(Vec::len), Some(1));
         assert_eq!(exact["rows"][0]["name"], "buildSignupPath");
         assert_eq!(exact["rows"][0]["match"], "exact_name");
+        verify_reported_find_and_node_regressions(handler).await;
         let low_token_find = execute_live_tool(
             handler,
             FIND_TOOL,
@@ -28673,6 +28765,60 @@ pub fn target(value: u32) -> u32 {
             json!({"symbol": "root", "code": true, "detail": "full", "includeCallers": true, "includeCallees": true, "includeBiomarkers": true, "includeTests": true, "includeBetweenness": true}),
         )
         .await;
+    }
+
+    async fn verify_reported_find_and_node_regressions(handler: &CartographMcpHandler) {
+        let scoped_content = execute_live_tool(
+            handler,
+            FIND_TOOL,
+            json!({"by": "content", "query": "SELECT id", "pathFilter": "lib.rs"}),
+        )
+        .await;
+        let scoped_report = &scoped_content["structuredContent"]["evidence"]["report"];
+        assert_eq!(scoped_report["indexedFiles"], 1);
+        assert_eq!(scoped_report["filesScanned"], 1);
+        assert_eq!(scoped_report["hits"][0]["path"], "src/lib.rs");
+
+        let invalid_regex = CoreTools(handler)
+            .execute(
+                policy_call(FIND_TOOL, json!({"by": "content", "query": "foo(bar|baz"})),
+                ToolCallContext::local(Duration::from_secs(30)),
+            )
+            .await;
+        let invalid_regex = match invalid_regex {
+            Ok(result) => panic!("invalid content regex unexpectedly succeeded: {result:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(invalid_regex.code(), ToolErrorCode::InvalidArguments);
+        assert_eq!(
+            invalid_regex.wire_message(),
+            "Invalid content regex at byte 3: unclosed group"
+        );
+        assert!(!invalid_regex.wire_message().contains("foo"));
+
+        let node_batch = execute_live_tool(
+            handler,
+            NODE_TOOL,
+            json!({"symbols": ["root", "duplicateName", "buildSignupPath", "missingSymbol"]}),
+        )
+        .await;
+        let node_batch = &node_batch["structuredContent"]["evidence"];
+        assert!(node_batch["results"].as_array().is_some_and(|results| {
+            results.len() == 2
+                && results.iter().any(|result| result["requested"] == "root")
+                && results
+                    .iter()
+                    .any(|result| result["requested"] == "buildSignupPath")
+        }));
+        assert_eq!(node_batch["unresolved"][0]["requested"], "missingSymbol");
+        assert_eq!(node_batch["ambiguous"][0]["requested"], "duplicateName");
+        assert_eq!(
+            node_batch["ambiguous"][0]["candidates"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(node_batch["ambiguous"][0]["truncated"], false);
     }
 
     async fn verify_agent_file_surfaces(handler: &CartographMcpHandler) {
@@ -29144,9 +29290,16 @@ export async function loadFeature() { return import("./feature"); }
 export function buildSignupPath(id: string): string { return `/signup?id=${id}`; }
 export function buildSigninPath(): string { return "/signin"; }
 export function unrelatedAccountHandler(): null { return null; }
+export function duplicateName(): string { return "feature"; }
 "#,
         )
         .unwrap_or_else(|error| panic!("agent-surface feature fixture failed: {error}"));
+        std::fs::write(
+            project.join("src/alternate.ts"),
+            r#"export function duplicateName(): string { return "alternate"; }
+"#,
+        )
+        .unwrap_or_else(|error| panic!("agent-surface alternate fixture failed: {error}"));
         std::fs::write(
             project.join("tests/server.test.ts"),
             r#"import { handleOrder } from "../src/server";

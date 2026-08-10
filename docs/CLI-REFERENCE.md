@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-08 (`v2.1.13`).
+Last release audit: 2026-08-10 (`v2.1.14`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -11,6 +11,7 @@ subcommand help remains the authority for every option and default.
 
 ```text
 cartograph index [PROJECT] [--exclude GLOB]...
+cartograph sync-if-dirty [PROJECT] [--quiet] [--max-file-size SIZE]
 cartograph status [PROJECT]
 cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid
 cartograph context <TASK> [--exact-name NAME] [--exact-path PATH] [--exact-reference TEXT]
@@ -38,6 +39,13 @@ typed task intent and can use exact anchors, ParadeDB BM25, a ready matching
 semantic model, graph expansion, affected tests, and a separate stale
 working-tree overlay. JSON is the stable automation format; text favors concise
 operator output.
+
+`sync-if-dirty` skips a clean, current checkout. If another native watcher or
+manual index owns the project's index lease, it observes that lease for a
+bounded five minutes instead of stealing it or immediately returning
+`lease_failed`. After the competing writer releases, the command succeeds when
+that writer published the now-current source revision; otherwise it retries its
+own complete index.
 
 `scip-export` requires a fresh generation and writes atomically inside the
 project. It emits standard SCIP plus a forward-compatible Cartograph extension
@@ -70,7 +78,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.13 top-level command advertised
+This inventory contains every non-hidden v2.1.14 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 

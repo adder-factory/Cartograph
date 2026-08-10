@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.13"
+version = "2.1.14"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Adder Factory"]
@@ -84,6 +84,7 @@ futures-util = "=0.3.33"
 globset = "0.4.19"
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 regex = "1.13.1"
+regex-syntax = "0.8.11"
 rustls = { version = "=0.23.43", default-features = false, features = ["ring"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }

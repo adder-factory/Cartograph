@@ -17,9 +17,9 @@ use std::{
 };
 
 use cartograph_agent::{
-    EmbeddingOptions, IndexOptions, IndexReport, ProjectRuntime, ProjectStatus, RetrievalOptions,
-    RetrievalRequest, ReviewOptions, ReviewReport, SourceContextOptions, SourceContextRequest,
-    WorkingTreeOverlayRequest, semantic_readiness_from_database,
+    EmbeddingOptions, IndexOptions, IndexReport, ProjectError, ProjectRuntime, ProjectStatus,
+    RetrievalOptions, RetrievalRequest, ReviewOptions, ReviewReport, SourceContextOptions,
+    SourceContextRequest, WorkingTreeOverlayRequest, semantic_readiness_from_database,
 };
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{
@@ -92,6 +92,8 @@ const DEFAULT_IMPORT_OUTPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_IMPORT_WORKING_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAINTENANCE_LEASE_DURATION: Duration = Duration::from_mins(5);
 const MAINTENANCE_STATEMENT_TIMEOUT: Duration = Duration::from_mins(4);
+const SYNC_IF_DIRTY_LEASE_WAIT: Duration = Duration::from_mins(5);
+const SYNC_IF_DIRTY_LEASE_POLL: Duration = Duration::from_millis(200);
 const MAXIMUM_TRANSIENT_FILE_BYTES: usize = 10 * 1024 * 1024;
 const KIBIBYTE: usize = 1_024;
 const MEBIBYTE: usize = KIBIBYTE * KIBIBYTE;
@@ -3090,19 +3092,91 @@ async fn run_sync_if_dirty(
             .with_max_source_bytes(maximum_source_bytes)
             .map_err(|error| error.to_string())?;
     }
-    let report = runtime
-        .index(options)
+    let project_id = match status.snapshot.as_ref() {
+        Some(snapshot) => snapshot.project_id.clone(),
+        None => runtime
+            .register_agent_state_project()
+            .await
+            .map_err(error_codes::direct_index_failure_message)?,
+    };
+    let outcome = sync_if_dirty_index(&runtime, project_id, options)
         .await
         .map_err(error_codes::direct_index_failure_message)?;
     if !quiet {
-        if report.published {
-            println!("Synced changed source into a new generation");
-        } else {
-            println!("Source manifest is unchanged; existing generation retained");
+        match outcome {
+            SyncIfDirtyIndexOutcome::Indexed { published: true } => {
+                println!("Synced changed source into a new generation");
+            }
+            SyncIfDirtyIndexOutcome::Indexed { published: false } => {
+                println!("Source manifest is unchanged; existing generation retained");
+            }
+            SyncIfDirtyIndexOutcome::JoinedCurrentGeneration => {
+                println!(
+                    "Another sync published the current generation; no additional index was needed"
+                );
+            }
         }
     }
     runtime.close().await;
     Ok(ExitCode::SUCCESS)
+}
+
+enum SyncIfDirtyIndexOutcome {
+    Indexed { published: bool },
+    JoinedCurrentGeneration,
+}
+
+async fn sync_if_dirty_index(
+    runtime: &ProjectRuntime,
+    project_id: ProjectId,
+    options: IndexOptions,
+) -> Result<SyncIfDirtyIndexOutcome, ProjectError> {
+    let mut wait_deadline = None;
+    loop {
+        match runtime.index(options.clone()).await {
+            Ok(report) => {
+                return Ok(SyncIfDirtyIndexOutcome::Indexed {
+                    published: report.published,
+                });
+            }
+            Err(ProjectError::IndexLeaseFailed) => {}
+            Err(error) => return Err(error),
+        }
+
+        let deadline = *wait_deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + SYNC_IF_DIRTY_LEASE_WAIT);
+        let target = LeaseTarget::new(project_id.clone(), ProjectOperation::Index, None);
+        wait_for_competing_index(runtime, &target, deadline).await?;
+
+        let status = tokio::time::timeout_at(deadline, runtime.status())
+            .await
+            .map_err(|_| ProjectError::IndexLeaseFailed)??;
+        if status.fresh {
+            return Ok(SyncIfDirtyIndexOutcome::JoinedCurrentGeneration);
+        }
+    }
+}
+
+async fn wait_for_competing_index(
+    runtime: &ProjectRuntime,
+    target: &LeaseTarget,
+    deadline: tokio::time::Instant,
+) -> Result<(), ProjectError> {
+    loop {
+        let status = tokio::time::timeout_at(deadline, runtime.database().lease_status(target))
+            .await
+            .map_err(|_| ProjectError::IndexLeaseFailed)?
+            .map_err(|_| ProjectError::IndexLeaseFailed)?;
+        if status
+            .as_ref()
+            .is_none_or(cartograph_db::LeaseStatus::expired)
+        {
+            return Ok(());
+        }
+        tokio::time::timeout_at(deadline, tokio::time::sleep(SYNC_IF_DIRTY_LEASE_POLL))
+            .await
+            .map_err(|_| ProjectError::IndexLeaseFailed)?;
+    }
 }
 
 fn parse_max_file_size(raw: &str) -> Result<usize, String> {

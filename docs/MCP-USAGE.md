@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-08 (`v2.1.13`).
+Last release audit: 2026-08-10 (`v2.1.14`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -120,11 +120,11 @@ for all 36 wire contracts and their CLI families.
 | --- | --- |
 | `cartograph_status` | Current generation, row counts, compact database/schema storage as exact bytes plus readable IEC units, complete supported-source freshness, and auto-sync state |
 | `cartograph_context` | Intent-aware exact/BM25/hybrid packet, typed primary edit candidates, graph evidence, affected tests, trust, and live overlay |
-| `cartograph_find` | Exact name/path/reference or BM25/hybrid candidates |
+| `cartograph_find` | Exact name/path/reference, bounded live-source regex, or BM25/hybrid candidates |
 | `cartograph_files` | Bounded current-generation file inventory filtered by directory or language |
 | `cartograph_entry_points` | Typed routes, CLI commands, MCP tools, CLI declarations, and public API boundaries with exact totals |
 | `cartograph_at_range` | Exact symbols overlapping one source range or diff hunk |
-| `cartograph_node` | Exact symbol metadata and bounded source only when indexed line provenance is fresh |
+| `cartograph_node` | Exact symbol metadata and bounded source only when indexed line provenance is fresh; batches retain partial results and identify unresolved or ambiguous inputs |
 | `cartograph_graph` | Bounded callers/callees/impact, exact edge filters, shortest paths, or model-scoped pgvector symbol neighbors |
 | `cartograph_affected` | Structurally connected test candidates; file and symbol modes both enforce `maxDepth`, `maxNodes`, and result limits, and file mode reports `impact.nodesTruncated` when its traversal budget is reached |
 | `cartograph_numerical` | Generation-scoped static numerical sites, coverage, explanation, and non-executing probe plans with explicit evidence levels and unknowns |
@@ -156,6 +156,20 @@ evidence; sibling prefixes do not match. `allowStale` is a compatibility no-op
 in context mode because the Git review packet already reports immutable graph
 freshness separately, while non-Git review lenses continue to use it as an
 explicit stale-evidence opt-in.
+
+`cartograph_find` content mode treats `query` as a bounded Rust regular
+expression. Its optional `pathFilter` is a case-sensitive literal substring of
+the normalized project-relative path, not a glob or another regular
+expression; a basename such as `lib.rs`, a directory segment, or a longer path
+fragment therefore scopes the scanned inventory directly. Invalid expressions
+return a safe parser category and zero-based byte offset without echoing the
+query text.
+
+`cartograph_node` accepts either one `symbol` or a batch of up to 20 exact
+`symbols`. A batch preserves every resolvable result, lists missing inputs in
+`unresolved`, and lists each ambiguous input in `ambiguous` with up to ten
+candidate identities and an explicit `truncated` flag. A single-symbol request
+continues to fail closed when its name is ambiguous.
 
 `cartograph_context` classifies deterministic task intents such as symbol
 lookup, implementation trace, change planning, test selection, error diagnosis,

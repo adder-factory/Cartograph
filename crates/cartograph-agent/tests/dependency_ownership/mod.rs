@@ -21,6 +21,7 @@ use libc as _;
 use memchr as _;
 use num_traits as _;
 use regex as _;
+use regex_syntax as _;
 use serde as _;
 use serde_json as _;
 use sha2 as _;

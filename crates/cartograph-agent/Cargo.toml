@@ -25,6 +25,7 @@ ignore.workspace = true
 memchr.workspace = true
 num-traits.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

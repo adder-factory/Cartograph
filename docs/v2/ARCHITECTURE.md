@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-08 (`v2.1.13`)
+Last implementation review: 2026-08-10 (`v2.1.14`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides

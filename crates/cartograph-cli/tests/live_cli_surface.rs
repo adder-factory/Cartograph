@@ -6,9 +6,13 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::Path,
     process::{Command, Output},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::mpsc,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use cartograph_db::{CartographDatabase, LeaseOwner, LeaseRequest, LeaseTarget};
+use cartograph_domain::{ProjectId, ProjectOperation};
 use serde_json::Value;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -142,6 +146,134 @@ fn doctor_exposes_layered_readiness_before_the_first_generation() {
     if let Err(payload) = outcome {
         resume_unwind(payload);
     }
+}
+
+#[test]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+fn sync_if_dirty_waits_for_a_competing_index_lease() {
+    let database_url = std::env::var("CARTOGRAPH_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| panic!("live CLI database is not configured"));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let schema = format!("cg_cli_sync_lease_{}_{}", std::process::id(), nanos);
+    let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let project_path = project.path().to_string_lossy().into_owned();
+    write_project_fixture(project.path());
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        run_sync_if_dirty_lease_scenario(&project, &database_url, &schema, &project_path);
+    }));
+
+    cleanup_schema(&database_url, &schema);
+    if let Err(payload) = outcome {
+        resume_unwind(payload);
+    }
+}
+
+fn run_sync_if_dirty_lease_scenario(
+    project: &tempfile::TempDir,
+    database_url: &str,
+    schema: &str,
+    project_path: &str,
+) {
+    git(project.path(), &["init", "--initial-branch=main"]);
+    git(
+        project.path(),
+        &["config", "user.email", "sync-lease@example.invalid"],
+    );
+    git(
+        project.path(),
+        &["config", "user.name", "Sync Lease Fixture"],
+    );
+    git(project.path(), &["add", "."]);
+    git(project.path(), &["commit", "-m", "establish sync fixture"]);
+
+    let indexed = json_success(
+        project.path(),
+        database_url,
+        schema,
+        &["index", project_path, "--format", "json"],
+    );
+    let project_id = indexed["project_id"]
+        .as_str()
+        .and_then(|project_id| ProjectId::parse(project_id).ok())
+        .unwrap_or_else(|| panic!("index report omitted a valid project identity: {indexed}"));
+    std::fs::write(
+        project.path().join("src/index.ts"),
+        "export const marker = 2;\n",
+    )
+    .unwrap_or_else(|error| panic!("stale source fixture write failed: {error}"));
+
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    let lease_database_url = database_url.to_owned();
+    let lease_schema = schema.to_owned();
+    let lease_holder = thread::spawn(move || {
+        let settings = cartograph_config::DatabaseSettings::parse(
+            &lease_database_url,
+            Some("2"),
+            Some("10000"),
+        )
+        .and_then(|settings| settings.with_schema(&lease_schema))
+        .unwrap_or_else(|error| panic!("lease settings failed: {error}"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("lease runtime failed: {error}"));
+        runtime.block_on(async {
+            let pool = cartograph_db::connect(&settings)
+                .await
+                .unwrap_or_else(|error| panic!("lease connection failed: {error}"));
+            let database = CartographDatabase::new(pool, settings.schema().clone());
+            let lease = database
+                .acquire_lease(LeaseRequest::new(
+                    LeaseTarget::new(project_id, ProjectOperation::Index, None),
+                    LeaseOwner::new(std::process::id(), "live-cli-competing-sync"),
+                    Duration::from_secs(5),
+                ))
+                .await
+                .unwrap_or_else(|error| panic!("competing lease acquisition failed: {error}"));
+            ready_sender
+                .send(())
+                .unwrap_or_else(|error| panic!("lease-ready signal failed: {error}"));
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            database
+                .release_lease(&lease)
+                .await
+                .unwrap_or_else(|error| panic!("competing lease release failed: {error}"));
+            database.close().await;
+        });
+    });
+    ready_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|error| panic!("competing lease did not become ready: {error}"));
+
+    let sync = invoke(
+        project.path(),
+        database_url,
+        schema,
+        &["sync-if-dirty", project_path],
+    );
+    lease_holder
+        .join()
+        .unwrap_or_else(|payload| resume_unwind(payload));
+    assert!(
+        sync.status.success(),
+        "sync-if-dirty failed instead of waiting: {}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&sync.stdout)
+            .contains("Synced changed source into a new generation")
+    );
+    let status = json_success(
+        project.path(),
+        database_url,
+        schema,
+        &["status", project_path, "--json"],
+    );
+    assert_eq!(status.pointer("/project/fresh"), Some(&Value::Bool(true)));
 }
 
 #[derive(Clone, Copy)]
