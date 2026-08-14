@@ -1710,15 +1710,32 @@ async fn run_spilled_parse_stage(
     }
     let state =
         result.map_err(|error| classify_spilled_parse_stage_error(error, &failure_reasons))?;
-    finish_spilled_parse_stage(spill, initial.state, expected_files, state).await
+    finish_spilled_parse_stage(
+        spill,
+        SpilledParseCompletion {
+            initial_state: initial.state,
+            expected_files,
+            state,
+        },
+    )
+    .await
+}
+
+struct SpilledParseCompletion {
+    initial_state: NativeGenerationSpillState,
+    expected_files: u64,
+    state: SpilledParseStageAccumulator,
 }
 
 async fn finish_spilled_parse_stage(
     spill: NativeGenerationSpill,
-    initial_state: NativeGenerationSpillState,
-    expected_files: u64,
-    state: SpilledParseStageAccumulator,
+    completion: SpilledParseCompletion,
 ) -> Result<(SpilledNativeFacts, NativeParseCacheReport), NativePipelineError> {
+    let SpilledParseCompletion {
+        initial_state,
+        expected_files,
+        state,
+    } = completion;
     if state.files != expected_files {
         return Err(NativePipelineError::Incomplete {
             stage: PipelineStage::Parse,
@@ -2484,27 +2501,20 @@ async fn parse_manifest_entry_with_cache(
     let key = parse_cache.map(|cache| cache.key(&manifest));
     if let (Some(cache), Some(key)) = (parse_cache, key.as_ref()) {
         if cache.read_enabled {
-            match cache.database.load_native_parse_cache(key).await {
-                Ok(Some(record)) => {
-                    if let Some(file) = decode_cached_file(&manifest, &record) {
-                        revalidate_manifest(source_root, &manifest, &cancellation)
-                            .map_err(|_| ParseManifestFailure::unclassified())?;
-                        metrics.hits = 1;
-                        return Ok(ParsedManifestEntry {
-                            file,
-                            cache: metrics,
-                        });
-                    }
-                    metrics.misses = 1;
-                    metrics.corruptions = 1;
-                    let _ = cache.database.evict_native_parse_cache(key).await;
-                }
-                Ok(None) => metrics.misses = 1,
-                Err(_) => {
-                    metrics.misses = 1;
-                    metrics.read_errors = 1;
-                    let _ = cache.database.evict_native_parse_cache(key).await;
-                }
+            if let Some(file) = load_cached_manifest(CacheReadRequest {
+                cache,
+                key,
+                source_root,
+                manifest: &manifest,
+                cancellation: &cancellation,
+                metrics: &mut metrics,
+            })
+            .await?
+            {
+                return Ok(ParsedManifestEntry {
+                    file,
+                    cache: metrics,
+                });
             }
         } else {
             metrics.bypassed = 1;
@@ -2516,30 +2526,102 @@ async fn parse_manifest_entry_with_cache(
     metrics.parsed_files = 1;
     let parse_cancellation = cancellation.clone();
     let file = block_in_place(move || {
-        parse_manifest_entry(source_root, &manifest, maximum_ast_depth, || {
-            parse_cancellation.is_cancelled()
-        })
+        let request = ParseSourceRequest {
+            source_root,
+            manifest,
+            maximum_ast_depth,
+        };
+        parse_manifest_entry(&request, || parse_cancellation.is_cancelled())
     })?;
     if cancellation.is_cancelled() {
         return Err(ParseManifestFailure::unclassified());
     }
     if let (Some(cache), Some(key)) = (parse_cache, key.as_ref()) {
-        let payload =
-            serde_json::to_vec(&file).map_err(|_| ParseManifestFailure::unclassified())?;
-        if payload.len() <= MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES {
-            match cache.database.store_native_parse_cache(key, &payload).await {
-                Ok(NativeParseCacheWrite::Inserted) => metrics.writes = 1,
-                Ok(NativeParseCacheWrite::AlreadyPresent) => {}
-                Err(_) => metrics.write_errors = 1,
-            }
-        } else {
-            metrics.write_errors = 1;
-        }
+        store_cached_manifest(CacheWriteRequest {
+            cache,
+            key,
+            file: &file,
+            metrics: &mut metrics,
+        })
+        .await?;
     }
     Ok(ParsedManifestEntry {
         file,
         cache: metrics,
     })
+}
+
+struct CacheReadRequest<'a> {
+    cache: &'a NativeParseCache,
+    key: &'a NativeParseCacheKey,
+    source_root: &'a SourceRoot,
+    manifest: &'a SourceManifestEntry,
+    cancellation: &'a StageCancellation,
+    metrics: &'a mut NativeParseCacheReport,
+}
+
+async fn load_cached_manifest(
+    request: CacheReadRequest<'_>,
+) -> Result<Option<ExtractedFile>, ParseManifestFailure> {
+    let CacheReadRequest {
+        cache,
+        key,
+        source_root,
+        manifest,
+        cancellation,
+        metrics,
+    } = request;
+    match cache.database.load_native_parse_cache(key).await {
+        Ok(Some(record)) => {
+            let Some(file) = decode_cached_file(manifest, &record) else {
+                metrics.misses = 1;
+                metrics.corruptions = 1;
+                let _ = cache.database.evict_native_parse_cache(key).await;
+                return Ok(None);
+            };
+            revalidate_manifest(source_root, manifest, cancellation)
+                .map_err(|_| ParseManifestFailure::unclassified())?;
+            metrics.hits = 1;
+            Ok(Some(file))
+        }
+        Ok(None) => {
+            metrics.misses = 1;
+            Ok(None)
+        }
+        Err(_) => {
+            metrics.misses = 1;
+            metrics.read_errors = 1;
+            let _ = cache.database.evict_native_parse_cache(key).await;
+            Ok(None)
+        }
+    }
+}
+
+struct CacheWriteRequest<'a> {
+    cache: &'a NativeParseCache,
+    key: &'a NativeParseCacheKey,
+    file: &'a ExtractedFile,
+    metrics: &'a mut NativeParseCacheReport,
+}
+
+async fn store_cached_manifest(request: CacheWriteRequest<'_>) -> Result<(), ParseManifestFailure> {
+    let CacheWriteRequest {
+        cache,
+        key,
+        file,
+        metrics,
+    } = request;
+    let payload = serde_json::to_vec(file).map_err(|_| ParseManifestFailure::unclassified())?;
+    if payload.len() > MAX_NATIVE_PARSE_CACHE_PAYLOAD_BYTES {
+        metrics.write_errors = 1;
+        return Ok(());
+    }
+    match cache.database.store_native_parse_cache(key, &payload).await {
+        Ok(NativeParseCacheWrite::Inserted) => metrics.writes = 1,
+        Ok(NativeParseCacheWrite::AlreadyPresent) => {}
+        Err(_) => metrics.write_errors = 1,
+    }
+    Ok(())
 }
 
 fn decode_cached_file(
@@ -4139,18 +4221,22 @@ where
     }))
 }
 
-fn parse_manifest_entry<Cancel>(
-    source_root: &SourceRoot,
-    manifest: &SourceManifestEntry,
+struct ParseSourceRequest<'input> {
+    source_root: &'input SourceRoot,
+    manifest: SourceManifestEntry,
     maximum_ast_depth: usize,
+}
+
+fn parse_manifest_entry<Cancel>(
+    request: &ParseSourceRequest<'_>,
     mut cancelled: Cancel,
 ) -> Result<ExtractedFile, ParseManifestFailure>
 where
     Cancel: FnMut() -> bool,
 {
-    let snapshot = read_manifest_snapshot(source_root, manifest, &mut cancelled)?;
+    let snapshot = read_manifest_snapshot(request.source_root, &request.manifest, &mut cancelled)?;
     let mut extractor = NativeExtractor::new(snapshot.language())
-        .and_then(|extractor| extractor.with_maximum_ast_depth(maximum_ast_depth))
+        .and_then(|extractor| extractor.with_maximum_ast_depth(request.maximum_ast_depth))
         .map_err(ParseManifestFailure::from_extract)?;
     extractor
         .extract_with_cancellation(&snapshot, cancelled)
@@ -5580,35 +5666,51 @@ fn canonical_go_parameter_list(list: &str) -> Option<Vec<String>> {
         if segment.is_empty() {
             return None;
         }
-        if let Some((name, value_type)) = split_go_named_parameter(segment) {
-            if !go_identifier(name) {
-                return None;
-            }
-            let value_type = normalize_go_type(value_type)?;
-            output
-                .try_reserve(pending_identifiers.len().saturating_add(1))
-                .ok()?;
-            for _ in pending_identifiers.drain(..) {
-                output.push(value_type.clone());
-            }
-            output.push(value_type);
-        } else if go_identifier(segment) {
-            pending_identifiers.try_reserve_exact(1).ok()?;
-            pending_identifiers.push(segment);
-        } else {
-            output.try_reserve(pending_identifiers.len()).ok()?;
-            for identifier in pending_identifiers.drain(..) {
-                output.push(normalize_go_type(identifier)?);
-            }
-            output.try_reserve_exact(1).ok()?;
-            output.push(normalize_go_type(segment)?);
-        }
+        append_go_parameter_segment(segment, &mut pending_identifiers, &mut output)?;
     }
+    flush_go_parameter_types(&mut pending_identifiers, &mut output)?;
+    Some(output)
+}
+
+fn append_go_parameter_segment<'parameter>(
+    segment: &'parameter str,
+    pending_identifiers: &mut Vec<&'parameter str>,
+    output: &mut Vec<String>,
+) -> Option<()> {
+    if let Some((name, value_type)) = split_go_named_parameter(segment) {
+        if !go_identifier(name) {
+            return None;
+        }
+        let value_type = normalize_go_type(value_type)?;
+        output
+            .try_reserve(pending_identifiers.len().saturating_add(1))
+            .ok()?;
+        for _ in pending_identifiers.drain(..) {
+            output.push(value_type.clone());
+        }
+        output.push(value_type);
+        return Some(());
+    }
+    if go_identifier(segment) {
+        pending_identifiers.try_reserve_exact(1).ok()?;
+        pending_identifiers.push(segment);
+        return Some(());
+    }
+    flush_go_parameter_types(pending_identifiers, output)?;
+    output.try_reserve_exact(1).ok()?;
+    output.push(normalize_go_type(segment)?);
+    Some(())
+}
+
+fn flush_go_parameter_types(
+    pending_identifiers: &mut Vec<&str>,
+    output: &mut Vec<String>,
+) -> Option<()> {
     output.try_reserve(pending_identifiers.len()).ok()?;
-    for identifier in pending_identifiers {
+    for identifier in pending_identifiers.drain(..) {
         output.push(normalize_go_type(identifier)?);
     }
-    Some(output)
+    Some(())
 }
 
 fn split_go_named_parameter(value: &str) -> Option<(&str, &str)> {
@@ -5798,60 +5900,110 @@ where
             wildcard_sources.insert(re_export.source_file_id.clone());
             continue;
         }
-        let Some(target_file) = resolve_reexport_target(index, re_export) else {
-            continue;
-        };
-        let mut stack = BTreeSet::new();
-        let visible = collect_visible_exports(VisibleExportQuery {
-            index,
-            file_id: target_file,
-            include_default: true,
-            stack: &mut stack,
-            cancelled,
-        })?;
-        for target in visible.values().flatten() {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            append_derived_edge(
-                facts,
-                budget,
-                DerivedEdgeInput {
-                    source_symbol_id: &re_export.source_symbol_id,
-                    target_symbol_id: target,
-                    kind: EdgeKind::Exports,
-                    confidence: IMPORT_BINDING_CONFIDENCE,
-                    provenance: RE_EXPORT_NAMESPACE_PROVENANCE,
-                },
-            )?;
-        }
+        append_namespace_reexport_edges(
+            ResolutionMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                cancelled: &mut *cancelled,
+            },
+            re_export,
+        )?;
     }
 
     for source_file in wildcard_sources {
+        append_wildcard_reexport_edges(
+            ResolutionMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                cancelled: &mut *cancelled,
+            },
+            &source_file,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_namespace_reexport_edges<Cancel>(
+    input: ResolutionMutation<'_, Cancel>,
+    re_export: &ProjectReExport,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
+    let Some(target_file) = resolve_reexport_target(index, re_export) else {
+        return Ok(());
+    };
+    let mut stack = BTreeSet::new();
+    let visible = collect_visible_exports(VisibleExportQuery {
+        index,
+        file_id: target_file,
+        include_default: true,
+        stack: &mut stack,
+        cancelled,
+    })?;
+    for target in visible.values().flatten() {
         if cancelled() {
             return Err(StageItemFailure);
         }
-        let visible = collect_wildcard_exports(index, &source_file, cancelled)?;
-        let source_symbol = index
-            .file_symbols
-            .get(&source_file)
-            .ok_or(StageItemFailure)?;
-        for target in visible.values().flatten() {
-            if cancelled() {
-                return Err(StageItemFailure);
-            }
-            append_derived_edge(
-                facts,
-                budget,
-                DerivedEdgeInput {
-                    source_symbol_id: source_symbol,
-                    target_symbol_id: target,
-                    kind: EdgeKind::Exports,
-                    confidence: IMPORT_BINDING_CONFIDENCE,
-                    provenance: RE_EXPORT_ALL_PROVENANCE,
-                },
-            )?;
+        append_derived_edge(
+            facts,
+            budget,
+            DerivedEdgeInput {
+                source_symbol_id: &re_export.source_symbol_id,
+                target_symbol_id: target,
+                kind: EdgeKind::Exports,
+                confidence: IMPORT_BINDING_CONFIDENCE,
+                provenance: RE_EXPORT_NAMESPACE_PROVENANCE,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn append_wildcard_reexport_edges<Cancel>(
+    input: ResolutionMutation<'_, Cancel>,
+    source_file: &FileId,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
+    if cancelled() {
+        return Err(StageItemFailure);
+    }
+    let visible = collect_wildcard_exports(index, source_file, cancelled)?;
+    let source_symbol = index
+        .file_symbols
+        .get(source_file)
+        .ok_or(StageItemFailure)?;
+    for target in visible.values().flatten() {
+        if cancelled() {
+            return Err(StageItemFailure);
         }
+        append_derived_edge(
+            facts,
+            budget,
+            DerivedEdgeInput {
+                source_symbol_id: source_symbol,
+                target_symbol_id: target,
+                kind: EdgeKind::Exports,
+                confidence: IMPORT_BINDING_CONFIDENCE,
+                provenance: RE_EXPORT_ALL_PROVENANCE,
+            },
+        )?;
     }
     Ok(())
 }
@@ -5898,6 +6050,48 @@ where
     } = input;
     let mut visible = VisibleExportMap::new();
     let mut explicit_names = BTreeSet::new();
+    collect_explicit_visible_exports(ExplicitVisibleExports {
+        index,
+        file_id,
+        include_default,
+        visible: &mut visible,
+        explicit_names: &mut explicit_names,
+        cancelled,
+    })?;
+    collect_nested_visible_exports(NestedVisibleExports {
+        index,
+        file_id,
+        stack,
+        cancelled,
+        explicit_names: &explicit_names,
+        visible: &mut visible,
+    })?;
+    Ok(visible)
+}
+
+struct ExplicitVisibleExports<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    file_id: &'context FileId,
+    include_default: bool,
+    visible: &'context mut VisibleExportMap,
+    explicit_names: &'context mut BTreeSet<String>,
+    cancelled: &'context mut Cancel,
+}
+
+fn collect_explicit_visible_exports<Cancel>(
+    input: ExplicitVisibleExports<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ExplicitVisibleExports {
+        index,
+        file_id,
+        include_default,
+        visible,
+        explicit_names,
+        cancelled,
+    } = input;
     if let Some(exports) = index.exports.get(file_id) {
         for (name, target) in exports {
             if cancelled() {
@@ -5916,6 +6110,32 @@ where
             );
         }
     }
+    Ok(())
+}
+
+struct NestedVisibleExports<'context, Cancel> {
+    index: &'context ResolutionIndex,
+    file_id: &'context FileId,
+    stack: &'context mut BTreeSet<FileId>,
+    cancelled: &'context mut Cancel,
+    explicit_names: &'context BTreeSet<String>,
+    visible: &'context mut VisibleExportMap,
+}
+
+fn collect_nested_visible_exports<Cancel>(
+    input: NestedVisibleExports<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let NestedVisibleExports {
+        index,
+        file_id,
+        stack,
+        cancelled,
+        explicit_names,
+        visible,
+    } = input;
     for re_export in index
         .re_exports
         .iter()
@@ -5938,10 +6158,10 @@ where
             if explicit_names.contains(&name) {
                 continue;
             }
-            merge_visible_export(&mut visible, name, target);
+            merge_visible_export(visible, name, target);
         }
     }
-    Ok(visible)
+    Ok(())
 }
 
 fn collect_wildcard_exports<Cancel>(
@@ -6028,82 +6248,162 @@ where
         if cancelled() {
             return Err(StageItemFailure);
         }
-        let source = index
-            .modules
-            .files
-            .get(&evidence.file_id)
-            .ok_or(StageItemFailure)?;
-        let source_symbol = index
-            .file_symbols
-            .get(&evidence.file_id)
-            .ok_or(StageItemFailure)?;
+        append_test_subject_edge_set(
+            ResolutionMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                cancelled: &mut *cancelled,
+            },
+            evidence,
+        )?;
+    }
+    Ok(())
+}
 
-        if source.language == SourceLanguage::Rust.as_str()
-            && let Some(crate_root) = rust_integration_crate_root(&source.path)?
-        {
-            if let Some(target) = rust_crate_entry(index, &crate_root) {
-                let target_symbol = index.file_symbols.get(target).ok_or(StageItemFailure)?;
-                append_test_edge(
-                    facts,
-                    budget,
-                    TestEdgeInput {
-                        source_symbol_id: source_symbol,
-                        target_symbol_id: target_symbol,
-                        confidence: EXTRACTED_EDGE_CONFIDENCE,
-                        provenance: RUST_INTEGRATION_TEST_PROVENANCE,
-                    },
-                )?;
-            }
-            continue;
-        }
+fn append_test_subject_edge_set<Cancel>(
+    input: ResolutionMutation<'_, Cancel>,
+    evidence: &TestFileEvidence,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let source = input
+        .index
+        .modules
+        .files
+        .get(&evidence.file_id)
+        .ok_or(StageItemFailure)?;
+    let source_symbol = input
+        .index
+        .file_symbols
+        .get(&evidence.file_id)
+        .ok_or(StageItemFailure)?;
+    if append_rust_test_subject(RustTestSubjectInput {
+        index: input.index,
+        facts: &mut *input.facts,
+        budget: &mut *input.budget,
+        source,
+        source_symbol,
+    })? {
+        return Ok(());
+    }
+    if evidence.has_inline_tests && !is_test_source_path(&source.path) {
+        return append_test_edge(
+            input.facts,
+            input.budget,
+            TestEdgeInput {
+                source_symbol_id: source_symbol,
+                target_symbol_id: source_symbol,
+                confidence: EXTRACTED_EDGE_CONFIDENCE,
+                provenance: RUST_INLINE_TEST_PROVENANCE,
+            },
+        );
+    }
+    append_conventional_test_subjects(ConventionalTestEdgeInput {
+        mutation: input,
+        evidence,
+        source,
+        source_symbol,
+    })
+}
 
-        if evidence.has_inline_tests && !is_test_source_path(&source.path) {
-            append_test_edge(
-                facts,
-                budget,
-                TestEdgeInput {
-                    source_symbol_id: source_symbol,
-                    target_symbol_id: source_symbol,
-                    confidence: EXTRACTED_EDGE_CONFIDENCE,
-                    provenance: RUST_INLINE_TEST_PROVENANCE,
-                },
-            )?;
-            continue;
-        }
+struct RustTestSubjectInput<'a> {
+    index: &'a ResolutionIndex,
+    facts: &'a mut GenerationFacts,
+    budget: &'a mut ResolveBudget,
+    source: &'a ResolutionFileContext,
+    source_symbol: &'a SymbolId,
+}
 
-        let Some(language) = SourceLanguage::from_stable_str(&source.language) else {
-            return Err(StageItemFailure);
-        };
-        let mut subjects = conventional_test_subjects(ConventionalTestSubjectQuery {
+fn append_rust_test_subject(input: RustTestSubjectInput<'_>) -> Result<bool, StageItemFailure> {
+    let RustTestSubjectInput {
+        index,
+        facts,
+        budget,
+        source,
+        source_symbol,
+    } = input;
+    if source.language != SourceLanguage::Rust.as_str() {
+        return Ok(false);
+    }
+    let Some(crate_root) = rust_integration_crate_root(&source.path)? else {
+        return Ok(false);
+    };
+    let Some(target) = rust_crate_entry(index, &crate_root) else {
+        return Ok(true);
+    };
+    let target_symbol = index.file_symbols.get(target).ok_or(StageItemFailure)?;
+    append_test_edge(
+        facts,
+        budget,
+        TestEdgeInput {
+            source_symbol_id: source_symbol,
+            target_symbol_id: target_symbol,
+            confidence: EXTRACTED_EDGE_CONFIDENCE,
+            provenance: RUST_INTEGRATION_TEST_PROVENANCE,
+        },
+    )?;
+    Ok(true)
+}
+
+struct ConventionalTestEdgeInput<'context, Cancel> {
+    mutation: ResolutionMutation<'context, Cancel>,
+    evidence: &'context TestFileEvidence,
+    source: &'context ResolutionFileContext,
+    source_symbol: &'context SymbolId,
+}
+
+fn append_conventional_test_subjects<Cancel>(
+    input: ConventionalTestEdgeInput<'_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ConventionalTestEdgeInput {
+        mutation,
+        evidence,
+        source,
+        source_symbol,
+    } = input;
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = mutation;
+    let Some(language) = SourceLanguage::from_stable_str(&source.language) else {
+        return Err(StageItemFailure);
+    };
+    let mut subjects = conventional_test_subjects(ConventionalTestSubjectQuery {
+        index,
+        source,
+        language,
+        cancelled,
+    })?;
+    let (confidence, provenance) = if subjects.is_empty() {
+        subjects = imported_test_subjects(ImportedTestSubjectQuery {
             index,
+            evidence,
             source,
-            language,
             cancelled,
         })?;
-        let (confidence, provenance) = if subjects.is_empty() {
-            subjects = imported_test_subjects(ImportedTestSubjectQuery {
-                index,
-                evidence,
-                source,
-                cancelled,
-            })?;
-            (TEST_IMPORT_CONFIDENCE, TEST_IMPORT_PROVENANCE)
-        } else {
-            (TEST_CONVENTION_CONFIDENCE, TEST_CONVENTION_PROVENANCE)
-        };
-        for subject in subjects {
-            let target_symbol = index.file_symbols.get(&subject).ok_or(StageItemFailure)?;
-            append_test_edge(
-                facts,
-                budget,
-                TestEdgeInput {
-                    source_symbol_id: source_symbol,
-                    target_symbol_id: target_symbol,
-                    confidence,
-                    provenance,
-                },
-            )?;
-        }
+        (TEST_IMPORT_CONFIDENCE, TEST_IMPORT_PROVENANCE)
+    } else {
+        (TEST_CONVENTION_CONFIDENCE, TEST_CONVENTION_PROVENANCE)
+    };
+    for subject in subjects {
+        let target_symbol = index.file_symbols.get(&subject).ok_or(StageItemFailure)?;
+        append_test_edge(
+            facts,
+            budget,
+            TestEdgeInput {
+                source_symbol_id: source_symbol,
+                target_symbol_id: target_symbol,
+                confidence,
+                provenance,
+            },
+        )?;
     }
     Ok(())
 }
@@ -6271,35 +6571,55 @@ fn resolve_package_test_import<'index>(
         specifier.rsplit_once('.').map(|(owner, _)| owner),
     ] {
         let candidate = candidate?.trim_end_matches(".*");
-        let mut suffix = String::new();
-        suffix
-            .try_reserve_exact(candidate.len().saturating_add(7))
-            .ok()?;
-        suffix.push('/');
-        suffix.extend(
-            candidate
-                .chars()
-                .map(|character| if character == '.' { '/' } else { character }),
-        );
-        let mut matched = None;
-        for (file_id, file) in &index.modules.files {
-            if !matches!(file.language.as_str(), "java" | "kotlin" | "scala")
-                || ![".kt", ".kts", ".java", ".scala"]
-                    .iter()
-                    .any(|extension| file.path.ends_with(&format!("{suffix}{extension}")))
-            {
-                continue;
-            }
-            if matched.is_some() {
-                return None;
-            }
-            matched = Some(file_id);
-        }
-        if matched.is_some() {
-            return matched;
+        let suffix = package_test_suffix(candidate)?;
+        match unique_package_test_file(index, &suffix) {
+            PackageTestFileMatch::Unique(file_id) => return Some(file_id),
+            PackageTestFileMatch::Absent => {}
+            PackageTestFileMatch::Ambiguous => return None,
         }
     }
     None
+}
+
+fn package_test_suffix(candidate: &str) -> Option<String> {
+    let mut suffix = String::new();
+    suffix
+        .try_reserve_exact(candidate.len().saturating_add(7))
+        .ok()?;
+    suffix.push('/');
+    suffix.extend(
+        candidate
+            .chars()
+            .map(|character| if character == '.' { '/' } else { character }),
+    );
+    Some(suffix)
+}
+
+enum PackageTestFileMatch<'index> {
+    Absent,
+    Unique(&'index FileId),
+    Ambiguous,
+}
+
+fn unique_package_test_file<'index>(
+    index: &'index ResolutionIndex,
+    suffix: &str,
+) -> PackageTestFileMatch<'index> {
+    let mut matched = None;
+    for (file_id, file) in &index.modules.files {
+        if !matches!(file.language.as_str(), "java" | "kotlin" | "scala")
+            || ![".kt", ".kts", ".java", ".scala"]
+                .iter()
+                .any(|extension| file.path.ends_with(&format!("{suffix}{extension}")))
+        {
+            continue;
+        }
+        if matched.is_some() {
+            return PackageTestFileMatch::Ambiguous;
+        }
+        matched = Some(file_id);
+    }
+    matched.map_or(PackageTestFileMatch::Absent, PackageTestFileMatch::Unique)
 }
 
 fn rust_integration_crate_root(path: &str) -> Result<Option<String>, StageItemFailure> {
@@ -7263,43 +7583,54 @@ where
         {
             end = end.saturating_add(1);
         }
-        if end.saturating_sub(start) > 1 {
-            let first_digest = &clone_symbol(extracted, &candidates[order[start]])
-                .input
-                .structural_digest;
-            let spans_multiple_exact_digests = order[start + 1..end].iter().any(|index| {
-                clone_symbol(extracted, &candidates[*index])
-                    .input
-                    .structural_digest
-                    != *first_digest
-            });
-            let semantic_compatible =
-                order[start..end]
-                    .iter()
-                    .enumerate()
-                    .all(|(left_position, left)| {
-                        order[start..end]
-                            .iter()
-                            .skip(left_position.saturating_add(1))
-                            .all(|right| {
-                                clone_candidates_semantically_compatible(
-                                    &candidates[*left],
-                                    &candidates[*right],
-                                )
-                            })
-                    });
-            if spans_multiple_exact_digests && semantic_compatible {
-                for candidate in &order[start..end] {
-                    candidates[*candidate].syntactic_claimed = true;
-                    extracted.files[candidates[*candidate].file_index].symbols
-                        [candidates[*candidate].symbol_index]
-                        .near_clone_compatibility = NearCloneCompatibility::Compatible;
-                }
-            }
-        }
+        mark_near_clone_group(extracted, candidates, &order[start..end]);
         start = end;
     }
     Ok(())
+}
+
+fn mark_near_clone_group(
+    extracted: &mut NativeFactAccumulator,
+    candidates: &mut [CloneAnalysisCandidate],
+    group: &[usize],
+) {
+    if group.len() <= 1 || !near_clone_group_compatible(extracted, candidates, group) {
+        return;
+    }
+    for candidate in group {
+        candidates[*candidate].syntactic_claimed = true;
+        extracted.files[candidates[*candidate].file_index].symbols
+            [candidates[*candidate].symbol_index]
+            .near_clone_compatibility = NearCloneCompatibility::Compatible;
+    }
+}
+
+fn near_clone_group_compatible(
+    extracted: &NativeFactAccumulator,
+    candidates: &[CloneAnalysisCandidate],
+    group: &[usize],
+) -> bool {
+    let first_digest = &clone_symbol(extracted, &candidates[group[0]])
+        .input
+        .structural_digest;
+    let spans_multiple_exact_digests = group[1..].iter().any(|index| {
+        clone_symbol(extracted, &candidates[*index])
+            .input
+            .structural_digest
+            != *first_digest
+    });
+    spans_multiple_exact_digests
+        && group.iter().enumerate().all(|(left_position, left)| {
+            group
+                .iter()
+                .skip(left_position.saturating_add(1))
+                .all(|right| {
+                    clone_candidates_semantically_compatible(
+                        &candidates[*left],
+                        &candidates[*right],
+                    )
+                })
+        })
 }
 
 fn compare_partial_clone_band<Cancel>(
@@ -7342,61 +7673,88 @@ where
         if cancelled() {
             return Err(StageItemFailure);
         }
-        let left_index = order[left_position];
-        let left_language = candidates[left_index].language;
-        let left_total = clone_profile_total(&candidates[left_index]);
-        for right_index in order.iter().copied().skip(left_position.saturating_add(1)) {
-            if candidates[right_index].language != left_language {
-                break;
-            }
-            let right_total = clone_profile_total(&candidates[right_index]);
-            if u64::from(right_total).saturating_mul(u64::from(minimum_overlap_ppm))
-                > u64::from(left_total).saturating_mul(1_000_000)
-            {
-                break;
-            }
-            if clone_prefilter_overlap_ppm(
-                ClonePrefilter {
-                    buckets: &candidates[left_index].prefilter.complete,
-                    total: left_total,
-                },
-                ClonePrefilter {
-                    buckets: &candidates[right_index].prefilter.complete,
-                    total: right_total,
-                },
-            ) < minimum_overlap_ppm
-            {
-                continue;
-            }
-            let overlap_ppm = clone_profile_overlap_ppm(
-                candidates[left_index]
-                    .profile
-                    .as_ref()
-                    .ok_or(StageItemFailure)?,
-                candidates[right_index]
-                    .profile
-                    .as_ref()
-                    .ok_or(StageItemFailure)?,
-            );
-            if overlap_ppm < minimum_overlap_ppm {
-                continue;
-            }
-            if !clone_candidates_semantically_compatible(
-                &candidates[left_index],
-                &candidates[right_index],
-            ) {
-                continue;
-            }
-            link_partial_candidates(PartialCloneLink {
-                candidates,
-                left: left_index,
-                right: right_index,
-                overlap_ppm,
-                minimum_overlap_ppm,
-            })?;
-        }
+        compare_partial_clone_candidate(PartialCloneCandidateInput {
+            candidates: &mut *candidates,
+            order: &order,
+            left_position,
+            minimum_overlap_ppm,
+        })?;
     }
     Ok(())
+}
+
+struct PartialCloneCandidateInput<'a> {
+    candidates: &'a mut [CloneAnalysisCandidate],
+    order: &'a [usize],
+    left_position: usize,
+    minimum_overlap_ppm: u32,
+}
+
+fn compare_partial_clone_candidate(
+    input: PartialCloneCandidateInput<'_>,
+) -> Result<(), StageItemFailure> {
+    let PartialCloneCandidateInput {
+        candidates,
+        order,
+        left_position,
+        minimum_overlap_ppm,
+    } = input;
+    let left_index = order[left_position];
+    let left_language = candidates[left_index].language;
+    let left_total = clone_profile_total(&candidates[left_index]);
+    for right_index in order.iter().copied().skip(left_position.saturating_add(1)) {
+        if candidates[right_index].language != left_language {
+            break;
+        }
+        let right_total = clone_profile_total(&candidates[right_index]);
+        if partial_clone_band_exhausted(left_total, right_total, minimum_overlap_ppm) {
+            break;
+        }
+        if clone_prefilter_overlap_ppm(
+            ClonePrefilter {
+                buckets: &candidates[left_index].prefilter.complete,
+                total: left_total,
+            },
+            ClonePrefilter {
+                buckets: &candidates[right_index].prefilter.complete,
+                total: right_total,
+            },
+        ) < minimum_overlap_ppm
+        {
+            continue;
+        }
+        let overlap_ppm = clone_profile_overlap_ppm(
+            candidates[left_index]
+                .profile
+                .as_ref()
+                .ok_or(StageItemFailure)?,
+            candidates[right_index]
+                .profile
+                .as_ref()
+                .ok_or(StageItemFailure)?,
+        );
+        if overlap_ppm < minimum_overlap_ppm
+            || !clone_candidates_semantically_compatible(
+                &candidates[left_index],
+                &candidates[right_index],
+            )
+        {
+            continue;
+        }
+        link_partial_candidates(PartialCloneLink {
+            candidates,
+            left: left_index,
+            right: right_index,
+            overlap_ppm,
+            minimum_overlap_ppm,
+        })?;
+    }
+    Ok(())
+}
+
+fn partial_clone_band_exhausted(left_total: u32, right_total: u32, overlap_ppm: u32) -> bool {
+    u64::from(right_total).saturating_mul(u64::from(overlap_ppm))
+        > u64::from(left_total).saturating_mul(1_000_000)
 }
 
 fn link_partial_candidates(input: PartialCloneLink<'_>) -> Result<(), StageItemFailure> {
@@ -8112,53 +8470,116 @@ where
         if cancelled() {
             return Err(StageItemFailure);
         }
-        let Some(workspace) = manifest_workspace_tag(qualified_name, false) else {
-            continue;
-        };
-        let Ok(glob) = GlobBuilder::new(workspace.pattern)
-            .literal_separator(true)
-            .build()
-        else {
-            continue;
-        };
-        let matcher = glob.compile_matcher();
-        for source in workspace_candidates
-            .iter()
-            .filter(|candidate| candidate.qualified_name == *qualified_name)
-        {
-            if source.kind != SymbolKind::Resource {
-                continue;
-            }
-            for (package_qualified_name, package_candidates) in ordered_resolution_candidates(index)
-            {
-                if cancelled() {
-                    return Err(StageItemFailure);
-                }
-                let Some(package) = manifest_package_tag(package_qualified_name) else {
-                    continue;
-                };
-                if workspace.ecosystem != package.ecosystem
-                    || !matcher.is_match(package.directory)
-                    || manifest_workspace_excludes(ManifestWorkspaceExclusion {
-                        index,
-                        workspace,
-                        package_directory: package.directory,
-                        cancelled,
-                    })?
-                {
-                    continue;
-                }
-                append_manifest_resource_targets(
-                    facts,
-                    budget,
-                    ManifestResourceTargets {
-                        source,
-                        qualified_name: package_qualified_name,
-                        candidates: package_candidates,
-                    },
-                )?;
-            }
+        append_manifest_workspace(
+            ResolutionMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                cancelled: &mut *cancelled,
+            },
+            qualified_name,
+            workspace_candidates,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_manifest_workspace<Cancel>(
+    input: ResolutionMutation<'_, Cancel>,
+    qualified_name: &str,
+    workspace_candidates: &[ResolutionCandidate],
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = input;
+    let Some(workspace) = manifest_workspace_tag(qualified_name, false) else {
+        return Ok(());
+    };
+    let Ok(glob) = GlobBuilder::new(workspace.pattern)
+        .literal_separator(true)
+        .build()
+    else {
+        return Ok(());
+    };
+    let matcher = glob.compile_matcher();
+    for source in workspace_candidates
+        .iter()
+        .filter(|candidate| candidate.qualified_name == qualified_name)
+        .filter(|candidate| candidate.kind == SymbolKind::Resource)
+    {
+        append_manifest_workspace_source(ManifestWorkspaceSourceInput {
+            mutation: ResolutionMutation {
+                index,
+                facts: &mut *facts,
+                budget: &mut *budget,
+                cancelled: &mut *cancelled,
+            },
+            workspace,
+            matcher: &matcher,
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+struct ManifestWorkspaceSourceInput<'context, 'name, Cancel> {
+    mutation: ResolutionMutation<'context, Cancel>,
+    workspace: ManifestWorkspaceTag<'name>,
+    matcher: &'context globset::GlobMatcher,
+    source: &'context ResolutionCandidate,
+}
+
+fn append_manifest_workspace_source<Cancel>(
+    input: ManifestWorkspaceSourceInput<'_, '_, Cancel>,
+) -> Result<(), StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ManifestWorkspaceSourceInput {
+        mutation,
+        workspace,
+        matcher,
+        source,
+    } = input;
+    let ResolutionMutation {
+        index,
+        facts,
+        budget,
+        cancelled,
+    } = mutation;
+    for (qualified_name, candidates) in ordered_resolution_candidates(index) {
+        if cancelled() {
+            return Err(StageItemFailure);
         }
+        let Some(package) = manifest_package_tag(qualified_name) else {
+            continue;
+        };
+        if workspace.ecosystem != package.ecosystem || !matcher.is_match(package.directory) {
+            continue;
+        }
+        if manifest_workspace_excludes(ManifestWorkspaceExclusion {
+            index,
+            workspace,
+            package_directory: package.directory,
+            cancelled,
+        })? {
+            continue;
+        }
+        append_manifest_resource_targets(
+            facts,
+            budget,
+            ManifestResourceTargets {
+                source,
+                qualified_name,
+                candidates,
+            },
+        )?;
     }
     Ok(())
 }
@@ -12049,45 +12470,15 @@ where
         &[] as &[ResolutionCandidate],
         ResolutionCandidateBucket::as_slice,
     );
-    let mut included_candidate: Option<&ResolutionCandidate> = None;
-    for binding in request.import_bindings.iter() {
-        if cancelled() {
-            return Err(StageItemFailure);
-        }
-        match binding.kind {
-            ImportBindingKind::IncludeSystem
-            | ImportBindingKind::Default
-            | ImportBindingKind::Named
-            | ImportBindingKind::Namespace
-            | ImportBindingKind::ReExportAll
-            | ImportBindingKind::ReExportNamespace
-            | ImportBindingKind::ReExportNamed => {}
-            ImportBindingKind::IncludeQuoted => {
-                let Some(file_id) = resolve_quoted_include_file(index, request, binding) else {
-                    continue;
-                };
-                for candidate in candidates {
-                    if cancelled() {
-                        return Err(StageItemFailure);
-                    }
-                    if &candidate.file_id != file_id
-                        || !c_candidate_is_externally_visible(candidate)
-                        || !reference_kind_candidate(request.kind, candidate)
-                    {
-                        continue;
-                    }
-                    if included_candidate
-                        .is_some_and(|retained| retained.symbol_id != candidate.symbol_id)
-                    {
-                        return Ok(ImportResolution::Unresolved);
-                    }
-                    included_candidate = Some(candidate);
-                }
-            }
-        }
-    }
-    let Some(declaration) = included_candidate else {
-        return Ok(ImportResolution::NotBound);
+    let declaration = match find_include_bound_candidate(IncludeBoundQuery {
+        index,
+        request,
+        candidates,
+        cancelled,
+    })? {
+        IncludeCandidateMatch::Absent => return Ok(ImportResolution::NotBound),
+        IncludeCandidateMatch::Ambiguous => return Ok(ImportResolution::Unresolved),
+        IncludeCandidateMatch::Unique(candidate) => candidate,
     };
     let target = if declaration.implementation.declaration_only {
         unique_include_implementation(
@@ -12108,6 +12499,106 @@ where
         confidence: IMPORT_BINDING_CONFIDENCE,
         provenance: QUOTED_INCLUDE_PROVENANCE,
     }))
+}
+
+enum IncludeCandidateMatch<'candidate> {
+    Absent,
+    Unique(&'candidate ResolutionCandidate),
+    Ambiguous,
+}
+
+struct IncludeBoundQuery<'context, 'request, 'candidate, Cancel> {
+    index: &'context ResolutionIndex,
+    request: &'context ResolutionRequest<'request>,
+    candidates: &'candidate [ResolutionCandidate],
+    cancelled: &'context mut Cancel,
+}
+
+fn find_include_bound_candidate<'candidate, Cancel>(
+    query: IncludeBoundQuery<'_, '_, 'candidate, Cancel>,
+) -> Result<IncludeCandidateMatch<'candidate>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let IncludeBoundQuery {
+        index,
+        request,
+        candidates,
+        cancelled,
+    } = query;
+    let mut retained = None;
+    for binding in request.import_bindings.iter() {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        if binding.kind != ImportBindingKind::IncludeQuoted {
+            continue;
+        }
+        match quoted_include_candidate(QuotedIncludeQuery {
+            index,
+            request,
+            binding,
+            candidates,
+            cancelled: &mut *cancelled,
+        })? {
+            IncludeCandidateMatch::Absent => {}
+            IncludeCandidateMatch::Ambiguous => return Ok(IncludeCandidateMatch::Ambiguous),
+            IncludeCandidateMatch::Unique(candidate) => {
+                if retained.is_some_and(|current: &ResolutionCandidate| {
+                    current.symbol_id != candidate.symbol_id
+                }) {
+                    return Ok(IncludeCandidateMatch::Ambiguous);
+                }
+                retained = Some(candidate);
+            }
+        }
+    }
+    Ok(retained.map_or(IncludeCandidateMatch::Absent, IncludeCandidateMatch::Unique))
+}
+
+struct QuotedIncludeQuery<'context, 'request, 'candidate, Cancel> {
+    index: &'context ResolutionIndex,
+    request: &'context ResolutionRequest<'request>,
+    binding: &'context ExtractedImportBinding,
+    candidates: &'candidate [ResolutionCandidate],
+    cancelled: &'context mut Cancel,
+}
+
+fn quoted_include_candidate<'candidate, Cancel>(
+    query: QuotedIncludeQuery<'_, '_, 'candidate, Cancel>,
+) -> Result<IncludeCandidateMatch<'candidate>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let QuotedIncludeQuery {
+        index,
+        request,
+        binding,
+        candidates,
+        cancelled,
+    } = query;
+    let Some(file_id) = resolve_quoted_include_file(index, request, binding) else {
+        return Ok(IncludeCandidateMatch::Absent);
+    };
+    let mut retained = None;
+    for candidate in candidates {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        if &candidate.file_id != file_id
+            || !c_candidate_is_externally_visible(candidate)
+            || !reference_kind_candidate(request.kind, candidate)
+        {
+            continue;
+        }
+        if retained
+            .is_some_and(|current: &ResolutionCandidate| current.symbol_id != candidate.symbol_id)
+        {
+            return Ok(IncludeCandidateMatch::Ambiguous);
+        }
+        retained = Some(candidate);
+    }
+    Ok(retained.map_or(IncludeCandidateMatch::Absent, IncludeCandidateMatch::Unique))
 }
 
 fn unique_include_implementation<'a, Cancel>(
@@ -13319,71 +13810,125 @@ where
     let rust_local_import = request.language == SourceLanguage::Rust.as_str()
         && reference_import_scope(index, request, cancelled)? == ImportScope::Local;
     if let Some(candidate_bucket) = candidate_bucket {
-        let candidate = select_candidate(
-            ProjectResolutionCandidates::new(candidate_bucket, source, request.name)?,
-            |candidate| {
-                is_project_candidate(ProjectCandidateInput {
-                    modules: &index.modules,
-                    source,
-                    source_file_id: request.file_id,
-                    reference_name: request.name,
-                    dynamic_dispatch: request.dynamic_dispatch,
-                    rust_local_import,
-                    candidate,
-                }) && reference_kind_candidate(request.kind, candidate)
-            },
-            cancelled,
-        )?;
-        if let Some(candidate) = candidate {
-            return Ok(Some(project_resolved_target(candidate)));
-        }
-        if let Some(candidate) = select_framework_candidate(FrameworkSelection {
+        return resolve_project_candidates(ProjectResolutionQuery {
             index,
             source,
             request,
-            candidates: ProjectResolutionCandidates::new(candidate_bucket, source, request.name)?,
+            candidate_bucket,
+            rust_local_import,
             cancelled,
-        })? {
-            return Ok(Some(framework_convention_target(candidate)));
-        }
+        });
     }
-    if candidate_bucket.is_none() && php_route_source(source) {
-        for fallback_name in php_route_resolution_fallbacks(request.name)
-            .into_iter()
-            .flatten()
-        {
-            if fallback_name == request.name {
-                continue;
-            }
-            let Some(fallback_candidates) = index.candidates.get(&fallback_name) else {
-                continue;
-            };
-            let fallback_request = ResolutionRequest {
-                file_id: request.file_id,
-                file_path: request.file_path,
-                language: request.language,
-                import_bindings: request.import_bindings,
-                owner: request.owner,
-                name: &fallback_name,
-                dynamic_dispatch: request.dynamic_dispatch,
-                kind: request.kind,
-                span: request.span,
-            };
-            if let Some(candidate) = select_framework_candidate(FrameworkSelection {
-                index,
+    if php_route_source(source) {
+        return resolve_php_route_fallback(PhpRouteFallbackQuery {
+            index,
+            source,
+            request,
+            cancelled,
+        });
+    }
+    Ok(None)
+}
+
+struct ProjectResolutionQuery<'context, 'request, Cancel> {
+    index: &'context ResolutionIndex,
+    source: &'context ResolutionFileContext,
+    request: &'context ResolutionRequest<'request>,
+    candidate_bucket: &'context ResolutionCandidateBucket,
+    rust_local_import: bool,
+    cancelled: &'context mut Cancel,
+}
+
+fn resolve_project_candidates<Cancel>(
+    query: ProjectResolutionQuery<'_, '_, Cancel>,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ProjectResolutionQuery {
+        index,
+        source,
+        request,
+        candidate_bucket,
+        rust_local_import,
+        cancelled,
+    } = query;
+    let candidate = select_candidate(
+        ProjectResolutionCandidates::new(candidate_bucket, source, request.name)?,
+        |candidate| {
+            is_project_candidate(ProjectCandidateInput {
+                modules: &index.modules,
                 source,
-                request: &fallback_request,
-                candidates: ProjectResolutionCandidates::new(
-                    fallback_candidates,
-                    source,
-                    &fallback_name,
-                )?,
-                cancelled,
-            })? {
-                return Ok(Some(framework_convention_target(candidate)));
-            }
-            return Ok(None);
+                source_file_id: request.file_id,
+                reference_name: request.name,
+                dynamic_dispatch: request.dynamic_dispatch,
+                rust_local_import,
+                candidate,
+            }) && reference_kind_candidate(request.kind, candidate)
+        },
+        cancelled,
+    )?;
+    if let Some(candidate) = candidate {
+        return Ok(Some(project_resolved_target(candidate)));
+    }
+    let candidate = select_framework_candidate(FrameworkSelection {
+        index,
+        source,
+        request,
+        candidates: ProjectResolutionCandidates::new(candidate_bucket, source, request.name)?,
+        cancelled,
+    })?;
+    Ok(candidate.map(framework_convention_target))
+}
+
+struct PhpRouteFallbackQuery<'context, 'request, Cancel> {
+    index: &'context ResolutionIndex,
+    source: &'context ResolutionFileContext,
+    request: &'context ResolutionRequest<'request>,
+    cancelled: &'context mut Cancel,
+}
+
+fn resolve_php_route_fallback<Cancel>(
+    query: PhpRouteFallbackQuery<'_, '_, Cancel>,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let PhpRouteFallbackQuery {
+        index,
+        source,
+        request,
+        cancelled,
+    } = query;
+    for fallback_name in php_route_resolution_fallbacks(request.name)
+        .into_iter()
+        .flatten()
+    {
+        if fallback_name == request.name {
+            continue;
         }
+        let Some(candidates) = index.candidates.get(&fallback_name) else {
+            continue;
+        };
+        let fallback_request = ResolutionRequest {
+            file_id: request.file_id,
+            file_path: request.file_path,
+            language: request.language,
+            import_bindings: request.import_bindings,
+            owner: request.owner,
+            name: &fallback_name,
+            dynamic_dispatch: request.dynamic_dispatch,
+            kind: request.kind,
+            span: request.span,
+        };
+        let candidate = select_framework_candidate(FrameworkSelection {
+            index,
+            source,
+            request: &fallback_request,
+            candidates: ProjectResolutionCandidates::new(candidates, source, &fallback_name)?,
+            cancelled,
+        })?;
+        return Ok(candidate.map(framework_convention_target));
     }
     Ok(None)
 }

@@ -209,7 +209,23 @@ fn command_for_tool(
     let properties = schema_properties(&spec.schema)?;
     let required = required_properties(&spec.schema);
     let positional = positional_fields(&spec.command_name, properties, &required);
-    let mut command = clap::Command::new(spec.command_name.clone())
+    let mut command = base_tool_command(definition, spec);
+    for (name, property) in properties {
+        if name == "projectPath" {
+            continue;
+        }
+        command = command.arg(tool_property_argument(ToolPropertyInput {
+            spec,
+            name,
+            property,
+            positional: positional.get(name).copied(),
+        })?);
+    }
+    add_compatibility_arguments(command, spec, properties)
+}
+
+fn base_tool_command(definition: &ToolDefinition, spec: &GeneratedSpec) -> clap::Command {
+    clap::Command::new(spec.command_name.clone())
         .about(
             definition
                 .description()
@@ -225,65 +241,104 @@ fn command_for_tool(
                 .default_value(".")
                 .value_hint(ValueHint::DirPath)
                 .help("Existing project root served by this in-process tool call."),
-        );
-    for (name, property) in properties {
-        if name == "projectPath" {
-            continue;
-        }
-        let kind = property_kind(property)?;
-        let help = property
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("Cartograph tool argument")
-            .to_owned();
-        let is_positional = positional.get(name).copied();
-        let mut argument = Arg::new(name.clone()).help(help);
-        if let Some(positional_mode) = is_positional {
-            argument = argument.index(positional_mode.index);
-            if positional_mode.joined_or_variadic {
-                argument = argument.num_args(1..);
-            }
-            if positional_mode.required {
-                argument = argument.required(true);
-            }
-        } else {
-            let long = kebab_case(name);
-            if kind == PropertyKind::Boolean && property.get("default") == Some(&Value::Bool(true))
-            {
-                argument = argument
-                    .long(format!("no-{long}"))
-                    .action(ArgAction::SetFalse);
-            } else {
-                argument = argument.long(long);
-            }
-            if let ("review", "baseRef") = (spec.command_name.as_str(), name.as_str()) {
-                argument = argument.visible_alias("ref");
-            }
-            if let ("find", "by") = (spec.command_name.as_str(), name.as_str()) {
-                argument = argument.default_value("name");
-            }
-        }
-        argument = if spec.command_name == "admin" && name == "clearParseCache" {
-            argument
-                .long("clear-parse-cache")
-                .num_args(0..=1)
-                .default_missing_value(CLEAR_PARSE_CACHE_SENTINEL)
-                .action(ArgAction::Set)
-                .conflicts_with("clearParseCacheLanguage")
-        } else {
-            configure_argument(
-                argument,
-                &ArgumentConfiguration {
-                    property,
-                    kind,
-                    positional: is_positional.is_some(),
-                },
-            )
-        };
-        argument = apply_v1_short_alias(&spec.command_name, name, argument);
-        command = command.arg(argument);
+        )
+}
+
+#[derive(Clone, Copy)]
+struct ToolPropertyInput<'a> {
+    spec: &'a GeneratedSpec,
+    name: &'a str,
+    property: &'a Value,
+    positional: Option<PositionalMode>,
+}
+
+fn tool_property_argument(input: ToolPropertyInput<'_>) -> Result<Arg, String> {
+    let ToolPropertyInput {
+        spec,
+        name,
+        property,
+        positional,
+    } = input;
+    let kind = property_kind(property)?;
+    let help = property
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("Cartograph tool argument")
+        .to_owned();
+    let mut argument = Arg::new(name.to_owned()).help(help);
+    argument = match positional {
+        Some(mode) => configure_positional_argument(argument, mode),
+        None => configure_option_argument(OptionArgumentInput {
+            argument,
+            spec,
+            name,
+            property,
+            kind,
+        }),
+    };
+    argument = if spec.command_name == "admin" && name == "clearParseCache" {
+        argument
+            .long("clear-parse-cache")
+            .num_args(0..=1)
+            .default_missing_value(CLEAR_PARSE_CACHE_SENTINEL)
+            .action(ArgAction::Set)
+            .conflicts_with("clearParseCacheLanguage")
+    } else {
+        configure_argument(
+            argument,
+            &ArgumentConfiguration {
+                property,
+                kind,
+                positional: positional.is_some(),
+            },
+        )
+    };
+    Ok(apply_v1_short_alias(&spec.command_name, name, argument))
+}
+
+fn configure_positional_argument(mut argument: Arg, mode: PositionalMode) -> Arg {
+    argument = argument.index(mode.index);
+    if mode.joined_or_variadic {
+        argument = argument.num_args(1..);
     }
-    add_compatibility_arguments(command, spec, properties)
+    if mode.required {
+        argument = argument.required(true);
+    }
+    argument
+}
+
+struct OptionArgumentInput<'a> {
+    argument: Arg,
+    spec: &'a GeneratedSpec,
+    name: &'a str,
+    property: &'a Value,
+    kind: PropertyKind,
+}
+
+fn configure_option_argument(input: OptionArgumentInput<'_>) -> Arg {
+    let OptionArgumentInput {
+        mut argument,
+        spec,
+        name,
+        property,
+        kind,
+    } = input;
+    let long = kebab_case(name);
+    argument =
+        if kind == PropertyKind::Boolean && property.get("default") == Some(&Value::Bool(true)) {
+            argument
+                .long(format!("no-{long}"))
+                .action(ArgAction::SetFalse)
+        } else {
+            argument.long(long)
+        };
+    if let ("review", "baseRef") = (spec.command_name.as_str(), name) {
+        argument = argument.visible_alias("ref");
+    }
+    if let ("find", "by") = (spec.command_name.as_str(), name) {
+        argument = argument.default_value("name");
+    }
+    argument
 }
 
 fn apply_v1_short_alias(command: &str, name: &str, argument: Arg) -> Arg {

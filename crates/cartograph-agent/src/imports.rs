@@ -570,39 +570,69 @@ where
         digest
             .push(file.path(), snapshot.content_hash())
             .map_err(|_| ImportAuditError::SourceUnavailable)?;
-        if let Some(file_imports) = imports_by_path.remove(file.path().as_str()) {
-            let aliases = if javascript_family(snapshot.language()) {
-                read_ts_aliases(root, snapshot.path().as_str())
-            } else {
-                None
-            };
-            for import in file_imports {
-                push_bounded(
-                    &mut hits,
-                    static_hit(StaticHitInput {
-                        known_paths: &known_paths,
-                        go_module: go_module.as_deref(),
-                        aliases: aliases.as_ref(),
-                        snapshot: &snapshot,
-                        import: &import,
-                    })?,
-                )?;
-            }
-        }
-        if source_filter.includes_literal() && javascript_family(snapshot.language()) {
-            for hit in scan_literal_imports(
-                snapshot.path().as_str(),
-                snapshot.language().as_str(),
-                snapshot.source(),
-            )? {
-                push_bounded(&mut hits, hit)?;
-            }
-        }
+        scan_snapshot_imports(SnapshotImportScan {
+            root,
+            snapshot: &snapshot,
+            known_paths: &known_paths,
+            go_module: go_module.as_deref(),
+            imports_by_path: &mut imports_by_path,
+            source_filter,
+            hits: &mut hits,
+        })?;
     }
     if !imports_by_path.is_empty() {
         return Err(ImportAuditError::SourceChanged);
     }
     finish_import_scan(digest, hits)
+}
+
+struct SnapshotImportScan<'scan> {
+    root: &'scan Path,
+    snapshot: &'scan cartograph_extract::SourceSnapshot,
+    known_paths: &'scan BTreeSet<String>,
+    go_module: Option<&'scan str>,
+    imports_by_path: &'scan mut BTreeMap<String, Vec<ImportInsight>>,
+    source_filter: ImportAuditSource,
+    hits: &'scan mut Vec<ImportHit>,
+}
+
+fn scan_snapshot_imports(input: SnapshotImportScan<'_>) -> Result<(), ImportAuditError> {
+    let SnapshotImportScan {
+        root,
+        snapshot,
+        known_paths,
+        go_module,
+        imports_by_path,
+        source_filter,
+        hits,
+    } = input;
+    if let Some(file_imports) = imports_by_path.remove(snapshot.path().as_str()) {
+        let aliases = javascript_family(snapshot.language())
+            .then(|| read_ts_aliases(root, snapshot.path().as_str()))
+            .flatten();
+        for import in file_imports {
+            push_bounded(
+                hits,
+                static_hit(StaticHitInput {
+                    known_paths,
+                    go_module,
+                    aliases: aliases.as_ref(),
+                    snapshot,
+                    import: &import,
+                })?,
+            )?;
+        }
+    }
+    if source_filter.includes_literal() && javascript_family(snapshot.language()) {
+        for hit in scan_literal_imports(
+            snapshot.path().as_str(),
+            snapshot.language().as_str(),
+            snapshot.source(),
+        )? {
+            push_bounded(hits, hit)?;
+        }
+    }
+    Ok(())
 }
 
 fn static_hit(input: StaticHitInput<'_>) -> Result<ImportHit, ImportAuditError> {
@@ -770,41 +800,7 @@ fn classify_import(request: ClassifyRequest<'_>) -> ImportClassification {
     let relative = is_relative_specifier(request.specifier);
     let absolute = request.specifier.starts_with('/');
     if !relative && !absolute {
-        if request.language == SourceLanguage::Go
-            && let Some(module) = request.go_module
-            && let Some(stripped) = strip_module_alias(request.specifier, module)
-        {
-            return classify_resolved_base(request.known_paths, stripped, false);
-        }
-        if let Some(aliases) = request.aliases
-            && let Some(classification) =
-                classify_alias(request.known_paths, request.specifier, aliases)
-        {
-            return classification;
-        }
-        if matches!(request.c_include_style, Some(CIncludeStyle::Quoted)) {
-            let from_directory = parent_path(request.importing_path);
-            if let Some(path) = normalize_join(from_directory, request.specifier) {
-                let hit = classify_resolved_base(request.known_paths, &path, false);
-                if hit.target != ImportAuditTarget::Unresolvable {
-                    return hit;
-                }
-            }
-            let root_hit = classify_resolved_base(request.known_paths, request.specifier, false);
-            if root_hit.target != ImportAuditTarget::Unresolvable {
-                return root_hit;
-            }
-            return ImportClassification {
-                target: ImportAuditTarget::Unresolvable,
-                target_path: None,
-                extension_missing: false,
-            };
-        }
-        return ImportClassification {
-            target: ImportAuditTarget::Bare,
-            target_path: None,
-            extension_missing: false,
-        };
+        return classify_bare_import(request);
     }
     let base = if absolute {
         normalize_join("", request.specifier.trim_start_matches('/'))
@@ -822,6 +818,48 @@ fn classify_import(request: ClassifyRequest<'_>) -> ImportClassification {
     )
 }
 
+fn classify_bare_import(request: ClassifyRequest<'_>) -> ImportClassification {
+    if request.language == SourceLanguage::Go
+        && let Some(module) = request.go_module
+        && let Some(stripped) = strip_module_alias(request.specifier, module)
+    {
+        return classify_resolved_base(request.known_paths, stripped, false);
+    }
+    if let Some(aliases) = request.aliases
+        && let Some(classification) =
+            classify_alias(request.known_paths, request.specifier, aliases)
+    {
+        return classification;
+    }
+    if matches!(request.c_include_style, Some(CIncludeStyle::Quoted)) {
+        return classify_quoted_include(request);
+    }
+    ImportClassification {
+        target: ImportAuditTarget::Bare,
+        target_path: None,
+        extension_missing: false,
+    }
+}
+
+fn classify_quoted_include(request: ClassifyRequest<'_>) -> ImportClassification {
+    let from_directory = parent_path(request.importing_path);
+    if let Some(path) = normalize_join(from_directory, request.specifier) {
+        let hit = classify_resolved_base(request.known_paths, &path, false);
+        if hit.target != ImportAuditTarget::Unresolvable {
+            return hit;
+        }
+    }
+    let root_hit = classify_resolved_base(request.known_paths, request.specifier, false);
+    if root_hit.target != ImportAuditTarget::Unresolvable {
+        return root_hit;
+    }
+    ImportClassification {
+        target: ImportAuditTarget::Unresolvable,
+        target_path: None,
+        extension_missing: false,
+    }
+}
+
 fn classify_resolved_base(
     known_paths: &BTreeSet<String>,
     base: &str,
@@ -837,38 +875,20 @@ fn classify_resolved_base(
     if known_paths.contains(base) {
         return resolved_file(base, extension_missing);
     }
-    for (javascript, typescript) in JS_TO_TS_REWRITES {
-        if let Some(stem) = base.strip_suffix(javascript) {
-            for extension in *typescript {
-                let candidate = format!("{stem}{extension}");
-                if known_paths.contains(&candidate) {
-                    return resolved_file(&candidate, extension_missing);
-                }
-            }
-        }
+    if let Some(path) = rewritten_import_path(known_paths, base) {
+        return resolved_file(&path, extension_missing);
     }
-    for extension in IMPORT_EXTENSIONS {
-        let candidate = format!("{base}{extension}");
-        if known_paths.contains(&candidate) {
-            return resolved_file(&candidate, extension_missing);
-        }
+    if let Some(path) = extension_import_path(known_paths, base) {
+        return resolved_file(&path, extension_missing);
     }
-    for extension in IMPORT_EXTENSIONS {
-        let candidate = format!("{base}/index{extension}");
-        if known_paths.contains(&candidate) {
-            return ImportClassification {
-                target: ImportAuditTarget::Directory,
-                target_path: Some(candidate),
-                extension_missing,
-            };
-        }
+    if let Some(path) = index_import_path(known_paths, base) {
+        return ImportClassification {
+            target: ImportAuditTarget::Directory,
+            target_path: Some(path),
+            extension_missing,
+        };
     }
-    let prefix = format!("{}/", base.trim_end_matches('/'));
-    if known_paths
-        .range(prefix.clone()..)
-        .next()
-        .is_some_and(|path| path.starts_with(&prefix))
-    {
+    if contains_directory_prefix(known_paths, base) {
         return ImportClassification {
             target: ImportAuditTarget::Directory,
             target_path: None,
@@ -880,6 +900,48 @@ fn classify_resolved_base(
         target_path: None,
         extension_missing,
     }
+}
+
+fn rewritten_import_path(known_paths: &BTreeSet<String>, base: &str) -> Option<String> {
+    for (javascript, typescript) in JS_TO_TS_REWRITES {
+        if let Some(stem) = base.strip_suffix(javascript) {
+            for extension in *typescript {
+                let candidate = format!("{stem}{extension}");
+                if known_paths.contains(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extension_import_path(known_paths: &BTreeSet<String>, base: &str) -> Option<String> {
+    for extension in IMPORT_EXTENSIONS {
+        let candidate = format!("{base}{extension}");
+        if known_paths.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn index_import_path(known_paths: &BTreeSet<String>, base: &str) -> Option<String> {
+    for extension in IMPORT_EXTENSIONS {
+        let candidate = format!("{base}/index{extension}");
+        if known_paths.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn contains_directory_prefix(known_paths: &BTreeSet<String>, base: &str) -> bool {
+    let prefix = format!("{}/", base.trim_end_matches('/'));
+    known_paths
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|path| path.starts_with(&prefix))
 }
 
 fn resolved_file(path: &str, extension_missing: bool) -> ImportClassification {

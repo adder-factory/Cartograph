@@ -1517,24 +1517,42 @@ fn admit_mapping(
 fn source_retained_bytes(source: &SourceSnapshot) -> Result<u64, V1PostgresImportError> {
     let mut total = usize_to_u64(size_of::<SourceSnapshot>())?;
     for (path, file) in &source.files {
-        charge_bytes(&mut total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
-        for bytes in [
+        charge_source_file(&mut total, path, file)?;
+    }
+    for node in &source.nodes {
+        charge_source_node(&mut total, node)?;
+    }
+    for edge in &source.edges {
+        charge_source_edge(&mut total, edge)?;
+    }
+    for reference in &source.references {
+        charge_source_reference(&mut total, reference)?;
+    }
+    Ok(total)
+}
+
+fn charge_source_file(
+    total: &mut u64,
+    path: &String,
+    file: &SourceFile,
+) -> Result<(), V1PostgresImportError> {
+    charge_bytes(total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
+    charge_capacities(
+        total,
+        [
             path.capacity(),
             file.language.capacity(),
             file.source.capacity(),
-        ] {
-            charge_bytes(&mut total, usize_to_u64(bytes)?)?;
-        }
-        charge_bytes(
-            &mut total,
-            usize_to_u64(file.line_starts.capacity())?
-                .checked_mul(SOURCE_LINE_OFFSET_BYTES)
-                .ok_or(V1PostgresImportError::SourceLimit)?,
-        )?;
-    }
-    for node in &source.nodes {
-        charge_bytes(&mut total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
-        for bytes in [
+        ],
+    )?;
+    charge_vector_capacity(total, file.line_starts.capacity(), size_of::<u32>())
+}
+
+fn charge_source_node(total: &mut u64, node: &SourceNode) -> Result<(), V1PostgresImportError> {
+    charge_bytes(total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
+    charge_capacities(
+        total,
+        [
             node.legacy_id.capacity(),
             node.name.capacity(),
             node.kind.capacity(),
@@ -1545,13 +1563,15 @@ fn source_retained_bytes(source: &SourceSnapshot) -> Result<u64, V1PostgresImpor
             node.signature.as_ref().map_or(0, String::capacity),
             node.body_hash.capacity(),
             node.visibility.as_ref().map_or(0, String::capacity),
-        ] {
-            charge_bytes(&mut total, usize_to_u64(bytes)?)?;
-        }
-    }
-    for edge in &source.edges {
-        charge_bytes(&mut total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
-        for bytes in [
+        ],
+    )
+}
+
+fn charge_source_edge(total: &mut u64, edge: &SourceEdge) -> Result<(), V1PostgresImportError> {
+    charge_bytes(total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
+    charge_capacities(
+        total,
+        [
             edge.source.capacity(),
             edge.target.capacity(),
             edge.kind.capacity(),
@@ -1564,49 +1584,59 @@ fn source_retained_bytes(source: &SourceSnapshot) -> Result<u64, V1PostgresImpor
                 .def_use_name
                 .as_ref()
                 .map_or(0, String::capacity),
-        ] {
-            charge_bytes(&mut total, usize_to_u64(bytes)?)?;
-        }
-        for capacity in [
-            edge.metadata.extra_lines.capacity(),
-            edge.metadata.def_use_lines.capacity(),
-        ] {
-            charge_bytes(
-                &mut total,
-                usize_to_u64(capacity)?
-                    .checked_mul(usize_to_u64(size_of::<u32>())?)
-                    .ok_or(V1PostgresImportError::SourceLimit)?,
-            )?;
-        }
-    }
-    for reference in &source.references {
-        charge_bytes(&mut total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
-        for bytes in [
+        ],
+    )?;
+    charge_vector_capacity(
+        total,
+        edge.metadata.extra_lines.capacity(),
+        size_of::<u32>(),
+    )?;
+    charge_vector_capacity(
+        total,
+        edge.metadata.def_use_lines.capacity(),
+        size_of::<u32>(),
+    )
+}
+
+fn charge_source_reference(
+    total: &mut u64,
+    reference: &SourceReference,
+) -> Result<(), V1PostgresImportError> {
+    charge_bytes(total, SOURCE_ROW_ALLOCATION_ALLOWANCE)?;
+    charge_capacities(
+        total,
+        [
             reference.from_node_id.capacity(),
             reference.reference_name.capacity(),
             reference.reference_kind.capacity(),
             reference.file_path.capacity(),
             reference.language.capacity(),
-        ] {
-            charge_bytes(&mut total, usize_to_u64(bytes)?)?;
-        }
-        for candidate in &reference.candidates {
-            charge_bytes(&mut total, usize_to_u64(candidate.capacity())?)?;
-        }
-        charge_bytes(
-            &mut total,
-            usize_to_u64(reference.candidates.capacity())?
-                .checked_mul(usize_to_u64(size_of::<String>())?)
-                .ok_or(V1PostgresImportError::SourceLimit)?,
-        )?;
-        charge_bytes(
-            &mut total,
-            usize_to_u64(reference.extra_lines.capacity())?
-                .checked_mul(usize_to_u64(size_of::<u32>())?)
-                .ok_or(V1PostgresImportError::SourceLimit)?,
-        )?;
+        ],
+    )?;
+    charge_capacities(total, reference.candidates.iter().map(String::capacity))?;
+    charge_vector_capacity(total, reference.candidates.capacity(), size_of::<String>())?;
+    charge_vector_capacity(total, reference.extra_lines.capacity(), size_of::<u32>())
+}
+
+fn charge_capacities(
+    total: &mut u64,
+    capacities: impl IntoIterator<Item = usize>,
+) -> Result<(), V1PostgresImportError> {
+    for capacity in capacities {
+        charge_bytes(total, usize_to_u64(capacity)?)?;
     }
-    Ok(total)
+    Ok(())
+}
+
+fn charge_vector_capacity(
+    total: &mut u64,
+    capacity: usize,
+    element_bytes: usize,
+) -> Result<(), V1PostgresImportError> {
+    let bytes = usize_to_u64(capacity)?
+        .checked_mul(usize_to_u64(element_bytes)?)
+        .ok_or(V1PostgresImportError::SourceLimit)?;
+    charge_bytes(total, bytes)
 }
 
 fn derived_mapping_bounds(source: &SourceSnapshot) -> Result<(u64, u64), V1PostgresImportError> {

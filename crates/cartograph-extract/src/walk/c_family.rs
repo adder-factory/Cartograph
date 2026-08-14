@@ -91,6 +91,21 @@ struct ScopeSymbolInput<'scope> {
     kind: SymbolKind,
 }
 
+struct CFunctionDeclaration<'tree> {
+    node: Node<'tree>,
+    declarator: Node<'tree>,
+    name: DeclaratorName<'tree>,
+    local_name: String,
+    capture_types: bool,
+}
+
+struct EmittedCFunction<'tree> {
+    id: SymbolId,
+    kind: SymbolKind,
+    body: Option<Node<'tree>>,
+    local_name: String,
+}
+
 pub(super) fn visit_declaration(
     builder: &mut ExtractionBuilder<'_, '_>,
     node: Node<'_>,
@@ -100,17 +115,67 @@ pub(super) fn visit_declaration(
         visit_container(builder, ContainerVisit { node, depth, kind })?;
         return Ok(true);
     }
+    if visit_c_directive_or_module(builder, node, depth)? {
+        return Ok(true);
+    }
+    if visit_c_scope_or_callable(builder, node, depth)? {
+        return Ok(true);
+    }
+    if visit_c_type_declaration(builder, node, depth)? {
+        return Ok(true);
+    }
+    visit_c_declarator(builder, node, depth)
+}
+
+fn visit_c_directive_or_module(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    _depth: usize,
+) -> Result<bool, ExtractError> {
     match node.kind() {
         "preproc_include" => visit_include(builder, node)?,
         "preproc_def" => visit_macro_constant(builder, node)?,
-        "function_definition" => visit_function(builder, node, depth)?,
         "import_statement" => visit_slang_import(builder, node)?,
         "module_declaration" => visit_slang_module(builder, node)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn visit_c_scope_or_callable(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    match node.kind() {
+        "function_definition" => visit_function(builder, node, depth)?,
         "namespace_definition" => visit_namespace(builder, node, depth)?,
         "access_specifier" => visit_access_specifier(builder, node),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn visit_c_type_declaration(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    match node.kind() {
         "type_definition" => visit_type_definition(builder, node, depth)?,
         "alias_declaration" => visit_alias(builder, node)?,
         "enumerator" => visit_named_leaf(builder, node, SymbolKind::EnumMember)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn visit_c_declarator(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    depth: usize,
+) -> Result<bool, ExtractError> {
+    match node.kind() {
         "field_declaration" => visit_declarator_symbols(
             builder,
             DeclaratorVisit {
@@ -472,11 +537,30 @@ fn visit_function(
             },
         );
     }
-    let Some(declarator) = node.child_by_field_name("declarator") else {
+    let Some(declaration) = parse_c_function_declaration(builder, node)? else {
         return builder.visit_named_children(node, depth);
     };
+    let scope_name = declaration
+        .name
+        .scope
+        .map(|scope| owned_declarator_scope(builder, scope, declaration.name.node))
+        .transpose()?;
+    let restore = enter_c_function_scope(builder, scope_name.as_deref())?;
+    let emitted = emit_c_function(builder, declaration)?;
+    let result = visit_c_function_body(builder, depth, emitted);
+    restore_c_function_scope(builder, restore);
+    result
+}
+
+fn parse_c_function_declaration<'tree>(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'tree>,
+) -> Result<Option<CFunctionDeclaration<'tree>>, ExtractError> {
+    let Some(declarator) = node.child_by_field_name("declarator") else {
+        return Ok(None);
+    };
     let Some(parsed_name) = declarator_name(declarator)? else {
-        return builder.visit_named_children(node, depth);
+        return Ok(None);
     };
     let recovered_name = macro_decorated_function_name(
         builder,
@@ -489,26 +573,33 @@ fn visit_function(
     let name = recovered_name.unwrap_or(parsed_name);
     let local_name = builder.context.owned_text(name.node)?;
     if is_control_keyword(&local_name) {
-        return builder.visit_named_children(node, depth);
+        return Ok(None);
     }
-    let scope_name = name
-        .scope
-        .map(|scope| owned_declarator_scope(builder, scope, name.node))
-        .transpose()?;
-    let restore = enter_c_function_scope(builder, scope_name.as_deref())?;
+    Ok(Some(CFunctionDeclaration {
+        node,
+        declarator,
+        name,
+        local_name,
+        capture_types: recovered_name.is_none(),
+    }))
+}
 
+fn emit_c_function<'tree>(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    declaration: CFunctionDeclaration<'tree>,
+) -> Result<EmittedCFunction<'tree>, ExtractError> {
     let kind = if current_owner_kind_in(builder, C_TYPE_OWNER_KINDS) {
         SymbolKind::Method
     } else {
         SymbolKind::Function
     };
-    let body = node.child_by_field_name("body");
-    let mut signature = if recovered_name.is_some() {
-        None
+    let body = declaration.node.child_by_field_name("body");
+    let mut signature = if declaration.capture_types {
+        c_callable_signature(builder, declaration.node, declaration.declarator)?
     } else {
-        c_callable_signature(builder, node, declarator)?
+        None
     };
-    let shader_stage = slang_shader_stage(builder, node)?;
+    let shader_stage = slang_shader_stage(builder, declaration.node)?;
     if let Some(stage) = shader_stage.as_deref() {
         let mut staged = format!("shader:{stage}");
         if let Some(existing) = signature.take() {
@@ -523,43 +614,55 @@ fn visit_function(
         .or_else(|| cxx_visibility(builder));
     let pending = PendingSymbol {
         kind,
-        name: local_name.clone(),
-        span_node: node,
-        structural_node: node,
-        doc_anchor: node,
+        name: declaration.local_name.clone(),
+        span_node: declaration.node,
+        structural_node: declaration.node,
+        doc_anchor: declaration.node,
         body_node: body,
         declaration_only: body.is_none(),
         signature,
         export: crate::SymbolExportFlags::named(
-            shader_stage.is_some() || has_external_linkage(builder, node),
+            shader_stage.is_some() || has_external_linkage(builder, declaration.node),
         ),
         async_symbol: false,
         static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
-            && declaration_has_storage(builder, node, "static"),
+            && declaration_has_storage(builder, declaration.node, "static"),
         visibility,
     };
     let id = builder.emit_symbol(pending)?;
-    if recovered_name.is_none() {
+    if declaration.capture_types {
         capture_function_types(
             builder,
             FunctionTypeCapture {
-                node,
-                declarator,
+                node: declaration.node,
+                declarator: declaration.declarator,
                 owner: &id,
             },
         )?;
     }
-    if let Some(body) = body {
-        builder.owners.push(id);
-        builder.native_owner_kinds.push(kind);
-        builder.qualifiers.push(local_name);
+    Ok(EmittedCFunction {
+        id,
+        kind,
+        body,
+        local_name: declaration.local_name,
+    })
+}
+
+fn visit_c_function_body(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    depth: usize,
+    function: EmittedCFunction<'_>,
+) -> Result<(), ExtractError> {
+    if let Some(body) = function.body {
+        builder.owners.push(function.id);
+        builder.native_owner_kinds.push(function.kind);
+        builder.qualifiers.push(function.local_name);
         let result = builder.visit(body, depth.saturating_add(1));
         builder.qualifiers.pop();
         builder.native_owner_kinds.pop();
         builder.owners.pop();
         result?;
     }
-    restore_c_function_scope(builder, restore);
     Ok(())
 }
 

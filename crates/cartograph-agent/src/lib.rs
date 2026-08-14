@@ -473,15 +473,46 @@ impl From<NativeGenerationSpillReport> for NativeGenerationSpillMetrics {
     }
 }
 
+struct NativeAuxiliaryMetrics {
+    scip_overlay: Option<ScipOverlayMetrics>,
+    parse_cache: NativeParseCacheMetrics,
+    generation_storage: NativeGenerationStorageMetrics,
+    spill: Option<NativeGenerationSpillMetrics>,
+}
+
+impl From<&NativePipelineReport> for NativeAuxiliaryMetrics {
+    fn from(report: &NativePipelineReport) -> Self {
+        let cache = report.parse_cache();
+        Self {
+            scip_overlay: report.scip_overlay().map(ScipOverlayMetrics::from),
+            parse_cache: NativeParseCacheMetrics {
+                hits: cache.hits(),
+                misses: cache.misses(),
+                bypassed: cache.bypassed(),
+                parsed_files: cache.parsed_files(),
+                writes: cache.writes(),
+                corruptions: cache.corruptions(),
+                read_errors: cache.read_errors(),
+                write_errors: cache.write_errors(),
+            },
+            generation_storage: report.storage().into(),
+            spill: report.spill().map(NativeGenerationSpillMetrics::from),
+        }
+    }
+}
+
+impl From<NativeGenerationStorage> for NativeGenerationStorageMetrics {
+    fn from(storage: NativeGenerationStorage) -> Self {
+        match storage {
+            NativeGenerationStorage::Memory => Self::Memory,
+            NativeGenerationStorage::PostgreSql => Self::Postgres,
+        }
+    }
+}
+
 impl From<NativePipelineReport> for NativeIndexMetrics {
     fn from(report: NativePipelineReport) -> Self {
-        let scip_overlay = report.scip_overlay().map(ScipOverlayMetrics::from);
-        let parse_cache = report.parse_cache();
-        let generation_storage = match report.storage() {
-            NativeGenerationStorage::Memory => NativeGenerationStorageMetrics::Memory,
-            NativeGenerationStorage::PostgreSql => NativeGenerationStorageMetrics::Postgres,
-        };
-        let spill = report.spill().map(NativeGenerationSpillMetrics::from);
+        let auxiliary = NativeAuxiliaryMetrics::from(&report);
         Self {
             files: report.discovered_files(),
             excluded_paths: report.excluded_paths(),
@@ -505,19 +536,10 @@ impl From<NativePipelineReport> for NativeIndexMetrics {
             modeled_generation_bytes: report.modeled_generation_bytes(),
             resolve_high_water_bytes: report.resolve_high_water_bytes(),
             validation_high_water_bytes: report.validation_high_water_bytes(),
-            scip_overlay,
-            parse_cache: NativeParseCacheMetrics {
-                hits: parse_cache.hits(),
-                misses: parse_cache.misses(),
-                bypassed: parse_cache.bypassed(),
-                parsed_files: parse_cache.parsed_files(),
-                writes: parse_cache.writes(),
-                corruptions: parse_cache.corruptions(),
-                read_errors: parse_cache.read_errors(),
-                write_errors: parse_cache.write_errors(),
-            },
-            generation_storage,
-            spill,
+            scip_overlay: auxiliary.scip_overlay,
+            parse_cache: auxiliary.parse_cache,
+            generation_storage: auxiliary.generation_storage,
+            spill: auxiliary.spill,
         }
     }
 }
@@ -822,6 +844,12 @@ struct IndexCompletion {
     operation_started: Instant,
 }
 
+struct IndexSourceReconciliation<'report> {
+    options: &'report IndexOptions,
+    report: &'report IndexReport,
+    cancellation: ProjectCancellation,
+}
+
 fn index_enrichment_policy(
     options: &IndexOptions,
     source_settings: &ProjectSourceSettings,
@@ -870,8 +898,15 @@ async fn run_core_index(
         if let Some(profile) = report.profile.as_mut() {
             profile.preparation_millis = preparation_millis;
         }
-        if index_report_matches_live_source(runtime, &options, &report, cancellation.clone())
-            .await?
+        if index_report_matches_live_source(
+            runtime,
+            IndexSourceReconciliation {
+                options: &options,
+                report: &report,
+                cancellation: cancellation.clone(),
+            },
+        )
+        .await?
         {
             report.retention = runtime
                 .maintain_generation_retention(&report.project_id)
@@ -890,10 +925,13 @@ async fn run_core_index(
 
 async fn index_report_matches_live_source(
     runtime: &ProjectRuntime,
-    options: &IndexOptions,
-    report: &IndexReport,
-    cancellation: ProjectCancellation,
+    reconciliation: IndexSourceReconciliation<'_>,
 ) -> Result<bool, ProjectError> {
+    let IndexSourceReconciliation {
+        options,
+        report,
+        cancellation,
+    } = reconciliation;
     let source_policy =
         project_source_policy_with_excludes(&runtime.root, options.additional_excludes())?;
     let max_source_bytes = options

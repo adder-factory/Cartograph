@@ -5,6 +5,7 @@ use tree_sitter::Node;
 
 use crate::{
     DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractError, ExtractedReference,
+    framework::consume_quoted_byte,
     walk::{AstVisitBudget, ExtractionBuilder, syntax::span_for},
 };
 
@@ -324,14 +325,7 @@ fn matching_delimiter(value: &str, close: u8) -> Option<usize> {
     let mut quote = None;
     let mut escaped = false;
     for (index, byte) in bytes.iter().copied().enumerate() {
-        if let Some(active) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active {
-                quote = None;
-            }
+        if consume_quoted_byte(byte, &mut quote, &mut escaped) {
             continue;
         }
         if matches!(byte, b'\'' | b'"' | b'`') {

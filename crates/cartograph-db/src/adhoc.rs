@@ -867,40 +867,55 @@ fn collect_cte_names(tokens: &[Token]) -> Result<BTreeSet<String>, ReadOnlySqlEr
         index += 1;
     }
     loop {
-        let Some(Token::Word(name)) = tokens.get(index) else {
-            return Err(ReadOnlySqlError::InvalidInput);
-        };
-        names.insert(name.clone());
-        index += 1;
-        if matches!(tokens.get(index), Some(Token::Symbol('('))) {
-            index = skip_balanced(tokens, index)?;
-        }
-        if tokens.get(index).and_then(Token::word) != Some("as") {
-            return Err(ReadOnlySqlError::InvalidInput);
-        }
-        index += 1;
-        if matches!(
-            tokens.get(index).and_then(Token::word),
-            Some("materialized" | "not")
-        ) {
-            if tokens.get(index).and_then(Token::word) == Some("not") {
-                index += 1;
-                if tokens.get(index).and_then(Token::word) != Some("materialized") {
-                    return Err(ReadOnlySqlError::InvalidInput);
-                }
-            }
-            index += 1;
-        }
-        if !matches!(tokens.get(index), Some(Token::Symbol('('))) {
-            return Err(ReadOnlySqlError::InvalidInput);
-        }
-        index = skip_balanced(tokens, index)?;
+        index = collect_cte(tokens, index, &mut names)?;
         if !matches!(tokens.get(index), Some(Token::Symbol(','))) {
             break;
         }
         index += 1;
     }
     Ok(names)
+}
+
+fn collect_cte(
+    tokens: &[Token],
+    mut index: usize,
+    names: &mut BTreeSet<String>,
+) -> Result<usize, ReadOnlySqlError> {
+    let Some(Token::Word(name)) = tokens.get(index) else {
+        return Err(ReadOnlySqlError::InvalidInput);
+    };
+    names.insert(name.clone());
+    index = skip_optional_cte_columns(tokens, index + 1)?;
+    if tokens.get(index).and_then(Token::word) != Some("as") {
+        return Err(ReadOnlySqlError::InvalidInput);
+    }
+    index = skip_cte_materialization(tokens, index + 1)?;
+    if !matches!(tokens.get(index), Some(Token::Symbol('('))) {
+        return Err(ReadOnlySqlError::InvalidInput);
+    }
+    skip_balanced(tokens, index)
+}
+
+fn skip_optional_cte_columns(tokens: &[Token], index: usize) -> Result<usize, ReadOnlySqlError> {
+    if matches!(tokens.get(index), Some(Token::Symbol('('))) {
+        skip_balanced(tokens, index)
+    } else {
+        Ok(index)
+    }
+}
+
+fn skip_cte_materialization(tokens: &[Token], mut index: usize) -> Result<usize, ReadOnlySqlError> {
+    if tokens.get(index).and_then(Token::word) == Some("not") {
+        index += 1;
+        if tokens.get(index).and_then(Token::word) != Some("materialized") {
+            return Err(ReadOnlySqlError::InvalidInput);
+        }
+        return Ok(index + 1);
+    }
+    if tokens.get(index).and_then(Token::word) == Some("materialized") {
+        return Ok(index + 1);
+    }
+    Ok(index)
 }
 
 fn skip_balanced(tokens: &[Token], start: usize) -> Result<usize, ReadOnlySqlError> {

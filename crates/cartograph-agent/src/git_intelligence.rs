@@ -705,39 +705,8 @@ fn parse_blame(output: &[u8], path: &NormalizedPath) -> Result<Vec<GitBlameLine>
         if header.is_empty() {
             continue;
         }
-        let mut header_fields = header.split_ascii_whitespace();
-        let raw_commit = header_fields.next().ok_or(ReviewError::GitOutputInvalid)?;
-        let commit = normalize_commit(raw_commit)?;
-        let _original_line = header_fields
-            .next()
-            .and_then(|value| value.parse::<u32>().ok())
-            .ok_or(ReviewError::GitOutputInvalid)?;
-        let final_line = header_fields
-            .next()
-            .and_then(|value| value.parse::<u32>().ok())
-            .ok_or(ReviewError::GitOutputInvalid)?;
-        let mut author = String::new();
-        let mut unix_seconds = 0;
-        let mut summary = String::new();
-        let mut saw_source = false;
-        for metadata in lines.by_ref() {
-            if metadata.starts_with('\t') {
-                saw_source = true;
-                break;
-            }
-            if let Some(value) = metadata.strip_prefix("author ") {
-                author = clean_metadata(value)?;
-            } else if let Some(value) = metadata.strip_prefix("author-time ") {
-                unix_seconds = value
-                    .parse::<u64>()
-                    .map_err(|_| ReviewError::GitOutputInvalid)?;
-            } else if let Some(value) = metadata.strip_prefix("summary ") {
-                summary = clean_metadata(value)?;
-            }
-        }
-        if !saw_source || author.is_empty() {
-            return Err(ReviewError::GitOutputInvalid);
-        }
+        let (commit, final_line) = parse_blame_header(header)?;
+        let (author, unix_seconds, summary) = parse_blame_metadata(&mut lines)?;
         let uncommitted = commit.bytes().all(|byte| byte == b'0');
         result.push(GitBlameLine {
             path: path.clone(),
@@ -750,6 +719,45 @@ fn parse_blame(output: &[u8], path: &NormalizedPath) -> Result<Vec<GitBlameLine>
         });
     }
     Ok(result)
+}
+
+fn parse_blame_header(header: &str) -> Result<(String, u32), ReviewError> {
+    let mut fields = header.split_ascii_whitespace();
+    let commit = normalize_commit(fields.next().ok_or(ReviewError::GitOutputInvalid)?)?;
+    fields
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(ReviewError::GitOutputInvalid)?;
+    let final_line = fields
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(ReviewError::GitOutputInvalid)?;
+    Ok((commit, final_line))
+}
+
+fn parse_blame_metadata(
+    lines: &mut std::str::Lines<'_>,
+) -> Result<(String, u64, String), ReviewError> {
+    let mut author = String::new();
+    let mut unix_seconds = 0;
+    let mut summary = String::new();
+    for metadata in lines.by_ref() {
+        if metadata.starts_with('\t') {
+            return (!author.is_empty())
+                .then_some((author, unix_seconds, summary))
+                .ok_or(ReviewError::GitOutputInvalid);
+        }
+        if let Some(value) = metadata.strip_prefix("author ") {
+            author = clean_metadata(value)?;
+        } else if let Some(value) = metadata.strip_prefix("author-time ") {
+            unix_seconds = value
+                .parse::<u64>()
+                .map_err(|_| ReviewError::GitOutputInvalid)?;
+        } else if let Some(value) = metadata.strip_prefix("summary ") {
+            summary = clean_metadata(value)?;
+        }
+    }
+    Err(ReviewError::GitOutputInvalid)
 }
 
 fn extract_trace_locations(
@@ -767,49 +775,52 @@ fn extract_trace_locations(
             .enumerate()
             .filter_map(|(index, byte)| (*byte == b':').then_some(index))
         {
-            let digit_start = colon + 1;
-            if digit_start >= bytes.len() || !bytes[digit_start].is_ascii_digit() {
-                continue;
-            }
-            let digit_end = bytes[digit_start..]
-                .iter()
-                .position(|byte| !byte.is_ascii_digit())
-                .map_or(bytes.len(), |offset| digit_start + offset);
-            let Ok(number) = line[digit_start..digit_end].parse::<u32>() else {
-                continue;
-            };
-            if number == 0 || number > MAX_SOURCE_LINE {
-                continue;
-            }
-            let mut start = colon;
-            while start > 0 && trace_path_byte(bytes[start - 1]) {
-                start -= 1;
-            }
-            let raw_path = line[start..colon].trim_start_matches(['(', '[']);
-            if !raw_path
-                .chars()
-                .any(|character| matches!(character, '.' | '/' | '\\'))
-            {
-                continue;
-            }
-            let relative = raw_path
-                .strip_prefix(root.as_ref())
-                .and_then(|value| value.strip_prefix('/'))
-                .unwrap_or(raw_path);
-            let Ok(path) = NormalizedPath::parse(relative) else {
+            let Some(location) = trace_location(line, colon, root.as_ref()) else {
                 continue;
             };
             if locations.len() == limit {
                 truncated = true;
                 break;
             }
-            locations.insert((path, number));
+            locations.insert(location);
         }
         if truncated {
             break;
         }
     }
     (locations.into_iter().collect(), truncated)
+}
+
+fn trace_location(line: &str, colon: usize, root: &str) -> Option<(NormalizedPath, u32)> {
+    let bytes = line.as_bytes();
+    let digit_start = colon.saturating_add(1);
+    if !bytes.get(digit_start).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let digit_end = bytes[digit_start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .map_or(bytes.len(), |offset| digit_start + offset);
+    let number = line[digit_start..digit_end].parse::<u32>().ok()?;
+    if number == 0 || number > MAX_SOURCE_LINE {
+        return None;
+    }
+    let mut start = colon;
+    while start > 0 && trace_path_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    let raw_path = line[start..colon].trim_start_matches(['(', '[']);
+    if !raw_path
+        .chars()
+        .any(|character| matches!(character, '.' | '/' | '\\'))
+    {
+        return None;
+    }
+    let relative = raw_path
+        .strip_prefix(root)
+        .and_then(|value| value.strip_prefix('/'))
+        .unwrap_or(raw_path);
+    Some((NormalizedPath::parse(relative).ok()?, number))
 }
 
 fn validate_line_range(start_line: u32, end_line: u32) -> Result<(), ReviewError> {

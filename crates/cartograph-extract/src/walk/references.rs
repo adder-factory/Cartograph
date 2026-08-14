@@ -274,89 +274,125 @@ pub(super) fn capture_invocation(
     node: Node<'_>,
     invocation: InvocationKind,
 ) -> Result<(), ExtractError> {
-    let (target_field, reference_kind) = match invocation {
-        InvocationKind::Call => ("function", ReferenceKind::Calls),
-        InvocationKind::Construction => ("constructor", ReferenceKind::Instantiates),
-    };
-    let Some(target) = node.child_by_field_name(target_field) else {
+    let Some(capture) =
+        InvocationCapture::new(node, invocation, builder.context.snapshot.language())
+    else {
         return Ok(());
     };
     if module_system::is_static_commonjs_binding_call(builder, node) {
         return Ok(());
     }
-    if invocation == InvocationKind::Call
-        && builder.context.snapshot.language() == SourceLanguage::Rust
-        && let Some(resolution_name) = rust_receiver_call_resolution(builder, target)?
+    if capture_rust_receiver_invocation(builder, capture)? {
+        return Ok(());
+    }
+    if capture.shape.invocation == InvocationKind::Call
+        && anonymous_call_target(capture.shape.language, capture.target, 0)
     {
-        let owner = builder.owners.last().cloned();
-        let name = builder.context.owned_text(target)?;
+        return Ok(());
+    }
+    if capture_overwide_go_invocation(builder, capture)? {
+        return Ok(());
+    }
+    if capture_javascript_dispatch(builder, capture)? {
+        return Ok(());
+    }
+    capture_default_invocation(builder, capture)
+}
+
+fn capture_rust_receiver_invocation(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    capture: InvocationCapture<'_>,
+) -> Result<bool, ExtractError> {
+    if capture.shape.invocation != InvocationKind::Call
+        || capture.shape.language != SourceLanguage::Rust
+    {
+        return Ok(false);
+    }
+    let Some(resolution_name) = rust_receiver_call_resolution(builder, capture.target)? else {
+        return Ok(false);
+    };
+    let owner = builder.owners.last().cloned();
+    let name = builder.context.owned_text(capture.target)?;
+    builder.emit_reference(ExtractedReference {
+        owner,
+        name,
+        resolution_name: Some(resolution_name),
+        kind: capture.reference_kind,
+        span: span_for(capture.target)?,
+    })?;
+    Ok(true)
+}
+
+fn capture_overwide_go_invocation(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    capture: InvocationCapture<'_>,
+) -> Result<bool, ExtractError> {
+    if capture.shape.invocation != InvocationKind::Call
+        || capture.shape.language != SourceLanguage::Go
+        || capture
+            .target
+            .end_byte()
+            .saturating_sub(capture.target.start_byte())
+            <= MAX_DURABLE_REFERENCE_NAME_BYTES
+    {
+        return Ok(false);
+    }
+    if capture.target.kind() == "selector_expression"
+        && let Some(field) = capture.target.child_by_field_name("field")
+    {
+        let name = builder.context.owned_text(field)?;
+        let resolution_name = dynamic_dispatch_resolution(builder, &name)?;
         builder.emit_reference(ExtractedReference {
-            owner,
+            owner: builder.owners.last().cloned(),
             name,
             resolution_name: Some(resolution_name),
-            kind: reference_kind,
-            span: span_for(target)?,
+            kind: capture.reference_kind,
+            span: span_for(field)?,
         })?;
-        return Ok(());
     }
-    if invocation == InvocationKind::Call
-        && anonymous_call_target(builder.context.snapshot.language(), target, 0)
-    {
-        return Ok(());
-    }
-    if invocation == InvocationKind::Call
-        && builder.context.snapshot.language() == SourceLanguage::Go
-        && target.end_byte().saturating_sub(target.start_byte()) > MAX_DURABLE_REFERENCE_NAME_BYTES
-    {
-        if target.kind() == "selector_expression"
-            && let Some(field) = target.child_by_field_name("field")
-        {
-            let name = builder.context.owned_text(field)?;
-            let resolution_name = dynamic_dispatch_resolution(builder, &name)?;
-            builder.emit_reference(ExtractedReference {
-                owner: builder.owners.last().cloned(),
-                name,
-                resolution_name: Some(resolution_name),
-                kind: reference_kind,
-                span: span_for(field)?,
-            })?;
-        }
-        return Ok(());
-    }
-    if invocation == InvocationKind::Call
-        && matches!(
-            builder.context.snapshot.language(),
+    Ok(true)
+}
+
+fn capture_javascript_dispatch(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    capture: InvocationCapture<'_>,
+) -> Result<bool, ExtractError> {
+    if capture.shape.invocation != InvocationKind::Call
+        || !matches!(
+            capture.shape.language,
             SourceLanguage::TypeScript
                 | SourceLanguage::Tsx
                 | SourceLanguage::JavaScript
                 | SourceLanguage::Jsx
         )
-        && let Some(dispatch) = javascript_dynamic_member_call_resolution(builder, target)?
     {
-        let owner = builder.owners.last().cloned();
-        builder.emit_reference(ExtractedReference {
-            owner,
-            name: dispatch.name,
-            resolution_name: Some(dispatch.resolution_name),
-            kind: reference_kind,
-            span: span_for(dispatch.span)?,
-        })?;
-        // A statically named chain can still resolve exactly through an import
-        // binding, while its terminal method also represents interface/runtime
-        // dispatch. Retain both bounded facts; dynamic resolution only chooses a
-        // unique externally visible target and otherwise abstains.
-        if !static_javascript_member_chain(target, 0) {
-            return Ok(());
-        }
+        return Ok(false);
     }
-    let Some((name_node, reference_node)) = invocation_reference_nodes(
-        InvocationShape {
-            language: builder.context.snapshot.language(),
-            invocation,
-        },
-        target,
-        node,
-    ) else {
+    let Some(dispatch) = javascript_dynamic_member_call_resolution(builder, capture.target)? else {
+        return Ok(false);
+    };
+    let owner = builder.owners.last().cloned();
+    builder.emit_reference(ExtractedReference {
+        owner,
+        name: dispatch.name,
+        resolution_name: Some(dispatch.resolution_name),
+        kind: capture.reference_kind,
+        span: span_for(dispatch.span)?,
+    })?;
+    // A statically named chain can still resolve exactly through an import
+    // binding, while its terminal method also represents interface/runtime
+    // dispatch. Retain both bounded facts; dynamic resolution only chooses a
+    // unique externally visible target and otherwise abstains.
+    Ok(!static_javascript_member_chain(capture.target, 0))
+}
+
+fn capture_default_invocation(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    capture: InvocationCapture<'_>,
+) -> Result<(), ExtractError> {
+    let Some((name_node, reference_node)) =
+        invocation_reference_nodes(capture.shape, capture.target, capture.expression)
+    else {
         return Ok(());
     };
     let owner = builder.owners.last().cloned();
@@ -365,10 +401,41 @@ pub(super) fn capture_invocation(
         NodeReference {
             owner,
             name: name_node,
-            kind: reference_kind,
+            kind: capture.reference_kind,
             span: reference_node,
         },
     )
+}
+
+#[derive(Clone, Copy)]
+struct InvocationCapture<'tree> {
+    expression: Node<'tree>,
+    target: Node<'tree>,
+    shape: InvocationShape,
+    reference_kind: ReferenceKind,
+}
+
+impl<'tree> InvocationCapture<'tree> {
+    fn new(
+        expression: Node<'tree>,
+        invocation: InvocationKind,
+        language: SourceLanguage,
+    ) -> Option<Self> {
+        let (target_field, reference_kind) = match invocation {
+            InvocationKind::Call => ("function", ReferenceKind::Calls),
+            InvocationKind::Construction => ("constructor", ReferenceKind::Instantiates),
+        };
+        let target = expression.child_by_field_name(target_field)?;
+        Some(Self {
+            expression,
+            target,
+            shape: InvocationShape {
+                language,
+                invocation,
+            },
+            reference_kind,
+        })
+    }
 }
 
 /// Language and call form one invocation reference is resolved under.

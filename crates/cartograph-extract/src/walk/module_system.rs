@@ -626,35 +626,7 @@ pub(super) fn capture_commonjs_assignment(
         return Ok(());
     }
     if left_text == "module.exports" && right.kind() == "object" {
-        for child in named_children(right) {
-            if child.kind() != "pair" {
-                continue;
-            }
-            let Some(public_node) = child.child_by_field_name("key") else {
-                continue;
-            };
-            let Some(local_node) = child.child_by_field_name("value") else {
-                continue;
-            };
-            if !is_static_export_name(public_node) {
-                continue;
-            }
-            let public_name = builder.context.owned_unquoted_text(public_node)?;
-            let local_name = builder.context.owned_text(local_node)?;
-            if public_name != local_name && is_plain_identifier(local_node) {
-                emit_export_alias(
-                    builder,
-                    ExportAlias {
-                        public_name,
-                        local_name,
-                        span_node: child,
-                        reference_node: local_node,
-                        source: None,
-                    },
-                )?;
-            }
-        }
-        return Ok(());
+        return capture_commonjs_object_exports(builder, right);
     }
     let Some(public_name) = commonjs_member_export_name(left_text).map(str::to_owned) else {
         return Ok(());
@@ -671,6 +643,43 @@ pub(super) fn capture_commonjs_assignment(
                 local_name,
                 span_node: left,
                 reference_node: right,
+                source: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn capture_commonjs_object_exports(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    object: Node<'_>,
+) -> Result<(), ExtractError> {
+    for child in named_children(object) {
+        builder.context.ensure_active()?;
+        if child.kind() != "pair" {
+            continue;
+        }
+        let Some(public_node) = child.child_by_field_name("key") else {
+            continue;
+        };
+        let Some(local_node) = child.child_by_field_name("value") else {
+            continue;
+        };
+        if !is_static_export_name(public_node) || !is_plain_identifier(local_node) {
+            continue;
+        }
+        let public_name = builder.context.owned_unquoted_text(public_node)?;
+        let local_name = builder.context.owned_text(local_node)?;
+        if public_name == local_name {
+            continue;
+        }
+        emit_export_alias(
+            builder,
+            ExportAlias {
+                public_name,
+                local_name,
+                span_node: child,
+                reference_node: local_node,
                 source: None,
             },
         )?;
@@ -925,4 +934,57 @@ fn is_javascript_family(language: SourceLanguage) -> bool {
             | SourceLanguage::JavaScript
             | SourceLanguage::Jsx
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+
+    use tree_sitter::Parser;
+
+    use super::*;
+    use crate::{DEFAULT_MAXIMUM_AST_DEPTH, NativeGrammar, SourceLimits, SourceSnapshot};
+
+    const COMPLEX_COMMONJS_EXPORTS: usize = 2_048;
+
+    #[test]
+    fn commonjs_object_export_capture_polls_before_skipping_complex_values() {
+        let mut source = String::from("module.exports = {\n");
+        for index in 0..COMPLEX_COMMONJS_EXPORTS {
+            assert!(
+                writeln!(&mut source, "key_{index}: factory(value_{index}),").is_ok(),
+                "writing to a String is infallible"
+            );
+        }
+        source.push_str("};\n");
+
+        let limits = SourceLimits::new(source.len())
+            .unwrap_or_else(|error| panic!("test source bound is invalid: {error}"));
+        let snapshot = SourceSnapshot::from_bytes("src/cancel.js", source.as_bytes(), limits)
+            .unwrap_or_else(|error| panic!("test snapshot is invalid: {error}"));
+        let mut parser = Parser::new();
+        parser
+            .set_language(&NativeGrammar::JavaScript.language())
+            .unwrap_or_else(|error| panic!("test grammar setup failed: {error}"));
+        let tree = parser
+            .parse(snapshot.source(), None)
+            .unwrap_or_else(|| panic!("test parser did not produce a tree"));
+        let object = descendants_including_root(tree.root_node())
+            .find(|node| node.kind() == "object")
+            .unwrap_or_else(|| panic!("test CommonJS object was not found"));
+
+        let mut polls = 0_usize;
+        let mut cancelled = || {
+            polls = polls.saturating_add(1);
+            true
+        };
+        let mut builder =
+            ExtractionBuilder::new(&snapshot, DEFAULT_MAXIMUM_AST_DEPTH, &mut cancelled)
+                .unwrap_or_else(|error| panic!("test extraction builder failed: {error}"));
+        let result = capture_commonjs_object_exports(&mut builder, object);
+        drop(builder);
+
+        assert_eq!(result, Err(ExtractError::Cancelled));
+        assert_eq!(polls, 1);
+    }
 }

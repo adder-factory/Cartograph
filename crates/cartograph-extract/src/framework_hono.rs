@@ -153,56 +153,144 @@ fn scan_receiver_calls(
             cursor = open + 1;
             continue;
         };
-        if direct_method(method) {
-            if let Some(path) = quoted_argument(source, open + 1, close) {
-                push_route(
-                    routes,
-                    HonoRoute {
-                        receiver,
-                        method: method.to_ascii_uppercase(),
-                        path: path.value,
-                        path_start: path.start,
-                        path_end: path.end,
-                        handler: handler_after_argument(source, path.quote_end + 1, close),
-                    },
-                )?;
-            }
-        } else if method == "on" {
-            if let Some(method_arg) = quoted_argument(source, open + 1, close)
-                && let Some(comma) = next_top_level_comma(source, method_arg.quote_end + 1, close)
-                && let Some(path) = quoted_argument(source, comma + 1, close)
-            {
-                push_route(
-                    routes,
-                    HonoRoute {
-                        receiver,
-                        method: method_arg.value.to_ascii_uppercase(),
-                        path: path.value,
-                        path_start: path.start,
-                        path_end: path.end,
-                        handler: handler_after_argument(source, path.quote_end + 1, close),
-                    },
-                )?;
-            }
-        } else if method == "route"
-            && let Some(prefix) = quoted_argument(source, open + 1, close)
-            && let Some(comma) = next_top_level_comma(source, prefix.quote_end + 1, close)
-        {
-            let child_start = skip_ascii_whitespace(source, comma + 1);
-            if let Some((_, child)) = identifier_at(source, child_start) {
-                if mounts.len() >= MAX_RECEIVERS {
-                    return Err(ExtractError::OutputLimit);
-                }
-                mounts.push(HonoMount {
-                    prefix: prefix.value,
-                    prefix_start: prefix.start,
-                    prefix_end: prefix.end,
-                    child,
-                });
-            }
-        }
+        scan_hono_invocation(
+            ReceiverScan {
+                source,
+                receiver,
+                routes,
+                mounts,
+            },
+            Invocation {
+                method,
+                open,
+                close,
+            },
+        )?;
         cursor = close + 1;
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct Invocation<'a> {
+    method: &'a str,
+    open: usize,
+    close: usize,
+}
+
+fn scan_hono_invocation(
+    input: ReceiverScan<'_, '_>,
+    invocation: Invocation<'_>,
+) -> Result<(), ExtractError> {
+    let Invocation {
+        method,
+        open,
+        close,
+    } = invocation;
+    if direct_method(method) {
+        return scan_direct_invocation(input, invocation);
+    }
+    match method {
+        "on" => scan_on_invocation(input, open, close),
+        "route" => scan_mount_invocation(input, open, close),
+        _ => Ok(()),
+    }
+}
+
+fn scan_direct_invocation(
+    input: ReceiverScan<'_, '_>,
+    invocation: Invocation<'_>,
+) -> Result<(), ExtractError> {
+    let Invocation {
+        method,
+        open,
+        close,
+    } = invocation;
+    let ReceiverScan {
+        source,
+        receiver,
+        routes,
+        mounts: _,
+    } = input;
+    let Some(path) = quoted_argument(source, open + 1, close) else {
+        return Ok(());
+    };
+    push_route(
+        routes,
+        HonoRoute {
+            receiver,
+            method: method.to_ascii_uppercase(),
+            path: path.value,
+            path_start: path.start,
+            path_end: path.end,
+            handler: handler_after_argument(source, path.quote_end + 1, close),
+        },
+    )
+}
+
+fn scan_on_invocation(
+    input: ReceiverScan<'_, '_>,
+    open: usize,
+    close: usize,
+) -> Result<(), ExtractError> {
+    let ReceiverScan {
+        source,
+        receiver,
+        routes,
+        mounts: _,
+    } = input;
+    let Some(method) = quoted_argument(source, open + 1, close) else {
+        return Ok(());
+    };
+    let Some(comma) = next_top_level_comma(source, method.quote_end + 1, close) else {
+        return Ok(());
+    };
+    let Some(path) = quoted_argument(source, comma + 1, close) else {
+        return Ok(());
+    };
+    push_route(
+        routes,
+        HonoRoute {
+            receiver,
+            method: method.value.to_ascii_uppercase(),
+            path: path.value,
+            path_start: path.start,
+            path_end: path.end,
+            handler: handler_after_argument(source, path.quote_end + 1, close),
+        },
+    )
+}
+
+fn scan_mount_invocation(
+    input: ReceiverScan<'_, '_>,
+    open: usize,
+    close: usize,
+) -> Result<(), ExtractError> {
+    let ReceiverScan {
+        source,
+        receiver: _,
+        routes: _,
+        mounts,
+    } = input;
+    let Some(prefix) = quoted_argument(source, open + 1, close) else {
+        return Ok(());
+    };
+    let Some(comma) = next_top_level_comma(source, prefix.quote_end + 1, close) else {
+        return Ok(());
+    };
+    let child_start = skip_ascii_whitespace(source, comma + 1);
+    let Some((_, child)) = identifier_at(source, child_start) else {
+        return Ok(());
+    };
+    if mounts.len() >= MAX_RECEIVERS {
+        return Err(ExtractError::OutputLimit);
+    }
+    mounts.push(HonoMount {
+        prefix: prefix.value,
+        prefix_start: prefix.start,
+        prefix_end: prefix.end,
+        child,
+    });
     Ok(())
 }
 

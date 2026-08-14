@@ -572,49 +572,57 @@ fn preceding_jvm_doc(
 ) -> Result<Option<String>, ExtractError> {
     builder.context.ensure_active()?;
     let source = builder.context.source();
-    let upper_bound = node.start_byte();
+    let Some((prefix, lower_bound)) = jvm_doc_prefix(source, node.start_byte()) else {
+        return Ok(None);
+    };
+    let Some(raw) = raw_jvm_doc(prefix, lower_bound) else {
+        return Ok(None);
+    };
+    let raw = builder.context.copy_text(raw)?;
+    normalize_doc(builder, &raw)
+}
+
+fn jvm_doc_prefix(source: &str, upper_bound: usize) -> Option<(&str, usize)> {
     let mut lower_bound = upper_bound.saturating_sub(MAX_DOC_BYTES.saturating_add(4));
     while lower_bound < upper_bound && !source.is_char_boundary(lower_bound) {
         lower_bound = lower_bound.saturating_add(1);
     }
-    let Some(before) = source.get(lower_bound..upper_bound) else {
-        return Ok(None);
-    };
+    let before = source.get(lower_bound..upper_bound)?;
     let trimmed_end = before.trim_end_matches(char::is_whitespace).len();
     let gap = before.get(trimmed_end..).unwrap_or_default();
     if gap.bytes().filter(|byte| *byte == b'\n').count() > 1 {
-        return Ok(None);
+        return None;
     }
     let prefix = before.get(..trimmed_end).unwrap_or_default();
-    let raw = if prefix.ends_with("*/") {
-        let Some(relative_start) = prefix.rfind("/*") else {
-            return Ok(None);
-        };
+    Some((prefix, lower_bound))
+}
+
+fn raw_jvm_doc(prefix: &str, lower_bound: usize) -> Option<&str> {
+    if prefix.ends_with("*/") {
+        let relative_start = prefix.rfind("/*")?;
         if lower_bound > 0 && relative_start == 0 {
-            return Ok(None);
+            return None;
         }
-        prefix.get(relative_start..).unwrap_or_default()
-    } else {
-        let mut start = prefix.len();
-        let mut found = false;
-        for line in prefix.lines().rev() {
-            let line_start = start.saturating_sub(line.len());
-            if !line.trim_start().starts_with("//") {
-                break;
-            }
-            found = true;
-            start = line_start.saturating_sub(1);
-            if prefix.len().saturating_sub(start) > MAX_DOC_BYTES {
-                return Ok(None);
-            }
+        return Some(prefix.get(relative_start..).unwrap_or_default());
+    }
+    preceding_jvm_line_doc(prefix)
+}
+
+fn preceding_jvm_line_doc(prefix: &str) -> Option<&str> {
+    let mut start = prefix.len();
+    let mut found = false;
+    for line in prefix.lines().rev() {
+        let line_start = start.saturating_sub(line.len());
+        if !line.trim_start().starts_with("//") {
+            break;
         }
-        if !found {
-            return Ok(None);
+        found = true;
+        start = line_start.saturating_sub(1);
+        if prefix.len().saturating_sub(start) > MAX_DOC_BYTES {
+            return None;
         }
-        prefix.get(start..).unwrap_or_default().trim_start()
-    };
-    let raw = builder.context.copy_text(raw)?;
-    normalize_doc(builder, &raw)
+    }
+    found.then(|| prefix.get(start..).unwrap_or_default().trim_start())
 }
 
 fn normalize_doc(

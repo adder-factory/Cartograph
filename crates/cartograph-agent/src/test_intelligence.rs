@@ -248,42 +248,53 @@ fn literal_test_cases(source: &str) -> BTreeSet<TestCaseEvidence> {
                 index = skip_quoted(bytes, index + 1, quote);
             }
             byte if identifier_start(byte) => {
-                let start = index;
-                index = index.saturating_add(1);
-                while bytes
-                    .get(index)
-                    .is_some_and(|byte| identifier_continue(*byte))
-                {
-                    index = index.saturating_add(1);
-                }
-                let identifier = &source[start..index];
-                if !matches!(
-                    identifier,
-                    "describe" | "context" | "suite" | "it" | "test" | "specify" | "scenario"
-                ) {
-                    continue;
-                }
-                if let Some((title_start, title_end, quote)) = invocation_title(bytes, index) {
-                    let raw = &source[title_start..title_end];
-                    let title = clean_title(raw, quote);
-                    if !title.is_empty() {
-                        cases.insert(TestCaseEvidence {
-                            line: one_based_line(bytes, start),
-                            name: bounded_title(&title),
-                            kind: if matches!(identifier, "describe" | "context" | "suite") {
-                                "suite"
-                            } else {
-                                "test_case"
-                            },
-                            provenance: "literal_test_invocation",
-                        });
-                    }
-                }
+                index = scan_literal_test_identifier(source, bytes, index, &mut cases);
             }
             _ => index = index.saturating_add(1),
         }
     }
     cases
+}
+
+fn scan_literal_test_identifier(
+    source: &str,
+    bytes: &[u8],
+    start: usize,
+    cases: &mut BTreeSet<TestCaseEvidence>,
+) -> usize {
+    let mut end = start.saturating_add(1);
+    while bytes
+        .get(end)
+        .is_some_and(|byte| identifier_continue(*byte))
+    {
+        end = end.saturating_add(1);
+    }
+    let identifier = &source[start..end];
+    if !matches!(
+        identifier,
+        "describe" | "context" | "suite" | "it" | "test" | "specify" | "scenario"
+    ) {
+        return end;
+    }
+    let Some((title_start, title_end, quote)) = invocation_title(bytes, end) else {
+        return end;
+    };
+    let title = clean_title(&source[title_start..title_end], quote);
+    if title.is_empty() {
+        return end;
+    }
+    let kind = if matches!(identifier, "describe" | "context" | "suite") {
+        "suite"
+    } else {
+        "test_case"
+    };
+    cases.insert(TestCaseEvidence {
+        line: one_based_line(bytes, start),
+        name: bounded_title(&title),
+        kind,
+        provenance: "literal_test_invocation",
+    });
+    end
 }
 
 fn invocation_title(bytes: &[u8], mut index: usize) -> Option<(usize, usize, u8)> {

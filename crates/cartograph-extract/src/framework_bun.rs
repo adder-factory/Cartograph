@@ -92,21 +92,30 @@ fn top_level_routes_object(source: &str, start: usize, end: usize) -> Option<usi
             cursor += 1;
             continue;
         }
-        if depth == 0 && (byte == b'_' || byte.is_ascii_alphabetic()) {
-            let (name_end, name) = identifier_at(source, cursor)?;
-            let colon = skip_ascii_whitespace(source, name_end);
-            if name == "routes" && bytes.get(colon) == Some(&b':') {
-                let value = skip_ascii_whitespace(source, colon + 1);
-                if bytes.get(value) == Some(&b'{') {
-                    return Some(value);
-                }
-            }
-            cursor = name_end;
-        } else {
+        if depth != 0 || !(byte == b'_' || byte.is_ascii_alphabetic()) {
             cursor += 1;
+            continue;
         }
+        let (next, routes) = top_level_routes_property(source, cursor);
+        if routes.is_some() {
+            return routes;
+        }
+        cursor = next;
     }
     None
+}
+
+fn top_level_routes_property(source: &str, cursor: usize) -> (usize, Option<usize>) {
+    let Some((name_end, name)) = identifier_at(source, cursor) else {
+        return (cursor.saturating_add(1), None);
+    };
+    let colon = skip_ascii_whitespace(source, name_end);
+    if name != "routes" || source.as_bytes().get(colon) != Some(&b':') {
+        return (name_end, None);
+    }
+    let value = skip_ascii_whitespace(source, colon.saturating_add(1));
+    let routes = (source.as_bytes().get(value) == Some(&b'{')).then_some(value);
+    (name_end, routes)
 }
 
 fn advance_route_quote(byte: u8, quote: &mut Option<u8>, escaped: &mut bool) -> bool {
@@ -153,13 +162,8 @@ fn scan_route_entries(
     while cursor < end {
         builder.check_cancelled()?;
         let byte = bytes[cursor];
-        if matches!(byte, b'{' | b'[' | b'(') {
-            depth = depth.saturating_add(1);
-            cursor += 1;
-            continue;
-        }
-        if matches!(byte, b'}' | b']' | b')') {
-            depth = depth.saturating_sub(1);
+        if let Some(next_depth) = route_delimiter_depth(byte, depth) {
+            depth = next_depth;
             cursor += 1;
             continue;
         }
@@ -167,48 +171,76 @@ fn scan_route_entries(
             cursor += 1;
             continue;
         }
-        let Some(path) = quoted_at(source, cursor, end) else {
+        let Some(next) = scan_route_entry(
+            builder,
+            RouteEntryInput {
+                source,
+                cursor,
+                end,
+            },
+        )?
+        else {
             return Ok(());
         };
-        let colon = skip_ascii_whitespace(source, path.quote_end + 1);
-        if !path.value.starts_with('/') || bytes.get(colon) != Some(&b':') {
-            cursor = path.quote_end + 1;
-            continue;
-        }
-        let value = skip_ascii_whitespace(source, colon + 1);
-        if bytes.get(value) == Some(&b'{') {
-            let Some(map_close) = matching_delimiter(DelimiterInput::braces(source, value)) else {
-                return Ok(());
-            };
-            if map_close > end {
-                return Ok(());
-            }
-            scan_method_map(
-                builder,
-                source,
-                MethodMapInput {
-                    path: &path,
-                    range: ScanRange {
-                        start: value + 1,
-                        end: map_close,
-                    },
-                },
-            )?;
-            cursor = map_close + 1;
-        } else {
-            let handler = direct_handler(source, value, end);
-            builder.add_route(FrameworkRouteInput {
-                method: "ANY",
-                path: path.value,
-                start: path.start,
-                end: path.end,
-                command: false,
-                handler,
-            })?;
-            cursor = value.saturating_add(1);
-        }
+        cursor = next;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RouteEntryInput<'a> {
+    source: &'a str,
+    cursor: usize,
+    end: usize,
+}
+
+fn scan_route_entry(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: RouteEntryInput<'_>,
+) -> Result<Option<usize>, ExtractError> {
+    let RouteEntryInput {
+        source,
+        cursor,
+        end,
+    } = input;
+    let Some(path) = quoted_at(source, cursor, end) else {
+        return Ok(None);
+    };
+    let colon = skip_ascii_whitespace(source, path.quote_end.saturating_add(1));
+    if !path.value.starts_with('/') || source.as_bytes().get(colon) != Some(&b':') {
+        return Ok(Some(path.quote_end.saturating_add(1)));
+    }
+    let value = skip_ascii_whitespace(source, colon.saturating_add(1));
+    if source.as_bytes().get(value) != Some(&b'{') {
+        let handler = direct_handler(source, value, end);
+        builder.add_route(FrameworkRouteInput {
+            method: "ANY",
+            path: path.value,
+            start: path.start,
+            end: path.end,
+            command: false,
+            handler,
+        })?;
+        return Ok(Some(value.saturating_add(1)));
+    }
+    let Some(map_close) = matching_delimiter(DelimiterInput::braces(source, value)) else {
+        return Ok(None);
+    };
+    if map_close > end {
+        return Ok(None);
+    }
+    scan_method_map(
+        builder,
+        source,
+        MethodMapInput {
+            path: &path,
+            range: ScanRange {
+                start: value.saturating_add(1),
+                end: map_close,
+            },
+        },
+    )?;
+    Ok(Some(map_close.saturating_add(1)))
 }
 
 #[derive(Clone, Copy)]

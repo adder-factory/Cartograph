@@ -5423,85 +5423,137 @@ mod tests {
         let legacy = serde_json::from_str::<Vec<Value>>(include_str!("v1_1_33_cli_contract.json"))
             .unwrap_or_else(|error| panic!("v1.1.33 CLI fixture failed to parse: {error}"));
 
-        for command in legacy {
-            let path = command["path"]
-                .as_str()
-                .unwrap_or_else(|| panic!("legacy CLI path was invalid"));
-            if path == "cartograph viewer" || path.starts_with("cartograph viewer ") {
-                continue;
-            }
-            let segments = path.split_whitespace().collect::<Vec<_>>();
-            let collapsed = if current.contains_key(path) {
-                None
-            } else if segments.len() == 3 {
-                let family = segments[1];
-                let value = segments[2];
-                let property = match family {
-                    "admin" | "summaries" | "session" => "action",
-                    "review" => "mode",
-                    _ => panic!("v2 dropped the v1.1.33 command `{path}`"),
-                };
-                let tool_name = format!("cartograph_{}", family.replace('-', "_"));
-                let definition = tool_contracts
-                    .get(&tool_name)
-                    .unwrap_or_else(|| panic!("{tool_name} contract was missing"));
-                let accepted = definition.input_schema()["properties"][property]["enum"]
-                    .as_array()
-                    .unwrap_or_else(|| panic!("{tool_name}.{property} enum was missing"));
-                assert!(
-                    accepted.iter().any(|candidate| candidate == value),
-                    "v2 dropped the v1.1.33 action `{path}`"
+        for command in &legacy {
+            assert_legacy_cli_command(command, &current, &tool_contracts);
+        }
+    }
+
+    fn assert_legacy_cli_command(
+        command: &Value,
+        current: &BTreeMap<String, Value>,
+        tool_contracts: &BTreeMap<String, cartograph_mcp::ToolDefinition>,
+    ) {
+        let path = command["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("legacy CLI path was invalid"));
+        if path == "cartograph viewer" || path.starts_with("cartograph viewer ") {
+            return;
+        }
+        let segments = path.split_whitespace().collect::<Vec<_>>();
+        let collapsed = collapsed_cli_path(path, &segments, current, tool_contracts);
+        let actual_path = collapsed.as_deref().unwrap_or(path);
+        let actual = current
+            .get(actual_path)
+            .unwrap_or_else(|| panic!("v2 dropped the v1.1.33 command `{actual_path}`"));
+        for field in ["aliases", "options", "positionals"] {
+            assert_legacy_cli_field(LegacyCliField {
+                legacy: command,
+                actual,
+                path,
+                segments: &segments,
+                collapsed: collapsed.is_some(),
+                field,
+            });
+        }
+    }
+
+    fn collapsed_cli_path(
+        path: &str,
+        segments: &[&str],
+        current: &BTreeMap<String, Value>,
+        tool_contracts: &BTreeMap<String, cartograph_mcp::ToolDefinition>,
+    ) -> Option<String> {
+        if current.contains_key(path) {
+            return None;
+        }
+        assert_eq!(segments.len(), 3, "v2 dropped the v1.1.33 command `{path}`");
+        let family = segments[1];
+        let value = segments[2];
+        let property = match family {
+            "admin" | "summaries" | "session" => "action",
+            "review" => "mode",
+            _ => panic!("v2 dropped the v1.1.33 command `{path}`"),
+        };
+        let tool_name = format!("cartograph_{}", family.replace('-', "_"));
+        let definition = tool_contracts
+            .get(&tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} contract was missing"));
+        let accepted = definition.input_schema()["properties"][property]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{tool_name}.{property} enum was missing"));
+        assert!(
+            accepted.iter().any(|candidate| candidate == value),
+            "v2 dropped the v1.1.33 action `{path}`"
+        );
+        Some(format!("cartograph {family}"))
+    }
+
+    #[derive(Clone, Copy)]
+    struct LegacyCliField<'a> {
+        legacy: &'a Value,
+        actual: &'a Value,
+        path: &'a str,
+        segments: &'a [&'a str],
+        collapsed: bool,
+        field: &'a str,
+    }
+
+    fn assert_legacy_cli_field(input: LegacyCliField<'_>) {
+        let LegacyCliField {
+            legacy,
+            actual,
+            path,
+            segments,
+            collapsed,
+            field,
+        } = input;
+        let legacy_values = cli_contract_values(legacy, path, field, "legacy");
+        let actual_values = cli_contract_values(actual, path, field, "current");
+        if collapsed && field == "aliases" {
+            assert!(
+                legacy_values
+                    .iter()
+                    .all(|alias| *alias == segments[2].replace('_', "-")),
+                "collapsed action aliases drifted for `{path}`: {legacy_values:?}"
+            );
+            return;
+        }
+        if collapsed && field == "positionals" {
+            assert!(
+                legacy_values.len() <= actual_values.len().saturating_sub(1),
+                "v2 dropped v1.1.33 positional capacity on `{path}`; legacy={legacy_values:?}, current={actual_values:?}"
+            );
+            return;
+        }
+        assert_ordered_cli_values(&legacy_values, &actual_values, path, field);
+    }
+
+    fn cli_contract_values<'a>(
+        contract: &'a Value,
+        path: &str,
+        field: &str,
+        label: &str,
+    ) -> Vec<&'a str> {
+        contract[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("{label} `{path}` {field} were invalid"))
+            .iter()
+            .filter_map(Value::as_str)
+            .collect()
+    }
+
+    fn assert_ordered_cli_values(legacy: &[&str], actual: &[&str], path: &str, field: &str) {
+        let mut cursor = 0_usize;
+        for legacy_value in legacy {
+            let Some(relative) = actual[cursor..]
+                .iter()
+                .position(|actual| actual == legacy_value)
+            else {
+                panic!(
+                    "v2 dropped or reordered v1.1.33 {field} `{legacy_value}` on `{path}`; current={actual:?}"
                 );
-                Some(format!("cartograph {family}"))
-            } else {
-                panic!("v2 dropped the v1.1.33 command `{path}");
             };
-            let actual_path = collapsed.as_deref().unwrap_or(path);
-            let actual = current
-                .get(actual_path)
-                .unwrap_or_else(|| panic!("v2 dropped the v1.1.33 command `{actual_path}`"));
-            for field in ["aliases", "options", "positionals"] {
-                let legacy_values = command[field]
-                    .as_array()
-                    .unwrap_or_else(|| panic!("legacy `{path}` {field} were invalid"))
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>();
-                let actual_values = actual[field]
-                    .as_array()
-                    .unwrap_or_else(|| panic!("current `{path}` {field} were invalid"))
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>();
-                if collapsed.is_some() && field == "aliases" {
-                    assert!(
-                        legacy_values
-                            .iter()
-                            .all(|alias| *alias == segments[2].replace('_', "-")),
-                        "collapsed action aliases drifted for `{path}`: {legacy_values:?}"
-                    );
-                    continue;
-                }
-                if collapsed.is_some() && field == "positionals" {
-                    assert!(
-                        legacy_values.len() <= actual_values.len().saturating_sub(1),
-                        "v2 dropped v1.1.33 positional capacity on `{path}`; legacy={legacy_values:?}, current={actual_values:?}"
-                    );
-                    continue;
-                }
-                let mut cursor = 0_usize;
-                for legacy_value in legacy_values {
-                    let Some(relative) = actual_values[cursor..]
-                        .iter()
-                        .position(|actual| *actual == legacy_value)
-                    else {
-                        panic!(
-                            "v2 dropped or reordered v1.1.33 {field} `{legacy_value}` on `{path}`; current={actual_values:?}"
-                        );
-                    };
-                    cursor = cursor.saturating_add(relative).saturating_add(1);
-                }
-            }
+            cursor = cursor.saturating_add(relative).saturating_add(1);
         }
     }
 

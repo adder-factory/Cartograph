@@ -706,62 +706,112 @@ fn build_records<'tree>(
             continue;
         }
         match record.role {
-            RawRole::Definition(kind) => {
-                let key = (
-                    kind,
-                    record.role_node.id(),
-                    record.name_node.start_byte(),
-                    record.name_node.end_byte(),
-                );
-                if !seen_definitions.insert(key) {
-                    continue;
-                }
-                transient.charge(MODELED_TREE_ENTRY_BYTES)?;
-                let mut owned_name = String::new();
-                owned_name
-                    .try_reserve(name.len())
-                    .map_err(|_| ExtractError::OutputLimit)?;
-                owned_name.push_str(name);
-                transient.charge(owned_name.capacity())?;
-                transient.vector_entry::<Definition<'tree>>()?;
-                let docstring = if let Some(node) = record.doc_node {
-                    clean_doc(node_text(node, input.source))?
-                } else {
-                    None
-                };
-                if let Some(docstring) = &docstring {
-                    transient.charge(docstring.capacity())?;
-                }
-                definitions
-                    .try_reserve(1)
-                    .map_err(|_| ExtractError::OutputLimit)?;
-                definitions.push(Definition {
-                    kind,
-                    name: owned_name,
-                    node: record.role_node,
-                    docstring,
-                });
-            }
-            RawRole::Call => {
-                let mut owned_name = String::new();
-                owned_name
-                    .try_reserve(name.len())
-                    .map_err(|_| ExtractError::OutputLimit)?;
-                owned_name.push_str(name);
-                transient.charge(owned_name.capacity())?;
-                transient.vector_entry::<CallReference<'tree>>()?;
-                calls
-                    .try_reserve(1)
-                    .map_err(|_| ExtractError::OutputLimit)?;
-                calls.push(CallReference {
-                    name: owned_name,
-                    role_node: record.role_node,
-                    name_node: record.name_node,
-                });
-            }
+            RawRole::Definition(kind) => push_tag_definition(TagDefinitionInput {
+                record: &record,
+                kind,
+                name,
+                source: input.source,
+                definitions: &mut definitions,
+                seen: &mut seen_definitions,
+                transient,
+            })?,
+            RawRole::Call => push_tag_call(TagCallInput {
+                record: &record,
+                name,
+                calls: &mut calls,
+                transient,
+            })?,
         }
     }
     Ok((definitions, calls))
+}
+
+struct TagDefinitionInput<'input, 'tree> {
+    record: &'input RawMatch<'tree>,
+    kind: SymbolKind,
+    name: &'input str,
+    source: &'input str,
+    definitions: &'input mut Vec<Definition<'tree>>,
+    seen: &'input mut BTreeSet<(SymbolKind, usize, usize, usize)>,
+    transient: &'input mut TagTransientBudget,
+}
+
+fn push_tag_definition<'tree>(input: TagDefinitionInput<'_, 'tree>) -> Result<(), ExtractError> {
+    let TagDefinitionInput {
+        record,
+        kind,
+        name,
+        source,
+        definitions,
+        seen,
+        transient,
+    } = input;
+    let key = (
+        kind,
+        record.role_node.id(),
+        record.name_node.start_byte(),
+        record.name_node.end_byte(),
+    );
+    if !seen.insert(key) {
+        return Ok(());
+    }
+    transient.charge(MODELED_TREE_ENTRY_BYTES)?;
+    let owned_name = owned_tag_name(name, transient)?;
+    transient.vector_entry::<Definition<'tree>>()?;
+    let docstring = match record.doc_node {
+        Some(node) => clean_doc(node_text(node, source))?,
+        None => None,
+    };
+    if let Some(docstring) = &docstring {
+        transient.charge(docstring.capacity())?;
+    }
+    definitions
+        .try_reserve(1)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    definitions.push(Definition {
+        kind,
+        name: owned_name,
+        node: record.role_node,
+        docstring,
+    });
+    Ok(())
+}
+
+struct TagCallInput<'input, 'tree> {
+    record: &'input RawMatch<'tree>,
+    name: &'input str,
+    calls: &'input mut Vec<CallReference<'tree>>,
+    transient: &'input mut TagTransientBudget,
+}
+
+fn push_tag_call<'tree>(input: TagCallInput<'_, 'tree>) -> Result<(), ExtractError> {
+    let TagCallInput {
+        record,
+        name,
+        calls,
+        transient,
+    } = input;
+    let owned_name = owned_tag_name(name, transient)?;
+    transient.vector_entry::<CallReference<'tree>>()?;
+    calls
+        .try_reserve(1)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    calls.push(CallReference {
+        name: owned_name,
+        role_node: record.role_node,
+        name_node: record.name_node,
+    });
+    Ok(())
+}
+
+fn owned_tag_name(name: &str, transient: &mut TagTransientBudget) -> Result<String, ExtractError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve(name.len())
+        .map_err(|_| ExtractError::OutputLimit)?;
+    owned.push_str(name);
+    transient.charge(owned.capacity())?;
+    Ok(owned)
 }
 
 fn tag_structural_digests(
@@ -1086,37 +1136,44 @@ fn definition_parents(
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
-        let start = definition.node.start_byte();
-        let end = definition.node.end_byte();
-        while active
-            .last()
-            .is_some_and(|interval| interval.start > start || interval.end < end)
-        {
-            active.pop();
-        }
-        let parent = if let Some(interval) = active.last() {
-            if interval.start == start && interval.end == end {
-                interval.parent
-            } else {
-                Some(interval.owner)
-            }
-        } else {
-            None
-        };
+        let parent = definition_parent(&mut active, definition, index);
         parents.push(parent);
-        let duplicate_interval = active
-            .last()
-            .is_some_and(|interval| interval.start == start && interval.end == end);
-        if !duplicate_interval {
-            active.push(DefinitionInterval {
-                start,
-                end,
-                owner: index,
-                parent,
-            });
-        }
     }
     Ok(parents)
+}
+
+fn definition_parent(
+    active: &mut Vec<DefinitionInterval>,
+    definition: &Definition<'_>,
+    owner: usize,
+) -> Option<usize> {
+    let start = definition.node.start_byte();
+    let end = definition.node.end_byte();
+    while active
+        .last()
+        .is_some_and(|interval| interval.start > start || interval.end < end)
+    {
+        active.pop();
+    }
+    let parent = active.last().and_then(|interval| {
+        if interval.start == start && interval.end == end {
+            interval.parent
+        } else {
+            Some(interval.owner)
+        }
+    });
+    let duplicate = active
+        .last()
+        .is_some_and(|interval| interval.start == start && interval.end == end);
+    if !duplicate {
+        active.push(DefinitionInterval {
+            start,
+            end,
+            owner,
+            parent,
+        });
+    }
+    parent
 }
 
 fn call_owners(
@@ -1124,29 +1181,7 @@ fn call_owners(
     transient: &mut TagTransientBudget,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<Option<usize>>, ExtractError> {
-    let mut intervals = Vec::<DefinitionInterval>::new();
-    for (index, definition) in input.definitions.iter().enumerate() {
-        if cancelled() {
-            return Err(ExtractError::Cancelled);
-        }
-        let interval = DefinitionInterval {
-            start: definition.node.start_byte(),
-            end: definition.node.end_byte(),
-            owner: index,
-            parent: None,
-        };
-        if intervals
-            .last()
-            .is_some_and(|last| last.start == interval.start && last.end == interval.end)
-        {
-            continue;
-        }
-        transient.vector_entry::<DefinitionInterval>()?;
-        intervals
-            .try_reserve(1)
-            .map_err(|_| ExtractError::OutputLimit)?;
-        intervals.push(interval);
-    }
+    let intervals = definition_intervals(input.definitions, transient, cancelled)?;
 
     let mut owners = Vec::new();
     let mut active = Vec::<DefinitionInterval>::new();
@@ -1168,35 +1203,86 @@ fn call_owners(
             ),
     )?;
     let mut next_interval = 0;
+    let mut traversal = CallOwnerTraversal {
+        intervals: &intervals,
+        active: &mut active,
+        next_interval: &mut next_interval,
+    };
     for call in input.calls {
         if cancelled() {
             return Err(ExtractError::Cancelled);
         }
+        owners.push(traversal.owner_for(call));
+    }
+    Ok(owners)
+}
+
+fn definition_intervals(
+    definitions: &[Definition<'_>],
+    transient: &mut TagTransientBudget,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Vec<DefinitionInterval>, ExtractError> {
+    let mut intervals = Vec::new();
+    for (owner, definition) in definitions.iter().enumerate() {
+        if cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        let interval = DefinitionInterval {
+            start: definition.node.start_byte(),
+            end: definition.node.end_byte(),
+            owner,
+            parent: None,
+        };
+        let duplicate = intervals.last().is_some_and(|last: &DefinitionInterval| {
+            last.start == interval.start && last.end == interval.end
+        });
+        if duplicate {
+            continue;
+        }
+        transient.vector_entry::<DefinitionInterval>()?;
+        intervals
+            .try_reserve(1)
+            .map_err(|_| ExtractError::OutputLimit)?;
+        intervals.push(interval);
+    }
+    Ok(intervals)
+}
+
+struct CallOwnerTraversal<'a> {
+    intervals: &'a [DefinitionInterval],
+    active: &'a mut Vec<DefinitionInterval>,
+    next_interval: &'a mut usize,
+}
+
+impl CallOwnerTraversal<'_> {
+    fn owner_for(&mut self, call: &CallReference<'_>) -> Option<usize> {
         let call_start = call.role_node.start_byte();
         let call_end = call.role_node.end_byte();
-        while intervals
-            .get(next_interval)
+        while self
+            .intervals
+            .get(*self.next_interval)
             .is_some_and(|interval| interval.start <= call_start)
         {
-            let interval = intervals[next_interval];
-            while active
+            let interval = self.intervals[*self.next_interval];
+            while self
+                .active
                 .last()
                 .is_some_and(|current| current.end <= interval.start)
             {
-                active.pop();
+                self.active.pop();
             }
-            active.push(interval);
-            next_interval = next_interval.saturating_add(1);
+            self.active.push(interval);
+            *self.next_interval = self.next_interval.saturating_add(1);
         }
-        while active
+        while self
+            .active
             .last()
             .is_some_and(|interval| !strictly_contains_interval(*interval, call_start, call_end))
         {
-            active.pop();
+            self.active.pop();
         }
-        owners.push(active.last().map(|interval| interval.owner));
+        self.active.last().map(|interval| interval.owner)
     }
-    Ok(owners)
 }
 
 fn strictly_contains_interval(interval: DefinitionInterval, start: usize, end: usize) -> bool {

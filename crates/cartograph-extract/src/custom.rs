@@ -890,46 +890,50 @@ fn markup_tags(source: &str) -> Vec<MarkupTag<'_>> {
                 .map_or(source.len(), |close| start + 4 + close + 3);
             continue;
         }
-        let mut end = start + 1;
-        let mut quote = None;
-        while end < bytes.len() {
-            let byte = bytes[end];
-            if let Some(active) = quote {
-                if byte == active {
-                    quote = None;
-                }
-            } else if matches!(byte, b'\'' | b'"') {
-                quote = Some(byte);
-            } else if byte == b'>' {
-                break;
-            }
-            end += 1;
-        }
-        if end >= bytes.len() {
+        let Some(end) = markup_tag_end(bytes, start + 1) else {
             break;
-        }
-        let raw = &source[start + 1..end];
-        let trimmed = raw.trim();
-        let closing = trimmed.starts_with('/');
-        let name_source = trimmed.trim_start_matches('/').trim_start();
-        if !name_source.starts_with(['!', '?']) {
-            let name_end = name_source
-                .find(|character: char| character.is_whitespace() || character == '/')
-                .unwrap_or(name_source.len());
-            if name_end > 0 {
-                output.push(MarkupTag {
-                    name: &name_source[..name_end],
-                    raw,
-                    start,
-                    end: end + 1,
-                    closing,
-                    self_closing: !closing && trimmed.ends_with('/'),
-                });
-            }
+        };
+        if let Some(tag) = parse_markup_tag(source, start, end) {
+            output.push(tag);
         }
         cursor = end + 1;
     }
     output
+}
+
+fn markup_tag_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+    let mut quote = None;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        match (quote, byte) {
+            (Some(active), current) if current == active => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(cursor),
+            (Some(_) | None, _) => {}
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    None
+}
+
+fn parse_markup_tag(source: &str, start: usize, end: usize) -> Option<MarkupTag<'_>> {
+    let raw = &source[start.saturating_add(1)..end];
+    let trimmed = raw.trim();
+    let closing = trimmed.starts_with('/');
+    let name_source = trimmed.trim_start_matches('/').trim_start();
+    if name_source.starts_with(['!', '?']) {
+        return None;
+    }
+    let name_end = name_source
+        .find(|character: char| character.is_whitespace() || character == '/')
+        .unwrap_or(name_source.len());
+    (name_end > 0).then(|| MarkupTag {
+        name: &name_source[..name_end],
+        raw,
+        start,
+        end: end.saturating_add(1),
+        closing,
+        self_closing: !closing && trimmed.ends_with('/'),
+    })
 }
 
 fn tag_attribute<'source>(tag: MarkupTag<'source>, key: &str) -> Option<(usize, &'source str)> {
@@ -1442,24 +1446,11 @@ fn mask_literals_and_comments(line: &str) -> String {
     while cursor < bytes.len() {
         let byte = bytes[cursor];
         if let Some(active) = quote {
-            if byte == b'\\' {
-                output.push(' ');
-                cursor += 1;
-                if cursor < bytes.len() {
-                    output.push(' ');
-                    cursor += 1;
-                }
-                continue;
+            (cursor, quote) = QuotedMask {
+                bytes,
+                output: &mut output,
             }
-            output.push(if byte == active {
-                char::from(byte)
-            } else {
-                ' '
-            });
-            if byte == active {
-                quote = None;
-            }
-            cursor += 1;
+            .mask(cursor, active);
             continue;
         }
         if matches!(byte, b'\'' | b'"' | b'`') {
@@ -1476,6 +1467,32 @@ fn mask_literals_and_comments(line: &str) -> String {
         cursor += 1;
     }
     output
+}
+
+struct QuotedMask<'a> {
+    bytes: &'a [u8],
+    output: &'a mut String,
+}
+
+impl QuotedMask<'_> {
+    fn mask(&mut self, cursor: usize, active: u8) -> (usize, Option<u8>) {
+        let byte = self.bytes[cursor];
+        if byte == b'\\' {
+            self.output.push(' ');
+            let next = cursor.saturating_add(1);
+            if next < self.bytes.len() {
+                self.output.push(' ');
+                return (next.saturating_add(1), Some(active));
+            }
+            return (next, Some(active));
+        }
+        self.output.push(if byte == active {
+            char::from(byte)
+        } else {
+            ' '
+        });
+        (cursor.saturating_add(1), (byte != active).then_some(active))
+    }
 }
 
 fn function_like_names(value: &str) -> Vec<(usize, &str)> {
@@ -1589,29 +1606,50 @@ fn extract_template_expression_calls(
         };
         let close = content_start + close_relative;
         let expression = &source[content_start..close];
-        if !expression.trim_start().starts_with(['#', '/', ':', '@']) {
-            if builder.snapshot.language() == SourceLanguage::Svelte {
-                extract_svelte_store_references(
-                    builder,
-                    OwnedSourceInput {
-                        owner,
-                        source: &mask_literals_and_comments(expression),
-                        offset: content_start,
-                    },
-                )?;
-            }
-            for (relative_offset, name) in function_like_names(expression) {
-                if script_call_skip(name) {
-                    continue;
-                }
-                let start = content_start + relative_offset;
-                builder.add_reference(
-                    CustomReferenceInput::new(Some(owner.clone()), name, ReferenceKind::Calls)
-                        .at(start, start + name.len()),
-                )?;
-            }
-        }
+        extract_template_expression(
+            builder,
+            OwnedSourceInput {
+                owner,
+                source: expression,
+                offset: content_start,
+            },
+        )?;
         cursor = close + delimiters.1.len();
+    }
+    Ok(())
+}
+
+fn extract_template_expression(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: OwnedSourceInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    let OwnedSourceInput {
+        owner,
+        source: expression,
+        offset: content_start,
+    } = input;
+    if expression.trim_start().starts_with(['#', '/', ':', '@']) {
+        return Ok(());
+    }
+    if builder.snapshot.language() == SourceLanguage::Svelte {
+        extract_svelte_store_references(
+            builder,
+            OwnedSourceInput {
+                owner,
+                source: &mask_literals_and_comments(expression),
+                offset: content_start,
+            },
+        )?;
+    }
+    for (relative_offset, name) in function_like_names(expression) {
+        if script_call_skip(name) {
+            continue;
+        }
+        let start = content_start + relative_offset;
+        builder.add_reference(
+            CustomReferenceInput::new(Some(owner.clone()), name, ReferenceKind::Calls)
+                .at(start, start + name.len()),
+        )?;
     }
     Ok(())
 }
@@ -2905,74 +2943,163 @@ fn extract_bg3_stats(builder: &mut CustomBuilder<'_, '_>) -> Result<(), ExtractE
     for (line_start, line) in physical_lines(source) {
         builder.check_cancelled()?;
         let words = identifiers(line);
-        if words
-            .first()
-            .is_some_and(|(_, word)| word.eq_ignore_ascii_case("new"))
-            && words.get(1).is_some_and(|(_, shape)| {
-                matches!(
-                    shape.to_ascii_lowercase().as_str(),
-                    "entry" | "spellset" | "equipment" | "treasuretable"
-                )
-            })
-            && let Some((offset, name)) = quoted_values(line).into_iter().next()
-        {
-            let shape = words[1].1;
-            let id = builder.add_symbol(
-                CustomSymbolInput::new(
-                    SymbolKind::Resource,
-                    name,
-                    format!("{}::{name}", builder.path()),
-                )
-                .at(line_start + offset, line_start + offset + name.len())
-                .with_options(SymbolOptions {
-                    body_search_text: format!("bg3 {shape} {name}"),
-                    export: SymbolExportFlags::named(true),
-                    visibility: Some(Visibility::Public),
-                    ..SymbolOptions::default()
-                }),
-            )?;
+        let parsed = Bg3ParsedLine {
+            source: SourceLine {
+                start: line_start,
+                text: line,
+            },
+            words: &words,
+        };
+        if let Some(id) = add_bg3_declaration(builder, parsed)? {
             current = Some(id);
             continue;
         }
         let Some(owner) = current.clone() else {
             continue;
         };
-        let command = words.first().map(|(_, word)| word.to_ascii_lowercase());
-        if matches!(command.as_deref(), Some("using" | "add"))
-            && let Some((offset, value)) = quoted_values(line).into_iter().next()
-            && is_qualified_name(value)
-        {
-            builder.add_reference(
-                CustomReferenceInput::new(
-                    Some(owner),
-                    value,
-                    if command.as_deref() == Some("using") {
-                        ReferenceKind::Extends
-                    } else {
-                        ReferenceKind::References
-                    },
-                )
-                .at(line_start + offset, line_start + offset + value.len()),
-            )?;
-        } else if command.as_deref() == Some("data") {
-            let values = quoted_values(line);
-            if let Some((offset, value)) = values.get(1).copied() {
-                for token in bg3_reference_tokens(value) {
-                    let relative = value.find(token).unwrap_or(0);
-                    builder.add_reference(
-                        CustomReferenceInput::new(
-                            Some(owner.clone()),
-                            token,
-                            ReferenceKind::References,
-                        )
-                        .at(
-                            line_start + offset + relative,
-                            line_start + offset + relative + token.len(),
-                        ),
-                    )?;
-                }
-            }
-        }
+        extract_bg3_entry_line(builder, &owner, parsed)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct SourceLine<'a> {
+    start: usize,
+    text: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct Bg3ParsedLine<'a> {
+    source: SourceLine<'a>,
+    words: &'a [(usize, &'a str)],
+}
+
+fn add_bg3_declaration(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: Bg3ParsedLine<'_>,
+) -> Result<Option<SymbolId>, ExtractError> {
+    let Bg3ParsedLine {
+        source: SourceLine {
+            start: line_start,
+            text: line,
+        },
+        words,
+    } = input;
+    let Some((_, command)) = words.first() else {
+        return Ok(None);
+    };
+    let Some((_, shape)) = words.get(1) else {
+        return Ok(None);
+    };
+    if !command.eq_ignore_ascii_case("new") || !bg3_declaration_shape(shape) {
+        return Ok(None);
+    }
+    let Some((offset, name)) = quoted_values(line).into_iter().next() else {
+        return Ok(None);
+    };
+    builder
+        .add_symbol(
+            CustomSymbolInput::new(
+                SymbolKind::Resource,
+                name,
+                format!("{}::{name}", builder.path()),
+            )
+            .at(line_start + offset, line_start + offset + name.len())
+            .with_options(SymbolOptions {
+                body_search_text: format!("bg3 {shape} {name}"),
+                export: SymbolExportFlags::named(true),
+                visibility: Some(Visibility::Public),
+                ..SymbolOptions::default()
+            }),
+        )
+        .map(Some)
+}
+
+fn bg3_declaration_shape(shape: &str) -> bool {
+    matches!(
+        shape.to_ascii_lowercase().as_str(),
+        "entry" | "spellset" | "equipment" | "treasuretable"
+    )
+}
+
+fn extract_bg3_entry_line(
+    builder: &mut CustomBuilder<'_, '_>,
+    owner: &SymbolId,
+    input: Bg3ParsedLine<'_>,
+) -> Result<(), ExtractError> {
+    let Bg3ParsedLine { source, words } = input;
+    let command = words.first().map(|(_, word)| word.to_ascii_lowercase());
+    match command.as_deref() {
+        Some("using" | "add") => add_bg3_command_reference(
+            builder,
+            Bg3Command {
+                owner,
+                source,
+                command: command.as_deref(),
+            },
+        ),
+        Some("data") => add_bg3_data_references(builder, owner, source),
+        _ => Ok(()),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Bg3Command<'a> {
+    owner: &'a SymbolId,
+    source: SourceLine<'a>,
+    command: Option<&'a str>,
+}
+
+fn add_bg3_command_reference(
+    builder: &mut CustomBuilder<'_, '_>,
+    input: Bg3Command<'_>,
+) -> Result<(), ExtractError> {
+    let Bg3Command {
+        owner,
+        source: SourceLine {
+            start: line_start,
+            text: line,
+        },
+        command,
+    } = input;
+    let Some((offset, value)) = quoted_values(line).into_iter().next() else {
+        return Ok(());
+    };
+    if !is_qualified_name(value) {
+        return Ok(());
+    }
+    let kind = if command == Some("using") {
+        ReferenceKind::Extends
+    } else {
+        ReferenceKind::References
+    };
+    builder.add_reference(
+        CustomReferenceInput::new(Some(owner.clone()), value, kind)
+            .at(line_start + offset, line_start + offset + value.len()),
+    )
+}
+
+fn add_bg3_data_references(
+    builder: &mut CustomBuilder<'_, '_>,
+    owner: &SymbolId,
+    source: SourceLine<'_>,
+) -> Result<(), ExtractError> {
+    let SourceLine {
+        start: line_start,
+        text: line,
+    } = source;
+    let values = quoted_values(line);
+    let Some((offset, value)) = values.get(1).copied() else {
+        return Ok(());
+    };
+    for token in bg3_reference_tokens(value) {
+        let relative = value.find(token).unwrap_or(0);
+        builder.add_reference(
+            CustomReferenceInput::new(Some(owner.clone()), token, ReferenceKind::References).at(
+                line_start + offset + relative,
+                line_start + offset + relative + token.len(),
+            ),
+        )?;
     }
     Ok(())
 }

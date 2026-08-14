@@ -598,39 +598,55 @@ fn validate_workflow_observation(
         ));
     }
     if case.should_abstain {
-        if !observation.evaluation_abstained {
-            return Err(format!("{} failed to abstain", case.id));
-        }
-        if observation.review_abstention != Some(ReviewAbstention::NoChangedFiles) {
-            return Err(format!(
-                "{} review did not report no_changed_files",
-                case.id
-            ));
-        }
+        validate_abstaining_observation(case, observation)?;
     } else {
-        if context.abstention().is_some() {
-            return Err(format!("{} context unexpectedly abstained", case.id));
-        }
-        if observation.review_abstention != Some(ReviewAbstention::StaleIndex) {
-            return Err(format!(
-                "{} dirty review did not report stale_index",
-                case.id
-            ));
-        }
-        if observation.review_evidence.is_empty() {
-            return Err(format!("{} review returned no graph evidence", case.id));
-        }
-        if case.id == "watcher-empty-path"
-            && recall(
-                &observation.review_selected_test_files,
-                case.expected_test_files,
-            ) < 1.0
-        {
-            return Err(
-                "watcher-empty-path lost its locked reverse-graph affected-test evidence"
-                    .to_owned(),
-            );
-        }
+        validate_active_observation(case, context, observation)?;
+    }
+    Ok(())
+}
+
+fn validate_abstaining_observation(
+    case: fixture::PatchCase,
+    observation: &CaseObservation,
+) -> EvalResult<()> {
+    if !observation.evaluation_abstained {
+        return Err(format!("{} failed to abstain", case.id));
+    }
+    if observation.review_abstention != Some(ReviewAbstention::NoChangedFiles) {
+        return Err(format!(
+            "{} review did not report no_changed_files",
+            case.id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_active_observation(
+    case: fixture::PatchCase,
+    context: &ContextPacket,
+    observation: &CaseObservation,
+) -> EvalResult<()> {
+    if context.abstention().is_some() {
+        return Err(format!("{} context unexpectedly abstained", case.id));
+    }
+    if observation.review_abstention != Some(ReviewAbstention::StaleIndex) {
+        return Err(format!(
+            "{} dirty review did not report stale_index",
+            case.id
+        ));
+    }
+    if observation.review_evidence.is_empty() {
+        return Err(format!("{} review returned no graph evidence", case.id));
+    }
+    if case.id == "watcher-empty-path"
+        && recall(
+            &observation.review_selected_test_files,
+            case.expected_test_files,
+        ) < 1.0
+    {
+        return Err(
+            "watcher-empty-path lost its locked reverse-graph affected-test evidence".to_owned(),
+        );
     }
     Ok(())
 }

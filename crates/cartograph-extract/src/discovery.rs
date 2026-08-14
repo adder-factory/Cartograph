@@ -528,6 +528,11 @@ where
     let mut stack = vec![root.to_path_buf()];
     let mut scanned = 0_usize;
     let mut repositories = BTreeMap::<NormalizedPath, NestedRepositoryKind>::new();
+    let discovery = NestedDirectoryDiscovery {
+        root,
+        policy,
+        submodules: &submodules,
+    };
     while let Some(directory) = stack.pop() {
         if cancelled() {
             return Err(SourceDiscoveryError::Cancelled);
@@ -545,33 +550,10 @@ where
             if cancelled() {
                 return Err(SourceDiscoveryError::Cancelled);
             }
-            let file_type = entry.file_type().map_err(|_| SourceDiscoveryError::Walk)?;
-            if !file_type.is_dir() || file_type.is_symlink() {
+            let Some((path, normalized, kind)) = discovery.candidate(&entry)? else {
                 continue;
-            }
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| SourceDiscoveryError::Walk)?;
-            let raw = relative.to_str().ok_or(SourceDiscoveryError::NonUtf8Path)?;
-            let normalized =
-                NormalizedPath::parse(raw).map_err(|_| SourceDiscoveryError::InvalidPath)?;
-            if is_internal_path(&normalized)
-                || policy_excludes(policy, &normalized, true)
-                || has_ignore_marker(&path)
-            {
-                continue;
-            }
-            let git_marker = fs::symlink_metadata(path.join(GIT_DIRECTORY));
-            if git_marker.as_ref().is_ok_and(|metadata| {
-                let file_type = metadata.file_type();
-                file_type.is_dir() || file_type.is_file()
-            }) {
-                let kind = if submodules.contains(&normalized) {
-                    NestedRepositoryKind::Submodule
-                } else {
-                    NestedRepositoryKind::Embedded
-                };
+            };
+            if let Some(kind) = kind {
                 repositories.insert(normalized, kind);
             }
             stack.push(path);
@@ -581,6 +563,57 @@ where
         .into_iter()
         .map(|(path, kind)| NestedRepository { path, kind })
         .collect())
+}
+
+struct NestedDirectoryDiscovery<'a> {
+    root: &'a Path,
+    policy: &'a DiscoveryPolicy,
+    submodules: &'a BTreeSet<NormalizedPath>,
+}
+
+impl NestedDirectoryDiscovery<'_> {
+    fn candidate(
+        &self,
+        entry: &fs::DirEntry,
+    ) -> Result<Option<(PathBuf, NormalizedPath, Option<NestedRepositoryKind>)>, SourceDiscoveryError>
+    {
+        let file_type = entry.file_type().map_err(|_| SourceDiscoveryError::Walk)?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            return Ok(None);
+        }
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(self.root)
+            .map_err(|_| SourceDiscoveryError::Walk)?;
+        let raw = relative.to_str().ok_or(SourceDiscoveryError::NonUtf8Path)?;
+        let normalized =
+            NormalizedPath::parse(raw).map_err(|_| SourceDiscoveryError::InvalidPath)?;
+        if is_internal_path(&normalized)
+            || policy_excludes(self.policy, &normalized, true)
+            || has_ignore_marker(&path)
+        {
+            return Ok(None);
+        }
+        let kind = nested_repository_kind(&path, &normalized, self.submodules);
+        Ok(Some((path, normalized, kind)))
+    }
+}
+
+fn nested_repository_kind(
+    path: &Path,
+    normalized: &NormalizedPath,
+    submodules: &BTreeSet<NormalizedPath>,
+) -> Option<NestedRepositoryKind> {
+    let metadata = fs::symlink_metadata(path.join(GIT_DIRECTORY)).ok()?;
+    let file_type = metadata.file_type();
+    if !file_type.is_dir() && !file_type.is_file() {
+        return None;
+    }
+    Some(if submodules.contains(normalized) {
+        NestedRepositoryKind::Submodule
+    } else {
+        NestedRepositoryKind::Embedded
+    })
 }
 
 fn read_gitmodule_paths(root: &Path) -> Result<BTreeSet<NormalizedPath>, SourceDiscoveryError> {

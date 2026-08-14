@@ -16,6 +16,7 @@ use thiserror::Error;
 
 use crate::{
     ProjectCancellation, ProjectRuntime, SourceCompareError, SourceCompareOptions,
+    SourceCompareReport,
     review::{GitCommandBounds, run_git_bounded},
 };
 
@@ -135,85 +136,16 @@ impl ProjectRuntime {
         let scan = load_issue_commits(self, options.maximum_commits).await?;
         let tagged_commits = u64::try_from(scan.commits.len()).unwrap_or(u64::MAX);
         let root = self.project_root_for_host_operations();
-        let comparisons = stream::iter(scan.commits.into_iter().enumerate())
-            .map(|(index, commit)| {
-                let cancellation = cancellation.clone();
-                async move {
-                    if cancellation.is_cancelled() {
-                        return Err(IssueHistoryIndexError::Cancelled);
-                    }
-                    let base = format!("{}^", commit.sha);
-                    let options = SourceCompareOptions::new(base)
-                        .and_then(|options| options.with_head(&commit.sha))
-                        .and_then(|options| options.with_max_changed_files(COMPARE_ADMISSION_LIMIT))
-                        .map_err(|_| IssueHistoryIndexError::ComparisonFailed)?;
-                    let comparison =
-                        crate::compare::compare_sources_at(root, options, cancellation).await;
-                    match comparison {
-                        Ok(comparison) => Ok(Some((index, commit, Some(comparison)))),
-                        Err(SourceCompareError::RefNotFound) => Ok(None),
-                        Err(SourceCompareError::Cancelled) => {
-                            Err(IssueHistoryIndexError::Cancelled)
-                        }
-                        Err(_) => Ok(Some((index, commit, None))),
-                    }
-                }
-            })
-            .buffer_unordered(COMPARE_CONCURRENCY)
-            .try_collect::<Vec<_>>()
-            .await?;
-        let mut comparisons = comparisons.into_iter().flatten().collect::<Vec<_>>();
-        comparisons.sort_by_key(|(index, _, _)| *index);
-        let mut attributions = BTreeSet::new();
-        let mut oversized_commits_skipped = 0_u64;
-        let mut comparison_failures_skipped = 0_u64;
-        for (_, commit, comparison) in comparisons {
-            let Some(comparison) = comparison else {
-                comparison_failures_skipped = comparison_failures_skipped.saturating_add(1);
-                continue;
-            };
-            if comparison.exceeds_changed_file_limit(u64::from(MAXIMUM_FILES_PER_TAGGED_COMMIT)) {
-                oversized_commits_skipped = oversized_commits_skipped.saturating_add(1);
-                continue;
-            }
-            for (symbol_id, added) in comparison.current_issue_symbols() {
-                for issue_number in &commit.issues {
-                    attributions.insert((
-                        symbol_id.clone(),
-                        *issue_number,
-                        commit.sha.clone(),
-                        if added {
-                            IssueAttributionKind::Added
-                        } else {
-                            IssueAttributionKind::Modified
-                        },
-                    ));
-                    if attributions.len() > MAXIMUM_ATTRIBUTIONS {
-                        return Err(IssueHistoryIndexError::RelationLimit);
-                    }
-                }
-            }
-        }
-        let attributions = attributions
-            .into_iter()
-            .map(|(symbol_id, issue_number, sha, kind)| {
-                SymbolIssueAttribution::new(SymbolIssueAttributionInput {
-                    symbol_id,
-                    issue_number,
-                    commit_sha: sha,
-                    kind,
-                })
-                .map_err(|_| IssueHistoryIndexError::RelationLimit)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let comparisons = compare_issue_commits(root, scan.commits, cancellation).await?;
+        let collected = collect_issue_attributions(comparisons)?;
         Ok(PreparedIssueHistory {
             head,
             commits_scanned: scan.commits_scanned,
             tagged_commits,
             truncated: scan.truncated,
-            oversized_commits_skipped,
-            comparison_failures_skipped,
-            attributions,
+            oversized_commits_skipped: collected.oversized_commits_skipped,
+            comparison_failures_skipped: collected.comparison_failures_skipped,
+            attributions: collected.attributions,
         })
     }
 
@@ -246,6 +178,121 @@ impl ProjectRuntime {
             .await
             .map_err(|_| IssueHistoryIndexError::StorageUnavailable)
     }
+}
+
+type IssueComparison = (usize, IssueCommit, Option<SourceCompareReport>);
+
+async fn compare_issue_commits(
+    root: &std::path::Path,
+    commits: Vec<IssueCommit>,
+    cancellation: ProjectCancellation,
+) -> Result<Vec<IssueComparison>, IssueHistoryIndexError> {
+    let comparisons = stream::iter(commits.into_iter().enumerate())
+        .map(|(index, commit)| {
+            let cancellation = cancellation.clone();
+            async move {
+                if cancellation.is_cancelled() {
+                    return Err(IssueHistoryIndexError::Cancelled);
+                }
+                let base = format!("{}^", commit.sha);
+                let options = SourceCompareOptions::new(base)
+                    .and_then(|options| options.with_head(&commit.sha))
+                    .and_then(|options| options.with_max_changed_files(COMPARE_ADMISSION_LIMIT))
+                    .map_err(|_| IssueHistoryIndexError::ComparisonFailed)?;
+                let comparison =
+                    crate::compare::compare_sources_at(root, options, cancellation).await;
+                match comparison {
+                    Ok(comparison) => Ok(Some((index, commit, Some(comparison)))),
+                    Err(SourceCompareError::RefNotFound) => Ok(None),
+                    Err(SourceCompareError::Cancelled) => Err(IssueHistoryIndexError::Cancelled),
+                    Err(_) => Ok(Some((index, commit, None))),
+                }
+            }
+        })
+        .buffer_unordered(COMPARE_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut comparisons = comparisons.into_iter().flatten().collect::<Vec<_>>();
+    comparisons.sort_by_key(|(index, _, _)| *index);
+    Ok(comparisons)
+}
+
+struct CollectedIssueAttributions {
+    oversized_commits_skipped: u64,
+    comparison_failures_skipped: u64,
+    attributions: Vec<SymbolIssueAttribution>,
+}
+
+fn collect_issue_attributions(
+    comparisons: Vec<IssueComparison>,
+) -> Result<CollectedIssueAttributions, IssueHistoryIndexError> {
+    let mut attributions = BTreeSet::new();
+    let mut oversized_commits_skipped = 0_u64;
+    let mut comparison_failures_skipped = 0_u64;
+    for (_, commit, comparison) in comparisons {
+        let Some(comparison) = comparison else {
+            comparison_failures_skipped = comparison_failures_skipped.saturating_add(1);
+            continue;
+        };
+        if comparison.exceeds_changed_file_limit(u64::from(MAXIMUM_FILES_PER_TAGGED_COMMIT)) {
+            oversized_commits_skipped = oversized_commits_skipped.saturating_add(1);
+            continue;
+        }
+        append_issue_attributions(&mut attributions, &commit, &comparison)?;
+    }
+    Ok(CollectedIssueAttributions {
+        oversized_commits_skipped,
+        comparison_failures_skipped,
+        attributions: build_issue_attributions(attributions)?,
+    })
+}
+
+fn append_issue_attributions(
+    attributions: &mut BTreeSet<(
+        cartograph_domain::SymbolId,
+        u64,
+        String,
+        IssueAttributionKind,
+    )>,
+    commit: &IssueCommit,
+    comparison: &SourceCompareReport,
+) -> Result<(), IssueHistoryIndexError> {
+    for (symbol_id, added) in comparison.current_issue_symbols() {
+        let kind = if added {
+            IssueAttributionKind::Added
+        } else {
+            IssueAttributionKind::Modified
+        };
+        for issue_number in &commit.issues {
+            attributions.insert((symbol_id.clone(), *issue_number, commit.sha.clone(), kind));
+            if attributions.len() > MAXIMUM_ATTRIBUTIONS {
+                return Err(IssueHistoryIndexError::RelationLimit);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_issue_attributions(
+    attributions: BTreeSet<(
+        cartograph_domain::SymbolId,
+        u64,
+        String,
+        IssueAttributionKind,
+    )>,
+) -> Result<Vec<SymbolIssueAttribution>, IssueHistoryIndexError> {
+    attributions
+        .into_iter()
+        .map(|(symbol_id, issue_number, sha, kind)| {
+            SymbolIssueAttribution::new(SymbolIssueAttributionInput {
+                symbol_id,
+                issue_number,
+                commit_sha: sha,
+                kind,
+            })
+            .map_err(|_| IssueHistoryIndexError::RelationLimit)
+        })
+        .collect()
 }
 
 async fn load_issue_commits(
@@ -316,48 +363,53 @@ fn parse_issue_commits(
             truncated = true;
             break;
         }
-        let block = block.trim();
-        let mut lines = block.lines();
-        if lines.next() != Some(ISSUE_RECORD_MARKER) {
-            return Err(IssueHistoryIndexError::GitUnavailable);
-        }
-        let sha = lines
-            .next()
-            .filter(|sha| valid_sha(sha))
-            .ok_or(IssueHistoryIndexError::GitUnavailable)?
-            .to_owned();
+        let commit = parse_issue_commit(block, regex)?;
         commits_scanned = commits_scanned.saturating_add(1);
-        let message = lines.collect::<Vec<_>>().join("\n");
-        let mut issues = HashSet::new();
-        let mut ordered = Vec::new();
-        for capture in regex.captures_iter(&message) {
-            let Some(issue) = capture
-                .get(1)
-                .and_then(|value| value.as_str().parse::<u64>().ok())
-                .filter(|value| *value > 0 && *value <= 9_223_372_036_854_775_807_u64)
-            else {
-                continue;
-            };
-            if issues.insert(issue) {
-                ordered.push(issue);
-            }
+        if commit.issues.is_empty() {
+            continue;
         }
-        if !ordered.is_empty() {
-            if commits.len() >= MAXIMUM_TAGGED_COMMITS {
-                truncated = true;
-                continue;
-            }
-            commits.push(IssueCommit {
-                sha,
-                issues: ordered,
-            });
+        if commits.len() >= MAXIMUM_TAGGED_COMMITS {
+            truncated = true;
+            continue;
         }
+        commits.push(commit);
     }
     Ok(IssueCommitScan {
         commits,
         commits_scanned,
         truncated,
     })
+}
+
+fn parse_issue_commit(block: &str, regex: &Regex) -> Result<IssueCommit, IssueHistoryIndexError> {
+    let mut lines = block.trim().lines();
+    if lines.next() != Some(ISSUE_RECORD_MARKER) {
+        return Err(IssueHistoryIndexError::GitUnavailable);
+    }
+    let sha = lines
+        .next()
+        .filter(|sha| valid_sha(sha))
+        .ok_or(IssueHistoryIndexError::GitUnavailable)?
+        .to_owned();
+    let message = lines.collect::<Vec<_>>().join("\n");
+    Ok(IssueCommit {
+        sha,
+        issues: issue_numbers(regex, &message),
+    })
+}
+
+fn issue_numbers(regex: &Regex, message: &str) -> Vec<u64> {
+    let mut seen = HashSet::new();
+    regex
+        .captures_iter(message)
+        .filter_map(|capture| {
+            capture
+                .get(1)
+                .and_then(|value| value.as_str().parse::<u64>().ok())
+                .filter(|value| *value > 0 && *value <= 9_223_372_036_854_775_807_u64)
+        })
+        .filter(|issue| seen.insert(*issue))
+        .collect()
 }
 
 async fn git_head(runtime: &ProjectRuntime) -> Result<String, IssueHistoryIndexError> {

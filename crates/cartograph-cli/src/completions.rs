@@ -79,19 +79,30 @@ pub(super) fn complete(command: &Command, words: &[String]) -> Vec<String> {
     if let Some(choices) = option_choices(selected, previous.last().map(String::as_str)) {
         return filter(choices, current);
     }
+    filter(command_candidates(selected, current), current)
+}
+
+fn command_candidates(selected: &Command, current: &str) -> BTreeSet<String> {
     let mut candidates = BTreeSet::new();
     if !current.starts_with('-') {
-        for subcommand in selected.get_subcommands() {
-            if subcommand.is_hide_set() || subcommand.get_name().starts_with("__") {
-                continue;
-            }
-            candidates.insert(subcommand.get_name().to_owned());
-            for alias in subcommand.get_all_aliases() {
-                candidates.insert(alias.to_owned());
-            }
-        }
+        append_subcommand_candidates(selected, &mut candidates);
     }
     candidates.insert("--help".to_owned());
+    append_argument_candidates(selected, &mut candidates);
+    candidates
+}
+
+fn append_subcommand_candidates(selected: &Command, candidates: &mut BTreeSet<String>) {
+    for subcommand in selected.get_subcommands() {
+        if subcommand.is_hide_set() || subcommand.get_name().starts_with("__") {
+            continue;
+        }
+        candidates.insert(subcommand.get_name().to_owned());
+        candidates.extend(subcommand.get_all_aliases().map(str::to_owned));
+    }
+}
+
+fn append_argument_candidates(selected: &Command, candidates: &mut BTreeSet<String>) {
     for argument in selected.get_arguments() {
         if argument.is_hide_set() {
             continue;
@@ -103,7 +114,6 @@ pub(super) fn complete(command: &Command, words: &[String]) -> Vec<String> {
             candidates.insert(format!("-{short}"));
         }
     }
-    filter(candidates, current)
 }
 
 fn resolve_command<'command>(

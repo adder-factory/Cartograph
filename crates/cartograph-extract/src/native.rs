@@ -191,8 +191,7 @@ impl NativeExtractor {
         }
         let extracted = walk::extract(
             snapshot,
-            walk::WalkInput::new(root, parse_status),
-            self.maximum_ast_depth,
+            walk::WalkInput::new(root, parse_status, self.maximum_ast_depth),
             cancelled,
         )?;
         let extracted = framework::enrich(snapshot, extracted, cancelled)?;

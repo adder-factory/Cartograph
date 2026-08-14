@@ -28,36 +28,60 @@ where
             .await
             .map_err(|_| ServeError::InputReadFailed)?;
         if available.is_empty() {
-            return if !saw_bytes {
-                Ok(BoundedLine::Eof)
-            } else if overflowed {
-                Ok(BoundedLine::TooLarge)
-            } else {
-                Ok(BoundedLine::Line(line))
-            };
+            return Ok(finish_input(line, saw_bytes, overflowed));
         }
 
         saw_bytes = true;
         let newline = available.iter().position(|byte| *byte == b'\n');
         let payload_bytes = newline.unwrap_or(available.len());
-        if !overflowed {
-            let remaining = maximum_bytes.saturating_sub(line.len());
-            if payload_bytes <= remaining {
-                line.extend_from_slice(&available[..payload_bytes]);
-            } else {
-                overflowed = true;
-            }
+        BoundedPayload {
+            line: &mut line,
+            overflowed: &mut overflowed,
+            maximum_bytes,
         }
+        .append(available, payload_bytes);
 
         let consumed = newline.map_or(available.len(), |position| position + 1);
         reader.consume(consumed);
         if newline.is_some() {
-            return if overflowed {
-                Ok(BoundedLine::TooLarge)
-            } else {
-                Ok(BoundedLine::Line(line))
-            };
+            return Ok(finish_line(line, overflowed));
         }
+    }
+}
+
+struct BoundedPayload<'a> {
+    line: &'a mut Vec<u8>,
+    overflowed: &'a mut bool,
+    maximum_bytes: usize,
+}
+
+impl BoundedPayload<'_> {
+    fn append(&mut self, available: &[u8], payload_bytes: usize) {
+        if *self.overflowed {
+            return;
+        }
+        let remaining = self.maximum_bytes.saturating_sub(self.line.len());
+        if payload_bytes > remaining {
+            *self.overflowed = true;
+            return;
+        }
+        self.line.extend_from_slice(&available[..payload_bytes]);
+    }
+}
+
+fn finish_input(line: Vec<u8>, saw_bytes: bool, overflowed: bool) -> BoundedLine {
+    if saw_bytes {
+        finish_line(line, overflowed)
+    } else {
+        BoundedLine::Eof
+    }
+}
+
+fn finish_line(line: Vec<u8>, overflowed: bool) -> BoundedLine {
+    if overflowed {
+        BoundedLine::TooLarge
+    } else {
+        BoundedLine::Line(line)
     }
 }
 

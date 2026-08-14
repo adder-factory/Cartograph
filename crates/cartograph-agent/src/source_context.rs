@@ -1,5 +1,6 @@
 use cartograph_db::{
-    CurrentFileLookup, CurrentFileRecord, CurrentSymbolRecord, CurrentSymbolSetLookup, StorageError,
+    CurrentFileLookup, CurrentFileRecord, CurrentSymbolRecord, CurrentSymbolSetLookup,
+    ProjectSnapshot, StorageError,
 };
 use cartograph_domain::{ContentDigest, GenerationDigestVersion, NormalizedPath, SymbolId};
 use serde::Serialize;
@@ -262,95 +263,120 @@ impl ProjectRuntime {
     ) -> Result<SymbolSourceContext, ProjectError> {
         let SourceContextRequest { symbol_id, options } = request;
         for attempt in 0..SOURCE_CONTEXT_ATTEMPTS {
-            if cancellation.is_cancelled() {
-                return Err(ProjectError::RequestCancelled);
-            }
-            let Some(before) = self
-                .database()
-                .project_snapshot_by_root(self.root_identity())
-                .await
-                .map_err(|_| ProjectError::SourceContextUnavailable)?
-            else {
-                return Err(ProjectError::SourceContextUnavailable);
-            };
-            let Some(current) = before.current.as_ref() else {
-                return Err(ProjectError::SourceContextUnavailable);
-            };
-            let symbols = self
-                .database()
-                .current_symbols_by_ids(CurrentSymbolSetLookup::new(
-                    &before.project_id,
-                    &current.generation_id,
-                    std::slice::from_ref(&symbol_id),
-                ))
-                .await;
-            let mut symbols = match symbols {
-                Ok(symbols) => symbols,
-                Err(StorageError::CurrentGenerationChanged)
-                    if attempt + 1 < SOURCE_CONTEXT_ATTEMPTS =>
-                {
-                    continue;
-                }
-                Err(_) => return Err(ProjectError::SourceContextUnavailable),
-            };
-            let Some(symbol) = symbols.pop() else {
-                if self.generation_is_current(&before).await? {
-                    return Err(ProjectError::SymbolNotFound);
-                }
-                continue;
-            };
-            if symbol.generation_id() != &current.generation_id {
-                continue;
-            }
-            let source = self
-                .scan_source(Some(symbol.path().clone()), cancellation.clone())
-                .await?;
-            if !self.generation_is_current(&before).await? {
-                if attempt + 1 < SOURCE_CONTEXT_ATTEMPTS {
-                    continue;
-                }
-                return Err(ProjectError::SourceContextUnavailable);
-            }
-            let indexed_file = self
-                .database()
-                .exact_current_file_by_path(CurrentFileLookup::new(
-                    &before.project_id,
-                    &current.generation_id,
-                    symbol.path(),
-                ))
-                .await
-                .map_err(|_| ProjectError::SourceContextUnavailable)?
-                .ok_or(ProjectError::SourceContextUnavailable)?;
-            let file_fresh = source
-                .captured_content_hash
-                .as_ref()
-                .is_some_and(|digest| digest == indexed_file.content_hash());
-            let fresh = current.source_revision == source.digest.as_str()
-                && current.digest_version == GenerationDigestVersion::CURRENT;
-            let live_source = !file_fresh && options.allow_stale_live_source;
-            let excerpt = if file_fresh || live_source {
-                let captured = source
-                    .captured_source
-                    .as_deref()
-                    .ok_or(ProjectError::SourceContextUnavailable)?;
-                Some(extract_excerpt(ExcerptRequest {
-                    source: captured,
-                    symbol_start: symbol.start_line(),
-                    symbol_end: symbol.end_line(),
+            let can_retry = attempt + 1 < SOURCE_CONTEXT_ATTEMPTS;
+            if let Some(context) = self
+                .source_context_attempt(SourceContextAttempt {
+                    symbol_id: &symbol_id,
                     options,
-                })?)
-            } else {
-                None
-            };
-            return Ok(SymbolSourceContext {
-                symbol,
-                live_source_revision: source.digest,
-                fresh,
-                excerpt,
-                live_source,
-            });
+                    cancellation: cancellation.clone(),
+                    can_retry,
+                })
+                .await?
+            {
+                return Ok(context);
+            }
         }
         Err(ProjectError::SourceContextUnavailable)
+    }
+
+    async fn source_context_attempt(
+        &self,
+        request: SourceContextAttempt<'_>,
+    ) -> Result<Option<SymbolSourceContext>, ProjectError> {
+        let SourceContextAttempt {
+            symbol_id,
+            options,
+            cancellation,
+            can_retry,
+        } = request;
+        if cancellation.is_cancelled() {
+            return Err(ProjectError::RequestCancelled);
+        }
+        let before = self.source_context_snapshot().await?;
+        let current = before
+            .current
+            .as_ref()
+            .ok_or(ProjectError::SourceContextUnavailable)?;
+        let Some(symbol) = self
+            .source_context_symbol(&before, symbol_id, can_retry)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if symbol.generation_id() != &current.generation_id {
+            return Ok(None);
+        }
+        let source = self
+            .scan_source(Some(symbol.path().clone()), cancellation)
+            .await?;
+        if !self.generation_is_current(&before).await? {
+            return if can_retry {
+                Ok(None)
+            } else {
+                Err(ProjectError::SourceContextUnavailable)
+            };
+        }
+        let indexed_file = self
+            .database()
+            .exact_current_file_by_path(CurrentFileLookup::new(
+                &before.project_id,
+                &current.generation_id,
+                symbol.path(),
+            ))
+            .await
+            .map_err(|_| ProjectError::SourceContextUnavailable)?
+            .ok_or(ProjectError::SourceContextUnavailable)?;
+        let fresh = current.source_revision == source.digest.as_str()
+            && current.digest_version == GenerationDigestVersion::CURRENT;
+        Ok(Some(build_symbol_source_context(
+            SymbolSourceContextInput {
+                symbol,
+                indexed_file: &indexed_file,
+                source,
+                fresh,
+                options,
+            },
+        )?))
+    }
+
+    async fn source_context_snapshot(&self) -> Result<ProjectSnapshot, ProjectError> {
+        self.database()
+            .project_snapshot_by_root(self.root_identity())
+            .await
+            .map_err(|_| ProjectError::SourceContextUnavailable)?
+            .ok_or(ProjectError::SourceContextUnavailable)
+    }
+
+    async fn source_context_symbol(
+        &self,
+        before: &ProjectSnapshot,
+        symbol_id: &SymbolId,
+        can_retry: bool,
+    ) -> Result<Option<CurrentSymbolRecord>, ProjectError> {
+        let current = before
+            .current
+            .as_ref()
+            .ok_or(ProjectError::SourceContextUnavailable)?;
+        let symbols = self
+            .database()
+            .current_symbols_by_ids(CurrentSymbolSetLookup::new(
+                &before.project_id,
+                &current.generation_id,
+                std::slice::from_ref(symbol_id),
+            ))
+            .await;
+        let mut symbols = match symbols {
+            Ok(symbols) => symbols,
+            Err(StorageError::CurrentGenerationChanged) if can_retry => return Ok(None),
+            Err(_) => return Err(ProjectError::SourceContextUnavailable),
+        };
+        let Some(symbol) = symbols.pop() else {
+            if self.generation_is_current(before).await? {
+                return Err(ProjectError::SymbolNotFound);
+            }
+            return Ok(None);
+        };
+        Ok(Some(symbol))
     }
 
     /// Read a bounded line window from one exact indexed file when source is current.
@@ -456,6 +482,59 @@ impl ProjectRuntime {
                         .map(|current| (&current.generation_id, current.source_revision.as_str()))
         }))
     }
+}
+
+struct SourceContextAttempt<'a> {
+    symbol_id: &'a SymbolId,
+    options: SourceContextOptions,
+    cancellation: ProjectCancellation,
+    can_retry: bool,
+}
+
+struct SymbolSourceContextInput<'a> {
+    symbol: CurrentSymbolRecord,
+    indexed_file: &'a CurrentFileRecord,
+    source: crate::SourceRevision,
+    fresh: bool,
+    options: SourceContextOptions,
+}
+
+fn build_symbol_source_context(
+    input: SymbolSourceContextInput<'_>,
+) -> Result<SymbolSourceContext, ProjectError> {
+    let SymbolSourceContextInput {
+        symbol,
+        indexed_file,
+        source,
+        fresh,
+        options,
+    } = input;
+    let file_fresh = source
+        .captured_content_hash
+        .as_ref()
+        .is_some_and(|digest| digest == indexed_file.content_hash());
+    let live_source = !file_fresh && options.allow_stale_live_source;
+    let excerpt = if file_fresh || live_source {
+        let captured = source
+            .captured_source
+            .as_deref()
+            .ok_or(ProjectError::SourceContextUnavailable)?;
+        Some(extract_excerpt(ExcerptRequest {
+            source: captured,
+            symbol_start: symbol.start_line(),
+            symbol_end: symbol.end_line(),
+            options,
+        })?)
+    } else {
+        None
+    };
+    Ok(SymbolSourceContext {
+        symbol,
+        live_source_revision: source.digest,
+        fresh,
+        excerpt,
+        live_source,
+    })
 }
 
 fn extract_file_excerpt(

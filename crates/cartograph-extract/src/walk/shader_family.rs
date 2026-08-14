@@ -254,7 +254,14 @@ fn append_wesl_import_paths(
     imports: &mut Vec<(SourceSpan, String, String)>,
 ) -> Result<(), ExtractError> {
     let mut paths = Vec::new();
-    flatten_wesl_imports(payload, "", 0, &mut paths)?;
+    flatten_wesl_imports(
+        payload,
+        WeslImportBranch {
+            prefix: "",
+            depth: 0,
+        },
+        &mut paths,
+    )?;
     for raw in paths {
         if imports.len() >= MAXIMUM_WESL_IMPORT_PATHS {
             break;
@@ -303,18 +310,23 @@ fn skip_wesl_trivia(source: &str, mut cursor: usize) -> usize {
     }
 }
 
+#[derive(Clone, Copy)]
+struct WeslImportBranch<'source> {
+    prefix: &'source str,
+    depth: usize,
+}
+
 fn flatten_wesl_imports(
     raw: &str,
-    prefix: &str,
-    depth: usize,
+    branch: WeslImportBranch<'_>,
     output: &mut Vec<String>,
 ) -> Result<(), ExtractError> {
-    if depth > 16 || output.len() >= MAXIMUM_WESL_IMPORT_PATHS {
+    if branch.depth > 16 || output.len() >= MAXIMUM_WESL_IMPORT_PATHS {
         return Err(ExtractError::OutputLimit);
     }
     let raw = raw.trim().trim_end_matches(',').trim();
     let Some(open) = top_level_wesl_brace(raw) else {
-        let joined = join_wesl_path(prefix, raw)?;
+        let joined = join_wesl_path(branch.prefix, raw)?;
         if !joined.is_empty() {
             output.push(joined);
         }
@@ -324,9 +336,16 @@ fn flatten_wesl_imports(
         return Ok(());
     };
     let branch_prefix = raw[..open].trim().trim_end_matches("::");
-    let joined_prefix = join_wesl_path(prefix, branch_prefix)?;
+    let joined_prefix = join_wesl_path(branch.prefix, branch_prefix)?;
     for member in split_top_level_wesl(&raw[open + 1..close]) {
-        flatten_wesl_imports(member, &joined_prefix, depth.saturating_add(1), output)?;
+        flatten_wesl_imports(
+            member,
+            WeslImportBranch {
+                prefix: &joined_prefix,
+                depth: branch.depth.saturating_add(1),
+            },
+            output,
+        )?;
     }
     Ok(())
 }

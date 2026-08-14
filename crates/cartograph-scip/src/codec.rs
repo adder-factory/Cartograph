@@ -211,20 +211,7 @@ fn encode_symbol(writer: &mut Writer, symbol: &ScipSymbolInformation) -> Result<
     }
     for relationship in &symbol.relationships {
         writer.message(SYMBOL_RELATIONSHIPS, |writer| {
-            writer.string(RELATIONSHIP_SYMBOL, &relationship.symbol)?;
-            if relationship.roles.reference() {
-                writer.bool(RELATIONSHIP_REFERENCE, true)?;
-            }
-            if relationship.roles.implementation() {
-                writer.bool(RELATIONSHIP_IMPLEMENTATION, true)?;
-            }
-            if relationship.roles.type_definition() {
-                writer.bool(RELATIONSHIP_TYPE_DEFINITION, true)?;
-            }
-            if relationship.roles.definition() {
-                writer.bool(RELATIONSHIP_DEFINITION, true)?;
-            }
-            Ok(())
+            encode_relationship(writer, relationship)
         })?;
     }
     if symbol.kind != 0 {
@@ -238,14 +225,38 @@ fn encode_symbol(writer: &mut Writer, symbol: &ScipSymbolInformation) -> Result<
     }
     for edge in &symbol.cartograph_edges {
         writer.message(CARTOGRAPH_EDGES_FIELD, |writer| {
-            writer.string(CARTOGRAPH_EDGE_TARGET, &edge.target_symbol)?;
-            writer.string(CARTOGRAPH_EDGE_KIND, &edge.edge_kind)?;
-            writer.uint32(CARTOGRAPH_EDGE_SITE_COUNT, edge.site_count)?;
-            writer.string(CARTOGRAPH_EDGE_PROVENANCE, &edge.provenance)?;
-            writer.uint32(CARTOGRAPH_EDGE_CONFIDENCE_BITS, edge.confidence_bits)
+            encode_cartograph_edge(writer, edge)
         })?;
     }
     Ok(())
+}
+
+fn encode_relationship(
+    writer: &mut Writer,
+    relationship: &ScipRelationship,
+) -> Result<(), ScipError> {
+    writer.string(RELATIONSHIP_SYMBOL, &relationship.symbol)?;
+    if relationship.roles.reference() {
+        writer.bool(RELATIONSHIP_REFERENCE, true)?;
+    }
+    if relationship.roles.implementation() {
+        writer.bool(RELATIONSHIP_IMPLEMENTATION, true)?;
+    }
+    if relationship.roles.type_definition() {
+        writer.bool(RELATIONSHIP_TYPE_DEFINITION, true)?;
+    }
+    if relationship.roles.definition() {
+        writer.bool(RELATIONSHIP_DEFINITION, true)?;
+    }
+    Ok(())
+}
+
+fn encode_cartograph_edge(writer: &mut Writer, edge: &CartographScipEdge) -> Result<(), ScipError> {
+    writer.string(CARTOGRAPH_EDGE_TARGET, &edge.target_symbol)?;
+    writer.string(CARTOGRAPH_EDGE_KIND, &edge.edge_kind)?;
+    writer.uint32(CARTOGRAPH_EDGE_SITE_COUNT, edge.site_count)?;
+    writer.string(CARTOGRAPH_EDGE_PROVENANCE, &edge.provenance)?;
+    writer.uint32(CARTOGRAPH_EDGE_CONFIDENCE_BITS, edge.confidence_bits)
 }
 
 /// Decodes bounded protobuf bytes into a validated SCIP index.

@@ -117,46 +117,14 @@ fn scan_class_methods(
             continue;
         };
         for decorator in &decorators {
-            if let Some(method_name) = http_method(decorator.name) {
-                if context.controller {
-                    add_http_route(
-                        builder,
-                        HttpRouteInput {
-                            context: &context,
-                            decorator,
-                            method: &method,
-                            http_method: method_name,
-                        },
-                    )?;
-                }
-            } else if let Some(label) = graphql_label(decorator.name) {
-                if context.resolver {
-                    add_named_route(
-                        builder,
-                        NamedRouteInput {
-                            context: &context,
-                            decorator,
-                            method: &method,
-                            label,
-                            value: method.name,
-                        },
-                    )?;
-                }
-            } else if let Some(label) = rpc_label(decorator.name)
-                && (context.controller || context.gateway)
-                && let StaticArgument::Literal { value, .. } = decorator_static_argument(decorator)
-            {
-                add_named_route(
-                    builder,
-                    NamedRouteInput {
-                        context: &context,
-                        decorator,
-                        method: &method,
-                        label,
-                        value,
-                    },
-                )?;
-            }
+            scan_method_decorator(
+                builder,
+                MethodDecoratorInput {
+                    context: &context,
+                    decorator,
+                    method: &method,
+                },
+            )?;
         }
         cursor = method
             .body_end
@@ -164,6 +132,72 @@ fn scan_class_methods(
             .max(after_decorators);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct MethodDecoratorInput<'input, 'source> {
+    context: &'input ClassRouteContext<'source>,
+    decorator: &'input Decorator<'source>,
+    method: &'input Method<'source>,
+}
+
+fn scan_method_decorator(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: MethodDecoratorInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    let MethodDecoratorInput {
+        context,
+        decorator,
+        method,
+    } = input;
+    if let Some(http_method) = http_method(decorator.name) {
+        if context.controller {
+            return add_http_route(
+                builder,
+                HttpRouteInput {
+                    context,
+                    decorator,
+                    method,
+                    http_method,
+                },
+            );
+        }
+        return Ok(());
+    }
+    if let Some(label) = graphql_label(decorator.name) {
+        if context.resolver {
+            return add_named_route(
+                builder,
+                NamedRouteInput {
+                    context,
+                    decorator,
+                    method,
+                    label,
+                    value: method.name,
+                },
+            );
+        }
+        return Ok(());
+    }
+    let Some(label) = rpc_label(decorator.name) else {
+        return Ok(());
+    };
+    if !context.controller && !context.gateway {
+        return Ok(());
+    }
+    let StaticArgument::Literal { value, .. } = decorator_static_argument(decorator) else {
+        return Ok(());
+    };
+    add_named_route(
+        builder,
+        NamedRouteInput {
+            context,
+            decorator,
+            method,
+            label,
+            value,
+        },
+    )
 }
 
 #[derive(Clone, Copy)]

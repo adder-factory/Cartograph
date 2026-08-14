@@ -2668,7 +2668,7 @@ fn comment_syntax(language: SourceLanguage) -> CommentSyntax {
     }
 }
 
-fn consume_quoted_byte(byte: u8, quote: &mut Option<u8>, escaped: &mut bool) -> bool {
+pub(crate) fn consume_quoted_byte(byte: u8, quote: &mut Option<u8>, escaped: &mut bool) -> bool {
     let Some(active_quote) = *quote else {
         return false;
     };

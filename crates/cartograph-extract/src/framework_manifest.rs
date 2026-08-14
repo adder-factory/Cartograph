@@ -640,52 +640,47 @@ impl<'source, 'cancel> JsonScanner<'source, 'cancel> {
         }
         let mut members = Vec::new();
         loop {
-            self.skip_ws()?;
-            if self.take(b'}')? {
-                self.skip_ws()?;
-                return Ok(if self.cursor == self.end {
-                    members
-                } else {
-                    Vec::new()
-                });
+            if let JsonCollectionPrefix::Complete(valid) = self.collection_prefix(b'}')? {
+                return Ok(retain_valid_collection(members, valid));
             }
             if members.len() >= MAX_MANIFEST_ENTRIES {
                 return Ok(Vec::new());
             }
-            let Some((key, key_span)) = self.string()? else {
+            let Some(member) = self.object_member()? else {
                 return Ok(Vec::new());
             };
-            self.skip_ws()?;
-            if !self.take(b':')? {
-                return Ok(Vec::new());
-            }
-            self.skip_ws()?;
-            let value_start = self.cursor;
-            if !self.value(0)? {
-                return Ok(Vec::new());
-            }
             members
                 .try_reserve(1)
                 .map_err(|_| ExtractError::OutputLimit)?;
-            members.push(JsonMember {
-                key,
-                key_span,
-                value: value_start..self.cursor,
-            });
-            self.skip_ws()?;
-            if self.take(b',')? {
-                continue;
+            members.push(member);
+            match self.collection_suffix(b'}')? {
+                JsonCollectionSuffix::Continue => {}
+                JsonCollectionSuffix::Complete(valid) => {
+                    return Ok(retain_valid_collection(members, valid));
+                }
+                JsonCollectionSuffix::Invalid => return Ok(Vec::new()),
             }
-            if self.take(b'}')? {
-                self.skip_ws()?;
-                return Ok(if self.cursor == self.end {
-                    members
-                } else {
-                    Vec::new()
-                });
-            }
-            return Ok(Vec::new());
         }
+    }
+
+    fn object_member(&mut self) -> Result<Option<JsonMember<'source>>, ExtractError> {
+        let Some((key, key_span)) = self.string()? else {
+            return Ok(None);
+        };
+        self.skip_ws()?;
+        if !self.take(b':')? {
+            return Ok(None);
+        }
+        self.skip_ws()?;
+        let value_start = self.cursor;
+        if !self.value(0)? {
+            return Ok(None);
+        }
+        Ok(Some(JsonMember {
+            key,
+            key_span,
+            value: value_start..self.cursor,
+        }))
     }
 
     fn string_array(mut self) -> Result<Vec<(&'source str, Range<usize>)>, ExtractError> {
@@ -695,14 +690,8 @@ impl<'source, 'cancel> JsonScanner<'source, 'cancel> {
         }
         let mut values = Vec::new();
         loop {
-            self.skip_ws()?;
-            if self.take(b']')? {
-                self.skip_ws()?;
-                return Ok(if self.cursor == self.end {
-                    values
-                } else {
-                    Vec::new()
-                });
+            if let JsonCollectionPrefix::Complete(valid) = self.collection_prefix(b']')? {
+                return Ok(retain_valid_collection(values, valid));
             }
             if values.len() >= MAX_MANIFEST_ENTRIES {
                 return Ok(Vec::new());
@@ -716,20 +705,33 @@ impl<'source, 'cancel> JsonScanner<'source, 'cancel> {
                     .map_err(|_| ExtractError::OutputLimit)?;
                 values.push((value, span));
             }
-            self.skip_ws()?;
-            if self.take(b',')? {
-                continue;
+            match self.collection_suffix(b']')? {
+                JsonCollectionSuffix::Continue => {}
+                JsonCollectionSuffix::Complete(valid) => {
+                    return Ok(retain_valid_collection(values, valid));
+                }
+                JsonCollectionSuffix::Invalid => return Ok(Vec::new()),
             }
-            if self.take(b']')? {
-                self.skip_ws()?;
-                return Ok(if self.cursor == self.end {
-                    values
-                } else {
-                    Vec::new()
-                });
-            }
-            return Ok(Vec::new());
         }
+    }
+
+    fn collection_prefix(&mut self, closing: u8) -> Result<JsonCollectionPrefix, ExtractError> {
+        self.skip_ws()?;
+        Ok(match finish_json_collection(self, closing)? {
+            Some(valid) => JsonCollectionPrefix::Complete(valid),
+            None => JsonCollectionPrefix::Item,
+        })
+    }
+
+    fn collection_suffix(&mut self, closing: u8) -> Result<JsonCollectionSuffix, ExtractError> {
+        self.skip_ws()?;
+        if self.take(b',')? {
+            return Ok(JsonCollectionSuffix::Continue);
+        }
+        Ok(match finish_json_collection(self, closing)? {
+            Some(valid) => JsonCollectionSuffix::Complete(valid),
+            None => JsonCollectionSuffix::Invalid,
+        })
     }
 
     fn value(&mut self, depth: usize) -> Result<bool, ExtractError> {
@@ -855,4 +857,30 @@ impl<'source, 'cancel> JsonScanner<'source, 'cancel> {
         }
         Ok(())
     }
+}
+
+fn finish_json_collection(
+    scanner: &mut JsonScanner<'_, '_>,
+    closing: u8,
+) -> Result<Option<bool>, ExtractError> {
+    if !scanner.take(closing)? {
+        return Ok(None);
+    }
+    scanner.skip_ws()?;
+    Ok(Some(scanner.cursor == scanner.end))
+}
+
+enum JsonCollectionPrefix {
+    Item,
+    Complete(bool),
+}
+
+enum JsonCollectionSuffix {
+    Continue,
+    Complete(bool),
+    Invalid,
+}
+
+fn retain_valid_collection<T>(values: Vec<T>, valid: bool) -> Vec<T> {
+    if valid { values } else { Vec::new() }
 }

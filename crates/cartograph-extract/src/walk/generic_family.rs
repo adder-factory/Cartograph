@@ -492,6 +492,12 @@ fn find_name_node(node: Node<'_>, depth: usize) -> Option<Node<'_>> {
     if depth > NAME_SEARCH_DEPTH {
         return None;
     }
+    name_from_fields(node, depth)
+        .or_else(|| direct_name_child(node))
+        .or_else(|| nested_name_child(node, depth))
+}
+
+fn name_from_fields(node: Node<'_>, depth: usize) -> Option<Node<'_>> {
     for field in [
         "name",
         "identifier",
@@ -510,12 +516,16 @@ fn find_name_node(node: Node<'_>, depth: usize) -> Option<Node<'_>> {
             }
         }
     }
+    None
+}
+
+fn direct_name_child(node: Node<'_>) -> Option<Node<'_>> {
     let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if is_name_node(child.kind()) {
-            return Some(child);
-        }
-    }
+    node.named_children(&mut cursor)
+        .find(|child| is_name_node(child.kind()))
+}
+
+fn nested_name_child(node: Node<'_>, depth: usize) -> Option<Node<'_>> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if let Some(found) = find_name_node(child, depth.saturating_add(1)) {

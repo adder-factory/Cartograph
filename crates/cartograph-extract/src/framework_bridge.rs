@@ -225,6 +225,24 @@ fn scan_registry_alias_calls(
     builder: &mut FrameworkBuilder<'_, '_>,
     source: &str,
 ) -> Result<(), ExtractError> {
+    let bindings = collect_registry_alias_bindings(builder, source)?;
+    for (alias, module) in bindings {
+        scan_registry_alias_invocations(
+            builder,
+            RegistryAliasScan {
+                source,
+                alias: &alias,
+                module: &module,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_registry_alias_bindings(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    source: &str,
+) -> Result<Vec<(String, String)>, ExtractError> {
     let mut bindings = Vec::new();
     bindings
         .try_reserve_exact(MAX_NATIVE_ALIASES)
@@ -261,33 +279,50 @@ fn scan_registry_alias_calls(
             cursor = module.end;
         }
     }
-    for (alias, module) in bindings {
-        let marker = format!("{alias}.");
-        let mut cursor = 0_usize;
-        while let Some(relative) = source[cursor..].find(&marker) {
-            builder.check_cancelled()?;
-            let alias_start = cursor + relative;
-            if alias_start > 0 && source.as_bytes()[alias_start - 1].is_ascii_alphanumeric() {
-                cursor = alias_start + marker.len();
-                continue;
-            }
-            let method_start = alias_start + marker.len();
-            let Some((method_end, method)) = identifier_at(source, method_start) else {
-                cursor = method_start;
-                continue;
-            };
-            let call = skip_ascii_whitespace(source, method_end);
-            if source.as_bytes().get(call) == Some(&b'(') && !react_native_blocklisted(method) {
-                builder.add_reference_near_with_resolution(FrameworkNearReferenceInput {
-                    name: method,
-                    resolution_name: Some(&format!("{module}::{method}")),
-                    kind: ReferenceKind::Calls,
-                    start: method_start,
-                    end: method_end,
-                })?;
-            }
-            cursor = method_end;
+    Ok(bindings)
+}
+
+#[derive(Clone, Copy)]
+struct RegistryAliasScan<'a> {
+    source: &'a str,
+    alias: &'a str,
+    module: &'a str,
+}
+
+fn scan_registry_alias_invocations(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: RegistryAliasScan<'_>,
+) -> Result<(), ExtractError> {
+    let RegistryAliasScan {
+        source,
+        alias,
+        module,
+    } = input;
+    let marker = format!("{alias}.");
+    let mut cursor = 0_usize;
+    while let Some(relative) = source[cursor..].find(&marker) {
+        builder.check_cancelled()?;
+        let alias_start = cursor + relative;
+        if alias_start > 0 && source.as_bytes()[alias_start - 1].is_ascii_alphanumeric() {
+            cursor = alias_start + marker.len();
+            continue;
         }
+        let method_start = alias_start + marker.len();
+        let Some((method_end, method)) = identifier_at(source, method_start) else {
+            cursor = method_start;
+            continue;
+        };
+        let call = skip_ascii_whitespace(source, method_end);
+        if source.as_bytes().get(call) == Some(&b'(') && !react_native_blocklisted(method) {
+            builder.add_reference_near_with_resolution(FrameworkNearReferenceInput {
+                name: method,
+                resolution_name: Some(&format!("{module}::{method}")),
+                kind: ReferenceKind::Calls,
+                start: method_start,
+                end: method_end,
+            })?;
+        }
+        cursor = method_end;
     }
     Ok(())
 }
@@ -720,13 +755,17 @@ fn parse_objc_message(body: &str) -> Option<String> {
         return None;
     }
     let (selector_end, first_keyword) = identifier_at(body, selector_start)?;
-    let mut cursor = skip_ascii_whitespace(body, selector_end);
+    let cursor = skip_ascii_whitespace(body, selector_end);
     let mut selector = first_keyword.to_owned();
     if body.as_bytes().get(cursor) != Some(&b':') {
         return Some(format!("{receiver}.{selector}"));
     }
     selector.push(':');
-    cursor += 1;
+    append_objc_selector_tail(body, cursor.saturating_add(1), &mut selector)?;
+    Some(format!("{receiver}.{selector}"))
+}
+
+fn append_objc_selector_tail(body: &str, mut cursor: usize, selector: &mut String) -> Option<()> {
     let bytes = body.as_bytes();
     let mut state = BridgeDelimiterState::default();
     while cursor < bytes.len() {
@@ -753,7 +792,7 @@ fn parse_objc_message(body: &str) -> Option<String> {
             cursor += 1;
         }
     }
-    Some(format!("{receiver}.{selector}"))
+    Some(())
 }
 
 fn scan_objc_method_macro(

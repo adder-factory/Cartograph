@@ -1335,50 +1335,56 @@ fn numeric_claims(text: &str) -> BTreeSet<String> {
     let mut claims = BTreeSet::new();
     let mut index = 0_usize;
     while index < bytes.len() {
-        if !(bytes[index].is_ascii_digit()
-            || bytes[index] == b'-'
-                && bytes
-                    .get(index.saturating_add(1))
-                    .is_some_and(u8::is_ascii_digit))
-        {
+        let Some(end) = numeric_token_end(bytes, index) else {
             index = index.saturating_add(1);
             continue;
-        }
+        };
         let start = index;
-        if bytes[index] == b'-' {
-            index = index.saturating_add(1);
-        }
-        let mut decimal_seen = false;
-        while let Some(byte) = bytes.get(index) {
-            if byte.is_ascii_digit() || *byte == b'_' {
-                index = index.saturating_add(1);
-            } else if *byte == b'.'
-                && !decimal_seen
-                && bytes
-                    .get(index.saturating_add(1))
-                    .is_some_and(u8::is_ascii_digit)
-            {
-                decimal_seen = true;
-                index = index.saturating_add(1);
-            } else {
-                break;
-            }
-        }
+        index = end;
         if !numeric_claim_is_value(text, start, index) {
             continue;
         }
-        let Some(raw) = text.get(start..index) else {
-            continue;
-        };
-        let normalized = raw.replace('_', "");
-        if let Ok(number) = normalized.parse::<f64>()
-            && number.is_finite()
-            && !(1900.0..=2100.0).contains(&number)
-        {
-            claims.insert(canonical_number(number));
+        if let Some(claim) = canonical_numeric_claim(text, start, index) {
+            claims.insert(claim);
         }
     }
     claims
+}
+
+fn numeric_token_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let starts_number = bytes[start].is_ascii_digit()
+        || bytes[start] == b'-'
+            && bytes
+                .get(start.saturating_add(1))
+                .is_some_and(u8::is_ascii_digit);
+    if !starts_number {
+        return None;
+    }
+    let mut cursor = start + usize::from(bytes[start] == b'-');
+    let mut decimal_seen = false;
+    while let Some(byte) = bytes.get(cursor) {
+        if byte.is_ascii_digit() || *byte == b'_' {
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        let decimal = *byte == b'.'
+            && !decimal_seen
+            && bytes
+                .get(cursor.saturating_add(1))
+                .is_some_and(u8::is_ascii_digit);
+        if !decimal {
+            break;
+        }
+        decimal_seen = true;
+        cursor = cursor.saturating_add(1);
+    }
+    Some(cursor)
+}
+
+fn canonical_numeric_claim(text: &str, start: usize, end: usize) -> Option<String> {
+    let normalized = text.get(start..end)?.replace('_', "");
+    let number = normalized.parse::<f64>().ok()?;
+    (number.is_finite() && !(1900.0..=2100.0).contains(&number)).then(|| canonical_number(number))
 }
 
 fn documented_numeric_claims(text: &str) -> BTreeSet<String> {
@@ -2119,16 +2125,21 @@ pub(super) struct BodySearchText {
     pub(super) truncated: bool,
 }
 
+#[derive(Default)]
+struct BodySearchAccumulator<'source> {
+    prefix: String,
+    tail: VecDeque<&'source str>,
+    tail_bytes: usize,
+    using_tail: bool,
+    truncated: bool,
+}
+
 pub(super) fn body_search_text(
     root: Node<'_>,
     source: &str,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<BodySearchText, ExtractError> {
-    let mut prefix = String::new();
-    let mut tail: VecDeque<&str> = VecDeque::new();
-    let mut tail_bytes = 0_usize;
-    let mut using_tail = false;
-    let mut truncated = false;
+    let mut accumulator = BodySearchAccumulator::default();
     for node in descendants_including_root(root) {
         if cancelled() {
             return Err(ExtractError::Cancelled);
@@ -2143,70 +2154,101 @@ pub(super) fn body_search_text(
         if token.is_empty() {
             continue;
         }
+        accumulator.push(token)?;
+    }
+    accumulator.finish()
+}
 
-        let prefix_separator = usize::from(!prefix.is_empty());
-        let fits_prefix = !using_tail
-            && prefix
+impl<'source> BodySearchAccumulator<'source> {
+    fn push(&mut self, token: &'source str) -> Result<(), ExtractError> {
+        if self.fits_prefix(token) {
+            return self.push_prefix(token);
+        }
+        self.using_tail = true;
+        self.push_tail(token)
+    }
+
+    fn fits_prefix(&self, token: &str) -> bool {
+        let separator = usize::from(!self.prefix.is_empty());
+        !self.using_tail
+            && self
+                .prefix
                 .len()
-                .checked_add(prefix_separator)
+                .checked_add(separator)
                 .and_then(|length| length.checked_add(token.len()))
-                .is_some_and(|required| required <= BODY_SEARCH_PREFIX_BYTES);
-        if fits_prefix {
-            prefix
-                .try_reserve(prefix_separator.saturating_add(token.len()))
-                .map_err(|_| ExtractError::OutputLimit)?;
-            if prefix_separator != 0 {
-                prefix.push(' ');
-            }
-            prefix.push_str(token);
-            continue;
-        }
-        using_tail = true;
+                .is_some_and(|required| required <= BODY_SEARCH_PREFIX_BYTES)
+    }
 
-        let prefix_tail_separator = usize::from(!prefix.is_empty());
-        let tail_capacity = MAX_BODY_SEARCH_BYTES
-            .saturating_sub(prefix.len())
-            .saturating_sub(prefix_tail_separator);
-        if token.len() > tail_capacity {
-            truncated = true;
-            continue;
+    fn push_prefix(&mut self, token: &str) -> Result<(), ExtractError> {
+        let separator = usize::from(!self.prefix.is_empty());
+        self.prefix
+            .try_reserve(separator.saturating_add(token.len()))
+            .map_err(|_| ExtractError::OutputLimit)?;
+        if separator != 0 {
+            self.prefix.push(' ');
         }
-        while tail_bytes.saturating_add(
-            token
-                .len()
-                .checked_add(usize::from(!tail.is_empty()))
-                .ok_or(ExtractError::OutputLimit)?,
-        ) > tail_capacity
+        self.prefix.push_str(token);
+        Ok(())
+    }
+
+    fn push_tail(&mut self, token: &'source str) -> Result<(), ExtractError> {
+        let tail_capacity = MAX_BODY_SEARCH_BYTES
+            .saturating_sub(self.prefix.len())
+            .saturating_sub(usize::from(!self.prefix.is_empty()));
+        if token.len() > tail_capacity {
+            self.truncated = true;
+            return Ok(());
+        }
+        while self
+            .tail_bytes
+            .saturating_add(tail_token_bytes(token, !self.tail.is_empty())?)
+            > tail_capacity
         {
-            let Some(removed) = tail.pop_front() else {
+            let Some(removed) = self.tail.pop_front() else {
                 return Err(ExtractError::OutputLimit);
             };
-            tail_bytes = tail_bytes
+            self.tail_bytes = self
+                .tail_bytes
                 .saturating_sub(removed.len())
-                .saturating_sub(usize::from(!tail.is_empty()));
-            truncated = true;
+                .saturating_sub(usize::from(!self.tail.is_empty()));
+            self.truncated = true;
         }
-        let token_bytes = token
-            .len()
-            .checked_add(usize::from(!tail.is_empty()))
-            .ok_or(ExtractError::OutputLimit)?;
-        tail.try_reserve(1).map_err(|_| ExtractError::OutputLimit)?;
-        tail.push_back(token);
-        tail_bytes = tail_bytes
+        let token_bytes = tail_token_bytes(token, !self.tail.is_empty())?;
+        self.tail
+            .try_reserve(1)
+            .map_err(|_| ExtractError::OutputLimit)?;
+        self.tail.push_back(token);
+        self.tail_bytes = self
+            .tail_bytes
             .checked_add(token_bytes)
             .ok_or(ExtractError::OutputLimit)?;
+        Ok(())
     }
 
-    let mut text = prefix;
-    text.try_reserve(usize::from(!text.is_empty() && !tail.is_empty()).saturating_add(tail_bytes))
+    fn finish(self) -> Result<BodySearchText, ExtractError> {
+        let mut text = self.prefix;
+        text.try_reserve(
+            usize::from(!text.is_empty() && !self.tail.is_empty()).saturating_add(self.tail_bytes),
+        )
         .map_err(|_| ExtractError::OutputLimit)?;
-    for token in tail {
-        if !text.is_empty() {
-            text.push(' ');
+        for token in self.tail {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(token);
         }
-        text.push_str(token);
+        Ok(BodySearchText {
+            text,
+            truncated: self.truncated,
+        })
     }
-    Ok(BodySearchText { text, truncated })
+}
+
+fn tail_token_bytes(token: &str, separated: bool) -> Result<usize, ExtractError> {
+    token
+        .len()
+        .checked_add(usize::from(separated))
+        .ok_or(ExtractError::OutputLimit)
 }
 
 const SEARCH_IDENTIFIER_KINDS: &[&str] = &[
@@ -2687,41 +2729,65 @@ fn normalize_preceding_comments(
         .try_reserve(input.retained_bytes)
         .map_err(|_| ExtractError::OutputLimit)?;
     let mut pending_blank_lines = 0_usize;
-    for comment in input.comments {
-        if cancelled() {
-            return Err(ExtractError::Cancelled);
+    {
+        let mut appender = CommentAppender {
+            normalized: &mut normalized,
+            pending_blank_lines: &mut pending_blank_lines,
+            cancelled,
+        };
+        for comment in input.comments {
+            if (appender.cancelled)() {
+                return Err(ExtractError::Cancelled);
+            }
+            appender.append(text_for(input.source, *comment))?;
         }
-        let raw = text_for(input.source, *comment);
+    }
+    Ok((!normalized.is_empty()).then_some(normalized))
+}
+
+struct CommentAppender<'a> {
+    normalized: &'a mut String,
+    pending_blank_lines: &'a mut usize,
+    cancelled: &'a mut dyn FnMut() -> bool,
+}
+
+impl CommentAppender<'_> {
+    fn append(&mut self, raw: &str) -> Result<(), ExtractError> {
         let mut lines = raw.lines().peekable();
         let mut first = true;
         while let Some(line) = lines.next() {
             let cleaned = clean_comment_line(line, first, lines.peek().is_none());
             first = false;
-            if cleaned.is_empty() || is_decorative_rule_line(cleaned, cancelled)? {
-                if !normalized.is_empty() {
-                    pending_blank_lines = pending_blank_lines.saturating_add(1);
+            if cleaned.is_empty() || is_decorative_rule_line(cleaned, self.cancelled)? {
+                if !self.normalized.is_empty() {
+                    *self.pending_blank_lines = self.pending_blank_lines.saturating_add(1);
                 }
                 continue;
             }
-            if normalized.is_empty() {
-                ensure_fact_string_length(cleaned.len())?;
-            } else {
-                let separators = pending_blank_lines.saturating_add(1);
-                let next_length = normalized
-                    .len()
-                    .checked_add(separators)
-                    .and_then(|length| length.checked_add(cleaned.len()))
-                    .ok_or(ExtractError::OutputLimit)?;
-                ensure_fact_string_length(next_length)?;
-                for _ in 0..separators {
-                    normalized.push('\n');
-                }
-            }
-            pending_blank_lines = 0;
-            push_cancellable(&mut normalized, cleaned, cancelled)?;
+            self.append_clean_line(cleaned)?;
         }
+        Ok(())
     }
-    Ok((!normalized.is_empty()).then_some(normalized))
+
+    fn append_clean_line(&mut self, cleaned: &str) -> Result<(), ExtractError> {
+        if self.normalized.is_empty() {
+            ensure_fact_string_length(cleaned.len())?;
+        } else {
+            let separators = self.pending_blank_lines.saturating_add(1);
+            let next_length = self
+                .normalized
+                .len()
+                .checked_add(separators)
+                .and_then(|length| length.checked_add(cleaned.len()))
+                .ok_or(ExtractError::OutputLimit)?;
+            ensure_fact_string_length(next_length)?;
+            for _ in 0..separators {
+                self.normalized.push('\n');
+            }
+        }
+        *self.pending_blank_lines = 0;
+        push_cancellable(self.normalized, cleaned, self.cancelled)
+    }
 }
 
 fn clean_comment_line(mut line: &str, first: bool, last: bool) -> &str {

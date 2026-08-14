@@ -21,77 +21,108 @@ pub(super) fn visit_export(
         .transpose()?;
     let clause = named_children(node).find(|child| child.kind() == "export_clause");
     if let Some(clause) = clause {
-        for specifier in named_children(clause) {
-            builder.context.ensure_active()?;
-            if specifier.kind() != "export_specifier" {
-                continue;
-            }
-            let Some(name_node) = specifier.child_by_field_name("name") else {
-                continue;
-            };
-            let local_name = builder.context.owned_unquoted_text(name_node)?;
-            let alias_node = specifier.child_by_field_name("alias");
-            let public_name = match alias_node {
-                Some(alias) => builder.context.owned_unquoted_text(alias)?,
-                None => local_name.clone(),
-            };
-            if source.is_some() || public_name != local_name {
-                module_system::emit_export_alias(
-                    builder,
-                    module_system::ExportAlias {
-                        public_name,
-                        local_name,
-                        span_node: specifier,
-                        reference_node: name_node,
-                        source: source.clone(),
-                    },
-                )?;
-            }
-        }
+        emit_export_clause(builder, clause, source.as_deref())?;
     } else if let (Some(module_name), Some(source_node)) = (source, source_node) {
-        let pending = PendingSymbol {
-            kind: SymbolKind::Import,
-            name: module_name.clone(),
-            span_node: node,
-            structural_node: node,
-            doc_anchor: node,
-            body_node: None,
-            declaration_only: false,
-            signature: None,
-            export: crate::SymbolExportFlags::new(false, false),
-            async_symbol: false,
-            static_member: false,
-            visibility: None,
-        };
-        builder.emit_symbol(pending)?;
-        references::push_reference(
+        emit_export_all(
             builder,
-            PendingReference {
-                owner: None,
-                name: module_name.clone(),
-                kind: ReferenceKind::Imports,
+            ExportAllInput {
                 node,
+                source_node,
+                module_name,
             },
         )?;
-        if let Some(namespace) =
-            named_children(node).find(|child| child.kind() == "namespace_export")
-            && let Some(public_node) = namespace.named_child(0)
-        {
-            module_system::emit_namespace_reexport(
-                builder,
-                module_system::NamespaceReexportInput::new(namespace, public_node, module_name),
-            )?;
-        } else {
-            builder.emit_import_binding(ExtractedImportBinding {
-                kind: ImportBindingKind::ReExportAll,
-                module_specifier: module_name,
-                imported_name: "*".to_owned(),
-                local_name: "*".to_owned(),
-                span: span_for(source_node)?,
-            })?;
-        }
     }
     builder.visit_named_children(node, depth)
+}
+
+fn emit_export_clause(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    clause: Node<'_>,
+    source: Option<&str>,
+) -> Result<(), ExtractError> {
+    for specifier in named_children(clause) {
+        builder.context.ensure_active()?;
+        if specifier.kind() != "export_specifier" {
+            continue;
+        }
+        let Some(name_node) = specifier.child_by_field_name("name") else {
+            continue;
+        };
+        let local_name = builder.context.owned_unquoted_text(name_node)?;
+        let public_name = match specifier.child_by_field_name("alias") {
+            Some(alias) => builder.context.owned_unquoted_text(alias)?,
+            None => local_name.clone(),
+        };
+        if source.is_some() || public_name != local_name {
+            module_system::emit_export_alias(
+                builder,
+                module_system::ExportAlias {
+                    public_name,
+                    local_name,
+                    span_node: specifier,
+                    reference_node: name_node,
+                    source: source.map(str::to_owned),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+struct ExportAllInput<'tree> {
+    node: Node<'tree>,
+    source_node: Node<'tree>,
+    module_name: String,
+}
+
+fn emit_export_all(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: ExportAllInput<'_>,
+) -> Result<(), ExtractError> {
+    let ExportAllInput {
+        node,
+        source_node,
+        module_name,
+    } = input;
+    builder.emit_symbol(PendingSymbol {
+        kind: SymbolKind::Import,
+        name: module_name.clone(),
+        span_node: node,
+        structural_node: node,
+        doc_anchor: node,
+        body_node: None,
+        declaration_only: false,
+        signature: None,
+        export: crate::SymbolExportFlags::new(false, false),
+        async_symbol: false,
+        static_member: false,
+        visibility: None,
+    })?;
+    references::push_reference(
+        builder,
+        PendingReference {
+            owner: None,
+            name: module_name.clone(),
+            kind: ReferenceKind::Imports,
+            node,
+        },
+    )?;
+    let namespace = named_children(node).find(|child| child.kind() == "namespace_export");
+    if let Some((namespace, public_node)) =
+        namespace.and_then(|namespace| namespace.named_child(0).map(|node| (namespace, node)))
+    {
+        return module_system::emit_namespace_reexport(
+            builder,
+            module_system::NamespaceReexportInput::new(namespace, public_node, module_name),
+        );
+    }
+    builder.emit_import_binding(ExtractedImportBinding {
+        kind: ImportBindingKind::ReExportAll,
+        module_specifier: module_name,
+        imported_name: "*".to_owned(),
+        local_name: "*".to_owned(),
+        span: span_for(source_node)?,
+    })
 }
 
 pub(super) fn visit_import(
@@ -102,9 +133,22 @@ pub(super) fn visit_import(
         return Ok(());
     };
     let module_name = builder.context.owned_unquoted_text(source_node)?;
+    emit_import_declaration(builder, node, &module_name)?;
+
+    if let Some(clause) = named_children(node).find(|child| child.kind() == "import_clause") {
+        emit_import_clause_bindings(builder, clause, &module_name)?;
+    }
+    emit_named_import_bindings(builder, node, &module_name)
+}
+
+fn emit_import_declaration(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    module_name: &str,
+) -> Result<(), ExtractError> {
     let pending = PendingSymbol {
         kind: SymbolKind::Import,
-        name: module_name.clone(),
+        name: module_name.to_owned(),
         span_node: node,
         structural_node: node,
         doc_anchor: node,
@@ -121,44 +165,55 @@ pub(super) fn visit_import(
         builder,
         PendingReference {
             owner: None,
-            name: module_name.clone(),
+            name: module_name.to_owned(),
             kind: ReferenceKind::Imports,
             node,
         },
-    )?;
+    )
+}
 
-    let import_clause = named_children(node).find(|child| child.kind() == "import_clause");
-    if let Some(clause) = import_clause {
-        for child in named_children(clause) {
-            builder.context.ensure_active()?;
-            match child.kind() {
-                "identifier" => {
-                    let local_name = builder.context.owned_text(child)?;
-                    builder.emit_import_binding(ExtractedImportBinding {
-                        kind: ImportBindingKind::Default,
-                        module_specifier: module_name.clone(),
-                        imported_name: "default".to_owned(),
-                        local_name,
-                        span: span_for(child)?,
-                    })?;
-                }
-                "namespace_import" => {
-                    if let Some(local) = child.named_child(0) {
-                        let local_name = builder.context.owned_text(local)?;
-                        builder.emit_import_binding(ExtractedImportBinding {
-                            kind: ImportBindingKind::Namespace,
-                            module_specifier: module_name.clone(),
-                            imported_name: "*".to_owned(),
-                            local_name,
-                            span: span_for(local)?,
-                        })?;
-                    }
-                }
-                _ => {}
+fn emit_import_clause_bindings(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    clause: Node<'_>,
+    module_name: &str,
+) -> Result<(), ExtractError> {
+    for child in named_children(clause) {
+        builder.context.ensure_active()?;
+        match child.kind() {
+            "identifier" => {
+                let local_name = builder.context.owned_text(child)?;
+                builder.emit_import_binding(ExtractedImportBinding {
+                    kind: ImportBindingKind::Default,
+                    module_specifier: module_name.to_owned(),
+                    imported_name: "default".to_owned(),
+                    local_name,
+                    span: span_for(child)?,
+                })?;
             }
+            "namespace_import" => {
+                let Some(local) = child.named_child(0) else {
+                    continue;
+                };
+                let local_name = builder.context.owned_text(local)?;
+                builder.emit_import_binding(ExtractedImportBinding {
+                    kind: ImportBindingKind::Namespace,
+                    module_specifier: module_name.to_owned(),
+                    imported_name: "*".to_owned(),
+                    local_name,
+                    span: span_for(local)?,
+                })?;
+            }
+            _ => {}
         }
     }
+    Ok(())
+}
 
+fn emit_named_import_bindings(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+    module_name: &str,
+) -> Result<(), ExtractError> {
     for specifier in descendants(node) {
         builder.context.ensure_active()?;
         if specifier.kind() != "import_specifier" {
@@ -171,7 +226,7 @@ pub(super) fn visit_import(
                 let local_name = builder.context.owned_text(local_node)?;
                 builder.emit_import_binding(ExtractedImportBinding {
                     kind: ImportBindingKind::Named,
-                    module_specifier: module_name.clone(),
+                    module_specifier: module_name.to_owned(),
                     imported_name: name.clone(),
                     local_name,
                     span: span_for(name_node)?,

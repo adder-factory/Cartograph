@@ -265,84 +265,22 @@ fn collect_disk_evidence(
 
 fn compose_report(disk: DiskEvidence, imports: Vec<ExternalImportRecord>) -> DependencyAuditReport {
     let all_declared = disk.declared.all();
-    let mut usage = BTreeMap::<String, MutableUsage>::new();
-    for import in imports {
-        if is_fixture_path(import.path()) {
-            continue;
-        }
-        let Some(package) = package_name(import.module_specifier()) else {
-            continue;
-        };
-        let evidence = usage.entry(package).or_default();
-        evidence.import_sites = evidence.import_sites.saturating_add(import.site_count());
-        if evidence.import_paths.len() < MAX_EVIDENCE_PATHS {
-            evidence.import_paths.insert(import.path().to_owned());
-        }
+    let mut usage = import_usage(imports);
+    ScriptUsageRecorder {
+        usage: &mut usage,
+        bin_to_package: &disk.bin_to_package,
+        all_declared: &all_declared,
     }
-    for script in &disk.scripts {
-        for token in script_tokens(script) {
-            if let Some(package) = disk.bin_to_package.get(token) {
-                usage.entry(package.clone()).or_default().script_references = usage
-                    .get(package)
-                    .map_or(1, |evidence| evidence.script_references.saturating_add(1));
-            } else if all_declared.contains(token) {
-                usage.entry(token.to_owned()).or_default().script_references = usage
-                    .get(token)
-                    .map_or(1, |evidence| evidence.script_references.saturating_add(1));
-            }
-        }
-    }
-    for package in &disk.allowlist {
-        usage.entry(package.clone()).or_default().allowlisted = true;
-    }
-    for package in &disk.configured_providers {
-        usage
-            .entry(package.clone())
-            .or_default()
-            .configured_provider = true;
-    }
-    let used_upstreams = usage.keys().cloned().collect::<BTreeSet<_>>();
-    for package in &disk.declared.development {
-        if package == "@types/node"
-            || types_upstream(package).is_some_and(|upstream| used_upstreams.contains(&upstream))
-        {
-            let evidence = usage.entry(package.clone()).or_default();
-            evidence.type_companion = true;
-        }
-    }
+    .record(&disk.scripts);
+    mark_usage_flags(&mut usage, &disk.allowlist, &disk.configured_providers);
+    mark_type_companions(&mut usage, &disk.declared.development);
     let used_names = usage.keys().cloned().collect::<BTreeSet<_>>();
     let unused_runtime_candidates = difference(&disk.declared.runtime, &used_names);
     let unused_development_candidates = difference(&disk.declared.development, &used_names);
     let unused_optional_candidates = difference(&disk.declared.optional, &used_names);
     let unused_peer_candidates = difference(&disk.declared.peer, &used_names);
-    let undeclared = usage
-        .iter()
-        .filter(|(package, evidence)| {
-            evidence.import_sites > 0
-                && !all_declared.contains(*package)
-                && !disk.declared.workspace_packages.contains(*package)
-                && !disk.runtime_shims.contains(*package)
-                && !declared_types_companion(package, &all_declared)
-        })
-        .map(|(package, evidence)| UndeclaredDependency {
-            package: package.clone(),
-            import_sites: evidence.import_sites,
-            import_paths: evidence.import_paths.iter().cloned().collect(),
-        })
-        .collect();
-    let used = usage
-        .into_iter()
-        .filter(|(package, _)| all_declared.contains(package))
-        .map(|(package, evidence)| DependencyUseEvidence {
-            package,
-            import_sites: evidence.import_sites,
-            import_paths: evidence.import_paths.into_iter().collect(),
-            script_references: evidence.script_references,
-            allowlisted: evidence.allowlisted,
-            configured_provider: evidence.configured_provider,
-            type_companion: evidence.type_companion,
-        })
-        .collect();
+    let undeclared = undeclared_dependencies(&usage, &all_declared, &disk);
+    let used = declared_usage(usage, &all_declared);
     DependencyAuditReport {
         root_manifest: disk.root_manifest,
         workspace_manifests: disk.workspace_manifests,
@@ -363,6 +301,121 @@ fn compose_report(disk: DiskEvidence, imports: Vec<ExternalImportRecord>) -> Dep
             "Import evidence comes from the current indexed generation; script, bin, provider, allowlist, workspace, and ambient type signals are inspected separately.",
         ],
     }
+}
+
+fn import_usage(imports: Vec<ExternalImportRecord>) -> BTreeMap<String, MutableUsage> {
+    let mut usage = BTreeMap::<String, MutableUsage>::new();
+    for import in imports {
+        if is_fixture_path(import.path()) {
+            continue;
+        }
+        let Some(package) = package_name(import.module_specifier()) else {
+            continue;
+        };
+        let evidence = usage.entry(package).or_default();
+        evidence.import_sites = evidence.import_sites.saturating_add(import.site_count());
+        if evidence.import_paths.len() < MAX_EVIDENCE_PATHS {
+            evidence.import_paths.insert(import.path().to_owned());
+        }
+    }
+    usage
+}
+
+struct ScriptUsageRecorder<'a> {
+    usage: &'a mut BTreeMap<String, MutableUsage>,
+    bin_to_package: &'a BTreeMap<String, String>,
+    all_declared: &'a BTreeSet<String>,
+}
+
+impl ScriptUsageRecorder<'_> {
+    fn record(&mut self, scripts: &[String]) {
+        for script in scripts {
+            for token in script_tokens(script) {
+                if let Some(package) = self.bin_to_package.get(token) {
+                    increment_script_reference(self.usage, package);
+                } else if self.all_declared.contains(token) {
+                    increment_script_reference(self.usage, token);
+                }
+            }
+        }
+    }
+}
+
+fn increment_script_reference(usage: &mut BTreeMap<String, MutableUsage>, package: &str) {
+    let evidence = usage.entry(package.to_owned()).or_default();
+    evidence.script_references = evidence.script_references.saturating_add(1);
+}
+
+fn mark_usage_flags(
+    usage: &mut BTreeMap<String, MutableUsage>,
+    allowlist: &BTreeSet<String>,
+    configured_providers: &BTreeSet<String>,
+) {
+    for package in allowlist {
+        usage.entry(package.clone()).or_default().allowlisted = true;
+    }
+    for package in configured_providers {
+        usage
+            .entry(package.clone())
+            .or_default()
+            .configured_provider = true;
+    }
+}
+
+fn mark_type_companions(
+    usage: &mut BTreeMap<String, MutableUsage>,
+    development: &BTreeSet<String>,
+) {
+    let used_upstreams = usage.keys().cloned().collect::<BTreeSet<_>>();
+    for package in development {
+        if package == "@types/node"
+            || types_upstream(package).is_some_and(|upstream| used_upstreams.contains(&upstream))
+        {
+            let evidence = usage.entry(package.clone()).or_default();
+            evidence.type_companion = true;
+        }
+    }
+}
+
+fn undeclared_dependencies(
+    usage: &BTreeMap<String, MutableUsage>,
+    all_declared: &BTreeSet<String>,
+    disk: &DiskEvidence,
+) -> Vec<UndeclaredDependency> {
+    usage
+        .iter()
+        .filter(|(package, evidence)| {
+            evidence.import_sites > 0
+                && !all_declared.contains(*package)
+                && !disk.declared.workspace_packages.contains(*package)
+                && !disk.runtime_shims.contains(*package)
+                && !declared_types_companion(package, all_declared)
+        })
+        .map(|(package, evidence)| UndeclaredDependency {
+            package: package.clone(),
+            import_sites: evidence.import_sites,
+            import_paths: evidence.import_paths.iter().cloned().collect(),
+        })
+        .collect()
+}
+
+fn declared_usage(
+    usage: BTreeMap<String, MutableUsage>,
+    all_declared: &BTreeSet<String>,
+) -> Vec<DependencyUseEvidence> {
+    usage
+        .into_iter()
+        .filter(|(package, _)| all_declared.contains(package))
+        .map(|(package, evidence)| DependencyUseEvidence {
+            package,
+            import_sites: evidence.import_sites,
+            import_paths: evidence.import_paths.into_iter().collect(),
+            script_references: evidence.script_references,
+            allowlisted: evidence.allowlisted,
+            configured_provider: evidence.configured_provider,
+            type_companion: evidence.type_companion,
+        })
+        .collect()
 }
 
 fn read_manifest(root: &Path, path: &Path) -> Result<ManifestRecord, DependencyAuditError> {
@@ -627,42 +680,51 @@ fn collect_bin_names(
         if let Some(basename) = package.rsplit('/').next() {
             output.entry(basename.to_owned()).or_insert(package.clone());
         }
-        for directory in records
-            .iter()
-            .map(|record| record.directory.as_path())
-            .chain(std::iter::once(root))
-        {
-            let path = directory
-                .join("node_modules")
-                .join(&package)
-                .join("package.json");
-            let Ok(metadata) = std::fs::metadata(&path) else {
-                continue;
-            };
-            if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(path) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-                continue;
-            };
-            match value.get("bin") {
-                Some(Value::String(_)) => {
-                    if let Some(basename) = package.rsplit('/').next() {
-                        output.insert(basename.to_owned(), package.clone());
-                    }
-                }
-                Some(Value::Object(bins)) => {
-                    output.extend(bins.keys().cloned().map(|bin| (bin, package.clone())));
-                }
-                _ => {}
-            }
-            break;
+        for bin in package_bin_names(root, records, &package) {
+            output.insert(bin, package.clone());
         }
     }
     Ok(output)
+}
+
+fn package_bin_names(root: &Path, records: &[ManifestRecord], package: &str) -> Vec<String> {
+    for directory in records
+        .iter()
+        .map(|record| record.directory.as_path())
+        .chain(std::iter::once(root))
+    {
+        let path = directory
+            .join("node_modules")
+            .join(package)
+            .join("package.json");
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        return manifest_bin_names(&value, package);
+    }
+    Vec::new()
+}
+
+fn manifest_bin_names(value: &Value, package: &str) -> Vec<String> {
+    match value.get("bin") {
+        Some(Value::String(_)) => package
+            .rsplit('/')
+            .next()
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        Some(Value::Object(bins)) => bins.keys().cloned().collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn read_script_files(
@@ -678,46 +740,68 @@ fn read_script_files(
         .collect::<Vec<_>>();
     roots.sort();
     roots.dedup();
-    let mut output = Vec::new();
-    let mut files = 0_usize;
-    let mut bytes = 0_u64;
+    let mut state = ScriptReadState::default();
     for script_root in roots {
-        for entry in WalkBuilder::new(&script_root)
-            .hidden(true)
-            .follow_links(false)
-            .max_depth(Some(5))
-            .build()
-        {
-            if cancellation.is_cancelled() {
-                return Err(DependencyAuditError::Cancelled);
-            }
-            let entry = entry.map_err(|_| DependencyAuditError::WorkspaceLimit)?;
-            if !entry.file_type().is_some_and(|kind| kind.is_file())
-                || !is_script_extension(entry.path())
-            {
-                continue;
-            }
-            files = files.saturating_add(1);
-            if files > MAX_SCRIPT_FILES {
-                return Err(DependencyAuditError::WorkspaceLimit);
-            }
-            let metadata = entry
-                .metadata()
-                .map_err(|_| DependencyAuditError::WorkspaceLimit)?;
-            if metadata.len() > MAX_SCRIPT_FILE_BYTES {
-                return Err(DependencyAuditError::WorkspaceLimit);
-            }
-            bytes = bytes
-                .checked_add(metadata.len())
-                .filter(|value| *value <= MAX_SCRIPT_TOTAL_BYTES)
-                .ok_or(DependencyAuditError::WorkspaceLimit)?;
-            output.push(
-                std::fs::read_to_string(entry.path())
-                    .map_err(|_| DependencyAuditError::WorkspaceLimit)?,
-            );
-        }
+        read_script_root(&script_root, cancellation, &mut state)?;
     }
-    Ok(output)
+    Ok(state.output)
+}
+
+#[derive(Default)]
+struct ScriptReadState {
+    output: Vec<String>,
+    files: usize,
+    bytes: u64,
+}
+
+fn read_script_root(
+    script_root: &Path,
+    cancellation: &ProjectCancellation,
+    state: &mut ScriptReadState,
+) -> Result<(), DependencyAuditError> {
+    for entry in WalkBuilder::new(script_root)
+        .hidden(true)
+        .follow_links(false)
+        .max_depth(Some(5))
+        .build()
+    {
+        if cancellation.is_cancelled() {
+            return Err(DependencyAuditError::Cancelled);
+        }
+        let entry = entry.map_err(|_| DependencyAuditError::WorkspaceLimit)?;
+        if !entry.file_type().is_some_and(|kind| kind.is_file())
+            || !is_script_extension(entry.path())
+        {
+            continue;
+        }
+        append_script_file(&entry, state)?;
+    }
+    Ok(())
+}
+
+fn append_script_file(
+    entry: &ignore::DirEntry,
+    state: &mut ScriptReadState,
+) -> Result<(), DependencyAuditError> {
+    state.files = state.files.saturating_add(1);
+    if state.files > MAX_SCRIPT_FILES {
+        return Err(DependencyAuditError::WorkspaceLimit);
+    }
+    let metadata = entry
+        .metadata()
+        .map_err(|_| DependencyAuditError::WorkspaceLimit)?;
+    if metadata.len() > MAX_SCRIPT_FILE_BYTES {
+        return Err(DependencyAuditError::WorkspaceLimit);
+    }
+    state.bytes = state
+        .bytes
+        .checked_add(metadata.len())
+        .filter(|value| *value <= MAX_SCRIPT_TOTAL_BYTES)
+        .ok_or(DependencyAuditError::WorkspaceLimit)?;
+    state.output.push(
+        std::fs::read_to_string(entry.path()).map_err(|_| DependencyAuditError::WorkspaceLimit)?,
+    );
+    Ok(())
 }
 
 fn is_script_extension(path: &Path) -> bool {

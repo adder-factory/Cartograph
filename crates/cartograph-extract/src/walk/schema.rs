@@ -316,80 +316,149 @@ fn emit_zod_fields(
     } = input;
     let mut fields = BTreeSet::new();
     for pair in super::syntax::named_children(object) {
-        if pair.kind() != "pair" {
-            continue;
-        }
-        if fields.len() >= MAX_FIELDS_PER_SCHEMA {
-            return Err(ExtractError::OutputLimit);
-        }
-        let Some(key) = pair.child_by_field_name("key") else {
-            continue;
-        };
-        let Some(value) = pair.child_by_field_name("value") else {
-            continue;
-        };
-        let field_name = builder.context.owned_unquoted_text(key)?;
-        if !safe_schema_name(&field_name, false) || !fields.insert(field_name.clone()) {
-            continue;
-        }
-        let leaf = zod_leaf_type(value, builder.context.source());
-        let signature = leaf.as_deref().map(|leaf| format!("z.{leaf}"));
-        let field_id = emit_schema_symbol(
+        emit_zod_field(
             builder,
-            SchemaSymbolInput {
-                kind: SymbolKind::Field,
-                name: &field_name,
-                span_node: pair,
-                structural_node: pair,
-                signature: signature.as_deref(),
+            ZodFieldInput {
+                pair,
+                nested_depth,
+                budget,
+                consumed_objects,
+                fields: &mut fields,
             },
         )?;
-        if leaf.as_deref() == Some("enum") {
-            emit_zod_enum_members(
-                builder,
-                SchemaFieldInput {
-                    node: value,
-                    owner: &field_id,
-                    name: &field_name,
-                },
-            )?;
-        } else if leaf.as_deref() == Some("object") && nested_depth < MAX_ZOD_NESTING {
-            let nested = find_zod_call(value, "object", builder.context.source())
-                .and_then(first_named_argument)
-                .filter(|candidate| candidate.kind() == "object");
-            if let Some(nested) = nested {
-                let key = (nested.start_byte(), nested.end_byte());
-                if consumed_objects.insert(key) {
-                    budget.admit_candidate()?;
-                    with_scope(
-                        builder,
-                        SchemaScope {
-                            owner: &field_id,
-                            kind: SymbolKind::Field,
-                            qualifier: None,
-                        },
-                        |builder| {
-                            let (nested_id, _) = emit_zod_schema(
-                                builder,
-                                ZodSchemaInput {
-                                    span_node: pair,
-                                    structural_node: value,
-                                    object: nested,
-                                    name: &field_name,
-                                    nested_depth: nested_depth.saturating_add(1),
-                                    budget,
-                                    consumed_objects,
-                                },
-                            )?;
-                            let _ = nested_id;
-                            Ok(())
-                        },
-                    )?;
-                }
-            }
-        }
     }
     Ok(fields)
+}
+
+struct ZodFieldInput<'tree, 'input> {
+    pair: Node<'tree>,
+    nested_depth: usize,
+    budget: &'input mut ScanBudget,
+    consumed_objects: &'input mut BTreeSet<(usize, usize)>,
+    fields: &'input mut BTreeSet<String>,
+}
+
+fn emit_zod_field(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: ZodFieldInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    let ZodFieldInput {
+        pair,
+        nested_depth,
+        budget,
+        consumed_objects,
+        fields,
+    } = input;
+    if pair.kind() != "pair" {
+        return Ok(());
+    }
+    if fields.len() >= MAX_FIELDS_PER_SCHEMA {
+        return Err(ExtractError::OutputLimit);
+    }
+    let Some(key) = pair.child_by_field_name("key") else {
+        return Ok(());
+    };
+    let Some(value) = pair.child_by_field_name("value") else {
+        return Ok(());
+    };
+    let field_name = builder.context.owned_unquoted_text(key)?;
+    if !safe_schema_name(&field_name, false) || !fields.insert(field_name.clone()) {
+        return Ok(());
+    }
+    let leaf = zod_leaf_type(value, builder.context.source());
+    let signature = leaf.as_deref().map(|leaf| format!("z.{leaf}"));
+    let field_id = emit_schema_symbol(
+        builder,
+        SchemaSymbolInput {
+            kind: SymbolKind::Field,
+            name: &field_name,
+            span_node: pair,
+            structural_node: pair,
+            signature: signature.as_deref(),
+        },
+    )?;
+    match leaf.as_deref() {
+        Some("enum") => emit_zod_enum_members(
+            builder,
+            SchemaFieldInput {
+                node: value,
+                owner: &field_id,
+                name: &field_name,
+            },
+        ),
+        Some("object") if nested_depth < MAX_ZOD_NESTING => emit_nested_zod_object(
+            builder,
+            NestedZodInput {
+                pair,
+                value,
+                field_id: &field_id,
+                field_name: &field_name,
+                nested_depth,
+                budget,
+                consumed_objects,
+            },
+        ),
+        _ => Ok(()),
+    }
+}
+
+struct NestedZodInput<'tree, 'input> {
+    pair: Node<'tree>,
+    value: Node<'tree>,
+    field_id: &'input SymbolId,
+    field_name: &'input str,
+    nested_depth: usize,
+    budget: &'input mut ScanBudget,
+    consumed_objects: &'input mut BTreeSet<(usize, usize)>,
+}
+
+fn emit_nested_zod_object(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    input: NestedZodInput<'_, '_>,
+) -> Result<(), ExtractError> {
+    let NestedZodInput {
+        pair,
+        value,
+        field_id,
+        field_name,
+        nested_depth,
+        budget,
+        consumed_objects,
+    } = input;
+    let Some(nested) = find_zod_call(value, "object", builder.context.source())
+        .and_then(first_named_argument)
+        .filter(|candidate| candidate.kind() == "object")
+    else {
+        return Ok(());
+    };
+    let key = (nested.start_byte(), nested.end_byte());
+    if !consumed_objects.insert(key) {
+        return Ok(());
+    }
+    budget.admit_candidate()?;
+    with_scope(
+        builder,
+        SchemaScope {
+            owner: field_id,
+            kind: SymbolKind::Field,
+            qualifier: None,
+        },
+        |builder| {
+            emit_zod_schema(
+                builder,
+                ZodSchemaInput {
+                    span_node: pair,
+                    structural_node: value,
+                    object: nested,
+                    name: field_name,
+                    nested_depth: nested_depth.saturating_add(1),
+                    budget,
+                    consumed_objects,
+                },
+            )?;
+            Ok(())
+        },
+    )
 }
 
 fn emit_zod_enum_members(
@@ -849,35 +918,41 @@ fn emit_pydantic_literals(
             kind: SymbolKind::Field,
             qualifier: Some(field.name),
         },
-        |builder| {
-            for node in descendants(literal, 0) {
-                if !matches!(node.kind(), "string" | "string_content") {
-                    continue;
-                }
-                if node.kind() == "string" && super::syntax::named_children(node).next().is_some() {
-                    continue;
-                }
-                if members.len() >= MAX_ENUM_MEMBERS_PER_FIELD {
-                    return Err(ExtractError::OutputLimit);
-                }
-                let member = builder.context.owned_unquoted_text(node)?;
-                if !safe_schema_name(&member, true) || !members.insert(member.clone()) {
-                    continue;
-                }
-                emit_schema_symbol(
-                    builder,
-                    SchemaSymbolInput {
-                        kind: SymbolKind::EnumMember,
-                        name: &member,
-                        span_node: node,
-                        structural_node: node,
-                        signature: None,
-                    },
-                )?;
-            }
-            Ok(())
-        },
+        |builder| emit_pydantic_literal_members(builder, literal, &mut members),
     )
+}
+
+fn emit_pydantic_literal_members(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    literal: Node<'_>,
+    members: &mut BTreeSet<String>,
+) -> Result<(), ExtractError> {
+    for node in descendants(literal, 0) {
+        if !matches!(node.kind(), "string" | "string_content") {
+            continue;
+        }
+        if node.kind() == "string" && super::syntax::named_children(node).next().is_some() {
+            continue;
+        }
+        if members.len() >= MAX_ENUM_MEMBERS_PER_FIELD {
+            return Err(ExtractError::OutputLimit);
+        }
+        let member = builder.context.owned_unquoted_text(node)?;
+        if !safe_schema_name(&member, true) || !members.insert(member.clone()) {
+            continue;
+        }
+        emit_schema_symbol(
+            builder,
+            SchemaSymbolInput {
+                kind: SymbolKind::EnumMember,
+                name: &member,
+                span_node: node,
+                structural_node: node,
+                signature: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn emit_schema_symbol(
@@ -1103,26 +1178,31 @@ impl<'tree> Iterator for Descendants<'tree> {
             return Some(self.cursor.node());
         }
         loop {
-            if self.depth < MAX_SCHEMA_AST_DEPTH && self.cursor.goto_first_child() {
-                self.depth = self.depth.saturating_add(1);
-                if self.cursor.node().is_named() {
-                    return Some(self.cursor.node());
-                }
-                continue;
+            if !self.advance_depth_first() {
+                self.done = true;
+                return None;
             }
-            loop {
-                if self.cursor.goto_next_sibling() {
-                    if self.cursor.node().is_named() {
-                        return Some(self.cursor.node());
-                    }
-                    break;
-                }
-                if self.depth == 0 || !self.cursor.goto_parent() {
-                    self.done = true;
-                    return None;
-                }
-                self.depth = self.depth.saturating_sub(1);
+            if self.cursor.node().is_named() {
+                return Some(self.cursor.node());
             }
+        }
+    }
+}
+
+impl Descendants<'_> {
+    fn advance_depth_first(&mut self) -> bool {
+        if self.depth < MAX_SCHEMA_AST_DEPTH && self.cursor.goto_first_child() {
+            self.depth = self.depth.saturating_add(1);
+            return true;
+        }
+        loop {
+            if self.cursor.goto_next_sibling() {
+                return true;
+            }
+            if self.depth == 0 || !self.cursor.goto_parent() {
+                return false;
+            }
+            self.depth = self.depth.saturating_sub(1);
         }
     }
 }

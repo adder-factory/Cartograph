@@ -27,53 +27,60 @@ pub(crate) fn scan(
         .map_err(|_| ExtractError::OutputLimit)?;
     for (line_start, line) in physical_lines(source) {
         builder.check_cancelled()?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed == "end" {
-            scopes.pop();
-            continue;
-        }
-        if let Some(scope) = parse_scope(trimmed) {
-            if scopes.len() >= MAX_SCOPE_DEPTH {
-                return Err(ExtractError::NestingLimit);
-            }
-            scopes.push(scope);
-            continue;
-        }
-        if trimmed.starts_with("root") {
-            scan_root(
-                builder,
-                RouteLineInput {
-                    line_start,
-                    line,
-                    scopes: &scopes,
-                },
-            )?;
-            continue;
-        }
-        if trimmed.starts_with("resources ") || trimmed.starts_with("resource ") {
-            scan_resource(
-                builder,
-                RouteLineInput {
-                    line_start,
-                    line,
-                    scopes: &scopes,
-                },
-            )?;
-            continue;
-        }
-        scan_http_route(
+        scan_route_line(
             builder,
-            RouteLineInput {
+            MutableRouteLine {
                 line_start,
                 line,
-                scopes: &scopes,
+                scopes: &mut scopes,
             },
         )?;
     }
     Ok(())
+}
+
+struct MutableRouteLine<'line, 'scope> {
+    line_start: usize,
+    line: &'line str,
+    scopes: &'scope mut Vec<RouteScope>,
+}
+
+fn scan_route_line(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: MutableRouteLine<'_, '_>,
+) -> Result<(), ExtractError> {
+    let MutableRouteLine {
+        line_start,
+        line,
+        scopes,
+    } = input;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if trimmed == "end" {
+        scopes.pop();
+        return Ok(());
+    }
+    if let Some(scope) = parse_scope(trimmed) {
+        if scopes.len() >= MAX_SCOPE_DEPTH {
+            return Err(ExtractError::NestingLimit);
+        }
+        scopes.push(scope);
+        return Ok(());
+    }
+    let input = RouteLineInput {
+        line_start,
+        line,
+        scopes,
+    };
+    if trimmed.starts_with("root") {
+        return scan_root(builder, input);
+    }
+    if trimmed.starts_with("resources ") || trimmed.starts_with("resource ") {
+        return scan_resource(builder, input);
+    }
+    scan_http_route(builder, input)
 }
 
 #[derive(Clone)]

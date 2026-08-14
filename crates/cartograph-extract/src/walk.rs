@@ -80,25 +80,33 @@ impl<const MAXIMUM_DEPTH: usize> AstVisitBudget<MAXIMUM_DEPTH> {
 pub(crate) struct WalkInput<'tree> {
     root: Node<'tree>,
     parse_status: FileParseStatus,
+    maximum_ast_depth: usize,
 }
 
 impl<'tree> WalkInput<'tree> {
-    pub(crate) const fn new(root: Node<'tree>, parse_status: FileParseStatus) -> Self {
-        Self { root, parse_status }
+    pub(crate) const fn new(
+        root: Node<'tree>,
+        parse_status: FileParseStatus,
+        maximum_ast_depth: usize,
+    ) -> Self {
+        Self {
+            root,
+            parse_status,
+            maximum_ast_depth,
+        }
     }
 }
 
 pub(crate) fn extract(
     snapshot: &SourceSnapshot,
     input: WalkInput<'_>,
-    maximum_ast_depth: usize,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ExtractedFile, ExtractError> {
     let strategy = LanguageSpec::for_language(snapshot.language()).strategy();
     if !strategy.is_executable() {
         return Err(ExtractError::UnsupportedLanguage);
     }
-    let mut builder = ExtractionBuilder::new(snapshot, maximum_ast_depth, cancelled)?;
+    let mut builder = ExtractionBuilder::new(snapshot, input.maximum_ast_depth, cancelled)?;
     if strategy != ExtractionStrategy::ParserOnly {
         enrich_extraction(&mut builder, input.root)?;
     }

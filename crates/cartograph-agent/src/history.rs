@@ -340,55 +340,98 @@ fn parse_git_log(
         }
         let raw_field = fields[index];
         if crate::trim_ascii_bytes(raw_field) == COMMIT_MARKER {
-            if let Some(metadata) = current.take() {
-                history.apply_commit(metadata, &changes)?;
-                changes.clear();
-            }
+            apply_pending_commit(&mut history, &mut current, &mut changes)?;
             if history.commits_scanned >= u64::from(max_commits) {
                 truncated = true;
                 break;
             }
-            let commit = text_field(fields.get(index + 1).copied())?;
-            if !valid_commit(commit) {
-                return Err(HistoryIndexError::GitOutputInvalid);
-            }
-            let unix_seconds = text_field(fields.get(index + 2).copied())?
-                .parse::<u64>()
-                .map_err(|_| HistoryIndexError::GitOutputInvalid)?;
-            let author = fields
-                .get(index + COMMIT_AUTHOR_FIELD_OFFSET)
-                .copied()
-                .ok_or(HistoryIndexError::GitOutputInvalid)?;
-            current = Some(CommitMetadata {
-                unix_seconds,
-                author_key: author_key(author),
-            });
+            current = Some(parse_commit_metadata(&fields, index)?);
             index += COMMIT_FIELD_COUNT;
             continue;
         }
         let field = trim_numstat_prefix(raw_field);
         if !field.is_empty() {
-            if current.is_none() {
-                return Err(HistoryIndexError::GitOutputInvalid);
-            }
-            let (delta, renamed) = parse_numstat(field)?;
-            if renamed {
-                let new_path = fields
-                    .get(index + 2)
-                    .copied()
-                    .ok_or(HistoryIndexError::GitOutputInvalid)?;
-                add_delta(&mut changes, new_path, delta)?;
-                index += RENAMED_NUMSTAT_FIELD_COUNT;
-                continue;
-            }
-            add_delta(&mut changes, delta.path.as_bytes(), delta)?;
+            index += parse_history_delta(HistoryDeltaInput {
+                fields: &fields,
+                index,
+                field,
+                has_commit: current.is_some(),
+                changes: &mut changes,
+            })?;
+            continue;
         }
         index += 1;
     }
-    if !truncated && let Some(metadata) = current {
-        history.apply_commit(metadata, &changes)?;
+    if !truncated {
+        apply_pending_commit(&mut history, &mut current, &mut changes)?;
     }
     Ok(history.finish(truncated))
+}
+
+fn apply_pending_commit(
+    history: &mut CommitHistory,
+    current: &mut Option<CommitMetadata>,
+    changes: &mut BTreeMap<NormalizedPath, FileDelta>,
+) -> Result<(), HistoryIndexError> {
+    let Some(metadata) = current.take() else {
+        return Ok(());
+    };
+    history.apply_commit(metadata, changes)?;
+    changes.clear();
+    Ok(())
+}
+
+fn parse_commit_metadata(
+    fields: &[&[u8]],
+    index: usize,
+) -> Result<CommitMetadata, HistoryIndexError> {
+    let commit = text_field(fields.get(index + 1).copied())?;
+    if !valid_commit(commit) {
+        return Err(HistoryIndexError::GitOutputInvalid);
+    }
+    let unix_seconds = text_field(fields.get(index + 2).copied())?
+        .parse::<u64>()
+        .map_err(|_| HistoryIndexError::GitOutputInvalid)?;
+    let author = fields
+        .get(index + COMMIT_AUTHOR_FIELD_OFFSET)
+        .copied()
+        .ok_or(HistoryIndexError::GitOutputInvalid)?;
+    Ok(CommitMetadata {
+        unix_seconds,
+        author_key: author_key(author),
+    })
+}
+
+struct HistoryDeltaInput<'fields, 'changes> {
+    fields: &'fields [&'fields [u8]],
+    index: usize,
+    field: &'fields [u8],
+    has_commit: bool,
+    changes: &'changes mut BTreeMap<NormalizedPath, FileDelta>,
+}
+
+fn parse_history_delta(input: HistoryDeltaInput<'_, '_>) -> Result<usize, HistoryIndexError> {
+    let HistoryDeltaInput {
+        fields,
+        index,
+        field,
+        has_commit,
+        changes,
+    } = input;
+    if !has_commit {
+        return Err(HistoryIndexError::GitOutputInvalid);
+    }
+    let (delta, renamed) = parse_numstat(field)?;
+    if !renamed {
+        add_delta(changes, delta.path.as_bytes(), delta)?;
+        return Ok(1);
+    }
+    let new_path = fields
+        .get(index + 2)
+        .copied()
+        .ok_or(HistoryIndexError::GitOutputInvalid)?;
+    add_delta(changes, new_path, delta)?;
+    Ok(RENAMED_NUMSTAT_FIELD_COUNT)
 }
 
 #[derive(Clone, Copy)]

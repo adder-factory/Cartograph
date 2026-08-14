@@ -82,71 +82,110 @@ fn scan_aspnet(builder: &mut FrameworkBuilder<'_, '_>, source: &str) -> Result<(
         let Some(class) = original_declaration(builder, class_index, SymbolKind::Class) else {
             continue;
         };
-        let class_context = declaration_context(source, class.start, class.end);
-        let Some(class_route) = annotation_argument(class_context, "[Route") else {
-            continue;
-        };
-        if matches!(class_route, AnnotationArgument::Dynamic) {
-            continue;
-        }
-        let controller = class.name.strip_suffix("Controller").unwrap_or(&class.name);
-        let Some(base) =
-            replace_route_token(class_route.value_or_empty(), "controller", controller)
-        else {
-            continue;
-        };
-        for method_index in 0..builder.original_symbol_count() {
-            let Some(method) = original_callable(builder, method_index) else {
-                continue;
-            };
-            if method.start < class.start || method.end > class.end {
-                continue;
-            }
-            let method_context = declaration_context(source, method.start, method.end);
-            let Some(http) = aspnet_http_mapping(method_context) else {
-                continue;
-            };
-            let route_override = annotation_argument(method_context, "[Route");
-            let selected = match route_override.as_ref() {
-                Some(AnnotationArgument::Dynamic) => continue,
-                Some(argument) => argument,
-                None => &http.argument,
-            };
-            if matches!(selected, AnnotationArgument::Dynamic) {
-                continue;
-            }
-            let Some(subpath) =
-                replace_route_token(selected.value_or_empty(), "action", &method.name)
-            else {
-                continue;
-            };
-            let (effective_base, effective_subpath) =
-                if let Some(absolute) = subpath.strip_prefix("~/") {
-                    ("", absolute)
-                } else if subpath.starts_with('/') {
-                    ("", subpath.as_str())
-                } else {
-                    (base.as_str(), subpath.as_str())
-                };
-            let Some(path) = join_route_paths(effective_base, effective_subpath) else {
-                continue;
-            };
-            let (name_start, name_end) = symbol_name_span(source, &method);
-            let (start, end) = selected
-                .span()
-                .or_else(|| class_route.span())
-                .unwrap_or((name_start, name_end));
-            builder.add_route(FrameworkRouteInput {
-                method: http.method,
-                path: &path,
-                start,
-                end,
-                command: false,
-                handler: Some((&method.name, name_start, name_end)),
-            })?;
-        }
+        scan_aspnet_class(builder, source, &class)?;
     }
     Ok(())
+}
+
+fn scan_aspnet_class(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    source: &str,
+    class: &OriginalDeclaration,
+) -> Result<(), ExtractError> {
+    let class_context = declaration_context(source, class.start, class.end);
+    let Some(class_route) = annotation_argument(class_context, "[Route") else {
+        return Ok(());
+    };
+    if matches!(class_route, AnnotationArgument::Dynamic) {
+        return Ok(());
+    }
+    let controller = class.name.strip_suffix("Controller").unwrap_or(&class.name);
+    let Some(base) = replace_route_token(class_route.value_or_empty(), "controller", controller)
+    else {
+        return Ok(());
+    };
+    for method_index in 0..builder.original_symbol_count() {
+        let Some(method) = original_callable(builder, method_index) else {
+            continue;
+        };
+        if method.start < class.start || method.end > class.end {
+            continue;
+        }
+        add_aspnet_method_route(
+            builder,
+            AspNetMethodRoute {
+                source,
+                base: &base,
+                class_route: &class_route,
+                method: &method,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct AspNetMethodRoute<'a> {
+    source: &'a str,
+    base: &'a str,
+    class_route: &'a AnnotationArgument<'a>,
+    method: &'a OriginalDeclaration,
+}
+
+fn add_aspnet_method_route(
+    builder: &mut FrameworkBuilder<'_, '_>,
+    input: AspNetMethodRoute<'_>,
+) -> Result<(), ExtractError> {
+    let AspNetMethodRoute {
+        source,
+        base,
+        class_route,
+        method,
+    } = input;
+    let method_context = declaration_context(source, method.start, method.end);
+    let Some(http) = aspnet_http_mapping(method_context) else {
+        return Ok(());
+    };
+    let route_override = annotation_argument(method_context, "[Route");
+    let selected = match route_override.as_ref() {
+        Some(AnnotationArgument::Dynamic) => return Ok(()),
+        Some(argument) => argument,
+        None => &http.argument,
+    };
+    if matches!(selected, AnnotationArgument::Dynamic) {
+        return Ok(());
+    }
+    let Some(subpath) = replace_route_token(selected.value_or_empty(), "action", &method.name)
+    else {
+        return Ok(());
+    };
+    let (effective_base, effective_subpath) = effective_aspnet_paths(base, &subpath);
+    let Some(path) = join_route_paths(effective_base, effective_subpath) else {
+        return Ok(());
+    };
+    let (name_start, name_end) = symbol_name_span(source, method);
+    let (start, end) = selected
+        .span()
+        .or_else(|| class_route.span())
+        .unwrap_or((name_start, name_end));
+    builder.add_route(FrameworkRouteInput {
+        method: http.method,
+        path: &path,
+        start,
+        end,
+        command: false,
+        handler: Some((&method.name, name_start, name_end)),
+    })
+}
+
+fn effective_aspnet_paths<'a>(base: &'a str, subpath: &'a str) -> (&'a str, &'a str) {
+    if let Some(absolute) = subpath.strip_prefix("~/") {
+        ("", absolute)
+    } else if subpath.starts_with('/') {
+        ("", subpath)
+    } else {
+        (base, subpath)
+    }
 }
 
 struct Mapping<'source> {
@@ -265,42 +304,57 @@ fn annotation_argument<'source>(
     marker: &str,
 ) -> Option<AnnotationArgument<'source>> {
     for slice in context {
-        let text = slice.text;
-        let mut cursor = 0_usize;
-        while let Some(relative) = text[cursor..].find(marker) {
-            let start = cursor + relative;
-            if start > 0 && identifier_byte(text.as_bytes()[start - 1]) {
-                cursor = start + marker.len();
-                continue;
-            }
-            let after = skip_ascii_whitespace(text, start + marker.len());
-            let closing = if marker.starts_with('[') { b']' } else { b')' };
-            if marker.starts_with('[') && text.as_bytes().get(after) == Some(&b']') {
-                return Some(AnnotationArgument::Empty);
-            }
-            if text.as_bytes().get(after) != Some(&b'(') {
-                return Some(AnnotationArgument::Empty);
-            }
-            let close = matching_delimiter(DelimiterInput::parentheses(text, after))?;
-            let argument = &text[after + 1..close];
-            if argument.trim().is_empty() {
-                return Some(AnnotationArgument::Empty);
-            }
-            if let Some(quoted) = quoted_literal_after(argument, 0)
-                .map(|quoted| quoted.with_offset(slice.offset + after + 1))
-            {
-                return Some(AnnotationArgument::Literal {
-                    value: quoted.value,
-                    start: quoted.start,
-                    end: quoted.end,
-                });
-            }
-            if closing == b']' || close < text.len() {
-                return Some(AnnotationArgument::Dynamic);
-            }
+        if let Some(argument) = annotation_argument_in_slice(slice, marker) {
+            return Some(argument);
         }
     }
     None
+}
+
+fn annotation_argument_in_slice<'source>(
+    slice: ContextSlice<'source>,
+    marker: &str,
+) -> Option<AnnotationArgument<'source>> {
+    let text = slice.text;
+    let mut cursor = 0_usize;
+    while let Some(relative) = text[cursor..].find(marker) {
+        let start = cursor + relative;
+        if start > 0 && identifier_byte(text.as_bytes()[start - 1]) {
+            cursor = start + marker.len();
+            continue;
+        }
+        let after = skip_ascii_whitespace(text, start + marker.len());
+        if marker.starts_with('[') && text.as_bytes().get(after) == Some(&b']') {
+            return Some(AnnotationArgument::Empty);
+        }
+        if text.as_bytes().get(after) != Some(&b'(') {
+            return Some(AnnotationArgument::Empty);
+        }
+        return parse_annotation_parentheses(slice, after, marker.starts_with('['));
+    }
+    None
+}
+
+fn parse_annotation_parentheses(
+    slice: ContextSlice<'_>,
+    open: usize,
+    square_bracketed: bool,
+) -> Option<AnnotationArgument<'_>> {
+    let close = matching_delimiter(DelimiterInput::parentheses(slice.text, open))?;
+    let argument = &slice.text[open.saturating_add(1)..close];
+    if argument.trim().is_empty() {
+        return Some(AnnotationArgument::Empty);
+    }
+    if let Some(quoted) =
+        quoted_literal_after(argument, 0).map(|quoted| quoted.with_offset(slice.offset + open + 1))
+    {
+        return Some(AnnotationArgument::Literal {
+            value: quoted.value,
+            start: quoted.start,
+            end: quoted.end,
+        });
+    }
+    (square_bracketed || close < slice.text.len()).then_some(AnnotationArgument::Dynamic)
 }
 
 #[derive(Clone, Copy)]

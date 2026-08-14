@@ -2197,29 +2197,13 @@ impl ProjectRuntimeCache {
         if input.trim().is_empty() || input.len() > MAX_PROJECT_PATH_BYTES || input.contains('\0') {
             return Err(ProjectRouteError::InvalidPath);
         }
-        let canonical = std::fs::canonicalize(input).map_err(|_| ProjectRouteError::InvalidPath)?;
-        let mut candidate = if canonical.is_file() {
-            canonical
-                .parent()
-                .map(std::path::Path::to_path_buf)
-                .ok_or(ProjectRouteError::InvalidPath)?
-        } else if canonical.is_dir() {
-            canonical
-        } else {
-            return Err(ProjectRouteError::InvalidPath);
-        };
+        let mut candidate = canonical_project_candidate(input)?;
         for _ in 0..MAX_PROJECT_PARENT_STEPS {
-            let marker = candidate.join(".cartograph");
-            if let Ok(metadata) = std::fs::symlink_metadata(&marker) {
-                if metadata.file_type().is_symlink() {
-                    return Err(ProjectRouteError::InvalidPath);
+            if has_project_marker(&candidate)? {
+                if !self.project_allowed(&candidate) {
+                    return Err(ProjectRouteError::NotAllowed);
                 }
-                if metadata.is_dir() {
-                    if !self.project_allowed(&candidate) {
-                        return Err(ProjectRouteError::NotAllowed);
-                    }
-                    return Ok(candidate);
-                }
+                return Ok(candidate);
             }
             let Some(parent) = candidate.parent() else {
                 break;
@@ -2241,6 +2225,30 @@ impl ProjectRuntimeCache {
                     .any(|allowed_root| root == allowed_root || root.starts_with(allowed_root))
             })
     }
+}
+
+fn canonical_project_candidate(input: &str) -> Result<PathBuf, ProjectRouteError> {
+    let canonical = std::fs::canonicalize(input).map_err(|_| ProjectRouteError::InvalidPath)?;
+    if canonical.is_file() {
+        return canonical
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .ok_or(ProjectRouteError::InvalidPath);
+    }
+    canonical
+        .is_dir()
+        .then_some(canonical)
+        .ok_or(ProjectRouteError::InvalidPath)
+}
+
+fn has_project_marker(candidate: &Path) -> Result<bool, ProjectRouteError> {
+    let Ok(metadata) = std::fs::symlink_metadata(candidate.join(".cartograph")) else {
+        return Ok(false);
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(ProjectRouteError::InvalidPath);
+    }
+    Ok(metadata.is_dir())
 }
 
 fn touch_project_runtime(state: &mut ProjectRuntimeCacheState, root: &PathBuf) {
@@ -2800,16 +2808,12 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
         | ProjectError::FileNotFound
         | ProjectError::SourceContextUnavailable => AdminJobFailure::SourceUnavailable,
         ProjectError::SourceChangedDuringIndex => AdminJobFailure::SourceChangedDuringIndex,
-        ProjectError::EmbeddingConfigurationUnavailable => {
-            AdminJobFailure::EmbeddingConfigurationUnavailable
-        }
-        ProjectError::EmbeddingOperationFailed => AdminJobFailure::EmbeddingUnavailable,
-        ProjectError::EnrichmentReadFailed => AdminJobFailure::EnrichmentReadFailed,
-        ProjectError::EnrichmentWriteFailed => AdminJobFailure::EnrichmentWriteFailed,
-        ProjectError::EnrichmentDataInvalid => AdminJobFailure::EnrichmentDataInvalid,
-        ProjectError::HnswCreateSharedMemoryUnavailable => {
-            AdminJobFailure::HnswCreateSharedMemoryUnavailable
-        }
+        ProjectError::EmbeddingConfigurationUnavailable
+        | ProjectError::EmbeddingOperationFailed
+        | ProjectError::HnswCreateSharedMemoryUnavailable => admin_job_embedding_failure(error),
+        ProjectError::EnrichmentReadFailed
+        | ProjectError::EnrichmentWriteFailed
+        | ProjectError::EnrichmentDataInvalid => admin_job_enrichment_failure(error),
         ProjectError::InvalidOptions | ProjectError::ScipOverlayInvalid => {
             AdminJobFailure::InvalidOptions
         }
@@ -2823,6 +2827,28 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
         ProjectError::IndexFailed
         | ProjectError::RetrievalOperationFailed
         | ProjectError::RequestCancelled => AdminJobFailure::OperationFailed,
+    }
+}
+
+const fn admin_job_embedding_failure(error: ProjectError) -> AdminJobFailure {
+    match error {
+        ProjectError::EmbeddingConfigurationUnavailable => {
+            AdminJobFailure::EmbeddingConfigurationUnavailable
+        }
+        ProjectError::EmbeddingOperationFailed => AdminJobFailure::EmbeddingUnavailable,
+        ProjectError::HnswCreateSharedMemoryUnavailable => {
+            AdminJobFailure::HnswCreateSharedMemoryUnavailable
+        }
+        _ => AdminJobFailure::OperationFailed,
+    }
+}
+
+const fn admin_job_enrichment_failure(error: ProjectError) -> AdminJobFailure {
+    match error {
+        ProjectError::EnrichmentReadFailed => AdminJobFailure::EnrichmentReadFailed,
+        ProjectError::EnrichmentWriteFailed => AdminJobFailure::EnrichmentWriteFailed,
+        ProjectError::EnrichmentDataInvalid => AdminJobFailure::EnrichmentDataInvalid,
+        _ => AdminJobFailure::OperationFailed,
     }
 }
 
@@ -21644,19 +21670,37 @@ fn parse_unified_diff_ranges(diff: &str) -> Result<Vec<ParsedSourceRange>, ToolE
     let mut seen = BTreeSet::new();
     for line in diff.lines() {
         if let Some(raw_path) = line.strip_prefix("+++ ") {
-            let raw_path = raw_path.split('\t').next().unwrap_or_default().trim();
-            current_path = if raw_path == "/dev/null" || raw_path.starts_with('"') {
-                None
-            } else {
-                let path = raw_path.strip_prefix("b/").unwrap_or(raw_path);
-                NormalizedPath::parse(path).ok()
-            };
+            current_path = diff_post_image_path(raw_path);
             continue;
         }
         if !line.starts_with("@@ ") {
             continue;
         }
-        let path = current_path.clone().ok_or_else(|| {
+        UnifiedDiffRanges {
+            ranges: &mut ranges,
+            seen: &mut seen,
+        }
+        .append_hunk(line, current_path.as_ref())?;
+    }
+    Ok(ranges)
+}
+
+fn diff_post_image_path(raw_path: &str) -> Option<NormalizedPath> {
+    let raw_path = raw_path.split('\t').next().unwrap_or_default().trim();
+    if raw_path == "/dev/null" || raw_path.starts_with('"') {
+        return None;
+    }
+    NormalizedPath::parse(raw_path.strip_prefix("b/").unwrap_or(raw_path)).ok()
+}
+
+struct UnifiedDiffRanges<'a> {
+    ranges: &'a mut Vec<ParsedSourceRange>,
+    seen: &'a mut BTreeSet<(NormalizedPath, u32, u32)>,
+}
+
+impl UnifiedDiffRanges<'_> {
+    fn append_hunk(&mut self, line: &str, path: Option<&NormalizedPath>) -> Result<(), ToolError> {
+        let path = path.cloned().ok_or_else(|| {
             safe_error(
                 ToolErrorCode::InvalidArguments,
                 "Unified diff hunk is missing a safe post-image path",
@@ -21664,28 +21708,27 @@ fn parse_unified_diff_ranges(diff: &str) -> Result<Vec<ParsedSourceRange>, ToolE
         })?;
         let (start_line, count) = parse_unified_diff_post_image(line)?;
         if count == 0 {
-            continue;
+            return Ok(());
         }
         let end_line = start_line
             .checked_add(count.saturating_sub(1))
             .filter(|line| *line <= RANGE_MAXIMUM_LINE)
             .ok_or_else(invalid_arguments)?;
-        let key = (path.clone(), start_line, end_line);
-        if seen.insert(key) {
-            ranges.push(ParsedSourceRange {
+        if self.seen.insert((path.clone(), start_line, end_line)) {
+            self.ranges.push(ParsedSourceRange {
                 path,
                 start_line,
                 end_line,
             });
         }
-        if ranges.len() > RANGE_MAXIMUM_INPUTS {
+        if self.ranges.len() > RANGE_MAXIMUM_INPUTS {
             return Err(safe_error(
                 ToolErrorCode::InvalidArguments,
                 "Unified diff exceeds the 100-hunk range limit",
             ));
         }
+        Ok(())
     }
-    Ok(ranges)
 }
 
 fn parse_unified_diff_post_image(line: &str) -> Result<(u32, u32), ToolError> {
@@ -24245,50 +24288,17 @@ fn diff_review_error(error: DiffReviewError) -> ToolError {
 
 fn project_error(error: ProjectError) -> ToolError {
     match error {
-        ProjectError::SymbolNotFound => safe_error(
-            ToolErrorCode::NotFound,
-            "Symbol was not found in the current generation",
-        ),
-        ProjectError::FileNotFound => safe_error(
-            ToolErrorCode::NotFound,
-            "File was not found in the current generation",
-        ),
-        ProjectError::SourceContextUnavailable => safe_error(
-            ToolErrorCode::NotReady,
-            "Source context is unavailable; index or synchronize the project first",
-        ),
-        ProjectError::EmbeddingConfigurationUnavailable => safe_error(
-            ToolErrorCode::NotReady,
-            "Embedding endpoint and model configuration is unavailable",
-        ),
-        ProjectError::EmbeddingOperationFailed => safe_error(
-            ToolErrorCode::Unavailable,
-            "Cartograph semantic embedding operation is unavailable",
-        ),
-        ProjectError::HnswCreateSharedMemoryUnavailable => safe_error(
-            ToolErrorCode::Unavailable,
-            "HNSW creation could not allocate shared memory; existing vectors remain resumable after `cartograph db backup` and the confirmed managed database upgrade",
-        ),
-        ProjectError::RetrievalOperationFailed => safe_error(
-            ToolErrorCode::Unavailable,
-            "Cartograph retrieval operation is unavailable",
-        ),
-        ProjectError::SourceChangedDuringIndex => safe_error(
-            ToolErrorCode::Unavailable,
-            "Source changed repeatedly while Cartograph was indexing; retry after the active writes settle",
-        ),
-        ProjectError::EnrichmentReadFailed => safe_error(
-            ToolErrorCode::Unavailable,
-            "Cartograph enrichment could not read its current generation data",
-        ),
-        ProjectError::EnrichmentWriteFailed => safe_error(
-            ToolErrorCode::Unavailable,
-            "Cartograph enrichment could not persist its generated artifacts",
-        ),
-        ProjectError::EnrichmentDataInvalid => safe_error(
-            ToolErrorCode::Unavailable,
-            "Cartograph enrichment encountered invalid stored generation data",
-        ),
+        ProjectError::SymbolNotFound
+        | ProjectError::FileNotFound
+        | ProjectError::SourceContextUnavailable => project_source_error(error),
+        ProjectError::EmbeddingConfigurationUnavailable
+        | ProjectError::EmbeddingOperationFailed
+        | ProjectError::HnswCreateSharedMemoryUnavailable
+        | ProjectError::RetrievalOperationFailed
+        | ProjectError::SourceChangedDuringIndex
+        | ProjectError::EnrichmentReadFailed
+        | ProjectError::EnrichmentWriteFailed
+        | ProjectError::EnrichmentDataInvalid => project_operation_error(error),
         ProjectError::InvalidOptions => invalid_arguments(),
         ProjectError::ScipOverlayInvalid => safe_error(
             ToolErrorCode::InvalidArguments,
@@ -24322,6 +24332,62 @@ fn project_error(error: ProjectError) -> ToolError {
         | ProjectError::IndexLeaseFailed
         | ProjectError::IndexPublicationFailed
         | ProjectError::IndexCleanupFailed => ToolError::internal(),
+    }
+}
+
+fn project_source_error(error: ProjectError) -> ToolError {
+    match error {
+        ProjectError::SymbolNotFound => safe_error(
+            ToolErrorCode::NotFound,
+            "Symbol was not found in the current generation",
+        ),
+        ProjectError::FileNotFound => safe_error(
+            ToolErrorCode::NotFound,
+            "File was not found in the current generation",
+        ),
+        ProjectError::SourceContextUnavailable => safe_error(
+            ToolErrorCode::NotReady,
+            "Source context is unavailable; index or synchronize the project first",
+        ),
+        _ => ToolError::internal(),
+    }
+}
+
+fn project_operation_error(error: ProjectError) -> ToolError {
+    match error {
+        ProjectError::EmbeddingConfigurationUnavailable => safe_error(
+            ToolErrorCode::NotReady,
+            "Embedding endpoint and model configuration is unavailable",
+        ),
+        ProjectError::EmbeddingOperationFailed => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph semantic embedding operation is unavailable",
+        ),
+        ProjectError::HnswCreateSharedMemoryUnavailable => safe_error(
+            ToolErrorCode::Unavailable,
+            "HNSW creation could not allocate shared memory; existing vectors remain resumable after `cartograph db backup` and the confirmed managed database upgrade",
+        ),
+        ProjectError::RetrievalOperationFailed => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph retrieval operation is unavailable",
+        ),
+        ProjectError::SourceChangedDuringIndex => safe_error(
+            ToolErrorCode::Unavailable,
+            "Source changed repeatedly while Cartograph was indexing; retry after the active writes settle",
+        ),
+        ProjectError::EnrichmentReadFailed => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph enrichment could not read its current generation data",
+        ),
+        ProjectError::EnrichmentWriteFailed => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph enrichment could not persist its generated artifacts",
+        ),
+        ProjectError::EnrichmentDataInvalid => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph enrichment encountered invalid stored generation data",
+        ),
+        _ => ToolError::internal(),
     }
 }
 
@@ -25542,6 +25608,54 @@ mod tests {
             project_error_reason(parse_output),
             "parse_extraction_output_limit_exceeded"
         );
+    }
+
+    #[test]
+    fn grouped_project_failures_preserve_admin_and_public_error_contracts() {
+        let cases = [
+            (
+                ProjectError::EmbeddingConfigurationUnavailable,
+                AdminJobFailure::EmbeddingConfigurationUnavailable,
+                ToolErrorCode::NotReady,
+                "Embedding endpoint and model configuration",
+            ),
+            (
+                ProjectError::EmbeddingOperationFailed,
+                AdminJobFailure::EmbeddingUnavailable,
+                ToolErrorCode::Unavailable,
+                "semantic embedding operation",
+            ),
+            (
+                ProjectError::HnswCreateSharedMemoryUnavailable,
+                AdminJobFailure::HnswCreateSharedMemoryUnavailable,
+                ToolErrorCode::Unavailable,
+                "HNSW creation could not allocate shared memory",
+            ),
+            (
+                ProjectError::EnrichmentReadFailed,
+                AdminJobFailure::EnrichmentReadFailed,
+                ToolErrorCode::Unavailable,
+                "read its current generation data",
+            ),
+            (
+                ProjectError::EnrichmentWriteFailed,
+                AdminJobFailure::EnrichmentWriteFailed,
+                ToolErrorCode::Unavailable,
+                "persist its generated artifacts",
+            ),
+            (
+                ProjectError::EnrichmentDataInvalid,
+                AdminJobFailure::EnrichmentDataInvalid,
+                ToolErrorCode::Unavailable,
+                "invalid stored generation data",
+            ),
+        ];
+        for (error, expected_admin, expected_code, expected_message) in cases {
+            assert_eq!(admin_job_failure(error), expected_admin);
+            let public = project_error(error);
+            assert_eq!(public.code(), expected_code);
+            assert!(public.wire_message().contains(expected_message));
+        }
     }
 
     #[test]
@@ -29681,76 +29795,13 @@ test("handles an order", () => expect(handleOrder("42")).toContain("42"));
         let thread_source = saw_source_summary.clone();
         let thread_target = saw_target_summary.clone();
         let handle = thread::spawn(move || {
-            loop {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(connection) => connection,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if thread_stop.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(2));
-                        continue;
-                    }
-                    Err(error) => panic!("neighbor embedding accept failed: {error}"),
-                };
-                stream
-                    .set_nonblocking(false)
-                    .unwrap_or_else(|error| panic!("neighbor embedding blocking failed: {error}"));
-                thread_requests.fetch_add(1, Ordering::SeqCst);
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap_or_else(|error| panic!("neighbor embedding timeout failed: {error}"));
-                let request = read_summary_http_request(&mut stream);
-                let body_start = request
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .map_or_else(
-                        || panic!("neighbor embedding request has no body"),
-                        |index| index + 4,
-                    );
-                let body: Value = serde_json::from_slice(&request[body_start..])
-                    .unwrap_or_else(|error| panic!("neighbor embedding JSON failed: {error}"));
-                assert_eq!(body["model"], "fixture-neighbor-model");
-                let inputs = body["input"]
-                    .as_array()
-                    .unwrap_or_else(|| panic!("neighbor embedding inputs were not an array"));
-                for input in inputs {
-                    if let Some(text) = input.as_str() {
-                        if text.contains("summary:\nNormalizes and caps a numeric value") {
-                            thread_source.store(true, Ordering::SeqCst);
-                        }
-                        if text.contains("summary:\nA model-generated target summary.") {
-                            thread_target.store(true, Ordering::SeqCst);
-                        }
-                    }
-                }
-                let data = inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, input)| {
-                        let text = input.as_str().unwrap_or_default();
-                        let vector = if text.contains("name:\nsource")
-                            || text.contains("name:\ntarget")
-                            || text.contains("Cartograph embedding dimension probe")
-                        {
-                            json!([1.0, 0.0, 0.0])
-                        } else {
-                            json!([0.0, 1.0, 0.0])
-                        };
-                        json!({"index": index, "embedding": vector})
-                    })
-                    .collect::<Vec<_>>();
-                let response_body = serde_json::to_string(&json!({"data": data}))
-                    .unwrap_or_else(|error| panic!("neighbor embedding response failed: {error}"));
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response_body.len(),
-                    response_body
+            while let Some(stream) = accept_neighbor_embedding_connection(&listener, &thread_stop) {
+                serve_neighbor_embedding_request(
+                    stream,
+                    &thread_requests,
+                    &thread_source,
+                    &thread_target,
                 );
-                stream
-                    .write_all(response.as_bytes())
-                    .and_then(|()| stream.flush())
-                    .unwrap_or_else(|error| panic!("neighbor embedding write failed: {error}"));
             }
         });
         NeighborEmbeddingFixture {
@@ -29761,6 +29812,105 @@ test("handles an order", () => expect(handleOrder("42")).toContain("42"));
             saw_target_summary,
             handle: Some(handle),
         }
+    }
+
+    fn accept_neighbor_embedding_connection(
+        listener: &TcpListener,
+        stop: &AtomicBool,
+    ) -> Option<std::net::TcpStream> {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Some(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stop.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("neighbor embedding accept failed: {error}"),
+            }
+        }
+    }
+
+    fn serve_neighbor_embedding_request(
+        mut stream: std::net::TcpStream,
+        requests: &AtomicU64,
+        saw_source: &AtomicBool,
+        saw_target: &AtomicBool,
+    ) {
+        stream
+            .set_nonblocking(false)
+            .unwrap_or_else(|error| panic!("neighbor embedding blocking failed: {error}"));
+        requests.fetch_add(1, Ordering::SeqCst);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap_or_else(|error| panic!("neighbor embedding timeout failed: {error}"));
+        let request = read_summary_http_request(&mut stream);
+        let body = neighbor_embedding_request_body(&request);
+        let inputs = body["input"]
+            .as_array()
+            .unwrap_or_else(|| panic!("neighbor embedding inputs were not an array"));
+        record_neighbor_summary_inputs(inputs, saw_source, saw_target);
+        let response_body = neighbor_embedding_response(inputs);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .and_then(|()| stream.flush())
+            .unwrap_or_else(|error| panic!("neighbor embedding write failed: {error}"));
+    }
+
+    fn neighbor_embedding_request_body(request: &[u8]) -> Value {
+        let body_start = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map_or_else(
+                || panic!("neighbor embedding request has no body"),
+                |index| index + 4,
+            );
+        let body: Value = serde_json::from_slice(&request[body_start..])
+            .unwrap_or_else(|error| panic!("neighbor embedding JSON failed: {error}"));
+        assert_eq!(body["model"], "fixture-neighbor-model");
+        body
+    }
+
+    fn record_neighbor_summary_inputs(
+        inputs: &[Value],
+        saw_source: &AtomicBool,
+        saw_target: &AtomicBool,
+    ) {
+        for text in inputs.iter().filter_map(Value::as_str) {
+            if text.contains("summary:\nNormalizes and caps a numeric value") {
+                saw_source.store(true, Ordering::SeqCst);
+            }
+            if text.contains("summary:\nA model-generated target summary.") {
+                saw_target.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn neighbor_embedding_response(inputs: &[Value]) -> String {
+        let data = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let text = input.as_str().unwrap_or_default();
+                let vector = if text.contains("name:\nsource")
+                    || text.contains("name:\ntarget")
+                    || text.contains("Cartograph embedding dimension probe")
+                {
+                    json!([1.0, 0.0, 0.0])
+                } else {
+                    json!([0.0, 1.0, 0.0])
+                };
+                json!({"index": index, "embedding": vector})
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&json!({"data": data}))
+            .unwrap_or_else(|error| panic!("neighbor embedding response failed: {error}"))
     }
 
     fn read_summary_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
