@@ -621,9 +621,15 @@ fn managed_cancellation_nesting_and_output_bounds_are_explicit() {
     }
     nested.push_str("class Deep {}\n");
     nested.push_str(&"}\n".repeat(300));
+    let recovered = extract_result("src/Deep.cs", &nested)
+        .unwrap_or_else(|error| panic!("deep C# extraction did not recover: {error}"));
     assert_eq!(
-        extract_result("src/Deep.cs", &nested),
-        Err(ExtractError::NestingLimit),
+        recovered.parse_status,
+        cartograph_domain::FileParseStatus::Partial
+    );
+    assert_eq!(
+        recovered.diagnostics[0].code,
+        cartograph_extract::DiagnosticCode::NestingLimitExceeded
     );
 
     let mut excessive = String::from("class Many {\n");

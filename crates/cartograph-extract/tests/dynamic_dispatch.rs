@@ -65,7 +65,7 @@ export function dispatch(kind: string) {
 }
 
 #[test]
-fn unused_wrong_kind_and_overwide_dispatch_tables_do_not_invent_edges() {
+fn unused_and_overwide_tables_abstain_while_literal_member_calls_stay_explicit() {
     let source = r"
 function one() {}
 function two() {}
@@ -86,11 +86,21 @@ WRONG_KIND['one']();
 WIDE['one']();
 ";
     let extracted = extract("src/negative.ts", source);
-    assert!(extracted.references.iter().all(|reference| {
-        !reference
-            .resolution_name
-            .as_deref()
-            .is_some_and(|name| name.starts_with(DYNAMIC_DISPATCH_RESOLUTION_PREFIX))
+    let dynamic = extracted
+        .references
+        .iter()
+        .filter(|reference| {
+            reference
+                .resolution_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with(DYNAMIC_DISPATCH_RESOLUTION_PREFIX))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(dynamic.len(), 2);
+    assert!(dynamic.iter().all(|reference| {
+        reference.name == "one"
+            && reference.resolution_name.as_deref()
+                == Some(&format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}one"))
     }));
 }
 

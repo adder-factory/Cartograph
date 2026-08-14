@@ -66,8 +66,11 @@ their executable syntax. Physical source spans remain the navigation and
 history boundary.
 
 `sql_string_concat` requires dynamic text and a statement-shaped keyword pair:
-`SELECT ... FROM`, `INSERT ... INTO`, `UPDATE ... SET`, or `DELETE ... FROM`.
-Presentation strings containing a standalone English verb do not qualify.
+`INSERT ... INTO`, `UPDATE ... SET`, or `DELETE ... FROM`. `SELECT ... FROM`
+additionally needs SQL punctuation (`*`, `,`, `;`, or `=`) or a downstream
+clause such as `WHERE`, `JOIN`, `GROUP`, `ORDER`, `LIMIT`, `OFFSET`, or
+`HAVING`. Presentation prose such as an accessibility label containing
+“select ... from” therefore abstains.
 
 `stale_doc` compares declaration values only with documentation that makes an
 explicit value claim through a cue such as `default`, `limit`, `threshold`, or
@@ -107,8 +110,11 @@ surfacing stateful containers that combine a broad API with substantial logic.
 decision ladder. They still add cyclomatic branches; a nested `if` inside an
 `else` block still increases depth.
 
-`unresolved_reference_pressure` counts unresolved references that could still
-denote project declarations. Expected macro-expansion, dynamic receiver,
+`unresolved_reference_pressure` is Cartograph graph-resolution coverage, not a
+compiler diagnostic. Its detail sets `compilerDiagnostic: false` and directs
+the caller to confirm source correctness with the language toolchain before an
+edit. It counts unresolved references that could still denote project
+declarations. Expected macro-expansion, dynamic receiver,
 member-access, language-intrinsic (including Python built-ins), explicit
 non-local import, shell-command, and manifest-dependency boundaries retain
 distinct unresolved provenance but do not inflate that project-actionable
@@ -123,13 +129,18 @@ fabricate a target or convert ambiguity into a resolved edge.
 `unused_export` is deliberately conservative at external boundaries. Explicit
 public API declarations and files modeled as test/fixture sources are not
 claimed unused merely because the indexed checkout cannot contain their
-outside consumer. Internal/module exports are actionable only with zero
-cross-file incoming edges; one resolved type-only or runtime consumer is enough
-to abstain. Declaration-only type members never enter the export finding
-population. Ambiguous targetless receiver calls conservatively count as
-potential incoming use for same-named internal methods; this avoids a
-dead-export claim when the graph cannot prove the receiver type. Framework-owned
-exports retain their convention-specific entry-point rules. React `lazy(() =>
+outside consumer. Internal/module exports are actionable only with no credible
+incoming use; one resolved type-only or runtime consumer is enough to abstain.
+Use rooted in another exported declaration in the same file also counts,
+covering schema, configuration, and ORM object assembly. Declaration-only type
+members never enter the export finding population. Ambiguous targetless
+receiver calls conservatively count as potential incoming use for any
+same-named non-private exported method; static member calls and literal static
+subscript keys retain that evidence while computed dynamic keys abstain.
+Framework-owned exports retain their convention-specific entry-point rules,
+including methods in `*.config.*` objects and default-export platform handlers
+such as `fetch`, `scheduled`, `queue`, `email`, `alarm`, and WebSocket
+callbacks. React `lazy(() =>
 import(...))` records a default consumer, and TypeScript `typeof` queries retain
 typed value-consumer edges. Python's implicit module visibility is not explicit
 export intent, so Python declarations currently abstain from confident

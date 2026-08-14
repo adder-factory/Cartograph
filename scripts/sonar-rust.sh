@@ -3,10 +3,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLIPPY_DIRECTORY="$ROOT/target/sonar"
+SONAR_OUTPUT_ROOT="${CARTOGRAPH_SONAR_OUTPUT_ROOT:-$ROOT/target}"
+CLIPPY_DIRECTORY="$SONAR_OUTPUT_ROOT/sonar"
 CLIPPY_REPORT="$CLIPPY_DIRECTORY/clippy.json"
 CLIPPY_TEMPORARY="$CLIPPY_REPORT.tmp.$$"
-COVERAGE_DIRECTORY="$ROOT/target/llvm-cov"
+COVERAGE_DIRECTORY="$SONAR_OUTPUT_ROOT/llvm-cov"
 COVERAGE_BUILD_DIRECTORY="$COVERAGE_DIRECTORY/build"
 COVERAGE_REPORT="$COVERAGE_DIRECTORY/lcov.info"
 
@@ -89,6 +90,8 @@ cargo llvm-cov report --locked --lcov \
   --output-path "$COVERAGE_REPORT"
 
 sonar scan \
+  -Dsonar.rust.clippyReport.reportPaths="$CLIPPY_REPORT" \
+  -Dsonar.rust.lcov.reportPaths="$COVERAGE_REPORT" \
   -Dsonar.qualitygate.wait=true \
   -Dsonar.qualitygate.timeout="${SONAR_QUALITYGATE_TIMEOUT:-300}" \
   "$@"

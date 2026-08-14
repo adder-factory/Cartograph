@@ -119,8 +119,9 @@ const fn strategy_for_language(language: SourceLanguage) -> ExtractionStrategy {
         | SourceLanguage::Cuda
         | SourceLanguage::Glsl
         | SourceLanguage::Hlsl
-        | SourceLanguage::Metal => ExtractionStrategy::CFamily,
-        SourceLanguage::Wgsl => ExtractionStrategy::ShaderFamily,
+        | SourceLanguage::Metal
+        | SourceLanguage::Slang => ExtractionStrategy::CFamily,
+        SourceLanguage::Wesl | SourceLanguage::Wgsl => ExtractionStrategy::ShaderFamily,
         SourceLanguage::Bash
         | SourceLanguage::Fish
         | SourceLanguage::PowerShell
@@ -207,6 +208,8 @@ mod tests {
             SourceLanguage::Glsl,
             SourceLanguage::Hlsl,
             SourceLanguage::Metal,
+            SourceLanguage::Slang,
+            SourceLanguage::Wesl,
             SourceLanguage::Bash,
             SourceLanguage::Fish,
             SourceLanguage::PowerShell,

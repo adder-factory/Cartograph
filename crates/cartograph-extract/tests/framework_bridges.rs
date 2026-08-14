@@ -3,7 +3,9 @@
 mod dependency_ownership;
 
 use cartograph_domain::{ReferenceKind, SourceLanguage, SymbolKind};
-use cartograph_extract::{NativeExtractor, SourceLimits, SourceSnapshot};
+use cartograph_extract::{
+    DYNAMIC_DISPATCH_RESOLUTION_PREFIX, NativeExtractor, SourceLimits, SourceSnapshot,
+};
 
 const SOURCE_LIMIT: usize = 1024 * 1024;
 
@@ -154,8 +156,16 @@ Haptics.notificationAsync();
             javascript.references
         );
     }
+    assert!(javascript.references.iter().any(|reference| {
+        reference.kind == ReferenceKind::Calls
+            && reference.name == "addListener"
+            && reference.resolution_name.as_deref()
+                == Some(&format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}addListener"))
+    }));
     assert!(javascript.references.iter().all(|reference| {
-        !(reference.kind == ReferenceKind::Calls && reference.name == "addListener")
+        !(reference.kind == ReferenceKind::Calls
+            && reference.name == "addListener"
+            && reference.resolution_name.as_deref() == Some("Geolocation::addListener"))
     }));
 
     let turbo = extract(

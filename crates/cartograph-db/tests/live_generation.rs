@@ -88,8 +88,9 @@ const SPILL_PARSE_CACHE_REFERENCE_MIGRATION_VERSION: i64 = 34;
 const SEARCH_DOCUMENT_CANONICAL_METADATA_MIGRATION_VERSION: i64 = 35;
 const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_VERSION: i64 = 36;
 const STRUCTURAL_FINDING_CACHE_MIGRATION_VERSION: i64 = 37;
-const LATEST_MIGRATION_VERSION: i64 = STRUCTURAL_FINDING_CACHE_MIGRATION_VERSION;
-const EXPECTED_MIGRATIONS: [i64; 37] = [
+const SHADER_AND_DISPATCH_DIGEST_V14_MIGRATION_VERSION: i64 = 38;
+const LATEST_MIGRATION_VERSION: i64 = SHADER_AND_DISPATCH_DIGEST_V14_MIGRATION_VERSION;
+const EXPECTED_MIGRATIONS: [i64; 38] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
@@ -127,6 +128,7 @@ const EXPECTED_MIGRATIONS: [i64; 37] = [
     SEARCH_DOCUMENT_CANONICAL_METADATA_MIGRATION_VERSION,
     JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_VERSION,
     STRUCTURAL_FINDING_CACHE_MIGRATION_VERSION,
+    SHADER_AND_DISPATCH_DIGEST_V14_MIGRATION_VERSION,
 ];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
@@ -177,6 +179,8 @@ const GO_CALL_TARGET_DIGEST_V12_MIGRATION_CHECKSUM: &str =
     "a078b0076c3448fe6fee0fb99d0ddf0c2073dfc64be1ca860dea74b222714b46";
 const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_CHECKSUM: &str =
     "d6cd2cbb7c422e5738b5e32acea7eb200ccd90ab79a07c363f53f94e8ec9815e";
+const SHADER_AND_DISPATCH_DIGEST_V14_MIGRATION_CHECKSUM: &str =
+    "3cbb510a7453da463f127d7c92f4c216d5fb65748154e19ff035711b1f3a0d46";
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -202,6 +206,14 @@ async fn assert_unleased_staging_cleanup(
     database: &CartographDatabase,
     project: &ProjectId,
 ) -> GenerationId {
+    assert_single_unleased_staging_cleanup(database, project).await;
+    assert_bulk_unleased_staging_cleanup_preserves_live_lease(database, project).await
+}
+
+async fn assert_single_unleased_staging_cleanup(
+    database: &CartographDatabase,
+    project: &ProjectId,
+) {
     let abandoned = begin(
         database,
         GenerationFixture {
@@ -235,7 +247,12 @@ async fn assert_unleased_staging_cleanup(
         StateExpectation::new(project, &abandoned_id, GenerationState::Failed),
     )
     .await;
+}
 
+async fn assert_bulk_unleased_staging_cleanup_preserves_live_lease(
+    database: &CartographDatabase,
+    project: &ProjectId,
+) -> GenerationId {
     let leased = begin(
         database,
         GenerationFixture {
@@ -256,6 +273,43 @@ async fn assert_unleased_staging_cleanup(
             .await
             .unwrap_or_else(|error| panic!("lease-safe staging cleanup failed: {error}"))
     );
+    assert_state(
+        database,
+        StateExpectation::new(project, &leased_id, GenerationState::Staging),
+    )
+    .await;
+    let first_abandoned = begin(
+        database,
+        GenerationFixture {
+            project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let second_abandoned = begin(
+        database,
+        GenerationFixture {
+            project,
+            revision: REVISION_TWO,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    assert_eq!(
+        database
+            .fail_abandoned_staging_generations_bounded(project, LOCK_ORDER_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("bulk staging recovery failed: {error}")),
+        2
+    );
+    for generation in [&first_abandoned, &second_abandoned] {
+        assert_state(
+            database,
+            StateExpectation::new(project, generation.generation_id(), GenerationState::Failed),
+        )
+        .await;
+    }
     assert_state(
         database,
         StateExpectation::new(project, &leased_id, GenerationState::Staging),
@@ -3773,6 +3827,10 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
         schema_migration_checksum(pool, schema, 36).await,
         JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_MIGRATION_CHECKSUM
     );
+    assert_eq!(
+        schema_migration_checksum(pool, schema, 38).await,
+        SHADER_AND_DISPATCH_DIGEST_V14_MIGRATION_CHECKSUM
+    );
 
     let definition = query(
         r"SELECT pg_get_constraintdef(constraints.oid) AS definition
@@ -3789,9 +3847,9 @@ async fn assert_native_index_digest_migrations(pool: &sqlx_postgres::PgPool, sch
     .fetch_one(pool)
     .await
     .and_then(|row| row.try_get::<String, _>("definition"))
-    .unwrap_or_else(|error| panic!("could not inspect digest-v13 constraint: {error}"));
+    .unwrap_or_else(|error| panic!("could not inspect digest-v14 constraint: {error}"));
     assert!(
-        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]"),
+        definition.contains("ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]"),
         "{definition}"
     );
 }

@@ -37,6 +37,9 @@ const MAXIMUM_LLAMA_SERVER_ARGUMENT_TOTAL_BYTES: usize = 32 * 1_024;
 const MAXIMUM_PROBE_BYTES: usize = 1024 * 1024;
 const MAXIMUM_PROBE_MODELS: usize = 128;
 const MAXIMUM_PROJECT_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_PROJECT_AST_DEPTH: usize = 256;
+const MINIMUM_PROJECT_AST_DEPTH: usize = 64;
+const MAXIMUM_PROJECT_AST_DEPTH: usize = 1_024;
 const MAXIMUM_PROJECT_GENERATION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAXIMUM_PROJECT_SPILL_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAXIMUM_PROJECT_SPILL_ROWS: u64 = 10_000_000_000;
@@ -153,6 +156,7 @@ impl ProjectLlmProvider {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectSourceSettings {
     maximum_file_bytes: Option<usize>,
+    maximum_ast_depth: Option<usize>,
     maximum_generation_bytes: Option<u64>,
     generation_storage: ProjectGenerationStorage,
     maximum_spill_bytes: Option<u64>,
@@ -239,6 +243,7 @@ impl std::fmt::Debug for ProjectSourceSettings {
         formatter
             .debug_struct("ProjectSourceSettings")
             .field("maximum_file_bytes", &self.maximum_file_bytes)
+            .field("maximum_ast_depth", &self.maximum_ast_depth())
             .field("maximum_generation_bytes", &self.maximum_generation_bytes)
             .field("generation_storage", &self.generation_storage)
             .field("maximum_spill_bytes", &self.maximum_spill_bytes)
@@ -287,6 +292,15 @@ impl ProjectSourceSettings {
     /// Returns the maximum file bytes.
     pub const fn maximum_file_bytes(&self) -> Option<usize> {
         self.maximum_file_bytes
+    }
+
+    /// Effective defensive AST nesting ceiling.
+    #[must_use]
+    pub const fn maximum_ast_depth(&self) -> usize {
+        match self.maximum_ast_depth {
+            Some(value) => value,
+            None => DEFAULT_PROJECT_AST_DEPTH,
+        }
     }
 
     /// Returns the explicit retained canonical-generation byte ceiling.
@@ -1107,6 +1121,21 @@ fn parse_project_source_settings(
     .map(usize::try_from)
     .transpose()
     .map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
+    let maximum_ast_depth = optional_bounded_u64(
+        root,
+        "maxAstDepth",
+        BoundedU64Field {
+            maximum: u64::try_from(MAXIMUM_PROJECT_AST_DEPTH)
+                .map_err(|_| ProjectLlmConfigError::InvalidConfig)?,
+            invalid: ProjectLlmConfigError::InvalidConfig,
+        },
+    )?
+    .map(usize::try_from)
+    .transpose()
+    .map_err(|_| ProjectLlmConfigError::InvalidConfig)?;
+    if maximum_ast_depth.is_some_and(|value| value < MINIMUM_PROJECT_AST_DEPTH) {
+        return Err(ProjectLlmConfigError::InvalidConfig);
+    }
     let maximum_generation_bytes = optional_bounded_u64(
         root,
         "maxGenerationBytes",
@@ -1148,6 +1177,7 @@ fn parse_project_source_settings(
         .unwrap_or_default();
     Ok(ProjectSourceSettings {
         maximum_file_bytes,
+        maximum_ast_depth,
         maximum_generation_bytes,
         generation_storage,
         maximum_spill_bytes,
@@ -2811,12 +2841,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("config directory failed: {error}"));
         fs::write(
             root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
-            r#"{"maxFileSize":4096,"maxGenerationBytes":8589934592,"generationStorage":"postgres","maxSpillBytes":137438953472,"maxSpillRows":1000000000,"languages":["typescript","rust","rust"],"exclude":["private/**"],"extractDocstrings":false,"trackCallSites":false,"indexSubmodules":false,"indexEmbeddedRepos":true,"enableCentrality":false,"enableBetweenness":false,"enableChurn":false,"enableCoChange":false,"enableBiomarkers":false,"enableIssueHistory":false,"enableConfigRefs":false,"enableSqlRefs":false,"enableBuildContextRefs":false,"enableStringImports":false,"duplicateCodePartialClones":true,"duplicateCodeAllowlist":["generated/**","vendor-copy/**"],"llm":{"apiKey":"do-not-render"}}"#,
+            r#"{"maxFileSize":4096,"maxAstDepth":512,"maxGenerationBytes":8589934592,"generationStorage":"postgres","maxSpillBytes":137438953472,"maxSpillRows":1000000000,"languages":["typescript","rust","rust"],"exclude":["private/**"],"extractDocstrings":false,"trackCallSites":false,"indexSubmodules":false,"indexEmbeddedRepos":true,"enableCentrality":false,"enableBetweenness":false,"enableChurn":false,"enableCoChange":false,"enableBiomarkers":false,"enableIssueHistory":false,"enableConfigRefs":false,"enableSqlRefs":false,"enableBuildContextRefs":false,"enableStringImports":false,"duplicateCodePartialClones":true,"duplicateCodeAllowlist":["generated/**","vendor-copy/**"],"llm":{"apiKey":"do-not-render"}}"#,
         )
         .unwrap_or_else(|error| panic!("source config fixture failed: {error}"));
         let settings = load_project_source_settings(root.path())
             .unwrap_or_else(|error| panic!("source settings failed: {error}"));
         assert_eq!(settings.maximum_file_bytes(), Some(4096));
+        assert_eq!(settings.maximum_ast_depth(), 512);
         assert_eq!(settings.maximum_generation_bytes(), Some(8_589_934_592));
         assert_eq!(
             settings.generation_storage(),
@@ -2862,6 +2893,18 @@ mod tests {
             load_project_source_settings(root.path()),
             Err(ProjectLlmConfigError::InvalidConfig)
         );
+
+        for invalid_depth in [63, 1025] {
+            fs::write(
+                root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),
+                format!(r#"{{"maxAstDepth":{invalid_depth}}}"#),
+            )
+            .unwrap_or_else(|error| panic!("invalid AST depth config fixture failed: {error}"));
+            assert_eq!(
+                load_project_source_settings(root.path()),
+                Err(ProjectLlmConfigError::InvalidConfig)
+            );
+        }
 
         fs::write(
             root.path().join(CONFIG_DIRECTORY).join(CONFIG_FILE),

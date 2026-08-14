@@ -200,9 +200,15 @@ fn tags_queries_bound_failure_cancel_and_sensitive_text_paths() {
         nested.push(']');
     }
     nested.push_str("\nend\n");
+    let recovered = extract_result("lib/too_deep.ex", &nested)
+        .unwrap_or_else(|error| panic!("deep Elixir extraction did not recover: {error}"));
     assert_eq!(
-        extract_result("lib/too_deep.ex", &nested),
-        Err(ExtractError::NestingLimit)
+        recovered.parse_status,
+        cartograph_domain::FileParseStatus::Partial
+    );
+    assert_eq!(
+        recovered.diagnostics[0].code,
+        cartograph_extract::DiagnosticCode::NestingLimitExceeded
     );
 }
 

@@ -1,4 +1,4 @@
-//! Shader-family extraction contracts for WGSL and Metal.
+//! Shader-family extraction contracts for WGSL, WESL, Slang, and Metal.
 
 mod dependency_ownership;
 
@@ -125,6 +125,130 @@ fn wgsl_without_declarations_is_legitimately_empty_rather_than_unsupported() {
     let extracted = extract("shaders/empty.wgsl", "// only a comment\n");
     assert_eq!(extracted.language, SourceLanguage::Wgsl);
     assert!(extracted.symbols.is_empty());
+}
+
+#[test]
+fn wesl_extracts_wgsl_declarations_and_flattens_module_imports() {
+    let source = r"import package::lighting::pbr;
+
+struct Surface {
+    color: vec4<f32>,
+}
+
+fn helper() {
+    // import package::ignored::line_comment;
+    /* import package::ignored::block_comment; */
+}
+
+public import package::lighting::shadows::sample as sample_shadow;
+
+@fragment
+fn fragment_main() -> @location(0) vec4<f32> {
+    return sample_shadow();
+}
+";
+    let extracted = extract("shaders/material.wesl", source);
+    assert_eq!(extracted.language, SourceLanguage::Wesl);
+    symbol(&extracted, SymbolKind::Struct, "Surface");
+    let entry = symbol(&extracted, SymbolKind::Function, "fragment_main");
+    assert_eq!(entry.visibility, Some(Visibility::Public));
+    let imports = extracted
+        .references
+        .iter()
+        .filter(|reference| reference.kind == ReferenceKind::Imports)
+        .map(|reference| reference.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        imports,
+        [
+            "package::lighting::pbr",
+            "package::lighting::shadows::sample"
+        ]
+    );
+    assert!(extracted.import_bindings.iter().any(|binding| {
+        binding.module_specifier == "package::lighting::shadows::sample"
+            && binding.local_name == "sample_shadow"
+    }));
+}
+
+#[test]
+fn wesl_import_collection_is_bounded_across_multiple_statements() {
+    let first = (0..300)
+        .map(|index| format!("first_{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let second = (0..300)
+        .map(|index| format!("second_{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let source =
+        format!("import package::first::{{{first}}};\nimport package::second::{{{second}}};\n");
+    let extracted = extract("shaders/bounded.wesl", &source);
+    assert_eq!(
+        extracted
+            .references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::Imports)
+            .count(),
+        512
+    );
+    assert_eq!(extracted.import_bindings.len(), 512);
+}
+
+#[test]
+fn slang_extracts_modules_imports_generics_interfaces_and_shader_entry_points() {
+    let source = r#"module renderer.materials;
+import renderer.common_math;
+
+interface IShadingModel<T> {
+    T shade(T value);
+}
+
+struct Surface<T> {
+    T value;
+};
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void computeMain(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    helper(dispatchThreadId);
+}
+
+void helper(uint3 dispatchThreadId) {}
+"#;
+    let extracted = extract("shaders/material.slang", source);
+    assert_eq!(extracted.language, SourceLanguage::Slang);
+    symbol(&extracted, SymbolKind::Module, "renderer.materials");
+    symbol(&extracted, SymbolKind::Import, "renderer/common-math");
+    assert!(
+        extracted
+            .symbols
+            .iter()
+            .any(|candidate| candidate.kind == SymbolKind::Interface
+                && candidate.name.starts_with("IShadingModel")),
+        "the generic Slang interface was not extracted"
+    );
+    assert!(
+        extracted
+            .symbols
+            .iter()
+            .any(|candidate| candidate.kind == SymbolKind::Struct
+                && candidate.name.starts_with("Surface")),
+        "the generic Slang struct was not extracted"
+    );
+    let entry = symbol(&extracted, SymbolKind::Function, "computeMain");
+    assert_eq!(entry.visibility, Some(Visibility::Public));
+    assert!(
+        entry
+            .signature
+            .as_deref()
+            .is_some_and(|signature| signature.starts_with("shader:compute"))
+    );
+    assert!(
+        extracted.references.iter().any(|reference| {
+            reference.kind == ReferenceKind::Calls && reference.name == "helper"
+        })
+    );
 }
 
 #[test]

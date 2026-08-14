@@ -259,9 +259,15 @@ fn shell_family_enforces_source_nesting_and_output_bounds() {
         nested.push_str("fi\n");
     }
     nested.push_str("}\n");
+    let recovered = extract_result("deep.sh", &nested)
+        .unwrap_or_else(|error| panic!("deep shell extraction did not recover: {error}"));
     assert_eq!(
-        extract_result("deep.sh", &nested),
-        Err(ExtractError::NestingLimit)
+        recovered.parse_status,
+        cartograph_domain::FileParseStatus::Partial
+    );
+    assert_eq!(
+        recovered.diagnostics[0].code,
+        cartograph_extract::DiagnosticCode::NestingLimitExceeded
     );
 
     let mut excessive = String::new();

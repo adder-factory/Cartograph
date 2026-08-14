@@ -43,7 +43,7 @@ use syntax::{
     structural_digest, visibility,
 };
 
-const MAX_AST_DEPTH: usize = 256;
+const MAX_AST_DEPTH: usize = crate::MAXIMUM_AST_DEPTH;
 const MAX_BOUNDED_AST_VISITS: usize = 500_000;
 const AST_VISIT_CANCELLATION_INTERVAL: usize = 256;
 const MAX_SAFE_SIGNATURE_BYTES: usize = 512;
@@ -59,7 +59,7 @@ impl<const MAXIMUM_DEPTH: usize> AstVisitBudget<MAXIMUM_DEPTH> {
         builder: &mut ExtractionBuilder<'_, '_>,
         depth: usize,
     ) -> Result<(), ExtractError> {
-        if depth > MAXIMUM_DEPTH {
+        if depth > MAXIMUM_DEPTH.min(builder.maximum_ast_depth) {
             return Err(ExtractError::NestingLimit);
         }
         self.visits = self
@@ -91,13 +91,14 @@ impl<'tree> WalkInput<'tree> {
 pub(crate) fn extract(
     snapshot: &SourceSnapshot,
     input: WalkInput<'_>,
+    maximum_ast_depth: usize,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ExtractedFile, ExtractError> {
     let strategy = LanguageSpec::for_language(snapshot.language()).strategy();
     if !strategy.is_executable() {
         return Err(ExtractError::UnsupportedLanguage);
     }
-    let mut builder = ExtractionBuilder::new(snapshot, cancelled)?;
+    let mut builder = ExtractionBuilder::new(snapshot, maximum_ast_depth, cancelled)?;
     if strategy != ExtractionStrategy::ParserOnly {
         enrich_extraction(&mut builder, input.root)?;
     }
@@ -110,6 +111,7 @@ fn enrich_extraction(
     root: Node<'_>,
 ) -> Result<(), ExtractError> {
     module_system::collect_explicit_exports(builder, root)?;
+    shader_family::collect_wesl_imports(builder)?;
     builder.visit(root, 0)?;
     numerical::enrich(builder, root)?;
     dynamic_dispatch::enrich(builder, root)?;
@@ -304,6 +306,7 @@ struct ExtractionBuilder<'source, 'cancel> {
     explicit_exports: BTreeSet<String>,
     explicit_default_exports: BTreeSet<String>,
     commonjs_shadowing: module_system::CommonJsShadowing,
+    maximum_ast_depth: usize,
     /// Whether any synthesized name exceeded its canonical bound and had to be
     /// deterministically shortened for this file.
     shortened_canonical_names: bool,
@@ -695,6 +698,7 @@ const C_LANGUAGES: &[SourceLanguage] = &[
     SourceLanguage::Glsl,
     SourceLanguage::Hlsl,
     SourceLanguage::Metal,
+    SourceLanguage::Slang,
 ];
 const MANAGED_LANGUAGES: &[SourceLanguage] = &[SourceLanguage::Java, SourceLanguage::CSharp];
 const JVM_DYNAMIC_LANGUAGES: &[SourceLanguage] = &[
@@ -862,7 +866,7 @@ fn extraction_family(language: SourceLanguage) -> ExtractionFamily {
     } else {
         match language {
             SourceLanguage::GraphQl => ExtractionFamily::GraphQl,
-            SourceLanguage::Wgsl => ExtractionFamily::Shader,
+            SourceLanguage::Wesl | SourceLanguage::Wgsl => ExtractionFamily::Shader,
             SourceLanguage::Prisma => ExtractionFamily::Prisma,
             SourceLanguage::Sql => ExtractionFamily::Sql,
             _ => ExtractionFamily::Unsupported,
@@ -1081,6 +1085,7 @@ fn visit_javascript_binding(
 impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
     fn new(
         snapshot: &'source SourceSnapshot,
+        maximum_ast_depth: usize,
         cancelled: &'cancel mut dyn FnMut() -> bool,
     ) -> Result<Self, ExtractError> {
         Ok(Self {
@@ -1095,13 +1100,14 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             explicit_exports: BTreeSet::new(),
             explicit_default_exports: BTreeSet::new(),
             commonjs_shadowing: module_system::CommonJsShadowing::default(),
+            maximum_ast_depth,
             shortened_canonical_names: false,
         })
     }
 
     fn visit(&mut self, node: Node<'_>, depth: usize) -> Result<(), ExtractError> {
         self.context.ensure_active()?;
-        if depth > MAX_AST_DEPTH {
+        if depth > self.maximum_ast_depth {
             return Err(ExtractError::NestingLimit);
         }
         if self.visit_declaration(node, depth)? {

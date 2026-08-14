@@ -9,8 +9,9 @@ input. It does not depend on PostgreSQL, MCP, or an LLM.
 
 The authoritative, exhaustively tested manifest is
 `cartograph_domain::SourceLanguage::ALL`: all 73 v1.1.33 modes and their 163
-extensions, plus additive `.pyi`, native TOML, and 52 dedicated textual
-game-scripting modes. The
+extensions, plus additive `.pyi`, native TOML, 52 dedicated textual
+game-scripting modes, and the WGSL, Metal, Slang, and WESL shader additions:
+130 production-admitted modes in total. The
 implementation is divided into:
 
 - JavaScript/TypeScript, Rust/Python/Go, query-tag, C-family, shell, managed,
@@ -25,8 +26,10 @@ implementation is divided into:
 
 Shaders are where a large share of a renderer's logic lives, and they are
 exactly the code that is hardest to navigate by text search. CUDA, GLSL, and
-HLSL parse through the C-family walker, and Metal reuses the same slice because
-its shading language is C++-based. WGSL has its own slice covering:
+HLSL parse through the C-family walker, and Metal and Slang reuse the same
+slice because their shading languages are C++-family languages. Slang adds
+module/import resolution, interfaces, generics, and `[shader("stage")]` entry
+points. WGSL and WESL share the WGSL grammar slice covering:
 
 - functions, structs and struct members, module-scope `var`/`override`
   bindings, and type aliases;
@@ -36,7 +39,9 @@ its shading language is C++-based. WGSL has its own slice covering:
 - intra-file calls and declared-type edges, so callers/callees and impact work
   inside a shader;
 - `naga_oil` `#define_import_path` and `#import module::path`, which form the
-  shader module graph.
+  shader module graph;
+- bounded WESL `import`, nested collection, alias, `package::`, and `super::`
+  resolution across `.wesl` and `.wgsl` modules.
 
 Two boundaries are explicit rather than silently absent. The pinned grammar
 accepts `#import module::path` but not the quoted-file form, so a quoted import
@@ -78,8 +83,10 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V13 fences named TypeScript and JavaScript construction
-targets; contract V12 fenced stable bounded Go and Python anonymous call-target
+contract. Contract V14 fences first-class Slang/WESL module semantics and
+JavaScript static dynamic-dispatch evidence; contract V13 fenced named
+TypeScript and JavaScript construction targets; contract V12 fenced stable
+bounded Go and Python anonymous call-target
 normalization; contract V11 fenced anonymous Rust call-target normalization;
 contract V10 fenced call-target-precise
 secret exposure and incomplete-implementation evidence; contract V9 fenced JSX executable-line
@@ -102,6 +109,15 @@ custom structural scanner from the snapshot's typed language. Grammar-backed
 paths use bounded parse callbacks; every path polls cancellation and enforces
 fact/string/modeled-output limits. Grammar-backed malformed syntax returns
 recoverable diagnostics instead of panicking.
+
+Syntax-tree depth is independently bounded by `maxAstDepth` (default `256`,
+range `64..=1024`). A file that exceeds it is retained as a partial file with
+the `nesting_limit_exceeded` degraded reason and its exact normalized
+path; the remaining project continues through resolution and publication.
+Increase the bound only for authored source that legitimately needs deeper
+syntax. Generated outputs should normally be excluded through project ignore
+rules or `.cartograph/config.json` rather than forcing the whole corpus to
+accept their depth.
 
 The walker emits:
 

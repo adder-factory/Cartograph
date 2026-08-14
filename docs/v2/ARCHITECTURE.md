@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-10 (`v2.1.14`)
+Last implementation review: 2026-08-13 (`v2.1.15`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,8 +59,10 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns thirty-seven versions. Migration
-37 adds the generation-fenced structural finding relation and its input
+The append-only migration ledger currently owns thirty-eight versions.
+Migration 38 admits generation digest V14 for first-class Slang/WESL module
+semantics and JavaScript static dynamic-dispatch evidence. Migration 37 adds
+the generation-fenced structural finding relation and its input
 fingerprint, so a readiness probe reads stored findings instead of evaluating
 every detector over a whole generation. Migration
 36 admits generation digest V13 for named TypeScript/JavaScript construction
@@ -142,8 +144,9 @@ state lowers confidence and is never treated as a clean result.
 ## Native extraction
 
 Current production admission covers all 73 v1.1.33 language modes, native
-TOML, and 52 dedicated textual game-scripting modes: 61 pinned grammar-backed
-modes and 65 bounded Rust custom scanners. The 163-extension v1 manifest is
+TOML, 52 dedicated textual game-scripting modes, and the WGSL, Metal, Slang,
+and WESL shader additions: 130 modes total, with 64 pinned grammar-backed
+modes and 66 bounded Rust custom scanners. The 163-extension v1 manifest is
 exact; `.pyi` and every dedicated game-script extension are additive
 improvements. Every family has
 literal-safety and cancellation tests, deterministic 1-vs-4 worker facts, and
@@ -256,7 +259,7 @@ batch-local validation uses the same field contract, global conflicts and edge
 multiplicity are reduced under database constraints, and each canonical
 partition group proves its file/symbol/span cross-relations before its raw
 evidence is removed. The durable completed phase makes a redundant final
-generation-wide relation scan unnecessary. The V13 digest is streamed as exact
+generation-wide relation scan unnecessary. The V14 digest is streamed as exact
 canonical row bytes in the memory reducer's table/key order. Centrality uses
 the same pre-dedup calls/reference graph and is patched onto fenced raw symbols
 before sealing. Exact batch replay and the canonical cursor make an interrupted

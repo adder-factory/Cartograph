@@ -109,7 +109,7 @@ WITH RECURSIVE code_documents AS MATERIALIZED (
                   AND methods.generation_id = CAST($2 AS uuid)
                   AND methods.symbol_kind = 'method'
                   AND methods.exported
-                  AND methods.visibility = 'internal'
+                  AND COALESCE(methods.visibility, 'internal') <> 'private'
                 GROUP BY methods.symbol_id
             ), incoming AS (
                 SELECT edges.target_symbol_id AS symbol_id,
@@ -130,6 +130,28 @@ WITH RECURSIVE code_documents AS MATERIALIZED (
                   AND edges.generation_id = CAST($2 AS uuid)
                   AND edges.edge_kind <> 'contains'
                 GROUP BY edges.target_symbol_id
+            ), exported_api_incoming AS (
+                SELECT target.symbol_id,
+                       SUM(edges.site_count)::bigint AS sites
+                FROM {schema}."edges" AS edges
+                JOIN {schema}."symbols" AS source
+                  ON source.project_id = edges.project_id
+                 AND source.generation_id = edges.generation_id
+                 AND source.symbol_id = edges.source_symbol_id
+                JOIN {schema}."symbols" AS target
+                  ON target.project_id = edges.project_id
+                 AND target.generation_id = edges.generation_id
+                 AND target.symbol_id = edges.target_symbol_id
+                WHERE edges.project_id = CAST($1 AS uuid)
+                  AND edges.generation_id = CAST($2 AS uuid)
+                  AND source.file_id = target.file_id
+                  AND source.symbol_id <> target.symbol_id
+                  AND source.exported
+                  AND edges.edge_kind IN (
+                      'calls', 'references', 'type_of', 'returns',
+                      'instantiates', 'def_use'
+                  )
+                GROUP BY target.symbol_id
             ), function_locals AS (
                 SELECT DISTINCT containment.target_symbol_id AS symbol_id
                 FROM {schema}."edges" AS containment
@@ -468,6 +490,30 @@ WITH RECURSIVE code_documents AS MATERIALIZED (
                                files.normalized_path ~ '^(src/)?instrumentation\.(ts|js|mjs)$'
                                AND symbols.qualified_name ~ '(^|::|[.#/$])(register|onRequestError)$'
                            )
+                           OR (
+                               files.normalized_path ~ '(^|/)[^/]+\.config\.(ts|tsx|js|jsx|mjs|cjs)$'
+                               AND symbols.symbol_kind = 'method'
+                           )
+                           OR (
+                               symbols.symbol_kind = 'method'
+                               AND symbols.qualified_name ~ '(^|::|[.#/$])(fetch|scheduled|queue|email|alarm|webSocketMessage|webSocketClose|webSocketError)$'
+                               AND (
+                                   symbols.default_export
+                                   OR EXISTS (
+                                       SELECT 1
+                                       FROM {schema}."edges" AS containment
+                                       JOIN {schema}."symbols" AS parent
+                                         ON parent.project_id = containment.project_id
+                                        AND parent.generation_id = containment.generation_id
+                                        AND parent.symbol_id = containment.source_symbol_id
+                                       WHERE containment.project_id = symbols.project_id
+                                         AND containment.generation_id = symbols.generation_id
+                                         AND containment.edge_kind = 'contains'
+                                         AND containment.target_symbol_id = symbols.symbol_id
+                                         AND parent.default_export
+                                   )
+                               )
+                           )
                        ) AS framework_convention_export,
                        LEAST(
                            1.0,
@@ -484,6 +530,7 @@ WITH RECURSIVE code_documents AS MATERIALIZED (
                        (
                            COALESCE(incoming.external_edges, 0)
                            + COALESCE(potential_method_incoming.sites, 0)
+                           + COALESCE(exported_api_incoming.sites, 0)
                        )::bigint AS external_incoming,
                        COALESCE(members.behavioral_methods, 0)::bigint AS behavioral_methods,
                        COALESCE(members.complex_methods, 0)::bigint AS complex_methods,
@@ -574,6 +621,8 @@ WITH RECURSIVE code_documents AS MATERIALIZED (
                 LEFT JOIN function_locals ON function_locals.symbol_id = symbols.symbol_id
                 LEFT JOIN potential_method_incoming
                   ON potential_method_incoming.symbol_id = symbols.symbol_id
+                LEFT JOIN exported_api_incoming
+                  ON exported_api_incoming.symbol_id = symbols.symbol_id
                 LEFT JOIN members ON members.symbol_id = symbols.symbol_id
                 LEFT JOIN duplicates ON duplicates.structural_digest = symbols.structural_digest
                 LEFT JOIN LATERAL (
@@ -755,6 +804,13 @@ WITH RECURSIVE code_documents AS MATERIALIZED (
                            'dependencyAbstentions', base.serial_await_dependency_loops,
                            'controlFlowAbstentions', base.serial_await_control_flow_loops,
                            'declaredSerialIntentAbstentions', base.serial_await_intent_loops
+                         )
+                       WHEN candidate.finding = 'unresolved_reference_pressure' THEN
+                         jsonb_build_object(
+                           'category', 'graph_resolution_coverage',
+                           'compilerDiagnostic', false,
+                           'meaning', 'references_not_yet_bound_by_cartograph',
+                           'verification', 'confirm_with_the_language_toolchain_before_editing_source'
                          )
                        WHEN candidate.finding = 'high_fan_out' THEN
                          jsonb_build_object(

@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx_core::{column::ColumnIndex, row::Row};
 
 use crate::{
-    CartographDatabase, StorageError,
+    CartographDatabase, StorageError, StructuralFindingRefresh,
     database::{PgQuery, RowReadRequest, quoted_schema, read_rows},
 };
 
@@ -1042,9 +1042,21 @@ impl StructuralFindingQuery {
 }
 
 /// Project-wide deterministic finding totals without a row-limit blind spot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralFindingComputationState {
+    /// No complete detector relation exists for the selected generation.
+    #[default]
+    NotComputed,
+    /// Every detector completed for the exact current input fingerprint.
+    Ready,
+}
+
+/// Project-wide deterministic finding totals without a row-limit blind spot.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralFindingStats {
+    state: StructuralFindingComputationState,
     analyzed_symbols: u64,
     total_findings: u64,
     info_findings: u64,
@@ -1058,6 +1070,11 @@ pub struct StructuralFindingStats {
 }
 
 impl StructuralFindingStats {
+    /// Whether the complete detector relation was actually computed.
+    #[must_use]
+    pub const fn state(&self) -> StructuralFindingComputationState {
+        self.state
+    }
     /// Current-generation symbols evaluated by the complete detector relation.
     #[must_use]
     pub const fn analyzed_symbols(&self) -> u64 {
@@ -2091,12 +2108,23 @@ impl CartographDatabase {
         &self,
         project_id: &ProjectId,
     ) -> Result<StructuralFindingStats, StorageError> {
-        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
+        let refresh = self
+            .refresh_current_structural_findings_fenced(project_id, DEFAULT_INSIGHT_TIMEOUT)
             .await?;
-        Ok(self
+        if refresh.outcome == StructuralFindingRefresh::NoCurrentGeneration {
+            return Ok(StructuralFindingStats::default());
+        }
+        if let Some(stats) = self
             .cached_current_structural_finding_stats(project_id)
             .await?
-            .unwrap_or_default())
+        {
+            return Ok(stats);
+        }
+        let current_generation = current_generation_for_findings(self, project_id).await?;
+        Err(missing_structural_finding_stats_error(
+            refresh.generation_id.as_deref(),
+            current_generation.as_deref(),
+        ))
     }
 
     /// Aggregate the stored finding relation without ever recomputing it.
@@ -2740,6 +2768,7 @@ fn decode_finding_stats(
         return Err(corrupt_insight());
     }
     Ok(StructuralFindingStats {
+        state: StructuralFindingComputationState::Ready,
         analyzed_symbols,
         total_findings,
         info_findings,
@@ -2757,4 +2786,41 @@ fn decode_finding_stats(
 
 const fn corrupt_insight() -> StorageError {
     StorageError::CorruptStoredValue { field: "insight" }
+}
+
+fn missing_structural_finding_stats_error(
+    refreshed_generation: Option<&str>,
+    current_generation: Option<&str>,
+) -> StorageError {
+    if refreshed_generation == current_generation && refreshed_generation.is_some() {
+        StorageError::CorruptStoredValue {
+            field: "structural_finding_run",
+        }
+    } else {
+        StorageError::CurrentGenerationChanged
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing_structural_finding_stats_error;
+    use crate::StorageError;
+
+    #[test]
+    fn missing_structural_stats_distinguish_corruption_from_generation_drift() {
+        assert_eq!(
+            missing_structural_finding_stats_error(Some("generation-a"), Some("generation-a")),
+            StorageError::CorruptStoredValue {
+                field: "structural_finding_run"
+            }
+        );
+        assert_eq!(
+            missing_structural_finding_stats_error(Some("generation-a"), Some("generation-b")),
+            StorageError::CurrentGenerationChanged
+        );
+        assert_eq!(
+            missing_structural_finding_stats_error(Some("generation-a"), None),
+            StorageError::CurrentGenerationChanged
+        );
+    }
 }

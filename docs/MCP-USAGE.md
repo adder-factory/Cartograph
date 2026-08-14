@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-10 (`v2.1.14`).
+Last release audit: 2026-08-13 (`v2.1.15`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -223,7 +223,16 @@ text to stdout. It enforces:
 
 Do not retry by removing bounds or wrapping the server with an unbounded queue.
 For long index work, use `cartograph_admin` to start a job and poll status; cancel
-explicitly when the host/user abandons it.
+explicitly when the host/user abandons it. While an index job is running, its
+job view includes a live `progress` packet with the current stage, monotonic
+completed items/bytes, heartbeat count, progress-idle time, completed-stage
+timings, total elapsed time, and cancellation state. These counters expose
+actual work without source paths, source text, SQL, or database settings.
+
+Retention attached to a successful index can be independently deferred with
+`reason: "project_busy"`, `retryable: true`, `unlockApplicable: false`, and a
+wait-and-retry `nextAction`. `admin unlock` removes expired leases only; it
+does not retroactively clear that historical outcome or steal a live writer.
 
 SCIP interchange is also job-based. Use `action: "scip-export"` with a
 project-relative `out`, or `action: "scip-import"` with a project-relative

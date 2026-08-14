@@ -692,6 +692,9 @@ mod tests {
                 cartograph_extract::DiagnosticCode::CanonicalNameTruncated => {
                     "canonical_name_truncated"
                 }
+                cartograph_extract::DiagnosticCode::NestingLimitExceeded => {
+                    "nesting_limit_exceeded"
+                }
             };
             hash_text(hasher, code);
             match diagnostic.span {

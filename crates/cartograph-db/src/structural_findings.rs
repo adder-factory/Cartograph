@@ -58,6 +58,11 @@ struct FingerprintedGeneration {
     inputs_digest: String,
 }
 
+pub(crate) struct FencedStructuralFindingRefresh {
+    pub(crate) outcome: StructuralFindingRefresh,
+    pub(crate) generation_id: Option<String>,
+}
+
 impl CartographDatabase {
     /// Recompute the stored finding relation unless it already matches the exact
     /// current input fingerprint.
@@ -71,23 +76,47 @@ impl CartographDatabase {
         project_id: &ProjectId,
         statement_timeout: Duration,
     ) -> Result<StructuralFindingRefresh, StorageError> {
+        Ok(self
+            .refresh_current_structural_findings_fenced(project_id, statement_timeout)
+            .await?
+            .outcome)
+    }
+
+    /// Reconcile the cache and retain the exact generation used to compute it.
+    pub(crate) async fn refresh_current_structural_findings_fenced(
+        &self,
+        project_id: &ProjectId,
+        statement_timeout: Duration,
+    ) -> Result<FencedStructuralFindingRefresh, StorageError> {
         if statement_timeout.is_zero() {
             return Err(StorageError::InvalidInput {
                 field: "statement_timeout",
             });
         }
         let Some(fingerprint) = self.structural_finding_fingerprint(project_id).await? else {
-            return Ok(StructuralFindingRefresh::NoCurrentGeneration);
+            return Ok(FencedStructuralFindingRefresh {
+                outcome: StructuralFindingRefresh::NoCurrentGeneration,
+                generation_id: None,
+            });
         };
+        let generation_id = fingerprint.generation_id.clone();
         if self
             .stored_structural_finding_digest(project_id, &fingerprint.generation_id)
             .await?
             .is_some_and(|stored| stored == fingerprint.inputs_digest)
         {
-            return Ok(StructuralFindingRefresh::Current);
+            return Ok(FencedStructuralFindingRefresh {
+                outcome: StructuralFindingRefresh::Current,
+                generation_id: Some(generation_id),
+            });
         }
-        self.recompute_structural_findings(project_id, &fingerprint, statement_timeout)
-            .await
+        let outcome = self
+            .recompute_structural_findings(project_id, &fingerprint, statement_timeout)
+            .await?;
+        Ok(FencedStructuralFindingRefresh {
+            outcome,
+            generation_id: Some(generation_id),
+        })
     }
 
     /// Replace the stored relation for one generation inside a single bounded,

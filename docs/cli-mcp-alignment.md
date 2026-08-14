@@ -1,6 +1,6 @@
 # CLI and MCP alignment
 
-Last release audit: 2026-08-10 (`v2.1.14`).
+Last release audit: 2026-08-13 (`v2.1.15`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands
 and 36 bounded MCP tools. Shared schemas generate ordinary CLI adapters where

@@ -25,8 +25,8 @@ use cartograph_agent::{
     RetrievalRequest, ReviewError, ReviewOptions, ScipExportRequest, ScipImportLimits,
     ScipImportRequest, SourceCompareError, SourceCompareOptions, SourceContextOptions,
     SourceContextRequest, SourceSearchError, SourceSearchHit, SourceSearchOptions,
-    SymbolSourceContext, TestEvidenceError, TestEvidenceOptions, TestEvidenceReport,
-    VerificationCommand, WorkingTreeOverlayRequest, judge_dead_code_candidates,
+    SupervisorStatus, SymbolSourceContext, TestEvidenceError, TestEvidenceOptions,
+    TestEvidenceReport, VerificationCommand, WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_db::{
     AgentArtifactContent, AgentArtifactKind, AgentArtifactQuery, AgentArtifactScope,
@@ -831,6 +831,8 @@ struct NeighborSummarySweepStats {
     propagated: u64,
     no_neighbor: u64,
     lookup_failures: u64,
+    retrieval_failures: u64,
+    task_failures: u64,
     preserved_or_source_changed: u64,
     source_changed: bool,
 }
@@ -2479,8 +2481,12 @@ enum AdminJobFailure {
     ProjectUnavailable,
     DatabaseUnavailable,
     SourceUnavailable,
+    SourceChangedDuringIndex,
     EmbeddingConfigurationUnavailable,
     EmbeddingUnavailable,
+    EnrichmentReadFailed,
+    EnrichmentWriteFailed,
+    EnrichmentDataInvalid,
     HnswCreateSharedMemoryUnavailable,
     InvalidOptions,
     DiscoverFailed,
@@ -2513,6 +2519,7 @@ enum AdminJobFailure {
     PublicationFailed,
     PublicationProgressStalled,
     LeaseFailed,
+    CleanupFailed,
     OperationFailed,
 }
 
@@ -2526,6 +2533,8 @@ struct AdminJobView {
     report: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<AdminJobFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<SupervisorStatus>,
 }
 
 struct ActiveAdminJob {
@@ -2621,6 +2630,7 @@ impl AdminJobs {
             status: AdminJobStatus::Running,
             report: None,
             failure: None,
+            progress: None,
         };
         let handle = tokio::spawn(async move {
             let result = operation.await;
@@ -2643,6 +2653,7 @@ impl AdminJobs {
                 status,
                 report,
                 failure,
+                progress: None,
             });
             drop(state);
         });
@@ -2657,24 +2668,30 @@ impl AdminJobs {
 
     async fn status(&self, job_id: Option<u64>) -> Result<AdminJobView, ToolError> {
         let state = self.shared.state.lock().await;
-        let view = state
-            .active
-            .as_ref()
-            .map(|active| &active.view)
-            .or(state.latest.as_ref())
-            .ok_or_else(|| {
-                safe_error(
-                    ToolErrorCode::NotReady,
-                    "No Cartograph admin job is available",
-                )
-            })?;
+        let (mut view, cancellation) = if let Some(active) = state.active.as_ref() {
+            (active.view.clone(), Some(active.cancellation.clone()))
+        } else {
+            (
+                state.latest.clone().ok_or_else(|| {
+                    safe_error(
+                        ToolErrorCode::NotReady,
+                        "No Cartograph admin job is available",
+                    )
+                })?,
+                None,
+            )
+        };
         if job_id.is_some_and(|expected| expected != view.job_id) {
             return Err(safe_error(
                 ToolErrorCode::NotFound,
                 "Cartograph admin job was not found",
             ));
         }
-        Ok(view.clone())
+        drop(state);
+        if let Some(cancellation) = cancellation {
+            view.progress = cancellation.index_progress_status().await;
+        }
+        Ok(view)
     }
 
     async fn cancel(&self, job_id: Option<u64>) -> Result<AdminJobView, ToolError> {
@@ -2758,6 +2775,7 @@ impl AdminJobs {
                 status: AdminJobStatus::Cancelled,
                 report: None,
                 failure: None,
+                progress: None,
             });
             active.handle
         };
@@ -2781,10 +2799,14 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
         | ProjectError::SymbolNotFound
         | ProjectError::FileNotFound
         | ProjectError::SourceContextUnavailable => AdminJobFailure::SourceUnavailable,
+        ProjectError::SourceChangedDuringIndex => AdminJobFailure::SourceChangedDuringIndex,
         ProjectError::EmbeddingConfigurationUnavailable => {
             AdminJobFailure::EmbeddingConfigurationUnavailable
         }
         ProjectError::EmbeddingOperationFailed => AdminJobFailure::EmbeddingUnavailable,
+        ProjectError::EnrichmentReadFailed => AdminJobFailure::EnrichmentReadFailed,
+        ProjectError::EnrichmentWriteFailed => AdminJobFailure::EnrichmentWriteFailed,
+        ProjectError::EnrichmentDataInvalid => AdminJobFailure::EnrichmentDataInvalid,
         ProjectError::HnswCreateSharedMemoryUnavailable => {
             AdminJobFailure::HnswCreateSharedMemoryUnavailable
         }
@@ -2797,8 +2819,8 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
         }
         ProjectError::IndexLeaseFailed => AdminJobFailure::LeaseFailed,
         ProjectError::IndexPublicationFailed => AdminJobFailure::PublicationFailed,
+        ProjectError::IndexCleanupFailed => AdminJobFailure::CleanupFailed,
         ProjectError::IndexFailed
-        | ProjectError::IndexCleanupFailed
         | ProjectError::RetrievalOperationFailed
         | ProjectError::RequestCancelled => AdminJobFailure::OperationFailed,
     }
@@ -11061,6 +11083,9 @@ impl AdminCoreTools<'_> {
             "liveLeasesPreserved": live,
             "observed": before,
             "policy": "database_clock_expired_only",
+            "retentionDeferredReportsAreHistorical": true,
+            "projectBusyClearedByUnlock": false,
+            "projectBusyNextAction": "retry index or bounded prune after the active writer completes",
         }))
     }
 
@@ -12550,14 +12575,14 @@ async fn run_structural_summary_sweep(
                 .after_symbol(after.as_ref()),
             )
             .await
-            .map_err(|_| ProjectError::IndexFailed)?;
+            .map_err(|_| ProjectError::EnrichmentReadFailed)?;
         if pending.is_empty() {
             break;
         }
         let last_id = pending
             .last()
             .map(|candidate| candidate.symbol_id().to_owned())
-            .ok_or(ProjectError::IndexFailed)?;
+            .ok_or(ProjectError::EnrichmentDataInvalid)?;
         persist_structural_summary_page(&context, pending, &mut stats).await?;
         if stats.source_changed {
             break;
@@ -12585,10 +12610,10 @@ async fn persist_structural_summary_page(
             stats.unmatched = stats.unmatched.saturating_add(1);
             continue;
         };
-        let symbol_id =
-            SymbolId::parse(candidate.symbol_id()).map_err(|_| ProjectError::IndexFailed)?;
+        let symbol_id = SymbolId::parse(candidate.symbol_id())
+            .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
         let source_digest = ContentDigest::parse(candidate.content_hash())
-            .map_err(|_| ProjectError::IndexFailed)?;
+            .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
         match context
             .runtime
             .database()
@@ -12601,7 +12626,7 @@ async fn persist_structural_summary_page(
                 .with_summary(&summary),
             )
             .await
-            .map_err(|_| ProjectError::IndexFailed)?
+            .map_err(|_| ProjectError::EnrichmentWriteFailed)?
         {
             Some(_) => stats.generated = stats.generated.saturating_add(1),
             None => {
@@ -12969,7 +12994,7 @@ async fn load_structural_rollup_page(
                     .collect()
             }),
     }
-    .map_err(|_| ProjectError::IndexFailed)
+    .map_err(|_| ProjectError::EnrichmentReadFailed)
 }
 
 async fn save_structural_rollup(
@@ -12979,10 +13004,10 @@ async fn save_structural_rollup(
 ) -> Result<StructuralRollupSaveOutcome, ProjectError> {
     match pending {
         PendingStructuralRollup::File(pending) => {
-            let path =
-                NormalizedPath::parse(pending.path()).map_err(|_| ProjectError::IndexFailed)?;
+            let path = NormalizedPath::parse(pending.path())
+                .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             let expected_digest = ContentDigest::parse(pending.content_hash())
-                .map_err(|_| ProjectError::IndexFailed)?;
+                .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             let request = FileSummarySaveRequest::new(
                 &path,
                 SummarySaveInput::new(&expected_digest, &context.anchor.digest, summary)
@@ -12990,7 +13015,7 @@ async fn save_structural_rollup(
                     .with_item_limit(FILE_SUMMARY_ROLLUP_ITEMS),
             )
             .and_then(|request| request.with_generation_mode("structural_rule"))
-            .map_err(|_| ProjectError::IndexFailed)?;
+            .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             structural_rollup_save_outcome(
                 &context
                     .runtime
@@ -13001,9 +13026,9 @@ async fn save_structural_rollup(
         }
         PendingStructuralRollup::Module(pending) => {
             let directory = NormalizedPath::parse(pending.directory())
-                .map_err(|_| ProjectError::IndexFailed)?;
+                .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             let expected_digest = ContentDigest::parse(pending.content_hash())
-                .map_err(|_| ProjectError::IndexFailed)?;
+                .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             let request = ModuleSummarySaveRequest::new(
                 &directory,
                 SummarySaveInput::new(&expected_digest, &context.anchor.digest, summary)
@@ -13011,7 +13036,7 @@ async fn save_structural_rollup(
                     .with_item_limit(MODULE_SUMMARY_ROLLUP_ITEMS),
             )
             .and_then(|request| request.with_generation_mode("structural_rule"))
-            .map_err(|_| ProjectError::IndexFailed)?;
+            .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             structural_rollup_save_outcome(
                 &context
                     .runtime
@@ -13032,7 +13057,7 @@ fn structural_rollup_save_outcome<Artifact>(
         Err(StorageError::CurrentGenerationChanged) => {
             Ok(StructuralRollupSaveOutcome::SourceChanged)
         }
-        Err(_) => Err(ProjectError::IndexFailed),
+        Err(_) => Err(ProjectError::EnrichmentWriteFailed),
     }
 }
 
@@ -13161,14 +13186,14 @@ async fn run_neighbor_summary_sweep(
                 .with_limit(NEIGHBOR_SUMMARY_PAGE_SIZE),
             )
             .await
-            .map_err(|_| ProjectError::IndexFailed)?;
+            .map_err(|_| ProjectError::EnrichmentReadFailed)?;
         if pending.is_empty() {
             break;
         }
         let last_id = pending
             .last()
             .map(|candidate| candidate.symbol_id().to_owned())
-            .ok_or(ProjectError::IndexFailed)?;
+            .ok_or(ProjectError::EnrichmentDataInvalid)?;
         stats.candidates = stats.candidates.saturating_add(
             u64::try_from(pending.len()).map_err(|_| ProjectError::InvalidOptions)?,
         );
@@ -13176,7 +13201,7 @@ async fn run_neighbor_summary_sweep(
         lookups.sort_by(|left, right| left.candidate.symbol_id().cmp(right.candidate.symbol_id()));
         let page = resolve_neighbor_page(&context, lookups).await?;
         persist_neighbor_page(&context, page, &mut stats).await?;
-        after = Some(SymbolId::parse(&last_id).map_err(|_| ProjectError::IndexFailed)?);
+        after = Some(SymbolId::parse(&last_id).map_err(|_| ProjectError::EnrichmentDataInvalid)?);
     }
     finish_neighbor_sweep(&context, stats).await
 }
@@ -13190,8 +13215,8 @@ async fn lookup_neighbor_page(
     for chunk in pending.chunks(usize::from(context.concurrency)) {
         let mut tasks = JoinSet::new();
         for candidate in chunk {
-            let source_symbol_id =
-                SymbolId::parse(candidate.symbol_id()).map_err(|_| ProjectError::IndexFailed)?;
+            let source_symbol_id = SymbolId::parse(candidate.symbol_id())
+                .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             let request = SimilarRequest::new(
                 context.project_id.clone(),
                 source_symbol_id,
@@ -13202,7 +13227,7 @@ async fn lookup_neighbor_page(
                     .with_model_id(context.model_id.clone())
                     .with_minimum_score(NEIGHBOR_SUMMARY_MINIMUM_SIMILARITY)
             })
-            .map_err(|_| ProjectError::IndexFailed)?;
+            .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
             let retriever = context.retriever.clone();
             let candidate = candidate.clone();
             tasks.spawn(async move {
@@ -13261,12 +13286,16 @@ async fn collect_neighbor_lookups(
             }
             Ok((candidate, Err(_))) => {
                 stats.lookup_failures = stats.lookup_failures.saturating_add(1);
+                stats.retrieval_failures = stats.retrieval_failures.saturating_add(1);
                 lookups.push(NeighborSummaryLookup {
                     candidate,
                     hits: Vec::new(),
                 });
             }
-            Err(_) => stats.lookup_failures = stats.lookup_failures.saturating_add(1),
+            Err(_) => {
+                stats.lookup_failures = stats.lookup_failures.saturating_add(1);
+                stats.task_failures = stats.task_failures.saturating_add(1);
+            }
         }
     }
 }
@@ -13300,7 +13329,7 @@ async fn resolve_neighbor_page(
                 &source_ids.into_values().collect::<Vec<_>>(),
             )
             .await
-            .map_err(|_| ProjectError::IndexFailed)?
+            .map_err(|_| ProjectError::EnrichmentReadFailed)?
     };
     Ok(NeighborResolvedPage {
         lookups,
@@ -13358,11 +13387,11 @@ async fn persist_neighbor_summary(
         persistence.source.summary()
     ));
     let symbol_id = SymbolId::parse(persistence.candidate.symbol_id())
-        .map_err(|_| ProjectError::IndexFailed)?;
+        .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
     let source_digest = ContentDigest::parse(persistence.candidate.content_hash())
-        .map_err(|_| ProjectError::IndexFailed)?;
-    let neighbor_symbol_id =
-        SymbolId::parse(persistence.source.symbol_id()).map_err(|_| ProjectError::IndexFailed)?;
+        .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
+    let neighbor_symbol_id = SymbolId::parse(persistence.source.symbol_id())
+        .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
     let request = NeighborSummarySaveRequest::new(NeighborSummarySaveInput {
         symbol_id: &symbol_id,
         source_digest: &source_digest,
@@ -13372,13 +13401,13 @@ async fn persist_neighbor_summary(
         embedding_model_id: context.model_id,
         similarity: persistence.similarity,
     })
-    .map_err(|_| ProjectError::IndexFailed)?;
+    .map_err(|_| ProjectError::EnrichmentDataInvalid)?;
     match context
         .runtime
         .database()
         .save_neighbor_symbol_summary(context.project_id, request)
         .await
-        .map_err(|_| ProjectError::IndexFailed)?
+        .map_err(|_| ProjectError::EnrichmentWriteFailed)?
     {
         Some(_) => stats.propagated = stats.propagated.saturating_add(1),
         None => {
@@ -13410,6 +13439,11 @@ async fn finish_neighbor_sweep(
             "propagated": stats.propagated,
             "noNeighbor": stats.no_neighbor,
             "lookupFailures": stats.lookup_failures,
+            "failureBreakdown": {
+                "retrievalFailures": stats.retrieval_failures,
+                "taskFailures": stats.task_failures,
+            },
+            "lookupFailureRetryable": stats.lookup_failures > 0,
             "preservedOrSourceChanged": stats.preserved_or_source_changed,
             "sourceChanged": stats.source_changed,
             "minimumSimilarity": NEIGHBOR_SUMMARY_MINIMUM_SIMILARITY,
@@ -13503,9 +13537,27 @@ fn enrichment_failure_report(error: ProjectError) -> Value {
     json!({
         "state": "failed",
         "reason": project_error_reason(error),
+        "failureCategory": enrichment_failure_category(error),
+        "retryable": !matches!(error, ProjectError::EnrichmentDataInvalid | ProjectError::InvalidOptions),
         "retryBoundary": "retry_post_index_enrichment",
         "baseGraphRemainsQueryable": true,
     })
+}
+
+const fn enrichment_failure_category(error: ProjectError) -> &'static str {
+    match error {
+        ProjectError::EnrichmentReadFailed => "storage_read",
+        ProjectError::EnrichmentWriteFailed => "storage_write",
+        ProjectError::EnrichmentDataInvalid => "stored_contract",
+        ProjectError::EmbeddingConfigurationUnavailable
+        | ProjectError::EmbeddingOperationFailed
+        | ProjectError::HnswCreateSharedMemoryUnavailable => "semantic_model",
+        ProjectError::SourceChangedDuringIndex | ProjectError::SourceScanFailed => "source_drift",
+        ProjectError::IndexStageFailed { .. }
+        | ProjectError::IndexStageFailedWithReason { .. }
+        | ProjectError::IndexFailed => "index_pipeline",
+        _ => "project_runtime",
+    }
 }
 
 fn project_error_reason(error: ProjectError) -> &'static str {
@@ -13546,6 +13598,9 @@ const fn project_query_error_reason(error: ProjectError) -> &'static str {
         ProjectError::EmbeddingOperationFailed => "embedding_operation_failed",
         ProjectError::HnswCreateSharedMemoryUnavailable => "hnsw_shared_memory_unavailable",
         ProjectError::RetrievalOperationFailed => "retrieval_operation_failed",
+        ProjectError::EnrichmentReadFailed => "enrichment_read_failed",
+        ProjectError::EnrichmentWriteFailed => "enrichment_write_failed",
+        ProjectError::EnrichmentDataInvalid => "enrichment_data_invalid",
         ProjectError::RequestCancelled => "request_cancelled",
         _ => "project_operation_failed",
     }
@@ -20846,6 +20901,10 @@ fn merge_layer_finding_stats(
     let mut value = serde_json::to_value(stats).map_err(internal_error)?;
     let object = value.as_object_mut().ok_or_else(ToolError::internal)?;
     let added = u64::try_from(layer_violations).unwrap_or(u64::MAX);
+    if object.get("state").and_then(Value::as_str) != Some("ready") {
+        object.insert("layerViolationCount".to_owned(), Value::from(added));
+        return Ok(value);
+    }
     increment_json_u64(object, "totalFindings", added)?;
     increment_json_u64(object, "warningFindings", added)?;
     if added > 0 {
@@ -24213,6 +24272,22 @@ fn project_error(error: ProjectError) -> ToolError {
         ProjectError::RetrievalOperationFailed => safe_error(
             ToolErrorCode::Unavailable,
             "Cartograph retrieval operation is unavailable",
+        ),
+        ProjectError::SourceChangedDuringIndex => safe_error(
+            ToolErrorCode::Unavailable,
+            "Source changed repeatedly while Cartograph was indexing; retry after the active writes settle",
+        ),
+        ProjectError::EnrichmentReadFailed => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph enrichment could not read its current generation data",
+        ),
+        ProjectError::EnrichmentWriteFailed => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph enrichment could not persist its generated artifacts",
+        ),
+        ProjectError::EnrichmentDataInvalid => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph enrichment encountered invalid stored generation data",
         ),
         ProjectError::InvalidOptions => invalid_arguments(),
         ProjectError::ScipOverlayInvalid => safe_error(

@@ -5,9 +5,16 @@ use thiserror::Error;
 use tree_sitter::{ParseOptions, Parser, Point, Query};
 
 use crate::{
-    ExtractedFile, ExtractionStrategy, LanguageSpec, SourceSnapshot, custom, framework, tags,
-    test_names, walk,
+    DiagnosticCode, ExtractedFile, ExtractionDiagnostic, ExtractionStrategy, LanguageSpec,
+    SourceSnapshot, custom, framework, tags, test_names, walk,
 };
+
+/// Default defensive AST depth used when a project does not override it.
+pub const DEFAULT_MAXIMUM_AST_DEPTH: usize = 256;
+/// Smallest accepted project AST-depth override.
+pub const MINIMUM_AST_DEPTH: usize = 64;
+/// Hard ceiling for project AST-depth overrides.
+pub const MAXIMUM_AST_DEPTH: usize = 1_024;
 
 /// Reusable one-language native parser. Create one per bounded worker.
 pub struct NativeExtractor {
@@ -15,6 +22,7 @@ pub struct NativeExtractor {
     strategy: ExtractionStrategy,
     tags_query: Option<&'static Query>,
     parser: Option<Parser>,
+    maximum_ast_depth: usize,
 }
 
 impl NativeExtractor {
@@ -68,7 +76,20 @@ impl NativeExtractor {
             strategy: spec.strategy(),
             tags_query,
             parser,
+            maximum_ast_depth: DEFAULT_MAXIMUM_AST_DEPTH,
         })
+    }
+
+    /// Apply a bounded project-specific AST nesting ceiling.
+    /// # Errors
+    ///
+    /// Returns [`ExtractError::InvalidNestingLimit`] outside 64..=1024.
+    pub fn with_maximum_ast_depth(mut self, value: usize) -> Result<Self, ExtractError> {
+        if !(MINIMUM_AST_DEPTH..=MAXIMUM_AST_DEPTH).contains(&value) {
+            return Err(ExtractError::InvalidNestingLimit);
+        }
+        self.maximum_ast_depth = value;
+        Ok(self)
     }
 
     /// Extract one immutable snapshot without an external cancellation probe.
@@ -90,6 +111,17 @@ impl NativeExtractor {
         snapshot: &SourceSnapshot,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ExtractedFile, ExtractError> {
+        match self.extract_with_cancellation_inner(snapshot, &mut cancelled) {
+            Err(ExtractError::NestingLimit) if !cancelled() => Ok(nesting_limited_file(snapshot)),
+            outcome => outcome,
+        }
+    }
+
+    fn extract_with_cancellation_inner(
+        &mut self,
+        snapshot: &SourceSnapshot,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<ExtractedFile, ExtractError> {
         if snapshot.language() != self.language {
             return Err(ExtractError::LanguageMismatch);
         }
@@ -97,8 +129,8 @@ impl NativeExtractor {
             return Err(ExtractError::Cancelled);
         }
         if self.strategy == ExtractionStrategy::CustomStructural {
-            let extracted = custom::extract(snapshot, &mut cancelled)?;
-            let extracted = framework::enrich(snapshot, extracted, &mut cancelled)?;
+            let extracted = custom::extract(snapshot, cancelled)?;
+            let extracted = framework::enrich(snapshot, extracted, cancelled)?;
             return test_names::enrich(snapshot, extracted);
         }
 
@@ -152,18 +184,43 @@ impl NativeExtractor {
                     parse_status,
                     query: self.tags_query.ok_or(ExtractError::GrammarUnavailable)?,
                 },
-                &mut cancelled,
+                cancelled,
             )?;
-            let extracted = framework::enrich(snapshot, extracted, &mut cancelled)?;
+            let extracted = framework::enrich(snapshot, extracted, cancelled)?;
             return test_names::enrich(snapshot, extracted);
         }
         let extracted = walk::extract(
             snapshot,
             walk::WalkInput::new(root, parse_status),
-            &mut cancelled,
+            self.maximum_ast_depth,
+            cancelled,
         )?;
-        let extracted = framework::enrich(snapshot, extracted, &mut cancelled)?;
+        let extracted = framework::enrich(snapshot, extracted, cancelled)?;
         test_names::enrich(snapshot, extracted)
+    }
+}
+
+fn nesting_limited_file(snapshot: &SourceSnapshot) -> ExtractedFile {
+    ExtractedFile {
+        file_id: snapshot.file_id().clone(),
+        path: snapshot.path().clone(),
+        language: snapshot.language(),
+        content_hash: snapshot.content_hash().clone(),
+        byte_size: snapshot.byte_size(),
+        line_count: snapshot.line_count(),
+        parse_status: FileParseStatus::Partial,
+        symbols: Vec::new(),
+        containments: Vec::new(),
+        references: Vec::new(),
+        numerical_sites: Vec::new(),
+        import_bindings: Vec::new(),
+        has_inline_tests: false,
+        test_search_text: String::new(),
+        test_search_truncated: false,
+        diagnostics: vec![ExtractionDiagnostic {
+            code: DiagnosticCode::NestingLimitExceeded,
+            span: None,
+        }],
     }
 }
 
@@ -191,6 +248,9 @@ pub enum ExtractError {
     /// A source syntax tree exceeded the defensive nesting ceiling.
     #[error("native source nesting exceeds the extraction limit")]
     NestingLimit,
+    /// A caller supplied an AST-depth policy outside the hard safety range.
+    #[error("native extraction nesting limit is outside the supported range")]
+    InvalidNestingLimit,
     /// Extracted facts exceeded the per-file fact, string, or modeled-output bound.
     #[error("native extraction output exceeds the configured bound")]
     OutputLimit,

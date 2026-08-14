@@ -106,6 +106,8 @@ pub enum NativeGrammar {
     Rust,
     /// Represents the scala native grammar.
     Scala,
+    /// Represents the Slang shader-language native grammar.
+    Slang,
     /// Represents the solidity native grammar.
     Solidity,
     /// Represents the SQL native grammar.
@@ -126,7 +128,7 @@ pub enum NativeGrammar {
     Yaml,
 }
 
-const NATIVE_GRAMMAR_IDS: [&str; 58] = [
+const NATIVE_GRAMMAR_IDS: [&str; 59] = [
     "abap",
     "apex",
     "arkts",
@@ -176,6 +178,7 @@ const NATIVE_GRAMMAR_IDS: [&str; 58] = [
     "ruby",
     "rust",
     "scala",
+    "slang",
     "solidity",
     "sql",
     "swift",
@@ -187,7 +190,7 @@ const NATIVE_GRAMMAR_IDS: [&str; 58] = [
     "yaml",
 ];
 
-const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 58] = [
+const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 59] = [
     || tree_sitter_abap_sqry::language(),
     || tree_sitter_sfapex::apex::LANGUAGE.into(),
     || tree_sitter_arkts::LANGUAGE.into(),
@@ -237,6 +240,7 @@ const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 58] = [
     || arborium_ruby::language().into(),
     || tree_sitter_rust::LANGUAGE.into(),
     || arborium_scala::language().into(),
+    || tree_sitter_slang::LANGUAGE_SLANG.into(),
     || arborium_solidity::language().into(),
     || arborium_sql::language().into(),
     || arborium_swift::language().into(),
@@ -250,7 +254,7 @@ const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 58] = [
 
 impl NativeGrammar {
     /// Every admitted binding in stable language-id order.
-    pub const ALL: [Self; 58] = [
+    pub const ALL: [Self; 59] = [
         Self::Abap,
         Self::Apex,
         Self::ArkTs,
@@ -300,6 +304,7 @@ impl NativeGrammar {
         Self::Ruby,
         Self::Rust,
         Self::Scala,
+        Self::Slang,
         Self::Solidity,
         Self::Sql,
         Self::Swift,
@@ -434,6 +439,7 @@ const fn grammar_group_e_systems(language: SourceLanguage) -> Option<NativeGramm
         SourceLanguage::Ruby => Some(NativeGrammar::Ruby),
         SourceLanguage::Rust => Some(NativeGrammar::Rust),
         SourceLanguage::Scala => Some(NativeGrammar::Scala),
+        SourceLanguage::Slang => Some(NativeGrammar::Slang),
         SourceLanguage::Solidity => Some(NativeGrammar::Solidity),
         SourceLanguage::Sql => Some(NativeGrammar::Sql),
         _ => None,
@@ -448,7 +454,7 @@ const fn grammar_group_f(language: SourceLanguage) -> Option<NativeGrammar> {
         SourceLanguage::VbNet => Some(NativeGrammar::VisualBasic),
         SourceLanguage::Metal => Some(NativeGrammar::Cpp),
         SourceLanguage::Verilog => Some(NativeGrammar::Verilog),
-        SourceLanguage::Wgsl => Some(NativeGrammar::Wgsl),
+        SourceLanguage::Wesl | SourceLanguage::Wgsl => Some(NativeGrammar::Wgsl),
         SourceLanguage::Yaml => Some(NativeGrammar::Yaml),
         _ => None,
     }

@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.14"
+version = "2.1.15"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Adder Factory"]
@@ -64,8 +64,8 @@ arborium-swift = "=2.18.1"
 arborium-vb = "=2.18.1"
 arborium-verilog = "=2.18.1"
 arborium-yaml = "=2.18.1"
-blake3 = "1.8.5"
-clap = { version = "4.6.5", default-features = false, features = [
+blake3 = "1.8.6"
+clap = { version = "4.6.6", default-features = false, features = [
   "derive",
   "error-context",
   "help",
@@ -75,13 +75,13 @@ clap = { version = "4.6.5", default-features = false, features = [
   "usage",
 ] }
 getrandom = "0.4.3"
-ignore = "0.4.32"
+ignore = "0.4.33"
 libc = "0.2.189"
 memchr = "=2.8.3"
 notify = "=8.2.0"
 num-traits = "=0.2.19"
-futures-util = "=0.3.33"
-globset = "0.4.19"
+futures-util = "=0.3.34"
+globset = "0.4.20"
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 regex = "1.13.1"
 regex-syntax = "0.8.11"
@@ -95,7 +95,7 @@ sqlx-core = { version = "=0.9.0", default-features = false, features = [
   "_tls-rustls-ring-native-roots",
 ] }
 sqlx-postgres = { version = "=0.9.0", default-features = false }
-thiserror = "2.0.19"
+thiserror = "2.0.20"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = [
   "fs",
@@ -108,7 +108,7 @@ tokio = { version = "1.53.1", features = [
   "time",
 ] }
 toml_edit = "=0.25.13"
-tree-sitter = "=0.26.11"
+tree-sitter = "=0.26.12"
 tree-sitter-abap-sqry = "=29.0.6"
 tree-sitter-arkts = "=0.2.0"
 tree-sitter-astro-next = "=0.1.1"
@@ -124,6 +124,7 @@ tree-sitter-prisma-io = "=1.6.0"
 tree-sitter-python = "=0.25.0"
 tree-sitter-rust = "=0.24.2"
 tree-sitter-sfapex = "=3.0.0"
+tree-sitter-slang = "=0.3.1"
 tree-sitter-typescript = "=0.23.2"
 tree-sitter-wgsl-bevy = "=0.1.4"
 url = "2.5.8"

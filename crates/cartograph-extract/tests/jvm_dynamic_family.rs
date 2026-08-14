@@ -439,9 +439,15 @@ fn jvm_dynamic_extraction_is_cancellable_bounded_literal_safe_and_repeatable() {
     assert!(probes > 512, "cancellation did not occur after progress");
 
     let nested = format!("fun nested() = {}Unit{}", "(".repeat(300), ")".repeat(300));
+    let recovered = extract_result("src/Nested.kt", &nested)
+        .unwrap_or_else(|error| panic!("deep Kotlin extraction did not recover: {error}"));
     assert_eq!(
-        extract_result("src/Nested.kt", &nested).err(),
-        Some(ExtractError::NestingLimit)
+        recovered.parse_status,
+        cartograph_domain::FileParseStatus::Partial
+    );
+    assert_eq!(
+        recovered.diagnostics[0].code,
+        cartograph_extract::DiagnosticCode::NestingLimitExceeded
     );
 
     let mut excessive = String::new();

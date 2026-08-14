@@ -331,19 +331,23 @@ pub(super) fn capture_invocation(
                 | SourceLanguage::JavaScript
                 | SourceLanguage::Jsx
         )
-        && let Some((property, resolution_name)) =
-            javascript_dynamic_member_call_resolution(builder, target)?
+        && let Some(dispatch) = javascript_dynamic_member_call_resolution(builder, target)?
     {
         let owner = builder.owners.last().cloned();
-        let name = builder.context.owned_text(property)?;
         builder.emit_reference(ExtractedReference {
             owner,
-            name,
-            resolution_name: Some(resolution_name),
+            name: dispatch.name,
+            resolution_name: Some(dispatch.resolution_name),
             kind: reference_kind,
-            span: span_for(property)?,
+            span: span_for(dispatch.span)?,
         })?;
-        return Ok(());
+        // A statically named chain can still resolve exactly through an import
+        // binding, while its terminal method also represents interface/runtime
+        // dispatch. Retain both bounded facts; dynamic resolution only chooses a
+        // unique externally visible target and otherwise abstains.
+        if !static_javascript_member_chain(target, 0) {
+            return Ok(());
+        }
     }
     let Some((name_node, reference_node)) = invocation_reference_nodes(
         InvocationShape {
@@ -453,25 +457,70 @@ fn rust_receiver_target(target: Node<'_>, depth: usize) -> Option<Node<'_>> {
     }
 }
 
+struct JavascriptDispatchReference<'tree> {
+    span: Node<'tree>,
+    name: String,
+    resolution_name: String,
+}
+
 fn javascript_dynamic_member_call_resolution<'tree>(
-    builder: &ExtractionBuilder<'_, '_>,
+    builder: &mut ExtractionBuilder<'_, '_>,
     target: Node<'tree>,
-) -> Result<Option<(Node<'tree>, String)>, ExtractError> {
-    if target.kind() != "member_expression" || static_javascript_member_chain(target, 0) {
-        return Ok(None);
-    }
-    let Some(property) = target
-        .child_by_field_name("property")
-        .and_then(|property| normalized_javascript_call_target(property, 0))
-    else {
-        return Ok(None);
+) -> Result<Option<JavascriptDispatchReference<'tree>>, ExtractError> {
+    let (span, name) = match target.kind() {
+        "member_expression" => {
+            let Some(property) = target
+                .child_by_field_name("property")
+                .and_then(|property| normalized_javascript_call_target(property, 0))
+            else {
+                return Ok(None);
+            };
+            (property, builder.context.owned_text(property)?)
+        }
+        "subscript_expression" => {
+            let Some(index) = target.child_by_field_name("index") else {
+                return Ok(None);
+            };
+            let Some(name) = static_javascript_dispatch_key(builder.context.text(index)) else {
+                return Ok(None);
+            };
+            builder.context.budget.ensure_string_length(name.len())?;
+            (index, name.to_owned())
+        }
+        _ => return Ok(None),
     };
-    let name = builder.context.text(property).trim();
     if name.is_empty() {
         return Ok(None);
     }
-    let resolution_name = dynamic_dispatch_resolution(builder, name)?;
-    Ok(Some((property, resolution_name)))
+    let resolution_name = dynamic_dispatch_resolution(builder, &name)?;
+    Ok(Some(JavascriptDispatchReference {
+        span,
+        name,
+        resolution_name,
+    }))
+}
+
+fn static_javascript_dispatch_key(raw: &str) -> Option<&str> {
+    let raw = raw.trim();
+    let key = raw
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            raw.strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .or_else(|| {
+            raw.strip_prefix('`')
+                .and_then(|value| value.strip_suffix('`'))
+        })?;
+    let mut characters = key.chars();
+    let first = characters.next()?;
+    (key.len() <= MAX_DURABLE_REFERENCE_NAME_BYTES
+        && (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character == '_' || character == '$' || character.is_ascii_alphanumeric()
+        }))
+    .then_some(key)
 }
 
 pub(super) fn dynamic_dispatch_resolution(

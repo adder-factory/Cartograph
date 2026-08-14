@@ -22,6 +22,7 @@ const C_TYPE_OWNER_KINDS: &[SymbolKind] = &[
     SymbolKind::Class,
     SymbolKind::Struct,
     SymbolKind::Union,
+    SymbolKind::Interface,
     SymbolKind::Enum,
     SymbolKind::TypeAlias,
 ];
@@ -103,6 +104,8 @@ pub(super) fn visit_declaration(
         "preproc_include" => visit_include(builder, node)?,
         "preproc_def" => visit_macro_constant(builder, node)?,
         "function_definition" => visit_function(builder, node, depth)?,
+        "import_statement" => visit_slang_import(builder, node)?,
+        "module_declaration" => visit_slang_module(builder, node)?,
         "namespace_definition" => visit_namespace(builder, node, depth)?,
         "access_specifier" => visit_access_specifier(builder, node),
         "type_definition" => visit_type_definition(builder, node, depth)?,
@@ -135,6 +138,7 @@ fn c_container_kind(node_kind: &str) -> Option<SymbolKind> {
         ("struct_specifier", SymbolKind::Struct),
         ("union_specifier", SymbolKind::Union),
         ("enum_specifier", SymbolKind::Enum),
+        ("interface_specifier", SymbolKind::Interface),
     ]
     .into_iter()
     .find_map(|(candidate, kind)| (candidate == node_kind).then_some(kind))
@@ -499,12 +503,24 @@ fn visit_function(
         SymbolKind::Function
     };
     let body = node.child_by_field_name("body");
-    let signature = if recovered_name.is_some() {
+    let mut signature = if recovered_name.is_some() {
         None
     } else {
         c_callable_signature(builder, node, declarator)?
     };
-    let visibility = cxx_visibility(builder);
+    let shader_stage = slang_shader_stage(builder, node)?;
+    if let Some(stage) = shader_stage.as_deref() {
+        let mut staged = format!("shader:{stage}");
+        if let Some(existing) = signature.take() {
+            staged.push(' ');
+            staged.push_str(&existing);
+        }
+        signature = Some(staged);
+    }
+    let visibility = shader_stage
+        .as_ref()
+        .map(|_| Visibility::Public)
+        .or_else(|| cxx_visibility(builder));
     let pending = PendingSymbol {
         kind,
         name: local_name.clone(),
@@ -514,7 +530,9 @@ fn visit_function(
         body_node: body,
         declaration_only: body.is_none(),
         signature,
-        export: crate::SymbolExportFlags::named(has_external_linkage(builder, node)),
+        export: crate::SymbolExportFlags::named(
+            shader_stage.is_some() || has_external_linkage(builder, node),
+        ),
         async_symbol: false,
         static_member: current_owner_kind_in(builder, C_TYPE_OWNER_KINDS)
             && declaration_has_storage(builder, node, "static"),
@@ -543,6 +561,155 @@ fn visit_function(
     }
     restore_c_function_scope(builder, restore);
     Ok(())
+}
+
+fn visit_slang_module(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    if builder.context.snapshot.language() != SourceLanguage::Slang {
+        return Ok(());
+    }
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return Ok(());
+    };
+    let name = builder.context.owned_text(name_node)?;
+    if name.is_empty() {
+        return Ok(());
+    }
+    builder.emit_symbol(PendingSymbol {
+        kind: SymbolKind::Module,
+        name,
+        span_node: node,
+        structural_node: node,
+        doc_anchor: node,
+        body_node: None,
+        declaration_only: true,
+        signature: None,
+        export: crate::SymbolExportFlags::new(true, false),
+        async_symbol: false,
+        static_member: false,
+        visibility: Some(Visibility::Public),
+    })?;
+    Ok(())
+}
+
+fn visit_slang_import(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<(), ExtractError> {
+    if builder.context.snapshot.language() != SourceLanguage::Slang {
+        return Ok(());
+    }
+    let raw = builder.context.text(node).trim();
+    let Some(module) = raw
+        .strip_prefix("import")
+        .map(str::trim)
+        .map(|value| value.trim_end_matches(';').trim())
+        .filter(|value| !value.is_empty() && value.len() <= MAX_REFERENCE_TARGET_BYTES)
+    else {
+        return Ok(());
+    };
+    if !module
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+    {
+        return Ok(());
+    }
+    let module = module
+        .split('.')
+        .map(|component| component.replace('_', "-"))
+        .collect::<Vec<_>>()
+        .join("/");
+    if module.is_empty() {
+        return Ok(());
+    }
+    builder.emit_symbol(PendingSymbol {
+        kind: SymbolKind::Import,
+        name: module.clone(),
+        span_node: node,
+        structural_node: node,
+        doc_anchor: node,
+        body_node: None,
+        declaration_only: true,
+        signature: None,
+        export: crate::SymbolExportFlags::new(false, false),
+        async_symbol: false,
+        static_member: false,
+        visibility: None,
+    })?;
+    let span = span_for(node)?;
+    builder.emit_import_binding(ExtractedImportBinding {
+        kind: ImportBindingKind::Namespace,
+        module_specifier: module.clone(),
+        imported_name: "*".to_owned(),
+        local_name: "*".to_owned(),
+        span,
+    })?;
+    builder.emit_reference(crate::ExtractedReference {
+        owner: None,
+        name: module,
+        resolution_name: None,
+        kind: ReferenceKind::Imports,
+        span,
+    })
+}
+
+fn slang_shader_stage(
+    builder: &mut ExtractionBuilder<'_, '_>,
+    node: Node<'_>,
+) -> Result<Option<String>, ExtractError> {
+    if builder.context.snapshot.language() != SourceLanguage::Slang {
+        return Ok(None);
+    }
+    if let Some(stage) = slang_shader_stage_from_text(builder.context.text(node)) {
+        return Ok(Some(builder.context.copy_text(stage)?));
+    }
+    let mut sibling = node.prev_named_sibling();
+    for _ in 0..8 {
+        let Some(attribute) = sibling else {
+            break;
+        };
+        if !matches!(
+            attribute.kind(),
+            "ERROR" | "hlsl_attribute" | "attribute_declaration" | "attribute_specifier"
+        ) {
+            break;
+        }
+        if let Some(stage) = slang_shader_stage_from_text(builder.context.text(attribute)) {
+            return Ok(Some(builder.context.copy_text(stage)?));
+        }
+        sibling = attribute.prev_named_sibling();
+    }
+    Ok(None)
+}
+
+fn slang_shader_stage_from_text(raw: &str) -> Option<&str> {
+    const STAGES: &[&str] = &[
+        "amplification",
+        "anyhit",
+        "callable",
+        "closesthit",
+        "compute",
+        "domain",
+        "fragment",
+        "geometry",
+        "hull",
+        "intersection",
+        "mesh",
+        "miss",
+        "raygeneration",
+        "vertex",
+    ];
+    let attribute_start = raw.find("shader")?;
+    let tail = &raw[attribute_start + "shader".len()..];
+    let open = tail.find('(')?;
+    let close = tail[open + 1..].find(')')?;
+    let stage = tail[open + 1..open + 1 + close].trim().trim_matches('"');
+    if !STAGES.contains(&stage) {
+        return None;
+    }
+    Some(stage)
 }
 
 #[derive(Clone, Copy)]

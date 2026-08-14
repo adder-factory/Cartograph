@@ -1,10 +1,11 @@
 # Support Matrix
 
-Last implementation audit: 2026-08-10 (`v2.1.14`).
+Last implementation audit: 2026-08-13 (`v2.1.15`).
 
 Cartograph v2 supports all 73 v1.1.33 language modes, native TOML, 52
-dedicated textual game-scripting modes, and the WGSL and Metal shader modes
-added in v2.1.12: 128 modes total. The source of truth is
+dedicated textual game-scripting modes, the WGSL and Metal shader modes added
+in v2.1.12, and first-class Slang and WESL added in v2.1.15: 130 modes total.
+The source of truth is
 `cartograph_domain::SourceLanguage::ALL`; native
 extractor strategy lives in `crates/cartograph-extract/src/language.rs`, and
 framework/cross-language enrichment lives in the focused Rust modules beside
@@ -66,6 +67,7 @@ does not yet extract language-specific symbols from that grammar.
 | Liquid | `.liquid` | Custom extractor |
 | Lua | `.lua` | Tree-sitter |
 | Luau | `.luau` | Tree-sitter |
+| Metal Shading Language | `.metal` | Tree-sitter C-family slice |
 | Nix | `.nix` | Tree-sitter |
 | Objective-C | `.m`, `.mm` | Tree-sitter |
 | OCaml | `.ml` | Tree-sitter tags query |
@@ -85,6 +87,7 @@ does not yet extract language-specific symbols from that grammar.
 | Scala | `.scala`, `.sc` | Tree-sitter |
 | SQL | `.sql`, `.ddl`, `.dml` | Tree-sitter |
 | Solidity | `.sol` | Tree-sitter |
+| Slang | `.slang` | Tree-sitter with module/import, interface/generic, and shader-stage facts |
 | Svelte | `.svelte` | Custom extractor |
 | Swift | `.swift` | Tree-sitter |
 | TOML | `.toml` (additive v2 mode) | Bounded native structural scanner |
@@ -95,6 +98,8 @@ does not yet extract language-specific symbols from that grammar.
 | Verilog / SystemVerilog | `.v`, `.vh`, `.sv`, `.svh` | Tree-sitter tags query |
 | Visualforce | `.page`, `.component` | Custom extractor |
 | Vue | `.vue` | Custom extractor |
+| WESL | `.wesl` | WGSL grammar plus bounded WESL import/module extraction |
+| WGSL | `.wgsl` | Tree-sitter shader-family slice |
 | XML (MyBatis) | `.xml` | Custom extractor |
 | YAML | `.yml`, `.yaml` | Tree-sitter |
 | Zsh | `.zsh`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin` | Tree-sitter |

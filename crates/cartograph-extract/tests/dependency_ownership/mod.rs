@@ -68,6 +68,7 @@ use tree_sitter_prisma_io as _;
 use tree_sitter_python as _;
 use tree_sitter_rust as _;
 use tree_sitter_sfapex as _;
+use tree_sitter_slang as _;
 use tree_sitter_typescript as _;
 use tree_sitter_wgsl_bevy as _;
 use unicode_ident as _;

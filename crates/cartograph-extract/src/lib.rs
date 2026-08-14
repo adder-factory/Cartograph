@@ -47,7 +47,9 @@ pub use model::{
     TYPE_QUERY_VALUE_RESOLUTION_PREFIX,
 };
 pub use module_alias::substitute_module_alias;
-pub use native::{ExtractError, NativeExtractor};
+pub use native::{
+    DEFAULT_MAXIMUM_AST_DEPTH, ExtractError, MAXIMUM_AST_DEPTH, MINIMUM_AST_DEPTH, NativeExtractor,
+};
 pub use reader::{SourceReadError, SourceReadOptions, SourceRoot};
 pub use snapshot::{
     SnapshotError, SourceLimits, SourceLimitsError, SourceSnapshot, is_test_source_path,

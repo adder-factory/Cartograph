@@ -30,13 +30,15 @@ use cartograph_domain::{
     SymbolImplementationFlags, SymbolKind, Visibility, symbol_signature_is_search_safe,
 };
 use cartograph_extract::{
-    CloneTokenCount, CloneTokenProfile, Containment, DYNAMIC_DISPATCH_RESOLUTION_PREFIX,
-    DiscoveredSource, DiscoveryLimits, EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractError, ExtractedFile,
-    ExtractedImportBinding, ExtractedNumericalSite, ExtractedReference, ImportBindingKind,
-    NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions, SourceExclusionEvidence,
-    SourceLimits, SourceReadError, SourceReadOptions, SourceRoot, SourceSnapshot,
-    TYPE_QUERY_VALUE_RESOLUTION_PREFIX, is_test_source_path, native_extraction_reservation,
-    native_extractor_contract_digest, native_read_reservation, substitute_module_alias,
+    CloneTokenCount, CloneTokenProfile, Containment, DEFAULT_MAXIMUM_AST_DEPTH,
+    DYNAMIC_DISPATCH_RESOLUTION_PREFIX, DiagnosticCode, DiscoveredSource, DiscoveryLimits,
+    EMBEDDED_SQL_RESOLUTION_PREFIX, ExtractError, ExtractedFile, ExtractedImportBinding,
+    ExtractedNumericalSite, ExtractedReference, ImportBindingKind, MAXIMUM_AST_DEPTH,
+    MINIMUM_AST_DEPTH, NativeExtractor, RUST_MACRO_RESOLUTION_PREFIX, SourceDiscoveryOptions,
+    SourceExclusionEvidence, SourceLimits, SourceReadError, SourceReadOptions, SourceRoot,
+    SourceSnapshot, TYPE_QUERY_VALUE_RESOLUTION_PREFIX, is_test_source_path,
+    native_extraction_reservation, native_extractor_contract_digest, native_read_reservation,
+    substitute_module_alias,
 };
 use cartograph_scip::{
     ScipOverlayReport, ScipOverlayRequest, apply_scip_overlay_with_cancellation,
@@ -60,6 +62,7 @@ use crate::{
 const MAX_PIPELINE_RETAINED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_STAGE_TIMEOUT: Duration = Duration::from_hours(24);
 const MAX_CLEANUP_GRACE: Duration = Duration::from_mins(1);
+const MAX_REPORTED_DEGRADED_FILES: usize = 32;
 const DOCUMENT_ID_DOMAIN: &[u8] = b"cartograph-v2-native-document-v1";
 const MYBATIS_BRIDGE_PROVENANCE: &str = "framework-mybatis-qualified";
 const NATIVE_MODULE_BRIDGE_PROVENANCE: &str = "framework-native-module-impl";
@@ -206,6 +209,19 @@ impl NativeParseCache {
         self
     }
 
+    fn with_maximum_ast_depth(mut self, maximum_ast_depth: usize) -> Self {
+        let mut hasher =
+            blake3::Hasher::new_derive_key("cartograph.v2.native-parse-cache-policy.2026-08-13");
+        hasher.update(self.extractor_contract_digest.as_str().as_bytes());
+        hasher.update(
+            &u64::try_from(maximum_ast_depth)
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        self.extractor_contract_digest = ContentDigest::from_bytes(*hasher.finalize().as_bytes());
+        self
+    }
+
     fn key(&self, manifest: &SourceManifestEntry) -> NativeParseCacheKey {
         NativeParseCacheKey::new(NativeParseCacheKeyInput {
             project_id: self.project_id.clone(),
@@ -338,6 +354,7 @@ pub struct NativePipelineConfig {
     deadlines: NativePipelineDeadlines,
     evidence: NativeEvidencePolicy,
     clones: NativeClonePolicy,
+    maximum_ast_depth: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -463,6 +480,7 @@ impl NativePipelineConfig {
             clones: NativeClonePolicy {
                 wider_partial_band: false,
             },
+            maximum_ast_depth: DEFAULT_MAXIMUM_AST_DEPTH,
         }
     }
 
@@ -501,6 +519,21 @@ impl NativePipelineConfig {
         self
     }
 
+    /// Apply the project-specific AST depth within the extractor hard safety range.
+    /// # Errors
+    ///
+    /// Returns an error outside 64..=1024.
+    pub fn with_maximum_ast_depth(
+        mut self,
+        value: usize,
+    ) -> Result<Self, NativePipelineConfigError> {
+        if !(MINIMUM_AST_DEPTH..=MAXIMUM_AST_DEPTH).contains(&value) {
+            return Err(NativePipelineConfigError::invalid("maximum_ast_depth"));
+        }
+        self.maximum_ast_depth = value;
+        Ok(self)
+    }
+
     /// Largest single supervisor-owned worker reservation required by this pipeline.
     /// # Errors
     ///
@@ -532,6 +565,10 @@ impl NativePipelineConfig {
     const fn clone_policy(self) -> NativeClonePolicy {
         self.clones
     }
+
+    const fn maximum_ast_depth(self) -> usize {
+        self.maximum_ast_depth
+    }
 }
 
 /// A native pipeline policy was zero, overflowed, or exceeded a hard ceiling.
@@ -549,7 +586,7 @@ impl NativePipelineConfigError {
 }
 
 /// Fixed-size accounting for one complete native source-to-facts build.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NativePipelineReport {
     discovered_files: u64,
     excluded_paths: u64,
@@ -561,6 +598,8 @@ pub struct NativePipelineReport {
     resolved_references: u64,
     unresolved_references: u64,
     diagnostics: u64,
+    degraded_files: Vec<NativeDegradedFile>,
+    degraded_files_truncated: u64,
     modeled_generation_bytes: u64,
     resolve_high_water_bytes: u64,
     validation_high_water_bytes: u64,
@@ -569,6 +608,27 @@ pub struct NativePipelineReport {
     parse_cache: NativeParseCacheReport,
     storage: NativeGenerationStorage,
     spill: Option<NativeGenerationSpillReport>,
+}
+
+/// One source file retained as partial after a recoverable extraction boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeDegradedFile {
+    path: String,
+    reason: &'static str,
+}
+
+impl NativeDegradedFile {
+    /// Exact normalized project-relative source path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Stable source-safe recovery category.
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        self.reason
+    }
 }
 
 /// Physical working-set strategy used before atomic generation publication.
@@ -658,7 +718,7 @@ impl NativeParseCacheReport {
 impl NativePipelineReport {
     /// Supported source files admitted by discovery.
     #[must_use]
-    pub const fn discovered_files(self) -> u64 {
+    pub const fn discovered_files(&self) -> u64 {
         self.discovered_files
     }
 
@@ -667,103 +727,115 @@ impl NativePipelineReport {
     /// A partial index must never look complete, so this is reported even when
     /// the exclusion was exactly what the project asked for.
     #[must_use]
-    pub const fn excluded_paths(self) -> u64 {
+    pub const fn excluded_paths(&self) -> u64 {
         self.excluded_paths
     }
 
     /// Directory subtrees skipped without being descended into.
     #[must_use]
-    pub const fn excluded_trees(self) -> u64 {
+    pub const fn excluded_trees(&self) -> u64 {
         self.excluded_trees
     }
 
     /// Supported files excluded before reads because their observed size exceeded policy.
     #[must_use]
-    pub const fn skipped_oversized_files(self) -> u64 {
+    pub const fn skipped_oversized_files(&self) -> u64 {
         self.skipped_oversized_files
     }
 
     /// Exact source bytes hashed and then revalidated before parsing.
     #[must_use]
-    pub const fn source_bytes(self) -> u64 {
+    pub const fn source_bytes(&self) -> u64 {
         self.source_bytes
     }
 
     /// Native declarations emitted into the generation.
     #[must_use]
-    pub const fn symbols(self) -> u64 {
+    pub const fn symbols(&self) -> u64 {
         self.symbols
     }
 
     /// Static numerical source sites emitted into the generation.
     #[must_use]
-    pub const fn numerical_sites(self) -> u64 {
+    pub const fn numerical_sites(&self) -> u64 {
         self.numerical_sites
     }
 
     /// References assigned one deterministic project symbol.
     #[must_use]
-    pub const fn resolved_references(self) -> u64 {
+    pub const fn resolved_references(&self) -> u64 {
         self.resolved_references
     }
 
     /// Explicit unresolved reference rows retained for later improvements.
     #[must_use]
-    pub const fn unresolved_references(self) -> u64 {
+    pub const fn unresolved_references(&self) -> u64 {
         self.unresolved_references
     }
 
     /// Recoverable parser diagnostics observed but not persisted in the first schema.
     #[must_use]
-    pub const fn diagnostics(self) -> u64 {
+    pub const fn diagnostics(&self) -> u64 {
         self.diagnostics
+    }
+
+    /// Bounded paths retained as partial after recoverable extraction limits.
+    #[must_use]
+    pub fn degraded_files(&self) -> &[NativeDegradedFile] {
+        &self.degraded_files
+    }
+
+    /// Additional degraded paths omitted after the bounded report limit.
+    #[must_use]
+    pub const fn degraded_files_truncated(&self) -> u64 {
+        self.degraded_files_truncated
     }
 
     /// Conservative Rust-owned bytes retained by the canonical COPY payload.
     #[must_use]
-    pub const fn modeled_generation_bytes(self) -> u64 {
+    pub const fn modeled_generation_bytes(&self) -> u64 {
         self.modeled_generation_bytes
     }
 
     /// Conservative cumulative allocation charge observed while resolving facts.
     #[must_use]
-    pub const fn resolve_high_water_bytes(self) -> u64 {
+    pub const fn resolve_high_water_bytes(&self) -> u64 {
         self.resolve_high_water_bytes
     }
 
     /// Conservative cumulative allocation charge observed while canonicalizing the payload.
     #[must_use]
-    pub const fn validation_high_water_bytes(self) -> u64 {
+    pub const fn validation_high_water_bytes(&self) -> u64 {
         self.validation_high_water_bytes
     }
 
     /// Per-file replacement accounting when a persistent SCIP overlay was present.
     #[must_use]
-    pub const fn scip_overlay(self) -> Option<ScipOverlayReport> {
+    pub const fn scip_overlay(&self) -> Option<ScipOverlayReport> {
         self.scip_overlay
     }
 
     /// Conservative stage reservation for decoded and reconciled SCIP facts.
     #[must_use]
-    pub const fn overlay_high_water_bytes(self) -> u64 {
+    pub const fn overlay_high_water_bytes(&self) -> u64 {
         self.overlay_high_water_bytes
     }
 
     /// Path/content/extractor cache activity. Zeroed when no cache was configured.
     #[must_use]
-    pub const fn parse_cache(self) -> NativeParseCacheReport {
+    pub const fn parse_cache(&self) -> NativeParseCacheReport {
         self.parse_cache
     }
 
     /// Physical working-set strategy used for this build.
     #[must_use]
-    pub const fn storage(self) -> NativeGenerationStorage {
+    pub const fn storage(&self) -> NativeGenerationStorage {
         self.storage
     }
 
     /// Fixed-size PostgreSQL spill accounting, absent for the memory path.
     #[must_use]
-    pub const fn spill(self) -> Option<NativeGenerationSpillReport> {
+    pub const fn spill(&self) -> Option<NativeGenerationSpillReport> {
         self.spill
     }
 }
@@ -798,8 +870,8 @@ impl NativeGeneration {
 
     /// Fixed-size discovery, extraction, and resolution accounting.
     #[must_use]
-    pub const fn report(&self) -> NativePipelineReport {
-        self.report
+    pub fn report(&self) -> NativePipelineReport {
+        self.report.clone()
     }
 
     /// Split the ready-to-COPY facts from their build report.
@@ -829,8 +901,8 @@ impl fmt::Debug for NativeSpilledGeneration {
 impl NativeSpilledGeneration {
     /// Fixed-size discovery, extraction, resolution, and spill accounting.
     #[must_use]
-    pub const fn report(&self) -> NativePipelineReport {
-        self.report
+    pub fn report(&self) -> NativePipelineReport {
+        self.report.clone()
     }
 
     /// Split the exact streamed digest capability from its public build report.
@@ -997,6 +1069,8 @@ pub async fn build_native_generation_with_scip_and_cache(
         scip_overlay,
         parse_cache,
     } = request;
+    let parse_cache =
+        parse_cache.map(|cache| cache.with_maximum_ast_depth(config.maximum_ast_depth()));
     require_multithread_runtime()?;
     let stages = NativeStageContext {
         runner,
@@ -1013,7 +1087,10 @@ pub async fn build_native_generation_with_scip_and_cache(
         source_bytes: manifest.source_bytes,
         ..NativePipelineReport::default()
     };
-    let (extracted, parse_cache) = run_parse_stage(&stages, manifest.entries, parse_cache).await?;
+    let (mut extracted, parse_cache) =
+        run_parse_stage(&stages, manifest.entries, parse_cache).await?;
+    let degraded_files = take(&mut extracted.degraded_files);
+    let degraded_files_truncated = extracted.degraded_files_truncated;
     let (facts, resolution) = run_resolve_stage(&stages, extracted).await?;
     let (facts, scip_overlay, overlay_high_water_bytes, reduction_progress_bytes) =
         match scip_overlay {
@@ -1037,6 +1114,8 @@ pub async fn build_native_generation_with_scip_and_cache(
             resolved_references: resolution.resolved,
             unresolved_references: resolution.unresolved,
             diagnostics: resolution.diagnostics,
+            degraded_files,
+            degraded_files_truncated,
             modeled_generation_bytes,
             resolve_high_water_bytes: resolution.charged_high_water_bytes,
             validation_high_water_bytes: validation.charged_high_water_bytes(),
@@ -1070,6 +1149,8 @@ pub async fn build_native_generation_spilled(
         scip_overlay,
         parse_cache,
     } = request;
+    let parse_cache =
+        parse_cache.map(|cache| cache.with_maximum_ast_depth(config.maximum_ast_depth()));
     if scip_overlay.is_some() {
         return Err(NativePipelineError::Spill {
             stage: PipelineStage::Overlay,
@@ -1116,6 +1197,8 @@ pub async fn build_native_generation_spilled(
             resolved_references: resolved.report.resolved,
             unresolved_references: resolved.report.unresolved,
             diagnostics: resolved.report.diagnostics,
+            degraded_files: resolved.degraded_files,
+            degraded_files_truncated: resolved.degraded_files_truncated,
             resolve_high_water_bytes: resolved.report.charged_high_water_bytes,
             validation_high_water_bytes: SPILLED_REDUCTION_RESERVATION_BYTES,
             parse_cache,
@@ -1269,6 +1352,7 @@ async fn run_parse_stage(
     };
     let source_root = stages.source_root.clone();
     let worker_cache = parse_cache;
+    let maximum_ast_depth = config.maximum_ast_depth();
     let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
     let worker_failure_reasons = Arc::clone(&failure_reasons);
     let execution = StageExecution::new(
@@ -1291,6 +1375,7 @@ async fn run_parse_stage(
                             source_root: &source_root,
                             manifest,
                             parse_cache: parse_cache.as_ref(),
+                            maximum_ast_depth,
                         },
                         cancellation,
                     )
@@ -1357,11 +1442,15 @@ struct SpilledNativeFacts {
     state: NativeGenerationSpillState,
     files: u64,
     diagnostics: u64,
+    degraded_files: Vec<NativeDegradedFile>,
+    degraded_files_truncated: u64,
 }
 
 struct SpilledParseStageAccumulator {
     files: u64,
     diagnostics: u64,
+    degraded_files: Vec<NativeDegradedFile>,
+    degraded_files_truncated: u64,
     cache: NativeParseCacheReport,
 }
 
@@ -1370,6 +1459,8 @@ impl SpilledParseStageAccumulator {
         Self {
             files: 0,
             diagnostics: 0,
+            degraded_files: Vec::new(),
+            degraded_files_truncated: 0,
             cache: NativeParseCacheReport {
                 hits: 0,
                 misses: 0,
@@ -1383,7 +1474,7 @@ impl SpilledParseStageAccumulator {
         }
     }
 
-    fn push(&mut self, parsed: &SpilledParsedManifestBatch) -> Result<(), StageItemFailure> {
+    fn push(&mut self, mut parsed: SpilledParsedManifestBatch) -> Result<(), StageItemFailure> {
         self.files = self
             .files
             .checked_add(parsed.files)
@@ -1392,6 +1483,15 @@ impl SpilledParseStageAccumulator {
             .diagnostics
             .checked_add(parsed.diagnostics)
             .ok_or(StageItemFailure)?;
+        self.degraded_files_truncated = self
+            .degraded_files_truncated
+            .checked_add(parsed.degraded_files_truncated)
+            .ok_or(StageItemFailure)?;
+        append_degraded_files(
+            &mut self.degraded_files,
+            &mut self.degraded_files_truncated,
+            &mut parsed.degraded_files,
+        )?;
         self.cache.add(parsed.cache);
         Ok(())
     }
@@ -1409,6 +1509,8 @@ struct SpilledParseManifestBatch {
 struct SpilledParsedManifestBatch {
     files: u64,
     diagnostics: u64,
+    degraded_files: Vec<NativeDegradedFile>,
+    degraded_files_truncated: u64,
     cache: NativeParseCacheReport,
 }
 
@@ -1546,6 +1648,7 @@ async fn run_spilled_parse_stage(
     let source_root = stages.source_root.clone();
     let worker_cache = parse_cache;
     let worker_spill = spill.clone();
+    let maximum_ast_depth = config.maximum_ast_depth();
     let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
     let worker_failure_reasons = Arc::clone(&failure_reasons);
     let execution = StageExecution::new(
@@ -1569,6 +1672,7 @@ async fn run_spilled_parse_stage(
                             spill: &spill,
                             source_root: &source_root,
                             parse_cache: parse_cache.as_ref(),
+                            maximum_ast_depth,
                         },
                         batch,
                         cancellation,
@@ -1593,7 +1697,7 @@ async fn run_spilled_parse_stage(
             |state: &mut SpilledParseStageAccumulator,
              output: StageOutput<u64, SpilledParsedManifestBatch>| {
                 let (_, parsed) = output.into_parts();
-                state.push(&parsed)
+                state.push(parsed)
             },
         ),
     );
@@ -1606,6 +1710,15 @@ async fn run_spilled_parse_stage(
     }
     let state =
         result.map_err(|error| classify_spilled_parse_stage_error(error, &failure_reasons))?;
+    finish_spilled_parse_stage(spill, initial.state, expected_files, state).await
+}
+
+async fn finish_spilled_parse_stage(
+    spill: NativeGenerationSpill,
+    initial_state: NativeGenerationSpillState,
+    expected_files: u64,
+    state: SpilledParseStageAccumulator,
+) -> Result<(SpilledNativeFacts, NativeParseCacheReport), NativePipelineError> {
     if state.files != expected_files {
         return Err(NativePipelineError::Incomplete {
             stage: PipelineStage::Parse,
@@ -1615,15 +1728,18 @@ async fn run_spilled_parse_stage(
         .finish_parsing(expected_files)
         .await
         .map_err(|error| spill_pipeline_error(PipelineStage::Parse, &error))?;
+    let spill_state = match initial_state {
+        NativeGenerationSpillState::Parsing => NativeGenerationSpillState::Resolving,
+        state => state,
+    };
     Ok((
         SpilledNativeFacts {
             spill,
-            state: match initial.state {
-                NativeGenerationSpillState::Parsing => NativeGenerationSpillState::Resolving,
-                state => state,
-            },
+            state: spill_state,
             files: state.files,
             diagnostics: state.diagnostics,
+            degraded_files: state.degraded_files,
+            degraded_files_truncated: state.degraded_files_truncated,
         },
         state.cache,
     ))
@@ -1824,6 +1940,7 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
         let SpilledParseInputs {
             source_root,
             parse_cache,
+            maximum_ast_depth,
             ..
         } = inputs;
         let mut cache_writes = Vec::new();
@@ -1834,11 +1951,13 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
             source_root,
             parse_cache,
             cancellation,
-            extractors: SpilledExtractorPool::default(),
+            extractors: SpilledExtractorPool::new(maximum_ast_depth),
             transaction: SpilledParseTransaction::new(spill)?,
             output: SpilledParsedManifestBatch {
                 files: 0,
                 diagnostics: 0,
+                degraded_files: Vec::new(),
+                degraded_files_truncated: 0,
                 cache: NativeParseCacheReport::default(),
             },
             cache_writes,
@@ -2033,6 +2152,7 @@ struct SpilledParseInputs<'inputs> {
     spill: &'inputs NativeGenerationSpill,
     source_root: &'inputs SourceRoot,
     parse_cache: Option<&'inputs NativeParseCache>,
+    maximum_ast_depth: usize,
 }
 
 async fn stream_spilled_parse_batch(
@@ -2044,6 +2164,7 @@ async fn stream_spilled_parse_batch(
         spill,
         source_root,
         parse_cache,
+        maximum_ast_depth,
     } = inputs;
     let entries = batch.entries;
     let (cache_keys, cached, cache_read_failed) =
@@ -2055,6 +2176,7 @@ async fn stream_spilled_parse_batch(
                 spill,
                 source_root,
                 parse_cache,
+                maximum_ast_depth,
             },
             cancellation: &cancellation,
         },
@@ -2118,6 +2240,12 @@ fn record_spilled_parse_output(
         .diagnostics
         .checked_add(usize_to_u64(file.diagnostics.len()))
         .ok_or_else(ParseManifestFailure::unclassified)?;
+    record_degraded_file(
+        &mut output.degraded_files,
+        &mut output.degraded_files_truncated,
+        file,
+    )
+    .map_err(|_| ParseManifestFailure::unclassified())?;
     output.cache.add(metrics);
     Ok(())
 }
@@ -2269,6 +2397,7 @@ struct ParseManifestRequest<'input> {
     source_root: &'input SourceRoot,
     manifest: SourceManifestEntry,
     parse_cache: Option<&'input NativeParseCache>,
+    maximum_ast_depth: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2290,6 +2419,7 @@ impl ParseManifestFailure {
             ExtractError::UnsupportedLanguage
             | ExtractError::LanguageMismatch
             | ExtractError::GrammarUnavailable
+            | ExtractError::InvalidNestingLimit
             | ExtractError::ParserStopped
             | ExtractError::Cancelled
             | ExtractError::InvalidSpan => None,
@@ -2348,6 +2478,7 @@ async fn parse_manifest_entry_with_cache(
         source_root,
         manifest,
         parse_cache,
+        maximum_ast_depth,
     } = request;
     let mut metrics = NativeParseCacheReport::default();
     let key = parse_cache.map(|cache| cache.key(&manifest));
@@ -2385,7 +2516,9 @@ async fn parse_manifest_entry_with_cache(
     metrics.parsed_files = 1;
     let parse_cancellation = cancellation.clone();
     let file = block_in_place(move || {
-        parse_manifest_entry(source_root, &manifest, || parse_cancellation.is_cancelled())
+        parse_manifest_entry(source_root, &manifest, maximum_ast_depth, || {
+            parse_cancellation.is_cancelled()
+        })
     })?;
     if cancellation.is_cancelled() {
         return Err(ParseManifestFailure::unclassified());
@@ -2542,6 +2675,8 @@ async fn run_resolve_stage(
 struct SpilledResolutionOutput {
     spill: NativeGenerationSpill,
     report: ResolutionReport,
+    degraded_files: Vec<NativeDegradedFile>,
+    degraded_files_truncated: u64,
 }
 
 struct SpilledResolutionState {
@@ -2977,6 +3112,8 @@ async fn resolve_spilled_generation(
     Ok(SpilledResolutionOutput {
         spill: source.spill,
         report: state.report,
+        degraded_files: source.degraded_files,
+        degraded_files_truncated: source.degraded_files_truncated,
     })
 }
 
@@ -4005,14 +4142,16 @@ where
 fn parse_manifest_entry<Cancel>(
     source_root: &SourceRoot,
     manifest: &SourceManifestEntry,
+    maximum_ast_depth: usize,
     mut cancelled: Cancel,
 ) -> Result<ExtractedFile, ParseManifestFailure>
 where
     Cancel: FnMut() -> bool,
 {
     let snapshot = read_manifest_snapshot(source_root, manifest, &mut cancelled)?;
-    let mut extractor =
-        NativeExtractor::new(snapshot.language()).map_err(ParseManifestFailure::from_extract)?;
+    let mut extractor = NativeExtractor::new(snapshot.language())
+        .and_then(|extractor| extractor.with_maximum_ast_depth(maximum_ast_depth))
+        .map_err(ParseManifestFailure::from_extract)?;
     extractor
         .extract_with_cancellation(&snapshot, cancelled)
         .map_err(ParseManifestFailure::from_extract)
@@ -4046,14 +4185,29 @@ where
     Ok(snapshot)
 }
 
-#[derive(Default)]
 struct SpilledExtractorPool {
     extractors: HashMap<SourceLanguage, NativeExtractor>,
+    maximum_ast_depth: usize,
     #[cfg(test)]
     initializations: usize,
 }
 
+impl Default for SpilledExtractorPool {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAXIMUM_AST_DEPTH)
+    }
+}
+
 impl SpilledExtractorPool {
+    fn new(maximum_ast_depth: usize) -> Self {
+        Self {
+            extractors: HashMap::new(),
+            maximum_ast_depth,
+            #[cfg(test)]
+            initializations: 0,
+        }
+    }
+
     fn extract<Cancel>(
         &mut self,
         source_root: &SourceRoot,
@@ -4069,8 +4223,9 @@ impl SpilledExtractorPool {
             self.extractors
                 .try_reserve(1)
                 .map_err(|_| ParseManifestFailure::unclassified())?;
-            let extractor =
-                NativeExtractor::new(language).map_err(ParseManifestFailure::from_extract)?;
+            let extractor = NativeExtractor::new(language)
+                .and_then(|extractor| extractor.with_maximum_ast_depth(self.maximum_ast_depth))
+                .map_err(ParseManifestFailure::from_extract)?;
             if self.extractors.insert(language, extractor).is_some() {
                 return Err(ParseManifestFailure::unclassified());
             }
@@ -4108,6 +4263,8 @@ struct NativeFactAccumulator {
     retained_bytes: u64,
     maximum_bytes: u64,
     diagnostics: u64,
+    degraded_files: Vec<NativeDegradedFile>,
+    degraded_files_truncated: u64,
 }
 
 impl NativeFactAccumulator {
@@ -4117,10 +4274,17 @@ impl NativeFactAccumulator {
             retained_bytes: 0,
             maximum_bytes,
             diagnostics: 0,
+            degraded_files: Vec::new(),
+            degraded_files_truncated: 0,
         }
     }
 
     fn push(&mut self, extracted: ExtractedFile) -> Result<(), StageItemFailure> {
+        record_degraded_file(
+            &mut self.degraded_files,
+            &mut self.degraded_files_truncated,
+            &extracted,
+        )?;
         let diagnostics = self
             .diagnostics
             .checked_add(usize_to_u64(extracted.diagnostics.len()))
@@ -4184,6 +4348,50 @@ impl NativeFactAccumulator {
         self.diagnostics = diagnostics;
         Ok(())
     }
+}
+
+fn record_degraded_file(
+    reported: &mut Vec<NativeDegradedFile>,
+    truncated: &mut u64,
+    file: &ExtractedFile,
+) -> Result<(), StageItemFailure> {
+    if !file
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == DiagnosticCode::NestingLimitExceeded)
+    {
+        return Ok(());
+    }
+    if reported.len() >= MAX_REPORTED_DEGRADED_FILES {
+        *truncated = truncated.checked_add(1).ok_or(StageItemFailure)?;
+        return Ok(());
+    }
+    reported
+        .try_reserve_exact(1)
+        .map_err(|_| StageItemFailure)?;
+    reported.push(NativeDegradedFile {
+        path: try_clone_text(file.path.as_str())?,
+        reason: "nesting_limit_exceeded",
+    });
+    Ok(())
+}
+
+fn append_degraded_files(
+    reported: &mut Vec<NativeDegradedFile>,
+    truncated: &mut u64,
+    incoming: &mut Vec<NativeDegradedFile>,
+) -> Result<(), StageItemFailure> {
+    let available = MAX_REPORTED_DEGRADED_FILES.saturating_sub(reported.len());
+    let admitted = available.min(incoming.len());
+    reported
+        .try_reserve_exact(admitted)
+        .map_err(|_| StageItemFailure)?;
+    reported.extend(incoming.drain(..admitted));
+    *truncated = truncated
+        .checked_add(usize_to_u64(incoming.len()))
+        .ok_or(StageItemFailure)?;
+    incoming.clear();
+    Ok(())
 }
 
 fn compact_clone_file(mut file: NativeFileFacts) -> NativeFileFacts {
@@ -12366,6 +12574,7 @@ fn import_binding_is_project_local(
         || SourceLanguage::from_stable_str(reference.language).is_some_and(|language| {
             language.is_game_scripting() && game_script_module_specifier_is_local(specifier)
         })
+        || matches!(reference.language, "slang" | "wesl")
         || typescript_alias_matches(
             &index.modules,
             TypeScriptAliasMatch {
@@ -12518,6 +12727,18 @@ fn resolve_module_file<'a>(
     modules: &'a ModulePathIndex,
     request: ModuleResolutionRequest<'_>,
 ) -> Option<&'a FileId> {
+    if request.importing_language == SourceLanguage::Slang.as_str()
+        && let Some(normalized) = normalize_root_module_path(request.specifier)
+        && let Some(file_id) =
+            resolve_normalized_module_file(modules, &normalized, request.importing_language)
+    {
+        return Some(file_id);
+    }
+    if request.importing_language == SourceLanguage::Wesl.as_str()
+        && let Some(file_id) = resolve_wesl_module_file(modules, request)
+    {
+        return Some(file_id);
+    }
     if request.importing_language == SourceLanguage::Rust.as_str()
         && request.specifier == "crate"
         && let Some(file_id) = rust_crate_entry_file(modules, request.importing_path)
@@ -12698,6 +12919,73 @@ fn normalize_rust_module_path(
     };
     append_rust_module_suffix(&mut normalized, components)?;
     (!normalized.is_empty()).then_some(normalized)
+}
+
+fn resolve_wesl_module_file<'a>(
+    modules: &'a ModulePathIndex,
+    request: ModuleResolutionRequest<'_>,
+) -> Option<&'a FileId> {
+    let normalized = normalize_wesl_module_path(request.importing_path, request.specifier)?;
+    if let Some(file_id) =
+        resolve_normalized_module_file(modules, &normalized, request.importing_language)
+    {
+        return Some(file_id);
+    }
+    let parent = normalized.rsplit_once('/').map(|(parent, _)| parent)?;
+    resolve_normalized_module_file(modules, parent, request.importing_language)
+}
+
+fn normalize_wesl_module_path(importing_path: &str, specifier: &str) -> Option<String> {
+    if specifier.is_empty() || specifier.len() > 512 || specifier.contains(['/', '\\', '\0']) {
+        return None;
+    }
+    let mut components = specifier.split("::").peekable();
+    let first = components.next()?;
+    let mut path = if first == "package" {
+        String::new()
+    } else if first == "super" {
+        let mut directory = importing_path
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory)
+            .to_owned();
+        while components.peek() == Some(&"super") {
+            components.next();
+            if let Some((parent, _)) = directory.rsplit_once('/') {
+                directory.truncate(parent.len());
+            } else {
+                directory.clear();
+            }
+        }
+        directory
+    } else {
+        let mut root = String::new();
+        append_wesl_component(&mut root, first)?;
+        root
+    };
+    for component in components {
+        if matches!(component, "package" | "super" | "*") {
+            break;
+        }
+        append_wesl_component(&mut path, component)?;
+    }
+    (!path.is_empty()).then_some(path)
+}
+
+fn append_wesl_component(path: &mut String, component: &str) -> Option<()> {
+    if component.is_empty()
+        || !component
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    path.try_reserve_exact(component.len().saturating_add(1))
+        .ok()?;
+    if !path.is_empty() {
+        path.push('/');
+    }
+    path.push_str(component);
+    Some(())
 }
 
 fn append_rust_module_suffix<'component>(
@@ -14134,6 +14422,7 @@ fn resolution_languages_compatible(source: &str, target: &str) -> bool {
         || (matches!(source, "svelte" | "vue" | "astro" | "html") && javascript_family_name(target))
         || (javascript_family_name(source) && matches!(target, "svelte" | "vue" | "astro"))
         || (matches!(source, "c" | "cpp" | "cuda") && matches!(target, "c" | "cpp" | "cuda"))
+        || (matches!(source, "wesl" | "wgsl") && matches!(target, "wesl" | "wgsl"))
 }
 
 fn select_candidate<'a, Candidates, Eligible, Cancel>(
@@ -14530,21 +14819,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "ead0174f920a3a2e9c62f98068c9b5c636ed93290943aaed10e5542c36e7dc01";
+        "e97a459292d8fff224297a47ddfa7c6072e567b8f12ca334a9820c69b8a89c9d";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "6b194944008d8037aedfd135edee6c1e08025b6199731fe2a137760018e3f04b";
+        "83e213545481f29a7916e30645aae45c9cdb4c2e78ceeb1cfa2892873197ef03";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "e180176dfb55f5828d0e3847f8e5089b79e5bd1d3e9b515ca0f784a14443d670";
+        "5f89d054f8461c9b60d422877e801df0847959f2d4a7920fd541360cae12c54b";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 13;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "cab3563cb1aaa8ab851339f18822d69a296333774d0a2e137b31402cb3f31343";
+        "f9d1495c5d433196e081cbfcb87a43fa14f6a1d7e3d664899fe7da1c626be52c";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (13, 49, 44, 32, 49);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -16457,15 +16746,22 @@ pub fn score(a: u16, b: u16, value: f32) -> f32 {
         let start_scan = ambiguous
             .references()
             .iter()
-            .find(|reference| reference.reference_name == "startScan")
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing ambiguous native call: {:?}",
-                    ambiguous.references()
-                )
-            });
-        assert!(start_scan.target_symbol_id.is_none());
-        assert_eq!(start_scan.resolution_provenance, UNRESOLVED_PROVENANCE);
+            .filter(|reference| reference.reference_name == "startScan")
+            .collect::<Vec<_>>();
+        assert!(!start_scan.is_empty(), "missing ambiguous native call");
+        assert!(
+            start_scan
+                .iter()
+                .all(|reference| reference.target_symbol_id.is_none())
+        );
+        assert!(start_scan.iter().any(|reference| {
+            reference.resolution_provenance == DYNAMIC_DISPATCH_UNRESOLVED_PROVENANCE
+        }));
+        assert!(
+            start_scan
+                .iter()
+                .any(|reference| { reference.resolution_provenance == UNRESOLVED_PROVENANCE })
+        );
     }
 
     #[test]
@@ -18806,6 +19102,70 @@ export function secondClone(value: number) {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn slang_and_wesl_module_imports_resolve_to_exact_shader_files() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create shader resolver fixture: {error}"));
+        for (path, source) in [
+            (
+                "renderer/common-math.slang",
+                "module renderer.common_math;\nfloat helper(float value) { return value; }\n",
+            ),
+            (
+                "renderer/material.slang",
+                "module renderer.material;\nimport renderer.common_math;\nvoid materialMain() {}\n",
+            ),
+            (
+                "lighting/common.wesl",
+                "fn light_value() -> f32 { return 1.0; }\n",
+            ),
+            (
+                "lighting/material.wesl",
+                "import package::lighting::common;\n@fragment\nfn material_main() -> @location(0) vec4<f32> { return vec4<f32>(); }\n",
+            ),
+        ] {
+            let target = directory.path().join(path);
+            fs::create_dir_all(
+                target
+                    .parent()
+                    .unwrap_or_else(|| panic!("shader fixture had no parent: {path}")),
+            )
+            .unwrap_or_else(|error| panic!("could not create shader fixture parent: {error}"));
+            fs::write(target, source)
+                .unwrap_or_else(|error| panic!("could not write shader fixture: {error}"));
+        }
+        let generation = build(directory.path(), PARALLEL_WORKERS).await;
+        for (path, reference_name) in [
+            ("renderer/material.slang", "renderer/common-math"),
+            ("lighting/material.wesl", "package::lighting::common"),
+        ] {
+            let file_id = generation
+                .facts()
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == path)
+                .map_or_else(
+                    || panic!("missing shader file {path}"),
+                    |file| &file.file_id,
+                );
+            let reference = generation
+                .facts()
+                .references()
+                .iter()
+                .find(|reference| {
+                    &reference.file_id == file_id
+                        && reference.reference_kind == ReferenceKind::Imports.as_str()
+                        && reference.reference_name == reference_name
+                })
+                .unwrap_or_else(|| panic!("missing shader import {path}:{reference_name}"));
+            assert!(
+                reference.target_symbol_id.is_some(),
+                "{path}:{reference_name}"
+            );
+            assert_eq!(reference.resolution_provenance, MODULE_IMPORT_PROVENANCE);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn typescript_paths_without_base_url_resolve_from_the_config_directory() {
         let directory = tempdir()
             .unwrap_or_else(|error| panic!("could not create TypeScript alias fixture: {error}"));
@@ -19789,7 +20149,7 @@ export function secondClone(value: number) {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn parse_preserves_bounded_extraction_limit_reasons_without_source_details() {
+    async fn parse_recovers_nesting_limits_and_preserves_fatal_output_limit_reasons() {
         let mut nested = String::from("void deep(void) {\n");
         for _ in 0..300 {
             nested.push_str("if (enabled) {\n");
@@ -19798,12 +20158,8 @@ export function secondClone(value: number) {
             nested.push_str("}\n");
         }
         nested.push_str("}\n");
-        assert_parse_extraction_reason(
-            "private-nesting-marker.c",
-            nested,
-            PipelineFailureReason::ExtractionNestingLimitExceeded,
-        )
-        .await;
+        assert_parse_nesting_recovery("private-nesting-marker.c", nested.clone()).await;
+        assert_parse_nesting_override("private-nesting-marker.c", nested).await;
 
         let mut excessive = String::new();
         for index in 0..20_000 {
@@ -19817,6 +20173,63 @@ export function secondClone(value: number) {
             PipelineFailureReason::ExtractionOutputLimitExceeded,
         )
         .await;
+    }
+
+    async fn assert_parse_nesting_recovery(file_name: &str, source: String) {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create nesting-limit fixture: {error}"));
+        assert!(fs::write(directory.path().join(file_name), &source).is_ok());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open nesting-limit fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let generation = build_native_generation(&runner, source_root, config(SERIAL_WORKERS))
+            .await
+            .unwrap_or_else(|error| panic!("nesting-limit fixture did not recover: {error}"));
+        let report = generation.report();
+        assert_eq!(report.degraded_files_truncated(), 0);
+        assert_eq!(report.degraded_files().len(), 1);
+        assert_eq!(report.degraded_files()[0].path(), file_name);
+        assert_eq!(
+            report.degraded_files()[0].reason(),
+            "nesting_limit_exceeded"
+        );
+        drop(cancellation);
+        let task_report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(task_report.all_joined);
+        assert!(!task_report.worker_failed);
+    }
+
+    async fn assert_parse_nesting_override(file_name: &str, source: String) {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create nesting override fixture: {error}"));
+        assert!(fs::write(directory.path().join(file_name), &source).is_ok());
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open nesting override fixture: {error}"));
+        let (runner, tasks, cancellation) =
+            test_stage_runner(DRIFT_SCOPE_TASKS, TEST_SCOPE_BYTES).await;
+        let pipeline = config(SERIAL_WORKERS)
+            .with_maximum_ast_depth(1_024)
+            .unwrap_or_else(|error| panic!("nesting override was invalid: {error}"));
+        let generation = build_native_generation(&runner, source_root, pipeline)
+            .await
+            .unwrap_or_else(|error| panic!("nesting override did not parse: {error}"));
+        assert!(generation.report().degraded_files().is_empty());
+        assert!(
+            generation
+                .facts()
+                .symbols()
+                .iter()
+                .any(|symbol| symbol.qualified_name == "deep")
+        );
+        drop(cancellation);
+        let task_report = tasks
+            .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
+            .await;
+        assert!(task_report.all_joined);
+        assert!(!task_report.worker_failed);
     }
 
     async fn assert_parse_extraction_reason(

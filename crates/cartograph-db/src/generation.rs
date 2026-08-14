@@ -964,6 +964,80 @@ impl CartographDatabase {
         Ok(updated)
     }
 
+    /// Terminalize every abandoned staging generation for one project while
+    /// preserving any generation owned by a live lease.
+    ///
+    /// This is the bounded retry preflight used by index/sync after an attached
+    /// client or worker disappeared between staging and publication.
+    /// # Errors
+    ///
+    /// Returns an error if the timeout is invalid, the project lock cannot be
+    /// acquired, or the exact guarded update cannot commit.
+    pub async fn fail_abandoned_staging_generations_bounded(
+        &self,
+        project_id: &ProjectId,
+        statement_timeout: Duration,
+    ) -> Result<u64, StorageError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("fail-abandoned-staging-begin"))?;
+        if crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+            .await
+            .is_err()
+        {
+            return match transaction.rollback().await {
+                Ok(()) => Err(StorageError::InvalidInput {
+                    field: "statement_timeout",
+                }),
+                Err(_) => Err(database_error("fail-abandoned-staging-rollback")),
+            };
+        }
+        let lock = query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(project_lock_key(&self.schema, project_id))
+            .execute(&mut *transaction)
+            .await;
+        if lock.is_err() {
+            return match transaction.rollback().await {
+                Ok(()) => Err(database_error("fail-abandoned-staging-lock")),
+                Err(_) => Err(database_error("fail-abandoned-staging-rollback")),
+            };
+        }
+        let schema = crate::database::quoted_schema(&self.schema);
+        let sql = format!(
+            r#"UPDATE {schema}."index_generations" AS generations
+                SET state = 'failed'
+                WHERE generations.project_id = CAST($1 AS uuid)
+                  AND generations.state = 'staging'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM {schema}."project_operation_leases" AS leases
+                      WHERE leases.project_id = generations.project_id
+                        AND leases.generation_id = generations.generation_id
+                        AND leases.expires_at > clock_timestamp()
+                  )"#
+        );
+        let updated = audited_query(sql)
+            .bind(project_id.as_str())
+            .execute(&mut *transaction)
+            .await;
+        let updated = match updated {
+            Ok(updated) => updated.rows_affected(),
+            Err(_) => {
+                return match transaction.rollback().await {
+                    Ok(()) => Err(database_error("fail-abandoned-staging")),
+                    Err(_) => Err(database_error("fail-abandoned-staging-rollback")),
+                };
+            }
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("fail-abandoned-staging-commit"))?;
+        Ok(updated)
+    }
+
     /// Deterministically reduce and atomically COPY all fact tables before
     /// moving the consumed generation token to `ready`.
     /// # Errors

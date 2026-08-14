@@ -10,16 +10,413 @@
 //! flattened into "some function", so `entry-points` can report a vertex,
 //! fragment, or compute entry as what it is.
 
-use cartograph_domain::{ReferenceKind, SymbolKind, Visibility};
+use cartograph_domain::{ReferenceKind, SourceLanguage, SourceSpan, SymbolKind, Visibility};
 use tree_sitter::Node;
 
 use super::{
     ExtractionBuilder, PendingReference, PendingSymbol, references, syntax::named_children,
 };
+use crate::source_lines::{LineMap, SourceByteRange};
 use crate::{ExtractError, SymbolExportFlags};
+use crate::{ExtractedImportBinding, ExtractedReference, ImportBindingKind};
 
 /// Attribute names that make a WGSL function a pipeline entry point.
 const STAGE_ATTRIBUTES: [&str; 3] = ["vertex", "fragment", "compute"];
+const MAXIMUM_WESL_IMPORT_STATEMENTS: usize = 256;
+const MAXIMUM_WESL_IMPORT_BYTES: usize = 4_096;
+const MAXIMUM_WESL_IMPORT_PATHS: usize = 512;
+
+pub(super) fn collect_wesl_imports(
+    builder: &mut ExtractionBuilder<'_, '_>,
+) -> Result<(), ExtractError> {
+    if builder.context.snapshot.language() != SourceLanguage::Wesl {
+        return Ok(());
+    }
+    let imports = parse_wesl_imports(builder.context.source())?;
+    for (span, module_specifier, local_name) in imports {
+        builder.emit_reference(ExtractedReference {
+            owner: None,
+            name: module_specifier.clone(),
+            resolution_name: None,
+            kind: ReferenceKind::Imports,
+            span,
+        })?;
+        builder.emit_import_binding(ExtractedImportBinding {
+            kind: ImportBindingKind::Namespace,
+            module_specifier,
+            imported_name: "*".to_owned(),
+            local_name,
+            span,
+        })?;
+    }
+    Ok(())
+}
+
+struct WeslImportStatement<'source> {
+    start: usize,
+    end: usize,
+    payload: &'source str,
+}
+
+fn parse_wesl_imports(source: &str) -> Result<Vec<(SourceSpan, String, String)>, ExtractError> {
+    let line_map = LineMap::new(source)?;
+    let mut imports = Vec::new();
+    imports
+        .try_reserve_exact(MAXIMUM_WESL_IMPORT_PATHS)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    let mut cursor = 0_usize;
+    let mut statements = 0_usize;
+    while cursor < source.len()
+        && statements < MAXIMUM_WESL_IMPORT_STATEMENTS
+        && imports.len() < MAXIMUM_WESL_IMPORT_PATHS
+    {
+        let Some(statement) = next_wesl_import_statement(source, cursor) else {
+            break;
+        };
+        let span = line_map.span(SourceByteRange::new(
+            statement.start,
+            statement.end,
+            source.len(),
+        ))?;
+        append_wesl_import_paths(statement.payload, span, &mut imports)?;
+        statements = statements.saturating_add(1);
+        cursor = statement.end;
+    }
+    Ok(imports)
+}
+
+fn next_wesl_import_statement(source: &str, cursor: usize) -> Option<WeslImportStatement<'_>> {
+    let mut search = cursor;
+    while search < source.len() {
+        let start = find_wesl_import_start(source, search)?;
+        let head = wesl_import_head(source, start)?;
+        let payload_start = skip_wesl_trivia(source, head + "import".len());
+        if let Some(end) = wesl_import_statement_end(source, payload_start) {
+            return Some(WeslImportStatement {
+                start,
+                end,
+                payload: &source[payload_start..end - 1],
+            });
+        }
+        search = head.saturating_add("import".len());
+    }
+    None
+}
+
+fn wesl_import_head(source: &str, start: usize) -> Option<usize> {
+    if wesl_keyword_at(source, start, "import") {
+        return Some(start);
+    }
+    if !wesl_keyword_at(source, start, "public") {
+        return None;
+    }
+    let head = skip_wesl_trivia(source, start + "public".len());
+    wesl_keyword_at(source, head, "import").then_some(head)
+}
+
+fn find_wesl_import_start(source: &str, mut cursor: usize) -> Option<usize> {
+    let mut nesting = 0_usize;
+    while cursor < source.len() {
+        if source[cursor..].starts_with("//") {
+            cursor = skip_wesl_line_comment(source, cursor);
+            continue;
+        }
+        if source[cursor..].starts_with("/*") {
+            cursor = skip_wesl_block_comment(source, cursor);
+            continue;
+        }
+        match source.as_bytes()[cursor] {
+            b'"' | b'\'' => {
+                cursor = skip_wesl_quoted(source, cursor);
+                continue;
+            }
+            b'{' | b'(' | b'[' => nesting = nesting.saturating_add(1),
+            b'}' | b')' | b']' => nesting = nesting.saturating_sub(1),
+            _ if nesting == 0
+                && (wesl_keyword_at(source, cursor, "import")
+                    || (wesl_keyword_at(source, cursor, "public")
+                        && wesl_import_head(source, cursor).is_some())) =>
+            {
+                return Some(cursor);
+            }
+            _ => {}
+        }
+        cursor = next_wesl_cursor(source, cursor);
+    }
+    None
+}
+
+fn wesl_import_statement_end(source: &str, payload_start: usize) -> Option<usize> {
+    let limit = payload_start
+        .saturating_add(MAXIMUM_WESL_IMPORT_BYTES)
+        .min(source.len());
+    let mut cursor = payload_start;
+    let mut brace_depth = 0_usize;
+    while cursor < limit {
+        if source[cursor..].starts_with("//") {
+            cursor = skip_wesl_line_comment(source, cursor);
+            continue;
+        }
+        if source[cursor..].starts_with("/*") {
+            cursor = skip_wesl_block_comment(source, cursor);
+            continue;
+        }
+        match source.as_bytes()[cursor] {
+            b'"' | b'\'' => {
+                cursor = skip_wesl_quoted(source, cursor);
+                continue;
+            }
+            b'{' => brace_depth = brace_depth.saturating_add(1),
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b';' if brace_depth == 0 => return Some(cursor + 1),
+            _ => {}
+        }
+        cursor = next_wesl_cursor(source, cursor);
+    }
+    None
+}
+
+fn wesl_keyword_at(source: &str, cursor: usize, keyword: &str) -> bool {
+    source
+        .get(cursor..)
+        .is_some_and(|suffix| suffix.starts_with(keyword))
+        && (cursor == 0
+            || source
+                .as_bytes()
+                .get(cursor - 1)
+                .is_none_or(|byte| !wesl_identifier_byte(*byte)))
+        && source
+            .as_bytes()
+            .get(cursor + keyword.len())
+            .is_none_or(|byte| !wesl_identifier_byte(*byte))
+}
+
+const fn wesl_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn next_wesl_cursor(source: &str, cursor: usize) -> usize {
+    source[cursor..]
+        .chars()
+        .next()
+        .map_or(source.len(), |character| cursor + character.len_utf8())
+}
+
+fn skip_wesl_line_comment(source: &str, cursor: usize) -> usize {
+    source[cursor..]
+        .find('\n')
+        .map_or(source.len(), |offset| cursor + offset + 1)
+}
+
+fn skip_wesl_block_comment(source: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.saturating_add(2);
+    let mut depth = 1_usize;
+    while cursor < source.len() {
+        if source[cursor..].starts_with("/*") {
+            depth = depth.saturating_add(1);
+            cursor = cursor.saturating_add(2);
+            continue;
+        }
+        if source[cursor..].starts_with("*/") {
+            depth = depth.saturating_sub(1);
+            cursor = cursor.saturating_add(2);
+            if depth == 0 {
+                return cursor;
+            }
+            continue;
+        }
+        cursor = next_wesl_cursor(source, cursor);
+    }
+    source.len()
+}
+
+fn skip_wesl_quoted(source: &str, cursor: usize) -> usize {
+    let quote = source.as_bytes()[cursor];
+    let mut cursor = cursor.saturating_add(1);
+    while cursor < source.len() {
+        match source.as_bytes()[cursor] {
+            b'\\' => {
+                cursor = cursor.saturating_add(1);
+                if cursor < source.len() {
+                    cursor = next_wesl_cursor(source, cursor);
+                }
+            }
+            byte if byte == quote => return cursor.saturating_add(1),
+            _ => cursor = next_wesl_cursor(source, cursor),
+        }
+    }
+    source.len()
+}
+
+fn append_wesl_import_paths(
+    payload: &str,
+    span: SourceSpan,
+    imports: &mut Vec<(SourceSpan, String, String)>,
+) -> Result<(), ExtractError> {
+    let mut paths = Vec::new();
+    flatten_wesl_imports(payload, "", 0, &mut paths)?;
+    for raw in paths {
+        if imports.len() >= MAXIMUM_WESL_IMPORT_PATHS {
+            break;
+        }
+        let Some((module_specifier, local_name)) = normalize_wesl_import_path(&raw) else {
+            continue;
+        };
+        imports.push((span, module_specifier, local_name));
+    }
+    Ok(())
+}
+
+fn normalize_wesl_import_path(raw: &str) -> Option<(String, String)> {
+    let (path, alias) = split_wesl_alias(raw);
+    let path = path.trim().trim_end_matches("::*").trim();
+    if path.is_empty() || path.len() > 512 || !valid_wesl_path(path) {
+        return None;
+    }
+    let local_name = alias.unwrap_or_else(|| path.rsplit("::").next().unwrap_or("*").to_owned());
+    Some((path.to_owned(), local_name))
+}
+
+fn skip_wesl_whitespace(source: &str, mut cursor: usize) -> usize {
+    while source
+        .as_bytes()
+        .get(cursor)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        cursor = cursor.saturating_add(1);
+    }
+    cursor
+}
+
+fn skip_wesl_trivia(source: &str, mut cursor: usize) -> usize {
+    loop {
+        cursor = skip_wesl_whitespace(source, cursor);
+        if source[cursor..].starts_with("//") {
+            cursor = skip_wesl_line_comment(source, cursor);
+            continue;
+        }
+        if source[cursor..].starts_with("/*") {
+            cursor = skip_wesl_block_comment(source, cursor);
+            continue;
+        }
+        return cursor;
+    }
+}
+
+fn flatten_wesl_imports(
+    raw: &str,
+    prefix: &str,
+    depth: usize,
+    output: &mut Vec<String>,
+) -> Result<(), ExtractError> {
+    if depth > 16 || output.len() >= MAXIMUM_WESL_IMPORT_PATHS {
+        return Err(ExtractError::OutputLimit);
+    }
+    let raw = raw.trim().trim_end_matches(',').trim();
+    let Some(open) = top_level_wesl_brace(raw) else {
+        let joined = join_wesl_path(prefix, raw)?;
+        if !joined.is_empty() {
+            output.push(joined);
+        }
+        return Ok(());
+    };
+    let Some(close) = matching_wesl_brace(raw, open) else {
+        return Ok(());
+    };
+    let branch_prefix = raw[..open].trim().trim_end_matches("::");
+    let joined_prefix = join_wesl_path(prefix, branch_prefix)?;
+    for member in split_top_level_wesl(&raw[open + 1..close]) {
+        flatten_wesl_imports(member, &joined_prefix, depth.saturating_add(1), output)?;
+    }
+    Ok(())
+}
+
+fn top_level_wesl_brace(raw: &str) -> Option<usize> {
+    raw.char_indices()
+        .find_map(|(offset, character)| (character == '{').then_some(offset))
+}
+
+fn matching_wesl_brace(raw: &str, open: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (relative, character) in raw[open..].char_indices() {
+        match character {
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + relative);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_wesl(raw: &str) -> Vec<&str> {
+    let mut members = Vec::new();
+    let mut start = 0_usize;
+    let mut depth = 0_usize;
+    for (offset, character) in raw.char_indices() {
+        match character {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                members.push(&raw[start..offset]);
+                start = offset + 1;
+            }
+            _ => {}
+        }
+    }
+    members.push(&raw[start..]);
+    members
+}
+
+fn join_wesl_path(prefix: &str, suffix: &str) -> Result<String, ExtractError> {
+    let prefix = prefix.trim().trim_end_matches("::");
+    let suffix = suffix.trim().trim_start_matches("::");
+    let separator = if prefix.is_empty() || suffix.is_empty() {
+        ""
+    } else {
+        "::"
+    };
+    let capacity = prefix
+        .len()
+        .checked_add(separator.len())
+        .and_then(|value| value.checked_add(suffix.len()))
+        .ok_or(ExtractError::OutputLimit)?;
+    if capacity > 512 {
+        return Err(ExtractError::OutputLimit);
+    }
+    let mut joined = String::new();
+    joined
+        .try_reserve_exact(capacity)
+        .map_err(|_| ExtractError::OutputLimit)?;
+    joined.push_str(prefix);
+    joined.push_str(separator);
+    joined.push_str(suffix);
+    Ok(joined)
+}
+
+fn split_wesl_alias(raw: &str) -> (&str, Option<String>) {
+    raw.rsplit_once(" as ")
+        .map_or((raw, None), |(path, alias)| {
+            (
+                path,
+                (!alias.trim().is_empty()).then(|| alias.trim().to_owned()),
+            )
+        })
+}
+
+fn valid_wesl_path(path: &str) -> bool {
+    path.split("::").all(|component| {
+        component == "*"
+            || !component.is_empty()
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
 
 pub(super) fn visit_declaration(
     builder: &mut ExtractionBuilder<'_, '_>,

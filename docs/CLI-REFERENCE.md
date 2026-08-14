@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-10 (`v2.1.14`).
+Last release audit: 2026-08-13 (`v2.1.15`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -13,6 +13,8 @@ subcommand help remains the authority for every option and default.
 cartograph index [PROJECT] [--exclude GLOB]...
 cartograph sync-if-dirty [PROJECT] [--quiet] [--max-file-size SIZE]
 cartograph status [PROJECT]
+cartograph embedding-status [PROJECT]
+cartograph embed [PROJECT]
 cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid
 cartograph context <TASK> [--exact-name NAME] [--exact-path PATH] [--exact-reference TEXT]
 cartograph entry-points [--bucket routes|cli|cli-commands|mcp-tools|cli-files|public-exports]
@@ -39,6 +41,14 @@ typed task intent and can use exact anchors, ParadeDB BM25, a ready matching
 semantic model, graph expansion, affected tests, and a separate stale
 working-tree overlay. JSON is the stable automation format; text favors concise
 operator output.
+
+`embed` carries forward matching content-addressed vectors before calling the
+configured endpoint. Its report distinguishes the complete
+`corpusDocuments`, pre-existing `reusedDocuments`, and newly submitted
+`endpointDocuments`; their latter two counts cover the corpus when readiness is
+complete. The legacy `documents` field remains the endpoint-work count for
+wire compatibility. `embedding-status` is read-only and should be used before
+requesting an explicit sweep.
 
 `sync-if-dirty` skips a clean, current checkout. If another native watcher or
 manual index owns the project's index lease, it observes that lease for a
@@ -78,7 +88,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.14 top-level command advertised
+This inventory contains every non-hidden v2.1.15 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 

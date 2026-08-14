@@ -367,6 +367,9 @@ pub enum DiagnosticCode {
     /// publishable. The shortened form keeps a `~` marker and a digest of the
     /// exact original name.
     CanonicalNameTruncated,
+    /// A defensive AST nesting limit was reached. The file remains in the
+    /// generation as recoverably partial while its untrusted subtree is omitted.
+    NestingLimitExceeded,
 }
 
 /// Bounded diagnostic that never embeds source text or project paths.

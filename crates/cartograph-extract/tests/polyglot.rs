@@ -509,6 +509,51 @@ export function schema(z: any) {
 }
 
 #[test]
+fn javascript_interface_and_static_key_calls_emit_safe_dispatch_evidence() {
+    let file = extract(
+        "src/runtime.ts",
+        r#"
+export function invoke(iface: Runner, mod: Record<string, () => void>, key: string) {
+    iface.run();
+    mod["renderPanel"]();
+    mod[key]();
+}
+"#,
+    );
+    let owner = symbol(&file, "invoke");
+    for name in ["run", "renderPanel"] {
+        let expected = format!("{DYNAMIC_DISPATCH_RESOLUTION_PREFIX}{name}");
+        assert!(file.references.iter().any(|reference| {
+            reference.owner.as_ref() == Some(&owner.id)
+                && reference.name == name
+                && reference.kind == ReferenceKind::Calls
+                && reference.resolution_name.as_deref() == Some(expected.as_str())
+        }));
+    }
+    assert!(file.references.iter().all(|reference| {
+        reference.name != "key"
+            || !reference
+                .resolution_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with(DYNAMIC_DISPATCH_RESOLUTION_PREFIX))
+    }));
+}
+
+#[test]
+fn javascript_default_export_object_marks_platform_methods_as_default_exports() {
+    let file = extract(
+        "src/worker.ts",
+        "export default { scheduled(): void {}, fetch(): Response { return new Response(); } };\n",
+    );
+    for name in ["scheduled", "fetch"] {
+        let method = symbol(&file, name);
+        assert_eq!(method.kind, SymbolKind::Method);
+        assert!(method.export.exported);
+        assert!(method.export.default_export);
+    }
+}
+
+#[test]
 fn javascript_binding_patterns_emit_lexical_symbols() {
     let file = extract(
         "src/bindings.ts",
@@ -995,6 +1040,10 @@ export function DeleteButton({ name }: { name: string }) {
   return <button aria-label={`Delete ${name}`}>Delete</button>;
 }
 
+export function ItemPicker({ name }: { name: string }) {
+  return <input aria-label={`Select item from ${name}`} />;
+}
+
 export function selectRecord(id: string) {
   return `SELECT * FROM records WHERE id = ${id}`;
 }
@@ -1013,7 +1062,7 @@ export function deleteRecord(id: string) {
 "#,
     );
 
-    for name in ["StatusPicker", "SettingsCopy", "DeleteButton"] {
+    for name in ["StatusPicker", "SettingsCopy", "DeleteButton", "ItemPicker"] {
         assert_eq!(
             symbol(&file, name).health.sql_string_concatenation,
             0,

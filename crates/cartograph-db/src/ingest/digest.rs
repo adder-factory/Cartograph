@@ -16,6 +16,7 @@ const DIGEST_V10_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v8";
 const DIGEST_V11_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v9";
 const DIGEST_V12_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v10";
 const DIGEST_V13_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v11";
+const DIGEST_V14_DOMAIN: &[u8] = b"cartograph-v2-logical-generation-v12";
 
 pub(super) fn logical_digest<Cancel>(
     facts: &ValidatedFactTables,
@@ -87,6 +88,7 @@ const fn digest_includes_numerical_sites(version: GenerationDigestVersion) -> bo
             | GenerationDigestVersion::V11
             | GenerationDigestVersion::V12
             | GenerationDigestVersion::V13
+            | GenerationDigestVersion::V14
     )
 }
 
@@ -97,6 +99,7 @@ pub(crate) struct LogicalDigestBuilder {
 impl LogicalDigestBuilder {
     pub(crate) fn new(version: GenerationDigestVersion) -> Self {
         let domain = match version {
+            GenerationDigestVersion::V14 => DIGEST_V14_DOMAIN,
             GenerationDigestVersion::V13 => DIGEST_V13_DOMAIN,
             GenerationDigestVersion::V12 => DIGEST_V12_DOMAIN,
             GenerationDigestVersion::V11 => DIGEST_V11_DOMAIN,

@@ -45,7 +45,8 @@ const SPILL_PARSE_CACHE_REFERENCE_SCHEMA_VERSION: i64 = 34;
 const SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA_VERSION: i64 = 35;
 const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION: i64 = 36;
 const STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION: i64 = 37;
-const LATEST_SCHEMA_VERSION: i64 = STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION;
+const SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA_VERSION: i64 = 38;
+const LATEST_SCHEMA_VERSION: i64 = SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 /// Latest append-only schema version understood by this native binary.
@@ -1586,7 +1587,16 @@ const STRUCTURAL_FINDING_CACHE_SCHEMA: Migration = Migration {
     ],
 };
 
-const MIGRATIONS: [&Migration; 37] = [
+const SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA: Migration = Migration {
+    version: SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA_VERSION,
+    name: "shader_and_dispatch_digest_v14",
+    statements: &[r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))"#],
+};
+
+const MIGRATIONS: [&Migration; 38] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1624,6 +1634,7 @@ const MIGRATIONS: [&Migration; 37] = [
     &SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA,
     &JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA,
     &STRUCTURAL_FINDING_CACHE_SCHEMA,
+    &SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -2020,7 +2031,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 37] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 38] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -2058,9 +2069,10 @@ mod tests {
         SEARCH_DOCUMENT_CANONICAL_METADATA_SCHEMA_VERSION,
         JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION,
         STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION,
+        SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 37] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 38] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -2209,6 +2221,10 @@ mod tests {
             37,
             "0446eff6def9284dc72e231dcd1bec2c7562524a2142044133ea80716c7f9843",
         ),
+        (
+            38,
+            "3cbb510a7453da463f127d7c92f4c216d5fb65748154e19ff035711b1f3a0d46",
+        ),
     ];
 
     #[test]
@@ -2254,7 +2270,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION
+            SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA_VERSION
         );
     }
 

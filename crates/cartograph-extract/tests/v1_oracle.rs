@@ -9,9 +9,9 @@ use std::{
 
 use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind, Visibility};
 use cartograph_extract::{
-    ExtractError, ExtractedFile, ImportBindingKind, NativeExtractor, SnapshotError, SourceLimits,
-    SourceSnapshot, SymbolExecutionFlags, SymbolExportFlags, native_extraction_reservation,
-    native_output_limit,
+    DYNAMIC_DISPATCH_RESOLUTION_PREFIX, ExtractError, ExtractedFile, ImportBindingKind,
+    NativeExtractor, SnapshotError, SourceLimits, SourceSnapshot, SymbolExecutionFlags,
+    SymbolExportFlags, native_extraction_reservation, native_output_limit,
 };
 use serde::Deserialize;
 
@@ -1053,7 +1053,12 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
                     && reference.owner.as_ref().is_some_and(|owner| {
                         parameter_uses.contains(&(owner.as_str(), reference.name.as_str()))
                     });
+                let additive_dynamic_dispatch = reference
+                    .resolution_name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with(DYNAMIC_DISPATCH_RESOLUTION_PREFIX));
                 !additive_parameter_use
+                    && !additive_dynamic_dispatch
                     && (owner_kind != Some(SymbolKind::Component)
                         || !matches!(
                             reference.kind,

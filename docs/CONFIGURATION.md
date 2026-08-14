@@ -13,6 +13,7 @@ The file is optional. A representative v2 configuration is:
   "include": ["src/**", "tests/**"],
   "exclude": ["vendor/**", "generated/**"],
   "maxFileSize": 5242880,
+  "maxAstDepth": 256,
   "maxGenerationBytes": 1073741824,
   "generationStorage": "auto",
   "maxSpillBytes": 137438953472,
@@ -43,6 +44,7 @@ The file is optional. A representative v2 configuration is:
 | `include` | Project-relative glob allowlist; omitted means all admitted paths | omitted |
 | `exclude` | Additional project-relative glob exclusions | `[]` plus built-in exclusions |
 | `maxFileSize` | Per-source byte ceiling, 1 byte through 32 MiB | runtime default |
+| `maxAstDepth` | Defensive syntax-tree depth ceiling, 64 through 1024; overflow retains a partial file and reports its exact path | `256` |
 | `maxGenerationBytes` | Memory-path canonical ceiling and compact resolver working-set basis, 1 byte through 8 GiB | 1 GiB |
 | `generationStorage` | Native working-set strategy: `auto`, `memory`, or `postgres` | `auto` |
 | `maxSpillBytes` | Logical sort-key/payload quota for one incomplete PostgreSQL spill, through 1 TiB | 128 GiB |
@@ -128,7 +130,7 @@ digest-fenced; exact replay is idempotent, while a different retry fails
 closed. PostgreSQL reduces six relations through 64 deterministic UUID
 partitions each, commits four contiguous partitions at a time, proves
 cross-relations within those transactions, can use its own temporary storage
-for grouping/sorting, and streams exact V13 row bytes from final canonical
+for grouping/sorting, and streams exact V14 row bytes from final canonical
 rows. The final ready transaction rechecks the fence, completed-validation
 phase (`canonicalized`), counts, and digest capability before it deletes spill
 state. Only the later short publication transaction changes the current pointer.

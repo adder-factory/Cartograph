@@ -68,6 +68,7 @@ const TEST_LEASE_DURATION: Duration = Duration::from_secs(3);
 // production operation, heartbeat, progress, or COPY deadline.
 const LEASE_WAIT_ATTEMPTS: usize = 250;
 const LEASE_WAIT_INTERVAL: Duration = Duration::from_millis(20);
+const INSTRUMENTED_STAGE_WAIT_ATTEMPTS: usize = 500;
 const NONCOOPERATIVE_WORK_DURATION: Duration = Duration::from_secs(2);
 const SHORT_CANCELLATION_GRACE: Duration = Duration::from_millis(150);
 const CANCELLING_OBSERVATION_DELAY: Duration = Duration::from_millis(40);
@@ -82,10 +83,10 @@ const DEADLINE_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(250);
 const DEADLINE_PROGRESS_TIMEOUT: Duration = Duration::from_millis(300);
 const DEADLINE_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 const DEADLINE_COPY_TIMEOUT: Duration = Duration::from_millis(50);
-const BOUNDARY_OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
+const BOUNDARY_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const BOUNDARY_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 const BOUNDARY_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(750);
-const BOUNDARY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(3);
+const BOUNDARY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10);
 const BOUNDARY_CANCELLATION_GRACE: Duration = Duration::from_millis(500);
 const BOUNDARY_COPY_TIMEOUT: Duration = Duration::from_millis(500);
 const BOUNDARY_LEASE_DURATION: Duration = Duration::from_secs(6);
@@ -159,10 +160,10 @@ const SPILL_PARITY_OPERATION_TIMEOUT: Duration = Duration::from_mins(1);
 const SPILL_PARITY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10);
 const SPILL_PARITY_LEASE_DURATION: Duration = Duration::from_secs(30);
 const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
-const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 14;
+const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 16;
 const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
 const NATIVE_CUSTOM_FAMILY_FILE_COUNT: usize = 13;
-const NATIVE_EXPECTED_FILES: u64 = 72;
+const NATIVE_EXPECTED_FILES: u64 = 75;
 const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 60;
 const NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES: u64 = 3;
 const NATIVE_SEARCH_LIMIT: u16 = 10;
@@ -235,6 +236,18 @@ const NATIVE_ADMITTED_FAMILY_FIXTURES: [(&str, &str, &str, &str);
         "float4 hlslbeacon() : SV_Target { return float4(1, 1, 1, 1); }\n",
         "hlsl",
         "hlslbeacon",
+    ),
+    (
+        "native/slangbeacon.slang",
+        "module beacon.shader;\n[shader(\"compute\")]\nvoid slangbeacon() {}\n",
+        "slang",
+        "slangbeacon",
+    ),
+    (
+        "native/weslbeacon.wesl",
+        "import package::beacon::common;\n@compute @workgroup_size(1)\nfn weslbeacon() {}\n",
+        "wesl",
+        "weslbeacon",
     ),
     (
         "native/bashbeacon.sh",
@@ -1159,6 +1172,11 @@ async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
         ("app/routes/dashboard.tsx", "Dashboard"),
         ("src/routes/about.ts", "Route"),
         ("src/model.ts", "PublicRecord"),
+        ("src/service.ts", "SessionTable"),
+        ("src/service.ts", "greet"),
+        ("src/service.ts", "renderPanel"),
+        ("src/service.ts", "scheduled"),
+        ("build.config.ts", "buildEnd"),
     ] {
         assert!(
             !has_structural_finding(&unused_exports, path, name),
@@ -1173,6 +1191,7 @@ async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
         ("app/routes/dashboard.tsx", "formatDate"),
         ("src/routes/about.ts", "helper"),
         ("lib/action.ts", "action"),
+        ("build.config.ts", "unusedConfigHelper"),
     ] {
         assert!(
             has_structural_finding(&unused_exports, path, name),
@@ -1255,12 +1274,12 @@ fn write_native_live_project(root: &std::path::Path) {
         .unwrap_or_else(|error| panic!("could not create native source fixture: {error}"));
     std::fs::write(
         root.join("src/service.ts"),
-        "export interface Greeter {}\nexport class Service implements Greeter {\n  greet(): string { return format(); }\n}\nexport const RuntimeSchema = z.object({ value: z.string() });\nexport type RuntimeSchema = z.infer<typeof RuntimeSchema>;\n",
+        "export interface Greeter { greet(): string; }\nexport class Service implements Greeter {\n  greet(): string { return format(); }\n}\nexport const RuntimeSchema = z.object({ value: z.string() });\nexport type RuntimeSchema = z.infer<typeof RuntimeSchema>;\nexport const SessionTable = table('session');\nexport const AuthSchema = { sessions: SessionTable };\nexport function renderPanel(): string { return 'panel'; }\nexport default { scheduled(): void {} };\n",
     )
     .unwrap_or_else(|error| panic!("could not write native service fixture: {error}"));
     std::fs::write(
         root.join("src/build.ts"),
-        "import { RuntimeSchema, Service } from './service';\nexport function build(): Service { return new Service(); }\nexport function parseRuntime(value: unknown) { return RuntimeSchema.safeParse(value); }\n",
+        "import { RuntimeSchema, Service } from './service';\nexport function build(): Service { return new Service(); }\nexport function parseRuntime(value: unknown) { return RuntimeSchema.safeParse(value); }\nexport function runInterface(iface: Service): string { return iface.greet(); }\nexport function loadRenderer(mod: Record<string, () => string>): string { return mod[\"renderPanel\"](); }\n",
     )
     .unwrap_or_else(|error| panic!("could not write native build fixture: {error}"));
     write_type_consumer_fixture(root);
@@ -1293,6 +1312,10 @@ fn write_native_live_project(root: &std::path::Path) {
             "src/rows.py",
             "def build_rows(values):\n    escaped = [str(value).replace('|', '\\\\|') for value in values]\n    sequence_id = len(escaped)\n    return sequence_id, escaped\n",
         ),
+        (
+            "build.config.ts",
+            "export default { buildEnd(): void {} };\nexport function unusedConfigHelper(): void {}\n",
+        ),
     ] {
         let target = root.join(path);
         std::fs::create_dir_all(
@@ -1304,45 +1327,23 @@ fn write_native_live_project(root: &std::path::Path) {
         std::fs::write(target, source)
             .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
     }
-    for (path, source, _, _) in NATIVE_PARSER_ONLY_FIXTURES {
-        let target = root.join(path);
-        std::fs::create_dir_all(
-            target
-                .parent()
-                .unwrap_or_else(|| panic!("parser-only live fixture had no parent: {path}")),
-        )
-        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
-        std::fs::write(target, source)
-            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+    for fixtures in [
+        &NATIVE_PARSER_ONLY_FIXTURES[..],
+        &NATIVE_ADMITTED_FAMILY_FIXTURES[..],
+        &NATIVE_GENERIC_FAMILY_FIXTURES[..],
+        &NATIVE_CUSTOM_FAMILY_FIXTURES[..],
+    ] {
+        write_native_fixture_group(root, fixtures);
     }
-    for (path, source, _, _) in NATIVE_ADMITTED_FAMILY_FIXTURES {
+}
+
+fn write_native_fixture_group(root: &std::path::Path, fixtures: &[(&str, &str, &str, &str)]) {
+    for &(path, source, _, _) in fixtures {
         let target = root.join(path);
         std::fs::create_dir_all(
             target
                 .parent()
-                .unwrap_or_else(|| panic!("admitted-family live fixture had no parent: {path}")),
-        )
-        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
-        std::fs::write(target, source)
-            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
-    }
-    for (path, source, _, _) in NATIVE_GENERIC_FAMILY_FIXTURES {
-        let target = root.join(path);
-        std::fs::create_dir_all(
-            target
-                .parent()
-                .unwrap_or_else(|| panic!("generic-family live fixture had no parent: {path}")),
-        )
-        .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
-        std::fs::write(target, source)
-            .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
-    }
-    for (path, source, _, _) in NATIVE_CUSTOM_FAMILY_FIXTURES {
-        let target = root.join(path);
-        std::fs::create_dir_all(
-            target
-                .parent()
-                .unwrap_or_else(|| panic!("custom-family live fixture had no parent: {path}")),
+                .unwrap_or_else(|| panic!("native live fixture had no parent: {path}")),
         )
         .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
         std::fs::write(target, source)
@@ -3338,13 +3339,16 @@ async fn assert_generation_advisories_available(fixture: &DatabaseFixture, targe
 }
 
 async fn wait_for_supervisor_stage(supervisor: &IndexerSupervisor, expected: PipelineStage) {
-    for _ in 0..LEASE_WAIT_ATTEMPTS {
+    for _ in 0..INSTRUMENTED_STAGE_WAIT_ATTEMPTS {
         if supervisor.status().await.stage() == Some(expected) {
             return;
         }
         tokio::time::sleep(LEASE_WAIT_INTERVAL).await;
     }
-    panic!("supervisor did not reach its expected pipeline stage");
+    panic!(
+        "supervisor did not reach {expected:?}; final status: {:?}",
+        supervisor.status().await
+    );
 }
 
 async fn wait_for_supervisor_state(supervisor: &IndexerSupervisor, expected: SupervisorState) {

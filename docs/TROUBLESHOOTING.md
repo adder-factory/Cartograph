@@ -93,6 +93,38 @@ MCP admin job), then re-check status. Context packets may include a separate
 changed-source overlay while stale; they still lower confidence and retain the
 stale abstention.
 
+An unchanged no-op is decided by the exact supported-source and index-policy
+scan that prepared the request; it does not repeat that full read. A newly
+published generation gets one final reconciliation scan. If files race a
+publication, Cartograph retries reconciliation twice and then returns
+`source_changed_during_index`; it never reports success for a generation that
+the final scan already knows is stale. Unsupported editor metadata such as
+`.editorconfig` does not enter the source revision.
+
+Before that no-op decision, index/sync also terminalizes every unleased
+`staging` generation for the project under a bounded project lock. A staging
+generation protected by a live lease is preserved. This lets an unchanged
+retry recover work abandoned by an interrupted client without forcing a full
+re-index; normal retention may subsequently remove the failed row.
+
+## A deeply nested file degrades extraction
+
+Grammar-backed extraction defaults to `maxAstDepth: 256`. Exceeding the bound
+is recoverable: the report names up to 32 exact normalized degraded paths,
+reports how many additional paths were truncated, retains each affected file as
+partial, and continues the rest of the generation. Configure a value from 64
+through 1024 only when authored source legitimately needs it:
+
+```json
+{
+  "maxAstDepth": 512
+}
+```
+
+Prefer ignore rules or project `exclude` globs for generated/build output. A
+larger global bound should not be used to hide an unexpected generated-source
+tree.
+
 ## Source excerpt is omitted
 
 `cartograph node/show` returns source only when the complete live manifest still
@@ -134,6 +166,13 @@ For a measured example with parser, resolver, publication, memory, row-count,
 and no-op timings kept separate, see the published
 [large public corpus streaming benchmark record](v2/benchmarks/LARGE-PUBLIC-CORPUS-STREAMING.md).
 
+Automatic retention can report `reason: "project_busy"` after a successful
+index when another live writer owns the migration lease. That report is
+historical and retryable; it does not make the index unsuccessful. `admin
+unlock` removes database-clock-expired leases only and cannot clear a live
+`project_busy` outcome. Wait for the named writer to finish, then retry index or
+a bounded prune.
+
 ## Native stage reports `progress_stalled`
 
 The supervisor cancels an operation when its active stage produces no durable
@@ -150,6 +189,12 @@ I/O or lock pressure. Retry only after identifying transient resource pressure
 or a fixed defect. The prior generation remains visible, and a failed staging
 generation is handled by normal bounded cleanup.
 
+For an MCP admin index job, polling the job now returns live supervisor
+progress while it runs: stage, completed items/bytes, heartbeat count, idle
+time, completed stage timings, total elapsed time, and cancellation state. A
+busy host is therefore distinguishable from a stalled stage without exposing
+source or database text.
+
 ## Semantic search is skipped
 
 Hybrid mode requires a reachable OpenAI-compatible embedding endpoint and a
@@ -157,6 +202,12 @@ model registration whose fingerprint, dimension, current-generation coverage,
 HNSW index, and query probe all pass. The packet reports `not_configured`,
 `not_indexed`, `stale`, or `unavailable` and falls back explicitly to lexical
 evidence. It never labels BM25-only results as hybrid.
+
+An embedding sweep reports the complete `corpusDocuments` alongside
+`reusedDocuments` and `endpointDocuments`. Unchanged current-generation
+documents reuse matching content-addressed vectors before endpoint work; only
+documents whose rendered embedding input changed are submitted. The legacy
+`documents` counter remains the endpoint-work count for compatibility.
 
 ## ParadeDB derived index is unhealthy after a crash
 

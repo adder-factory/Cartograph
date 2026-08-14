@@ -30,14 +30,15 @@ use cartograph_db::{
     FileDependencyDirection, FileDependencyQuery, FileHistoryQuery, FileSurfaceQuery,
     FileTestImpactQuery, GroupedPathInput, GroupedSymbolQuery, InterchangeSnapshotRequest,
     IssueAttributionKind, IssueCommitSymbolPeerQuery, LeaseOwner, LeaseRequest, LeaseTarget,
-    NativeParseCacheKey, NativeParseCacheKeyInput, SearchQuery, SemanticStorageError,
-    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingRefresh,
-    StructuralFindingSeverity, StructuralHotspotCategory, StructuralHotspotQuery,
-    StructuralHotspotSort, SymbolCoverageQuery, SymbolIssuePeerQuery, SymbolIssueQuery,
+    NativeParseCacheKey, NativeParseCacheKeyInput, NewGeneration, SearchQuery,
+    SemanticStorageError, StructuralFindingGroupQuery, StructuralFindingQuery,
+    StructuralFindingRefresh, StructuralFindingSeverity, StructuralHotspotCategory,
+    StructuralHotspotQuery, StructuralHotspotSort, SymbolCoverageQuery, SymbolIssuePeerQuery,
+    SymbolIssueQuery,
 };
 use cartograph_domain::{
-    ContentDigest, EdgeKind, GenerationDigestVersion, ModelId, NormalizedPath, ProjectOperation,
-    SourceLanguage, SymbolId,
+    ContentDigest, EdgeKind, GenerationDigestVersion, GenerationState, ModelId, NormalizedPath,
+    ProjectOperation, SourceLanguage, SymbolId,
 };
 use cartograph_extract::native_extractor_contract_digest;
 use cartograph_llm::{ChatSettings, EmbeddingSettings, OpenAiChatClient, OpenAiEmbeddingClient};
@@ -483,6 +484,149 @@ async fn incremental_sync_reparses_only_changed_or_corrupt_files_and_keeps_compl
     drop_schema(&settings, &schema).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn incremental_embedding_reuses_unchanged_generation_documents() {
+    let (schema, settings, project) = live_project_fixture("8");
+    let source = project.path().join("src");
+    std::fs::create_dir(&source)
+        .unwrap_or_else(|error| panic!("embedding reuse source directory failed: {error}"));
+    for (path, body) in [
+        (
+            "service.ts",
+            "/** Adds one to the input. */\nexport function calculate(value: number): number { return value + 1; }\n",
+        ),
+        (
+            "caller.ts",
+            "import { calculate } from './service.js';\nexport function checkout(): number { return calculate(2); }\n",
+        ),
+        (
+            "stable.ts",
+            "export function stable(): boolean { return true; }\n",
+        ),
+    ] {
+        std::fs::write(source.join(path), body)
+            .unwrap_or_else(|error| panic!("embedding reuse fixture failed: {error}"));
+    }
+
+    {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("embedding reuse runtime connect failed: {error}"));
+        let options = IndexOptions::default().with_history_refresh(false);
+        let first = runtime
+            .index(options.clone())
+            .await
+            .unwrap_or_else(|error| panic!("embedding reuse initial index failed: {error}"));
+        assert!(first.published);
+
+        let (endpoint, server) = embedding_fixture_server(4);
+        let embedding_settings = EmbeddingSettings::new(&endpoint, "fixture-reuse-model", None)
+            .unwrap_or_else(|error| panic!("embedding reuse settings failed: {error}"));
+        let first_sweep = runtime
+            .embed_current_with_client(EmbeddingClientRequest::new(
+                OpenAiEmbeddingClient::new(embedding_settings.clone())
+                    .unwrap_or_else(|error| panic!("embedding reuse client failed: {error}")),
+                EmbeddingOptions::default(),
+                ProjectCancellation::new(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("embedding reuse initial sweep failed: {error}"));
+        assert_eq!(first_sweep.reused_documents(), 0);
+        assert_eq!(
+            first_sweep.endpoint_documents(),
+            first_sweep.corpus_documents()
+        );
+
+        std::fs::write(
+            source.join("service.ts"),
+            "/** Adds two to the input. */\nexport function calculate(value: number): number { return value + 2; }\n",
+        )
+        .unwrap_or_else(|error| panic!("embedding reuse source edit failed: {error}"));
+        let second = runtime
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("embedding reuse delta index failed: {error}"));
+        assert!(second.published);
+        assert_ne!(second.generation_id, first.generation_id);
+
+        let second_sweep = runtime
+            .embed_current_with_client(EmbeddingClientRequest::new(
+                OpenAiEmbeddingClient::new(embedding_settings)
+                    .unwrap_or_else(|error| panic!("embedding reuse client failed: {error}")),
+                EmbeddingOptions::default(),
+                ProjectCancellation::new(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("embedding reuse delta sweep failed: {error}"));
+        assert!(second_sweep.reused_documents() > 0);
+        assert!(second_sweep.endpoint_documents() > 0);
+        assert!(second_sweep.endpoint_documents() < second_sweep.corpus_documents());
+        assert_eq!(
+            second_sweep
+                .reused_documents()
+                .saturating_add(second_sweep.endpoint_documents()),
+            second_sweep.corpus_documents()
+        );
+        assert!(second_sweep.readiness().ready());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("embedding reuse fixture server panicked"));
+        runtime.close().await;
+    }
+
+    drop_schema(&settings, &schema).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn unchanged_index_terminalizes_all_abandoned_staging_generations() {
+    let (schema, settings, project) = live_project_fixture("8");
+    std::fs::write(
+        project.path().join("service.ts"),
+        "export function stableSource(): boolean { return true; }\n",
+    )
+    .unwrap_or_else(|error| panic!("staging recovery fixture failed: {error}"));
+
+    {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("staging recovery runtime failed: {error}"));
+        let options = IndexOptions::default().with_history_refresh(false);
+        let first = runtime
+            .index(options.clone())
+            .await
+            .unwrap_or_else(|error| panic!("staging recovery initial index failed: {error}"));
+        let abandoned = runtime
+            .database()
+            .begin_generation(NewGeneration::new(
+                first.project_id.clone(),
+                first.source_revision.as_str(),
+                1,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("abandoned staging fixture failed: {error}"));
+        let unchanged = runtime
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("staging recovery no-op index failed: {error}"));
+        assert!(!unchanged.published);
+        assert_eq!(unchanged.generation_id, first.generation_id);
+        let recovered_state = runtime
+            .database()
+            .generation_state(&first.project_id, abandoned.generation_id())
+            .await
+            .unwrap_or_else(|error| panic!("staging recovery state failed: {error}"));
+        assert!(
+            matches!(recovered_state, None | Some(GenerationState::Failed)),
+            "abandoned generation remained nonterminal: {recovered_state:?}"
+        );
+        runtime.close().await;
+    }
+
+    drop_schema(&settings, &schema).await;
+}
+
 fn write_incremental_fixture(root: &Path) -> std::path::PathBuf {
     let source = root.join("src");
     std::fs::create_dir(&source)
@@ -541,7 +685,7 @@ async fn assert_incremental_cache_contract(
         source_bytes: u64::try_from(service_bytes.len()).unwrap_or(u64::MAX),
     };
     let exact_key = NativeParseCacheKey::new(key_input(
-        native_extractor_contract_digest(),
+        parse_cache_policy_digest(&native_extractor_contract_digest()),
         service_path.clone(),
         service_hash.clone(),
     ));
@@ -569,6 +713,18 @@ async fn assert_incremental_cache_contract(
             .is_none()
     );
     changed_contract
+}
+
+fn parse_cache_policy_digest(extractor_contract: &ContentDigest) -> ContentDigest {
+    let mut hasher =
+        blake3::Hasher::new_derive_key("cartograph.v2.native-parse-cache-policy.2026-08-13");
+    hasher.update(extractor_contract.as_str().as_bytes());
+    hasher.update(
+        &u64::try_from(cartograph_extract::DEFAULT_MAXIMUM_AST_DEPTH)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    ContentDigest::from_bytes(*hasher.finalize().as_bytes())
 }
 
 async fn assert_incremental_contract_upgrade(
@@ -713,11 +869,12 @@ async fn corrupt_incremental_cache(
     let pool = cartograph_db::connect(settings)
         .await
         .unwrap_or_else(|error| panic!("cache corruption connection failed: {error}"));
+    let cache_contract = parse_cache_policy_digest(&native_extractor_contract_digest());
     let corrupted = query(AssertSqlSafe(statement))
         .bind(payload.as_slice())
         .bind(digest.as_str())
         .bind(changed.project_id.as_str())
-        .bind(native_extractor_contract_digest().as_str())
+        .bind(cache_contract.as_str())
         .execute(&pool)
         .await
         .unwrap_or_else(|_| panic!("cache corruption fixture failed"));
@@ -3653,7 +3810,7 @@ async fn file_drift_distinguishes_content_hash_from_mtime_threshold_semantics() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
-async fn oversized_synthesized_names_shorten_and_fatal_stages_preserve_the_generation() {
+async fn oversized_names_shorten_and_deep_files_publish_a_partial_generation() {
     let (schema, settings, project) = live_project_fixture("8");
     let source_path = project.path().join("repro.rs");
     // A single ordinary construct used to synthesize a name past the canonical
@@ -3701,7 +3858,8 @@ async fn oversized_synthesized_names_shorten_and_fatal_stages_preserve_the_gener
 
         let published_generation = shortened.generation_id.clone();
 
-        // A genuinely fatal stage must still leave the published generation visible.
+        // Defensive syntax depth is file-local and recoverable: the exact path
+        // is reported while the rest of the generation still publishes.
         let deep = format!(
             "pub fn nested() {{{}{}}}\n",
             "{ ".repeat(400),
@@ -3709,19 +3867,24 @@ async fn oversized_synthesized_names_shorten_and_fatal_stages_preserve_the_gener
         );
         std::fs::write(&source_path, deep)
             .unwrap_or_else(|error| panic!("nesting fixture failed: {error}"));
-        let fatal = runtime.index(options).await;
-        assert!(
-            fatal.is_err(),
-            "a source past the defensive nesting ceiling must fail the generation"
-        );
-        let rendered = match fatal {
-            Err(error) => error.to_string(),
-            Ok(_) => unreachable!("checked above"),
-        };
+        let recovered = runtime
+            .index(options)
+            .await
+            .unwrap_or_else(|error| panic!("deep source must publish as partial: {error}"));
+        assert!(recovered.published);
+        let native = recovered
+            .native
+            .as_ref()
+            .unwrap_or_else(|| panic!("deep-source native metrics were missing"));
+        assert_eq!(native.degraded_files_truncated, 0);
+        assert_eq!(native.degraded_files.len(), 1);
+        assert_eq!(native.degraded_files[0].path, "repro.rs");
+        assert_eq!(native.degraded_files[0].reason, "nesting_limit_exceeded");
+        let rendered = format!("{recovered:?}");
         assert!(
             !rendered.contains(&long_target)
                 && !rendered.contains(&project.path().to_string_lossy().to_string()),
-            "a failure must never render source text or a checkout path"
+            "a partial report must never render source text or a checkout path"
         );
         let retained = runtime
             .status()
@@ -3732,9 +3895,10 @@ async fn oversized_synthesized_names_shorten_and_fatal_stages_preserve_the_gener
                 .snapshot
                 .and_then(|snapshot| snapshot.current)
                 .map(|current| current.generation_id),
-            Some(published_generation),
-            "a failed index must leave the previous generation visible"
+            Some(recovered.generation_id.clone()),
+            "the recoverable generation must become current"
         );
+        assert_ne!(published_generation, recovered.generation_id);
         runtime.close().await;
     }
     drop_schema(&settings, &schema).await;

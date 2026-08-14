@@ -101,6 +101,9 @@ pub struct EmbeddingSweepReport {
     model: EmbeddingModelIdentity,
     dimension: u16,
     generation_id: GenerationId,
+    corpus_documents: u64,
+    reused_documents: u64,
+    endpoint_documents: u64,
     documents: u64,
     batches: u64,
     written: u64,
@@ -114,6 +117,24 @@ impl EmbeddingSweepReport {
     #[must_use]
     pub const fn readiness(&self) -> &SemanticReadinessReport {
         &self.readiness
+    }
+
+    /// Complete current-generation document population.
+    #[must_use]
+    pub const fn corpus_documents(&self) -> u64 {
+        self.corpus_documents
+    }
+
+    /// Matching current-generation vectors present before endpoint work began.
+    #[must_use]
+    pub const fn reused_documents(&self) -> u64 {
+        self.reused_documents
+    }
+
+    /// Documents submitted to the embedding endpoint during this sweep.
+    #[must_use]
+    pub const fn endpoint_documents(&self) -> u64 {
+        self.endpoint_documents
     }
 }
 
@@ -224,6 +245,9 @@ impl ProjectRuntime {
             model: sweep.model_identity,
             dimension: sweep.registered.selector().dimension(),
             generation_id,
+            corpus_documents: readiness.documents(),
+            reused_documents: sweep.preexisting_embedded_documents,
+            endpoint_documents: progress.documents,
             documents: progress.documents,
             batches: progress.batches,
             written: progress.written,
@@ -256,6 +280,19 @@ impl ProjectRuntime {
                 SEMANTIC_STATEMENT_TIMEOUT,
             ) => result.map_err(|_| ProjectError::EmbeddingOperationFailed)?,
         };
+        let readiness_request = SemanticReadinessRequest::new(
+            project_id.clone(),
+            registered.selector().clone(),
+            SEMANTIC_STATEMENT_TIMEOUT,
+        )
+        .map_err(|_| ProjectError::EmbeddingOperationFailed)?;
+        let preexisting_readiness = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(ProjectError::RequestCancelled),
+            result = self.database().semantic_readiness(readiness_request) => {
+                result.map_err(|_| ProjectError::EmbeddingOperationFailed)?
+            }
+        };
         let page_bytes = pending_page_bytes(&client, options)?;
         Ok(ActiveEmbeddingSweep {
             client,
@@ -264,6 +301,7 @@ impl ProjectRuntime {
             model_identity,
             project_id,
             registered,
+            preexisting_embedded_documents: preexisting_readiness.embedded(),
             page_bytes,
         })
     }
@@ -403,6 +441,7 @@ struct ActiveEmbeddingSweep {
     model_identity: EmbeddingModelIdentity,
     project_id: ProjectId,
     registered: RegisteredEmbeddingModel,
+    preexisting_embedded_documents: u64,
     page_bytes: u64,
 }
 

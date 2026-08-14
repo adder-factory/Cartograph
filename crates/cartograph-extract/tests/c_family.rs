@@ -486,10 +486,17 @@ fn c_family_bounds_cancellation_nesting_output_and_syntax_damage() {
         nested.push_str("}\n");
     }
     nested.push_str("}\n");
+    let recovered = extract_result("deep.c", &nested)
+        .unwrap_or_else(|error| panic!("deep C extraction did not recover: {error}"));
     assert_eq!(
-        extract_result("deep.c", &nested),
-        Err(ExtractError::NestingLimit)
+        recovered.parse_status,
+        cartograph_domain::FileParseStatus::Partial
     );
+    assert_eq!(
+        recovered.diagnostics[0].code,
+        cartograph_extract::DiagnosticCode::NestingLimitExceeded
+    );
+    assert!(recovered.symbols.is_empty());
 
     let mut excessive = String::new();
     for index in 0..20_000 {

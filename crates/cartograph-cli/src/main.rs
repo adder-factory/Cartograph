@@ -3501,7 +3501,7 @@ fn print_index_report(report: &IndexReport, format: OutputFormat) -> Result<(), 
             println!("Workers: {}", report.workers);
             println!("Source revision: {}", report.source_revision);
             println!("Logical digest: {}", report.content_digest);
-            if let Some(native) = report.native {
+            if let Some(native) = &report.native {
                 println!(
                     "Native facts: {} files, {} symbols, {} numerical sites, {} resolved and {} unresolved references",
                     native.files,
@@ -3510,6 +3510,15 @@ fn print_index_report(report: &IndexReport, format: OutputFormat) -> Result<(), 
                     native.resolved_references,
                     native.unresolved_references
                 );
+                for degraded in &native.degraded_files {
+                    println!("Degraded source: {} ({})", degraded.path, degraded.reason);
+                }
+                if native.degraded_files_truncated > 0 {
+                    println!(
+                        "Degraded source paths omitted: {}",
+                        native.degraded_files_truncated
+                    );
+                }
             }
         }
     }

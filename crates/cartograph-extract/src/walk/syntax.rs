@@ -1952,14 +1952,22 @@ fn contains_security_word(raw: &str) -> bool {
 }
 
 fn contains_sql_statement_shape(raw: &str) -> bool {
-    [
-        ("select", "from"),
-        ("insert", "into"),
-        ("update", "set"),
-        ("delete", "from"),
-    ]
-    .iter()
-    .any(|(statement, clause)| contains_ordered_words(raw, statement, clause))
+    contains_select_statement_shape(raw)
+        || [("insert", "into"), ("update", "set"), ("delete", "from")]
+            .iter()
+            .any(|(statement, clause)| contains_ordered_words(raw, statement, clause))
+}
+
+fn contains_select_statement_shape(raw: &str) -> bool {
+    contains_ordered_words(raw, "select", "from")
+        && (raw
+            .bytes()
+            .any(|byte| matches!(byte, b'*' | b',' | b';' | b'='))
+            || [
+                "where", "join", "group", "order", "limit", "offset", "having",
+            ]
+            .iter()
+            .any(|clause| contains_ordered_words(raw, "from", clause)))
 }
 
 fn contains_ordered_words(raw: &str, first: &str, second: &str) -> bool {

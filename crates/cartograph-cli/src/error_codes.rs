@@ -157,6 +157,7 @@ pub(crate) const fn index_stage_failure_code(error: ProjectError) -> Option<&'st
     match error {
         ProjectError::BeginGenerationFailed => Some("generation_start_failed"),
         ProjectError::SourceScanFailed => Some("source_scan_failed"),
+        ProjectError::SourceChangedDuringIndex => Some("source_changed_during_index"),
         ProjectError::IndexFailed => Some("index_failed"),
         ProjectError::IndexStageFailed { stage } => Some(pipeline_stage_failure_code(stage)),
         ProjectError::IndexStageFailedWithReason { stage, reason } => {
