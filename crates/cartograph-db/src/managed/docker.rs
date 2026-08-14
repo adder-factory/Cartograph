@@ -765,37 +765,41 @@ pub(super) async fn initialize_extensions(
     docker: &DockerCli,
     name: &str,
 ) -> Result<(), ManagedDatabaseError> {
-    let pg_search_upgrade =
-        format!("ALTER EXTENSION pg_search UPDATE TO '{SUPPORTED_PG_SEARCH_VERSION}';");
-    let pgvector_upgrade =
-        format!("ALTER EXTENSION vector UPDATE TO '{MANAGED_PGVECTOR_VERSION}';");
     docker
         .runner
         .checked_os(
             "initialize PostgreSQL extensions",
-            vec![
-                OsString::from("exec"),
-                OsString::from(name),
-                OsString::from("psql"),
-                OsString::from("--username"),
-                OsString::from(DATABASE_USER),
-                OsString::from("--dbname"),
-                OsString::from(DATABASE_NAME),
-                OsString::from("--set"),
-                OsString::from("ON_ERROR_STOP=1"),
-                OsString::from("--single-transaction"),
-                OsString::from("--command"),
-                OsString::from("CREATE EXTENSION IF NOT EXISTS pg_search;"),
-                OsString::from("--command"),
-                OsString::from(pg_search_upgrade),
-                OsString::from("--command"),
-                OsString::from("CREATE EXTENSION IF NOT EXISTS vector;"),
-                OsString::from("--command"),
-                OsString::from(pgvector_upgrade),
-            ],
+            initialize_extension_arguments(name),
         )
         .await
         .map(|_| ())
+}
+
+fn initialize_extension_arguments(name: &str) -> Vec<OsString> {
+    let pg_search_upgrade =
+        format!("ALTER EXTENSION pg_search UPDATE TO '{SUPPORTED_PG_SEARCH_VERSION}';");
+    let pgvector_upgrade =
+        format!("ALTER EXTENSION vector UPDATE TO '{MANAGED_PGVECTOR_VERSION}';");
+    vec![
+        OsString::from("exec"),
+        OsString::from(name),
+        OsString::from("psql"),
+        OsString::from("--username"),
+        OsString::from(DATABASE_USER),
+        OsString::from("--dbname"),
+        OsString::from(DATABASE_NAME),
+        OsString::from("--set"),
+        OsString::from("ON_ERROR_STOP=1"),
+        OsString::from("--single-transaction"),
+        OsString::from("--command"),
+        OsString::from("CREATE EXTENSION IF NOT EXISTS vector;"),
+        OsString::from("--command"),
+        OsString::from(pgvector_upgrade),
+        OsString::from("--command"),
+        OsString::from("CREATE EXTENSION IF NOT EXISTS pg_search;"),
+        OsString::from("--command"),
+        OsString::from(pg_search_upgrade),
+    ]
 }
 
 async fn inspect_volume_labels(
@@ -1279,6 +1283,26 @@ mod tests {
                 "managed create arguments did not bind {flag} to its supported value"
             );
         }
+    }
+
+    #[test]
+    fn extension_initialization_installs_pgvector_before_pg_search() {
+        let arguments = initialize_extension_arguments("cartograph-v2-test");
+        let commands: Vec<_> = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--command")
+            .map(|pair| pair[1].to_string_lossy())
+            .collect();
+
+        assert_eq!(
+            commands,
+            [
+                "CREATE EXTENSION IF NOT EXISTS vector;",
+                "ALTER EXTENSION vector UPDATE TO '0.8.4';",
+                "CREATE EXTENSION IF NOT EXISTS pg_search;",
+                "ALTER EXTENSION pg_search UPDATE TO '0.25.2';",
+            ]
+        );
     }
 
     #[test]

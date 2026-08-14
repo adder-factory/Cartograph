@@ -36,9 +36,9 @@ Cartograph v2 is:
 
 - a native Rust executable;
 - PostgreSQL 18.4 or newer within major version 18;
-- code-aware BM25 through ParadeDB `pg_search` 0.25.1;
+- code-aware BM25 through ParadeDB `pg_search` 0.25.2;
 - pgvector 0.8.4 or newer (0.8.6 recommended for external PostgreSQL; the
-  managed ParadeDB 0.25.1 image bundles 0.8.4);
+  managed ParadeDB 0.25.2 image bundles 0.8.4);
 - useful without an LLM through exact, lexical, graph, review, and test-impact
   retrieval.
 
@@ -98,8 +98,8 @@ older containers are reported rather than silently replaced.
 ### External PostgreSQL (all supported platforms)
 
 The database administrator must install PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.1, and pgvector 0.8.4 or newer, then create both
-extensions. Supply the URL through the environment:
+version 18, `pg_search` 0.25.2, and pgvector 0.8.4 or newer, then create pgvector
+before creating `pg_search`. Supply the URL through the environment:
 
 ```sh
 export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
@@ -369,9 +369,15 @@ the installed binary, and repairs stale owned host pins. Require
 `completed: true`; do not mistake `applied: false` for failure when
 `installedVersion` was already current. If `projectReconciliation` requests
 `upgrade-managed-database`, run only its backup and exact confirmed replacement
-steps, then rerun the same command to resume. Restart or reopen the host only
-when `restartRequired` is true, because an attached process cannot hot-load the
-new child. That flag describes binary or pin changes made by the current
+steps, then rerun the same command to resume. A failure after the extension
+update retains the new image for that retry and keeps the old image stopped; do
+not manually restart the old container against the possibly newer catalog. An
+interruption between renaming the stopped old container and creating the
+candidate is also resumed by the same confirmed command; do not rename the
+rollback slot by hand.
+Restart or reopen the host only when `restartRequired` is true, because an
+attached process cannot hot-load the new child. That flag describes binary or
+pin changes made by the current
 invocation; false on a no-op rerun does not prove the version of a process left
 attached across an earlier upgrade. Treat a database `timed_out` step as a
 retryable cold-pull/readiness timeout, not as permission to replace a container.

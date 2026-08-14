@@ -19,8 +19,8 @@ use crate::{CapabilityReport, CartographDatabase, MigrationReport, connect, prob
 
 /// Exact upstream multi-architecture image accepted by Cartograph v2.
 pub const MANAGED_DATABASE_IMAGE: &str = concat!(
-    "paradedb/paradedb:0.25.1@sha256:",
-    "fcd662a9b32e683638e0a2c2d9fd313e433f07694ec70543b30de0d84a721c18"
+    "paradedb/paradedb:0.25.2@sha256:",
+    "f34b716407b4d509d3e59e649495964b296ad7c0931658dbf99d3cf1b35bc994"
 );
 /// Default loopback port for the first managed Cartograph database.
 pub const DEFAULT_MANAGED_DATABASE_PORT: u16 = 55_432;
@@ -1171,6 +1171,9 @@ pub enum ManagedDatabaseError {
     /// The old owned container could not be restored after a pinned-image upgrade failed.
     #[error("managed database image upgrade rollback could not be verified")]
     UpgradeRollbackFailed,
+    /// A post-extension failure did not leave a verifiable new-image recovery boundary.
+    #[error("managed database image upgrade recovery state could not be verified")]
+    UpgradeRecoveryFailed,
     /// Removal could not safely delete the private credential file.
     #[error("managed database credential removal failed")]
     CredentialRemove,

@@ -67,8 +67,8 @@ cartograph install --yes --target codex --location local --project-path .
 ```
 
 For external PostgreSQL, require PostgreSQL 18.4 or newer within major version
-18, `pg_search` 0.25.1, and pgvector 0.8.4 or newer, then pass the secret URL
-only through `CARTOGRAPH_DATABASE_URL` and
+18, `pg_search` 0.25.2, and pgvector 0.8.4 or newer. Create pgvector before
+`pg_search`, then pass the secret URL only through `CARTOGRAPH_DATABASE_URL` and
 select the schema with `CARTOGRAPH_DATABASE_SCHEMA`. Never write or echo the URL
 in committed project files.
 

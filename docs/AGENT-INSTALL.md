@@ -71,9 +71,15 @@ Require `completed: true`. The operation verifies and smoke-tests the release,
 applies safe schema migrations, reconciles a fresh current generation, runs
 `doctor`, and repairs stale owned host pins. If it reports that the managed
 database must be replaced, perform only the exact backup and confirmed upgrade
-steps it prints, then rerun the same command. Reopen the agent host only when
-`restartRequired` is true; a process already attached to an older MCP child
-cannot hot-load the new binary. That flag describes changes made by the current
+steps it prints, then rerun the same command. If the database command fails
+after attempting the extension update, the new image remains the resumable
+candidate and the old image remains stopped; do not start the old container by
+hand. An interruption after the old container is renamed but before the new
+candidate exists is resumed by repeating the same confirmed command; do not
+rename the rollback slot manually. Reopen the agent host only when
+`restartRequired` is true; a process
+already attached to an older MCP child cannot hot-load the new binary. That flag
+describes changes made by the current
 invocation; `false` on a later no-op rerun does not prove that a host left open
 across an earlier upgrade loaded the replacement child.
 
@@ -91,9 +97,10 @@ cartograph context 'explain the primary request flow' --project-path .
 
 The managed lifecycle creates project-owned, loopback-only Docker resources
 using the pinned upstream ParadeDB image. PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.1, pgvector 0.8.4 or newer, preload, ParadeDB
-index access, BM25, and source-code tokenization are hard checks. Newly created
-containers also have explicit 2 GiB memory, four-CPU, and 256-process ceilings;
+version 18, `pg_search` 0.25.2, pgvector 0.8.4 or newer, preload, ParadeDB
+index access, BM25, and source-code tokenization are hard checks. External
+administrators create pgvector before `pg_search`. Newly created containers
+also have explicit 2 GiB memory, four-CPU, and 256-process ceilings;
 their 15-minute checkpoint interval, 4 GiB soft maximum WAL size, and 512 MiB
 recycled-WAL floor bound repeated checkpoint pressure during indexing bursts.
 `cartograph db status` and `doctor` expose whether an older owned container needs

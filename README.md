@@ -30,7 +30,7 @@ abstention instead of presenting stale or incomplete data as certainty.
 
 > [!IMPORTANT]
 > Cartograph v2 is PostgreSQL-only. It requires PostgreSQL 18.4 or newer within
-> major version 18, ParadeDB `pg_search` 0.25.1, and pgvector 0.8.4 or newer
+> major version 18, ParadeDB `pg_search` 0.25.2, and pgvector 0.8.4 or newer
 > (0.8.6 recommended for external PostgreSQL).
 > There is no SQLite runtime, compatibility mode, importer, optional feature,
 > or fallback.
@@ -141,6 +141,9 @@ image pull has its own 15-minute budget; a timeout is reported as retryable and
 never treated as evidence that the container is incompatible. A fully
 idempotent rerun does not request another host reopen unless that invocation
 changed the binary or repaired a host pin.
+The confirmed database replacement also resumes an interruption after the old
+container was stopped and renamed but before the new candidate was created; do
+not rename its rollback slot manually.
 
 ### 4. Verify the live integration
 
@@ -176,9 +179,9 @@ in a pinned Rust/Trixie container and executed in a separate pinned Debian 13
 runtime container before publication.
 
 For an external deployment, the database administrator installs PostgreSQL 18.4
-or newer within major version 18, `pg_search` 0.25.1, and pgvector 0.8.4 or
-newer, and creates both extensions. Load the connection URL from the shell or a
-secret manager rather than a committed file:
+or newer within major version 18, `pg_search` 0.25.2, and pgvector 0.8.4 or
+newer, and creates pgvector before `pg_search`. Load the connection URL from the
+shell or a secret manager rather than a committed file:
 
 ```sh
 export CARTOGRAPH_DATABASE_SCHEMA='cartograph_project'

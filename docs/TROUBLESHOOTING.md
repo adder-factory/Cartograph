@@ -15,9 +15,9 @@ MCP call is the control evidence.
 ## PostgreSQL capability failure
 
 Cartograph requires PostgreSQL 18.4 or newer within major version 18,
-`pg_search` 0.25.1 with the expected preload state/ParadeDB access method/BM25
+`pg_search` 0.25.2 with the expected preload state/ParadeDB access method/BM25
 tokenizer behavior, and pgvector 0.8.4 or newer. Pgvector 0.8.6 is recommended
-for external PostgreSQL; the managed ParadeDB 0.25.1 image bundles 0.8.4.
+for external PostgreSQL; the managed ParadeDB 0.25.2 image bundles 0.8.4.
 Upgrade or correct the external service, or use the pinned managed database on
 macOS/Linux. There is no SQLite or plain-FTS
 fallback.
@@ -84,6 +84,13 @@ intentionally stricter than read-only `status` or an ordinary relational index:
 an MCP process exposes semantic maintenance paths that may need HNSW, so it
 refuses an older 64 MiB managed container even when non-vector reads still
 work. `doctor` is the readiness authority for that boundary.
+If a confirmed database upgrade fails after attempting the extension update,
+repeat the same command: the new image is retained for resumable verification
+and the old image stays stopped so it cannot load a possibly newer catalog.
+An interruption after the old container is renamed but before the candidate is
+created is also resumable: repeat the same confirmed command and let Cartograph
+validate the stopped rollback slot and continue. Do not rename containers by
+hand; ambiguous recovery topology fails closed.
 
 ## Index is stale
 

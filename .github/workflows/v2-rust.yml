@@ -397,7 +397,7 @@ jobs:
       CARTOGRAPH_POSTGRES_PASSWORD: cartograph-v2-ci-only
       CARTOGRAPH_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
       CARTOGRAPH_TEST_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
-      CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.25.1@sha256:fcd662a9b32e683638e0a2c2d9fd313e433f07694ec70543b30de0d84a721c18
+      CARTOGRAPH_PARADEDB_IMAGE: paradedb/paradedb:0.25.2@sha256:f34b716407b4d509d3e59e649495964b296ad7c0931658dbf99d3cf1b35bc994
     steps:
       - name: Documentation-only required-check fast path
         if: needs.classify.outputs.docs_only == 'true'
@@ -495,8 +495,8 @@ jobs:
         run: >-
           docker exec cartograph-v2-ci-postgres
           psql --username cartograph --dbname cartograph --set ON_ERROR_STOP=1
-          --command 'CREATE EXTENSION IF NOT EXISTS pg_search;'
           --command 'CREATE EXTENSION IF NOT EXISTS vector;'
+          --command 'CREATE EXTENSION IF NOT EXISTS pg_search;'
 
       - name: Capture clean schema baseline
         if: needs.classify.outputs.full == 'true'

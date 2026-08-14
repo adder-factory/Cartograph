@@ -18,7 +18,7 @@ use super::{
     credentials::DatabaseCredentials,
     docker::{
         ContainerArchivePath, ContainerCreateSpec, ContainerInspection, DatabaseArchiveOperation,
-        DatabaseArchiveRequest,
+        DatabaseArchiveRequest, initialize_extensions,
     },
     has_expected_resource_limits, initialize_managed_database, validate_configured_port,
     validate_destructive_confirmation, validate_owned_container,
@@ -32,11 +32,23 @@ const RESTORE_CONTAINER_PATH: &str = "/tmp/cartograph-managed-restore.dump";
 const ROLLBACK_CONTAINER_PATH: &str = "/tmp/cartograph-managed-rollback.dump";
 const UPGRADE_ROLLBACK_SUFFIX: &str = "-upgrade-rollback";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OriginalContainerState {
     Running,
     Paused,
     Stopped,
+}
+
+enum UpgradeInitializationFailure {
+    RollbackSafe(ManagedDatabaseError),
+    RetainReplacement(ManagedDatabaseError),
+}
+
+struct PreparedUpgrade {
+    inspection: ContainerInspection,
+    retained_rollback: Option<ContainerInspection>,
+    rollback_name: String,
+    credentials: DatabaseCredentials,
 }
 
 impl ManagedDatabaseArchives<'_> {
@@ -382,48 +394,13 @@ impl ManagedDatabaseMaintenance<'_> {
         )?;
         self.database.docker.ensure_available().await?;
         let _lifecycle_lock = self.database.credentials.acquire_lifecycle_lock()?;
-        let inspection = self
-            .database
-            .docker
-            .containers()
-            .inspect_container(&self.database.identity.container_name)
-            .await?
-            .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
-        validate_owned_container(&self.database.identity, &inspection, false)?;
-        if !self
-            .database
-            .docker
-            .volumes()
-            .volume_exists_owned(&self.database.identity)
-            .await?
-        {
-            return Err(ManagedDatabaseError::ManagedVolumeMissing);
-        }
-        validate_configured_port(self.database.port, &inspection)?;
-        let credentials = self.database.credentials.load()?;
-        if inspection.image == super::MANAGED_DATABASE_IMAGE
-            && inspection.shared_memory_bytes >= super::MANAGED_DATABASE_SHARED_MEMORY_BYTES
-            && has_expected_resource_limits(&inspection)
-        {
-            let initialized = self
-                .initialize_supported_existing(&inspection, &credentials)
-                .await?;
-            return Ok(upgrade_report(false, initialized, &self.database.schema));
+        let prepared = self.prepare_upgrade().await?;
+        if let Some(report) = self.finish_supported_upgrade(&prepared).await? {
+            return Ok(report);
         }
 
-        let original_state = original_container_state(&inspection)?;
-        let rollback_name = format!(
-            "{}{UPGRADE_ROLLBACK_SUFFIX}",
-            self.database.identity.container_name
-        );
-        if self
-            .database
-            .docker
-            .containers()
-            .inspect_container(&rollback_name)
-            .await?
-            .is_some()
-        {
+        let original_state = original_container_state(&prepared.inspection)?;
+        if prepared.retained_rollback.is_some() {
             return Err(ManagedDatabaseError::UpgradeRollbackFailed);
         }
         self.database
@@ -435,7 +412,10 @@ impl ManagedDatabaseMaintenance<'_> {
             .database
             .docker
             .containers()
-            .rename_container(&self.database.identity.container_name, &rollback_name)
+            .rename_container(
+                &self.database.identity.container_name,
+                &prepared.rollback_name,
+            )
             .await
         {
             self.restore_original_container_state(
@@ -446,22 +426,136 @@ impl ManagedDatabaseMaintenance<'_> {
             return Err(error);
         }
 
-        let replacement = self.create_and_initialize_upgrade(&credentials).await;
+        let replacement = self
+            .create_and_initialize_upgrade(&prepared.credentials)
+            .await;
         match replacement {
             Ok(initialized) => {
                 self.database
                     .docker
                     .containers()
-                    .remove_container(&rollback_name)
+                    .remove_container(&prepared.rollback_name)
                     .await?;
                 Ok(upgrade_report(true, initialized, &self.database.schema))
             }
-            Err(error) => {
-                self.rollback_upgrade(&rollback_name, original_state)
+            Err(UpgradeInitializationFailure::RollbackSafe(error)) => {
+                self.rollback_upgrade(&prepared.rollback_name, original_state)
+                    .await?;
+                Err(error)
+            }
+            Err(UpgradeInitializationFailure::RetainReplacement(error)) => {
+                self.verify_retained_upgrade_state(&prepared.rollback_name)
                     .await?;
                 Err(error)
             }
         }
+    }
+
+    async fn prepare_upgrade(&self) -> Result<PreparedUpgrade, ManagedDatabaseError> {
+        let mut inspection = self
+            .database
+            .docker
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
+            .await?;
+        let rollback_name = format!(
+            "{}{UPGRADE_ROLLBACK_SUFFIX}",
+            self.database.identity.container_name
+        );
+        let mut retained_rollback = self
+            .database
+            .docker
+            .containers()
+            .inspect_container(&rollback_name)
+            .await?;
+        let upgrade_preflight = inspection
+            .as_ref()
+            .or(retained_rollback.as_ref())
+            .ok_or(ManagedDatabaseError::ManagedContainerMissing)?;
+        if inspection.is_some() {
+            validate_owned_container(&self.database.identity, upgrade_preflight, false)?;
+        } else {
+            validate_retained_upgrade_rollback(&self.database.identity, upgrade_preflight)?;
+        }
+        if !self
+            .database
+            .docker
+            .volumes()
+            .volume_exists_owned(&self.database.identity)
+            .await?
+        {
+            return Err(ManagedDatabaseError::ManagedVolumeMissing);
+        }
+        validate_configured_port(self.database.port, upgrade_preflight)?;
+        let credentials = self.database.credentials.load()?;
+        if inspection.is_none() {
+            inspection = Some(
+                self.recover_interrupted_upgrade_rename(&rollback_name)
+                    .await?,
+            );
+            retained_rollback = None;
+        }
+        let inspection = inspection.ok_or(ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        Ok(PreparedUpgrade {
+            inspection,
+            retained_rollback,
+            rollback_name,
+            credentials,
+        })
+    }
+
+    async fn recover_interrupted_upgrade_rename(
+        &self,
+        rollback_name: &str,
+    ) -> Result<ContainerInspection, ManagedDatabaseError> {
+        self.database
+            .docker
+            .containers()
+            .rename_container(rollback_name, &self.database.identity.container_name)
+            .await
+            .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        let recovered = self
+            .database
+            .docker
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
+            .await
+            .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?
+            .ok_or(ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        validate_retained_upgrade_rollback(&self.database.identity, &recovered)?;
+        validate_configured_port(self.database.port, &recovered)
+            .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        Ok(recovered)
+    }
+
+    async fn finish_supported_upgrade(
+        &self,
+        prepared: &PreparedUpgrade,
+    ) -> Result<Option<ManagedUpgradeReport>, ManagedDatabaseError> {
+        if prepared.inspection.image != super::MANAGED_DATABASE_IMAGE
+            || prepared.inspection.shared_memory_bytes < super::MANAGED_DATABASE_SHARED_MEMORY_BYTES
+            || !has_expected_resource_limits(&prepared.inspection)
+        {
+            return Ok(None);
+        }
+        if let Some(rollback) = prepared.retained_rollback.as_ref() {
+            validate_retained_upgrade_rollback(&self.database.identity, rollback)?;
+        }
+        let initialized = self
+            .initialize_supported_existing(&prepared.inspection, &prepared.credentials)
+            .await?;
+        if prepared.retained_rollback.is_some() {
+            self.database
+                .docker
+                .containers()
+                .remove_container(&prepared.rollback_name)
+                .await?;
+        }
+        Ok(Some(upgrade_report(
+            prepared.retained_rollback.is_some(),
+            initialized,
+            &self.database.schema,
+        )))
     }
 
     async fn initialize_supported_existing(
@@ -533,7 +627,7 @@ impl ManagedDatabaseMaintenance<'_> {
     async fn create_and_initialize_upgrade(
         &self,
         credentials: &DatabaseCredentials,
-    ) -> Result<ManagedInitialization, ManagedDatabaseError> {
+    ) -> Result<ManagedInitialization, UpgradeInitializationFailure> {
         self.database
             .docker
             .containers()
@@ -542,7 +636,8 @@ impl ManagedDatabaseMaintenance<'_> {
                 port: self.database.port,
                 image: super::MANAGED_DATABASE_IMAGE,
             })
-            .await?;
+            .await
+            .map_err(UpgradeInitializationFailure::RollbackSafe)?;
         self.database
             .docker
             .containers()
@@ -550,16 +645,73 @@ impl ManagedDatabaseMaintenance<'_> {
                 &self.database.identity.container_name,
                 self.database.credentials.path(),
             )
-            .await?;
+            .await
+            .map_err(UpgradeInitializationFailure::RollbackSafe)?;
         self.database
             .docker
             .containers()
             .start_container(&self.database.identity.container_name, self.database.port)
-            .await?;
-        self.database
-            .lifecycle()
-            .finish_start(credentials, false)
             .await
+            .map_err(UpgradeInitializationFailure::RollbackSafe)?;
+
+        let mut catalog_mutation_attempted = false;
+        let initialization = timeout(self.database.timeouts.startup, async {
+            self.database.lifecycle().wait_until_healthy(false).await?;
+            self.database
+                .docker
+                .containers()
+                .verify_loopback_port(&self.database.identity.container_name, self.database.port)
+                .await?;
+            catalog_mutation_attempted = true;
+            initialize_extensions(
+                &self.database.docker,
+                &self.database.identity.container_name,
+            )
+            .await?;
+            initialize_managed_database(credentials, self.database.port, &self.database.schema)
+                .await
+        })
+        .await;
+        let result = initialization
+            .map_err(|_| ManagedDatabaseError::DatabaseStartupTimeout)
+            .and_then(std::convert::identity);
+        result.map_err(|error| {
+            if catalog_mutation_attempted {
+                UpgradeInitializationFailure::RetainReplacement(error)
+            } else {
+                UpgradeInitializationFailure::RollbackSafe(error)
+            }
+        })
+    }
+
+    async fn verify_retained_upgrade_state(
+        &self,
+        rollback_name: &str,
+    ) -> Result<(), ManagedDatabaseError> {
+        let replacement = self
+            .database
+            .docker
+            .containers()
+            .inspect_container(&self.database.identity.container_name)
+            .await
+            .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?
+            .ok_or(ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        validate_owned_container(&self.database.identity, &replacement, true)
+            .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        validate_configured_port(self.database.port, &replacement)
+            .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        if !has_expected_resource_limits(&replacement) {
+            return Err(ManagedDatabaseError::UpgradeRecoveryFailed);
+        }
+        let rollback = self
+            .database
+            .docker
+            .containers()
+            .inspect_container(rollback_name)
+            .await
+            .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?
+            .ok_or(ManagedDatabaseError::UpgradeRecoveryFailed)?;
+        validate_retained_upgrade_rollback(&self.database.identity, &rollback)
     }
 
     async fn rollback_upgrade(
@@ -775,6 +927,21 @@ fn original_container_state(
         "created" | "exited" | "dead" => Ok(OriginalContainerState::Stopped),
         _ => Err(ManagedDatabaseError::UnsupportedContainerState),
     }
+}
+
+fn validate_retained_upgrade_rollback(
+    identity: &super::ManagedResourceIdentity,
+    rollback: &ContainerInspection,
+) -> Result<(), ManagedDatabaseError> {
+    validate_owned_container(identity, rollback, false)
+        .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?;
+    if original_container_state(rollback)
+        .map_err(|_| ManagedDatabaseError::UpgradeRecoveryFailed)?
+        != OriginalContainerState::Stopped
+    {
+        return Err(ManagedDatabaseError::UpgradeRecoveryFailed);
+    }
+    Ok(())
 }
 
 fn restore_report(
@@ -1025,10 +1192,15 @@ mod tests {
     use crate::managed::ManagedDatabase;
 
     const LIVE_SCHEMA: &str = "cartograph_managed_maintenance_test";
+    const UPGRADE_FIXTURE_SCHEMA: &str = "cartograph_managed_upgrade_fixture";
     const LIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    const LIVE_PROJECT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const LIVE_GENERATION: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const LIVE_DOCUMENT: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const LIVE_DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const PREVIOUS_MANAGED_DATABASE_IMAGE: &str = concat!(
-        "paradedb/paradedb:0.25.0@sha256:",
-        "6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7"
+        "paradedb/paradedb:0.25.1@sha256:",
+        "fcd662a9b32e683638e0a2c2d9fd313e433f07694ec70543b30de0d84a721c18"
     );
 
     struct LiveDockerCleanup {
@@ -1216,16 +1388,12 @@ mod tests {
     }
 
     async fn install_managed_search_fixture(database: &ManagedDatabase) {
-        const PROJECT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        const GENERATION: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-        const DOCUMENT: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-        const DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
         execute_test_sql(
             database,
             format!(
                 r#"INSERT INTO "{LIVE_SCHEMA}"."projects" (
                         project_id, root_identity, repository_fingerprint
-                    ) VALUES ('{PROJECT}'::uuid, 'managed/maintenance-fixture', '{DIGEST}')"#
+                    ) VALUES ('{LIVE_PROJECT}'::uuid, 'managed/maintenance-fixture', '{LIVE_DIGEST}')"#
             ),
         )
         .await;
@@ -1237,8 +1405,8 @@ mod tests {
                         source_revision, state, worker_count, content_digest,
                         content_digest_version, ready_at, published_at
                     ) VALUES (
-                        '{PROJECT}'::uuid, '{GENERATION}'::uuid, 1,
-                        'managed-fixture', 'current', 1, '{DIGEST}', 3,
+                        '{LIVE_PROJECT}'::uuid, '{LIVE_GENERATION}'::uuid, 1,
+                        'managed-fixture', 'current', 1, '{LIVE_DIGEST}', 3,
                         clock_timestamp(), clock_timestamp()
                     )"#
             ),
@@ -1248,8 +1416,8 @@ mod tests {
             database,
             format!(
                 r#"UPDATE "{LIVE_SCHEMA}"."projects"
-                    SET current_generation_id = '{GENERATION}'::uuid
-                    WHERE project_id = '{PROJECT}'::uuid"#
+                    SET current_generation_id = '{LIVE_GENERATION}'::uuid
+                    WHERE project_id = '{LIVE_PROJECT}'::uuid"#
             ),
         )
         .await;
@@ -1260,7 +1428,7 @@ mod tests {
                         project_id, generation_id, document_id, path, language,
                         document_kind, qualified_name, code, natural_text, metadata
                     ) VALUES (
-                        '{PROJECT}'::uuid, '{GENERATION}'::uuid, '{DOCUMENT}'::uuid,
+                        '{LIVE_PROJECT}'::uuid, '{LIVE_GENERATION}'::uuid, '{LIVE_DOCUMENT}'::uuid,
                         'src/managed.rs', 'rust', 'symbol', 'managedFixture',
                         'fn managed_fixture() {{}}', '', '{{}}'::jsonb
                     )"#
@@ -1273,7 +1441,7 @@ mod tests {
             format!(
                 r#"CREATE TABLE "{LIVE_SCHEMA}"."{table}" AS
                     SELECT * FROM "{LIVE_SCHEMA}"."search_documents"
-                    WHERE generation_id = '{GENERATION}'::uuid"#
+                    WHERE generation_id = '{LIVE_GENERATION}'::uuid"#
             ),
         )
         .await;
@@ -1295,7 +1463,9 @@ mod tests {
             format!(
                 r#"INSERT INTO "{LIVE_SCHEMA}"."generation_search_relations" (
                         project_id, generation_id, document_count, content_digest
-                    ) VALUES ('{PROJECT}'::uuid, '{GENERATION}'::uuid, 1, '{DIGEST}')"#
+                    ) VALUES (
+                        '{LIVE_PROJECT}'::uuid, '{LIVE_GENERATION}'::uuid, 1, '{LIVE_DIGEST}'
+                    )"#
             ),
         )
         .await;
@@ -1440,7 +1610,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "starts a real ParadeDB container and forces pinned-image upgrade rollback"]
-    async fn managed_upgrade_restores_old_container_after_readiness_failure() {
+    async fn managed_upgrade_resumes_after_interruption_between_rename_and_candidate() {
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("could not create upgrade project: {error}"));
         let database = live_database(directory.path());
@@ -1452,14 +1622,76 @@ mod tests {
         assert_docker_success(&["image", "pull", PREVIOUS_MANAGED_DATABASE_IMAGE]);
         assert_docker_success(&["image", "tag", PREVIOUS_MANAGED_DATABASE_IMAGE, &old_image]);
         install_old_image_container(&database, &old_image).await;
+        install_previous_image_data_fixture(&database).await;
         let pre_upgrade_backup = directory.path().join("pre-upgrade.dump");
         let backup = database
             .archives()
             .backup(&pre_upgrade_backup)
             .await
             .unwrap_or_else(|error| panic!("could not back up previous image: {error}"));
-        assert!(backup.bytes > 0);
+        assert!(backup.bytes > ARCHIVE_MAGIC_BYTES);
+
+        let rollback_name = format!(
+            "{}{UPGRADE_ROLLBACK_SUFFIX}",
+            database.identity.container_name
+        );
+        database
+            .docker
+            .containers()
+            .stop_container(&database.identity.container_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not stop pre-upgrade container: {error}"));
+        database
+            .docker
+            .containers()
+            .rename_container(&database.identity.container_name, &rollback_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not simulate interrupted rename: {error}"));
+        let missing_primary = database
+            .docker
+            .containers()
+            .inspect_container(&database.identity.container_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect interrupted primary: {error}"));
+        assert!(missing_primary.is_none());
+        let interrupted_rollback = database
+            .docker
+            .containers()
+            .inspect_container(&rollback_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect interrupted rollback: {error}"))
+            .unwrap_or_else(|| panic!("interrupted rollback is missing"));
+        validate_retained_upgrade_rollback(&database.identity, &interrupted_rollback)
+            .unwrap_or_else(|error| panic!("interrupted rollback is unsafe: {error}"));
+
+        assert_pinned_upgrade_succeeds(&database).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "starts a real ParadeDB container and forces pinned-image upgrade rollback"]
+    async fn managed_upgrade_recovers_before_and_after_extension_catalog_mutation() {
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("could not create upgrade project: {error}"));
+        let database = live_database(directory.path());
+        let old_image = format!(
+            "cartograph-maintenance-upgrade-old:{}",
+            database.identity.project_hash
+        );
+        let _cleanup = live_cleanup(&database, Some(old_image.clone()));
+        assert_docker_success(&["image", "pull", PREVIOUS_MANAGED_DATABASE_IMAGE]);
+        assert_docker_success(&["image", "tag", PREVIOUS_MANAGED_DATABASE_IMAGE, &old_image]);
+        install_old_image_container(&database, &old_image).await;
+        install_previous_image_data_fixture(&database).await;
+        install_malformed_upgrade_schema(&database).await;
+        let pre_upgrade_backup = directory.path().join("pre-upgrade.dump");
+        let backup = database
+            .archives()
+            .backup(&pre_upgrade_backup)
+            .await
+            .unwrap_or_else(|error| panic!("could not back up previous image: {error}"));
+        assert!(backup.bytes > ARCHIVE_MAGIC_BYTES);
         assert_upgrade_failure_restores_old(&database, directory.path(), &old_image).await;
+        assert_post_extension_failure_retains_new(&database, &old_image).await;
         assert_pinned_upgrade_succeeds(&database).await;
     }
 
@@ -1508,6 +1740,76 @@ mod tests {
         wait_for_owned_health(database, false).await;
     }
 
+    async fn install_previous_image_data_fixture(database: &ManagedDatabase) {
+        execute_test_sql(database, "CREATE EXTENSION IF NOT EXISTS vector").await;
+        execute_test_sql(database, "CREATE EXTENSION IF NOT EXISTS pg_search").await;
+        execute_test_sql(
+            database,
+            format!(r#"CREATE SCHEMA "{UPGRADE_FIXTURE_SCHEMA}""#),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"CREATE TABLE "{UPGRADE_FIXTURE_SCHEMA}"."upgrade_marker" (
+                        value text NOT NULL
+                    )"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"INSERT INTO "{UPGRADE_FIXTURE_SCHEMA}"."upgrade_marker" (value)
+                    VALUES ('retained-across-upgrade')"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"CREATE TABLE "{UPGRADE_FIXTURE_SCHEMA}"."upgrade_documents" (
+                        id bigserial PRIMARY KEY,
+                        document_id uuid NOT NULL,
+                        qualified_name text NOT NULL
+                    )"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"INSERT INTO "{UPGRADE_FIXTURE_SCHEMA}"."upgrade_documents" (
+                        document_id, qualified_name
+                    ) VALUES ('{LIVE_DOCUMENT}'::uuid, 'managedUpgradeFixture')"#
+            ),
+        )
+        .await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"CREATE INDEX "upgrade_documents_bm25"
+                    ON "{UPGRADE_FIXTURE_SCHEMA}"."upgrade_documents"
+                    USING bm25 (id, (qualified_name::pdb.source_code))
+                    WITH (key_field = 'id')"#
+            ),
+        )
+        .await;
+    }
+
+    async fn install_malformed_upgrade_schema(database: &ManagedDatabase) {
+        execute_test_sql(database, format!(r#"CREATE SCHEMA "{LIVE_SCHEMA}""#)).await;
+        execute_test_sql(
+            database,
+            format!(
+                r#"CREATE TABLE "{LIVE_SCHEMA}"."schema_migrations" (
+                        incompatible integer NOT NULL
+                    )"#
+            ),
+        )
+        .await;
+    }
+
     async fn assert_upgrade_failure_restores_old(
         database: &ManagedDatabase,
         directory: &Path,
@@ -1535,6 +1837,15 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not inspect rollback container: {error}"))
             .unwrap_or_else(|| panic!("rollback container is missing"));
         assert_eq!(rolled_back.image, old_image);
+        assert_eq!(
+            read_extension_version(database, "pg_search").await,
+            "0.25.1"
+        );
+        assert_eq!(
+            read_upgrade_marker(database).await,
+            "retained-across-upgrade"
+        );
+        assert_upgrade_search_hit(database).await;
         let rollback_name = format!(
             "{}{UPGRADE_ROLLBACK_SUFFIX}",
             database.identity.container_name
@@ -1546,6 +1857,64 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("could not inspect rollback slot: {error}"));
         assert!(retained_rollback.is_none());
+    }
+
+    async fn assert_post_extension_failure_retains_new(
+        database: &ManagedDatabase,
+        old_image: &str,
+    ) {
+        let failed_upgrade = database
+            .maintenance()
+            .upgrade(confirmation(database, ManagedDestructiveOperation::Upgrade))
+            .await;
+        assert!(matches!(
+            failed_upgrade,
+            Err(ManagedDatabaseError::SchemaMigration)
+        ));
+
+        wait_for_owned_health(database, true).await;
+        let candidate = database
+            .docker
+            .containers()
+            .inspect_container(&database.identity.container_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect retained candidate: {error}"))
+            .unwrap_or_else(|| panic!("retained candidate is missing"));
+        assert_eq!(candidate.image, super::super::MANAGED_DATABASE_IMAGE);
+        let rollback_name = format!(
+            "{}{UPGRADE_ROLLBACK_SUFFIX}",
+            database.identity.container_name
+        );
+        let rollback = database
+            .docker
+            .containers()
+            .inspect_container(&rollback_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect retained rollback: {error}"))
+            .unwrap_or_else(|| panic!("retained rollback is missing"));
+        assert_eq!(rollback.image, old_image);
+        assert_eq!(
+            original_container_state(&rollback)
+                .unwrap_or_else(|error| panic!("retained rollback state is invalid: {error}")),
+            OriginalContainerState::Stopped
+        );
+        assert_eq!(
+            read_extension_version(database, "pg_search").await,
+            "0.25.2"
+        );
+        let connection = open_test_database(database).await;
+        let capabilities = connection
+            .capability_report()
+            .await
+            .unwrap_or_else(|error| panic!("retained candidate capability probe failed: {error}"));
+        assert!(capabilities.ready);
+        connection.close().await;
+        assert_eq!(
+            read_upgrade_marker(database).await,
+            "retained-across-upgrade"
+        );
+        assert_upgrade_search_hit(database).await;
+        execute_test_sql(database, format!(r#"DROP SCHEMA "{LIVE_SCHEMA}" CASCADE"#)).await;
     }
 
     async fn assert_pinned_upgrade_succeeds(database: &ManagedDatabase) {
@@ -1572,6 +1941,22 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not inspect upgraded container: {error}"))
             .unwrap_or_else(|| panic!("upgraded container is missing"));
         assert_eq!(inspection.image, super::super::MANAGED_DATABASE_IMAGE);
+        let rollback_name = format!(
+            "{}{UPGRADE_ROLLBACK_SUFFIX}",
+            database.identity.container_name
+        );
+        let rollback = database
+            .docker
+            .containers()
+            .inspect_container(&rollback_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect completed rollback slot: {error}"));
+        assert!(rollback.is_none());
+        assert_eq!(
+            read_upgrade_marker(database).await,
+            "retained-across-upgrade"
+        );
+        assert_upgrade_search_hit(database).await;
 
         database
             .maintenance()
@@ -1636,6 +2021,65 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("maintenance fixture statement failed: {error}"));
         connection.pool.close().await;
+    }
+
+    async fn open_test_database(database: &ManagedDatabase) -> CartographDatabase {
+        let credentials = database
+            .credentials
+            .load()
+            .unwrap_or_else(|error| panic!("could not load test database credentials: {error}"));
+        open_managed_database(&credentials, database.port, &database.schema)
+            .await
+            .unwrap_or_else(|error| panic!("could not open test database: {error}"))
+    }
+
+    async fn read_extension_version(database: &ManagedDatabase, extension: &str) -> String {
+        let connection = open_test_database(database).await;
+        let row = query("SELECT extversion FROM pg_extension WHERE extname = $1")
+            .bind(extension)
+            .fetch_one(&connection.pool)
+            .await
+            .unwrap_or_else(|error| panic!("could not read extension version: {error}"));
+        let version = row
+            .try_get::<String, _>(0)
+            .unwrap_or_else(|error| panic!("extension version was invalid: {error}"));
+        connection.close().await;
+        version
+    }
+
+    async fn assert_upgrade_search_hit(database: &ManagedDatabase) {
+        let connection = open_test_database(database).await;
+        let sql = format!(
+            r#"SELECT documents.document_id::text
+                FROM "{UPGRADE_FIXTURE_SCHEMA}"."upgrade_documents" AS documents
+                WHERE documents.qualified_name ||| $1
+                ORDER BY pdb.score(documents.id) DESC, documents.id ASC
+                LIMIT 1"#
+        );
+        let row = query(AssertSqlSafe(sql))
+            .bind("managedUpgradeFixture")
+            .fetch_one(&connection.pool)
+            .await
+            .unwrap_or_else(|error| panic!("upgrade BM25 query failed: {error}"));
+        let document = row
+            .try_get::<String, _>(0)
+            .unwrap_or_else(|error| panic!("upgrade BM25 document was invalid: {error}"));
+        assert_eq!(document, LIVE_DOCUMENT);
+        connection.close().await;
+    }
+
+    async fn read_upgrade_marker(database: &ManagedDatabase) -> String {
+        let connection = open_test_database(database).await;
+        let sql = format!(r#"SELECT value FROM "{UPGRADE_FIXTURE_SCHEMA}"."upgrade_marker""#);
+        let row = query(AssertSqlSafe(sql))
+            .fetch_one(&connection.pool)
+            .await
+            .unwrap_or_else(|error| panic!("could not read upgrade marker: {error}"));
+        let value = row
+            .try_get::<String, _>(0)
+            .unwrap_or_else(|error| panic!("upgrade marker value was invalid: {error}"));
+        connection.close().await;
+        value
     }
 
     async fn read_marker(database: &ManagedDatabase) -> String {

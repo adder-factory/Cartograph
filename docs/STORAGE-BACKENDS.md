@@ -1,9 +1,9 @@
 # PostgreSQL storage and operations
 
 Cartograph v2 has one storage engine: PostgreSQL 18.4 or newer within major
-version 18 with ParadeDB `pg_search` 0.25.1 and pgvector 0.8.4 or newer.
+version 18 with ParadeDB `pg_search` 0.25.2 and pgvector 0.8.4 or newer.
 Pgvector 0.8.6 is recommended for external PostgreSQL; the managed upstream
-ParadeDB 0.25.1 image bundles 0.8.4. SQLite is not a backend, fallback,
+ParadeDB 0.25.2 image bundles 0.8.4. SQLite is not a backend, fallback,
 migration target, importer, feature, or test utility.
 
 ## Capability contract
@@ -61,12 +61,22 @@ cartograph db upgrade --project-path . \
 ```
 
 The upgrade starts the exact digest against the retained volume, updates
-`pg_search` and pgvector transactionally before calling extension-defined
+pgvector and then `pg_search` transactionally before calling extension-defined
 functions, and requires capability plus Cartograph migration proof before it
-discards the old container. ParadeDB 0.25.1 retains the legacy `bm25` access
+discards the old container. ParadeDB 0.25.2 retains the legacy `bm25` access
 method, so existing derived indexes remain valid and queryable; Cartograph
 creates replacement/new generation indexes with the current `paradedb` access
 method and accepts both catalog names during this upgrade boundary.
+Failures before the extension transaction restore the old container. Once an
+extension-catalog mutation has been attempted, Cartograph instead retains the
+new exact-digest container as the only runnable candidate and keeps the old
+container stopped. Repeating the same confirmed upgrade resumes verification
+and removes the stopped rollback container only after every proof passes; it
+never restarts an old image against a possibly newer extension catalog.
+If the client is interrupted after the stopped old container is renamed but
+before the candidate exists, the next confirmed upgrade validates that sole
+owned rollback slot, recovers its canonical name, and continues the cutover.
+Foreign, running, or otherwise ambiguous rollback topologies fail closed.
 It also replaces a same-image legacy container when its shared-memory allocation
 is below the current HNSW requirement. `doctor` reports that condition before
 embedding work reaches index creation.
@@ -82,9 +92,9 @@ disabled there until private credential ACL behavior can be proved equivalent.
 ## External database
 
 The database administrator installs PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.1, and pgvector 0.8.4 or newer (0.8.6
-recommended), and creates the extensions. Supply secrets only through the
-process environment:
+version 18, `pg_search` 0.25.2, and pgvector 0.8.4 or newer (0.8.6
+recommended), and creates pgvector before `pg_search`. Supply secrets only
+through the process environment:
 
 ```sh
 export CARTOGRAPH_DATABASE_URL='postgresql://cartograph:secret@127.0.0.1:5432/cartograph'
@@ -98,8 +108,8 @@ database backup, install the new extension binaries, restart PostgreSQL, and
 update both catalogs before running `cartograph doctor`:
 
 ```sql
-ALTER EXTENSION pg_search UPDATE TO '0.25.1';
 ALTER EXTENSION vector UPDATE TO '0.8.6';
+ALTER EXTENSION pg_search UPDATE TO '0.25.2';
 ```
 
 Optional bounded pool controls:

@@ -17,7 +17,7 @@ mod unix {
     use serde_json::Value;
     use tempfile::{TempDir, tempdir};
 
-    const LOG_READY_ATTEMPTS: usize = 100;
+    const LOG_READY_ATTEMPTS: usize = 500;
     const LOG_READY_INTERVAL: Duration = Duration::from_millis(20);
 
     struct ManagedProcessGuard {
