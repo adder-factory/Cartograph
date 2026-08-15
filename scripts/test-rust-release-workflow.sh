@@ -299,6 +299,17 @@ grep -Fq "NOTES=\"docs/releases/\$TAG.md\"" "$RELEASE" || \
   fail 'release notes are not loaded from the tracked versioned file'
 grep -Fq -- "--notes-file \"\$NOTES\"" "$RELEASE" || \
   fail 'tracked release notes are not supplied to GitHub'
+release_note_marker_pattern='(^|[[:space:][:punct:]])(TBD|TODO|PLACEHOLDER)($|[[:space:][:punct:]])'
+grep -Fq "grep -Eiq '$release_note_marker_pattern' \"\$NOTES\"" "$RELEASE" || \
+  fail 'release-note marker validation is not token-aware'
+if grep -Eiq "$release_note_marker_pattern" \
+  <<<'Grammar-recovery placeholders can no longer create invalid durable spans.'; then
+  fail 'release-note marker validation rejects legitimate inflected prose'
+fi
+for marker in TBD TODO PLACEHOLDER; do
+  grep -Eiq "$release_note_marker_pattern" <<<"Release note $marker: replace before publishing." || \
+    fail "release-note marker validation misses $marker"
+done
 if grep -Fq -- '--generate-notes' "$RELEASE"; then
   fail 'release publication can still replace detailed notes with generated changelog text'
 fi

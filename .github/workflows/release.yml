@@ -311,7 +311,7 @@ jobs:
             echo "Release notes at $NOTES do not identify $TAG" >&2
             exit 1
           fi
-          if grep -Eiq '(TBD|TODO|PLACEHOLDER)' "$NOTES"; then
+          if grep -Eiq '(^|[[:space:][:punct:]])(TBD|TODO|PLACEHOLDER)($|[[:space:][:punct:]])' "$NOTES"; then
             echo "Release notes at $NOTES still contain placeholder text" >&2
             exit 1
           fi
