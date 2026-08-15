@@ -120,6 +120,64 @@ async fn forced_postgres_generation_storage_publishes_and_reports_spill() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn auto_storage_streams_many_crate_workspaces_before_memory_resolve_capacity() {
+    const CARGO_MANIFESTS: usize = 64;
+    let (schema, settings, project) = live_project_fixture("8");
+    std::fs::create_dir_all(project.path().join(".cartograph"))
+        .unwrap_or_else(|error| panic!("auto-spill config directory failed: {error}"));
+    std::fs::write(
+        project.path().join(".cartograph/config.json"),
+        r#"{"generationStorage":"auto","maxSpillBytes":67108864,"maxSpillRows":1000000,"enableChurn":false,"enableCoChange":false,"enableIssueHistory":false}"#,
+    )
+    .unwrap_or_else(|error| panic!("auto-spill config failed: {error}"));
+    for index in 0..CARGO_MANIFESTS {
+        let crate_root = project.path().join(format!("crates/member_{index}"));
+        std::fs::create_dir_all(crate_root.join("src"))
+            .unwrap_or_else(|error| panic!("member directory failed: {error}"));
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            format!("[package]\nname = \"member_{index}\"\nversion = \"0.1.0\"\n"),
+        )
+        .unwrap_or_else(|error| panic!("member manifest failed: {error}"));
+        std::fs::write(
+            crate_root.join("src/lib.rs"),
+            format!("pub fn member_{index}() -> usize {{ {index} }}\n"),
+        )
+        .unwrap_or_else(|error| panic!("member source failed: {error}"));
+    }
+
+    {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("auto-spill runtime connect failed: {error}"));
+        let report = runtime
+            .index(IndexOptions::default().with_history_refresh(false))
+            .await
+            .unwrap_or_else(|error| panic!("auto-spill index failed: {error}"));
+        let native = report
+            .native
+            .as_ref()
+            .unwrap_or_else(|| panic!("auto-spill metrics were missing"));
+        assert_eq!(
+            native.generation_storage,
+            NativeGenerationStorageMetrics::Postgres
+        );
+        assert_eq!(
+            native
+                .spill
+                .unwrap_or_else(|| panic!("auto-spill accounting was missing"))
+                .extracted_files,
+            u64::try_from(CARGO_MANIFESTS * 2)
+                .unwrap_or_else(|_| panic!("fixture file count overflowed"))
+        );
+        runtime.close().await;
+    }
+
+    drop_schema(&settings, &schema).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
 async fn empty_graph_memory_and_forced_postgres_paths_publish_identical_facts() {
     let (schema, settings, project) = live_project_fixture("8");
     let config_directory = project.path().join(".cartograph");

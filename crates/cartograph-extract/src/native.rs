@@ -112,7 +112,7 @@ impl NativeExtractor {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ExtractedFile, ExtractError> {
         match self.extract_with_cancellation_inner(snapshot, &mut cancelled) {
-            Err(ExtractError::NestingLimit) if !cancelled() => Ok(nesting_limited_file(snapshot)),
+            Err(error) if !cancelled() => recover_file_local_failure(snapshot, error),
             outcome => outcome,
         }
     }
@@ -199,7 +199,20 @@ impl NativeExtractor {
     }
 }
 
-fn nesting_limited_file(snapshot: &SourceSnapshot) -> ExtractedFile {
+fn recover_file_local_failure(
+    snapshot: &SourceSnapshot,
+    error: ExtractError,
+) -> Result<ExtractedFile, ExtractError> {
+    let diagnostic = match error {
+        ExtractError::NestingLimit => DiagnosticCode::NestingLimitExceeded,
+        ExtractError::InvalidSpan => DiagnosticCode::InvalidSpan,
+        ExtractError::ParserStopped => DiagnosticCode::ParserStopped,
+        _ => return Err(error),
+    };
+    Ok(degraded_file(snapshot, diagnostic))
+}
+
+fn degraded_file(snapshot: &SourceSnapshot, diagnostic: DiagnosticCode) -> ExtractedFile {
     ExtractedFile {
         file_id: snapshot.file_id().clone(),
         path: snapshot.path().clone(),
@@ -217,9 +230,66 @@ fn nesting_limited_file(snapshot: &SourceSnapshot) -> ExtractedFile {
         test_search_text: String::new(),
         test_search_truncated: false,
         diagnostics: vec![ExtractionDiagnostic {
-            code: DiagnosticCode::NestingLimitExceeded,
+            code: diagnostic,
             span: None,
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SourceLimits;
+
+    #[test]
+    fn invalid_span_is_a_partial_file_instead_of_a_generation_fatal_error() {
+        let limits =
+            SourceLimits::new(1024).unwrap_or_else(|error| panic!("source limits failed: {error}"));
+        let snapshot = SourceSnapshot::from_bytes_for_capability_validation(
+            "shader.slang",
+            b"void main() {}\n",
+            limits,
+        )
+        .unwrap_or_else(|error| panic!("snapshot failed: {error}"));
+        let recovered = recover_file_local_failure(&snapshot, ExtractError::InvalidSpan)
+            .unwrap_or_else(|error| panic!("invalid span stayed fatal: {error}"));
+        assert_eq!(recovered.parse_status, FileParseStatus::Partial);
+        assert!(recovered.symbols.is_empty());
+        assert_eq!(
+            recovered.diagnostics,
+            vec![ExtractionDiagnostic {
+                code: DiagnosticCode::InvalidSpan,
+                span: None,
+            }]
+        );
+        let stopped = recover_file_local_failure(&snapshot, ExtractError::ParserStopped)
+            .unwrap_or_else(|error| panic!("parser stop stayed fatal: {error}"));
+        assert_eq!(
+            stopped.diagnostics,
+            vec![ExtractionDiagnostic {
+                code: DiagnosticCode::ParserStopped,
+                span: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn systemic_and_cancelled_failures_remain_fatal() {
+        let limits =
+            SourceLimits::new(1024).unwrap_or_else(|error| panic!("source limits failed: {error}"));
+        let snapshot = SourceSnapshot::from_bytes_for_capability_validation(
+            "shader.slang",
+            b"void main() {}\n",
+            limits,
+        )
+        .unwrap_or_else(|error| panic!("snapshot failed: {error}"));
+        for error in [
+            ExtractError::Cancelled,
+            ExtractError::GrammarUnavailable,
+            ExtractError::OutputLimit,
+        ] {
+            assert_eq!(recover_file_local_failure(&snapshot, error), Err(error));
+        }
     }
 }
 

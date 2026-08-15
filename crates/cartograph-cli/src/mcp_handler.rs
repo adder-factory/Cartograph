@@ -2542,6 +2542,8 @@ struct AdminJobView {
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<AdminJobFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    failure_detail: Option<AdminJobFailureDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     file_failure: Option<AdminJobFileFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     progress: Option<SupervisorStatus>,
@@ -2553,6 +2555,15 @@ struct AdminJobFileFailure {
     path: NormalizedPath,
     reason: &'static str,
     description: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminJobFailureDetail {
+    reason: &'static str,
+    limit: &'static str,
+    scope: &'static str,
+    next_action: &'static str,
 }
 
 struct ActiveAdminJob {
@@ -2648,20 +2659,22 @@ impl AdminJobs {
             status: AdminJobStatus::Running,
             report: None,
             failure: None,
+            failure_detail: None,
             file_failure: None,
             progress: None,
         };
         let handle = tokio::spawn(async move {
             let result = operation.await;
-            let (status, report, failure, file_failure) = match result {
-                Ok(report) => (AdminJobStatus::Succeeded, Some(report), None, None),
+            let (status, report, failure, failure_detail, file_failure) = match result {
+                Ok(report) => (AdminJobStatus::Succeeded, Some(report), None, None, None),
                 Err(ProjectError::RequestCancelled) => {
-                    (AdminJobStatus::Cancelled, None, None, None)
+                    (AdminJobStatus::Cancelled, None, None, None, None)
                 }
                 Err(error) => (
                     AdminJobStatus::Failed,
                     None,
                     Some(admin_job_failure(&error)),
+                    admin_job_failure_detail(&error),
                     admin_job_file_failure(&error),
                 ),
             };
@@ -2679,6 +2692,7 @@ impl AdminJobs {
                 status,
                 report,
                 failure,
+                failure_detail,
                 file_failure,
                 progress: None,
             });
@@ -2802,6 +2816,7 @@ impl AdminJobs {
                 status: AdminJobStatus::Cancelled,
                 report: None,
                 failure: None,
+                failure_detail: None,
                 file_failure: None,
                 progress: None,
             });
@@ -2816,6 +2831,56 @@ impl AdminJobs {
 
 const fn admin_job_failure(error: &ProjectError) -> AdminJobFailure {
     match error {
+        ProjectError::EmbeddingConfigurationUnavailable
+        | ProjectError::EmbeddingOperationFailed
+        | ProjectError::HnswCreateSharedMemoryUnavailable => admin_job_embedding_failure(error),
+        ProjectError::EnrichmentReadFailed
+        | ProjectError::EnrichmentWriteFailed
+        | ProjectError::EnrichmentDataInvalid => admin_job_enrichment_failure(error),
+        ProjectError::IndexFailed
+        | ProjectError::IndexStageFailed { .. }
+        | ProjectError::IndexStageFailedWithReason { .. }
+        | ProjectError::IndexStageFileFailed { .. }
+        | ProjectError::IndexLeaseFailed
+        | ProjectError::IndexPublicationFailed
+        | ProjectError::IndexCleanupFailed => admin_job_index_failure(error),
+        ProjectError::ProjectRootUnavailable
+        | ProjectError::DatabaseUnavailable
+        | ProjectError::MigrationFailed
+        | ProjectError::SchemaVersionAhead { .. }
+        | ProjectError::RegisterFailed
+        | ProjectError::BeginGenerationFailed
+        | ProjectError::SourceScanFailed
+        | ProjectError::SourceChangedDuringIndex
+        | ProjectError::StatusFailed
+        | ProjectError::ScipOverlayInvalid
+        | ProjectError::InvalidOptions
+        | ProjectError::SymbolNotFound
+        | ProjectError::FileNotFound
+        | ProjectError::SourceContextUnavailable
+        | ProjectError::RetrievalOperationFailed
+        | ProjectError::RequestCancelled => admin_job_general_failure(error),
+    }
+}
+
+const fn admin_job_index_failure(error: &ProjectError) -> AdminJobFailure {
+    match error {
+        ProjectError::IndexStageFailed { stage } => admin_job_stage_failure(*stage),
+        ProjectError::IndexStageFailedWithReason { stage, reason } => {
+            admin_job_reason_failure(*stage, *reason)
+        }
+        ProjectError::IndexStageFileFailed { stage, failure } => {
+            admin_job_reason_failure(*stage, failure.reason())
+        }
+        ProjectError::IndexLeaseFailed => AdminJobFailure::LeaseFailed,
+        ProjectError::IndexPublicationFailed => AdminJobFailure::PublicationFailed,
+        ProjectError::IndexCleanupFailed => AdminJobFailure::CleanupFailed,
+        _ => AdminJobFailure::OperationFailed,
+    }
+}
+
+const fn admin_job_general_failure(error: &ProjectError) -> AdminJobFailure {
+    match error {
         ProjectError::ProjectRootUnavailable => AdminJobFailure::ProjectUnavailable,
         ProjectError::DatabaseUnavailable
         | ProjectError::MigrationFailed
@@ -2828,28 +2893,13 @@ const fn admin_job_failure(error: &ProjectError) -> AdminJobFailure {
         | ProjectError::FileNotFound
         | ProjectError::SourceContextUnavailable => AdminJobFailure::SourceUnavailable,
         ProjectError::SourceChangedDuringIndex => AdminJobFailure::SourceChangedDuringIndex,
-        ProjectError::EmbeddingConfigurationUnavailable
-        | ProjectError::EmbeddingOperationFailed
-        | ProjectError::HnswCreateSharedMemoryUnavailable => admin_job_embedding_failure(error),
-        ProjectError::EnrichmentReadFailed
-        | ProjectError::EnrichmentWriteFailed
-        | ProjectError::EnrichmentDataInvalid => admin_job_enrichment_failure(error),
         ProjectError::InvalidOptions | ProjectError::ScipOverlayInvalid => {
             AdminJobFailure::InvalidOptions
         }
-        ProjectError::IndexStageFailed { stage } => admin_job_stage_failure(*stage),
-        ProjectError::IndexStageFailedWithReason { stage, reason } => {
-            admin_job_reason_failure(*stage, *reason)
+        ProjectError::RetrievalOperationFailed | ProjectError::RequestCancelled => {
+            AdminJobFailure::OperationFailed
         }
-        ProjectError::IndexStageFileFailed { stage, failure } => {
-            admin_job_reason_failure(*stage, failure.reason())
-        }
-        ProjectError::IndexLeaseFailed => AdminJobFailure::LeaseFailed,
-        ProjectError::IndexPublicationFailed => AdminJobFailure::PublicationFailed,
-        ProjectError::IndexCleanupFailed => AdminJobFailure::CleanupFailed,
-        ProjectError::IndexFailed
-        | ProjectError::RetrievalOperationFailed
-        | ProjectError::RequestCancelled => AdminJobFailure::OperationFailed,
+        _ => AdminJobFailure::OperationFailed,
     }
 }
 
@@ -2861,6 +2911,15 @@ fn admin_job_file_failure(error: &ProjectError) -> Option<AdminJobFileFailure> {
         path: failure.path().clone(),
         reason: failure.reason().as_str(),
         description: failure.reason().description(),
+    })
+}
+
+fn admin_job_failure_detail(error: &ProjectError) -> Option<AdminJobFailureDetail> {
+    crate::error_codes::is_generation_capacity_failure(error).then_some(AdminJobFailureDetail {
+        reason: PipelineFailureReason::GenerationCapacityExceeded.as_str(),
+        limit: crate::error_codes::GENERATION_CAPACITY_LIMIT,
+        scope: crate::error_codes::GENERATION_CAPACITY_SCOPE,
+        next_action: crate::error_codes::GENERATION_CAPACITY_NEXT_ACTION,
     })
 }
 
@@ -4557,7 +4616,7 @@ async fn retrieve_context_packet(
             input.cancellation,
         )
         .await
-        .map_err(project_error)?;
+        .map_err(|error| project_error(&error))?;
     let request = ContextRequest::new(
         input.project_id.clone(),
         input.query,
@@ -4593,7 +4652,7 @@ async fn with_stale_overlay(
             input.cancellation,
         ))
         .await
-        .map_err(project_error)?;
+        .map_err(|error| project_error(&error))?;
     Ok(packet.with_working_tree_overlay(overlay))
 }
 
@@ -5084,7 +5143,7 @@ async fn explore_source_windows(
         {
             Ok(source) => sources.push(source),
             Err(ProjectError::SymbolNotFound) => {}
-            Err(error) => return Err(project_error(error)),
+            Err(error) => return Err(project_error(&error)),
         }
     }
     Ok(sources)
@@ -5250,7 +5309,7 @@ async fn discover_host_projects(
         .runtime
         .status_with_cancellation(cancellation)
         .await
-        .map_err(project_error)?;
+        .map_err(|error| project_error(&error))?;
     json_result(&json!({
         "mode": "discover",
         "discovery": report,
@@ -5279,7 +5338,7 @@ async fn host_diagnostics(
         .runtime
         .status_with_cancellation(cancellation.clone())
         .await
-        .map_err(project_error)?;
+        .map_err(|error| project_error(&error))?;
     let install_targets = if include_targets {
         let project_root = handler
             .runtime
@@ -5365,7 +5424,7 @@ impl ContextTools<'_> {
                     cancellation.clone(),
                 ))
                 .await
-                .map_err(project_error)?;
+                .map_err(|error| project_error(&error))?;
             packet.with_working_tree_overlay(overlay)
         } else {
             packet
@@ -5467,7 +5526,7 @@ impl ContextTools<'_> {
             {
                 Ok(source) => source_windows.push(source),
                 Err(ProjectError::SymbolNotFound) => {}
-                Err(error) => return Err(project_error(error)),
+                Err(error) => return Err(project_error(&error)),
             }
         }
         Ok(source_windows)
@@ -5812,7 +5871,7 @@ impl FindPrimitiveTools<'_> {
                 request.cancellation,
             )
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         if low_tokens {
             return fresh_json_result_with_compaction(
                 request.freshness,
@@ -6286,7 +6345,7 @@ impl FindNameTools<'_> {
                 branch.cancellation.clone(),
             )
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let items = packet
             .items()
             .iter()
@@ -6528,7 +6587,7 @@ impl FilesTools<'_> {
                 "file",
                 CONTEXT_ANCHOR_MAXIMUM_BYTES,
             )?)
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let limit = optional_integer(
             execution.arguments,
             "limit",
@@ -6607,7 +6666,7 @@ impl FilesTools<'_> {
                 "file",
                 CONTEXT_ANCHOR_MAXIMUM_BYTES,
             )?)
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let direction =
             parse_file_dependency_direction(optional_text(execution.arguments, "direction")?)?;
         let limit = optional_integer(
@@ -6682,7 +6741,7 @@ impl FilesTools<'_> {
                 "file",
                 CONTEXT_ANCHOR_MAXIMUM_BYTES,
             )?)
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let line_offset = optional_integer(
             execution.arguments,
             "lineOffset",
@@ -6702,12 +6761,13 @@ impl FilesTools<'_> {
             .file_source_with_cancellation(
                 FileSourceRequest::new(
                     path,
-                    FileSourceOptions::new(line_offset, line_limit).map_err(project_error)?,
+                    FileSourceOptions::new(line_offset, line_limit)
+                        .map_err(|error| project_error(&error))?,
                 ),
                 execution.cancellation.clone(),
             )
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         if !source.fresh() && !execution.allow_stale {
             return Err(stale_index_error());
         }
@@ -8771,7 +8831,7 @@ impl SessionTools<'_> {
             .runtime
             .register_agent_state_project()
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let execution = SessionExecution {
             project_id: &project_id,
             arguments: &arguments,
@@ -10008,16 +10068,16 @@ async fn prepare_admin_init(
     let runtime = Arc::new(match &database_settings {
         Some(settings) => ProjectRuntime::connect(&target_root.root, settings)
             .await
-            .map_err(project_error)?,
+            .map_err(|error| project_error(&error))?,
         None => {
             ProjectRuntime::with_database(&target_root.root, handler.runtime.database().clone())
-                .map_err(project_error)?
+                .map_err(|error| project_error(&error))?
         }
     });
     let project_id = runtime
         .register_agent_state_project()
         .await
-        .map_err(project_error)?;
+        .map_err(|error| project_error(&error))?;
     let capabilities = runtime
         .database()
         .capability_report()
@@ -10910,7 +10970,7 @@ impl SummaryReviewTools<'_> {
             .runtime
             .status_with_cancellation(cancellation.clone())
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let capabilities = self
             .runtime
             .database()
@@ -11055,7 +11115,7 @@ impl AdminCoreTools<'_> {
         if let Some(maximum_source_bytes) = prepared.maximum_source_bytes {
             options = options
                 .with_max_source_bytes(maximum_source_bytes)
-                .map_err(project_error)?;
+                .map_err(|error| project_error(&error))?;
         }
         let enrichment = build_post_index_enrichment_plan(
             prepared.runtime.project_root_for_host_operations(),
@@ -11112,7 +11172,7 @@ impl AdminCoreTools<'_> {
             .runtime
             .register_agent_state_project()
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let mut before = Vec::new();
         for operation in [
             ProjectOperation::Index,
@@ -11193,7 +11253,7 @@ impl AdminCoreTools<'_> {
             .runtime
             .register_agent_state_project()
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let storage = self
             .runtime
             .database()
@@ -11220,7 +11280,7 @@ impl AdminCoreTools<'_> {
             .runtime
             .register_agent_state_project()
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         json_result(
             &self
                 .runtime
@@ -11288,8 +11348,13 @@ impl AdminCoreTools<'_> {
                 json!({"state": "skipped"}),
             )
         } else {
-            let project = serde_json::to_value(self.runtime.status().await.map_err(project_error)?)
-                .map_err(internal_error)?;
+            let project = serde_json::to_value(
+                self.runtime
+                    .status()
+                    .await
+                    .map_err(|error| project_error(&error))?,
+            )
+            .map_err(internal_error)?;
             let embedding = match self.runtime.embedding_status().await {
                 Ok(report) => json!({"state": "ready", "report": report}),
                 Err(ProjectError::EmbeddingConfigurationUnavailable) => {
@@ -11523,7 +11588,7 @@ fn prepare_storage_migration(
     )?;
     let identity =
         ProjectRuntime::inspect_source_identity(handler.runtime.project_root_for_host_operations())
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
     let validation =
         GenerationValidationLimits::new(ADMIN_IMPORT_OUTPUT_BYTES, ADMIN_IMPORT_WORKING_BYTES)
             .map_err(internal_error)?;
@@ -11666,7 +11731,7 @@ impl AdminLifecycleTools<'_> {
         if let Some(maximum_source_bytes) = maximum_source_bytes {
             options = options
                 .with_max_source_bytes(maximum_source_bytes)
-                .map_err(project_error)?;
+                .map_err(|error| project_error(&error))?;
         }
         let enrichment = build_post_index_enrichment_plan(
             self.runtime.project_root_for_host_operations(),
@@ -11826,7 +11891,7 @@ impl AdminLifecycleTools<'_> {
         if let Some(maximum_source_bytes) = maximum_source_bytes {
             index_options = index_options
                 .with_max_source_bytes(maximum_source_bytes)
-                .map_err(project_error)?;
+                .map_err(|error| project_error(&error))?;
         }
         let embedding_options = EmbeddingOptions::default()
             .with_max_workers(workers)
@@ -12189,7 +12254,7 @@ async fn prepare_uninit(
     )?;
     let target_runtime =
         ProjectRuntime::with_database(&target_root, handler.runtime.database().clone())
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
     let snapshot = target_runtime
         .database()
         .project_snapshot_by_root(target_runtime.root_identity())
@@ -12197,7 +12262,7 @@ async fn prepare_uninit(
         .map_err(internal_error)?;
     let Some(snapshot) = snapshot else {
         let removed = if state_exists {
-            remove_admin_state_directory(&target_root).map_err(project_error)?
+            remove_admin_state_directory(&target_root).map_err(|error| project_error(&error))?
         } else {
             false
         };
@@ -15465,7 +15530,7 @@ async fn status_tool(
             .status_with_cancellation(cancellation.clone()),
         status_database_storage(handler),
     );
-    let status = status.map_err(project_error)?;
+    let status = status.map_err(|error| project_error(&error))?;
     let project_id = status.snapshot.as_ref().and_then(|snapshot| {
         snapshot
             .current
@@ -15791,7 +15856,7 @@ async fn node_source_evidence(
                 request.cancellation.clone(),
             )
             .await
-            .map_err(project_error)?;
+            .map_err(|error| project_error(&error))?;
         let mut value = serde_json::to_value(context).map_err(internal_error)?;
         apply_node_source_window(
             &mut value,
@@ -17704,7 +17769,7 @@ async fn current_project_generation(
         .runtime
         .status_with_cancellation(cancellation)
         .await
-        .map_err(project_error)?;
+        .map_err(|error| project_error(&error))?;
     let Some(snapshot) = status.snapshot else {
         return Err(safe_error(
             ToolErrorCode::NotReady,
@@ -24321,7 +24386,42 @@ fn diff_review_error(error: DiffReviewError) -> ToolError {
     }
 }
 
-fn project_error(error: ProjectError) -> ToolError {
+fn project_error(error: &ProjectError) -> ToolError {
+    match error {
+        ProjectError::SymbolNotFound
+        | ProjectError::FileNotFound
+        | ProjectError::SourceContextUnavailable
+        | ProjectError::EmbeddingConfigurationUnavailable
+        | ProjectError::EmbeddingOperationFailed
+        | ProjectError::HnswCreateSharedMemoryUnavailable => project_lookup_error(error),
+        ProjectError::RetrievalOperationFailed
+        | ProjectError::SourceChangedDuringIndex
+        | ProjectError::EnrichmentReadFailed
+        | ProjectError::EnrichmentWriteFailed
+        | ProjectError::EnrichmentDataInvalid
+        | ProjectError::InvalidOptions
+        | ProjectError::ScipOverlayInvalid
+        | ProjectError::RequestCancelled => project_operation_error(error),
+        ProjectError::IndexStageFileFailed { .. } | ProjectError::SchemaVersionAhead { .. } => {
+            project_actionable_index_error(error)
+        }
+        ProjectError::ProjectRootUnavailable
+        | ProjectError::DatabaseUnavailable
+        | ProjectError::MigrationFailed
+        | ProjectError::RegisterFailed
+        | ProjectError::BeginGenerationFailed
+        | ProjectError::SourceScanFailed
+        | ProjectError::StatusFailed
+        | ProjectError::IndexFailed
+        | ProjectError::IndexStageFailed { .. }
+        | ProjectError::IndexStageFailedWithReason { .. }
+        | ProjectError::IndexLeaseFailed
+        | ProjectError::IndexPublicationFailed
+        | ProjectError::IndexCleanupFailed => ToolError::internal(),
+    }
+}
+
+fn project_lookup_error(error: &ProjectError) -> ToolError {
     match error {
         ProjectError::SymbolNotFound => safe_error(
             ToolErrorCode::NotFound,
@@ -24347,6 +24447,12 @@ fn project_error(error: ProjectError) -> ToolError {
             ToolErrorCode::Unavailable,
             "HNSW creation could not allocate shared memory; existing vectors remain resumable after `cartograph db backup` and the confirmed managed database upgrade",
         ),
+        _ => ToolError::internal(),
+    }
+}
+
+fn project_operation_error(error: &ProjectError) -> ToolError {
+    match error {
         ProjectError::RetrievalOperationFailed => safe_error(
             ToolErrorCode::Unavailable,
             "Cartograph retrieval operation is unavailable",
@@ -24376,6 +24482,12 @@ fn project_error(error: ProjectError) -> ToolError {
             ToolErrorCode::Unavailable,
             "Cartograph request was cancelled",
         ),
+        _ => ToolError::internal(),
+    }
+}
+
+fn project_actionable_index_error(error: &ProjectError) -> ToolError {
+    match error {
         ProjectError::IndexStageFileFailed { stage, failure } => safe_error(
             ToolErrorCode::Unavailable,
             format!(
@@ -24393,19 +24505,7 @@ fn project_error(error: ProjectError) -> ToolError {
             ),
         )
         .unwrap_or_else(|_| ToolError::internal()),
-        ProjectError::ProjectRootUnavailable
-        | ProjectError::DatabaseUnavailable
-        | ProjectError::MigrationFailed
-        | ProjectError::RegisterFailed
-        | ProjectError::BeginGenerationFailed
-        | ProjectError::SourceScanFailed
-        | ProjectError::StatusFailed
-        | ProjectError::IndexFailed
-        | ProjectError::IndexStageFailed { .. }
-        | ProjectError::IndexStageFailedWithReason { .. }
-        | ProjectError::IndexLeaseFailed
-        | ProjectError::IndexPublicationFailed
-        | ProjectError::IndexCleanupFailed => ToolError::internal(),
+        _ => ToolError::internal(),
     }
 }
 
@@ -25567,6 +25667,12 @@ mod tests {
             project_error_reason(&capacity),
             "resolve_generation_capacity_exceeded"
         );
+        let detail = admin_job_failure_detail(&capacity)
+            .unwrap_or_else(|| panic!("capacity failure omitted MCP guidance"));
+        assert_eq!(detail.reason, "generation_capacity_exceeded");
+        assert_eq!(detail.limit, crate::error_codes::GENERATION_CAPACITY_LIMIT);
+        assert_eq!(detail.scope, "cartograph_process");
+        assert!(detail.next_action.contains("generationStorage=postgres"));
 
         let deadline = ProjectError::IndexStageFailedWithReason {
             stage: PipelineStage::Resolve,
@@ -25640,7 +25746,7 @@ mod tests {
         assert_eq!(detail.path.as_str(), "src/broken.rs");
         assert_eq!(detail.reason, "extraction_parser_stopped");
         assert!(detail.description.contains("syntax tree"));
-        let public = project_error(parse_file);
+        let public = project_error(&parse_file);
         assert_eq!(public.code(), ToolErrorCode::Unavailable);
         assert!(public.wire_message().contains("src/broken.rs"));
     }
@@ -25687,7 +25793,7 @@ mod tests {
         ];
         for (error, expected_admin, expected_code, expected_message) in cases {
             assert_eq!(admin_job_failure(&error), expected_admin);
-            let public = project_error(error);
+            let public = project_error(&error);
             assert_eq!(public.code(), expected_code);
             assert!(public.wire_message().contains(expected_message));
         }

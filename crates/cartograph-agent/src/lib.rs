@@ -163,6 +163,7 @@ const DEFAULT_MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_GENERATION_BYTES: u64 = 1024 * 1024 * 1024;
 const AUTO_SPILL_MINIMUM_FILES: usize = 10_000;
+const AUTO_SPILL_MINIMUM_CARGO_MANIFESTS: usize = 64;
 const AUTO_SPILL_MINIMUM_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const AUTO_SPILL_EXPANSION_FACTOR: u64 = 16;
 const DEFAULT_MAX_SUPERVISOR_BYTES: u64 = 6 * 1024 * 1024 * 1024;
@@ -1539,6 +1540,7 @@ impl ProjectRuntime {
             GenerationStorageSignals {
                 files: source.files,
                 source_bytes: source.source_bytes,
+                cargo_manifests: source.cargo_manifests,
                 maximum_generation_bytes: max_generation_bytes,
                 has_scip_overlay: source.scip_overlay.is_some(),
             },
@@ -2051,6 +2053,7 @@ struct SourceRevision {
     v1_source_manifest: ContentDigest,
     files: usize,
     source_bytes: u64,
+    cargo_manifests: usize,
     captured_source: Option<Box<str>>,
     captured_content_hash: Option<ContentDigest>,
     scip_overlay: Option<ScipOverlayInput>,
@@ -2224,6 +2227,7 @@ impl ProjectSourcePolicy {
 struct GenerationStorageSignals {
     files: usize,
     source_bytes: u64,
+    cargo_manifests: usize,
     maximum_generation_bytes: u64,
     has_scip_overlay: bool,
 }
@@ -2235,6 +2239,7 @@ fn select_generation_storage(
     let GenerationStorageSignals {
         files,
         source_bytes,
+        cargo_manifests,
         maximum_generation_bytes,
         has_scip_overlay,
     } = signals;
@@ -2253,6 +2258,7 @@ fn select_generation_storage(
             if files >= AUTO_SPILL_MINIMUM_FILES
                 || source_bytes >= AUTO_SPILL_MINIMUM_SOURCE_BYTES
                 || estimated_generation_bytes >= maximum_generation_bytes
+                || cargo_manifests >= AUTO_SPILL_MINIMUM_CARGO_MANIFESTS
             {
                 Ok(GenerationStorageSelection::Postgres(policy.spill))
             } else {
@@ -2351,7 +2357,13 @@ where
     let mut captured_source = None;
     let mut captured_content_hash = None;
     let mut source_bytes = 0_u64;
+    let mut cargo_manifests = 0_usize;
     for file in &files {
+        if is_cargo_manifest(file.path()) {
+            cargo_manifests = cargo_manifests
+                .checked_add(1)
+                .ok_or(ProjectError::SourceScanFailed)?;
+        }
         if file.byte_size() > u64::try_from(max_source_bytes).unwrap_or(u64::MAX) {
             let marker = oversized_source_digest(file);
             if SourceLanguage::is_v1_candidate_path(file.path().as_str()) {
@@ -2401,10 +2413,16 @@ where
         v1_source_manifest,
         files: manifest_entries.len(),
         source_bytes,
+        cargo_manifests,
         captured_source,
         captured_content_hash,
         scip_overlay: overlay.input,
     })
+}
+
+fn is_cargo_manifest(path: &NormalizedPath) -> bool {
+    let path = path.as_str();
+    path == "Cargo.toml" || path.ends_with("/Cargo.toml")
 }
 
 fn finish_source_manifest(
@@ -3095,6 +3113,7 @@ mod tests {
                 GenerationStorageSignals {
                     files: AUTO_SPILL_MINIMUM_FILES,
                     source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: false,
                 },
@@ -3107,6 +3126,7 @@ mod tests {
                 GenerationStorageSignals {
                     files: 1,
                     source_bytes: 1,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: false,
                 },
@@ -3119,6 +3139,7 @@ mod tests {
                 GenerationStorageSignals {
                     files: AUTO_SPILL_MINIMUM_FILES - 1,
                     source_bytes: (DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR) - 1,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: false,
                 },
@@ -3131,11 +3152,33 @@ mod tests {
                 GenerationStorageSignals {
                     files: AUTO_SPILL_MINIMUM_FILES,
                     source_bytes: 1,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: false,
                 },
             ),
             Ok(GenerationStorageSelection::Postgres(_))
+        ));
+        assert!(matches!(
+            select_generation_storage(
+                policy(ProjectGenerationStorage::Auto),
+                GenerationStorageSignals {
+                    files: 1,
+                    source_bytes: 1,
+                    cargo_manifests: AUTO_SPILL_MINIMUM_CARGO_MANIFESTS,
+                    maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
+                    has_scip_overlay: false,
+                },
+            ),
+            Ok(GenerationStorageSelection::Postgres(_))
+        ));
+        assert!(is_cargo_manifest(
+            &NormalizedPath::parse("crates/service/Cargo.toml")
+                .unwrap_or_else(|error| panic!("fixture path failed: {error}"))
+        ));
+        assert!(!is_cargo_manifest(
+            &NormalizedPath::parse("docs/Cargo.toml.md")
+                .unwrap_or_else(|error| panic!("fixture path failed: {error}"))
         ));
     }
 
@@ -3151,6 +3194,7 @@ mod tests {
                 GenerationStorageSignals {
                     files: 1,
                     source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: false,
                 },
@@ -3163,6 +3207,7 @@ mod tests {
                 GenerationStorageSignals {
                     files: 1,
                     source_bytes: DEFAULT_MAX_GENERATION_BYTES / AUTO_SPILL_EXPANSION_FACTOR,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: false,
                 },
@@ -3175,6 +3220,7 @@ mod tests {
                 GenerationStorageSignals {
                     files: AUTO_SPILL_MINIMUM_FILES,
                     source_bytes: AUTO_SPILL_MINIMUM_SOURCE_BYTES,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: true,
                 },
@@ -3187,6 +3233,7 @@ mod tests {
                 GenerationStorageSignals {
                     files: 1,
                     source_bytes: 1,
+                    cargo_manifests: 0,
                     maximum_generation_bytes: DEFAULT_MAX_GENERATION_BYTES,
                     has_scip_overlay: true,
                 },
@@ -3212,6 +3259,28 @@ mod tests {
                 .as_str()
                 .contains(&first_path.to_string_lossy().to_string())
         );
+    }
+
+    #[test]
+    fn source_revision_counts_only_exact_cargo_manifests_for_storage_selection() {
+        let directory =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let nested = directory.path().join("crates/service");
+        std::fs::create_dir_all(&nested)
+            .unwrap_or_else(|error| panic!("fixture directory failed: {error}"));
+        std::fs::write(directory.path().join("Cargo.toml"), "[workspace]\n")
+            .unwrap_or_else(|error| panic!("root manifest write failed: {error}"));
+        std::fs::write(
+            nested.join("Cargo.toml"),
+            "[package]\nname = \"service\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap_or_else(|error| panic!("nested manifest write failed: {error}"));
+        std::fs::write(directory.path().join("Cargo.toml.md"), "not a manifest\n")
+            .unwrap_or_else(|error| panic!("decoy write failed: {error}"));
+
+        let revision = source_revision(directory.path())
+            .unwrap_or_else(|error| panic!("source revision failed: {error}"));
+        assert_eq!(revision.cargo_manifests, 2);
     }
 
     #[test]

@@ -110,14 +110,23 @@ paths use bounded parse callbacks; every path polls cancellation and enforces
 fact/string/modeled-output limits. Grammar-backed malformed syntax returns
 recoverable diagnostics instead of panicking.
 
-A fatal file-local read or extraction failure crosses the public boundary only
-as one validated project-relative `NormalizedPath` and an allowlisted reason.
-Source drift, unavailable grammar, parser stop, invalid span, cancellation,
-nesting policy, nesting exhaustion, and modeled-output exhaustion remain
-distinct. Direct text escapes the relative path, JSON returns a structured file
-failure, and MCP admin status retains the same bounded evidence. Absolute
-checkout paths, source/parser text, literals, database URLs, and driver errors
-are discarded before the indexer supervisor boundary.
+An unrecoverable file-local read or extraction failure crosses the public
+boundary only as one validated project-relative `NormalizedPath` and an
+allowlisted reason. Source drift, unavailable grammar, parser stop,
+cancellation, nesting policy, nesting exhaustion, and modeled-output exhaustion
+remain distinct. Direct text escapes the relative path, JSON returns a
+structured file failure, and MCP admin status retains the same bounded evidence.
+Absolute checkout paths, source/parser text, literals, database URLs, and driver
+errors are discarded before the indexer supervisor boundary.
+
+An invalid span produced by one grammar-recovery placeholder or a parser stop
+without cancellation is recoverable: the file remains in the generation as
+explicitly partial with no unsafe facts, and the bounded degraded-file report
+records `extraction_invalid_span` or `extraction_parser_stopped`. Missing or
+zero-width C-family/Slang declarators are ignored before fact creation, so a
+valid neighboring declaration is still extracted. Systemic grammar mismatch or
+unavailability, cancellation, invalid policy, and output exhaustion remain
+fatal.
 
 Syntax-tree depth is independently bounded by `maxAstDepth` (default `256`,
 range `64..=1024`). A file that exceeds it is retained as a partial file with

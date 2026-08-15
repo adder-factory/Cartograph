@@ -252,6 +252,109 @@ void helper(uint3 dispatchThreadId) {}
 }
 
 #[test]
+fn slang_parameter_blocks_and_multiple_entry_points_have_durable_spans() {
+    let source = r#"module renderer.pipeline;
+import renderer.camera;
+import renderer.lighting;
+import renderer.materials;
+import renderer.geometry;
+import renderer.output;
+
+struct FrameParameters {
+    float4x4 viewProjection;
+};
+
+struct MaterialParameters {
+    float4 baseColor;
+};
+
+ParameterBlock<FrameParameters> frame;
+ParameterBlock<MaterialParameters> material;
+RWStructuredBuffer<float4> outputBuffer;
+
+struct VertexInput {
+    float3 position : POSITION;
+};
+
+struct VertexOutput {
+    float4 position : SV_Position;
+};
+
+[shader("vertex")]
+VertexOutput vertexMain(VertexInput input) {
+    VertexOutput output;
+    output.position = mul(frame.viewProjection, float4(input.position, 1.0));
+    return output;
+}
+
+[shader("fragment")]
+float4 fragmentMain(VertexOutput input) : SV_Target {
+    return material.baseColor;
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void computeMain(uint3 dispatchThreadId : SV_DispatchThreadID) {
+}
+"#;
+    let extracted = extract("shaders/pipeline.slang", source);
+    assert_eq!(extracted.language, SourceLanguage::Slang);
+    symbol(&extracted, SymbolKind::Module, "renderer.pipeline");
+    for entry_point in ["vertexMain", "fragmentMain", "computeMain"] {
+        let entry = extracted
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == entry_point)
+            .unwrap_or_else(|| panic!("missing Slang entry point {entry_point}"));
+        assert!(entry.span.start_byte() < entry.span.end_byte());
+        assert_eq!(entry.visibility, Some(Visibility::Public));
+    }
+}
+
+#[test]
+fn slang_missing_recovery_nodes_are_not_promoted_as_durable_symbols() {
+    let source = r#"module renderer.recovery;
+struct FrameParameters {
+    float4x4 viewProjection;
+};
+ParameterBlock<FrameParameters>;
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void computeMain(uint3 dispatchThreadId : SV_DispatchThreadID) {
+}
+"#;
+    let extracted = extract("shaders/recovery.slang", source);
+    assert_eq!(
+        extracted.parse_status,
+        cartograph_domain::FileParseStatus::Partial
+    );
+    let entry = symbol(&extracted, SymbolKind::Function, "computeMain");
+    assert!(entry.span.start_byte() < entry.span.end_byte());
+}
+
+#[test]
+fn slang_keyword_named_resources_do_not_promote_missing_declarators() {
+    let source = r#"RWStructuredBuffer<uint> out;
+
+[shader("compute")]
+void computeMain(uint3 dispatchID : SV_DispatchThreadID) {
+    out[0] = dispatchID.x;
+}
+"#;
+    let extracted = extract("shaders/keyword-resource.slang", source);
+    let entry = symbol(&extracted, SymbolKind::Function, "computeMain");
+    assert!(entry.span.start_byte() < entry.span.end_byte());
+    assert!(
+        extracted
+            .symbols
+            .iter()
+            .all(|symbol| !symbol.name.is_empty()
+                && symbol.span.start_byte() < symbol.span.end_byte())
+    );
+}
+
+#[test]
 fn metal_reuses_the_c_family_slice_for_kernels_and_structs() {
     let source = r"#include <metal_stdlib>
 using namespace metal;

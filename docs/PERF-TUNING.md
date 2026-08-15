@@ -27,8 +27,8 @@ export CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS=120000
 - More parse workers help only when corpus size and CPU justify them. Database
   COPY, derived-index build, and publication remain bounded phases.
 - Native generation storage defaults to `auto`. It selects PostgreSQL spill at
-  10,000 supported files, 64 MiB of indexed source, or when a conservative 16x
-  expansion estimate reaches `maxGenerationBytes`. Use
+  64 Cargo manifests, 10,000 supported files, 64 MiB of indexed source, or when
+  a conservative 16x expansion estimate reaches `maxGenerationBytes`. Use
   `generationStorage: "memory"` only when measured headroom favors the faster
   in-memory reducer; use `"postgres"` to force the durable path for a known
   dense corpus.

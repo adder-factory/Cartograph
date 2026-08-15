@@ -362,6 +362,12 @@ pub struct ExtractedImportBinding {
 pub enum DiagnosticCode {
     /// Tree-sitter recovered through one or more syntax-error nodes.
     SyntaxError,
+    /// A parser recovery node exposed an empty or otherwise invalid source
+    /// range. The file remains present as partial, but unsafe facts are omitted.
+    InvalidSpan,
+    /// The parser stopped without cancellation before it produced a syntax
+    /// tree. The file remains present as partial with no inferred facts.
+    ParserStopped,
     /// A synthesized qualified or reference name exceeded its canonical byte
     /// bound and was deterministically shortened so the generation stays
     /// publishable. The shortened form keeps a `~` marker and a digest of the

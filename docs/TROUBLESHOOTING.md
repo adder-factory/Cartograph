@@ -167,8 +167,12 @@ wrong bytes. Re-index and retry.
 
 Inspect the exact stage/reason and the returned native metrics. A
 `generation_capacity_exceeded` result is a real admission boundary, not a
-database-health diagnosis. With the default `generationStorage: "auto"`, large
-source manifests select PostgreSQL spill automatically. For a dense smaller
+database-health diagnosis. It is bounded by the Cartograph process's
+`maxGenerationBytes` policy and is not the managed PostgreSQL container's 2 GiB
+memory ceiling. Direct JSON and MCP admin failures name that limit, its
+`cartograph_process` scope, and the next action. With the default
+`generationStorage: "auto"`, large source manifests and workspaces with at least
+64 Cargo manifests select PostgreSQL spill automatically. For a dense smaller
 manifest, force it in `.cartograph/config.json`:
 
 ```json

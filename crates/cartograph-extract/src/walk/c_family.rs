@@ -1530,6 +1530,9 @@ fn normalize_call_target(
 
 fn declarator_name(mut node: Node<'_>) -> Result<Option<DeclaratorName<'_>>, ExtractError> {
     for _ in 0..=MAX_DECLARATOR_DEPTH {
+        if !node_has_durable_span(node) {
+            return Ok(None);
+        }
         match node.kind() {
             "identifier" | "field_identifier" | "type_identifier" | "operator_name"
             | "destructor_name" => {
@@ -1540,17 +1543,24 @@ fn declarator_name(mut node: Node<'_>) -> Result<Option<DeclaratorName<'_>>, Ext
                     return Ok(None);
                 };
                 let name = if declarator_shape(raw_name.kind()) {
-                    declarator_name(raw_name)?.map_or(raw_name, |name| name.node)
+                    let Some(name) = declarator_name(raw_name)? else {
+                        return Ok(None);
+                    };
+                    name.node
                 } else {
                     descendants_including_root(raw_name)
                         .find(|candidate| {
-                            matches!(
-                                candidate.kind(),
-                                "identifier" | "field_identifier" | "type_identifier"
-                            )
+                            node_has_durable_span(*candidate)
+                                && matches!(
+                                    candidate.kind(),
+                                    "identifier" | "field_identifier" | "type_identifier"
+                                )
                         })
                         .unwrap_or(raw_name)
                 };
+                if !node_has_durable_span(name) {
+                    return Ok(None);
+                }
                 return Ok(Some(DeclaratorName {
                     node: name,
                     scope: Some(node),
@@ -1571,6 +1581,10 @@ fn declarator_name(mut node: Node<'_>) -> Result<Option<DeclaratorName<'_>>, Ext
         node = next;
     }
     Err(ExtractError::NestingLimit)
+}
+
+fn node_has_durable_span(node: Node<'_>) -> bool {
+    !node.is_missing() && node.start_byte() < node.end_byte()
 }
 
 fn owned_declarator_scope(

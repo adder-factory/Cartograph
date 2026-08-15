@@ -1,6 +1,6 @@
 # CLI and MCP alignment
 
-Last release audit: 2026-08-15 (`v2.1.18`).
+Last release audit: 2026-08-15 (`v2.1.19`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands
 and 36 bounded MCP tools. Shared schemas generate ordinary CLI adapters where
@@ -75,10 +75,15 @@ retention, embedding-readiness, SCIP, and agent-workflow operations.
 
 These do not hide a coding capability from MCP. Long MCP admin operations use
 bounded jobs with explicit status/cancel instead of blocking transport.
-File-local index errors share the same typed project-relative path and fixed
-reason across both surfaces: direct CLI JSON uses `error.file_failure`, while
-admin job status uses `fileFailure`. Text rendering escapes control characters,
-and neither surface accepts arbitrary parser/driver text at that boundary.
+Non-recoverable file-local index errors share the same typed project-relative
+path and fixed reason across both surfaces: direct CLI JSON uses
+`error.file_failure`, while admin job status uses `fileFailure`. Invalid spans
+and non-cancelled parser stops instead publish an empty partial file with a
+stable degraded reason. Generation-capacity failures name
+`maxGenerationBytes`, its Cartograph-process scope, and a bounded next action in
+direct CLI output and MCP `failureDetail`. Text rendering escapes control
+characters, and neither surface accepts arbitrary parser/driver text at that
+boundary.
 
 ## Verification
 

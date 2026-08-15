@@ -3696,10 +3696,20 @@ async fn release_copy_and_wait_for_schema_lock(
     }
     let observer_pool = pool.clone();
     let observer_schema = schema.to_owned();
+    let (observer_ready, observer_ready_rx) = oneshot::channel();
     let observer = tokio::spawn(async move {
-        wait_for_schema_lock(&observer_pool, &observer_schema, "search_documents").await;
+        wait_for_schema_lock_with_ready_connection(
+            &observer_pool,
+            &observer_schema,
+            "search_documents",
+            observer_ready,
+        )
+        .await;
     });
-    tokio::task::yield_now().await;
+    tokio::time::timeout(ABORT_RESULT_BOUND, observer_ready_rx)
+        .await
+        .map_err(|error| format!("COPY lock observer did not acquire a connection: {error}"))?
+        .map_err(|_| "COPY lock observer dropped its readiness barrier".to_owned())?;
     control
         .release
         .send(())
@@ -3708,6 +3718,41 @@ async fn release_copy_and_wait_for_schema_lock(
         .await
         .map_err(|error| format!("COPY lock observer failed: {error}"))?;
     Ok(())
+}
+
+async fn wait_for_schema_lock_with_ready_connection(
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    relation: &str,
+    ready: oneshot::Sender<()>,
+) {
+    let mut connection = pool
+        .acquire()
+        .await
+        .unwrap_or_else(|error| panic!("lock observer connection failed: {error}"));
+    ready
+        .send(())
+        .unwrap_or_else(|()| panic!("lock observer readiness receiver dropped"));
+    let pattern = format!("%{schema}%{relation}%");
+    for _ in 0..LEASE_WAIT_ATTEMPTS {
+        let row = query(
+            r"SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE application_name = 'cartograph-v2'
+                      AND state = 'active'
+                      AND wait_event_type = 'Lock'
+                      AND query ILIKE $1
+                )",
+        )
+        .bind(&pattern)
+        .fetch_one(&mut *connection)
+        .await;
+        if matches!(row, Ok(row) if row.try_get::<bool, _>(0).unwrap_or(false)) {
+            return;
+        }
+        tokio::time::sleep(LEASE_WAIT_INTERVAL).await;
+    }
+    panic!("database operation did not reach the expected lock wait");
 }
 
 async fn require_combined_copy_lock(

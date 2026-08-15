@@ -104,9 +104,9 @@ that keeps discovery bounded on vendored and generated directories.
 
 `generationStorage: "auto"` keeps the lower-latency memory path for small
 manifests and selects PostgreSQL spill when any of these conservative signals
-is reached: 10,000 supported files, 64 MiB of indexed source, or a 16x source
-expansion estimate at or above `maxGenerationBytes`. `memory` and `postgres`
-force the respective path. The selected strategy and fixed-size spill
+is reached: 64 Cargo manifests, 10,000 supported files, 64 MiB of indexed
+source, or a 16x source expansion estimate at or above `maxGenerationBytes`.
+`memory` and `postgres` force the respective path. The selected strategy and fixed-size spill
 accounting are returned in native index metrics. This physical working-set
 choice does not change the logical source digest, so changing it does not make
 an otherwise fresh generation stale; use `cartograph index --force` when you

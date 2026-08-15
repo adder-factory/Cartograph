@@ -268,9 +268,9 @@ automation surface where exposed by command help.
 
 No special command is required for a large first index. With the default
 `generationStorage: "auto"`, Cartograph selects its PostgreSQL spill path at
-10,000 supported files, 64 MiB of indexed source, or when a conservative 16x
-source-expansion estimate reaches `maxGenerationBytes`. A dense smaller corpus
-can opt in explicitly through `.cartograph/config.json`:
+64 Cargo manifests, 10,000 supported files, 64 MiB of indexed source, or when a
+conservative 16x source-expansion estimate reaches `maxGenerationBytes`. A
+dense smaller corpus can opt in explicitly through `.cartograph/config.json`:
 
 ```json
 {

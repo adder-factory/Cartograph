@@ -4561,13 +4561,13 @@ fn record_degraded_file(
     truncated: &mut u64,
     file: &ExtractedFile,
 ) -> Result<(), StageItemFailure> {
-    if !file
+    let reason = file
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.code == DiagnosticCode::NestingLimitExceeded)
-    {
+        .find_map(|diagnostic| degraded_file_reason(diagnostic.code));
+    let Some(reason) = reason else {
         return Ok(());
-    }
+    };
     if reported.len() >= MAX_REPORTED_DEGRADED_FILES {
         *truncated = truncated.checked_add(1).ok_or(StageItemFailure)?;
         return Ok(());
@@ -4577,9 +4577,18 @@ fn record_degraded_file(
         .map_err(|_| StageItemFailure)?;
     reported.push(NativeDegradedFile {
         path: try_clone_text(file.path.as_str())?,
-        reason: "nesting_limit_exceeded",
+        reason,
     });
     Ok(())
+}
+
+const fn degraded_file_reason(diagnostic: DiagnosticCode) -> Option<&'static str> {
+    match diagnostic {
+        DiagnosticCode::InvalidSpan => Some("extraction_invalid_span"),
+        DiagnosticCode::ParserStopped => Some("extraction_parser_stopped"),
+        DiagnosticCode::NestingLimitExceeded => Some("nesting_limit_exceeded"),
+        DiagnosticCode::SyntaxError | DiagnosticCode::CanonicalNameTruncated => None,
+    }
 }
 
 fn append_degraded_files(
@@ -20993,6 +21002,23 @@ export function secondClone(value: number) {
             assert_eq!(file.reason(), expected);
             assert!(!expected.description().is_empty());
         }
+    }
+
+    #[test]
+    fn recoverable_parser_failures_keep_stable_degraded_reasons() {
+        assert_eq!(
+            degraded_file_reason(DiagnosticCode::InvalidSpan),
+            Some("extraction_invalid_span")
+        );
+        assert_eq!(
+            degraded_file_reason(DiagnosticCode::ParserStopped),
+            Some("extraction_parser_stopped")
+        );
+        assert_eq!(
+            degraded_file_reason(DiagnosticCode::NestingLimitExceeded),
+            Some("nesting_limit_exceeded")
+        );
+        assert_eq!(degraded_file_reason(DiagnosticCode::SyntaxError), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

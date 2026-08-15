@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-15 (`v2.1.18`).
+Last release audit: 2026-08-15 (`v2.1.19`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -42,14 +42,21 @@ semantic model, graph expansion, affected tests, and a separate stale
 working-tree overlay. JSON is the stable automation format; text favors concise
 operator output.
 
-A file-local index failure keeps the previous generation visible and reports
-one exact normalized project-relative path plus an allowlisted reason. Text
+A non-recoverable file-local index failure keeps the previous generation visible
+and reports one exact normalized project-relative path plus an allowlisted reason. Text
 escapes control characters in the path. `index --format json` exits nonzero and
 writes a structured `error` object to stderr with `code`, `message`, `stage`,
 `previous_generation_visible`, and `file_failure.path`, `reason`, and
 `description`. It never renders the absolute checkout root, source text,
 literal values, database URL, or parser/driver internals. MCP admin job status
 uses the same bounded `fileFailure` evidence.
+
+Invalid parser-recovery spans and parser stops without cancellation are instead
+retained as partial files and listed in a successful index report with degraded
+reason `extraction_invalid_span` or `extraction_parser_stopped`.
+For a generation-capacity failure, text and JSON name `maxGenerationBytes`, the
+`cartograph_process` scope, and the bounded PostgreSQL-spill/host-headroom next
+action.
 
 `embed` carries forward matching content-addressed vectors before calling the
 configured endpoint. Its report distinguishes the complete
@@ -97,7 +104,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.18 top-level command advertised
+This inventory contains every non-hidden v2.1.19 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 

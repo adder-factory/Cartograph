@@ -1,6 +1,20 @@
 use cartograph_agent::{PipelineFailureReason, PipelineStage, ProjectError};
 use serde::Serialize;
 
+pub(crate) const GENERATION_CAPACITY_LIMIT: &str = "maxGenerationBytes";
+pub(crate) const GENERATION_CAPACITY_SCOPE: &str = "cartograph_process";
+pub(crate) const GENERATION_CAPACITY_NEXT_ACTION: &str = "use generationStorage=postgres for a dense repository; if PostgreSQL spill was already selected, raise maxGenerationBytes only with Cartograph-process host headroom";
+
+pub(crate) const fn is_generation_capacity_failure(error: &ProjectError) -> bool {
+    matches!(
+        error,
+        ProjectError::IndexStageFailedWithReason {
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+            ..
+        }
+    )
+}
+
 /// Stable machine-readable codes one pipeline stage can report.
 struct StageCodes {
     failed: &'static str,
@@ -122,61 +136,85 @@ const fn pipeline_failure_reason_code(
     stage: PipelineStage,
     reason: PipelineFailureReason,
 ) -> &'static str {
-    match (stage, reason) {
-        (stage, PipelineFailureReason::DeadlineExceeded) => pipeline_deadline_code(stage),
-        (stage, PipelineFailureReason::ProgressStalled) => pipeline_progress_stalled_code(stage),
-        (PipelineStage::Parse, PipelineFailureReason::GenerationCapacityExceeded) => {
-            "parse_generation_capacity_exceeded"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionNestingLimitExceeded) => {
+    match reason {
+        PipelineFailureReason::DeadlineExceeded => pipeline_deadline_code(stage),
+        PipelineFailureReason::ProgressStalled => pipeline_progress_stalled_code(stage),
+        _ => pipeline_stage_reason_code(stage, reason),
+    }
+}
+
+const fn pipeline_stage_reason_code(
+    stage: PipelineStage,
+    reason: PipelineFailureReason,
+) -> &'static str {
+    match stage {
+        PipelineStage::Parse => parse_failure_reason_code(reason),
+        PipelineStage::Resolve => resolve_failure_reason_code(reason),
+        PipelineStage::Reduce => reduce_failure_reason_code(reason),
+        _ => pipeline_stage_failure_code(stage),
+    }
+}
+
+const fn parse_failure_reason_code(reason: PipelineFailureReason) -> &'static str {
+    match reason {
+        PipelineFailureReason::GenerationCapacityExceeded => "parse_generation_capacity_exceeded",
+        PipelineFailureReason::SourceReadFailed
+        | PipelineFailureReason::SourceChangedDuringParse => parse_source_failure_code(reason),
+        PipelineFailureReason::ExtractionUnsupportedLanguage
+        | PipelineFailureReason::ExtractionLanguageMismatch
+        | PipelineFailureReason::ExtractionGrammarUnavailable
+        | PipelineFailureReason::ExtractionParserStopped
+        | PipelineFailureReason::ExtractionCancelled
+        | PipelineFailureReason::ExtractionInvalidSpan
+        | PipelineFailureReason::ExtractionInvalidNestingLimit
+        | PipelineFailureReason::ExtractionNestingLimitExceeded
+        | PipelineFailureReason::ExtractionOutputLimitExceeded
+        | PipelineFailureReason::FileProcessingFailed => parse_extraction_failure_code(reason),
+        _ => pipeline_stage_failure_code(PipelineStage::Parse),
+    }
+}
+
+const fn parse_source_failure_code(reason: PipelineFailureReason) -> &'static str {
+    match reason {
+        PipelineFailureReason::SourceReadFailed => "parse_source_read_failed",
+        PipelineFailureReason::SourceChangedDuringParse => "parse_source_changed",
+        _ => pipeline_stage_failure_code(PipelineStage::Parse),
+    }
+}
+
+const fn parse_extraction_failure_code(reason: PipelineFailureReason) -> &'static str {
+    match reason {
+        PipelineFailureReason::ExtractionNestingLimitExceeded => {
             "parse_extraction_nesting_limit_exceeded"
         }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionOutputLimitExceeded) => {
+        PipelineFailureReason::ExtractionOutputLimitExceeded => {
             "parse_extraction_output_limit_exceeded"
         }
-        (PipelineStage::Parse, PipelineFailureReason::SourceReadFailed) => {
-            "parse_source_read_failed"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::SourceChangedDuringParse) => {
-            "parse_source_changed"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionUnsupportedLanguage) => {
-            "parse_unsupported_language"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionLanguageMismatch) => {
-            "parse_language_mismatch"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionGrammarUnavailable) => {
-            "parse_grammar_unavailable"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionParserStopped) => {
-            "parse_parser_stopped"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionCancelled) => {
-            "parse_extraction_cancelled"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionInvalidSpan) => {
-            "parse_invalid_span"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::ExtractionInvalidNestingLimit) => {
-            "parse_invalid_nesting_limit"
-        }
-        (PipelineStage::Parse, PipelineFailureReason::FileProcessingFailed) => {
-            "parse_file_processing_failed"
-        }
-        (PipelineStage::Resolve, PipelineFailureReason::GenerationCapacityExceeded) => {
-            "resolve_generation_capacity_exceeded"
-        }
-        (PipelineStage::Reduce, PipelineFailureReason::GenerationCapacityExceeded) => {
-            "reduce_generation_capacity_exceeded"
-        }
-        (PipelineStage::Reduce, PipelineFailureReason::ReferenceNameTooLong) => {
-            "reduce_reference_name_too_long"
-        }
-        (PipelineStage::Reduce, PipelineFailureReason::CanonicalFieldRejected(_)) => {
-            "reduce_canonical_field_rejected"
-        }
-        _ => pipeline_stage_failure_code(stage),
+        PipelineFailureReason::ExtractionUnsupportedLanguage => "parse_unsupported_language",
+        PipelineFailureReason::ExtractionLanguageMismatch => "parse_language_mismatch",
+        PipelineFailureReason::ExtractionGrammarUnavailable => "parse_grammar_unavailable",
+        PipelineFailureReason::ExtractionParserStopped => "parse_parser_stopped",
+        PipelineFailureReason::ExtractionCancelled => "parse_extraction_cancelled",
+        PipelineFailureReason::ExtractionInvalidSpan => "parse_invalid_span",
+        PipelineFailureReason::ExtractionInvalidNestingLimit => "parse_invalid_nesting_limit",
+        PipelineFailureReason::FileProcessingFailed => "parse_file_processing_failed",
+        _ => pipeline_stage_failure_code(PipelineStage::Parse),
+    }
+}
+
+const fn resolve_failure_reason_code(reason: PipelineFailureReason) -> &'static str {
+    match reason {
+        PipelineFailureReason::GenerationCapacityExceeded => "resolve_generation_capacity_exceeded",
+        _ => pipeline_stage_failure_code(PipelineStage::Resolve),
+    }
+}
+
+const fn reduce_failure_reason_code(reason: PipelineFailureReason) -> &'static str {
+    match reason {
+        PipelineFailureReason::GenerationCapacityExceeded => "reduce_generation_capacity_exceeded",
+        PipelineFailureReason::ReferenceNameTooLong => "reduce_reference_name_too_long",
+        PipelineFailureReason::CanonicalFieldRejected(_) => "reduce_canonical_field_rejected",
+        _ => pipeline_stage_failure_code(PipelineStage::Reduce),
     }
 }
 
@@ -213,10 +251,17 @@ pub(crate) const fn project_index_failure_code(error: &ProjectError) -> Option<&
 }
 
 pub(crate) fn direct_index_failure_message(error: &ProjectError) -> String {
-    project_index_failure_code(error).map_or_else(
+    let message = project_index_failure_code(error).map_or_else(
         || error.to_string(),
         |code| format!("{error} (reason: {code})"),
-    )
+    );
+    if is_generation_capacity_failure(error) {
+        format!(
+            "{message}; limit: {GENERATION_CAPACITY_LIMIT}; scope: {GENERATION_CAPACITY_SCOPE}; next action: {GENERATION_CAPACITY_NEXT_ACTION}"
+        )
+    } else {
+        message
+    }
 }
 
 #[derive(Serialize)]
@@ -231,6 +276,12 @@ struct DirectIndexFailure<'failure> {
     #[serde(skip_serializing_if = "Option::is_none")]
     stage: Option<PipelineStage>,
     previous_generation_visible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capacity_limit: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capacity_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_failure: Option<DirectFileFailure<'failure>>,
 }
@@ -266,12 +317,16 @@ pub(crate) fn direct_index_failure_json(error: &ProjectError) -> Result<String, 
             | ProjectError::IndexLeaseFailed
             | ProjectError::IndexPublicationFailed
     );
+    let capacity = is_generation_capacity_failure(error);
     serde_json::to_string_pretty(&DirectIndexFailureReport {
         error: DirectIndexFailure {
             code: project_index_failure_code(error).unwrap_or("index_failed"),
             message: error.to_string(),
             stage,
             previous_generation_visible,
+            capacity_limit: capacity.then_some(GENERATION_CAPACITY_LIMIT),
+            capacity_scope: capacity.then_some(GENERATION_CAPACITY_SCOPE),
+            next_action: capacity.then_some(GENERATION_CAPACITY_NEXT_ACTION),
             file_failure,
         },
     })
@@ -300,6 +355,36 @@ mod tests {
         let message = direct_index_failure_message(&error);
         assert!(message.contains("resolve/progress_stalled"));
         assert!(message.ends_with("(reason: resolve_progress_stalled)"));
+    }
+
+    #[test]
+    fn direct_cli_capacity_failure_names_the_bound_scope_and_next_action() {
+        let error = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Resolve,
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+        };
+        let message = direct_index_failure_message(&error);
+        assert!(message.contains("resolve_generation_capacity_exceeded"));
+        assert!(message.contains(GENERATION_CAPACITY_LIMIT));
+        assert!(message.contains(GENERATION_CAPACITY_SCOPE));
+        assert!(message.contains("generationStorage=postgres"));
+
+        let encoded = direct_index_failure_json(&error).unwrap_or_else(|serialization| {
+            panic!("capacity failure JSON was unavailable: {serialization}")
+        });
+        let report: serde_json::Value = serde_json::from_str(&encoded)
+            .unwrap_or_else(|error| panic!("capacity failure JSON was invalid: {error}"));
+        assert_eq!(
+            report["error"]["code"],
+            "resolve_generation_capacity_exceeded"
+        );
+        assert_eq!(report["error"]["capacity_limit"], GENERATION_CAPACITY_LIMIT);
+        assert_eq!(report["error"]["capacity_scope"], GENERATION_CAPACITY_SCOPE);
+        assert!(
+            report["error"]["next_action"]
+                .as_str()
+                .is_some_and(|action| action.contains("maxGenerationBytes"))
+        );
     }
 
     #[test]

@@ -123,8 +123,9 @@ Never write the URL into a committed config. See
 
 Leave `generationStorage` at its default `auto` for the first run. Cartograph
 automatically selects PostgreSQL spill at 10,000 supported files, 64 MiB of
-indexed source, or when its conservative 16x source-expansion estimate reaches
-`maxGenerationBytes`. A dense smaller repository can force the same path in
+indexed source, 64 Cargo manifests, or when its conservative 16x
+source-expansion estimate reaches `maxGenerationBytes`. A dense smaller
+repository can force the same path in
 `.cartograph/config.json`:
 
 ```json

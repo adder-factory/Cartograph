@@ -146,81 +146,140 @@ pub enum PipelineFailureReason {
     CanonicalFieldRejected(&'static str),
 }
 
+#[derive(Clone, Copy)]
+struct PipelineFailureText {
+    code: &'static str,
+    description: &'static str,
+}
+
+impl PipelineFailureText {
+    const fn new(code: &'static str, description: &'static str) -> Self {
+        Self { code, description }
+    }
+}
+
+const FILE_PROCESSING_FAILURE_TEXT: PipelineFailureText = PipelineFailureText::new(
+    "file_processing_failed",
+    "file-local parse processing failed without a more specific safe classification",
+);
+
+const fn pipeline_failure_text(reason: PipelineFailureReason) -> PipelineFailureText {
+    match reason {
+        PipelineFailureReason::DeadlineExceeded
+        | PipelineFailureReason::ProgressStalled
+        | PipelineFailureReason::GenerationCapacityExceeded
+        | PipelineFailureReason::SourceReadFailed
+        | PipelineFailureReason::SourceChangedDuringParse => pipeline_control_failure_text(reason),
+        PipelineFailureReason::ExtractionUnsupportedLanguage
+        | PipelineFailureReason::ExtractionLanguageMismatch
+        | PipelineFailureReason::ExtractionGrammarUnavailable
+        | PipelineFailureReason::ExtractionParserStopped
+        | PipelineFailureReason::ExtractionCancelled
+        | PipelineFailureReason::ExtractionInvalidSpan
+        | PipelineFailureReason::ExtractionInvalidNestingLimit
+        | PipelineFailureReason::ExtractionNestingLimitExceeded
+        | PipelineFailureReason::ExtractionOutputLimitExceeded
+        | PipelineFailureReason::FileProcessingFailed => pipeline_extraction_failure_text(reason),
+        PipelineFailureReason::ReferenceNameTooLong
+        | PipelineFailureReason::CanonicalFieldRejected(_) => {
+            pipeline_reduction_failure_text(reason)
+        }
+    }
+}
+
+const fn pipeline_control_failure_text(reason: PipelineFailureReason) -> PipelineFailureText {
+    match reason {
+        PipelineFailureReason::DeadlineExceeded => PipelineFailureText::new(
+            "deadline_exceeded",
+            "the bounded item or stage deadline elapsed",
+        ),
+        PipelineFailureReason::ProgressStalled => PipelineFailureText::new(
+            "progress_stalled",
+            "the stage made no durable progress inside its watchdog horizon",
+        ),
+        PipelineFailureReason::GenerationCapacityExceeded => PipelineFailureText::new(
+            "generation_capacity_exceeded",
+            "the configured generation capacity rejected this work",
+        ),
+        PipelineFailureReason::SourceReadFailed => PipelineFailureText::new(
+            "source_read_failed",
+            "the source file could not be reopened under the bounded source contract",
+        ),
+        PipelineFailureReason::SourceChangedDuringParse => PipelineFailureText::new(
+            "source_changed_during_parse",
+            "the source file changed after its manifest entry was read",
+        ),
+        _ => FILE_PROCESSING_FAILURE_TEXT,
+    }
+}
+
+const fn pipeline_extraction_failure_text(reason: PipelineFailureReason) -> PipelineFailureText {
+    match reason {
+        PipelineFailureReason::ExtractionUnsupportedLanguage => PipelineFailureText::new(
+            "extraction_unsupported_language",
+            "no production extractor was available for the admitted source language",
+        ),
+        PipelineFailureReason::ExtractionLanguageMismatch => PipelineFailureText::new(
+            "extraction_language_mismatch",
+            "the selected extractor did not match the source language",
+        ),
+        PipelineFailureReason::ExtractionGrammarUnavailable => PipelineFailureText::new(
+            "extraction_grammar_unavailable",
+            "the statically linked parser grammar was unavailable",
+        ),
+        PipelineFailureReason::ExtractionParserStopped => PipelineFailureText::new(
+            "extraction_parser_stopped",
+            "the parser stopped before producing a syntax tree",
+        ),
+        PipelineFailureReason::ExtractionCancelled => PipelineFailureText::new(
+            "extraction_cancelled",
+            "cooperative cancellation interrupted source extraction",
+        ),
+        PipelineFailureReason::ExtractionInvalidSpan => PipelineFailureText::new(
+            "extraction_invalid_span",
+            "the parser produced a source span outside the durable contract",
+        ),
+        PipelineFailureReason::ExtractionInvalidNestingLimit => PipelineFailureText::new(
+            "extraction_invalid_nesting_limit",
+            "the AST-depth policy was outside the supported range",
+        ),
+        PipelineFailureReason::ExtractionNestingLimitExceeded => PipelineFailureText::new(
+            "extraction_nesting_limit_exceeded",
+            "the source syntax tree exceeded the configured nesting limit",
+        ),
+        PipelineFailureReason::ExtractionOutputLimitExceeded => PipelineFailureText::new(
+            "extraction_output_limit_exceeded",
+            "the extracted file facts exceeded the configured output limit",
+        ),
+        _ => FILE_PROCESSING_FAILURE_TEXT,
+    }
+}
+
+const fn pipeline_reduction_failure_text(reason: PipelineFailureReason) -> PipelineFailureText {
+    match reason {
+        PipelineFailureReason::ReferenceNameTooLong => PipelineFailureText::new(
+            "reference_name_too_long",
+            "an extracted reference name exceeded the canonical storage bound",
+        ),
+        PipelineFailureReason::CanonicalFieldRejected(_) => PipelineFailureText::new(
+            "canonical_field_rejected",
+            "an extracted field was rejected by the canonical storage contract",
+        ),
+        _ => FILE_PROCESSING_FAILURE_TEXT,
+    }
+}
+
 impl PipelineFailureReason {
     /// Stable machine-readable reason code.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::DeadlineExceeded => "deadline_exceeded",
-            Self::ProgressStalled => "progress_stalled",
-            Self::GenerationCapacityExceeded => "generation_capacity_exceeded",
-            Self::SourceReadFailed => "source_read_failed",
-            Self::SourceChangedDuringParse => "source_changed_during_parse",
-            Self::ExtractionUnsupportedLanguage => "extraction_unsupported_language",
-            Self::ExtractionLanguageMismatch => "extraction_language_mismatch",
-            Self::ExtractionGrammarUnavailable => "extraction_grammar_unavailable",
-            Self::ExtractionParserStopped => "extraction_parser_stopped",
-            Self::ExtractionCancelled => "extraction_cancelled",
-            Self::ExtractionInvalidSpan => "extraction_invalid_span",
-            Self::ExtractionInvalidNestingLimit => "extraction_invalid_nesting_limit",
-            Self::ExtractionNestingLimitExceeded => "extraction_nesting_limit_exceeded",
-            Self::ExtractionOutputLimitExceeded => "extraction_output_limit_exceeded",
-            Self::FileProcessingFailed => "file_processing_failed",
-            Self::ReferenceNameTooLong => "reference_name_too_long",
-            Self::CanonicalFieldRejected(_) => "canonical_field_rejected",
-        }
+        pipeline_failure_text(self).code
     }
 
     /// Fixed user-facing explanation that never contains source, paths, or driver text.
     #[must_use]
     pub const fn description(self) -> &'static str {
-        match self {
-            Self::DeadlineExceeded => "the bounded item or stage deadline elapsed",
-            Self::ProgressStalled => {
-                "the stage made no durable progress inside its watchdog horizon"
-            }
-            Self::GenerationCapacityExceeded => {
-                "the configured generation capacity rejected this work"
-            }
-            Self::SourceReadFailed => {
-                "the source file could not be reopened under the bounded source contract"
-            }
-            Self::SourceChangedDuringParse => {
-                "the source file changed after its manifest entry was read"
-            }
-            Self::ExtractionUnsupportedLanguage => {
-                "no production extractor was available for the admitted source language"
-            }
-            Self::ExtractionLanguageMismatch => {
-                "the selected extractor did not match the source language"
-            }
-            Self::ExtractionGrammarUnavailable => {
-                "the statically linked parser grammar was unavailable"
-            }
-            Self::ExtractionParserStopped => "the parser stopped before producing a syntax tree",
-            Self::ExtractionCancelled => "cooperative cancellation interrupted source extraction",
-            Self::ExtractionInvalidSpan => {
-                "the parser produced a source span outside the durable contract"
-            }
-            Self::ExtractionInvalidNestingLimit => {
-                "the AST-depth policy was outside the supported range"
-            }
-            Self::ExtractionNestingLimitExceeded => {
-                "the source syntax tree exceeded the configured nesting limit"
-            }
-            Self::ExtractionOutputLimitExceeded => {
-                "the extracted file facts exceeded the configured output limit"
-            }
-            Self::FileProcessingFailed => {
-                "file-local parse processing failed without a more specific safe classification"
-            }
-            Self::ReferenceNameTooLong => {
-                "an extracted reference name exceeded the canonical storage bound"
-            }
-            Self::CanonicalFieldRejected(_) => {
-                "an extracted field was rejected by the canonical storage contract"
-            }
-        }
+        pipeline_failure_text(self).description
     }
 
     /// Stable storage field identifier for a rejected bounded field.
