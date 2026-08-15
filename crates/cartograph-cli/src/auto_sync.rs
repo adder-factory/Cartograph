@@ -205,15 +205,15 @@ impl AutoSyncState {
         }
     }
 
-    fn record_index_failure(&self, revision: ContentDigest, error: ProjectError, now: u64) {
+    fn record_index_failure(&self, revision: ContentDigest, error: &ProjectError, now: u64) {
         self.record_failure(FailedRevision::Known(revision), error, now);
     }
 
-    fn record_unknown_failure(&self, error: ProjectError, now: u64) {
+    fn record_unknown_failure(&self, error: &ProjectError, now: u64) {
         self.record_failure(FailedRevision::Unknown, error, now);
     }
 
-    fn record_failure(&self, revision: FailedRevision, error: ProjectError, now: u64) {
+    fn record_failure(&self, revision: FailedRevision, error: &ProjectError, now: u64) {
         self.errors.fetch_add(1, Ordering::AcqRel);
         let Ok(mut failure) = self.failure.write() else {
             return;
@@ -447,7 +447,7 @@ async fn synchronize_if_stale(runtime: &ProjectRuntime, state: &AutoSyncState) {
             }
         }
         Err(_) => {
-            state.record_unknown_failure(ProjectError::StatusFailed, now);
+            state.record_unknown_failure(&ProjectError::StatusFailed, now);
         }
     }
 }
@@ -517,9 +517,9 @@ async fn synchronize(
                     .map(|status| status.live_source_revision),
             };
             if let Some(failed_revision) = failed_revision {
-                state.record_index_failure(failed_revision, error, unix_millis());
+                state.record_index_failure(failed_revision, &error, unix_millis());
             } else {
-                state.record_unknown_failure(error, unix_millis());
+                state.record_unknown_failure(&error, unix_millis());
             }
         }
     }
@@ -537,7 +537,7 @@ fn retry_interval(attempts: u8) -> Duration {
         .min(MAXIMUM_RETRY_INTERVAL)
 }
 
-const fn project_error_code(error: ProjectError) -> &'static str {
+const fn project_error_code(error: &ProjectError) -> &'static str {
     match error {
         ProjectError::StatusFailed => "status_failed",
         other => match project_index_failure_code(other) {
@@ -719,7 +719,7 @@ mod tests {
         assert!(state.automatic_attempt_allowed(&first_revision, now));
         state.record_index_failure(
             first_revision.clone(),
-            ProjectError::IndexStageFailed {
+            &ProjectError::IndexStageFailed {
                 stage: PipelineStage::Reduce,
             },
             now,
@@ -739,7 +739,7 @@ mod tests {
         for expected_attempts in 2..=MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION {
             state.record_index_failure(
                 first_revision.clone(),
-                ProjectError::IndexStageFailed {
+                &ProjectError::IndexStageFailed {
                     stage: PipelineStage::Copy,
                 },
                 now,
@@ -770,7 +770,7 @@ mod tests {
         let state = AutoSyncState::default();
         let mut now = 1_000_u64;
 
-        state.record_unknown_failure(ProjectError::StatusFailed, now);
+        state.record_unknown_failure(&ProjectError::StatusFailed, now);
         let first = state.failure_status();
         assert_eq!(first.last_error_code, Some("status_failed"));
         assert_eq!(first.attempts, 1);
@@ -785,7 +785,7 @@ mod tests {
         assert!(state.reconciliation_probe_allowed(now));
 
         for expected_attempts in 2..=MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION.saturating_add(1) {
-            state.record_unknown_failure(ProjectError::StatusFailed, now);
+            state.record_unknown_failure(&ProjectError::StatusFailed, now);
             let status = state.failure_status();
             assert_eq!(status.attempts, expected_attempts);
             assert!(!status.retry_suppressed);
@@ -817,54 +817,54 @@ mod tests {
         ];
         for (stage, expected) in stage_codes {
             assert_eq!(
-                project_error_code(ProjectError::IndexStageFailed { stage }),
+                project_error_code(&ProjectError::IndexStageFailed { stage }),
                 expected
             );
         }
         assert_eq!(
-            project_error_code(ProjectError::IndexStageFailedWithReason {
+            project_error_code(&ProjectError::IndexStageFailedWithReason {
                 stage: PipelineStage::Reduce,
                 reason: PipelineFailureReason::ReferenceNameTooLong,
             }),
             "reduce_reference_name_too_long"
         );
         assert_eq!(
-            project_error_code(ProjectError::IndexStageFailedWithReason {
+            project_error_code(&ProjectError::IndexStageFailedWithReason {
                 stage: PipelineStage::Resolve,
                 reason: PipelineFailureReason::GenerationCapacityExceeded,
             }),
             "resolve_generation_capacity_exceeded"
         );
         assert_eq!(
-            project_error_code(ProjectError::IndexStageFailedWithReason {
+            project_error_code(&ProjectError::IndexStageFailedWithReason {
                 stage: PipelineStage::Resolve,
                 reason: PipelineFailureReason::DeadlineExceeded,
             }),
             "resolve_deadline_exceeded"
         );
         assert_eq!(
-            project_error_code(ProjectError::IndexStageFailedWithReason {
+            project_error_code(&ProjectError::IndexStageFailedWithReason {
                 stage: PipelineStage::Resolve,
                 reason: PipelineFailureReason::ProgressStalled,
             }),
             "resolve_progress_stalled"
         );
         assert_eq!(
-            project_error_code(ProjectError::IndexStageFailedWithReason {
+            project_error_code(&ProjectError::IndexStageFailedWithReason {
                 stage: PipelineStage::Parse,
                 reason: PipelineFailureReason::GenerationCapacityExceeded,
             }),
             "parse_generation_capacity_exceeded"
         );
         assert_eq!(
-            project_error_code(ProjectError::IndexStageFailedWithReason {
+            project_error_code(&ProjectError::IndexStageFailedWithReason {
                 stage: PipelineStage::Parse,
                 reason: PipelineFailureReason::ExtractionNestingLimitExceeded,
             }),
             "parse_extraction_nesting_limit_exceeded"
         );
         assert_eq!(
-            project_error_code(ProjectError::IndexStageFailedWithReason {
+            project_error_code(&ProjectError::IndexStageFailedWithReason {
                 stage: PipelineStage::Parse,
                 reason: PipelineFailureReason::ExtractionOutputLimitExceeded,
             }),
@@ -886,7 +886,7 @@ mod tests {
             (ProjectError::InvalidOptions, "index_failed"),
         ];
         for (error, expected) in error_codes {
-            assert_eq!(project_error_code(error), expected);
+            assert_eq!(project_error_code(&error), expected);
         }
     }
 

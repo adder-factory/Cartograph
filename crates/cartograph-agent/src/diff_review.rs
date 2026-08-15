@@ -575,7 +575,7 @@ impl crate::ProjectRuntime {
         let status = self
             .status_with_cancellation(input.cancellation.clone())
             .await
-            .map_err(map_project_error)?;
+            .map_err(|error| map_project_error(&error))?;
         let (project_id, freshness) = match status.snapshot {
             Some(snapshot) if snapshot.current.is_some() => (
                 Some(snapshot.project_id),
@@ -893,7 +893,7 @@ fn require_not_cancelled(cancellation: &ProjectCancellation) -> Result<(), DiffR
     }
 }
 
-const fn map_project_error(error: ProjectError) -> DiffReviewError {
+const fn map_project_error(error: &ProjectError) -> DiffReviewError {
     match error {
         ProjectError::RequestCancelled => DiffReviewError::Cancelled,
         _ => DiffReviewError::ProjectStateUnavailable,

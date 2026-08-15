@@ -2542,7 +2542,17 @@ struct AdminJobView {
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<AdminJobFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    file_failure: Option<AdminJobFileFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     progress: Option<SupervisorStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminJobFileFailure {
+    path: NormalizedPath,
+    reason: &'static str,
+    description: &'static str,
 }
 
 struct ActiveAdminJob {
@@ -2638,14 +2648,22 @@ impl AdminJobs {
             status: AdminJobStatus::Running,
             report: None,
             failure: None,
+            file_failure: None,
             progress: None,
         };
         let handle = tokio::spawn(async move {
             let result = operation.await;
-            let (status, report, failure) = match result {
-                Ok(report) => (AdminJobStatus::Succeeded, Some(report), None),
-                Err(ProjectError::RequestCancelled) => (AdminJobStatus::Cancelled, None, None),
-                Err(error) => (AdminJobStatus::Failed, None, Some(admin_job_failure(error))),
+            let (status, report, failure, file_failure) = match result {
+                Ok(report) => (AdminJobStatus::Succeeded, Some(report), None, None),
+                Err(ProjectError::RequestCancelled) => {
+                    (AdminJobStatus::Cancelled, None, None, None)
+                }
+                Err(error) => (
+                    AdminJobStatus::Failed,
+                    None,
+                    Some(admin_job_failure(&error)),
+                    admin_job_file_failure(&error),
+                ),
             };
             let mut state = shared.state.lock().await;
             let Some(active) = state.active.take() else {
@@ -2661,6 +2679,7 @@ impl AdminJobs {
                 status,
                 report,
                 failure,
+                file_failure,
                 progress: None,
             });
             drop(state);
@@ -2783,6 +2802,7 @@ impl AdminJobs {
                 status: AdminJobStatus::Cancelled,
                 report: None,
                 failure: None,
+                file_failure: None,
                 progress: None,
             });
             active.handle
@@ -2794,7 +2814,7 @@ impl AdminJobs {
     }
 }
 
-const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
+const fn admin_job_failure(error: &ProjectError) -> AdminJobFailure {
     match error {
         ProjectError::ProjectRootUnavailable => AdminJobFailure::ProjectUnavailable,
         ProjectError::DatabaseUnavailable
@@ -2817,9 +2837,12 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
         ProjectError::InvalidOptions | ProjectError::ScipOverlayInvalid => {
             AdminJobFailure::InvalidOptions
         }
-        ProjectError::IndexStageFailed { stage } => admin_job_stage_failure(stage),
+        ProjectError::IndexStageFailed { stage } => admin_job_stage_failure(*stage),
         ProjectError::IndexStageFailedWithReason { stage, reason } => {
-            admin_job_reason_failure(stage, reason)
+            admin_job_reason_failure(*stage, *reason)
+        }
+        ProjectError::IndexStageFileFailed { stage, failure } => {
+            admin_job_reason_failure(*stage, failure.reason())
         }
         ProjectError::IndexLeaseFailed => AdminJobFailure::LeaseFailed,
         ProjectError::IndexPublicationFailed => AdminJobFailure::PublicationFailed,
@@ -2830,7 +2853,18 @@ const fn admin_job_failure(error: ProjectError) -> AdminJobFailure {
     }
 }
 
-const fn admin_job_embedding_failure(error: ProjectError) -> AdminJobFailure {
+fn admin_job_file_failure(error: &ProjectError) -> Option<AdminJobFileFailure> {
+    let ProjectError::IndexStageFileFailed { failure, .. } = error else {
+        return None;
+    };
+    Some(AdminJobFileFailure {
+        path: failure.path().clone(),
+        reason: failure.reason().as_str(),
+        description: failure.reason().description(),
+    })
+}
+
+const fn admin_job_embedding_failure(error: &ProjectError) -> AdminJobFailure {
     match error {
         ProjectError::EmbeddingConfigurationUnavailable => {
             AdminJobFailure::EmbeddingConfigurationUnavailable
@@ -2843,7 +2877,7 @@ const fn admin_job_embedding_failure(error: ProjectError) -> AdminJobFailure {
     }
 }
 
-const fn admin_job_enrichment_failure(error: ProjectError) -> AdminJobFailure {
+const fn admin_job_enrichment_failure(error: &ProjectError) -> AdminJobFailure {
     match error {
         ProjectError::EnrichmentReadFailed => AdminJobFailure::EnrichmentReadFailed,
         ProjectError::EnrichmentWriteFailed => AdminJobFailure::EnrichmentWriteFailed,
@@ -13555,22 +13589,22 @@ fn enrichment_phase_report(result: Result<Value, ProjectError>) -> Result<Value,
     match result {
         Ok(report) => Ok(json!({"state": "succeeded", "report": report})),
         Err(ProjectError::RequestCancelled) => Err(ProjectError::RequestCancelled),
-        Err(error) => Ok(enrichment_failure_report(error)),
+        Err(error) => Ok(enrichment_failure_report(&error)),
     }
 }
 
-fn enrichment_failure_report(error: ProjectError) -> Value {
+fn enrichment_failure_report(error: &ProjectError) -> Value {
     json!({
         "state": "failed",
         "reason": project_error_reason(error),
         "failureCategory": enrichment_failure_category(error),
-        "retryable": !matches!(error, ProjectError::EnrichmentDataInvalid | ProjectError::InvalidOptions),
+        "retryable": !matches!(&error, ProjectError::EnrichmentDataInvalid | ProjectError::InvalidOptions),
         "retryBoundary": "retry_post_index_enrichment",
         "baseGraphRemainsQueryable": true,
     })
 }
 
-const fn enrichment_failure_category(error: ProjectError) -> &'static str {
+const fn enrichment_failure_category(error: &ProjectError) -> &'static str {
     match error {
         ProjectError::EnrichmentReadFailed => "storage_read",
         ProjectError::EnrichmentWriteFailed => "storage_write",
@@ -13581,12 +13615,13 @@ const fn enrichment_failure_category(error: ProjectError) -> &'static str {
         ProjectError::SourceChangedDuringIndex | ProjectError::SourceScanFailed => "source_drift",
         ProjectError::IndexStageFailed { .. }
         | ProjectError::IndexStageFailedWithReason { .. }
+        | ProjectError::IndexStageFileFailed { .. }
         | ProjectError::IndexFailed => "index_pipeline",
         _ => "project_runtime",
     }
 }
 
-fn project_error_reason(error: ProjectError) -> &'static str {
+fn project_error_reason(error: &ProjectError) -> &'static str {
     if let Some(reason) = project_setup_error_reason(error) {
         return reason;
     }
@@ -13596,7 +13631,7 @@ fn project_error_reason(error: ProjectError) -> &'static str {
     project_query_error_reason(error)
 }
 
-const fn project_setup_error_reason(error: ProjectError) -> Option<&'static str> {
+const fn project_setup_error_reason(error: &ProjectError) -> Option<&'static str> {
     match error {
         ProjectError::ProjectRootUnavailable => Some("project_root_unavailable"),
         ProjectError::DatabaseUnavailable => Some("database_unavailable"),
@@ -13608,14 +13643,14 @@ const fn project_setup_error_reason(error: ProjectError) -> Option<&'static str>
     }
 }
 
-const fn project_index_error_reason(error: ProjectError) -> Option<&'static str> {
+const fn project_index_error_reason(error: &ProjectError) -> Option<&'static str> {
     match error {
         ProjectError::StatusFailed => Some("project_status_unavailable"),
         other => index_stage_failure_code(other),
     }
 }
 
-const fn project_query_error_reason(error: ProjectError) -> &'static str {
+const fn project_query_error_reason(error: &ProjectError) -> &'static str {
     match error {
         ProjectError::SymbolNotFound => "symbol_not_found",
         ProjectError::FileNotFound => "file_not_found",
@@ -13772,7 +13807,7 @@ async fn run_initial_embedding_phase(
         }),
         Err(ProjectError::RequestCancelled) => Err(ProjectError::RequestCancelled),
         Err(error) => Ok(InitialEmbeddingPhase {
-            report: enrichment_failure_report(error),
+            report: enrichment_failure_report(&error),
             semantic_context: None,
         }),
     }
@@ -13826,7 +13861,7 @@ async fn run_summary_enrichment_phase(
         }),
         Err(ProjectError::RequestCancelled) => Err(ProjectError::RequestCancelled),
         Err(error) => Ok(SummaryEnrichmentPhase {
-            report: enrichment_failure_report(error),
+            report: enrichment_failure_report(&error),
             succeeded: false,
         }),
     }
@@ -24288,55 +24323,6 @@ fn diff_review_error(error: DiffReviewError) -> ToolError {
 
 fn project_error(error: ProjectError) -> ToolError {
     match error {
-        ProjectError::SymbolNotFound
-        | ProjectError::FileNotFound
-        | ProjectError::SourceContextUnavailable => project_source_error(error),
-        ProjectError::EmbeddingConfigurationUnavailable
-        | ProjectError::EmbeddingOperationFailed
-        | ProjectError::HnswCreateSharedMemoryUnavailable
-        | ProjectError::RetrievalOperationFailed
-        | ProjectError::SourceChangedDuringIndex
-        | ProjectError::EnrichmentReadFailed
-        | ProjectError::EnrichmentWriteFailed
-        | ProjectError::EnrichmentDataInvalid => project_operation_error(error),
-        ProjectError::InvalidOptions => invalid_arguments(),
-        ProjectError::ScipOverlayInvalid => safe_error(
-            ToolErrorCode::InvalidArguments,
-            "SCIP artifact is invalid, unsafe, or exceeds its configured bounds",
-        ),
-        ProjectError::RequestCancelled => safe_error(
-            ToolErrorCode::Unavailable,
-            "Cartograph request was cancelled",
-        ),
-        ProjectError::SchemaVersionAhead {
-            binary_version,
-            database_schema_version,
-            supported_schema_version,
-        } => ToolError::safe(
-            ToolErrorCode::NotReady,
-            format!(
-                "Cartograph {binary_version} supports schema version {supported_schema_version}, but PostgreSQL is at newer schema version {database_schema_version}; upgrade the binary and repin this MCP registration before retrying"
-            ),
-        )
-        .unwrap_or_else(|_| ToolError::internal()),
-        ProjectError::ProjectRootUnavailable
-        | ProjectError::DatabaseUnavailable
-        | ProjectError::MigrationFailed
-        | ProjectError::RegisterFailed
-        | ProjectError::BeginGenerationFailed
-        | ProjectError::SourceScanFailed
-        | ProjectError::StatusFailed
-        | ProjectError::IndexFailed
-        | ProjectError::IndexStageFailed { .. }
-        | ProjectError::IndexStageFailedWithReason { .. }
-        | ProjectError::IndexLeaseFailed
-        | ProjectError::IndexPublicationFailed
-        | ProjectError::IndexCleanupFailed => ToolError::internal(),
-    }
-}
-
-fn project_source_error(error: ProjectError) -> ToolError {
-    match error {
         ProjectError::SymbolNotFound => safe_error(
             ToolErrorCode::NotFound,
             "Symbol was not found in the current generation",
@@ -24349,12 +24335,6 @@ fn project_source_error(error: ProjectError) -> ToolError {
             ToolErrorCode::NotReady,
             "Source context is unavailable; index or synchronize the project first",
         ),
-        _ => ToolError::internal(),
-    }
-}
-
-fn project_operation_error(error: ProjectError) -> ToolError {
-    match error {
         ProjectError::EmbeddingConfigurationUnavailable => safe_error(
             ToolErrorCode::NotReady,
             "Embedding endpoint and model configuration is unavailable",
@@ -24387,7 +24367,45 @@ fn project_operation_error(error: ProjectError) -> ToolError {
             ToolErrorCode::Unavailable,
             "Cartograph enrichment encountered invalid stored generation data",
         ),
-        _ => ToolError::internal(),
+        ProjectError::InvalidOptions => invalid_arguments(),
+        ProjectError::ScipOverlayInvalid => safe_error(
+            ToolErrorCode::InvalidArguments,
+            "SCIP artifact is invalid, unsafe, or exceeds its configured bounds",
+        ),
+        ProjectError::RequestCancelled => safe_error(
+            ToolErrorCode::Unavailable,
+            "Cartograph request was cancelled",
+        ),
+        ProjectError::IndexStageFileFailed { stage, failure } => safe_error(
+            ToolErrorCode::Unavailable,
+            format!(
+                "Cartograph index failed during {stage}/{failure}; the previous generation remains visible"
+            ),
+        ),
+        ProjectError::SchemaVersionAhead {
+            binary_version,
+            database_schema_version,
+            supported_schema_version,
+        } => ToolError::safe(
+            ToolErrorCode::NotReady,
+            format!(
+                "Cartograph {binary_version} supports schema version {supported_schema_version}, but PostgreSQL is at newer schema version {database_schema_version}; upgrade the binary and repin this MCP registration before retrying"
+            ),
+        )
+        .unwrap_or_else(|_| ToolError::internal()),
+        ProjectError::ProjectRootUnavailable
+        | ProjectError::DatabaseUnavailable
+        | ProjectError::MigrationFailed
+        | ProjectError::RegisterFailed
+        | ProjectError::BeginGenerationFailed
+        | ProjectError::SourceScanFailed
+        | ProjectError::StatusFailed
+        | ProjectError::IndexFailed
+        | ProjectError::IndexStageFailed { .. }
+        | ProjectError::IndexStageFailedWithReason { .. }
+        | ProjectError::IndexLeaseFailed
+        | ProjectError::IndexPublicationFailed
+        | ProjectError::IndexCleanupFailed => ToolError::internal(),
     }
 }
 
@@ -24460,7 +24478,7 @@ mod tests {
         time::{Duration, SystemTime},
     };
 
-    use cartograph_agent::EmbeddingClientRequest;
+    use cartograph_agent::{EmbeddingClientRequest, PipelineFileFailure};
     use cartograph_domain::{DocumentId, DocumentKind, SymbolKind};
     use cartograph_llm::{EmbeddingSettings, OpenAiEmbeddingClient};
     use cartograph_mcp::{
@@ -25529,11 +25547,11 @@ mod tests {
             reason: PipelineFailureReason::ReferenceNameTooLong,
         };
         assert_eq!(
-            admin_job_failure(error),
+            admin_job_failure(&error),
             AdminJobFailure::ReduceReferenceNameTooLong
         );
         assert_eq!(
-            project_error_reason(error),
+            project_error_reason(&error),
             "reduce_reference_name_too_long"
         );
 
@@ -25542,11 +25560,11 @@ mod tests {
             reason: PipelineFailureReason::GenerationCapacityExceeded,
         };
         assert_eq!(
-            admin_job_failure(capacity),
+            admin_job_failure(&capacity),
             AdminJobFailure::ResolveGenerationCapacityExceeded
         );
         assert_eq!(
-            project_error_reason(capacity),
+            project_error_reason(&capacity),
             "resolve_generation_capacity_exceeded"
         );
 
@@ -25555,31 +25573,31 @@ mod tests {
             reason: PipelineFailureReason::DeadlineExceeded,
         };
         assert_eq!(
-            admin_job_failure(deadline),
+            admin_job_failure(&deadline),
             AdminJobFailure::ResolveDeadlineExceeded
         );
-        assert_eq!(project_error_reason(deadline), "resolve_deadline_exceeded");
+        assert_eq!(project_error_reason(&deadline), "resolve_deadline_exceeded");
 
         let stalled = ProjectError::IndexStageFailedWithReason {
             stage: PipelineStage::Resolve,
             reason: PipelineFailureReason::ProgressStalled,
         };
         assert_eq!(
-            admin_job_failure(stalled),
+            admin_job_failure(&stalled),
             AdminJobFailure::ResolveProgressStalled
         );
-        assert_eq!(project_error_reason(stalled), "resolve_progress_stalled");
+        assert_eq!(project_error_reason(&stalled), "resolve_progress_stalled");
 
         let parse_capacity = ProjectError::IndexStageFailedWithReason {
             stage: PipelineStage::Parse,
             reason: PipelineFailureReason::GenerationCapacityExceeded,
         };
         assert_eq!(
-            admin_job_failure(parse_capacity),
+            admin_job_failure(&parse_capacity),
             AdminJobFailure::ParseGenerationCapacityExceeded
         );
         assert_eq!(
-            project_error_reason(parse_capacity),
+            project_error_reason(&parse_capacity),
             "parse_generation_capacity_exceeded"
         );
 
@@ -25588,11 +25606,11 @@ mod tests {
             reason: PipelineFailureReason::ExtractionNestingLimitExceeded,
         };
         assert_eq!(
-            admin_job_failure(parse_nesting),
+            admin_job_failure(&parse_nesting),
             AdminJobFailure::ParseExtractionNestingLimitExceeded
         );
         assert_eq!(
-            project_error_reason(parse_nesting),
+            project_error_reason(&parse_nesting),
             "parse_extraction_nesting_limit_exceeded"
         );
 
@@ -25601,13 +25619,30 @@ mod tests {
             reason: PipelineFailureReason::ExtractionOutputLimitExceeded,
         };
         assert_eq!(
-            admin_job_failure(parse_output),
+            admin_job_failure(&parse_output),
             AdminJobFailure::ParseExtractionOutputLimitExceeded
         );
         assert_eq!(
-            project_error_reason(parse_output),
+            project_error_reason(&parse_output),
             "parse_extraction_output_limit_exceeded"
         );
+
+        let path = NormalizedPath::parse("src/broken.rs")
+            .unwrap_or_else(|invalid| panic!("fixture path was invalid: {invalid}"));
+        let parse_file = ProjectError::IndexStageFileFailed {
+            stage: PipelineStage::Parse,
+            failure: PipelineFileFailure::new(path, PipelineFailureReason::ExtractionParserStopped),
+        };
+        assert_eq!(admin_job_failure(&parse_file), AdminJobFailure::ParseFailed);
+        assert_eq!(project_error_reason(&parse_file), "parse_parser_stopped");
+        let detail = admin_job_file_failure(&parse_file)
+            .unwrap_or_else(|| panic!("admin failure omitted its file diagnostic"));
+        assert_eq!(detail.path.as_str(), "src/broken.rs");
+        assert_eq!(detail.reason, "extraction_parser_stopped");
+        assert!(detail.description.contains("syntax tree"));
+        let public = project_error(parse_file);
+        assert_eq!(public.code(), ToolErrorCode::Unavailable);
+        assert!(public.wire_message().contains("src/broken.rs"));
     }
 
     #[test]
@@ -25651,7 +25686,7 @@ mod tests {
             ),
         ];
         for (error, expected_admin, expected_code, expected_message) in cases {
-            assert_eq!(admin_job_failure(error), expected_admin);
+            assert_eq!(admin_job_failure(&error), expected_admin);
             let public = project_error(error);
             assert_eq!(public.code(), expected_code);
             assert!(public.wire_message().contains(expected_message));

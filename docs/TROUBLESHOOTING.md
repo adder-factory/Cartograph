@@ -114,6 +114,30 @@ generation protected by a live lease is preserved. This lets an unchanged
 retry recover work abandoned by an interrupted client without forcing a full
 re-index; normal retention may subsequently remove the failed row.
 
+## Index fails during the parse stage
+
+File-local parse failures name one escaped normalized project-relative input
+and a fixed reason such as `source_changed_during_parse`,
+`extraction_grammar_unavailable`, `extraction_parser_stopped`,
+`extraction_invalid_span`, or `extraction_output_limit_exceeded`. The text form
+is concise. For automation, request structured stderr:
+
+```sh
+cartograph index /absolute/path/to/project --format json
+```
+
+The nonzero result contains `error.code`, `error.stage`, and an
+`error.file_failure` object with `path`, `reason`, and a credential-safe
+`description`. The path is relative to the project; absolute roots, source
+text, literals, database URLs, and raw parser/driver messages remain omitted.
+MCP admin status exposes the same evidence as `fileFailure`.
+
+`source_changed_during_parse` means the named file no longer matches the exact
+manifest entry read at the start of that attempt. Let rapid writes settle and
+retry. A stable repeated reason points to the named source/extractor boundary;
+fix or deliberately ignore that input, then rerun the ordinary index. The prior
+generation remains queryable throughout.
+
 ## A deeply nested file degrades extraction
 
 Grammar-backed extraction defaults to `maxAstDepth: 256`. Exceeding the bound

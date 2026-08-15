@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-14 (`v2.1.17`).
+Last release audit: 2026-08-15 (`v2.1.18`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -66,6 +66,13 @@ When PostgreSQL is unavailable before a revision can be recovered, watcher
 events share an unknown-revision backoff bucket and retain a capped recovery
 probe rather than retrying every event or becoming permanently suppressed.
 `--no-startup-sync` suppresses only the initial reconciliation.
+
+A file-local admin index failure retains one `fileFailure` object with the
+normalized project-relative `path`, fixed `reason`, and credential-safe
+`description`. The terminal job still exposes its stable failure category and
+the previous published generation remains untouched. Absolute checkout paths,
+source/parser text, literals, database URLs, and driver messages are not part of
+the MCP result.
 
 Watcher events use a 750 ms quiet window with a default two-second hard
 coalescing deadline, then call the indexer's own manifest/no-op fence directly.

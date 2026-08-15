@@ -3064,10 +3064,26 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
             .map_err(|error| error.to_string())?;
     }
     let result = runtime.index(options).await;
-    let report = result.map_err(error_codes::direct_index_failure_message)?;
-    print_index_report(&report, format)?;
-    runtime.close().await;
-    Ok(ExitCode::SUCCESS)
+    match result {
+        Ok(report) => {
+            let rendered = print_index_report(&report, format);
+            runtime.close().await;
+            rendered?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(error) if matches!(format, OutputFormat::Json) => {
+            let rendered = error_codes::direct_index_failure_json(&error)
+                .map_err(|_| "could not serialize the index failure".to_owned())?;
+            runtime.close().await;
+            eprintln!("{rendered}");
+            Ok(ExitCode::FAILURE)
+        }
+        Err(error) => {
+            let rendered = error_codes::direct_index_failure_message(&error);
+            runtime.close().await;
+            Err(rendered)
+        }
+    }
 }
 
 async fn run_sync_if_dirty(
@@ -3097,11 +3113,11 @@ async fn run_sync_if_dirty(
         None => runtime
             .register_agent_state_project()
             .await
-            .map_err(error_codes::direct_index_failure_message)?,
+            .map_err(|error| error_codes::direct_index_failure_message(&error))?,
     };
     let outcome = sync_if_dirty_index(&runtime, project_id, options)
         .await
-        .map_err(error_codes::direct_index_failure_message)?;
+        .map_err(|error| error_codes::direct_index_failure_message(&error))?;
     if !quiet {
         match outcome {
             SyncIfDirtyIndexOutcome::Indexed { published: true } => {

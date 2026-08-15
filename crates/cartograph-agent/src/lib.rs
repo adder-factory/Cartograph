@@ -47,7 +47,9 @@ use cartograph_indexer::{
     SupervisorRequest, build_native_generation_spilled,
     build_native_generation_with_scip_and_cache,
 };
-pub use cartograph_indexer::{PipelineFailureReason, PipelineStage, SupervisorStatus};
+pub use cartograph_indexer::{
+    PipelineFailureReason, PipelineFileFailure, PipelineStage, SupervisorStatus,
+};
 use cartograph_llm::{
     ProjectGenerationStorage, ProjectSourceSettings, load_project_source_settings,
 };
@@ -1860,6 +1862,9 @@ impl PreparedIndexPublication {
             Err(SupervisorError::PipelineWithReason { stage, reason }) => {
                 return Err(ProjectError::IndexStageFailedWithReason { stage, reason });
             }
+            Err(SupervisorError::PipelineWithFileFailure { stage, failure }) => {
+                return Err(ProjectError::IndexStageFileFailed { stage, failure });
+            }
             Err(SupervisorError::Cancelled {
                 reason: cartograph_indexer::CancellationReason::ProgressStalled,
                 ..
@@ -1967,6 +1972,9 @@ async fn prepare_generation(
 }
 
 fn native_pipeline_failure(error: &cartograph_indexer::NativePipelineError) -> PipelineFailure {
+    if let Some(failure) = error.file_failure() {
+        return PipelineFailure::with_file_failure(error.stage(), failure.clone());
+    }
     match error.reason() {
         Some(reason) => PipelineFailure::with_reason(error.stage(), reason),
         None => PipelineFailure::new(error.stage()),
@@ -2743,7 +2751,7 @@ pub(crate) fn utf8_boundary(value: &str, maximum: usize) -> usize {
 }
 
 /// Credential-safe project service failures.
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ProjectError {
     /// Project root is missing, inaccessible, or not a directory.
     #[error("Cartograph project root is unavailable")]
@@ -2801,6 +2809,16 @@ pub enum ProjectError {
         stage: PipelineStage,
         /// Stable allowlisted reason with source and driver text discarded.
         reason: PipelineFailureReason,
+    },
+    /// One exact native pipeline input failed with a bounded relative-path diagnostic.
+    #[error(
+        "Cartograph index operation failed during {stage}/{failure}; the previous generation remains visible"
+    )]
+    IndexStageFileFailed {
+        /// Stable credential-safe stage identifier.
+        stage: PipelineStage,
+        /// Validated project-relative path plus an allowlisted failure reason.
+        failure: PipelineFileFailure,
     },
     /// The index operation could not acquire or retain its exact lease.
     #[error(
@@ -2929,6 +2947,34 @@ mod tests {
         assert_eq!(
             public.to_string(),
             "Cartograph index operation failed during reduce/reference_name_too_long; the previous generation remains visible"
+        );
+
+        let path = NormalizedPath::parse("src/broken.rs")
+            .unwrap_or_else(|error| panic!("fixture path was invalid: {error}"));
+        let input = native_pipeline_failure(
+            &cartograph_indexer::NativePipelineError::StageWithFileFailure {
+                stage: PipelineStage::Parse,
+                failure: PipelineFileFailure::new(
+                    path,
+                    PipelineFailureReason::ExtractionParserStopped,
+                ),
+            },
+        );
+        let input_failure = input
+            .file_failure()
+            .unwrap_or_else(|| panic!("native parser failure lost its input path"));
+        assert_eq!(input_failure.path().as_str(), "src/broken.rs");
+        assert_eq!(
+            input_failure.reason(),
+            PipelineFailureReason::ExtractionParserStopped
+        );
+        let public = ProjectError::IndexStageFileFailed {
+            stage: input.stage(),
+            failure: input_failure.clone(),
+        };
+        assert_eq!(
+            public.to_string(),
+            "Cartograph index operation failed during parse/extraction_parser_stopped at project-relative path \"src/broken.rs\"; the previous generation remains visible"
         );
     }
 

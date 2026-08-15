@@ -110,6 +110,15 @@ paths use bounded parse callbacks; every path polls cancellation and enforces
 fact/string/modeled-output limits. Grammar-backed malformed syntax returns
 recoverable diagnostics instead of panicking.
 
+A fatal file-local read or extraction failure crosses the public boundary only
+as one validated project-relative `NormalizedPath` and an allowlisted reason.
+Source drift, unavailable grammar, parser stop, invalid span, cancellation,
+nesting policy, nesting exhaustion, and modeled-output exhaustion remain
+distinct. Direct text escapes the relative path, JSON returns a structured file
+failure, and MCP admin status retains the same bounded evidence. Absolute
+checkout paths, source/parser text, literals, database URLs, and driver errors
+are discarded before the indexer supervisor boundary.
+
 Syntax-tree depth is independently bounded by `maxAstDepth` (default `256`,
 range `64..=1024`). A file that exceeds it is retained as a partial file with
 the `nesting_limit_exceeded` degraded reason and its exact normalized

@@ -589,7 +589,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cartograph-agent"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-cli"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "blake3",
  "cartograph-agent",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-config"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "secrecy",
  "thiserror",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-db"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-domain"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "blake3",
  "serde",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-extract"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "arborium-bash",
  "arborium-c",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-indexer"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-llm"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "blake3",
  "cartograph-domain",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-mcp"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "serde",
  "serde_json",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-scip"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "blake3",
  "cartograph-db",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-search"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "cartograph-db",
  "cartograph-domain",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-test-support"
-version = "2.1.17"
+version = "2.1.18"
 dependencies = [
  "sqlx-core",
  "sqlx-postgres",

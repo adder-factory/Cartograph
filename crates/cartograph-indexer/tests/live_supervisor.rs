@@ -31,12 +31,14 @@ use cartograph_domain::{
 use cartograph_extract::{DiscoveryLimits, SourceLimits, SourceRoot};
 use cartograph_indexer::{
     CancellationReason, IndexerSupervisor, NativeGenerationBuild, NativeGenerationStorage,
-    NativeParseCache, NativePipelineConfig, NativePipelineDeadlines, NativePipelineLimits,
-    NativePipelineParallelism, NativePipelineReport, NativeRetainedLimits, PipelineFailure,
-    PipelineStage, StageCapacity, StageDeadlinePolicy, StageEnvelope, StageExecution, StageFold,
-    StageItemBudget, StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageSequence,
-    StageWorkItem, StageWorkload, SupervisorConfig, SupervisorError, SupervisorRequest,
-    SupervisorState, build_native_generation, build_native_generation_spilled,
+    NativeParseCache, NativePipelineConfig, NativePipelineDeadlines, NativePipelineError,
+    NativePipelineLimits, NativePipelineParallelism, NativePipelineReport, NativeRetainedLimits,
+    PipelineFailure, PipelineFailureReason, PipelineStage, StageCapacity, StageDeadlinePolicy,
+    StageEnvelope, StageExecution, StageFailureKind, StageFold, StageItemBudget, StageItemFailure,
+    StageItemMeta, StageOutput, StageRunConfig, StageRunError, StageSequence, StageWorkItem,
+    StageWorkload, SupervisorConfig, SupervisorError, SupervisorRequest, SupervisorState,
+    build_native_generation, build_native_generation_spilled,
+    build_native_generation_with_scip_and_cache,
 };
 use cartograph_test_support::TestSchemaGuard;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -159,6 +161,11 @@ const SPILL_PARITY_STAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const SPILL_PARITY_OPERATION_TIMEOUT: Duration = Duration::from_mins(1);
 const SPILL_PARITY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10);
 const SPILL_PARITY_LEASE_DURATION: Duration = Duration::from_secs(30);
+const CACHE_PROBE_ORIGINAL: &str = "pub fn cached_probe() -> u32 { 1 }\n";
+const CACHE_PROBE_CHANGED: &str = "pub fn cached_probe() -> u32 { 2 }\n";
+const SPILL_PARSE_BATCH_FILES: usize = 64;
+const SPILL_ITEM_DEADLINE: Duration = Duration::from_millis(500);
+const SPILL_DELAY_SECONDS: &str = "2.0";
 const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
 const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 16;
 const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
@@ -792,6 +799,21 @@ async fn bounded_parallel_stage_reduces_before_supervised_publication() {
     fixture.close().await;
 }
 
+fn assert_cache_drift_failure(
+    result: &Result<CurrentGeneration, SupervisorError>,
+    storage: CacheProbeStorage,
+) {
+    let Err(SupervisorError::PipelineWithFileFailure { stage, failure }) = result else {
+        panic!("{storage:?} cache drift returned the wrong failure: {result:?}");
+    };
+    assert_eq!(*stage, PipelineStage::Parse);
+    assert_eq!(failure.path().as_str(), "src/cache_probe.rs");
+    assert_eq!(
+        failure.reason(),
+        PipelineFailureReason::SourceChangedDuringParse
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
 async fn native_source_pipeline_copies_publishes_and_is_bm25_searchable() {
@@ -962,6 +984,281 @@ async fn postgres_spill_matches_memory_digest_centrality_and_publication() {
     fixture.close().await;
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CacheProbeStorage {
+    Memory,
+    PostgreSql,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn cache_hit_revalidation_preserves_source_drift_in_memory_and_postgres_spill() {
+    let directory = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("could not create cache revalidation fixture: {error}"));
+    write_cache_probe_project(directory.path(), CACHE_PROBE_ORIGINAL);
+    let fixture = open_fixture().await;
+    publish_cache_probe(&fixture, directory.path()).await;
+    assert_parse_cache_populated(&fixture).await;
+
+    for storage in [CacheProbeStorage::Memory, CacheProbeStorage::PostgreSql] {
+        write_cache_probe_project(directory.path(), CACHE_PROBE_ORIGINAL);
+        let staged = begin_generation(&fixture).await;
+        let generation_id = staged.generation_id().clone();
+        let target = target(&fixture.project, &generation_id);
+        let source = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not reopen {storage:?} cache fixture: {error}"));
+        let cache = NativeParseCache::new(fixture.database.clone(), fixture.project.clone());
+        let build = NativeGenerationBuild::new(source, native_spill_pipeline_config())
+            .with_parse_cache(cache);
+        let lock_statement = format!(
+            r#"LOCK TABLE "{}"."native_parse_cache" IN ACCESS EXCLUSIVE MODE"#,
+            fixture.schema
+        );
+        let mut table_lock =
+            fixture.pool.begin().await.unwrap_or_else(|error| {
+                panic!("{storage:?} cache lock transaction failed: {error}")
+            });
+        query(AssertSqlSafe(lock_statement))
+            .execute(&mut *table_lock)
+            .await
+            .unwrap_or_else(|error| panic!("{storage:?} cache table lock failed: {error}"));
+        let supervisor =
+            IndexerSupervisor::new(fixture.database.clone(), spill_parity_supervisor_config());
+        let supervisor_request = request_with_duration(target.clone(), SPILL_PARITY_LEASE_DURATION);
+        let handle = tokio::spawn(async move {
+            supervisor
+                .run(supervisor_request, move |context| async move {
+                    match storage {
+                        CacheProbeStorage::Memory => {
+                            let native = build_native_generation_with_scip_and_cache(
+                                &context.stages(),
+                                build,
+                            )
+                            .await
+                            .map_err(|error| native_pipeline_failure(&error))?;
+                            let (facts, _) = native.into_parts();
+                            context
+                                .progress()
+                                .begin_stage(PipelineStage::Copy)
+                                .await
+                                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                            context
+                                .prepare_generation(GenerationContents::new(staged, facts))
+                                .await
+                                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+                        }
+                        CacheProbeStorage::PostgreSql => {
+                            let spill = context
+                                .generation_spill(&staged, NativeGenerationSpillPolicy::default())
+                                .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+                            let native =
+                                build_native_generation_spilled(&context.stages(), build, spill)
+                                    .await
+                                    .map_err(|error| native_pipeline_failure(&error))?;
+                            let (digest, _) = native.into_parts();
+                            context
+                                .progress()
+                                .begin_stage(PipelineStage::Copy)
+                                .await
+                                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                            context
+                                .prepare_spilled_generation(SpilledGenerationContents::new(
+                                    staged, digest,
+                                ))
+                                .await
+                                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+                        }
+                    }
+                })
+                .await
+        });
+        wait_for_schema_lock(&fixture.pool, &fixture.schema, "native_parse_cache").await;
+        write_cache_probe_project(directory.path(), CACHE_PROBE_CHANGED);
+        table_lock
+            .rollback()
+            .await
+            .unwrap_or_else(|error| panic!("{storage:?} cache lock rollback failed: {error}"));
+        let result = tokio::time::timeout(SPILL_PARITY_OPERATION_TIMEOUT, handle)
+            .await
+            .unwrap_or_else(|error| panic!("{storage:?} cache build timed out: {error}"))
+            .unwrap_or_else(|error| panic!("{storage:?} cache build task failed: {error}"));
+        assert_cache_drift_failure(&result, storage);
+        assert_generation_state(&fixture, &generation_id, GenerationState::Failed).await;
+        assert!(matches!(
+            fixture.database.lease_status(&target).await,
+            Ok(None)
+        ));
+    }
+
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn postgres_spill_in_loop_storage_fault_is_not_attributed_to_a_source_file() {
+    let directory = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("could not create spill fault fixture: {error}"));
+    write_spill_batch_project(directory.path());
+    let fixture = open_fixture().await;
+    install_spill_batch_failure(&fixture).await;
+    let staged = begin_generation(&fixture).await;
+    let generation_id = staged.generation_id().clone();
+    let target = target(&fixture.project, &generation_id);
+    let source = open_parity_source(directory.path(), "spill fault");
+    let build = NativeGenerationBuild::new(source, native_spill_pipeline_config());
+    let supervisor =
+        IndexerSupervisor::new(fixture.database.clone(), spill_parity_supervisor_config());
+    let (error_sender, error_receiver) = oneshot::channel();
+    let result = supervisor
+        .run(
+            request_with_duration(target.clone(), SPILL_PARITY_LEASE_DURATION),
+            move |context| async move {
+                let spill = context
+                    .generation_spill(&staged, NativeGenerationSpillPolicy::default())
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+                match build_native_generation_spilled(&context.stages(), build, spill).await {
+                    Ok(native) => {
+                        let (digest, _) = native.into_parts();
+                        context
+                            .progress()
+                            .begin_stage(PipelineStage::Copy)
+                            .await
+                            .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                        context
+                            .prepare_spilled_generation(SpilledGenerationContents::new(
+                                staged, digest,
+                            ))
+                            .await
+                            .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+                    }
+                    Err(error) => {
+                        let failure = native_pipeline_failure(&error);
+                        let _ = error_sender.send(error);
+                        Err(failure)
+                    }
+                }
+            },
+        )
+        .await;
+    let native_error = error_receiver
+        .await
+        .unwrap_or_else(|error| panic!("spill fault omitted its native failure: {error}"));
+
+    assert!(matches!(
+        native_error,
+        NativePipelineError::Spill {
+            stage: PipelineStage::Parse
+        }
+    ));
+    assert!(native_error.file_failure().is_none());
+    assert!(matches!(
+        result,
+        Err(SupervisorError::Pipeline {
+            stage: PipelineStage::Parse
+        })
+    ));
+    assert_generation_state(&fixture, &generation_id, GenerationState::Failed).await;
+    assert!(matches!(
+        fixture.database.lease_status(&target).await,
+        Ok(None)
+    ));
+
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn postgres_spill_item_deadline_remains_deadline_without_file_attribution() {
+    let directory = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("could not create spill deadline fixture: {error}"));
+    write_spill_batch_project(directory.path());
+    let fixture = open_fixture().await;
+    install_spill_batch_delay(&fixture).await;
+    let staged = begin_generation(&fixture).await;
+    let generation_id = staged.generation_id().clone();
+    let target = target(&fixture.project, &generation_id);
+    let source = open_parity_source(directory.path(), "spill deadline");
+    let config =
+        native_pipeline_config_with_deadlines(SPILL_ITEM_DEADLINE, SPILL_PARITY_STAGE_TIMEOUT);
+    let build = NativeGenerationBuild::new(source, config);
+    let supervisor =
+        IndexerSupervisor::new(fixture.database.clone(), spill_deadline_supervisor_config());
+    let observer_pool = fixture.pool.clone();
+    let observer_schema = fixture.schema.clone();
+    let (error_sender, error_receiver) = oneshot::channel();
+    let result = supervisor
+        .run(
+            request_with_duration(target.clone(), SPILL_PARITY_LEASE_DURATION),
+            move |context| async move {
+                let spill = context
+                    .generation_spill(&staged, NativeGenerationSpillPolicy::default())
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+                match build_native_generation_spilled(&context.stages(), build, spill).await {
+                    Ok(native) => {
+                        let (digest, _) = native.into_parts();
+                        context
+                            .progress()
+                            .begin_stage(PipelineStage::Copy)
+                            .await
+                            .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                        context
+                            .prepare_spilled_generation(SpilledGenerationContents::new(
+                                staged, digest,
+                            ))
+                            .await
+                            .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+                    }
+                    Err(error) => {
+                        let failure = native_pipeline_failure(&error);
+                        let _ = error_sender.send(error);
+                        wait_for_query_absent(
+                            &observer_pool,
+                            &observer_schema,
+                            "%native_generation_spill_batches%",
+                        )
+                        .await;
+                        Err(failure)
+                    }
+                }
+            },
+        )
+        .await;
+    let native_error = error_receiver
+        .await
+        .unwrap_or_else(|error| panic!("spill deadline omitted its native failure: {error}"));
+
+    assert!(matches!(
+        native_error,
+        NativePipelineError::Stage(StageRunError::Item {
+            stage: PipelineStage::Parse,
+            kind: StageFailureKind::Deadline,
+            ..
+        })
+    ));
+    assert_eq!(
+        native_error.reason(),
+        Some(PipelineFailureReason::DeadlineExceeded)
+    );
+    assert!(native_error.file_failure().is_none());
+    assert!(
+        matches!(
+            result,
+            Err(SupervisorError::PipelineWithReason {
+                stage: PipelineStage::Parse,
+                reason: PipelineFailureReason::DeadlineExceeded
+            })
+        ),
+        "spill deadline returned the wrong supervised failure: {result:?}"
+    );
+    assert_generation_state(&fixture, &generation_id, GenerationState::Failed).await;
+    assert!(matches!(
+        fixture.database.lease_status(&target).await,
+        Ok(None)
+    ));
+
+    fixture.close().await;
+}
+
 async fn assert_spill_progress_observable(
     memory_supervisor: &IndexerSupervisor,
     spill_supervisor: &IndexerSupervisor,
@@ -983,6 +1280,154 @@ fn cold_spill_build(fixture: &DatabaseFixture, source: SourceRoot) -> NativeGene
     let cache =
         NativeParseCache::new(fixture.database.clone(), fixture.project.clone()).with_reads(false);
     NativeGenerationBuild::new(source, native_spill_pipeline_config()).with_parse_cache(cache)
+}
+
+fn write_cache_probe_project(root: &std::path::Path, source: &str) {
+    std::fs::create_dir_all(root.join(".git"))
+        .unwrap_or_else(|error| panic!("could not create cache fixture root: {error}"));
+    std::fs::create_dir_all(root.join("src"))
+        .unwrap_or_else(|error| panic!("could not create cache fixture source: {error}"));
+    std::fs::write(root.join("src/cache_probe.rs"), source)
+        .unwrap_or_else(|error| panic!("could not write cache fixture source: {error}"));
+}
+
+async fn publish_cache_probe(fixture: &DatabaseFixture, root: &std::path::Path) {
+    let staged = begin_generation(fixture).await;
+    let generation_id = staged.generation_id().clone();
+    let target = target(&fixture.project, &generation_id);
+    let source = SourceRoot::open(root)
+        .unwrap_or_else(|error| panic!("could not open cache warmup source: {error}"));
+    let cache = NativeParseCache::new(fixture.database.clone(), fixture.project.clone());
+    let build =
+        NativeGenerationBuild::new(source, native_spill_pipeline_config()).with_parse_cache(cache);
+    let supervisor =
+        IndexerSupervisor::new(fixture.database.clone(), spill_parity_supervisor_config());
+    let current = supervisor
+        .run(
+            request_with_duration(target, SPILL_PARITY_LEASE_DURATION),
+            move |context| async move {
+                let native = build_native_generation_with_scip_and_cache(&context.stages(), build)
+                    .await
+                    .map_err(|error| native_pipeline_failure(&error))?;
+                let (facts, _) = native.into_parts();
+                context
+                    .progress()
+                    .begin_stage(PipelineStage::Copy)
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+                context
+                    .prepare_generation(GenerationContents::new(staged, facts))
+                    .await
+                    .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("cache warmup generation failed: {error}"));
+    assert_eq!(current.generation_id(), &generation_id);
+}
+
+async fn assert_parse_cache_populated(fixture: &DatabaseFixture) {
+    let statement = format!(
+        r#"SELECT COUNT(*) AS entries
+              FROM "{}"."native_parse_cache"
+             WHERE project_id = CAST($1 AS uuid)"#,
+        fixture.schema
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(fixture.project.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not inspect cache warmup: {error}"));
+    let entries = row
+        .try_get::<i64, _>("entries")
+        .unwrap_or_else(|error| panic!("cache warmup count was invalid: {error}"));
+    assert!(entries > 0, "cache warmup did not persist an exact entry");
+}
+
+fn native_pipeline_failure(error: &NativePipelineError) -> PipelineFailure {
+    if let Some(failure) = error.file_failure() {
+        return PipelineFailure::with_file_failure(error.stage(), failure.clone());
+    }
+    error.reason().map_or_else(
+        || PipelineFailure::new(error.stage()),
+        |reason| PipelineFailure::with_reason(error.stage(), reason),
+    )
+}
+
+fn write_spill_batch_project(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join(".git"))
+        .unwrap_or_else(|error| panic!("could not create spill fault root: {error}"));
+    std::fs::create_dir_all(root.join("src"))
+        .unwrap_or_else(|error| panic!("could not create spill fault source: {error}"));
+    for index in 0..SPILL_PARSE_BATCH_FILES {
+        let source = format!("pub fn spill_probe_{index}() -> usize {{ {index} }}\n");
+        std::fs::write(root.join(format!("src/spill_probe_{index:02}.rs")), source)
+            .unwrap_or_else(|error| panic!("could not write spill fault source: {error}"));
+    }
+}
+
+async fn install_spill_batch_failure(fixture: &DatabaseFixture) {
+    let function = format!(
+        r#"CREATE FUNCTION "{}"."fail_extracted_spill_batch"()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $cartograph$
+            BEGIN
+                IF NEW.relation = 'extracted_files' THEN
+                    RAISE EXCEPTION 'forced isolated spill append failure';
+                END IF;
+                RETURN NEW;
+            END
+            $cartograph$"#,
+        fixture.schema
+    );
+    query(AssertSqlSafe(function))
+        .execute(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not create spill fault function: {error}"));
+    let trigger = format!(
+        r#"CREATE TRIGGER fail_extracted_spill_batch
+            BEFORE INSERT ON "{}"."native_generation_spill_batches"
+            FOR EACH ROW
+            EXECUTE FUNCTION "{}"."fail_extracted_spill_batch"()"#,
+        fixture.schema, fixture.schema
+    );
+    query(AssertSqlSafe(trigger))
+        .execute(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not create spill fault trigger: {error}"));
+}
+
+async fn install_spill_batch_delay(fixture: &DatabaseFixture) {
+    let function = format!(
+        r#"CREATE FUNCTION "{}"."delay_extracted_spill_batch"()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $cartograph$
+            BEGIN
+                IF NEW.relation = 'extracted_files' THEN
+                    PERFORM pg_sleep({SPILL_DELAY_SECONDS});
+                END IF;
+                RETURN NEW;
+            END
+            $cartograph$"#,
+        fixture.schema
+    );
+    query(AssertSqlSafe(function))
+        .execute(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not create spill delay function: {error}"));
+    let trigger = format!(
+        r#"CREATE TRIGGER delay_extracted_spill_batch
+            BEFORE INSERT ON "{}"."native_generation_spill_batches"
+            FOR EACH ROW
+            EXECUTE FUNCTION "{}"."delay_extracted_spill_batch"()"#,
+        fixture.schema, fixture.schema
+    );
+    query(AssertSqlSafe(trigger))
+        .execute(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not create spill delay trigger: {error}"));
 }
 
 async fn assert_spill_parity_evidence(
@@ -1564,6 +2009,13 @@ fn native_spill_pipeline_config() -> NativePipelineConfig {
 }
 
 fn native_pipeline_config_with_timeout(stage_timeout: Duration) -> NativePipelineConfig {
+    native_pipeline_config_with_deadlines(stage_timeout, stage_timeout)
+}
+
+fn native_pipeline_config_with_deadlines(
+    item_timeout: Duration,
+    stage_timeout: Duration,
+) -> NativePipelineConfig {
     let discovery = match DiscoveryLimits::new(NATIVE_MAX_FILES, NATIVE_MAX_PATH_BYTES) {
         Ok(discovery) => discovery,
         Err(error) => panic!("native test discovery limits were invalid: {error}"),
@@ -1584,7 +2036,7 @@ fn native_pipeline_config_with_timeout(stage_timeout: Duration) -> NativePipelin
         Err(error) => panic!("native test pipeline parallelism was invalid: {error}"),
     };
     let deadlines = match NativePipelineDeadlines::new(
-        stage_timeout,
+        item_timeout,
         stage_timeout,
         STANDARD_CANCELLATION_GRACE,
     ) {
@@ -2985,6 +3437,15 @@ fn spill_parity_supervisor_config() -> SupervisorConfig {
         .with_progress_timeout(SPILL_PARITY_PROGRESS_TIMEOUT)
         .with_cancellation_grace(BOUNDARY_CANCELLATION_GRACE)
         .with_copy_timeout(BOUNDARY_COPY_TIMEOUT)
+}
+
+fn spill_deadline_supervisor_config() -> SupervisorConfig {
+    SupervisorConfig::new(SPILL_PARITY_OPERATION_TIMEOUT)
+        .with_heartbeat_interval(BOUNDARY_HEARTBEAT_INTERVAL)
+        .with_heartbeat_timeout(BOUNDARY_HEARTBEAT_TIMEOUT)
+        .with_progress_timeout(SPILL_PARITY_PROGRESS_TIMEOUT)
+        .with_cancellation_grace(BOUNDARY_CANCELLATION_GRACE)
+        .with_copy_timeout(Duration::from_secs(3))
 }
 
 fn uncertain_config() -> SupervisorConfig {

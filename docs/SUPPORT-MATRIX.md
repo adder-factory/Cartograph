@@ -1,6 +1,6 @@
 # Support Matrix
 
-Last implementation audit: 2026-08-14 (`v2.1.17`).
+Last implementation audit: 2026-08-15 (`v2.1.18`).
 
 Cartograph v2 supports all 73 v1.1.33 language modes, native TOML, 52
 dedicated textual game-scripting modes, the WGSL and Metal shader modes added

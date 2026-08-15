@@ -3,6 +3,7 @@
 mod dependency_ownership;
 
 use std::{
+    fmt::Write as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::Path,
     process::{Command, Output},
@@ -140,6 +141,89 @@ fn doctor_exposes_layered_readiness_before_the_first_generation() {
             .unwrap_or_else(|error| panic!("doctor report encoding failed: {error}"));
         assert!(!encoded.contains(&project_path));
         assert!(!encoded.contains(&database_url));
+    }));
+
+    cleanup_schema(&database_url, &schema);
+    if let Err(payload) = outcome {
+        resume_unwind(payload);
+    }
+}
+
+#[test]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+fn parse_failure_json_names_relative_input_and_preserves_the_current_generation() {
+    let database_url = std::env::var("CARTOGRAPH_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| panic!("live CLI database is not configured"));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let schema = format!("cg_cli_parse_failure_{}_{}", std::process::id(), nanos);
+    let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let project_path = project.path().to_string_lossy().into_owned();
+    write_project_fixture(project.path());
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let initial = json_success(
+            project.path(),
+            &database_url,
+            &schema,
+            &["index", &project_path, "--format", "json"],
+        );
+        let initial_generation = initial["generation_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("initial index omitted its generation identity"));
+
+        let mut excessive = String::new();
+        for index in 0..20_000 {
+            writeln!(excessive, "int v{index};")
+                .unwrap_or_else(|error| panic!("failure fixture write failed: {error}"));
+        }
+        std::fs::write(project.path().join("src/fatal-output.c"), excessive)
+            .unwrap_or_else(|error| panic!("failure fixture source write failed: {error}"));
+
+        let output = failure(
+            project.path(),
+            &database_url,
+            &schema,
+            &["index", &project_path, "--format", "json"],
+        );
+        assert!(output.stdout.is_empty());
+        let report: Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|error| {
+            panic!(
+                "index failure stderr was not standalone JSON: {error}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(
+            report["error"]["code"],
+            "parse_extraction_output_limit_exceeded"
+        );
+        assert_eq!(report["error"]["stage"], "parse");
+        assert_eq!(report["error"]["previous_generation_visible"], true);
+        assert_eq!(
+            report["error"]["file_failure"]["path"],
+            "src/fatal-output.c"
+        );
+        assert_eq!(
+            report["error"]["file_failure"]["reason"],
+            "extraction_output_limit_exceeded"
+        );
+        let encoded = String::from_utf8_lossy(&output.stderr);
+        assert!(!encoded.contains(&project_path));
+        assert!(!encoded.contains("int v19999"));
+
+        let status = json_success(
+            project.path(),
+            &database_url,
+            &schema,
+            &["status", &project_path, "--format", "json"],
+        );
+        assert_eq!(
+            status["project"]["snapshot"]["current"]["generation_id"],
+            initial_generation
+        );
+        assert_eq!(status["project"]["fresh"], false);
     }));
 
     cleanup_schema(&database_url, &schema);

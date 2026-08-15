@@ -12,7 +12,7 @@ use cartograph_db::{
     ObservedLease, OperationReconciliation, ProjectLease, ReadyGeneration, StorageError,
     TerminalGenerationMutation,
 };
-use cartograph_domain::{ContentDigest, GenerationId, ProjectId};
+use cartograph_domain::{ContentDigest, GenerationId, NormalizedPath, ProjectId};
 use thiserror::Error;
 use tokio::{
     sync::watch,
@@ -51,11 +51,58 @@ impl SupervisorRequest {
 }
 
 /// Credential-safe failure returned by a supervised pipeline future.
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-#[error("Cartograph indexing failed during the {stage:?} stage")]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("Cartograph indexing failed during the {stage} stage")]
 pub struct PipelineFailure {
     stage: PipelineStage,
-    reason: Option<PipelineFailureReason>,
+    detail: PipelineFailureDetail,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PipelineFailureDetail {
+    None,
+    Reason(PipelineFailureReason),
+    File(PipelineFileFailure),
+}
+
+/// One bounded project-relative input and its allowlisted failure reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineFileFailure {
+    path: NormalizedPath,
+    reason: PipelineFailureReason,
+}
+
+impl PipelineFileFailure {
+    /// Bind one allowlisted failure reason to a validated project-relative path.
+    #[must_use]
+    pub const fn new(path: NormalizedPath, reason: PipelineFailureReason) -> Self {
+        Self { path, reason }
+    }
+
+    /// Exact normalized path relative to the configured project root.
+    #[must_use]
+    pub const fn path(&self) -> &NormalizedPath {
+        &self.path
+    }
+
+    /// Stable credential-safe reason for this input failure.
+    #[must_use]
+    pub const fn reason(&self) -> PipelineFailureReason {
+        self.reason
+    }
+}
+
+impl fmt::Display for PipelineFileFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug-format only the already-normalized relative string so control
+        // characters cannot inject another terminal/log line.
+        write!(
+            formatter,
+            "{} at project-relative path {:?}",
+            self.reason,
+            self.path.as_str()
+        )
+    }
 }
 
 /// Stable credential-safe detail for a pipeline failure whose cause is actionable.
@@ -67,10 +114,30 @@ pub enum PipelineFailureReason {
     ProgressStalled,
     /// The configured in-memory generation ceiling rejected bounded work.
     GenerationCapacityExceeded,
+    /// One manifest input could not be reopened under the bounded source contract.
+    SourceReadFailed,
+    /// One source changed after its exact manifest entry was read.
+    SourceChangedDuringParse,
+    /// Discovery admitted a language without a production extractor.
+    ExtractionUnsupportedLanguage,
+    /// A reusable extractor received a snapshot for another language.
+    ExtractionLanguageMismatch,
+    /// A statically linked grammar was unavailable or ABI-incompatible.
+    ExtractionGrammarUnavailable,
+    /// The parser stopped before returning a syntax tree.
+    ExtractionParserStopped,
+    /// Cooperative cancellation interrupted one extraction input.
+    ExtractionCancelled,
+    /// The parser returned a source span outside the durable contract.
+    ExtractionInvalidSpan,
+    /// The configured AST-depth policy was outside the supported range.
+    ExtractionInvalidNestingLimit,
     /// One source syntax tree exceeded the extractor's defensive nesting ceiling.
     ExtractionNestingLimitExceeded,
     /// One source file exceeded its bounded modeled extraction output allowance.
     ExtractionOutputLimitExceeded,
+    /// One file-local parse operation failed without a more specific safe classification.
+    FileProcessingFailed,
     /// Canonical reduction rejected an extracted reference name above the storage bound.
     ReferenceNameTooLong,
     /// Canonical reduction rejected one bounded field, named by its stable
@@ -87,10 +154,72 @@ impl PipelineFailureReason {
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::ProgressStalled => "progress_stalled",
             Self::GenerationCapacityExceeded => "generation_capacity_exceeded",
+            Self::SourceReadFailed => "source_read_failed",
+            Self::SourceChangedDuringParse => "source_changed_during_parse",
+            Self::ExtractionUnsupportedLanguage => "extraction_unsupported_language",
+            Self::ExtractionLanguageMismatch => "extraction_language_mismatch",
+            Self::ExtractionGrammarUnavailable => "extraction_grammar_unavailable",
+            Self::ExtractionParserStopped => "extraction_parser_stopped",
+            Self::ExtractionCancelled => "extraction_cancelled",
+            Self::ExtractionInvalidSpan => "extraction_invalid_span",
+            Self::ExtractionInvalidNestingLimit => "extraction_invalid_nesting_limit",
             Self::ExtractionNestingLimitExceeded => "extraction_nesting_limit_exceeded",
             Self::ExtractionOutputLimitExceeded => "extraction_output_limit_exceeded",
+            Self::FileProcessingFailed => "file_processing_failed",
             Self::ReferenceNameTooLong => "reference_name_too_long",
             Self::CanonicalFieldRejected(_) => "canonical_field_rejected",
+        }
+    }
+
+    /// Fixed user-facing explanation that never contains source, paths, or driver text.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::DeadlineExceeded => "the bounded item or stage deadline elapsed",
+            Self::ProgressStalled => {
+                "the stage made no durable progress inside its watchdog horizon"
+            }
+            Self::GenerationCapacityExceeded => {
+                "the configured generation capacity rejected this work"
+            }
+            Self::SourceReadFailed => {
+                "the source file could not be reopened under the bounded source contract"
+            }
+            Self::SourceChangedDuringParse => {
+                "the source file changed after its manifest entry was read"
+            }
+            Self::ExtractionUnsupportedLanguage => {
+                "no production extractor was available for the admitted source language"
+            }
+            Self::ExtractionLanguageMismatch => {
+                "the selected extractor did not match the source language"
+            }
+            Self::ExtractionGrammarUnavailable => {
+                "the statically linked parser grammar was unavailable"
+            }
+            Self::ExtractionParserStopped => "the parser stopped before producing a syntax tree",
+            Self::ExtractionCancelled => "cooperative cancellation interrupted source extraction",
+            Self::ExtractionInvalidSpan => {
+                "the parser produced a source span outside the durable contract"
+            }
+            Self::ExtractionInvalidNestingLimit => {
+                "the AST-depth policy was outside the supported range"
+            }
+            Self::ExtractionNestingLimitExceeded => {
+                "the source syntax tree exceeded the configured nesting limit"
+            }
+            Self::ExtractionOutputLimitExceeded => {
+                "the extracted file facts exceeded the configured output limit"
+            }
+            Self::FileProcessingFailed => {
+                "file-local parse processing failed without a more specific safe classification"
+            }
+            Self::ReferenceNameTooLong => {
+                "an extracted reference name exceeded the canonical storage bound"
+            }
+            Self::CanonicalFieldRejected(_) => {
+                "an extracted field was rejected by the canonical storage contract"
+            }
         }
     }
 
@@ -123,7 +252,7 @@ impl PipelineFailure {
     pub const fn new(stage: PipelineStage) -> Self {
         Self {
             stage,
-            reason: None,
+            detail: PipelineFailureDetail::None,
         }
     }
 
@@ -132,20 +261,42 @@ impl PipelineFailure {
     pub const fn with_reason(stage: PipelineStage, reason: PipelineFailureReason) -> Self {
         Self {
             stage,
-            reason: Some(reason),
+            detail: PipelineFailureDetail::Reason(reason),
+        }
+    }
+
+    /// Attach one validated project-relative input and allowlisted reason.
+    #[must_use]
+    pub const fn with_file_failure(stage: PipelineStage, failure: PipelineFileFailure) -> Self {
+        Self {
+            stage,
+            detail: PipelineFailureDetail::File(failure),
         }
     }
 
     /// Stable failed stage recorded by the supervisor and structured workers.
     #[must_use]
-    pub const fn stage(self) -> PipelineStage {
+    pub const fn stage(&self) -> PipelineStage {
         self.stage
     }
 
     /// Optional allowlisted actionable reason.
     #[must_use]
-    pub const fn reason(self) -> Option<PipelineFailureReason> {
-        self.reason
+    pub const fn reason(&self) -> Option<PipelineFailureReason> {
+        match &self.detail {
+            PipelineFailureDetail::None => None,
+            PipelineFailureDetail::Reason(reason) => Some(*reason),
+            PipelineFailureDetail::File(failure) => Some(failure.reason()),
+        }
+    }
+
+    /// Optional exact project-relative input that caused the stage failure.
+    #[must_use]
+    pub const fn file_failure(&self) -> Option<&PipelineFileFailure> {
+        match &self.detail {
+            PipelineFailureDetail::File(failure) => Some(failure),
+            PipelineFailureDetail::None | PipelineFailureDetail::Reason(_) => None,
+        }
     }
 }
 
@@ -493,7 +644,7 @@ impl RunCoordinator<'_> {
         }
         if let MonitorOutcome::Failed(failure) = &outcome {
             return self
-                .fail_owned(operation, pipeline_supervisor_error(*failure))
+                .fail_owned(operation, pipeline_supervisor_error(failure.clone()))
                 .await;
         }
         if reap.worker_failed {
@@ -612,15 +763,16 @@ impl RunCoordinator<'_> {
     }
 }
 
-const fn pipeline_supervisor_error(failure: PipelineFailure) -> SupervisorError {
-    match failure.reason {
-        Some(reason) => SupervisorError::PipelineWithReason {
-            stage: failure.stage,
-            reason,
-        },
-        None => SupervisorError::Pipeline {
-            stage: failure.stage,
-        },
+fn pipeline_supervisor_error(failure: PipelineFailure) -> SupervisorError {
+    let PipelineFailure { stage, detail } = failure;
+    match detail {
+        PipelineFailureDetail::None => SupervisorError::Pipeline { stage },
+        PipelineFailureDetail::Reason(reason) => {
+            SupervisorError::PipelineWithReason { stage, reason }
+        }
+        PipelineFailureDetail::File(failure) => {
+            SupervisorError::PipelineWithFileFailure { stage, failure }
+        }
     }
 }
 
@@ -1861,6 +2013,14 @@ pub enum SupervisorError {
         /// Stable actionable reason with no source or driver text.
         reason: PipelineFailureReason,
     },
+    /// A pipeline input failed with one bounded project-relative diagnostic.
+    #[error("Cartograph indexing failed during {stage}/{failure}")]
+    PipelineWithFileFailure {
+        /// Stable pipeline stage.
+        stage: PipelineStage,
+        /// Exact normalized relative input plus one allowlisted reason.
+        failure: PipelineFileFailure,
+    },
     /// A full index operation did not identify a generation to publish.
     #[error("Cartograph indexer supervision requires a generation-bound lease target")]
     MissingGeneration,
@@ -1939,6 +2099,31 @@ const fn ownership_lost(operation: &'static str) -> SupervisorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_failure_preserves_one_relative_path_without_terminal_injection() {
+        let path = NormalizedPath::parse("src/broken\nfile.rs")
+            .unwrap_or_else(|error| panic!("fixture path was invalid: {error}"));
+        let pipeline = PipelineFailure::with_file_failure(
+            PipelineStage::Parse,
+            PipelineFileFailure::new(path, PipelineFailureReason::ExtractionParserStopped),
+        );
+        assert_eq!(pipeline.stage(), PipelineStage::Parse);
+        assert_eq!(
+            pipeline.reason(),
+            Some(PipelineFailureReason::ExtractionParserStopped)
+        );
+
+        let supervisor = pipeline_supervisor_error(pipeline);
+        let SupervisorError::PipelineWithFileFailure { stage, failure } = supervisor else {
+            panic!("file failure was flattened before the supervisor boundary");
+        };
+        assert_eq!(stage, PipelineStage::Parse);
+        assert_eq!(failure.path().as_str(), "src/broken\nfile.rs");
+        let rendered = failure.to_string();
+        assert_eq!(rendered.lines().count(), 1);
+        assert!(rendered.contains("src/broken\\nfile.rs"));
+    }
 
     #[test]
     fn cancellation_and_publication_are_one_atomic_lifecycle_decision() {

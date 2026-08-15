@@ -53,10 +53,10 @@ use tokio::{
 };
 
 use crate::{
-    PipelineFailureReason, PipelineStage, StageCancellation, StageCapacity, StageDeadlinePolicy,
-    StageEnvelope, StageExecution, StageFailureKind, StageFold, StageItemBudget, StageItemFailure,
-    StageItemMeta, StageOutput, StageRunConfig, StageRunError, StageRunner, StageSequence,
-    StageWorkItem, StageWorkload,
+    PipelineFailureReason, PipelineFileFailure, PipelineStage, StageCancellation, StageCapacity,
+    StageDeadlinePolicy, StageEnvelope, StageExecution, StageFailureKind, StageFold,
+    StageItemBudget, StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageRunError,
+    StageRunner, StageSequence, StageWorkItem, StageWorkload,
 };
 
 const MAX_PIPELINE_RETAINED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -929,6 +929,14 @@ pub enum NativePipelineError {
         /// Stable reason with source, identifier, path, and driver text discarded.
         reason: PipelineFailureReason,
     },
+    /// One file-local stage input failed with a bounded project-relative diagnostic.
+    #[error("native pipeline failed during {stage}/{failure}")]
+    StageWithFileFailure {
+        /// Exact stage whose worker returned the classified failure.
+        stage: PipelineStage,
+        /// Validated relative input path plus one allowlisted reason.
+        failure: PipelineFileFailure,
+    },
     /// Canonical validation failed with only an optional allowlisted reason retained.
     #[error("native pipeline canonical validation failed")]
     Validation {
@@ -957,6 +965,7 @@ impl NativePipelineError {
             Self::Runtime => PipelineStage::Discover,
             Self::Stage(error) => error.stage(),
             Self::StageWithReason { stage, .. }
+            | Self::StageWithFileFailure { stage, .. }
             | Self::Spill { stage }
             | Self::Incomplete { stage } => *stage,
             Self::Validation { .. } => PipelineStage::Reduce,
@@ -968,6 +977,7 @@ impl NativePipelineError {
     pub const fn reason(&self) -> Option<PipelineFailureReason> {
         match self {
             Self::StageWithReason { reason, .. } => Some(*reason),
+            Self::StageWithFileFailure { failure, .. } => Some(failure.reason()),
             Self::Validation { reason } => *reason,
             Self::Stage(
                 StageRunError::StageDeadline { .. }
@@ -977,6 +987,20 @@ impl NativePipelineError {
                 },
             ) => Some(PipelineFailureReason::DeadlineExceeded),
             Self::Runtime | Self::Stage(_) | Self::Spill { .. } | Self::Incomplete { .. } => None,
+        }
+    }
+
+    /// Optional project-relative input diagnostic retained by a file-local stage.
+    #[must_use]
+    pub const fn file_failure(&self) -> Option<&PipelineFileFailure> {
+        match self {
+            Self::StageWithFileFailure { failure, .. } => Some(failure),
+            Self::Runtime
+            | Self::Stage(_)
+            | Self::StageWithReason { .. }
+            | Self::Validation { .. }
+            | Self::Spill { .. }
+            | Self::Incomplete { .. } => None,
         }
     }
 }
@@ -1353,8 +1377,8 @@ async fn run_parse_stage(
     let source_root = stages.source_root.clone();
     let worker_cache = parse_cache;
     let maximum_ast_depth = config.maximum_ast_depth();
-    let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
-    let worker_failure_reasons = Arc::clone(&failure_reasons);
+    let failures = Arc::new(Mutex::new(BTreeMap::new()));
+    let worker_failures = Arc::clone(&failures);
     let execution = StageExecution::new(
         StageRunConfig::new(
             PipelineStage::Parse,
@@ -1366,7 +1390,7 @@ async fn run_parse_stage(
             move |item: StageWorkItem<FileId, SourceManifestEntry>| {
                 let source_root = source_root.clone();
                 let parse_cache = worker_cache.clone();
-                let failure_reasons = Arc::clone(&worker_failure_reasons);
+                let failures = Arc::clone(&worker_failures);
                 async move {
                     let cancellation = item.cancellation();
                     let (sequence, _, manifest) = item.into_parts();
@@ -1383,10 +1407,8 @@ async fn run_parse_stage(
                     match parsed {
                         Ok(parsed) => Ok(parsed),
                         Err(failure) => {
-                            if let Some(reason) = failure.reason()
-                                && let Ok(mut retained) = failure_reasons.lock()
-                            {
-                                retained.insert(sequence, reason);
+                            if let Ok(mut retained) = failures.lock() {
+                                retained.insert(sequence, failure);
                             }
                             Err(StageItemFailure)
                         }
@@ -1414,25 +1436,46 @@ async fn run_parse_stage(
             reason: PipelineFailureReason::GenerationCapacityExceeded,
         }),
         Err(error) => {
-            let reason = match &error {
+            let failure = match &error {
                 StageRunError::Item {
                     stage: PipelineStage::Parse,
                     sequence,
                     kind: StageFailureKind::Worker,
-                } => failure_reasons
+                } => failures
                     .lock()
                     .ok()
-                    .and_then(|retained| retained.get(sequence).copied()),
+                    .and_then(|retained| retained.get(sequence).cloned()),
                 _ => None,
             };
-            match reason {
-                Some(reason) => Err(NativePipelineError::StageWithReason {
-                    stage: PipelineStage::Parse,
-                    reason,
-                }),
-                None => Err(NativePipelineError::Stage(error)),
-            }
+            Err(classify_parse_stage_failure(error, failure))
         }
+    }
+}
+
+fn classify_parse_stage_failure(
+    error: StageRunError,
+    failure: Option<ParseManifestFailure>,
+) -> NativePipelineError {
+    if failure.as_ref().is_some_and(ParseManifestFailure::is_spill) {
+        return NativePipelineError::Spill {
+            stage: PipelineStage::Parse,
+        };
+    }
+    if let Some(file_failure) = failure
+        .as_ref()
+        .and_then(ParseManifestFailure::file_failure)
+    {
+        return NativePipelineError::StageWithFileFailure {
+            stage: PipelineStage::Parse,
+            failure: file_failure,
+        };
+    }
+    match failure.and_then(|failure| failure.reason()) {
+        Some(reason) => NativePipelineError::StageWithReason {
+            stage: PipelineStage::Parse,
+            reason,
+        },
+        None => NativePipelineError::Stage(error),
     }
 }
 
@@ -1649,8 +1692,8 @@ async fn run_spilled_parse_stage(
     let worker_cache = parse_cache;
     let worker_spill = spill.clone();
     let maximum_ast_depth = config.maximum_ast_depth();
-    let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
-    let worker_failure_reasons = Arc::clone(&failure_reasons);
+    let failures = Arc::new(Mutex::new(BTreeMap::new()));
+    let worker_failures = Arc::clone(&failures);
     let execution = StageExecution::new(
         StageRunConfig::new(
             PipelineStage::Parse,
@@ -1663,7 +1706,7 @@ async fn run_spilled_parse_stage(
                 let source_root = source_root.clone();
                 let parse_cache = worker_cache.clone();
                 let spill = worker_spill.clone();
-                let failure_reasons = Arc::clone(&worker_failure_reasons);
+                let failures = Arc::clone(&worker_failures);
                 async move {
                     let cancellation = item.cancellation();
                     let (sequence, _, batch) = item.into_parts();
@@ -1681,10 +1724,8 @@ async fn run_spilled_parse_stage(
                     match result {
                         Ok(parsed) => Ok(parsed),
                         Err(failure) => {
-                            if let Some(reason) = failure.reason()
-                                && let Ok(mut retained) = failure_reasons.lock()
-                            {
-                                retained.insert(sequence, reason);
+                            if let Ok(mut retained) = failures.lock() {
+                                retained.insert(sequence, failure);
                             }
                             Err(StageItemFailure)
                         }
@@ -1708,8 +1749,7 @@ async fn run_spilled_parse_stage(
             reason: PipelineFailureReason::GenerationCapacityExceeded,
         });
     }
-    let state =
-        result.map_err(|error| classify_spilled_parse_stage_error(error, &failure_reasons))?;
+    let state = result.map_err(|error| classify_spilled_parse_stage_error(error, &failures))?;
     finish_spilled_parse_stage(
         spill,
         SpilledParseCompletion {
@@ -1764,22 +1804,20 @@ async fn finish_spilled_parse_stage(
 
 fn classify_spilled_parse_stage_error(
     error: StageRunError,
-    failure_reasons: &Mutex<BTreeMap<StageSequence, PipelineFailureReason>>,
+    failures: &Mutex<BTreeMap<StageSequence, ParseManifestFailure>>,
 ) -> NativePipelineError {
-    let reason = match &error {
-        StageRunError::Item { sequence, .. } => failure_reasons
+    let failure = match &error {
+        StageRunError::Item {
+            stage: PipelineStage::Parse,
+            sequence,
+            kind: StageFailureKind::Worker,
+        } => failures
             .lock()
             .ok()
-            .and_then(|retained| retained.get(sequence).copied()),
+            .and_then(|retained| retained.get(sequence).cloned()),
         _ => None,
     };
-    match reason {
-        Some(reason) => NativePipelineError::StageWithReason {
-            stage: PipelineStage::Parse,
-            reason,
-        },
-        None => NativePipelineError::Stage(error),
-    }
+    classify_parse_stage_failure(error, failure)
 }
 
 struct SpilledParseTransaction<'spill> {
@@ -2085,8 +2123,9 @@ impl<'input, 'spill> SpilledParseBatchContext<'input, 'spill> {
             metrics.read_errors = 1;
         } else if let Some(record) = cached {
             if let Some(file) = decode_cached_file(manifest, &record) {
-                revalidate_manifest(self.source_root, manifest, self.cancellation)
-                    .map_err(|_| ParseManifestFailure::unclassified())?;
+                revalidate_manifest(self.source_root, manifest, || {
+                    self.cancellation.is_cancelled()
+                })?;
                 metrics.hits = 1;
                 return Ok(Some((
                     file,
@@ -2200,6 +2239,7 @@ async fn stream_spilled_parse_batch(
         entries.len(),
     )?;
     for (index, (entry, cached)) in entries.into_iter().zip(cached).enumerate() {
+        let path = entry.manifest.path.clone();
         let key = cache_keys.as_ref().and_then(|keys| keys.get(index));
         context
             .process(
@@ -2210,7 +2250,8 @@ async fn stream_spilled_parse_batch(
                     cache_read_failed,
                 },
             )
-            .await?;
+            .await
+            .map_err(|failure| failure.with_path(path))?;
     }
     context.finish().await
 }
@@ -2417,44 +2458,125 @@ struct ParseManifestRequest<'input> {
     maximum_ast_depth: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ParseManifestFailure {
     reason: Option<PipelineFailureReason>,
+    path: Option<NormalizedPath>,
+    scope: ParseManifestFailureScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParseManifestFailureScope {
+    File,
+    Stage,
+    Spill,
 }
 
 impl ParseManifestFailure {
     const fn unclassified() -> Self {
-        Self { reason: None }
+        Self {
+            reason: None,
+            path: None,
+            scope: ParseManifestFailureScope::File,
+        }
     }
 
     const fn from_extract(error: ExtractError) -> Self {
         let reason = match error {
+            ExtractError::UnsupportedLanguage => {
+                Some(PipelineFailureReason::ExtractionUnsupportedLanguage)
+            }
+            ExtractError::LanguageMismatch => {
+                Some(PipelineFailureReason::ExtractionLanguageMismatch)
+            }
+            ExtractError::GrammarUnavailable => {
+                Some(PipelineFailureReason::ExtractionGrammarUnavailable)
+            }
+            ExtractError::ParserStopped => Some(PipelineFailureReason::ExtractionParserStopped),
+            ExtractError::Cancelled => Some(PipelineFailureReason::ExtractionCancelled),
+            ExtractError::InvalidSpan => Some(PipelineFailureReason::ExtractionInvalidSpan),
             ExtractError::NestingLimit => {
                 Some(PipelineFailureReason::ExtractionNestingLimitExceeded)
             }
+            ExtractError::InvalidNestingLimit => {
+                Some(PipelineFailureReason::ExtractionInvalidNestingLimit)
+            }
             ExtractError::OutputLimit => Some(PipelineFailureReason::ExtractionOutputLimitExceeded),
-            ExtractError::UnsupportedLanguage
-            | ExtractError::LanguageMismatch
-            | ExtractError::GrammarUnavailable
-            | ExtractError::InvalidNestingLimit
-            | ExtractError::ParserStopped
-            | ExtractError::Cancelled
-            | ExtractError::InvalidSpan => None,
         };
-        Self { reason }
+        Self {
+            reason,
+            path: None,
+            scope: ParseManifestFailureScope::File,
+        }
+    }
+
+    const fn from_source_read(error: SourceReadError) -> Self {
+        let reason = match error {
+            SourceReadError::Cancelled => PipelineFailureReason::ExtractionCancelled,
+            SourceReadError::RootUnavailable
+            | SourceReadError::InvalidPolicy
+            | SourceReadError::FileUnavailable
+            | SourceReadError::OutsideRoot
+            | SourceReadError::NotRegularFile
+            | SourceReadError::SourceTooLarge
+            | SourceReadError::ResourceLimit
+            | SourceReadError::UnsupportedLanguage
+            | SourceReadError::InvalidSnapshot => PipelineFailureReason::SourceReadFailed,
+        };
+        Self {
+            reason: Some(reason),
+            path: None,
+            scope: ParseManifestFailureScope::File,
+        }
     }
 
     fn from_spill(error: &cartograph_db::StorageError) -> Self {
-        let reason = if spill_capacity_error(error) {
-            Some(PipelineFailureReason::GenerationCapacityExceeded)
+        if spill_capacity_error(error) {
+            Self {
+                reason: Some(PipelineFailureReason::GenerationCapacityExceeded),
+                path: None,
+                scope: ParseManifestFailureScope::Stage,
+            }
         } else {
-            None
-        };
-        Self { reason }
+            Self {
+                reason: None,
+                path: None,
+                scope: ParseManifestFailureScope::Spill,
+            }
+        }
     }
 
-    const fn reason(self) -> Option<PipelineFailureReason> {
+    const fn source_changed() -> Self {
+        Self {
+            reason: Some(PipelineFailureReason::SourceChangedDuringParse),
+            path: None,
+            scope: ParseManifestFailureScope::File,
+        }
+    }
+
+    fn with_path(mut self, path: NormalizedPath) -> Self {
+        if self.scope == ParseManifestFailureScope::File {
+            self.path = Some(path);
+            if self.reason.is_none() {
+                self.reason = Some(PipelineFailureReason::FileProcessingFailed);
+            }
+        }
+        self
+    }
+
+    const fn reason(&self) -> Option<PipelineFailureReason> {
         self.reason
+    }
+
+    fn file_failure(&self) -> Option<PipelineFileFailure> {
+        if self.scope != ParseManifestFailureScope::File {
+            return None;
+        }
+        Some(PipelineFileFailure::new(self.path.clone()?, self.reason?))
+    }
+
+    const fn is_spill(&self) -> bool {
+        matches!(self.scope, ParseManifestFailureScope::Spill)
     }
 }
 
@@ -2497,6 +2619,7 @@ async fn parse_manifest_entry_with_cache(
         parse_cache,
         maximum_ast_depth,
     } = request;
+    let path = manifest.path.clone();
     let mut metrics = NativeParseCacheReport::default();
     let key = parse_cache.map(|cache| cache.key(&manifest));
     if let (Some(cache), Some(key)) = (parse_cache, key.as_ref()) {
@@ -2509,7 +2632,8 @@ async fn parse_manifest_entry_with_cache(
                 cancellation: &cancellation,
                 metrics: &mut metrics,
             })
-            .await?
+            .await
+            .map_err(|failure| failure.with_path(path.clone()))?
             {
                 return Ok(ParsedManifestEntry {
                     file,
@@ -2521,7 +2645,9 @@ async fn parse_manifest_entry_with_cache(
         }
     }
     if cancellation.is_cancelled() {
-        return Err(ParseManifestFailure::unclassified());
+        return Err(
+            ParseManifestFailure::from_extract(ExtractError::Cancelled).with_path(path.clone())
+        );
     }
     metrics.parsed_files = 1;
     let parse_cancellation = cancellation.clone();
@@ -2534,7 +2660,9 @@ async fn parse_manifest_entry_with_cache(
         parse_manifest_entry(&request, || parse_cancellation.is_cancelled())
     })?;
     if cancellation.is_cancelled() {
-        return Err(ParseManifestFailure::unclassified());
+        return Err(
+            ParseManifestFailure::from_extract(ExtractError::Cancelled).with_path(path.clone())
+        );
     }
     if let (Some(cache), Some(key)) = (parse_cache, key.as_ref()) {
         store_cached_manifest(CacheWriteRequest {
@@ -2543,7 +2671,8 @@ async fn parse_manifest_entry_with_cache(
             file: &file,
             metrics: &mut metrics,
         })
-        .await?;
+        .await
+        .map_err(|failure| failure.with_path(path))?;
     }
     Ok(ParsedManifestEntry {
         file,
@@ -2579,8 +2708,7 @@ async fn load_cached_manifest(
                 let _ = cache.database.evict_native_parse_cache(key).await;
                 return Ok(None);
             };
-            revalidate_manifest(source_root, manifest, cancellation)
-                .map_err(|_| ParseManifestFailure::unclassified())?;
+            revalidate_manifest(source_root, manifest, || cancellation.is_cancelled())?;
             metrics.hits = 1;
             Ok(Some(file))
         }
@@ -2641,28 +2769,15 @@ fn decode_cached_file(
         .then_some(file)
 }
 
-fn revalidate_manifest(
+fn revalidate_manifest<Cancel>(
     source_root: &SourceRoot,
     manifest: &SourceManifestEntry,
-    cancellation: &StageCancellation,
-) -> Result<(), StageItemFailure> {
-    let exact_limits =
-        exact_source_limits(manifest.byte_size, exact_limit_ceiling(manifest.byte_size)?)?;
-    let snapshot = block_in_place(|| {
-        source_root.read_with_cancellation(
-            &manifest.path,
-            SourceReadOptions::new(exact_limits, || cancellation.is_cancelled()),
-        )
-    })
-    .map_err(|_| StageItemFailure)?;
-    if snapshot.byte_size() != manifest.byte_size
-        || snapshot.content_hash() != &manifest.content_hash
-        || snapshot.file_id() != &manifest.file_id
-        || snapshot.language() != manifest.language
-    {
-        return Err(StageItemFailure);
-    }
-    Ok(())
+    mut cancelled: Cancel,
+) -> Result<(), ParseManifestFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    block_in_place(|| read_manifest_snapshot(source_root, manifest, &mut cancelled)).map(|_| ())
 }
 
 async fn run_resolve_stage(
@@ -4235,12 +4350,13 @@ where
     Cancel: FnMut() -> bool,
 {
     let snapshot = read_manifest_snapshot(request.source_root, &request.manifest, &mut cancelled)?;
+    let path = snapshot.path().clone();
     let mut extractor = NativeExtractor::new(snapshot.language())
         .and_then(|extractor| extractor.with_maximum_ast_depth(request.maximum_ast_depth))
-        .map_err(ParseManifestFailure::from_extract)?;
+        .map_err(|error| ParseManifestFailure::from_extract(error).with_path(path.clone()))?;
     extractor
         .extract_with_cancellation(&snapshot, cancelled)
-        .map_err(ParseManifestFailure::from_extract)
+        .map_err(|error| ParseManifestFailure::from_extract(error).with_path(path))
 }
 
 fn read_manifest_snapshot<Cancel>(
@@ -4251,22 +4367,23 @@ fn read_manifest_snapshot<Cancel>(
 where
     Cancel: FnMut() -> bool,
 {
+    let path = manifest.path.clone();
     let ceiling = exact_limit_ceiling(manifest.byte_size)
-        .map_err(|_| ParseManifestFailure::unclassified())?;
+        .map_err(|_| ParseManifestFailure::unclassified().with_path(path.clone()))?;
     let exact_limits = exact_source_limits(manifest.byte_size, ceiling)
-        .map_err(|_| ParseManifestFailure::unclassified())?;
+        .map_err(|_| ParseManifestFailure::unclassified().with_path(path.clone()))?;
     let snapshot = source_root
         .read_with_cancellation(
             &manifest.path,
             SourceReadOptions::new(exact_limits, cancelled),
         )
-        .map_err(|_| ParseManifestFailure::unclassified())?;
+        .map_err(|error| ParseManifestFailure::from_source_read(error).with_path(path.clone()))?;
     if snapshot.byte_size() != manifest.byte_size
         || snapshot.content_hash() != &manifest.content_hash
         || snapshot.file_id() != &manifest.file_id
         || snapshot.language() != manifest.language
     {
-        return Err(ParseManifestFailure::unclassified());
+        return Err(ParseManifestFailure::source_changed().with_path(path));
     }
     Ok(snapshot)
 }
@@ -4304,16 +4421,19 @@ impl SpilledExtractorPool {
         Cancel: FnMut() -> bool,
     {
         let snapshot = read_manifest_snapshot(source_root, manifest, &mut cancelled)?;
+        let path = snapshot.path().clone();
         let language = snapshot.language();
         if !self.extractors.contains_key(&language) {
             self.extractors
                 .try_reserve(1)
-                .map_err(|_| ParseManifestFailure::unclassified())?;
+                .map_err(|_| ParseManifestFailure::unclassified().with_path(path.clone()))?;
             let extractor = NativeExtractor::new(language)
                 .and_then(|extractor| extractor.with_maximum_ast_depth(self.maximum_ast_depth))
-                .map_err(ParseManifestFailure::from_extract)?;
+                .map_err(|error| {
+                    ParseManifestFailure::from_extract(error).with_path(path.clone())
+                })?;
             if self.extractors.insert(language, extractor).is_some() {
-                return Err(ParseManifestFailure::unclassified());
+                return Err(ParseManifestFailure::unclassified().with_path(path));
             }
             #[cfg(test)]
             {
@@ -4322,9 +4442,9 @@ impl SpilledExtractorPool {
         }
         self.extractors
             .get_mut(&language)
-            .ok_or_else(ParseManifestFailure::unclassified)?
+            .ok_or_else(|| ParseManifestFailure::unclassified().with_path(path.clone()))?
             .extract_with_cancellation(&snapshot, cancelled)
-            .map_err(ParseManifestFailure::from_extract)
+            .map_err(|error| ParseManifestFailure::from_extract(error).with_path(path))
     }
 }
 
@@ -20678,19 +20798,201 @@ export function secondClone(value: number) {
             )
             .is_ok()
         );
-        assert!(matches!(
-            run_parse_stage(&stages, manifest.entries, None).await,
-            Err(NativePipelineError::Stage(StageRunError::Item {
-                stage: PipelineStage::Parse,
-                ..
-            }))
-        ));
+        let Err(error) = run_parse_stage(&stages, manifest.entries, None).await else {
+            panic!("content drift must fail the parse stage");
+        };
+        let failure = error
+            .file_failure()
+            .unwrap_or_else(|| panic!("parse failure omitted its project-relative input: {error}"));
+        assert_eq!(failure.path().as_str(), "drift.ts");
+        assert_eq!(
+            failure.reason(),
+            PipelineFailureReason::SourceChangedDuringParse
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("source_changed_during_parse"));
+        assert!(rendered.contains("\"drift.ts\""));
+        assert!(!rendered.contains(&directory.path().to_string_lossy().into_owned()));
         drop(cancellation);
         let report = tasks
             .close_abort_and_reap(Instant::now() + TEST_TIMEOUT)
             .await;
         assert!(report.all_joined);
         assert!(report.worker_failed);
+    }
+
+    #[test]
+    fn spilled_parse_item_deadline_does_not_reuse_retained_file_failure() {
+        let sequence = StageSequence::new(7);
+        let path = NormalizedPath::parse("src/innocent.rs")
+            .unwrap_or_else(|error| panic!("deadline fixture path was invalid: {error}"));
+        let failures = Mutex::new(BTreeMap::from([(
+            sequence,
+            ParseManifestFailure::from_extract(ExtractError::Cancelled).with_path(path),
+        )]));
+
+        let error = classify_spilled_parse_stage_error(
+            StageRunError::Item {
+                stage: PipelineStage::Parse,
+                sequence,
+                kind: StageFailureKind::Deadline,
+            },
+            &failures,
+        );
+
+        assert_eq!(
+            error.reason(),
+            Some(PipelineFailureReason::DeadlineExceeded)
+        );
+        assert!(error.file_failure().is_none());
+        assert!(matches!(
+            error,
+            NativePipelineError::Stage(StageRunError::Item {
+                stage: PipelineStage::Parse,
+                kind: StageFailureKind::Deadline,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn spilled_parse_storage_failure_stays_stage_scoped() {
+        let path = NormalizedPath::parse("src/not-at-fault.rs")
+            .unwrap_or_else(|error| panic!("spill fixture path was invalid: {error}"));
+        let failure = ParseManifestFailure::from_spill(&StorageError::DatabaseOperation {
+            operation: "spill-test",
+        })
+        .with_path(path);
+
+        let error = classify_parse_stage_failure(
+            StageRunError::Item {
+                stage: PipelineStage::Parse,
+                sequence: StageSequence::new(0),
+                kind: StageFailureKind::Worker,
+            },
+            Some(failure),
+        );
+
+        assert!(matches!(
+            error,
+            NativePipelineError::Spill {
+                stage: PipelineStage::Parse
+            }
+        ));
+        assert!(error.file_failure().is_none());
+        assert_eq!(error.reason(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_hit_revalidation_preserves_typed_file_reasons() {
+        const ORIGINAL: &str = "pub fn cached_probe() -> u32 { 1 }\n";
+        const CHANGED: &str = "pub fn cached_probe() -> u32 { 2 }\n";
+        let directory =
+            tempdir().unwrap_or_else(|error| panic!("could not create cache fixture: {error}"));
+        let path = directory.path().join("cached.rs");
+        fs::write(&path, ORIGINAL)
+            .unwrap_or_else(|error| panic!("could not write cache fixture: {error}"));
+        let limits = SourceLimits::new(TEST_SOURCE_BYTES)
+            .unwrap_or_else(|error| panic!("cache fixture limits were invalid: {error}"));
+        let snapshot = SourceSnapshot::from_bytes("cached.rs", ORIGINAL.as_bytes(), limits)
+            .unwrap_or_else(|error| panic!("cache fixture snapshot failed: {error}"));
+        let manifest = SourceManifestEntry {
+            path: snapshot.path().clone(),
+            language: snapshot.language(),
+            file_id: snapshot.file_id().clone(),
+            content_hash: snapshot.content_hash().clone(),
+            byte_size: snapshot.byte_size(),
+        };
+        let source_root = SourceRoot::open(directory.path())
+            .unwrap_or_else(|error| panic!("could not open cache fixture: {error}"));
+
+        fs::write(&path, CHANGED)
+            .unwrap_or_else(|error| panic!("could not mutate cache fixture: {error}"));
+        assert_revalidation_failure(
+            revalidate_manifest(&source_root, &manifest, || false),
+            PipelineFailureReason::SourceChangedDuringParse,
+        );
+
+        fs::remove_file(&path)
+            .unwrap_or_else(|error| panic!("could not remove cache fixture: {error}"));
+        assert_revalidation_failure(
+            revalidate_manifest(&source_root, &manifest, || false),
+            PipelineFailureReason::SourceReadFailed,
+        );
+
+        fs::write(&path, ORIGINAL)
+            .unwrap_or_else(|error| panic!("could not restore cache fixture: {error}"));
+        assert_revalidation_failure(
+            revalidate_manifest(&source_root, &manifest, || true),
+            PipelineFailureReason::ExtractionCancelled,
+        );
+    }
+
+    fn assert_revalidation_failure(
+        result: Result<(), ParseManifestFailure>,
+        expected: PipelineFailureReason,
+    ) {
+        let Err(failure) = result else {
+            panic!("cache revalidation unexpectedly passed");
+        };
+        let file = failure
+            .file_failure()
+            .unwrap_or_else(|| panic!("cache revalidation omitted its file diagnostic"));
+        assert_eq!(file.path().as_str(), "cached.rs");
+        assert_eq!(file.reason(), expected);
+    }
+
+    #[test]
+    fn parser_failures_retain_exact_allowlisted_reasons() {
+        let cases = [
+            (
+                ExtractError::UnsupportedLanguage,
+                PipelineFailureReason::ExtractionUnsupportedLanguage,
+            ),
+            (
+                ExtractError::LanguageMismatch,
+                PipelineFailureReason::ExtractionLanguageMismatch,
+            ),
+            (
+                ExtractError::GrammarUnavailable,
+                PipelineFailureReason::ExtractionGrammarUnavailable,
+            ),
+            (
+                ExtractError::ParserStopped,
+                PipelineFailureReason::ExtractionParserStopped,
+            ),
+            (
+                ExtractError::Cancelled,
+                PipelineFailureReason::ExtractionCancelled,
+            ),
+            (
+                ExtractError::InvalidSpan,
+                PipelineFailureReason::ExtractionInvalidSpan,
+            ),
+            (
+                ExtractError::NestingLimit,
+                PipelineFailureReason::ExtractionNestingLimitExceeded,
+            ),
+            (
+                ExtractError::InvalidNestingLimit,
+                PipelineFailureReason::ExtractionInvalidNestingLimit,
+            ),
+            (
+                ExtractError::OutputLimit,
+                PipelineFailureReason::ExtractionOutputLimitExceeded,
+            ),
+        ];
+        for (error, expected) in cases {
+            let path = NormalizedPath::parse("src/failing.rs")
+                .unwrap_or_else(|invalid| panic!("fixture path was invalid: {invalid}"));
+            let failure = ParseManifestFailure::from_extract(error).with_path(path);
+            let file = failure
+                .file_failure()
+                .unwrap_or_else(|| panic!("{error} omitted its file diagnostic"));
+            assert_eq!(file.path().as_str(), "src/failing.rs");
+            assert_eq!(file.reason(), expected);
+            assert!(!expected.description().is_empty());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -20795,8 +21097,13 @@ export function secondClone(value: number) {
         };
         assert_eq!(error.stage(), PipelineStage::Parse);
         assert_eq!(error.reason(), Some(expected));
+        let failure = error
+            .file_failure()
+            .unwrap_or_else(|| panic!("extraction failure omitted its relative input path"));
+        assert_eq!(failure.path().as_str(), file_name);
+        assert_eq!(failure.reason(), expected);
         let rendered = format!("{error:?} {error}");
-        assert!(!rendered.contains(file_name));
+        assert!(rendered.contains(file_name));
         assert!(!rendered.contains("private_output_marker"));
         assert!(!rendered.contains(&directory.path().to_string_lossy().to_string()));
         drop(cancellation);

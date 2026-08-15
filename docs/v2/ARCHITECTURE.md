@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-14 (`v2.1.17`)
+Last implementation review: 2026-08-15 (`v2.1.18`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -482,6 +482,11 @@ through to SQL or filesystem internals.
 The CLI exposes the same typed services plus managed database and project-local
 MCP installation. Background admin work has explicit job IDs/status/cancel; it
 is not an unbounded detached process.
+File-local parse failures retain one validated normalized relative path and an
+allowlisted reason through the native worker, supervisor, project runtime, and
+CLI/MCP adapters. Text paths are escaped and JSON/MCP responses are structured;
+absolute roots, source/parser text, literals, database URLs, and driver errors
+are discarded before that public boundary.
 
 ## Managed PostgreSQL
 

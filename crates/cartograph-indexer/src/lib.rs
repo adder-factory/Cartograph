@@ -44,6 +44,7 @@ pub use stage::{
     StageRunner, StageSequence, StageWorkItem, StageWorkload,
 };
 pub use supervisor::{
-    IndexerSupervisor, PipelineFailure, PipelineFailureReason, SupervisorError, SupervisorRequest,
+    IndexerSupervisor, PipelineFailure, PipelineFailureReason, PipelineFileFailure,
+    SupervisorError, SupervisorRequest,
 };
 pub use task_scope::{ScopedTask, ScopedTaskError};
