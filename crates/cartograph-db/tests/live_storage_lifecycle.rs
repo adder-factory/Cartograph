@@ -279,7 +279,12 @@ async fn assert_parse_cache_and_ready_retention(
         .storage_totals(STATEMENT_TIMEOUT)
         .await
         .unwrap_or_else(|error| panic!("compact storage totals failed: {error}"));
-    assert_eq!(totals.database_bytes, before.database_bytes);
+    // The database-wide allocation includes every schema and can change between
+    // these independent read-only transactions as PostgreSQL background work
+    // extends another relation. Each snapshot must still contain the exact
+    // Cartograph schema allocation compared below.
+    assert!(before.database_bytes >= before.schema_bytes);
+    assert!(totals.database_bytes >= totals.schema_bytes);
     assert_eq!(totals.schema_bytes, before.schema_bytes);
     assert_eq!(totals.heap_bytes, before.heap_bytes);
     assert_eq!(totals.index_bytes, before.index_bytes);
