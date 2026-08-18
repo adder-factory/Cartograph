@@ -17,8 +17,8 @@ use cartograph_db::{
     NewGeneration, NewProject, PendingEmbeddingPageInput, PendingEmbeddingPageRequest,
     RetireEmbeddingModelRequest, SearchDocumentInput, SemanticReadinessRequest,
     SemanticReadinessState, SemanticStorageError, SimilarSymbolsInput, SimilarSymbolsRequest,
-    SimilarityMaterializationPolicy, SymbolInput, VectorSearchInput, VectorSearchRequest,
-    latest_schema_version, validate_generation_facts,
+    SimilarityMaterializationPolicy, StructuralFindingRefresh, SymbolInput, VectorSearchInput,
+    VectorSearchRequest, latest_schema_version, validate_generation_facts,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, FileId, FileParseStatus, GenerationId, ModelId,
@@ -340,6 +340,14 @@ async fn assert_vector_similarity(fixture: &Fixture, scenario: &SemanticScenario
 
 async fn assert_semantic_clone_findings(fixture: &Fixture, scenario: &SemanticScenario) {
     let project = &scenario.project;
+    assert_eq!(
+        fixture
+            .database
+            .refresh_current_structural_findings(project, STATEMENT_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("semantic clone refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed
+    );
     let findings = fixture
         .database
         .current_structural_findings(project, 100)
@@ -412,6 +420,15 @@ async fn assert_non_clique_semantic_clone_component(
         .await
         .unwrap_or_else(|error| panic!("semantic chain fixture failed: {error}"));
     assert_eq!(updated.rows_affected(), 6);
+
+    assert_eq!(
+        fixture
+            .database
+            .refresh_current_structural_findings(&scenario.project, STATEMENT_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("semantic chain refresh failed: {error}")),
+        StructuralFindingRefresh::Recomputed
+    );
 
     let findings = fixture
         .database

@@ -14,6 +14,24 @@ calendar day bounding the `recently_grew` window, and the detector contract
 compiled into the binary. A detector-SQL change therefore invalidates every
 stored relation instead of serving findings the shipped rules no longer produce.
 
+Biomarker reads are deliberately non-mutating. Before the exact relation has
+been computed, `cartograph biomarkers` returns `state: not_computed`, status
+returns a pending readiness state, and an inline biomarker rollup returns an
+empty array with `biomarkerRollupState: not_computed`. Review-risk labels its
+structural-findings lens `not_computed` as well. None of those reads start the
+whole-generation detector cascade. Inspect or build the relation through
+the dry-run-first admin boundary:
+
+```sh
+cartograph admin biomarkers-refresh --json
+cartograph admin biomarkers-refresh --no-dry-run --confirm --timeout-ms 240000 --json
+```
+
+The first command reports whether the exact relation would be recomputed. The
+second is the explicit confirmed mutation; its timeout is caller-bounded from
+1 through 600000 milliseconds. Indexing publishes canonical graph facts but
+does not implicitly compute this optional derived relation.
+
 The public detector names are:
 
 - size and complexity: `large_method`, `complex_method`,
@@ -200,6 +218,7 @@ Use:
 
 ```sh
 cartograph biomarkers --help
+cartograph admin biomarkers-refresh --help
 cartograph review agent-audit --help
 cartograph hotspots --help
 cartograph coverage --help

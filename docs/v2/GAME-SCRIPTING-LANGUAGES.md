@@ -1,10 +1,10 @@
 # Game scripting language coverage
 
-Last implementation audit: 2026-08-18 (`v2.1.22`).
+Last implementation audit: 2026-08-18 (`v2.1.23`).
 
 Research inventory last reviewed: 2026-08-02 (`v2.1.7`).
 
-Cartograph v2.1.22 recognizes 130 native source-language modes. Seventy-three
+Cartograph v2.1.23 recognizes 130 native source-language modes. Seventy-three
 remain the byte-for-byte v1.1.33 parity floor, TOML remains an additive v2 mode,
 52 dedicated game, modding, and interactive-fiction scripting modes were
 introduced in v2.1.7, WGSL and Metal were added in v2.1.12, and Slang and WESL

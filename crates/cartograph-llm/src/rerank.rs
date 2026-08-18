@@ -52,14 +52,11 @@ impl RerankSettings {
         else {
             return Ok(None);
         };
-        let mut endpoint =
-            Url::parse(config.endpoint()).map_err(|_| RerankError::InvalidConfiguration)?;
-        let current = endpoint.path().trim_end_matches('/');
-        let base = current
-            .strip_suffix("/v1/rerank")
-            .or_else(|| current.strip_suffix("/v1"))
-            .unwrap_or(current);
-        endpoint.set_path(&format!("{base}/v1/rerank"));
+        let endpoint = crate::endpoint::normalize_endpoint(
+            config.endpoint(),
+            crate::endpoint::EndpointPath::Rerank,
+        )
+        .map_err(|()| RerankError::InvalidConfiguration)?;
         let timeout = config
             .timeout_ms()
             .map_or(DEFAULT_TIMEOUT, Duration::from_millis);

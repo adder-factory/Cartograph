@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-18 (`v2.1.22`).
+Last release audit: 2026-08-18 (`v2.1.23`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -32,6 +32,7 @@ cartograph affected --symbol-id <SYMBOL_ID> [--max-depth 5] [--max-nodes 40]
 cartograph show <SYMBOL_ID>
 cartograph review --ref <GIT_REF>
 cartograph doctor [PROJECT]
+cartograph admin biomarkers-refresh [--no-dry-run --confirm] [--timeout-ms 240000]
 cartograph admin scip-export [--out index.scip] [--maximum-rows 5000000]
 cartograph admin scip-import [--in index.scip] [--maximum-rows 10000000]
   [--maximum-source-bytes 268435456] [--workers 16]
@@ -115,7 +116,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.22 top-level command advertised
+This inventory contains every non-hidden v2.1.23 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -272,13 +273,26 @@ ever reads the stored relation and never evaluates the detector cascade behind
 its five-second deadline. The fingerprint covers the current generation, the
 superseded generation the growth detector compares against, imported coverage,
 materialised similarity, the calendar day bounding the growth window, and the
-detector contract compiled into the binary; any change recomputes the relation.
+detector contract compiled into the binary; any change marks the stored relation
+uncomputed until an explicit refresh replaces it.
 Before the first computation `featureReadiness.biomarkers` reports
-`state: pending` and `reason: not_computed` — never an empty finding set — and
-`cartograph biomarkers` is the explicit path that computes it under the separate
-insight deadline. `state: unavailable` with `reason: timeout` or
+`state: pending` and `reason: not_computed`; `cartograph biomarkers` returns the
+same typed state without mutation, and requested status rollups return
+`biomarkers: []` plus `biomarkerRollupState: not_computed` instead of failing.
+`cartograph admin biomarkers-refresh` is dry-run-first. Execute mode requires
+`--no-dry-run --confirm` and accepts a bounded `--timeout-ms` from 1 through
+600000. `state: unavailable` with `reason: timeout` or
 `reason: database_error` remains reserved for a storage read that genuinely
 failed.
+
+The deterministic dead-code query applies framework/test/fixture exemptions
+and materializes a PageRank-prioritized `maxCandidates` orphan window before
+outgoing-edge aggregation and source lookup. A genuine statement timeout is
+reported as `dead_code_query_timeout` with bounded retry guidance instead of a
+generic tool failure. `digest` runs its five bounded sections concurrently and
+returns each section's `ready`, `timeout`, or `unavailable` status; one failed
+section receives a safe empty/null fallback and sets `degraded: true` without
+discarding the other four.
 
 ## LLM credentials and local backend state
 

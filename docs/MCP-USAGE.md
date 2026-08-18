@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-18 (`v2.1.22`).
+Last release audit: 2026-08-18 (`v2.1.23`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -169,6 +169,25 @@ coverage. Each lens is independently bounded and reports `ready`, `timeout`, or
 `unavailable` with stage, limit, and retry guidance. Counts derived from the
 returned window are labeled `returned_rows_only`; partial non-Git or large
 project evidence is never presented as a complete scan.
+The structural-findings lens additionally reports `not_computed` with the
+explicit refresh action when its exact relation is absent; an empty result is
+therefore never mislabeled as a clean ready lens.
+
+`cartograph_biomarkers` is read-only. When the current fingerprint has no
+stored complete relation it returns `state: not_computed`, `findings: []`, and
+the exact confirmed refresh action without starting detector computation.
+`cartograph_status` preserves the rest of its payload in that state and reports
+an empty inline rollup with `biomarkerRollupState: not_computed`. The
+`cartograph_admin` `biomarkers-refresh` action is dry-run-first; execution
+requires `dryRun: false`, `confirm: true`, and optionally accepts a bounded
+`timeoutMs` from 1 through 600000.
+
+`cartograph_dead_code` materializes its deterministic, exempted
+`maxCandidates` orphan window before bounded edge/source enrichment. A database
+statement timeout is a typed `dead_code_query_timeout`. `cartograph_digest`
+isolates all five concurrent sections: `sectionStatus` records `ready`,
+`timeout`, or `unavailable`, safe fallback values replace only failed sections,
+and `degraded` states whether any section was incomplete.
 
 `cartograph_review` context mode accepts the shared `pathFilter` and
 `allowStale` fields advertised by its schema. `pathFilter` is a validated

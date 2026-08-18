@@ -1806,13 +1806,9 @@ pub async fn probe_openai_compatible_endpoint(
         return Err(ProjectLlmConfigError::InvalidTier);
     }
     crate::ensure_tls_crypto_provider().map_err(|_| ProjectLlmConfigError::InvalidTier)?;
-    let mut models_url = Url::parse(endpoint).map_err(|_| ProjectLlmConfigError::InvalidTier)?;
-    let path = models_url.path().trim_end_matches('/');
-    let base = ["/v1/chat/completions", "/v1/embeddings", "/v1/rerank"]
-        .iter()
-        .find_map(|suffix| path.strip_suffix(suffix))
-        .unwrap_or(path);
-    models_url.set_path(&format!("{base}/v1/models"));
+    let models_url =
+        crate::endpoint::normalize_endpoint(endpoint, crate::endpoint::EndpointPath::Models)
+            .map_err(|()| ProjectLlmConfigError::InvalidTier)?;
     let client = reqwest::Client::builder()
         .connect_timeout(timeout)
         .timeout(timeout)
@@ -2553,6 +2549,7 @@ fn canonical_project_root(project_root: &Path) -> Result<PathBuf, ProjectLlmConf
 mod tests {
     use super::*;
     use std::{
+        net::TcpListener,
         sync::{Arc, Barrier, mpsc},
         thread,
         time::Duration,
@@ -2566,6 +2563,71 @@ mod tests {
         "file:///tmp/model",
     ];
     const VALID_REMOTE_ENDPOINT: &str = "https://example.test";
+
+    fn spawn_model_catalog_fixture() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("model catalog listener failed: {error}"));
+        let endpoint = format!(
+            "http://{}/v1",
+            listener
+                .local_addr()
+                .unwrap_or_else(|error| panic!("model catalog address failed: {error}"))
+        );
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .unwrap_or_else(|error| panic!("model catalog accept failed: {error}"));
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap_or_else(|error| panic!("model catalog timeout failed: {error}"));
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1_024];
+            while request.len() < 64 * 1_024 && !request.windows(4).any(|part| part == b"\r\n\r\n")
+            {
+                let read = stream
+                    .read(&mut chunk)
+                    .unwrap_or_else(|error| panic!("model catalog read failed: {error}"));
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request)
+                .unwrap_or_else(|error| panic!("model catalog request was not UTF-8: {error}"));
+            let (status, body) = if request.starts_with("GET /v1/models HTTP/1.1\r\n") {
+                (
+                    "200 OK",
+                    r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                )
+            } else {
+                ("404 Not Found", r#"{"error":"not found"}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .unwrap_or_else(|error| panic!("model catalog response failed: {error}"));
+            request
+        });
+        (endpoint, server)
+    }
+
+    #[tokio::test]
+    async fn endpoint_probe_reuses_existing_v1_base_for_model_catalog() {
+        let (endpoint, server) = spawn_model_catalog_fixture();
+        let probe = probe_openai_compatible_endpoint(&endpoint, Duration::from_secs(2))
+            .await
+            .unwrap_or_else(|error| panic!("model catalog probe failed: {error}"));
+        assert!(probe.reachable);
+        assert!(probe.openai_compatible);
+        assert_eq!(probe.models, vec!["fixture-model"]);
+        let request = server
+            .join()
+            .unwrap_or_else(|_| panic!("model catalog server panicked"));
+        assert!(request.starts_with("GET /v1/models HTTP/1.1\r\n"));
+    }
 
     #[test]
     fn project_config_round_trips_without_replacing_unrelated_fields() {

@@ -6,11 +6,12 @@ use serde_json::Value;
 use sqlx_core::{column::ColumnIndex, row::Row};
 
 use crate::{
-    CartographDatabase, StorageError, StructuralFindingRefresh,
+    CartographDatabase, StorageError,
     database::{PgQuery, RowReadRequest, quoted_schema, read_rows},
 };
 
-const DEFAULT_INSIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default PostgreSQL statement deadline for bounded insight reads.
+pub const DEFAULT_INSIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_INSIGHT_LIMIT: u16 = 500;
 const MAX_IMPORT_INSIGHTS: i64 = 250_000;
 const IMPORT_INSIGHT_OVERFLOW_PROBE: i64 = MAX_IMPORT_INSIGHTS + 1;
@@ -1908,8 +1909,13 @@ impl CartographDatabase {
         request: &StructuralFindingQuery,
     ) -> Result<Vec<StructuralFinding>, StorageError> {
         validate_limit(request.limit)?;
-        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
-            .await?;
+        if self
+            .cached_current_structural_finding_stats(project_id)
+            .await?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r"SELECT symbol_id::text AS symbol_id, path, qualified_name, finding, severity,
@@ -1963,8 +1969,13 @@ impl CartographDatabase {
         request: &StructuralFindingQuery,
     ) -> Result<u64, StorageError> {
         validate_limit(request.limit)?;
-        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
-            .await?;
+        if self
+            .cached_current_structural_finding_stats(project_id)
+            .await?
+            .is_none()
+        {
+            return Ok(0);
+        }
         let schema = quoted_schema(&self.schema);
         let statement = format!(
             r"SELECT COUNT(*)::bigint
@@ -2017,10 +2028,20 @@ impl CartographDatabase {
         request: &StructuralFindingGroupQuery,
     ) -> Result<StructuralFindingGroup, StorageError> {
         validate_limit(request.per_finding_limit)?;
-        // Every sibling finding query reads the stored relation; this one backs
-        // the agent audit, which is the most detector-heavy consumer of all.
-        self.refresh_current_structural_findings(project_id, DEFAULT_INSIGHT_TIMEOUT)
-            .await?;
+        if self
+            .cached_current_structural_finding_stats(project_id)
+            .await?
+            .is_none()
+        {
+            return Ok(StructuralFindingGroup {
+                findings: Vec::new(),
+                counts: request
+                    .findings
+                    .iter()
+                    .map(|finding| (finding.clone(), 0))
+                    .collect(),
+            });
+        }
         let Some(generation) = current_generation_for_findings(self, project_id).await? else {
             return Ok(StructuralFindingGroup {
                 findings: Vec::new(),
@@ -2099,7 +2120,10 @@ impl CartographDatabase {
         Ok(StructuralFindingGroup { findings, counts })
     }
 
-    /// Aggregate every current-generation finding without a row-limit blind spot.
+    /// Read complete current-generation finding totals without recomputing them.
+    ///
+    /// A default `not_computed` value is returned when no exact stored relation
+    /// exists for the current detector-input fingerprint.
     /// # Errors
     ///
     /// Returns an error if aggregate finding totals/by-kind counts cannot be
@@ -2108,23 +2132,10 @@ impl CartographDatabase {
         &self,
         project_id: &ProjectId,
     ) -> Result<StructuralFindingStats, StorageError> {
-        let refresh = self
-            .refresh_current_structural_findings_fenced(project_id, DEFAULT_INSIGHT_TIMEOUT)
-            .await?;
-        if refresh.outcome == StructuralFindingRefresh::NoCurrentGeneration {
-            return Ok(StructuralFindingStats::default());
-        }
-        if let Some(stats) = self
+        Ok(self
             .cached_current_structural_finding_stats(project_id)
             .await?
-        {
-            return Ok(stats);
-        }
-        let current_generation = current_generation_for_findings(self, project_id).await?;
-        Err(missing_structural_finding_stats_error(
-            refresh.generation_id.as_deref(),
-            current_generation.as_deref(),
-        ))
+            .unwrap_or_default())
     }
 
     /// Aggregate the stored finding relation without ever recomputing it.
@@ -2150,7 +2161,16 @@ impl CartographDatabase {
                 "cached-structural-finding-stats",
             )
             .await?;
-        rows.pop().map(|row| decode_finding_stats(&row)).transpose()
+        let Some(row) = rows.pop() else {
+            return Ok(None);
+        };
+        if !self
+            .structural_finding_run_matches_current_inputs(project_id)
+            .await?
+        {
+            return Ok(None);
+        }
+        decode_finding_stats(&row).map(Some)
     }
 
     /// Aggregate every current-generation finding by evaluating the complete
@@ -2788,39 +2808,20 @@ const fn corrupt_insight() -> StorageError {
     StorageError::CorruptStoredValue { field: "insight" }
 }
 
-fn missing_structural_finding_stats_error(
-    refreshed_generation: Option<&str>,
-    current_generation: Option<&str>,
-) -> StorageError {
-    if refreshed_generation == current_generation && refreshed_generation.is_some() {
-        StorageError::CorruptStoredValue {
-            field: "structural_finding_run",
-        }
-    } else {
-        StorageError::CurrentGenerationChanged
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::missing_structural_finding_stats_error;
-    use crate::StorageError;
-
     #[test]
-    fn missing_structural_stats_distinguish_corruption_from_generation_drift() {
-        assert_eq!(
-            missing_structural_finding_stats_error(Some("generation-a"), Some("generation-a")),
-            StorageError::CorruptStoredValue {
-                field: "structural_finding_run"
-            }
-        );
-        assert_eq!(
-            missing_structural_finding_stats_error(Some("generation-a"), Some("generation-b")),
-            StorageError::CurrentGenerationChanged
-        );
-        assert_eq!(
-            missing_structural_finding_stats_error(Some("generation-a"), None),
-            StorageError::CurrentGenerationChanged
-        );
+    fn dead_code_candidate_cap_precedes_edge_aggregation() {
+        let statement = include_str!("sql/insights_dead_code.sql");
+        let candidates = statement
+            .find("candidates AS MATERIALIZED")
+            .unwrap_or_else(|| panic!("dead-code candidates are not materialized"));
+        let degrees = statement
+            .find("degrees AS")
+            .unwrap_or_else(|| panic!("dead-code degree aggregation is missing"));
+        let limit = statement[..degrees]
+            .rfind("LIMIT $4")
+            .unwrap_or_else(|| panic!("dead-code candidate cap is not applied before degrees"));
+        assert!(candidates < limit && limit < degrees);
     }
 }

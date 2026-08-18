@@ -1596,6 +1596,11 @@ async fn assert_native_retrieval_and_coverage(
 }
 
 async fn assert_native_framework_findings(fixture: &DatabaseFixture) {
+    fixture
+        .database
+        .refresh_current_structural_findings(&fixture.project, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|error| panic!("structural finding refresh failed: {error}"));
     let unused_exports = fixture
         .database
         .query_current_structural_findings(

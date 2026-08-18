@@ -1,6 +1,6 @@
 # CLI and MCP alignment
 
-Last release audit: 2026-08-18 (`v2.1.22`).
+Last release audit: 2026-08-18 (`v2.1.23`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands
 and 36 bounded MCP tools. Shared schemas generate ordinary CLI adapters where
@@ -75,6 +75,11 @@ retention, embedding-readiness, SCIP, and agent-workflow operations.
 
 These do not hide a coding capability from MCP. Long MCP admin operations use
 bounded jobs with explicit status/cancel instead of blocking transport.
+Biomarker reads are non-mutating on both surfaces; the explicit
+`biomarkers-refresh` admin action is dry-run-first and requires confirmation to
+compute the generation-fenced relation. Dead-code statement timeouts use the
+same typed error on CLI and MCP, while digest preserves successful sections and
+labels an incomplete section independently.
 Non-recoverable file-local index errors share the same typed project-relative
 path and fixed reason across both surfaces: direct CLI JSON uses
 `error.file_failure`, while admin job status uses `fileFailure`. Invalid spans

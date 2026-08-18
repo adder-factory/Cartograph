@@ -7,6 +7,8 @@ pub(crate) enum EndpointPath {
     ChatCompletions,
     AnthropicMessages,
     Embeddings,
+    Rerank,
+    Models,
 }
 
 impl EndpointPath {
@@ -15,6 +17,8 @@ impl EndpointPath {
             Self::ChatCompletions => "/v1/chat/completions",
             Self::AnthropicMessages => "/v1/messages",
             Self::Embeddings => "/v1/embeddings",
+            Self::Rerank => "/v1/rerank",
+            Self::Models => "/v1/models",
         }
     }
 
@@ -23,6 +27,8 @@ impl EndpointPath {
             Self::ChatCompletions => "chat/completions",
             Self::AnthropicMessages => "messages",
             Self::Embeddings => "embeddings",
+            Self::Rerank => "rerank",
+            Self::Models => "models",
         }
     }
 }
@@ -59,12 +65,25 @@ fn parse_endpoint(raw: &str) -> Result<Url, ()> {
 fn normalized_endpoint_path(path: &str, target: EndpointPath) -> String {
     if path.ends_with(target.full()) {
         path.to_owned()
-    } else if path.ends_with("/v1") {
-        format!("{path}/{}", target.after_v1())
-    } else if path.is_empty() {
-        target.full().to_owned()
     } else {
-        format!("{path}{}", target.full())
+        let base = [
+            EndpointPath::ChatCompletions,
+            EndpointPath::AnthropicMessages,
+            EndpointPath::Embeddings,
+            EndpointPath::Rerank,
+            EndpointPath::Models,
+        ]
+        .iter()
+        .find_map(|known| path.strip_suffix(known.full()))
+        .or_else(|| path.strip_suffix("/v1"))
+        .unwrap_or(path);
+        if base.is_empty() {
+            target.full().to_owned()
+        } else if path.ends_with("/v1") {
+            format!("{base}/v1/{}", target.after_v1())
+        } else {
+            format!("{base}{}", target.full())
+        }
     }
 }
 

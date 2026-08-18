@@ -2873,14 +2873,7 @@ async fn assert_structural_finding_cache(
     schema: &str,
 ) {
     let database = runtime.database();
-    assert!(
-        database
-            .cached_current_structural_finding_stats(&indexed.project_id)
-            .await
-            .unwrap_or_else(|error| panic!("uncomputed cache read failed: {error}"))
-            .is_none(),
-        "readiness must report pending before the relation is computed"
-    );
+    assert_uncomputed_structural_finding_reads(runtime, indexed).await;
 
     assert_eq!(
         database
@@ -2943,6 +2936,57 @@ async fn assert_structural_finding_cache(
             .unwrap_or_else(|error| panic!("stale fingerprint refresh failed: {error}")),
         StructuralFindingRefresh::Recomputed,
         "a moved input fingerprint must force a recomputation"
+    );
+}
+
+async fn assert_uncomputed_structural_finding_reads(
+    runtime: &ProjectRuntime,
+    indexed: &IndexReport,
+) {
+    let database = runtime.database();
+    assert!(
+        database
+            .cached_current_structural_finding_stats(&indexed.project_id)
+            .await
+            .unwrap_or_else(|error| panic!("uncomputed cache read failed: {error}"))
+            .is_none(),
+        "readiness must report pending before the relation is computed"
+    );
+
+    let uncomputed = database
+        .current_structural_finding_stats(&indexed.project_id)
+        .await
+        .unwrap_or_else(|error| panic!("uncomputed stats read failed: {error}"));
+    assert_eq!(
+        serde_json::to_value(&uncomputed)
+            .unwrap_or_else(|error| panic!("uncomputed stats serialization failed: {error}"))["state"],
+        "not_computed",
+        "a biomarker read must not start a full-generation detector refresh"
+    );
+    let uncomputed_query = StructuralFindingQuery::new(10)
+        .unwrap_or_else(|error| panic!("uncomputed finding query failed: {error}"));
+    assert!(
+        database
+            .query_current_structural_findings(&indexed.project_id, &uncomputed_query)
+            .await
+            .unwrap_or_else(|error| panic!("uncomputed findings read failed: {error}"))
+            .is_empty(),
+        "an uncomputed finding relation must degrade to an empty bounded result"
+    );
+    assert_eq!(
+        database
+            .count_current_structural_findings(&indexed.project_id, &uncomputed_query)
+            .await
+            .unwrap_or_else(|error| panic!("uncomputed finding count failed: {error}")),
+        0
+    );
+    assert!(
+        database
+            .cached_current_structural_finding_stats(&indexed.project_id)
+            .await
+            .unwrap_or_else(|error| panic!("post-read cache check failed: {error}"))
+            .is_none(),
+        "read-only biomarker queries must leave not_computed state unchanged"
     );
 }
 

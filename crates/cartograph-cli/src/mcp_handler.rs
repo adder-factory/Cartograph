@@ -40,13 +40,14 @@ use cartograph_db::{
 };
 use cartograph_db::{
     CurrentGenerationLookup, CurrentGenerationRecord, CurrentSymbolRecord, CurrentSymbolSetLookup,
-    DeadCodeQuery, FileCochangeQuery, FileDependencyDirection, FileDependencyQuery,
-    FileHistoryQuery, FileSurfaceQuery, FileTestImpactQuery, FileTestImpactResult,
-    GroupedPathInput, GroupedSymbolQuery, NumericalSiteQuery, QualifiedCentralityComparator,
-    QualifiedSymbolHit, QualifiedSymbolPage, QualifiedSymbolQuery, QualifiedSymbolSort,
-    ReadOnlySqlError, ReadOnlySqlRequest, SearchComponent, SearchHit, SimilarSymbolsResult,
-    SimilarityMaterializationPolicy, StructuralFindingGroupQuery, StructuralFindingQuery,
-    StructuralFindingSeverity, StructuralHotspotCategory, StructuralHotspotQuery,
+    DEFAULT_INSIGHT_TIMEOUT, DeadCodeQuery, FileCochangeQuery, FileDependencyDirection,
+    FileDependencyQuery, FileHistoryQuery, FileSurfaceQuery, FileTestImpactQuery,
+    FileTestImpactResult, GroupedPathInput, GroupedSymbolQuery, NumericalSiteQuery,
+    QualifiedCentralityComparator, QualifiedSymbolHit, QualifiedSymbolPage, QualifiedSymbolQuery,
+    QualifiedSymbolSort, ReadOnlySqlError, ReadOnlySqlRequest, SearchComponent, SearchHit,
+    SimilarSymbolsResult, SimilarityMaterializationPolicy, StructuralFinding,
+    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
+    StructuralFindingStats, StructuralHotspotCategory, StructuralHotspotQuery,
     StructuralHotspotSort, SymbolCoverageQuery, VectorSearchHit, read_only_sql_schema,
 };
 use cartograph_db::{
@@ -242,6 +243,7 @@ const ADMIN_DATABASE_SCHEMA_MAXIMUM_BYTES: usize = 63;
 const ADMIN_LANGUAGE_ID_MAXIMUM_BYTES: usize = 64;
 const ADMIN_DATABASE_MAXIMUM_CONNECTIONS: u16 = 64;
 const ADMIN_QUERY_TIMEOUT_MAXIMUM_MS: u64 = 600_000;
+const ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS: u64 = 240_000;
 const ADMIN_CONNECTION_TIMEOUT_MAXIMUM_SECONDS: u64 = 120;
 const ADMIN_MAX_FILE_SIZE_TEXT_BYTES: usize = 32;
 const ADMIN_RETENTION_MAXIMUM_COUNT: u32 = 10_000;
@@ -1828,8 +1830,31 @@ struct BiomarkerExecution<'input> {
     freshness: IndexFreshness,
     format: &'static str,
     low_tokens: bool,
+    stats: StructuralFindingStats,
     layer_findings: Vec<Value>,
     layer_violation_count: usize,
+}
+
+struct DigestSection {
+    value: Value,
+    status: Value,
+}
+
+impl DigestSection {
+    fn ready<T: Serialize>(value: T) -> Result<Self, ToolError> {
+        Ok(Self {
+            value: serde_json::to_value(value).map_err(internal_error)?,
+            status: json!({"state": "ready"}),
+        })
+    }
+
+    fn failed(value: Value, status: Value) -> Self {
+        Self { value, status }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.status.get("state").and_then(Value::as_str) == Some("ready")
+    }
 }
 
 struct TestsForExecution<'input> {
@@ -2435,6 +2460,39 @@ enum AdminAction {
     LlmApply,
     LlmTune,
     EmbeddingStatus,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BiomarkerRefreshOptions {
+    dry_run: bool,
+    statement_timeout: Duration,
+}
+
+fn parse_biomarker_refresh_options(
+    arguments: &Map<String, Value>,
+) -> Result<BiomarkerRefreshOptions, ToolError> {
+    reject_admin_extras(arguments, &["dryRun", "confirm", "timeoutMs"])?;
+    let dry_run = optional_bool(arguments, "dryRun")?.unwrap_or(true);
+    let confirmed = optional_bool(arguments, "confirm")?.unwrap_or(false);
+    if !dry_run && !confirmed {
+        return Err(safe_error(
+            ToolErrorCode::InvalidArguments,
+            "biomarkers-refresh requires confirm true when dryRun is false",
+        ));
+    }
+    let timeout_ms = optional_integer(
+        arguments,
+        "timeoutMs",
+        NumericBounds::new(
+            1,
+            ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS,
+            ADMIN_QUERY_TIMEOUT_MAXIMUM_MS,
+        ),
+    )?;
+    Ok(BiomarkerRefreshOptions {
+        dry_run,
+        statement_timeout: Duration::from_millis(timeout_ms),
+    })
 }
 
 const ADMIN_ACTIONS: [(&str, AdminAction); 25] = [
@@ -5381,6 +5439,60 @@ async fn host_diagnostics(
     }))
 }
 
+fn digest_storage_section<T: Serialize>(
+    stage: &'static str,
+    result: Result<T, StorageError>,
+    fallback: Value,
+) -> Result<DigestSection, ToolError> {
+    match result {
+        Ok(value) => DigestSection::ready(value),
+        Err(StorageError::StatementTimeout { .. }) => Ok(DigestSection::failed(
+            fallback,
+            json!({
+                "state": "timeout",
+                "stage": stage,
+                "errorCode": if stage == "dead_code" {
+                    "dead_code_query_timeout"
+                } else {
+                    "digest_section_timeout"
+                },
+                "timeoutMs": default_insight_timeout_millis(),
+                "retryGuidance": if stage == "dead_code" {
+                    "Run cartograph dead-code with a smaller maxCandidates bound to inspect this section directly"
+                } else {
+                    "Run the corresponding bounded Cartograph tool directly for focused evidence"
+                }
+            }),
+        )),
+        Err(_) => Ok(DigestSection::failed(
+            fallback,
+            json!({
+                "state": "unavailable",
+                "stage": stage,
+                "errorCode": "digest_section_unavailable"
+            }),
+        )),
+    }
+}
+
+fn digest_retrieval_section<T: Serialize>(
+    stage: &'static str,
+    result: Result<T, RetrievalError>,
+    fallback: Value,
+) -> Result<DigestSection, ToolError> {
+    match result {
+        Ok(value) => DigestSection::ready(value),
+        Err(_) => Ok(DigestSection::failed(
+            fallback,
+            json!({
+                "state": "unavailable",
+                "stage": stage,
+                "errorCode": "digest_section_unavailable"
+            }),
+        )),
+    }
+}
+
 impl ContextTools<'_> {
     async fn context(
         &self,
@@ -5678,15 +5790,37 @@ impl ContextTools<'_> {
             database.current_dependency_coverage(&project_id, DIGEST_SECTION_LIMIT),
             self.retrieval.entry_points(&project_id, entry_query),
         );
+        let hotspots = digest_storage_section("hotspots", hotspots, json!([]))?;
+        let findings = digest_storage_section("code_health", findings, Value::Null)?;
+        let dead_code = digest_storage_section("dead_code", dead_code, json!([]))?;
+        let dependencies = digest_storage_section("dependency_coverage", dependencies, json!([]))?;
+        let entry_points = digest_retrieval_section("entry_points", entry_points, Value::Null)?;
+        let degraded = [
+            &hotspots,
+            &findings,
+            &dead_code,
+            &dependencies,
+            &entry_points,
+        ]
+        .iter()
+        .any(|section| !section.is_ready());
         fresh_json_result(
             freshness,
             &json!({
                 "projectId": project_id,
-                "hotspots": hotspots.map_err(internal_error)?,
-                "codeHealth": findings.map_err(internal_error)?,
-                "deadCodeCandidates": dead_code.map_err(internal_error)?,
-                "dependencyCoverage": dependencies.map_err(internal_error)?,
-                "entryPoints": entry_points.map_err(internal_error)?,
+                "hotspots": hotspots.value,
+                "codeHealth": findings.value,
+                "deadCodeCandidates": dead_code.value,
+                "dependencyCoverage": dependencies.value,
+                "entryPoints": entry_points.value,
+                "sectionStatus": {
+                    "hotspots": hotspots.status,
+                    "codeHealth": findings.status,
+                    "deadCode": dead_code.status,
+                    "dependencyCoverage": dependencies.status,
+                    "entryPoints": entry_points.status,
+                },
+                "degraded": degraded,
                 "sectionsAreIndependentlyBounded": true
             }),
         )
@@ -8194,6 +8328,27 @@ impl InsightTools<'_> {
                 BiomarkerPresentation { format, low_tokens },
             );
         }
+        let Some(stats) = self
+            .runtime
+            .database()
+            .cached_current_structural_finding_stats(&project_id)
+            .await
+            .map_err(internal_error)?
+        else {
+            let evidence = json!({
+                "mode": mode.as_str(),
+                "state": "not_computed",
+                "reason": "not_computed",
+                "findings": [],
+                "currentGenerationFenced": true,
+                "nextAction": "Run cartograph admin biomarkers-refresh --no-dry-run --confirm",
+            });
+            return biomarker_result(
+                freshness,
+                &evidence,
+                BiomarkerPresentation { format, low_tokens },
+            );
+        };
         let layer_report = self
             .runtime
             .analyze_layers(&project_id, layer_cancellation)
@@ -8206,11 +8361,12 @@ impl InsightTools<'_> {
             freshness,
             format,
             low_tokens,
+            stats,
             layer_findings,
             layer_violation_count,
         };
         match mode {
-            BiomarkerMode::Stats => biomarker_stats(self, execution).await,
+            BiomarkerMode::Stats => biomarker_stats(execution),
             BiomarkerMode::Symbol => biomarker_symbols(self, execution).await,
             BiomarkerMode::Ranked => biomarker_ranked(self, execution).await,
         }
@@ -8329,7 +8485,7 @@ impl InsightTools<'_> {
             .database()
             .query_current_dead_code(&project_id, &query)
             .await
-            .map_err(internal_error)?;
+            .map_err(dead_code_storage_error)?;
         if input.via == "rule" {
             return fresh_json_result(
                 freshness,
@@ -8337,6 +8493,8 @@ impl InsightTools<'_> {
                     "via": "rule",
                     "candidates": candidates,
                     "candidateCount": candidates.len(),
+                    "candidateLimit": input.maximum_candidates,
+                    "candidateWindow": "PageRank-prioritized deterministic orphan window materialized before outgoing-edge aggregation and source lookup",
                     "graphEvidence": "non-exported with zero incoming static usage after deterministic framework, entry-point, public-container, test, and fixture exemptions",
                     "verdictFilterIgnored": arguments.contains_key("verdict"),
                     "deletionAuthorized": false,
@@ -9399,6 +9557,29 @@ struct RiskLayerFindingsOutput {
     status: Value,
 }
 
+enum RiskFindingLens {
+    Ready(Vec<StructuralFinding>),
+    NotComputed,
+}
+
+async fn load_risk_finding_lens(
+    database: &cartograph_db::CartographDatabase,
+    project_id: &ProjectId,
+    query: &StructuralFindingQuery,
+) -> Result<RiskFindingLens, StorageError> {
+    if database
+        .cached_current_structural_finding_stats(project_id)
+        .await?
+        .is_none()
+    {
+        return Ok(RiskFindingLens::NotComputed);
+    }
+    database
+        .query_current_structural_findings(project_id, query)
+        .await
+        .map(RiskFindingLens::Ready)
+}
+
 fn risk_lens_ready(limit: u16, returned: usize) -> Value {
     json!({
         "state": "ready",
@@ -9417,12 +9598,28 @@ fn risk_lens_unavailable(stage: &'static str, limit: u16) -> Value {
     })
 }
 
+fn risk_lens_not_computed(limit: u16) -> Value {
+    json!({
+        "state": "not_computed",
+        "stage": "structural_findings",
+        "limit": limit,
+        "returned": 0,
+        "truncated": false,
+        "currentGenerationFenced": true,
+        "nextAction": "Run cartograph admin biomarkers-refresh --no-dry-run --confirm",
+    })
+}
+
+fn default_insight_timeout_millis() -> u64 {
+    u64::try_from(DEFAULT_INSIGHT_TIMEOUT.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn risk_storage_lens_failure(stage: &'static str, limit: u16, error: &StorageError) -> Value {
     match error {
         StorageError::StatementTimeout { .. } => json!({
             "state": "timeout",
             "stage": stage,
-            "timeoutMs": 30_000,
+            "timeoutMs": default_insight_timeout_millis(),
             "limit": limit,
             "retryGuidance": "retry with a narrower pathFilter or smaller topN",
         }),
@@ -10613,7 +10810,7 @@ impl SummaryReviewTools<'_> {
         let (coverage_query, finding_query) = risk_review_queries(&input)?;
         let database = self.runtime.database();
         let (findings, hotspots, coverage, dead_code, layers) = tokio::join!(
-            database.query_current_structural_findings(&project_id, &finding_query),
+            load_risk_finding_lens(database, &project_id, &finding_query),
             database.current_structural_hotspots(&project_id, input.top_n),
             database.current_symbol_coverage(&project_id, &coverage_query),
             database.current_dead_code(&project_id, input.top_n, false),
@@ -10621,7 +10818,7 @@ impl SummaryReviewTools<'_> {
         );
         let mut lens_status = Map::new();
         let mut findings = match findings {
-            Ok(findings) => {
+            Ok(RiskFindingLens::Ready(findings)) => {
                 lens_status.insert(
                     "findings".to_owned(),
                     risk_lens_ready(input.top_n, findings.len()),
@@ -10630,6 +10827,10 @@ impl SummaryReviewTools<'_> {
                     .into_iter()
                     .map(|finding| serde_json::to_value(finding).map_err(internal_error))
                     .collect::<Result<Vec<_>, _>>()?
+            }
+            Ok(RiskFindingLens::NotComputed) => {
+                lens_status.insert("findings".to_owned(), risk_lens_not_computed(input.top_n));
+                Vec::new()
             }
             Err(error) => {
                 lens_status.insert(
@@ -11217,31 +11418,66 @@ impl AdminCoreTools<'_> {
         &self,
         arguments: &Map<String, Value>,
     ) -> Result<ToolResult, ToolError> {
-        reject_admin_extras(arguments, &[])?;
+        let options = parse_biomarker_refresh_options(arguments)?;
         let started = Instant::now();
         let (project_id, freshness) =
             current_project_for_evidence(self, ProjectCancellation::new(), true).await?;
         let inventory_query = FileSurfaceQuery::new(1).map_err(internal_error)?;
-        let (stats, inventory) = tokio::join!(
+        let (cached, inventory) = tokio::join!(
             self.runtime
                 .database()
-                .current_structural_finding_stats(&project_id),
+                .cached_current_structural_finding_stats(&project_id),
             self.runtime
                 .database()
                 .current_file_surface(&project_id, &inventory_query),
         );
-        let stats = stats.map_err(internal_error)?;
+        let cached = cached.map_err(internal_error)?;
         let inventory = inventory.map_err(internal_error)?;
+        if options.dry_run {
+            return fresh_json_result(
+                freshness,
+                &json!({
+                    "dryRun": true,
+                    "state": if cached.is_some() { "ready" } else { "not_computed" },
+                    "wouldRecompute": cached.is_none(),
+                    "filesScanned": inventory.total_files(),
+                    "stats": cached,
+                    "statementTimeoutMs": u64::try_from(options.statement_timeout.as_millis())
+                        .unwrap_or(u64::MAX),
+                    "nextAction": "Set dryRun false and confirm true to recompute the exact current-generation relation",
+                    "storage": "generation_fenced_derived_relation",
+                    "detectorAuthority": "complete_generation_fenced_sql_relation",
+                }),
+            );
+        }
+        let refresh = self
+            .runtime
+            .database()
+            .refresh_current_structural_findings(&project_id, options.statement_timeout)
+            .await
+            .map_err(biomarker_refresh_storage_error)?;
+        let stats = self
+            .runtime
+            .database()
+            .cached_current_structural_finding_stats(&project_id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(ToolError::internal)?;
         fresh_json_result(
             freshness,
             &json!({
+                "dryRun": false,
+                "confirmed": true,
+                "refreshOutcome": refresh,
                 "findingsEmitted": stats.total_findings(),
                 "filesScanned": inventory.total_files(),
                 "symbolsAnalyzed": stats.analyzed_symbols(),
                 "errors": 0,
                 "durationMs": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "statementTimeoutMs": u64::try_from(options.statement_timeout.as_millis())
+                    .unwrap_or(u64::MAX),
                 "stats": stats,
-                "storage": "derived_live_from_current_generation",
+                "storage": "generation_fenced_derived_relation",
                 "cacheRebuildRequired": false,
                 "detectorAuthority": "complete_generation_fenced_sql_relation",
             }),
@@ -15420,6 +15656,8 @@ fn status_biomarker_stats_pending() -> Value {
         "state": "pending",
         "reason": "not_computed",
         "detailTool": BIOMARKERS_TOOL,
+        "refreshTool": ADMIN_TOOL,
+        "nextAction": "Run cartograph admin biomarkers-refresh --no-dry-run --confirm",
         "currentGenerationFenced": true
     })
 }
@@ -15476,22 +15714,33 @@ async fn load_status_rollups(request: StatusRollupRequest<'_>) -> Result<Value, 
             .await
     };
     let biomarker_future = async {
-        if request.options.top_biomarkers == 0 || !request.source_settings.enable_biomarkers() {
-            return Ok(Vec::new());
+        if request.options.top_biomarkers == 0 {
+            return Ok((Vec::new(), "not_requested"));
+        }
+        if !request.source_settings.enable_biomarkers() {
+            return Ok((Vec::new(), "disabled_by_project_config"));
+        }
+        if database
+            .cached_current_structural_finding_stats(request.project_id)
+            .await?
+            .is_none()
+        {
+            return Ok((Vec::new(), "not_computed"));
         }
         let query = StructuralFindingQuery::new(request.options.top_biomarkers)?
             .with_minimum_severity(StructuralFindingSeverity::Warning);
         database
             .query_current_structural_findings(request.project_id, &query)
             .await
+            .map(|findings| (findings, "ready"))
     };
     let (hotspots, biomarkers) = tokio::join!(hotspot_future, biomarker_future);
+    let (biomarkers, biomarker_rollup_state) = biomarkers.map_err(internal_error)?;
     let mut biomarkers = biomarkers
-        .map_err(internal_error)?
         .into_iter()
         .map(|finding| serde_json::to_value(finding).map_err(internal_error))
         .collect::<Result<Vec<_>, _>>()?;
-    if request.options.top_biomarkers > 0 {
+    if request.options.top_biomarkers > 0 && biomarker_rollup_state == "ready" {
         biomarkers.extend(filter_layer_findings(
             request.layer_findings,
             LayerFindingFilter {
@@ -15508,6 +15757,7 @@ async fn load_status_rollups(request: StatusRollupRequest<'_>) -> Result<Value, 
     Ok(json!({
         "topHotspots": request.options.top_hotspots,
         "topBiomarkers": request.options.top_biomarkers,
+        "biomarkerRollupState": biomarker_rollup_state,
         "summaryBreakdown": request.options.summary_breakdown,
         "hotspots": hotspots.map_err(internal_error)?,
         "biomarkers": biomarkers,
@@ -17193,10 +17443,7 @@ fn biomarker_layer_evidence(report: LayerAnalysisReport) -> Result<(usize, Vec<V
     Ok((layer_violation_count, layer_findings))
 }
 
-async fn biomarker_stats(
-    handler: &CartographMcpHandler,
-    execution: BiomarkerExecution<'_>,
-) -> Result<ToolResult, ToolError> {
+fn biomarker_stats(execution: BiomarkerExecution<'_>) -> Result<ToolResult, ToolError> {
     reject_present(
         execution.arguments,
         &[
@@ -17211,13 +17458,7 @@ async fn biomarker_stats(
             "limit",
         ],
     )?;
-    let stats = handler
-        .runtime
-        .database()
-        .current_structural_finding_stats(&execution.project_id)
-        .await
-        .map_err(internal_error)?;
-    let stats = merge_layer_finding_stats(stats, execution.layer_violation_count)?;
+    let stats = merge_layer_finding_stats(execution.stats, execution.layer_violation_count)?;
     biomarker_result(
         execution.freshness,
         &json!({"mode": "stats", "stats": stats}),
@@ -19659,9 +19900,9 @@ fn admin_definition() -> Result<ToolDefinition, ToolContractError> {
         "profile": {"type": "boolean", "description": "Index/sync only. Include native bounded phase timing evidence."},
         "verbose": {"type": "boolean", "description": "Init/index/embed-only only. Retain the complete native worker and generation metrics in operator output."},
         "jobId": {"type": "integer", "minimum": 1},
-        "confirm": {"type": "boolean"},
+        "confirm": {"type": "boolean", "description": "Required with biomarkers-refresh when dryRun is false and for other explicitly guarded admin mutations."},
         "sourceSchema": {"type": "string"},
-        "dryRun": {"type": "boolean", "default": true},
+        "dryRun": {"type": "boolean", "default": true, "description": "biomarkers-refresh and storage-migrate plan without mutation by default; set false only with confirm true."},
         "maximumRows": {"type": "integer", "minimum": 1, "maximum": ADMIN_MAXIMUM_IMPORT_ROWS},
         "maximumSourceBytes": {"type": "integer", "minimum": 1, "maximum": ADMIN_DEFAULT_IMPORT_SOURCE_BYTES},
         "keepSuperseded": {"type": "integer", "minimum": 0, "maximum": ADMIN_RETENTION_MAXIMUM_COUNT},
@@ -19679,7 +19920,7 @@ fn admin_definition() -> Result<ToolDefinition, ToolContractError> {
         "endpoint": {"type": "string"},
         "model": {"type": "string"},
         "apiKeyEnv": {"type": "string"},
-        "timeoutMs": {"type": "integer", "minimum": 1, "maximum": ADMIN_QUERY_TIMEOUT_MAXIMUM_MS},
+        "timeoutMs": {"type": "integer", "minimum": 1, "maximum": ADMIN_QUERY_TIMEOUT_MAXIMUM_MS, "description": "Bounded execution timeout for biomarkers-refresh and supported LLM/SCIP admin operations."},
         "minimal": {"type": "boolean"},
         "dir": {"type": "string"},
         "writeConfig": {"type": "boolean"},
@@ -20696,6 +20937,14 @@ fn parse_file_symbol_kinds(value: Option<&str>) -> Result<Option<BTreeSet<String
 }
 
 fn render_biomarker_markdown(evidence: &Value, low_tokens: bool) -> String {
+    if evidence.get("state").and_then(Value::as_str) == Some("not_computed") {
+        return if low_tokens {
+            "# code-health state=not_computed next=biomarkers-refresh".to_owned()
+        } else {
+            "Biomarker findings have not been computed for the current generation. Run `cartograph admin biomarkers-refresh --no-dry-run --confirm` to build the bounded generation-fenced relation."
+                .to_owned()
+        };
+    }
     match evidence.get("mode").and_then(Value::as_str) {
         Some("ranked") => render_ranked_biomarker_markdown(evidence, low_tokens),
         Some("symbol") => render_symbol_biomarker_markdown(evidence, low_tokens),
@@ -24575,6 +24824,26 @@ fn dead_code_judge_error(error: DeadCodeJudgeError) -> ToolError {
     }
 }
 
+fn dead_code_storage_error(error: StorageError) -> ToolError {
+    match error {
+        StorageError::StatementTimeout { .. } => safe_error(
+            ToolErrorCode::Timeout,
+            "dead_code_query_timeout: retry with a smaller maxCandidates bound; the current generation remains available",
+        ),
+        error => internal_error(error),
+    }
+}
+
+fn biomarker_refresh_storage_error(error: StorageError) -> ToolError {
+    match error {
+        StorageError::StatementTimeout { .. } => safe_error(
+            ToolErrorCode::Timeout,
+            "biomarker_refresh_timeout: retry biomarkers-refresh with a larger bounded timeoutMs value",
+        ),
+        error => internal_error(error),
+    }
+}
+
 fn safe_error(code: ToolErrorCode, message: impl Into<String>) -> ToolError {
     match ToolError::safe(code, message) {
         Ok(error) => error,
@@ -24660,6 +24929,82 @@ mod tests {
         assert_eq!(unavailable["reason"], "timeout");
         assert_eq!(unavailable["detailTool"], BIOMARKERS_TOOL);
         assert_eq!(unavailable["currentGenerationFenced"], true);
+    }
+
+    #[test]
+    fn pending_biomarkers_name_the_explicit_refresh_boundary() {
+        let pending = status_biomarker_stats_pending();
+
+        assert_eq!(pending["state"], "pending");
+        assert_eq!(pending["reason"], "not_computed");
+        assert_eq!(pending["refreshTool"], ADMIN_TOOL);
+        assert_eq!(
+            pending["nextAction"],
+            "Run cartograph admin biomarkers-refresh --no-dry-run --confirm"
+        );
+    }
+
+    #[test]
+    fn biomarker_refresh_is_dry_run_by_default_and_requires_confirmation_to_execute() {
+        let dry_run = parse_biomarker_refresh_options(&Map::from_iter([(
+            "action".to_owned(),
+            json!("biomarkers-refresh"),
+        )]))
+        .unwrap_or_else(|error| panic!("default biomarker refresh options failed: {error:?}"));
+        assert!(dry_run.dry_run);
+        assert_eq!(
+            dry_run.statement_timeout,
+            Duration::from_millis(ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS)
+        );
+
+        let missing_confirmation = parse_biomarker_refresh_options(&Map::from_iter([
+            ("action".to_owned(), json!("biomarkers-refresh")),
+            ("dryRun".to_owned(), json!(false)),
+        ]));
+        let Err(missing_confirmation) = missing_confirmation else {
+            panic!("unconfirmed biomarker refresh execution was accepted");
+        };
+        assert_eq!(missing_confirmation.code(), ToolErrorCode::InvalidArguments);
+        assert_eq!(
+            missing_confirmation.wire_message(),
+            "biomarkers-refresh requires confirm true when dryRun is false"
+        );
+
+        let execute = parse_biomarker_refresh_options(&Map::from_iter([
+            ("action".to_owned(), json!("biomarkers-refresh")),
+            ("dryRun".to_owned(), json!(false)),
+            ("confirm".to_owned(), json!(true)),
+            ("timeoutMs".to_owned(), json!(300_000)),
+        ]))
+        .unwrap_or_else(|error| panic!("confirmed biomarker refresh options failed: {error:?}"));
+        assert!(!execute.dry_run);
+        assert_eq!(execute.statement_timeout, Duration::from_mins(5));
+    }
+
+    #[test]
+    fn dead_code_timeout_is_typed_and_digest_keeps_the_other_sections() {
+        let direct = dead_code_storage_error(StorageError::StatementTimeout {
+            operation: "current-dead-code",
+        });
+        assert_eq!(direct.code(), ToolErrorCode::Timeout);
+        assert!(
+            direct
+                .wire_message()
+                .starts_with("dead_code_query_timeout:")
+        );
+
+        let section = digest_storage_section::<Vec<Value>>(
+            "dead_code",
+            Err(StorageError::StatementTimeout {
+                operation: "current-dead-code",
+            }),
+            json!([]),
+        )
+        .unwrap_or_else(|error| panic!("digest timeout section failed: {error:?}"));
+        assert_eq!(section.value, json!([]));
+        assert_eq!(section.status["state"], "timeout");
+        assert_eq!(section.status["errorCode"], "dead_code_query_timeout");
+        assert!(!section.is_ready());
     }
 
     struct DropFlag(Arc<AtomicBool>);
@@ -25409,8 +25754,14 @@ mod tests {
         );
         assert_eq!(timeout["state"], "timeout");
         assert_eq!(timeout["stage"], "structural_findings");
-        assert_eq!(timeout["timeoutMs"], 30_000);
+        assert_eq!(timeout["timeoutMs"], default_insight_timeout_millis());
         assert_eq!(timeout["limit"], 20);
+
+        let not_computed = risk_lens_not_computed(20);
+        assert_eq!(not_computed["state"], "not_computed");
+        assert_eq!(not_computed["stage"], "structural_findings");
+        assert_eq!(not_computed["returned"], 0);
+        assert_eq!(not_computed["currentGenerationFenced"], true);
 
         let stats = returned_finding_stats(&[
             json!({"finding": "hardcoded_url", "severity": "warning"}),
@@ -28988,12 +29339,30 @@ pub fn target(value: u32) -> u32 {
             json!({"action": "create", "label": "agent-surface", "objective": "exercise every coding-agent evidence family"}),
         )
         .await;
-        execute_live_tool(
+        let pending_status = execute_live_tool(
             handler,
             STATUS_TOOL,
             json!({"verbose": true, "summaryBreakdown": true}),
         )
         .await;
+        assert_eq!(
+            pending_status["structuredContent"]["featureReadiness"]["biomarkers"]["reason"],
+            "not_computed"
+        );
+        assert_eq!(
+            pending_status["structuredContent"]["rollups"]["biomarkerRollupState"],
+            "not_computed"
+        );
+        assert_eq!(
+            pending_status["structuredContent"]["rollups"]["biomarkers"],
+            json!([])
+        );
+        let pending_risk =
+            execute_live_tool(handler, REVIEW_TOOL, json!({"mode": "risk", "topN": 5})).await;
+        assert_eq!(
+            pending_risk["structuredContent"]["evidence"]["lensStatus"]["findings"]["state"],
+            "not_computed"
+        );
         execute_live_tool(
             handler,
             CONTEXT_TOOL,
@@ -29281,6 +29650,40 @@ pub fn target(value: u32) -> u32 {
     }
 
     async fn verify_agent_analysis_surfaces(handler: &CartographMcpHandler, project: &Path) {
+        let pending = execute_live_tool(handler, BIOMARKERS_TOOL, json!({"mode": "stats"})).await;
+        assert_eq!(
+            pending["structuredContent"]["evidence"]["state"],
+            "not_computed"
+        );
+        let dry_run =
+            execute_live_tool(handler, ADMIN_TOOL, json!({"action": "biomarkers-refresh"})).await;
+        assert_eq!(
+            dry_run["structuredContent"]["evidence"]["state"],
+            "not_computed"
+        );
+        assert_eq!(
+            dry_run["structuredContent"]["evidence"]["wouldRecompute"],
+            true
+        );
+        let refreshed = execute_live_tool(
+            handler,
+            ADMIN_TOOL,
+            json!({
+                "action": "biomarkers-refresh",
+                "dryRun": false,
+                "confirm": true,
+                "timeoutMs": 30_000,
+            }),
+        )
+        .await;
+        assert_eq!(
+            refreshed["structuredContent"]["evidence"]["stats"]["state"],
+            "ready"
+        );
+        assert_eq!(
+            refreshed["structuredContent"]["evidence"]["confirmed"],
+            true
+        );
         for arguments in [
             json!({"mode": "ranked", "minSeverity": "info", "limit": 20}),
             json!({"mode": "symbol", "symbol": "root"}),

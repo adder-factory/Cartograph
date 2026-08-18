@@ -104,13 +104,13 @@ pub use ingest::{
     ReferenceSpanPrecision, SearchDocumentInput, SymbolInput, validate_generation_facts,
 };
 pub use insights::{
-    DeadCodeCandidate, DeadCodeQuery, DependencyCoverageRow, ExternalImportRecord, FileTestImpact,
-    FileTestImpactQuery, FileTestImpactResult, GroupedPathInput, GroupedSymbolPeer,
-    GroupedSymbolPeers, GroupedSymbolQuery, ImportInsight, IndexedFileFingerprint,
-    RenameReferenceSite, StructuralCoverageRow, StructuralFinding, StructuralFindingGroup,
-    StructuralFindingGroupQuery, StructuralFindingQuery, StructuralFindingSeverity,
-    StructuralFindingStats, StructuralHotspot, StructuralHotspotCategory, StructuralHotspotQuery,
-    StructuralHotspotSort,
+    DEFAULT_INSIGHT_TIMEOUT, DeadCodeCandidate, DeadCodeQuery, DependencyCoverageRow,
+    ExternalImportRecord, FileTestImpact, FileTestImpactQuery, FileTestImpactResult,
+    GroupedPathInput, GroupedSymbolPeer, GroupedSymbolPeers, GroupedSymbolQuery, ImportInsight,
+    IndexedFileFingerprint, RenameReferenceSite, StructuralCoverageRow, StructuralFinding,
+    StructuralFindingGroup, StructuralFindingGroupQuery, StructuralFindingQuery,
+    StructuralFindingSeverity, StructuralFindingStats, StructuralHotspot,
+    StructuralHotspotCategory, StructuralHotspotQuery, StructuralHotspotSort,
 };
 pub use interchange::{
     InterchangeEdge, InterchangeFile, InterchangeReference, InterchangeSnapshot,

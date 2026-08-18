@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-18 (`v2.1.22`)
+Last implementation review: 2026-08-18 (`v2.1.23`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -66,7 +66,9 @@ built it. Migration 38 admits generation digest V14 for first-class Slang/WESL m
 semantics and JavaScript static dynamic-dispatch evidence. Migration 37 adds
 the generation-fenced structural finding relation and its input
 fingerprint, so a readiness probe reads stored findings instead of evaluating
-every detector over a whole generation. Migration
+every detector over a whole generation. All finding/status/rollup reads remain
+non-mutating and expose `not_computed`; only the dry-run-first, confirmed
+`biomarkers-refresh` boundary may replace the exact derived relation. Migration
 36 admits generation digest V13 for named TypeScript/JavaScript construction
 targets. Migration 35 retains canonical search-document metadata text for exact
 SQL-streamed V13 digests; migration 34 lets generation spill reference immutable parse-cache
@@ -410,6 +412,12 @@ unchanged. Candidate source is never serialized in vector-search or retrieval
 responses. Timeout, endpoint, configuration, missing-text, and malformed-result
 paths retain cosine order and emit an explicit rerank outcome instead of
 failing lexical retrieval.
+
+Embedding, reranking, and model-catalog probes share one endpoint normalizer.
+A configured base ending in `/v1`, or in a known OpenAI-compatible operation
+path, is reduced before the target operation is appended. Doctor's model
+catalog probe therefore requests exactly `/v1/models`, matching the endpoint
+semantics used by smoke, embedding, and reranking clients.
 
 Embedding and reranking can be the only configured model tiers. Generated
 summaries, classification, `ask`, and local chat are independent optional
