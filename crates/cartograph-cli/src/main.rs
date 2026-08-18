@@ -25,11 +25,12 @@ use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{
     CapabilityReport, CartographDatabase, CheckStatus, DEFAULT_MANAGED_DATABASE_PORT,
     GenerationRetentionPolicy, GenerationRetentionRequest, GenerationStorageSummary,
-    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, ManagedContainerState,
-    ManagedDatabase, ManagedDatabaseStatus, ManagedDestructiveConfirmation,
-    ManagedDestructiveOperation, ManagedStartReport, SemanticReadinessState,
-    StorageCompactionPolicy, StorageCompactionPolicyInput, V1PostgresImportExecution,
-    V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource, V1PostgresSourceRevision,
+    GenerationValidationLimits, HeapCompactionPolicy, HeapCompactionPolicyInput, LeaseOwner,
+    LeaseRequest, LeaseTarget, ManagedContainerState, ManagedDatabase, ManagedDatabaseStatus,
+    ManagedDestructiveConfirmation, ManagedDestructiveOperation, ManagedStartReport,
+    SemanticReadinessState, StorageCompactionPolicy, StorageCompactionPolicyInput,
+    V1PostgresImportExecution, V1PostgresImportLimits, V1PostgresImportRequest, V1PostgresSource,
+    V1PostgresSourceRevision,
 };
 use cartograph_domain::{
     EdgeKind, ModelId, NormalizedPath, ProjectId, ProjectOperation, SourceLanguage, SymbolId,
@@ -82,6 +83,7 @@ const MANAGED_DATABASE_PORT_ENV: &str = "CARTOGRAPH_MANAGED_DATABASE_PORT";
 const V1_IMPORT_CONFIRMATION: &str = "import-v1-postgres";
 const RETENTION_CONFIRMATION: &str = "prune-old-generations";
 const ONLINE_COMPACTION_CONFIRMATION: &str = "compact-online-indexes";
+const HEAP_COMPACTION_CONFIRMATION: &str = "compact-heap-relations";
 const DEFAULT_IMPORT_MAXIMUM_ROWS: u64 = 10_000_000;
 const MAXIMUM_IMPORT_ROWS: u64 = 100_000_000;
 const DEFAULT_IMPORT_MAXIMUM_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -137,12 +139,16 @@ enum Command {
         /// Publish a new generation even when the live source digest is unchanged.
         #[arg(long)]
         force: bool,
-        /// Skip paths matching a glob for this run only, repeatable. A leading
-        /// `!` re-includes a path an earlier exclusion matched. Persist an
-        /// exclusion with the `exclude` array in .cartograph/config.json or a
-        /// .cartographignore file.
+        /// Skip paths matching a glob for this generation, repeatable. A
+        /// leading `!` re-includes a path an earlier exclusion matched. The
+        /// generation records this admission policy for freshness; persist a
+        /// shared project default in .cartograph/config.json or .cartographignore.
         #[arg(long = "exclude", value_name = "GLOB")]
         exclude: Vec<String>,
+        /// Inherit the current generation's run-scoped exclusions when this
+        /// reconciliation call does not supply replacements.
+        #[arg(long, hide = true)]
+        preserve_current_excludes: bool,
         /// Output format for humans or automation.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -682,7 +688,7 @@ enum DatabaseCommand {
     Prune(PruneArguments),
     /// Report database/schema heap, index, TOAST, cache, and generation storage.
     Usage(DatabaseUsageArguments),
-    /// Plan or explicitly apply bounded one-at-a-time concurrent B-tree rebuilds.
+    /// Plan or explicitly apply bounded B-tree or heap compaction.
     Compact(DatabaseCompactArguments),
 }
 
@@ -1049,6 +1055,7 @@ struct IndexArguments {
     workers: Option<u16>,
     force: bool,
     exclude: Vec<String>,
+    preserve_current_excludes: bool,
     format: OutputFormat,
     managed_database_port: Option<u16>,
 }
@@ -1169,19 +1176,30 @@ struct DatabaseCompactArguments {
     /// Apply the plan. Omit for the default read-only dry run.
     #[arg(long)]
     apply: bool,
-    /// Exact acknowledgement required with --apply: compact-online-indexes.
+    /// Rewrite table heaps with bounded one-at-a-time `VACUUM FULL`. This takes
+    /// an ACCESS EXCLUSIVE lock; omit for online B-tree compaction.
+    #[arg(long)]
+    heap: bool,
+    /// Exact acknowledgement required with --apply: compact-online-indexes,
+    /// or compact-heap-relations when --heap is selected.
     #[arg(long, requires = "apply")]
     confirm: Option<String>,
     /// Maximum B-tree indexes rebuilt one at a time.
     #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=64))]
     maximum_indexes: u16,
+    /// Maximum heap relations rewritten one at a time.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=32))]
+    maximum_relations: u16,
     /// Maximum aggregate bytes admitted into one resumable plan.
     #[arg(long, default_value_t = 16 * GIBIBYTE_U64, value_parser = clap::value_parser!(u64).range(1..=64 * GIBIBYTE_U64))]
     maximum_candidate_bytes: u64,
     /// Ignore B-tree indexes smaller than this allocation.
     #[arg(long, default_value_t = 8 * MEBIBYTE_U64, value_parser = clap::value_parser!(u64).range(1..=64 * GIBIBYTE_U64))]
     minimum_index_bytes: u64,
-    /// Hard PostgreSQL deadline for each concurrent index rebuild.
+    /// Ignore heap relations with less estimated reclaimable allocation.
+    #[arg(long, default_value_t = 64 * MEBIBYTE_U64, value_parser = clap::value_parser!(u64).range(1..=64 * GIBIBYTE_U64))]
+    minimum_reclaimable_bytes: u64,
+    /// Hard PostgreSQL deadline for each index rebuild or heap rewrite.
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=86400))]
     timeout_seconds: u64,
     /// Operator-observed free bytes for external PostgreSQL. Managed mode reads
@@ -1288,6 +1306,7 @@ async fn run_index_command(command: Command) -> Result<ExitCode, String> {
             workers,
             force,
             exclude,
+            preserve_current_excludes,
             format,
         } => {
             run_index(IndexArguments {
@@ -1295,6 +1314,7 @@ async fn run_index_command(command: Command) -> Result<ExitCode, String> {
                 workers,
                 force,
                 exclude,
+                preserve_current_excludes,
                 format,
                 managed_database_port: None,
             })
@@ -2698,6 +2718,7 @@ impl AgentInstallContext {
             workers: None,
             force: false,
             exclude: Vec::new(),
+            preserve_current_excludes: false,
             format: self.format,
             managed_database_port: self.managed_database_port,
         })
@@ -3068,6 +3089,7 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
         workers,
         force,
         exclude,
+        preserve_current_excludes,
         format,
         managed_database_port,
     } = arguments;
@@ -3076,9 +3098,13 @@ async fn run_index(arguments: IndexArguments) -> Result<ExitCode, String> {
     let runtime = ProjectRuntime::connect(&project_path, &settings)
         .await
         .map_err(|error| error.to_string())?;
-    let mut options = IndexOptions::default()
-        .with_force(force)
-        .with_additional_excludes(exclude);
+    let mut options = if preserve_current_excludes {
+        IndexOptions::reconciliation()
+    } else {
+        IndexOptions::default()
+    }
+    .with_force(force)
+    .with_additional_excludes(exclude);
     if let Some(workers) = workers {
         options = options
             .with_max_workers(workers)
@@ -3123,7 +3149,7 @@ async fn run_sync_if_dirty(
         runtime.close().await;
         return Ok(ExitCode::SUCCESS);
     }
-    let mut options = IndexOptions::default();
+    let mut options = IndexOptions::reconciliation();
     if let Some(maximum_source_bytes) = maximum_source_bytes {
         options = options
             .with_max_source_bytes(maximum_source_bytes)
@@ -3908,18 +3934,7 @@ async fn run_database_usage(arguments: DatabaseUsageArguments) -> Result<ExitCod
 }
 
 async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<ExitCode, String> {
-    if arguments.apply && arguments.confirm.as_deref() != Some(ONLINE_COMPACTION_CONFIRMATION) {
-        return Err(format!(
-            "online compaction requires --confirm {ONLINE_COMPACTION_CONFIRMATION}"
-        ));
-    }
-    let policy = StorageCompactionPolicy::new(StorageCompactionPolicyInput {
-        maximum_indexes: arguments.maximum_indexes,
-        maximum_candidate_bytes: arguments.maximum_candidate_bytes,
-        minimum_index_bytes: arguments.minimum_index_bytes,
-        statement_timeout: Duration::from_secs(arguments.timeout_seconds),
-    })
-    .map_err(|error| error.to_string())?;
+    let policy = database_compaction_policy(&arguments)?;
     let external_database = env::var_os(DATABASE_URL_ENV).is_some();
     let headroom_authority = arguments
         .apply
@@ -3950,21 +3965,75 @@ async fn run_database_compact(arguments: DatabaseCompactArguments) -> Result<Exi
             Some(CompactionHeadroomAuthority::External(bytes)) => bytes,
             None => return Err("online compaction headroom authority is unavailable".to_owned()),
         };
-        database
-            .compact_storage_online(policy, headroom)
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|report| print_serialized(&report, arguments.format))
+        match policy {
+            DatabaseCompactionPolicy::Heap(policy) => database
+                .compact_heap_storage(policy, headroom)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|report| print_serialized(&report, arguments.format)),
+            DatabaseCompactionPolicy::Online(policy) => database
+                .compact_storage_online(policy, headroom)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|report| print_serialized(&report, arguments.format)),
+        }
     } else {
-        database
-            .storage_compaction_plan(policy)
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|plan| print_serialized(&plan, arguments.format))
+        match policy {
+            DatabaseCompactionPolicy::Heap(policy) => database
+                .heap_compaction_plan(policy)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|plan| print_serialized(&plan, arguments.format)),
+            DatabaseCompactionPolicy::Online(policy) => database
+                .storage_compaction_plan(policy)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|plan| print_serialized(&plan, arguments.format)),
+        }
     };
     database.close().await;
     result?;
     Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DatabaseCompactionPolicy {
+    Online(StorageCompactionPolicy),
+    Heap(HeapCompactionPolicy),
+}
+
+fn database_compaction_policy(
+    arguments: &DatabaseCompactArguments,
+) -> Result<DatabaseCompactionPolicy, String> {
+    let (confirmation, label) = if arguments.heap {
+        (HEAP_COMPACTION_CONFIRMATION, "heap")
+    } else {
+        (ONLINE_COMPACTION_CONFIRMATION, "online")
+    };
+    if arguments.apply && arguments.confirm.as_deref() != Some(confirmation) {
+        return Err(format!(
+            "{label} compaction requires --confirm {confirmation}"
+        ));
+    }
+    if arguments.heap {
+        HeapCompactionPolicy::new(HeapCompactionPolicyInput {
+            maximum_relations: arguments.maximum_relations,
+            maximum_candidate_bytes: arguments.maximum_candidate_bytes,
+            minimum_reclaimable_bytes: arguments.minimum_reclaimable_bytes,
+            statement_timeout: Duration::from_secs(arguments.timeout_seconds),
+        })
+        .map(DatabaseCompactionPolicy::Heap)
+        .map_err(|error| error.to_string())
+    } else {
+        StorageCompactionPolicy::new(StorageCompactionPolicyInput {
+            maximum_indexes: arguments.maximum_indexes,
+            maximum_candidate_bytes: arguments.maximum_candidate_bytes,
+            minimum_index_bytes: arguments.minimum_index_bytes,
+            statement_timeout: Duration::from_secs(arguments.timeout_seconds),
+        })
+        .map(DatabaseCompactionPolicy::Online)
+        .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6226,12 +6295,14 @@ mod tests {
                 workers,
                 force,
                 exclude,
+                preserve_current_excludes,
                 format,
             } => {
                 assert_eq!(project_path, PathBuf::from("workspace"));
                 assert_eq!(workers, Some(4));
                 assert!(force);
                 assert!(exclude.is_empty());
+                assert!(!preserve_current_excludes);
                 assert!(matches!(format, OutputFormat::Json));
             }
             _ => panic!("index parsed as the wrong command"),
@@ -6616,6 +6687,7 @@ mod tests {
             Command::Db {
                 command: DatabaseCommand::Compact(DatabaseCompactArguments {
                     apply: true,
+                    heap: false,
                     available_headroom_bytes: Some(1_073_741_824),
                     ..
                 })
@@ -6631,6 +6703,34 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn cli_parses_heap_compaction_as_a_distinct_confirmed_mode() {
+        let heap = Cli::try_parse_from([
+            "cartograph",
+            "db",
+            "compact",
+            "--heap",
+            "--apply",
+            "--confirm",
+            HEAP_COMPACTION_CONFIRMATION,
+            "--available-headroom-bytes",
+            "1073741824",
+        ])
+        .unwrap_or_else(|error| panic!("database heap compact CLI did not parse: {error}"));
+        assert!(matches!(
+            heap.command,
+            Command::Db {
+                command: DatabaseCommand::Compact(DatabaseCompactArguments {
+                    apply: true,
+                    heap: true,
+                    maximum_relations: 8,
+                    minimum_reclaimable_bytes: 67_108_864,
+                    ..
+                })
+            }
+        ));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use serde::Serialize;
 
 pub(crate) const GENERATION_CAPACITY_LIMIT: &str = "maxGenerationBytes";
 pub(crate) const GENERATION_CAPACITY_SCOPE: &str = "cartograph_process";
-pub(crate) const GENERATION_CAPACITY_NEXT_ACTION: &str = "use generationStorage=postgres for a dense repository; if PostgreSQL spill was already selected, raise maxGenerationBytes only with Cartograph-process host headroom, then run an explicit cartograph index; auto-sync suppresses itself after five capacity failures";
+pub(crate) const GENERATION_CAPACITY_NEXT_ACTION: &str = "use generationStorage=postgres for a dense repository; maxGenerationBytes cannot exceed 8589934592 bytes (8 GiB), so when that ceiling is already selected exclude machine-generated or compiled artifacts with --exclude or project configuration, then run an explicit cartograph index; auto-sync suppresses itself after five capacity failures";
 
 pub(crate) const fn is_generation_capacity_failure(error: &ProjectError) -> bool {
     matches!(
@@ -239,6 +239,7 @@ pub(crate) const fn index_stage_failure_code(error: &ProjectError) -> Option<&'s
         ProjectError::IndexPublicationFailed => Some("publication_failed"),
         ProjectError::IndexCleanupFailed => Some("index_cleanup_failed"),
         ProjectError::ScipOverlayInvalid => Some("scip_overlay_invalid"),
+        ProjectError::ProjectConfiguration(_) => Some("project_configuration_invalid"),
         _ => None,
     }
 }
@@ -345,6 +346,7 @@ mod tests {
     use super::*;
     use cartograph_agent::PipelineFileFailure;
     use cartograph_domain::NormalizedPath;
+    use cartograph_llm::ProjectLlmConfigError;
 
     #[test]
     fn direct_cli_progress_stall_message_includes_the_qualified_stable_code() {
@@ -368,6 +370,9 @@ mod tests {
         assert!(message.contains(GENERATION_CAPACITY_LIMIT));
         assert!(message.contains(GENERATION_CAPACITY_SCOPE));
         assert!(message.contains("generationStorage=postgres"));
+        assert!(message.contains("8589934592 bytes (8 GiB)"));
+        assert!(message.contains("exclude machine-generated or compiled artifacts"));
+        assert!(!message.contains("raise maxGenerationBytes"));
 
         let encoded = direct_index_failure_json(&error).unwrap_or_else(|serialization| {
             panic!("capacity failure JSON was unavailable: {serialization}")
@@ -384,6 +389,29 @@ mod tests {
             report["error"]["next_action"]
                 .as_str()
                 .is_some_and(|action| action.contains("maxGenerationBytes"))
+        );
+    }
+
+    #[test]
+    fn direct_cli_configuration_failure_names_the_field_range_and_stable_code() {
+        let error =
+            ProjectError::ProjectConfiguration(ProjectLlmConfigError::NumericFieldOutOfRange {
+                field: "maxGenerationBytes",
+                minimum: 1,
+                maximum: 8_589_934_592,
+            });
+        let message = direct_index_failure_message(&error);
+        assert!(message.contains("`maxGenerationBytes`"));
+        assert!(message.contains("8589934592"));
+        let encoded = direct_index_failure_json(&error)
+            .unwrap_or_else(|serialization| panic!("config JSON failed: {serialization}"));
+        let report: serde_json::Value = serde_json::from_str(&encoded)
+            .unwrap_or_else(|serialization| panic!("config JSON was invalid: {serialization}"));
+        assert_eq!(report["error"]["code"], "project_configuration_invalid");
+        assert!(
+            report["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("maxGenerationBytes"))
         );
     }
 

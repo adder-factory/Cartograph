@@ -24,6 +24,7 @@ const EDGE_COUNT_COLUMN: usize = 8;
 const REFERENCE_COUNT_COLUMN: usize = 9;
 const NUMERICAL_SITE_COUNT_COLUMN: usize = 10;
 const DOCUMENT_COUNT_COLUMN: usize = 11;
+const SOURCE_ADMISSION_COLUMN: usize = 12;
 const PROJECT_PURGE_LOCK_NAMESPACE: &str = "cartograph-v2-project-purge";
 const PUBLICATION_LOCK_NAMESPACE: &str = "cartograph-v2-publish";
 const DIRECT_PROJECT_TABLES: &[&str] = &[
@@ -175,6 +176,41 @@ pub struct ProjectCurrentGeneration {
     pub digest_version: GenerationDigestVersion,
     /// Exact persisted relation counts.
     pub counts: GenerationCounts,
+    /// Privacy-preserving description of the generation's source admission policy.
+    pub source_admission: GenerationSourceAdmission,
+}
+
+/// Run-scoped source admission metadata. Serialization and debug output reveal
+/// only the count; the exact globs remain available solely to trusted runtime
+/// freshness and reconciliation code.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct GenerationSourceAdmission {
+    #[serde(skip)]
+    run_excludes: Vec<String>,
+    run_exclude_patterns: u16,
+}
+
+impl std::fmt::Debug for GenerationSourceAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GenerationSourceAdmission")
+            .field("run_exclude_patterns", &self.run_exclude_patterns)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GenerationSourceAdmission {
+    /// Exact run-scoped excludes for trusted source-policy reconciliation.
+    #[must_use]
+    pub fn run_excludes(&self) -> &[String] {
+        &self.run_excludes
+    }
+
+    /// Number of persisted run-scoped exclude patterns.
+    #[must_use]
+    pub const fn run_exclude_patterns(&self) -> u16 {
+        self.run_exclude_patterns
+    }
 }
 
 /// Read-only project state used by CLI, MCP, and freshness checks.
@@ -225,7 +261,8 @@ impl CartographDatabase {
                           AND rows.generation_id = generations.generation_id), 0)::bigint,
                     COALESCE((SELECT count(*) FROM {schema}."search_documents" AS rows
                         WHERE rows.project_id = projects.project_id
-                          AND rows.generation_id = generations.generation_id), 0)::bigint
+                          AND rows.generation_id = generations.generation_id), 0)::bigint,
+                    generations.run_excludes
                 FROM {schema}."projects" AS projects
                 LEFT JOIN {schema}."index_generations" AS generations
                   ON generations.project_id = projects.project_id
@@ -647,12 +684,39 @@ fn decode_snapshot(row: &sqlx_postgres::PgRow) -> Result<ProjectSnapshot, Storag
                 )?,
                 documents: read_nonnegative(row, DOCUMENT_COUNT_COLUMN, "documents")?,
             },
+            source_admission: decode_source_admission(row)?,
         }),
     };
     Ok(ProjectSnapshot {
         project_id,
         current,
         generation_storage: GenerationStorageSummary::default(),
+    })
+}
+
+fn decode_source_admission(
+    row: &sqlx_postgres::PgRow,
+) -> Result<GenerationSourceAdmission, StorageError> {
+    let run_excludes = row
+        .try_get::<Vec<String>, _>(SOURCE_ADMISSION_COLUMN)
+        .map_err(|_| corrupt("run_excludes"))?;
+    let count = u16::try_from(run_excludes.len()).map_err(|_| corrupt("run_excludes"))?;
+    let total_bytes = run_excludes.iter().try_fold(0_usize, |total, pattern| {
+        total
+            .checked_add(pattern.len())
+            .ok_or_else(|| corrupt("run_excludes"))
+    })?;
+    if count > 4_096
+        || total_bytes > 4 * 1024 * 1024
+        || run_excludes
+            .iter()
+            .any(|pattern| pattern.is_empty() || pattern.len() > 4_096 || pattern.contains('\0'))
+    {
+        return Err(corrupt("run_excludes"));
+    }
+    Ok(GenerationSourceAdmission {
+        run_excludes,
+        run_exclude_patterns: count,
     })
 }
 

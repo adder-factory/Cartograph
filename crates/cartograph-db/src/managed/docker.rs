@@ -799,6 +799,8 @@ fn initialize_extension_arguments(name: &str) -> Vec<OsString> {
         OsString::from("CREATE EXTENSION IF NOT EXISTS pg_search;"),
         OsString::from("--command"),
         OsString::from(pg_search_upgrade),
+        OsString::from("--command"),
+        OsString::from("CREATE EXTENSION IF NOT EXISTS pgstattuple;"),
     ]
 }
 
@@ -1286,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_initialization_installs_pgvector_before_pg_search() {
+    fn extension_initialization_installs_pgvector_before_pg_search_and_heap_measurement() {
         let arguments = initialize_extension_arguments("cartograph-v2-test");
         let commands: Vec<_> = arguments
             .windows(2)
@@ -1301,6 +1303,7 @@ mod tests {
                 "ALTER EXTENSION vector UPDATE TO '0.8.4';",
                 "CREATE EXTENSION IF NOT EXISTS pg_search;",
                 "ALTER EXTENSION pg_search UPDATE TO '0.25.3';",
+                "CREATE EXTENSION IF NOT EXISTS pgstattuple;",
             ]
         );
     }

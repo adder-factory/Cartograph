@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-17 (`v2.1.21`).
+Last release audit: 2026-08-18 (`v2.1.22`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -16,6 +16,7 @@ cartograph status [PROJECT]
 cartograph embedding-status [PROJECT]
 cartograph embed [PROJECT]
 cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid
+  [--format text|json] [--compact]
 cartograph context <TASK> [--exact-name NAME] [--exact-path PATH] [--exact-reference TEXT]
 cartograph entry-points [--bucket routes|cli|cli-commands|mcp-tools|cli-files|public-exports]
   [--limit 20]
@@ -42,6 +43,11 @@ semantic model, graph expansion, affected tests, and a separate stale
 working-tree overlay. JSON is the stable automation format; text favors concise
 operator output.
 
+`find` retains JSON as its compatibility default and accepts the uniform
+`--format json|text` selector. `--format text` renders bounded name/kind/path
+rows with freshness and truncation; `--compact` remains an independent exact-
+name JSON payload modifier and is still passed unchanged to the retrieval tool.
+
 A non-recoverable file-local index failure keeps the previous generation visible
 and reports one exact normalized project-relative path plus an allowlisted reason. Text
 escapes control characters in the path. `index --format json` exits nonzero and
@@ -55,8 +61,10 @@ Invalid parser-recovery spans and parser stops without cancellation are instead
 retained as partial files and listed in a successful index report with degraded
 reason `extraction_invalid_span` or `extraction_parser_stopped`.
 For a generation-capacity failure, text and JSON name `maxGenerationBytes`, the
-`cartograph_process` scope, and the bounded PostgreSQL-spill/host-headroom next
-action. Auto-sync performs bounded failed-generation cleanup after each failed
+`cartograph_process` scope, its hard 8 GiB maximum, and the bounded
+PostgreSQL-spill/generated-artifact-exclusion next action. An out-of-range
+configuration names the field and exact inclusive range. Auto-sync performs
+bounded failed-generation cleanup after each failed
 attempt and suppresses itself after five capacity failures across source
 revisions; adjust the reported setting and run an explicit index to clear that
 circuit.
@@ -107,7 +115,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.21 top-level command advertised
+This inventory contains every non-hidden v2.1.22 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -233,9 +241,13 @@ external PostgreSQL. Restore, upgrade, derived-index rebuild, remove, v1 import,
 and prune require explicit operation-specific confirmation. `db usage` is
 read-only: it verifies the exact current append-only migration ledger and fails
 with migration guidance instead of creating or upgrading a schema. `db compact`
-is a dry run unless `--apply --confirm compact-online-indexes` is supplied;
-managed mode always verifies filesystem headroom and rejects an operator
-override, while external PostgreSQL requires `--available-headroom-bytes`. See
+is a dry run unless `--apply --confirm compact-online-indexes` is supplied.
+`db compact --heap` is a separate reclaimable-heap/TOAST plan; apply requires
+`--confirm compact-heap-relations`, no live operation leases, and accepts the
+`ACCESS EXCLUSIVE` lock taken by one bounded `VACUUM FULL` at a time. Managed
+mode always verifies filesystem headroom and rejects an operator override,
+while external PostgreSQL requires `--available-headroom-bytes` and an
+installed `pgstattuple` extension. See
 [PostgreSQL operations](STORAGE-BACKENDS.md).
 
 Without an explicit `--port` or `CARTOGRAPH_MANAGED_DATABASE_PORT`, managed

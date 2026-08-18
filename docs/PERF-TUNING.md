@@ -107,8 +107,9 @@ circuit breaker: five unresolved capacity failures suppress automatic indexing
 even if editor changes keep producing new source revisions. Automatic failures
 run the same bounded terminal-generation retention path before returning, so a
 failing watcher does not leave one new failed spill generation per attempt.
-Adjust `generationStorage`/`maxGenerationBytes`, then run an explicit
-`cartograph index`; the next fresh status clears the circuit. If both indexing
+Select PostgreSQL spill when appropriate; `maxGenerationBytes` cannot exceed
+8 GiB, so at that ceiling exclude generated/compiled artifacts and then run an
+explicit `cartograph index`. The next fresh status clears the circuit. If both indexing
 and status are unavailable, a typed unknown-revision
 failure bucket applies the same backoff to subsequent watcher events but keeps
 one bounded recovery probe at the capped interval instead of suppressing

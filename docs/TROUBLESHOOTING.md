@@ -193,8 +193,13 @@ durable canonical partition cursor.
 
 PostgreSQL spill does not make every native structure unlimited. Resolution
 lookups, clone profiles, and the centrality graph retain a separate compact
-bound based on `maxGenerationBytes`. If that bound is named, raise it only with
-observed host headroom or reduce the admitted source/features. A configured SCIP
+bound based on `maxGenerationBytes`. The accepted maximum is 8 GiB
+(`8589934592` bytes); it cannot be raised beyond that process-safety ceiling.
+When the error occurs at the maximum, exclude generated metadata, compiled
+artifacts, or other machine-produced paths with `index --exclude`, project
+`exclude`, or `.cartographignore`, then run an explicit index. Invalid values
+now name `maxGenerationBytes` and its exact inclusive range instead of making
+status/index fail with an opaque options message. A configured SCIP
 overlay currently selects the memory path in `auto`; forcing `postgres` with
 that overlay is rejected until streamed replacement parity is available.
 

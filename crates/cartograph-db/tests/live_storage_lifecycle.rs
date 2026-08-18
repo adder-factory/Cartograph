@@ -7,7 +7,8 @@ use std::{env, process, time::Duration};
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CartographDatabase, GenerationContents, GenerationFacts, GenerationRetentionPolicy,
-    GenerationRetentionRequest, GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget,
+    GenerationRetentionRequest, GenerationValidationLimits, HeapCompactionPolicy,
+    HeapCompactionPolicyInput, LeaseError, LeaseOwner, LeaseRequest, LeaseTarget,
     NativeParseCacheKey, NativeParseCacheKeyInput, NativeParseCacheRetentionPolicy,
     NativeParseCacheRetentionPolicyInput, NativeParseCacheRetentionRequest, NewGeneration,
     NewProject, PostRetentionMaintenance, StorageCompactionPolicy, StorageCompactionPolicyInput,
@@ -46,6 +47,10 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         .await
         .unwrap_or_else(|error| panic!("storage migration failed: {error}"));
     assert_eq!(migration.current_version, latest_schema_version());
+    query("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("pgstattuple fixture failed: {error}"));
     assert_virtual_payload_accounting_and_autovacuum(&pool, &schema).await;
 
     let project = database
@@ -75,11 +80,117 @@ async fn storage_lifecycle_is_bounded_observable_and_online() {
         &second_ready,
     )
     .await;
+    assert_heap_storage_compaction(&database, &pool, &schema, &project).await;
     assert_online_storage_compaction(&database, &database_url, &pool, &schema).await;
 
     drop(database);
     drop_schema(&pool, &schema).await;
     pool.close().await;
+}
+
+async fn assert_heap_storage_compaction(
+    database: &CartographDatabase,
+    pool: &sqlx_postgres::PgPool,
+    schema: &str,
+    project: &ProjectId,
+) {
+    let insert = format!(
+        r#"INSERT INTO "{schema}"."native_parse_cache" (
+                project_id, extractor_contract_digest, path_digest, normalized_path,
+                language, content_hash, source_bytes, payload, payload_digest
+            )
+            SELECT CAST($1 AS uuid),
+                   lpad(to_hex(value), 64, '0'),
+                   lpad(to_hex(value + 1000), 64, '0'),
+                   'heap-fixture/' || value || '.rs',
+                   'rust',
+                   lpad(to_hex(value + 2000), 64, '0'),
+                   octet_length(payload),
+                   payload,
+                   lpad(to_hex(value + 3000), 64, '0')
+            FROM generate_series(1, 24) AS value
+            CROSS JOIN LATERAL (
+                SELECT decode(string_agg(md5(value::text || ':' || chunk), ''), 'hex') AS payload
+                FROM generate_series(1, 8192) AS chunk
+            ) AS generated"#
+    );
+    query(AssertSqlSafe(insert))
+        .bind(project.as_str())
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("heap bloat fixture insert failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"DELETE FROM "{schema}"."native_parse_cache"
+            WHERE normalized_path LIKE 'heap-fixture/%'"#
+    )))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("heap bloat fixture delete failed: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"VACUUM "{schema}"."native_parse_cache""#
+    )))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("heap bloat fixture vacuum failed: {error}"));
+
+    let policy = HeapCompactionPolicy::new(HeapCompactionPolicyInput {
+        maximum_relations: 8,
+        maximum_candidate_bytes: 64 * 1024 * 1024,
+        minimum_reclaimable_bytes: 1,
+        statement_timeout: Duration::from_mins(1),
+    })
+    .unwrap_or_else(|error| panic!("heap compaction policy failed: {error}"));
+    let plan = database
+        .heap_compaction_plan(policy)
+        .await
+        .unwrap_or_else(|error| panic!("heap compaction plan failed: {error}"));
+    let cache = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.table == "native_parse_cache")
+        .unwrap_or_else(|| panic!("native parse cache heap candidate was missing"));
+    assert!(cache.estimated_reclaimable_bytes > 0);
+    assert!(plan.requires_access_exclusive);
+
+    let active_lease = database
+        .acquire_lease(LeaseRequest::new(
+            LeaseTarget::new(project.clone(), ProjectOperation::Migration, None),
+            LeaseOwner::new(process::id(), "heap-active-operation"),
+            LEASE_DURATION,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("heap active lease fixture failed: {error}"));
+    assert_eq!(
+        database.compact_heap_storage(policy, u64::MAX).await,
+        Err(cartograph_db::StorageCompactionError::LiveOperations)
+    );
+    database
+        .release_lease(&active_lease)
+        .await
+        .unwrap_or_else(|error| panic!("heap active lease release failed: {error}"));
+
+    let lease_database = database.clone();
+    let lease_project = project.clone();
+    let report = database
+        .compact_heap_storage_with_observer(policy, u64::MAX, move || async move {
+            let attempted = lease_database
+                .acquire_lease(LeaseRequest::new(
+                    LeaseTarget::new(lease_project, ProjectOperation::Migration, None),
+                    LeaseOwner::new(process::id(), "heap-maintenance-gate"),
+                    LEASE_DURATION,
+                ))
+                .await;
+            assert!(matches!(attempted, Err(LeaseError::Busy)));
+        })
+        .await
+        .unwrap_or_else(|error| panic!("heap compaction apply failed: {error}"));
+    let cache = report
+        .compacted
+        .iter()
+        .find(|result| result.table == "native_parse_cache")
+        .unwrap_or_else(|| panic!("native parse cache heap result was missing"));
+    assert!(cache.bytes_after <= cache.bytes_before);
+    assert!(cache.reclaimed_bytes > 0);
 }
 
 async fn assert_generation_retention_fences(

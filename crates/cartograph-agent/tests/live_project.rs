@@ -223,6 +223,104 @@ async fn automatic_capacity_failure_cleans_its_terminal_generation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn run_excludes_define_freshness_drift_and_reconciliation_until_explicitly_replaced() {
+    let (schema, settings, project) = live_project_fixture("8");
+    std::fs::write(
+        project.path().join("service.rs"),
+        "pub fn admitted_source() -> bool { true }\n",
+    )
+    .unwrap_or_else(|error| panic!("admitted source fixture failed: {error}"));
+    std::fs::write(
+        project.path().join("generated.rs"),
+        "pub fn generated_source() -> usize { 1 }\n",
+    )
+    .unwrap_or_else(|error| panic!("excluded source fixture failed: {error}"));
+
+    {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("admission runtime connect failed: {error}"));
+        let first = runtime
+            .index(
+                IndexOptions::default()
+                    .with_history_refresh(false)
+                    .with_additional_excludes(vec!["generated.rs".to_owned()]),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("admission index failed: {error}"));
+        assert!(first.published);
+
+        let current = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("admission status failed: {error}"));
+        assert!(current.fresh);
+        let snapshot = current
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.current.as_ref())
+            .unwrap_or_else(|| panic!("admission generation was missing"));
+        assert_eq!(snapshot.source_admission.run_exclude_patterns(), 1);
+        let public = serde_json::to_string(snapshot)
+            .unwrap_or_else(|error| panic!("admission serialization failed: {error}"));
+        assert!(!public.contains("generated.rs"));
+
+        std::fs::write(
+            project.path().join("generated.rs"),
+            "pub fn generated_source() -> usize { 2 }\n",
+        )
+        .unwrap_or_else(|error| panic!("excluded source rewrite failed: {error}"));
+        assert!(
+            runtime
+                .status()
+                .await
+                .unwrap_or_else(|error| panic!("post-rewrite status failed: {error}"))
+                .fresh
+        );
+        let drift = runtime
+            .file_drift(FileDriftOptions::default(), ProjectCancellation::new())
+            .await
+            .unwrap_or_else(|error| panic!("admission drift failed: {error}"));
+        let drift = serde_json::to_value(drift)
+            .unwrap_or_else(|error| panic!("admission drift serialization failed: {error}"));
+        assert_eq!(drift["addedCount"], 0);
+        assert_eq!(drift["modifiedCount"], 0);
+        assert_eq!(drift["deletedCount"], 0);
+
+        let reconciled = runtime
+            .index(IndexOptions::automatic())
+            .await
+            .unwrap_or_else(|error| panic!("admission reconciliation failed: {error}"));
+        assert!(!reconciled.published);
+        assert_eq!(reconciled.generation_id, first.generation_id);
+
+        let replaced = runtime
+            .index(IndexOptions::default().with_history_refresh(false))
+            .await
+            .unwrap_or_else(|error| panic!("admission replacement failed: {error}"));
+        assert!(replaced.published);
+        assert_ne!(replaced.generation_id, first.generation_id);
+        let status = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("replacement status failed: {error}"));
+        assert!(status.fresh);
+        assert_eq!(
+            status
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.current.as_ref())
+                .map(|current| current.source_admission.run_exclude_patterns()),
+            Some(0)
+        );
+        runtime.close().await;
+    }
+
+    drop_schema(&settings, &schema).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
 async fn empty_graph_memory_and_forced_postgres_paths_publish_identical_facts() {
     let (schema, settings, project) = live_project_fixture("8");
     let config_directory = project.path().join(".cartograph");

@@ -1,5 +1,10 @@
 use std::{
-    collections::BTreeMap, ffi::OsString, fmt, fs::File, io::Read as _, path::PathBuf,
+    collections::BTreeMap,
+    ffi::OsString,
+    fmt::{self, Write as _},
+    fs::File,
+    io::Read as _,
+    path::PathBuf,
     time::Duration,
 };
 
@@ -31,6 +36,7 @@ const COMPAT_INCLUDE_TESTS: &str = "__compat_include_tests";
 const COMPAT_POSITIVE_DEFAULT: &str = "__compat_positive_default";
 const COMPAT_SECOND_POSITIONAL: &str = "__compat_second_positional";
 const COMPAT_ALL: &str = "__compat_all";
+const COMPAT_FORMAT: &str = "__compat_format";
 const CLEAR_PARSE_CACHE_SENTINEL: &str = "__all_languages";
 const MAXIMUM_COMPAT_STDIN_BYTES: u64 = 1024 * 1024;
 
@@ -79,6 +85,7 @@ enum CliRenderMode {
     #[default]
     Standard,
     Json,
+    FindText,
     QuietAsk,
     QuietAffected,
     AdminProfile,
@@ -446,6 +453,13 @@ fn add_secondary_compatibility_arguments(
     command_name: &str,
 ) -> clap::Command {
     match command_name {
+        "find" => command.arg(
+            Arg::new(COMPAT_FORMAT)
+                .long("format")
+                .default_value("json")
+                .value_parser(PossibleValuesParser::new(["text", "json"]))
+                .help("Output format. JSON remains the compatibility default."),
+        ),
         "host" => command.arg(positive_default_argument(
             "include-install-targets",
             "includeInstallTargets",
@@ -1033,7 +1047,11 @@ fn compatibility_render_mode(
     matches: &ArgMatches,
     arguments: &Map<String, Value>,
 ) -> CliRenderMode {
-    if compatibility_flag(matches, COMPAT_JSON) {
+    if spec.command_name == "find"
+        && matches.get_one::<String>(COMPAT_FORMAT).map(String::as_str) == Some("text")
+    {
+        CliRenderMode::FindText
+    } else if compatibility_flag(matches, COMPAT_JSON) {
         CliRenderMode::Json
     } else if compatibility_flag(matches, COMPAT_QUIET)
         && spec.command_name == "admin"
@@ -1523,6 +1541,7 @@ fn render_tool_result(result: &ToolResult, mode: CliRenderMode) {
     if !result.is_error() {
         match mode {
             CliRenderMode::Json if render_structured_json(result) => return,
+            CliRenderMode::FindText if render_find_text(result) => return,
             CliRenderMode::QuietAsk if render_quiet_ask(result) => return,
             CliRenderMode::QuietAffected if render_quiet_affected(result) => return,
             CliRenderMode::AdminProfile if render_admin_profile(result) => return,
@@ -1536,6 +1555,144 @@ fn render_tool_result(result: &ToolResult, mode: CliRenderMode) {
             println!();
         }
     }
+}
+
+fn render_find_text(result: &ToolResult) -> bool {
+    let Some(structured) = result.structured_content() else {
+        return false;
+    };
+    let Some(rendered) = render_find_text_content(structured) else {
+        return false;
+    };
+    println!("{rendered}");
+    true
+}
+
+fn render_find_text_content(structured: &Map<String, Value>) -> Option<String> {
+    let root = Value::Object(structured.clone());
+    let freshness = root
+        .get("freshness")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let evidence = root.get("evidence")?;
+    let rows = find_text_rows(evidence);
+    let total = find_text_total(evidence).unwrap_or(rows.len());
+    let mut output = format!("Cartograph find ({freshness})\n");
+    if rows.is_empty() {
+        output.push_str("No matches.");
+        if let Some(reason) = evidence
+            .get("abstention")
+            .or_else(|| evidence.get("state"))
+            .and_then(Value::as_str)
+        {
+            let _ = write!(output, " Reason: {reason}.");
+        }
+        return Some(output);
+    }
+    let _ = write!(
+        output,
+        "{total} result{}",
+        if total == 1 { "" } else { "s" }
+    );
+    if find_text_truncated(evidence) {
+        output.push_str(" (truncated)");
+    }
+    output.push('\n');
+    for row in rows {
+        output.push_str("- ");
+        output.push_str(&find_text_row(&row));
+        output.push('\n');
+    }
+    while output.ends_with('\n') {
+        output.pop();
+    }
+    Some(output)
+}
+
+fn find_text_rows(evidence: &Value) -> Vec<Value> {
+    if let Some(rows) = evidence.as_array() {
+        return rows.clone();
+    }
+    for pointer in ["/rows", "/items", "/hits", "/references", "/report/hits"] {
+        if let Some(rows) = evidence.pointer(pointer).and_then(Value::as_array) {
+            return rows.clone();
+        }
+    }
+    evidence
+        .get("file")
+        .filter(|value| value.is_object())
+        .cloned()
+        .into_iter()
+        .collect()
+}
+
+fn find_text_total(evidence: &Value) -> Option<usize> {
+    for pointer in [
+        "/total",
+        "/totalCount",
+        "/report/total",
+        "/report/totalMatches",
+        "/report/totalMatchesInScannedFiles",
+    ] {
+        if let Some(total) = evidence.pointer(pointer).and_then(Value::as_u64)
+            && let Ok(total) = usize::try_from(total)
+        {
+            return Some(total);
+        }
+    }
+    None
+}
+
+fn find_text_truncated(evidence: &Value) -> bool {
+    [
+        "/truncated",
+        "/report/truncated",
+        "/report/resultTruncated",
+        "/report/byteBudgetTruncated",
+        "/report/fileInventoryTruncated",
+    ]
+    .into_iter()
+    .any(|pointer| evidence.pointer(pointer).and_then(Value::as_bool) == Some(true))
+}
+
+fn find_text_row(row: &Value) -> String {
+    let identity = row
+        .get("document")
+        .filter(|value| !value.is_null())
+        .or_else(|| row.get("enclosingSymbol").filter(|value| !value.is_null()))
+        .unwrap_or(row);
+    let name = ["qualified_name", "qualifiedName", "name", "key", "relation"]
+        .into_iter()
+        .find_map(|key| identity.get(key).and_then(Value::as_str))
+        .unwrap_or("match");
+    let kind = [
+        "symbol_kind",
+        "symbolKind",
+        "kind",
+        "document_kind",
+        "documentKind",
+    ]
+    .into_iter()
+    .find_map(|key| identity.get(key).and_then(Value::as_str));
+    let path = row
+        .get("path")
+        .or_else(|| identity.get("path"))
+        .and_then(Value::as_str);
+    let line = row
+        .get("line")
+        .or_else(|| row.get("startLine"))
+        .and_then(Value::as_u64);
+    let mut rendered = name.to_owned();
+    if let Some(kind) = kind {
+        let _ = write!(rendered, " [{kind}]");
+    }
+    if let Some(path) = path {
+        let _ = write!(rendered, " — {path}");
+        if let Some(line) = line {
+            let _ = write!(rendered, ":{line}");
+        }
+    }
+    rendered
 }
 
 fn render_admin_profile(result: &ToolResult) -> bool {
@@ -1817,6 +1974,7 @@ mod tests {
         };
         assert_eq!(find.arguments["by"], "name");
         assert_eq!(find.arguments["query"], "root");
+        assert_eq!(find.render_mode, CliRenderMode::Standard);
         assert!(
             !find.arguments.contains_key("includeTests"),
             "branch-specific schema defaults must remain handler-owned"
@@ -1889,6 +2047,109 @@ mod tests {
         };
         assert_eq!(imports.arguments["pathFilter"], "src");
         assert_eq!(imports.arguments["excludeFixtures"], false);
+    }
+
+    #[test]
+    fn find_format_is_independent_from_compact_and_rejects_unknown_values() {
+        let parsed = parse_from([
+            "cartograph",
+            "find",
+            "root",
+            "--by",
+            "name",
+            "--format",
+            "text",
+            "--compact",
+        ])
+        .unwrap_or_else(|error| panic!("find text parse failed: {error}"));
+        let ParsedCli::Tool(find) = parsed else {
+            panic!("find did not route through generated CLI");
+        };
+        assert_eq!(find.render_mode, CliRenderMode::FindText);
+        assert_eq!(find.arguments["compact"], true);
+        assert!(!find.arguments.contains_key("format"));
+        assert!(matches!(
+            parse_from([
+                "cartograph",
+                "find",
+                "root",
+                "--by",
+                "name",
+                "--format",
+                "yaml",
+            ]),
+            Err(ParseFailure::Clap(_))
+        ));
+    }
+
+    #[test]
+    fn find_text_renderer_is_deterministic_and_keeps_freshness_and_truncation() {
+        let structured = serde_json::json!({
+            "freshness": "current",
+            "evidence": {
+                "rows": [
+                    {
+                        "name": "ProjectRuntime",
+                        "kind": "struct",
+                        "path": "crates/cartograph-agent/src/lib.rs",
+                        "line": 793
+                    }
+                ],
+                "total": 4,
+                "truncated": true
+            }
+        });
+        let rendered = render_find_text_content(
+            structured
+                .as_object()
+                .unwrap_or_else(|| panic!("find text fixture was not an object")),
+        )
+        .unwrap_or_else(|| panic!("find text result was unavailable"));
+        assert_eq!(
+            rendered,
+            "Cartograph find (current)\n4 results (truncated)\n- ProjectRuntime [struct] — crates/cartograph-agent/src/lib.rs:793"
+        );
+
+        let empty = serde_json::json!({
+            "freshness": "stale",
+            "evidence": {"rows": [], "abstention": "no_relevant_evidence"}
+        });
+        let rendered = render_find_text_content(
+            empty
+                .as_object()
+                .unwrap_or_else(|| panic!("empty fixture was not an object")),
+        )
+        .unwrap_or_else(|| panic!("empty find text result was unavailable"));
+        assert_eq!(
+            rendered,
+            "Cartograph find (stale)\nNo matches. Reason: no_relevant_evidence."
+        );
+
+        let module_level_reference = serde_json::json!({
+            "freshness": "current",
+            "evidence": {
+                "references": [
+                    {
+                        "key": "CARTOGRAPH_TOKEN",
+                        "path": "src/index.ts",
+                        "line": 1,
+                        "enclosingSymbol": null
+                    }
+                ],
+                "totalExtractedReferences": 1,
+                "truncated": false
+            }
+        });
+        let rendered = render_find_text_content(
+            module_level_reference
+                .as_object()
+                .unwrap_or_else(|| panic!("module reference fixture was not an object")),
+        )
+        .unwrap_or_else(|| panic!("module reference find text result was unavailable"));
+        assert_eq!(
+            rendered,
+            "Cartograph find (current)\n1 result\n- CARTOGRAPH_TOKEN — src/index.ts:1"
+        );
     }
 
     #[test]

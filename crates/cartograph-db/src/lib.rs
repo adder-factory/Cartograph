@@ -64,9 +64,10 @@ pub use centrality::{
     SymbolPageRankScore, apply_page_rank, apply_sampled_betweenness,
 };
 pub use compaction::{
-    InvalidIndexArtifact, StorageCompactionCandidate, StorageCompactionError,
-    StorageCompactionPlan, StorageCompactionPolicy, StorageCompactionPolicyInput,
-    StorageCompactionReport, StorageCompactionStopReason,
+    HeapCompactionCandidate, HeapCompactionPlan, HeapCompactionPolicy, HeapCompactionPolicyInput,
+    HeapCompactionReport, HeapCompactionResult, InvalidIndexArtifact, StorageCompactionCandidate,
+    StorageCompactionError, StorageCompactionPlan, StorageCompactionPolicy,
+    StorageCompactionPolicyInput, StorageCompactionReport, StorageCompactionStopReason,
 };
 pub use coverage::{
     CoverageCount, CoverageLoadInput, CoverageLoadReport, CoverageLoadRequest,
@@ -149,8 +150,9 @@ pub use parse_cache::{
     NativeParseCacheRetentionRequest, NativeParseCacheStats, NativeParseCacheWrite,
 };
 pub use project::{
-    GenerationCounts, GenerationStorageSummary, ProjectCurrentGeneration, ProjectPurgeError,
-    ProjectPurgeReport, ProjectPurgeRequest, ProjectSnapshot,
+    GenerationCounts, GenerationSourceAdmission, GenerationStorageSummary,
+    ProjectCurrentGeneration, ProjectPurgeError, ProjectPurgeReport, ProjectPurgeRequest,
+    ProjectSnapshot,
 };
 pub use qualified::{
     QualifiedCentralityComparator, QualifiedSymbolHit, QualifiedSymbolPage, QualifiedSymbolQuery,

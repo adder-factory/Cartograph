@@ -146,8 +146,11 @@ impl ProjectRuntime {
                 result.map_err(|_| FileDriftError::SourceUnavailable)?
             }
         };
-        let source_policy = crate::project_source_policy(&self.root)
-            .map_err(|_| FileDriftError::SourceUnavailable)?;
+        let source_policy = crate::project_source_policy_with_excludes(
+            &self.root,
+            current.source_admission.run_excludes(),
+        )
+        .map_err(|_| FileDriftError::SourceUnavailable)?;
         let root = self.root.clone();
         let worker_cancellation = cancellation.clone();
         let scan = tokio::task::spawn_blocking(move || {

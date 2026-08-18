@@ -4,7 +4,7 @@ use serde::Serialize;
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use thiserror::Error;
 
-use crate::{CartographDatabase, database::quoted_schema};
+use crate::{CartographDatabase, database::quoted_schema, leases::schema_maintenance_lock_key};
 
 const MAXIMUM_COMPACTION_INDEXES: u16 = 64;
 const MAXIMUM_COMPACTION_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -18,6 +18,38 @@ const AUTOMATIC_MAXIMUM_INDEXES: u16 = 32;
 const AUTOMATIC_MAXIMUM_CANDIDATE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const AUTOMATIC_MINIMUM_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 const AUTOMATIC_STATEMENT_TIMEOUT: Duration = Duration::from_mins(15);
+const MAXIMUM_HEAP_COMPACTION_RELATIONS: u16 = 32;
+const AUTOMATIC_HEAP_COMPACTION_RELATIONS: u16 = 8;
+const AUTOMATIC_MINIMUM_RECLAIMABLE_BYTES: u64 = 64 * 1024 * 1024;
+const HEAP_HEADROOM_ALLOWANCE_BYTES: u64 = 64 * 1024 * 1024;
+const HEAP_COMPACTION_TABLES: &[&str] = &[
+    "agent_artifacts",
+    "document_embeddings",
+    "edges",
+    "file_cochanges",
+    "file_history",
+    "files",
+    "index_generations",
+    "mcp_sessions",
+    "mcp_tool_calls",
+    "native_generation_spill_batches",
+    "native_generation_spill_documents",
+    "native_generation_spill_edges",
+    "native_generation_spill_files",
+    "native_generation_spill_numerical_sites",
+    "native_generation_spill_references",
+    "native_generation_spill_rows",
+    "native_generation_spill_symbols",
+    "native_generation_spills",
+    "native_parse_cache",
+    "numerical_sites",
+    "references",
+    "search_documents",
+    "structural_findings",
+    "structural_finding_runs",
+    "symbol_similarity_edges",
+    "symbols",
+];
 
 /// One exact B-tree candidate selected for an online rebuild.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -142,12 +174,153 @@ pub struct StorageCompactionPlan {
     pub truncated: bool,
 }
 
+/// One measured Cartograph heap relation eligible for an exclusive rewrite.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeapCompactionCandidate {
+    /// Cartograph-owned table name within the configured schema.
+    pub table: String,
+    /// Allocated main-fork heap bytes.
+    pub heap_bytes: u64,
+    /// Allocated table, TOAST, and index bytes.
+    pub total_bytes: u64,
+    /// Exact dead-tuple bytes reported by `pgstattuple_approx`.
+    pub dead_tuple_bytes: u64,
+    /// Approximate reusable free bytes within the heap.
+    pub free_bytes: u64,
+    /// Conservative heap bytes potentially returned by a rewrite.
+    pub estimated_reclaimable_bytes: u64,
+}
+
+/// Hard work and deadline bounds for one heap-compaction request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeapCompactionPolicy {
+    maximum_relations: u16,
+    maximum_candidate_bytes: u64,
+    minimum_reclaimable_bytes: u64,
+    statement_timeout: Duration,
+}
+
+/// Caller-selected heap-compaction bounds validated as one typed input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeapCompactionPolicyInput {
+    /// Maximum relations considered in one request.
+    pub maximum_relations: u16,
+    /// Maximum aggregate relation bytes admitted into the request.
+    pub maximum_candidate_bytes: u64,
+    /// Minimum estimated reclaimable bytes for one relation.
+    pub minimum_reclaimable_bytes: u64,
+    /// Hard PostgreSQL deadline for each relation rewrite.
+    pub statement_timeout: Duration,
+}
+
+impl HeapCompactionPolicy {
+    /// Creates a validated heap-compaction policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any count, byte, or deadline bound is zero,
+    /// inconsistent, or exceeds the hard maintenance ceiling.
+    pub fn new(input: HeapCompactionPolicyInput) -> Result<Self, StorageCompactionError> {
+        if input.maximum_relations == 0
+            || input.maximum_relations > MAXIMUM_HEAP_COMPACTION_RELATIONS
+        {
+            return Err(StorageCompactionError::InvalidPolicy);
+        }
+        if input.maximum_candidate_bytes == 0
+            || input.maximum_candidate_bytes > MAXIMUM_COMPACTION_BYTES
+        {
+            return Err(StorageCompactionError::InvalidPolicy);
+        }
+        if input.minimum_reclaimable_bytes == 0
+            || input.minimum_reclaimable_bytes > input.maximum_candidate_bytes
+        {
+            return Err(StorageCompactionError::InvalidPolicy);
+        }
+        if input.statement_timeout.is_zero() || input.statement_timeout > MAXIMUM_STATEMENT_TIMEOUT
+        {
+            return Err(StorageCompactionError::InvalidPolicy);
+        }
+        Ok(Self {
+            maximum_relations: input.maximum_relations,
+            maximum_candidate_bytes: input.maximum_candidate_bytes,
+            minimum_reclaimable_bytes: input.minimum_reclaimable_bytes,
+            statement_timeout: input.statement_timeout,
+        })
+    }
+
+    /// Conservative default for a read-only heap-reclaim plan.
+    #[must_use]
+    pub const fn automatic_plan() -> Self {
+        Self {
+            maximum_relations: AUTOMATIC_HEAP_COMPACTION_RELATIONS,
+            maximum_candidate_bytes: AUTOMATIC_MAXIMUM_CANDIDATE_BYTES,
+            minimum_reclaimable_bytes: AUTOMATIC_MINIMUM_RECLAIMABLE_BYTES,
+            statement_timeout: AUTOMATIC_STATEMENT_TIMEOUT,
+        }
+    }
+}
+
+impl Default for HeapCompactionPolicy {
+    fn default() -> Self {
+        Self::automatic_plan()
+    }
+}
+
+/// Read-only heap-reclaim inventory and exclusive-operation warning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeapCompactionPlan {
+    /// Bounded measured candidates in descending reclaimable-byte order.
+    pub candidates: Vec<HeapCompactionCandidate>,
+    /// Aggregate allocated bytes admitted into the plan.
+    pub candidate_bytes: u64,
+    /// Aggregate estimated reclaimable heap bytes.
+    pub estimated_reclaimable_bytes: u64,
+    /// Conservative free-space requirement for the largest one-table rewrite.
+    pub required_headroom_bytes: u64,
+    /// Whether eligible candidates were omitted by count or byte bounds.
+    pub truncated: bool,
+    /// `VACUUM FULL` takes an `ACCESS EXCLUSIVE` lock on each selected table.
+    pub requires_access_exclusive: bool,
+}
+
+/// Exact size outcome for one completed heap rewrite.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeapCompactionResult {
+    /// Rewritten Cartograph table.
+    pub table: String,
+    /// Total relation bytes before the rewrite.
+    pub bytes_before: u64,
+    /// Total relation bytes after the rewrite.
+    pub bytes_after: u64,
+    /// Bytes returned by this rewrite, saturating at zero.
+    pub reclaimed_bytes: u64,
+}
+
+/// Applied one-relation-at-a-time heap-compaction report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeapCompactionReport {
+    /// Exact dry-run plan used for the apply call.
+    pub plan: HeapCompactionPlan,
+    /// Completed relation rewrites before any bounded stop.
+    pub compacted: Vec<HeapCompactionResult>,
+    /// Relation at which the operation stopped, when applicable.
+    pub stopped_at: Option<String>,
+    /// Stable bounded reason for a partial stop.
+    pub stop_reason: Option<StorageCompactionStopReason>,
+}
+
 /// Why an applied online plan stopped before completing every candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageCompactionStopReason {
     /// Represents the reindex failed storage compaction stop reason.
     ReindexFailed,
+    /// `VACUUM FULL` failed or exceeded its statement deadline.
+    VacuumFullFailed,
     /// Represents the timeout restore failed storage compaction stop reason.
     TimeoutRestoreFailed,
     /// Represents the advisory unlock failed storage compaction stop reason.
@@ -189,6 +362,12 @@ pub enum StorageCompactionError {
     #[error("another Cartograph online compaction is active")]
     /// A conflicting maintenance operation currently owns the resource.
     Busy,
+    #[error("Cartograph heap compaction requires the pgstattuple extension")]
+    /// Reclaimable heap pages cannot be measured without `pgstattuple`.
+    HeapMeasurementUnavailable,
+    #[error("Cartograph heap compaction is blocked by active project operations")]
+    /// A live operation lease protects relations from exclusive maintenance.
+    LiveOperations,
     #[error("Cartograph PostgreSQL compaction failed during {operation}")]
     /// PostgreSQL could not complete the named operation.
     DatabaseOperation {
@@ -279,11 +458,118 @@ impl CartographDatabase {
             stop_reason: execution.stop_reason,
         })
     }
+
+    /// Build a bounded, read-only inventory of free-but-allocated heap pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the policy is invalid, `pgstattuple` is not
+    /// installed, or a Cartograph-owned relation cannot be measured safely.
+    pub async fn heap_compaction_plan(
+        &self,
+        policy: HeapCompactionPolicy,
+    ) -> Result<HeapCompactionPlan, StorageCompactionError> {
+        validate_heap_policy(policy)?;
+        load_heap_plan(self, policy).await
+    }
+
+    /// Rewrite eligible heaps one table at a time with `VACUUM FULL`. This is
+    /// deliberately separate from online B-tree compaction: every candidate
+    /// takes an `ACCESS EXCLUSIVE` table lock and requires quiesced project
+    /// operations plus verified filesystem headroom.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when measurement, policy, headroom, compaction locking,
+    /// or the active-operation preflight fails.
+    pub async fn compact_heap_storage(
+        &self,
+        policy: HeapCompactionPolicy,
+        available_headroom_bytes: u64,
+    ) -> Result<HeapCompactionReport, StorageCompactionError> {
+        self.compact_heap_storage_with_observer(policy, available_headroom_bytes, || async {})
+            .await
+    }
+
+    /// Execute heap compaction with one observer point after the maintenance
+    /// gate and active-operation check. Live tests use this to prove that new
+    /// project leases cannot enter the rewrite window.
+    #[doc(hidden)]
+    pub async fn compact_heap_storage_with_observer<Observe, Observed>(
+        &self,
+        policy: HeapCompactionPolicy,
+        available_headroom_bytes: u64,
+        observe_gate: Observe,
+    ) -> Result<HeapCompactionReport, StorageCompactionError>
+    where
+        Observe: FnOnce() -> Observed,
+        Observed: Future<Output = ()>,
+    {
+        validate_heap_policy(policy)?;
+        let plan = load_heap_plan(self, policy).await?;
+        require_headroom(available_headroom_bytes, plan.required_headroom_bytes)?;
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| database_error("heap-acquire"))?;
+        connection.close_on_drop();
+        let session =
+            begin_heap_compaction_session(&mut connection, &self.schema, policy.statement_timeout)
+                .await?;
+        if live_project_operations(&mut connection, self.schema.as_str()).await? > 0 {
+            let mut cleanup = OnlineCompactionExecution {
+                reindexed: Vec::new(),
+                stopped_at: None,
+                stop_reason: None,
+            };
+            let _ = finish_compaction_session(&mut connection, session, &mut cleanup).await;
+            let _ = connection.close().await;
+            return Err(StorageCompactionError::LiveOperations);
+        }
+        observe_gate().await;
+        let schema = quoted_schema(&self.schema);
+        let mut compacted = Vec::new();
+        let mut stopped_at = None;
+        let mut stop_reason = None;
+        for candidate in &plan.candidates {
+            if !vacuum_full_candidate(&mut connection, &schema, candidate).await {
+                stopped_at = Some(candidate.table.clone());
+                stop_reason = Some(StorageCompactionStopReason::VacuumFullFailed);
+                break;
+            }
+            let bytes_after =
+                relation_total_bytes(&mut connection, self.schema.as_str(), &candidate.table)
+                    .await?;
+            compacted.push(HeapCompactionResult {
+                table: candidate.table.clone(),
+                bytes_before: candidate.total_bytes,
+                bytes_after,
+                reclaimed_bytes: candidate.total_bytes.saturating_sub(bytes_after),
+            });
+        }
+        let mut cleanup = OnlineCompactionExecution {
+            reindexed: Vec::new(),
+            stopped_at: None,
+            stop_reason,
+        };
+        let session_clean = finish_compaction_session(&mut connection, session, &mut cleanup).await;
+        if !session_clean && cleanup.stop_reason.is_none() {
+            cleanup.stop_reason = Some(StorageCompactionStopReason::AdvisoryUnlockFailed);
+        }
+        let _ = connection.close().await;
+        Ok(HeapCompactionReport {
+            plan,
+            compacted,
+            stopped_at,
+            stop_reason: cleanup.stop_reason,
+        })
+    }
 }
 
 struct OnlineCompactionSession {
     prior_timeout: String,
-    lock_name: String,
+    lock_names: Vec<String>,
 }
 
 struct OnlineCompactionExecution {
@@ -313,13 +599,21 @@ async fn begin_compaction_session(
     schema: &str,
     policy: StorageCompactionPolicy,
 ) -> Result<OnlineCompactionSession, StorageCompactionError> {
+    begin_compaction_session_with_timeout(connection, schema, policy.statement_timeout).await
+}
+
+async fn begin_compaction_session_with_timeout(
+    connection: &mut sqlx_postgres::PgConnection,
+    schema: &str,
+    statement_timeout: Duration,
+) -> Result<OnlineCompactionSession, StorageCompactionError> {
     let prior_timeout = query("SELECT current_setting('statement_timeout')")
         .fetch_one(&mut *connection)
         .await
         .map_err(|_| database_error("read-timeout"))?
         .try_get::<String, _>(0)
         .map_err(|_| corrupt("statement_timeout"))?;
-    let timeout_millis = i64::try_from(policy.statement_timeout.as_millis())
+    let timeout_millis = i64::try_from(statement_timeout.as_millis())
         .map_err(|_| StorageCompactionError::InvalidPolicy)?;
     let lock_name = format!("{COMPACTION_LOCK_NAMESPACE}:{schema}");
     let lock = query("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
@@ -341,8 +635,53 @@ async fn begin_compaction_session(
     }
     Ok(OnlineCompactionSession {
         prior_timeout,
-        lock_name,
+        lock_names: vec![lock_name],
     })
+}
+
+async fn begin_heap_compaction_session(
+    connection: &mut sqlx_postgres::PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    statement_timeout: Duration,
+) -> Result<OnlineCompactionSession, StorageCompactionError> {
+    let mut session =
+        begin_compaction_session_with_timeout(connection, schema.as_str(), statement_timeout)
+            .await?;
+    let maintenance_lock_name = schema_maintenance_lock_key(schema);
+    let maintenance_lock = query("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+        .bind(&maintenance_lock_name)
+        .fetch_one(&mut *connection)
+        .await;
+    let acquired = match maintenance_lock {
+        Ok(row) => row
+            .try_get::<bool, _>(0)
+            .map_err(|_| corrupt("maintenance_gate")),
+        Err(_) => Err(database_error("maintenance-gate")),
+    };
+    match acquired {
+        Ok(true) => {
+            session.lock_names.push(maintenance_lock_name);
+            Ok(session)
+        }
+        Ok(false) => {
+            let mut cleanup = OnlineCompactionExecution {
+                reindexed: Vec::new(),
+                stopped_at: None,
+                stop_reason: None,
+            };
+            let _ = finish_compaction_session(connection, session, &mut cleanup).await;
+            Err(StorageCompactionError::LiveOperations)
+        }
+        Err(error) => {
+            let mut cleanup = OnlineCompactionExecution {
+                reindexed: Vec::new(),
+                stopped_at: None,
+                stop_reason: None,
+            };
+            let _ = finish_compaction_session(connection, session, &mut cleanup).await;
+            Err(error)
+        }
+    }
 }
 
 async fn set_compaction_timeout(
@@ -401,15 +740,24 @@ async fn finish_compaction_session(
     session: OnlineCompactionSession,
     execution: &mut OnlineCompactionExecution,
 ) -> bool {
+    let OnlineCompactionSession {
+        prior_timeout,
+        lock_names,
+    } = session;
     let timeout_restored = query("SELECT set_config('statement_timeout', $1, false)")
-        .bind(session.prior_timeout)
+        .bind(prior_timeout)
         .execute(&mut *connection)
         .await
         .is_ok();
     if !timeout_restored && execution.stop_reason.is_none() {
         execution.stop_reason = Some(StorageCompactionStopReason::TimeoutRestoreFailed);
     }
-    let unlocked = unlock_compaction(connection, &session.lock_name).await;
+    let mut unlocked = true;
+    for lock_name in lock_names.into_iter().rev() {
+        if !unlock_compaction(connection, &lock_name).await {
+            unlocked = false;
+        }
+    }
     if !unlocked && execution.stop_reason.is_none() {
         execution.stop_reason = Some(StorageCompactionStopReason::AdvisoryUnlockFailed);
     }
@@ -607,6 +955,238 @@ async fn load_candidate_bytes(
     read_nonnegative(&row, "bytes")
 }
 
+async fn load_heap_plan(
+    database: &CartographDatabase,
+    policy: HeapCompactionPolicy,
+) -> Result<HeapCompactionPlan, StorageCompactionError> {
+    let rows = load_heap_candidate_rows(database, policy).await?;
+    assemble_heap_plan(rows, policy)
+}
+
+async fn load_heap_candidate_rows(
+    database: &CartographDatabase,
+    policy: HeapCompactionPolicy,
+) -> Result<Vec<sqlx_postgres::PgRow>, StorageCompactionError> {
+    let extension_schema = pgstattuple_schema(database).await?;
+    let extension_schema = quote_valid_identifier(&extension_schema)?;
+    let statement = format!(
+        r#"WITH parents AS (
+               SELECT classes.oid AS parent_oid,
+                      classes.reltoastrelid AS toast_oid,
+                      classes.relname AS table_name
+               FROM pg_catalog.pg_class AS classes
+               INNER JOIN pg_catalog.pg_namespace AS namespaces
+                   ON namespaces.oid = classes.relnamespace
+               WHERE namespaces.nspname = $1
+                 AND classes.relkind = 'r'
+                 AND classes.relname = ANY($2::text[])
+           ), forks AS (
+               SELECT parent_oid, parent_oid AS fork_oid FROM parents
+               UNION ALL
+               SELECT parent_oid, toast_oid AS fork_oid
+               FROM parents WHERE toast_oid <> 0
+           ), fork_statistics AS (
+               SELECT forks.parent_oid,
+                      sum(pg_relation_size(forks.fork_oid))::bigint AS heap_bytes,
+                      sum(statistics.dead_tuple_len)::bigint AS dead_tuple_bytes,
+                      sum(statistics.approx_free_space)::bigint AS free_bytes
+               FROM forks
+               CROSS JOIN LATERAL {extension_schema}."pgstattuple_approx"(forks.fork_oid)
+                   AS statistics
+               GROUP BY forks.parent_oid
+           ), measured AS (
+               SELECT parents.table_name,
+                      fork_statistics.heap_bytes,
+                      pg_total_relation_size(parents.parent_oid)::bigint AS total_bytes,
+                      fork_statistics.dead_tuple_bytes,
+                      fork_statistics.free_bytes,
+                      (fork_statistics.dead_tuple_bytes
+                          + fork_statistics.free_bytes)::bigint
+                          AS estimated_reclaimable_bytes
+               FROM parents
+               INNER JOIN fork_statistics
+                   ON fork_statistics.parent_oid = parents.parent_oid
+           )
+           SELECT measured.table_name,
+                  measured.heap_bytes,
+                  measured.total_bytes,
+                  measured.dead_tuple_bytes,
+                  measured.free_bytes,
+                  measured.estimated_reclaimable_bytes,
+                  count(*) OVER ()::bigint AS total_candidates
+           FROM measured
+           WHERE measured.estimated_reclaimable_bytes >= $3
+           ORDER BY measured.estimated_reclaimable_bytes DESC, measured.table_name
+           LIMIT $4"#
+    );
+    let allowlist = HEAP_COMPACTION_TABLES
+        .iter()
+        .map(|table| (*table).to_owned())
+        .collect::<Vec<_>>();
+    query(AssertSqlSafe(statement))
+        .bind(database.schema.as_str())
+        .bind(allowlist)
+        .bind(
+            i64::try_from(policy.minimum_reclaimable_bytes)
+                .map_err(|_| StorageCompactionError::InvalidPolicy)?,
+        )
+        .bind(i64::from(policy.maximum_relations) + 1)
+        .fetch_all(&database.pool)
+        .await
+        .map_err(|_| database_error("heap-plan"))
+}
+
+fn assemble_heap_plan(
+    rows: Vec<sqlx_postgres::PgRow>,
+    policy: HeapCompactionPolicy,
+) -> Result<HeapCompactionPlan, StorageCompactionError> {
+    let total_candidates = rows
+        .first()
+        .map(|row| read_nonnegative(row, "total_candidates"))
+        .transpose()?
+        .unwrap_or(0);
+    let mut candidates = Vec::new();
+    let mut candidate_bytes = 0_u64;
+    let mut estimated_reclaimable_bytes = 0_u64;
+    let mut truncated = total_candidates > u64::from(policy.maximum_relations);
+    for row in rows.into_iter().take(usize::from(policy.maximum_relations)) {
+        let candidate = HeapCompactionCandidate {
+            table: read_identifier(&row, "table_name")?,
+            heap_bytes: read_nonnegative(&row, "heap_bytes")?,
+            total_bytes: read_nonnegative(&row, "total_bytes")?,
+            dead_tuple_bytes: read_nonnegative(&row, "dead_tuple_bytes")?,
+            free_bytes: read_nonnegative(&row, "free_bytes")?,
+            estimated_reclaimable_bytes: read_nonnegative(&row, "estimated_reclaimable_bytes")?,
+        };
+        if !heap_table_allowed(&candidate.table) {
+            return Err(corrupt("heap_table"));
+        }
+        let admitted = candidate_bytes
+            .checked_add(candidate.total_bytes)
+            .ok_or_else(|| corrupt("heap_candidate_bytes"))?;
+        if admitted > policy.maximum_candidate_bytes {
+            truncated = true;
+            continue;
+        }
+        candidate_bytes = admitted;
+        estimated_reclaimable_bytes = estimated_reclaimable_bytes
+            .checked_add(candidate.estimated_reclaimable_bytes)
+            .ok_or_else(|| corrupt("heap_reclaimable_bytes"))?;
+        candidates.push(candidate);
+    }
+    let required_headroom_bytes = candidates
+        .iter()
+        .map(|candidate| candidate.total_bytes)
+        .max()
+        .unwrap_or(0)
+        .checked_add(if candidates.is_empty() {
+            0
+        } else {
+            HEAP_HEADROOM_ALLOWANCE_BYTES
+        })
+        .ok_or_else(|| corrupt("heap_required_headroom_bytes"))?;
+    Ok(HeapCompactionPlan {
+        candidates,
+        candidate_bytes,
+        estimated_reclaimable_bytes,
+        required_headroom_bytes,
+        truncated,
+        requires_access_exclusive: true,
+    })
+}
+
+async fn pgstattuple_schema(
+    database: &CartographDatabase,
+) -> Result<String, StorageCompactionError> {
+    let row = query(
+        r"SELECT namespaces.nspname
+           FROM pg_catalog.pg_extension AS extensions
+           INNER JOIN pg_catalog.pg_namespace AS namespaces
+               ON namespaces.oid = extensions.extnamespace
+           WHERE extensions.extname = 'pgstattuple'",
+    )
+    .fetch_optional(&database.pool)
+    .await
+    .map_err(|_| database_error("heap-extension"))?
+    .ok_or(StorageCompactionError::HeapMeasurementUnavailable)?;
+    read_identifier(&row, "nspname")
+}
+
+fn quote_valid_identifier(value: &str) -> Result<String, StorageCompactionError> {
+    valid_identifier(value)
+        .then(|| format!(r#""{value}""#))
+        .ok_or_else(|| corrupt("identifier"))
+}
+
+fn heap_table_allowed(table: &str) -> bool {
+    HEAP_COMPACTION_TABLES.contains(&table)
+}
+
+async fn live_project_operations(
+    connection: &mut sqlx_postgres::PgConnection,
+    schema: &str,
+) -> Result<u64, StorageCompactionError> {
+    let schema = quote_valid_identifier(schema)?;
+    let statement = format!(
+        r#"SELECT count(*)::bigint AS live_operations
+           FROM {schema}."project_operation_leases"
+           WHERE expires_at > clock_timestamp()"#
+    );
+    let row = query(AssertSqlSafe(statement))
+        .fetch_one(connection)
+        .await
+        .map_err(|_| database_error("heap-live-operations"))?;
+    read_nonnegative(&row, "live_operations")
+}
+
+async fn vacuum_full_candidate(
+    connection: &mut sqlx_postgres::PgConnection,
+    schema: &str,
+    candidate: &HeapCompactionCandidate,
+) -> bool {
+    if !valid_identifier(&candidate.table) || !heap_table_allowed(&candidate.table) {
+        return false;
+    }
+    let statement = format!(r#"VACUUM (FULL, ANALYZE) {schema}."{}""#, candidate.table);
+    query(AssertSqlSafe(statement))
+        .execute(connection)
+        .await
+        .is_ok()
+}
+
+async fn relation_total_bytes(
+    connection: &mut sqlx_postgres::PgConnection,
+    schema: &str,
+    table: &str,
+) -> Result<u64, StorageCompactionError> {
+    if !valid_identifier(table) || !heap_table_allowed(table) {
+        return Err(corrupt("heap_table"));
+    }
+    let row = query(
+        r"SELECT pg_total_relation_size(classes.oid)::bigint AS bytes
+           FROM pg_catalog.pg_class AS classes
+           INNER JOIN pg_catalog.pg_namespace AS namespaces
+               ON namespaces.oid = classes.relnamespace
+           WHERE namespaces.nspname = $1 AND classes.relname = $2",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_one(connection)
+    .await
+    .map_err(|_| database_error("heap-post-compaction-size"))?;
+    read_nonnegative(&row, "bytes")
+}
+
+fn validate_heap_policy(policy: HeapCompactionPolicy) -> Result<(), StorageCompactionError> {
+    HeapCompactionPolicy::new(HeapCompactionPolicyInput {
+        maximum_relations: policy.maximum_relations,
+        maximum_candidate_bytes: policy.maximum_candidate_bytes,
+        minimum_reclaimable_bytes: policy.minimum_reclaimable_bytes,
+        statement_timeout: policy.statement_timeout,
+    })
+    .map(|_| ())
+}
+
 fn validate_policy(policy: StorageCompactionPolicy) -> Result<(), StorageCompactionError> {
     StorageCompactionPolicy::new(StorageCompactionPolicyInput {
         maximum_indexes: policy.maximum_indexes,
@@ -680,5 +1260,25 @@ mod tests {
         assert!(valid_identifier("references_exact_name_site_idx"));
         assert!(!valid_identifier("public.references_idx"));
         assert!(!valid_identifier("unsafe\"identifier"));
+        assert!(heap_table_allowed("search_documents"));
+        assert!(!heap_table_allowed("operator_table"));
+        assert!(
+            HeapCompactionPolicy::new(HeapCompactionPolicyInput {
+                maximum_relations: 8,
+                maximum_candidate_bytes: 1024,
+                minimum_reclaimable_bytes: 1,
+                statement_timeout: Duration::from_secs(1),
+            })
+            .is_ok()
+        );
+        assert!(
+            HeapCompactionPolicy::new(HeapCompactionPolicyInput {
+                maximum_relations: 33,
+                maximum_candidate_bytes: 1024,
+                minimum_reclaimable_bytes: 1,
+                statement_timeout: Duration::from_secs(1),
+            })
+            .is_err()
+        );
     }
 }

@@ -45,7 +45,7 @@ The file is optional. A representative v2 configuration is:
 | `exclude` | Additional project-relative glob exclusions | `[]` plus built-in exclusions |
 | `maxFileSize` | Per-source byte ceiling, 1 byte through 32 MiB | runtime default |
 | `maxAstDepth` | Defensive syntax-tree depth ceiling, 64 through 1024; overflow retains a partial file and reports its exact path | `256` |
-| `maxGenerationBytes` | Memory-path canonical ceiling and compact resolver working-set basis, 1 byte through 8 GiB | 1 GiB |
+| `maxGenerationBytes` | Cartograph-process canonical/resolver ceiling, 1 byte through the hard maximum of 8 GiB; out-of-range errors name this field and range | 1 GiB |
 | `generationStorage` | Native working-set strategy: `auto`, `memory`, or `postgres` | `auto` |
 | `maxSpillBytes` | Logical sort-key/payload quota for one incomplete PostgreSQL spill, through 1 TiB | 128 GiB |
 | `maxSpillRows` | Raw extraction/fact row quota for one incomplete PostgreSQL spill, through 10 billion | 1 billion |
@@ -76,8 +76,11 @@ to `sync-if-dirty` and the managed Git hooks, because an exclusion that stops
 holding the moment the index refreshes is not an exclusion.
 
 - The `exclude` array in `.cartograph/config.json` is the durable, shared form.
-- `cartograph index --exclude <GLOB>` is repeatable and scoped to one run, for
-  experimenting before committing a pattern.
+- `cartograph index --exclude <GLOB>` is repeatable and scoped to the generation
+  it publishes. That generation stores the policy privately so status,
+  `changed-since`, source reads, auto-sync, and upgrade reconcile the same
+  admitted tree. A later explicit index without `--exclude` clears the
+  generation-scoped list; automatic reconciliation inherits it.
 - A `.cartographignore` file carrying patterns is honored with gitignore
   semantics.
 

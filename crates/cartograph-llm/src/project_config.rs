@@ -931,6 +931,18 @@ pub enum ProjectLlmConfigError {
     #[error("Cartograph project configuration is invalid")]
     /// Configuration is malformed or violates a required bound.
     InvalidConfig,
+    #[error(
+        "Cartograph project configuration field `{field}` must be between {minimum} and {maximum}"
+    )]
+    /// A named numeric configuration field is outside its documented range.
+    NumericFieldOutOfRange {
+        /// Stable public configuration field name.
+        field: &'static str,
+        /// Inclusive minimum accepted value.
+        minimum: u64,
+        /// Inclusive maximum accepted value.
+        maximum: u64,
+    },
     #[error("Cartograph project LLM tier is invalid")]
     /// The requested model tier is not valid for this provider.
     InvalidTier,
@@ -1136,14 +1148,8 @@ fn parse_project_source_settings(
     if maximum_ast_depth.is_some_and(|value| value < MINIMUM_PROJECT_AST_DEPTH) {
         return Err(ProjectLlmConfigError::InvalidConfig);
     }
-    let maximum_generation_bytes = optional_bounded_u64(
-        root,
-        "maxGenerationBytes",
-        BoundedU64Field {
-            maximum: MAXIMUM_PROJECT_GENERATION_BYTES,
-            invalid: ProjectLlmConfigError::InvalidConfig,
-        },
-    )?;
+    let maximum_generation_bytes =
+        optional_named_bounded_u64(root, "maxGenerationBytes", MAXIMUM_PROJECT_GENERATION_BYTES)?;
     let (generation_storage, maximum_spill_bytes, maximum_spill_rows) =
         parse_generation_storage(root)?;
     let languages = root
@@ -2224,6 +2230,28 @@ fn optional_bounded_u64(
         .transpose()
 }
 
+fn optional_named_bounded_u64(
+    object: &Map<String, Value>,
+    key: &'static str,
+    maximum: u64,
+) -> Result<Option<u64>, ProjectLlmConfigError> {
+    object
+        .get(key)
+        .map(|value| {
+            let value = value.as_u64().ok_or(ProjectLlmConfigError::InvalidConfig)?;
+            if (1..=maximum).contains(&value) {
+                Ok(value)
+            } else {
+                Err(ProjectLlmConfigError::NumericFieldOutOfRange {
+                    field: key,
+                    minimum: 1,
+                    maximum,
+                })
+            }
+        })
+        .transpose()
+}
+
 fn validate_endpoint(raw: &str) -> Result<(), ProjectLlmConfigError> {
     crate::endpoint::validate_endpoint(raw).map_err(|()| ProjectLlmConfigError::InvalidTier)
 }
@@ -2923,7 +2951,18 @@ mod tests {
         .unwrap_or_else(|error| panic!("invalid generation config fixture failed: {error}"));
         assert_eq!(
             load_project_source_settings(root.path()),
-            Err(ProjectLlmConfigError::InvalidConfig)
+            Err(ProjectLlmConfigError::NumericFieldOutOfRange {
+                field: "maxGenerationBytes",
+                minimum: 1,
+                maximum: 8_589_934_592,
+            })
+        );
+        let error = load_project_source_settings(root.path())
+            .err()
+            .unwrap_or_else(|| panic!("out-of-range generation config unexpectedly loaded"));
+        assert_eq!(
+            error.to_string(),
+            "Cartograph project configuration field `maxGenerationBytes` must be between 1 and 8589934592"
         );
     }
 

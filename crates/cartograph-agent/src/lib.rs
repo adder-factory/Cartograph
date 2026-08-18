@@ -51,7 +51,8 @@ pub use cartograph_indexer::{
     PipelineFailureReason, PipelineFileFailure, PipelineStage, SupervisorStatus,
 };
 use cartograph_llm::{
-    ProjectGenerationStorage, ProjectSourceSettings, load_project_source_settings,
+    ProjectGenerationStorage, ProjectLlmConfigError, ProjectSourceSettings,
+    load_project_source_settings,
 };
 use cartograph_scip::ScipOverlayReport;
 use serde::Serialize;
@@ -225,12 +226,19 @@ pub struct IndexOptions {
     refresh_history: bool,
     failure_retention: IndexFailureRetention,
     additional_excludes: Vec<String>,
+    admission_reconciliation: IndexAdmissionReconciliation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IndexFailureRetention {
     SuccessfulRequestsOnly,
     AutomaticFailures,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexAdmissionReconciliation {
+    Replace,
+    PreserveCurrent,
 }
 
 impl Default for IndexOptions {
@@ -243,6 +251,7 @@ impl Default for IndexOptions {
             refresh_history: true,
             failure_retention: IndexFailureRetention::SuccessfulRequestsOnly,
             additional_excludes: Vec::new(),
+            admission_reconciliation: IndexAdmissionReconciliation::Replace,
         }
     }
 }
@@ -260,6 +269,18 @@ impl IndexOptions {
             max_workers: FOUR_WORKERS,
             refresh_history: false,
             failure_retention: IndexFailureRetention::AutomaticFailures,
+            admission_reconciliation: IndexAdmissionReconciliation::PreserveCurrent,
+            ..Self::default()
+        }
+    }
+
+    /// Policy for explicit reconciliation workflows such as upgrade and
+    /// sync-if-dirty. When no new run exclusions are supplied, the current
+    /// generation's admission policy is inherited.
+    #[must_use]
+    pub fn reconciliation() -> Self {
+        Self {
+            admission_reconciliation: IndexAdmissionReconciliation::PreserveCurrent,
             ..Self::default()
         }
     }
@@ -267,8 +288,9 @@ impl IndexOptions {
     /// Add run-scoped exclusion globs on top of the project's configured
     /// `exclude` list. A `!` prefix re-includes a path an exclusion matched.
     ///
-    /// These are deliberately not persisted: `--exclude` is for experimenting,
-    /// and the project config is what makes an exclusion survive and be shared.
+    /// The exact list is persisted on a published generation so freshness and
+    /// drift use the same admission policy. A later explicit index without
+    /// run exclusions clears it; automatic reconciliation inherits it.
     #[must_use]
     pub fn with_additional_excludes(mut self, patterns: Vec<String>) -> Self {
         self.additional_excludes = patterns;
@@ -1083,15 +1105,52 @@ async fn project_status_with_cancellation(
     runtime: &ProjectRuntime,
     cancellation: ProjectCancellation,
 ) -> Result<ProjectStatus, ProjectError> {
-    let source = runtime.scan_source(None, cancellation.clone()).await?;
-    if cancellation.is_cancelled() {
-        return Err(ProjectError::RequestCancelled);
-    }
-    let snapshot = runtime
+    let before = runtime
         .database
         .project_snapshot_by_root(&runtime.root_identity)
         .await
         .map_err(|_| ProjectError::StatusFailed)?;
+    let run_excludes = before
+        .as_ref()
+        .and_then(|project| project.current.as_ref())
+        .map_or(&[][..], |current| current.source_admission.run_excludes());
+    let mut source = runtime
+        .scan_source_with_excludes(None, run_excludes, cancellation.clone())
+        .await?;
+    if cancellation.is_cancelled() {
+        return Err(ProjectError::RequestCancelled);
+    }
+    let mut snapshot = runtime
+        .database
+        .project_snapshot_by_root(&runtime.root_identity)
+        .await
+        .map_err(|_| ProjectError::StatusFailed)?;
+    let stable_basis = same_status_source_basis(before.as_ref(), snapshot.as_ref());
+    if !stable_basis {
+        let run_excludes = snapshot
+            .as_ref()
+            .and_then(|project| project.current.as_ref())
+            .map_or(&[][..], |current| current.source_admission.run_excludes());
+        source = runtime
+            .scan_source_with_excludes(None, run_excludes, cancellation.clone())
+            .await?;
+        if cancellation.is_cancelled() {
+            return Err(ProjectError::RequestCancelled);
+        }
+        let observed = runtime
+            .database
+            .project_snapshot_by_root(&runtime.root_identity)
+            .await
+            .map_err(|_| ProjectError::StatusFailed)?;
+        if !same_status_source_basis(snapshot.as_ref(), observed.as_ref()) {
+            return Ok(ProjectStatus {
+                snapshot: observed,
+                live_source_revision: source.digest,
+                fresh: false,
+            });
+        }
+        snapshot = observed;
+    }
     let fresh = snapshot
         .as_ref()
         .and_then(|project| project.current.as_ref())
@@ -1106,14 +1165,34 @@ async fn project_status_with_cancellation(
     })
 }
 
+fn same_status_source_basis(
+    left: Option<&ProjectSnapshot>,
+    right: Option<&ProjectSnapshot>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) if left.project_id == right.project_id => {
+            match (left.current.as_ref(), right.current.as_ref()) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.generation_id == right.generation_id
+                        && left.source_admission.run_excludes()
+                            == right.source_admission.run_excludes()
+                }
+                (None, Some(_)) | (Some(_), None) => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 async fn index_project_with_cancellation(
     runtime: &ProjectRuntime,
     options: IndexOptions,
     cancellation: ProjectCancellation,
 ) -> Result<IndexReport, ProjectError> {
     let operation_started = Instant::now();
-    let source_settings =
-        load_project_source_settings(&runtime.root).map_err(|_| ProjectError::InvalidOptions)?;
+    let source_settings = load_project_source_settings(&runtime.root)?;
     let policy = index_enrichment_policy(&options, &source_settings);
     let index = run_core_index(runtime, options, cancellation.clone());
     let history = prepare_optional_history(runtime, policy, cancellation.clone());
@@ -1541,8 +1620,14 @@ impl ProjectRuntime {
         options: IndexOptions,
         cancellation: ProjectCancellation,
     ) -> Result<IndexPreparation, ProjectError> {
+        let prior = self
+            .database
+            .project_snapshot_by_root(&self.root_identity)
+            .await
+            .map_err(|_| ProjectError::StatusFailed)?;
+        let effective_run_excludes = effective_run_excludes(&options, prior.as_ref());
         let source_policy =
-            project_source_policy_with_excludes(&self.root, options.additional_excludes())?;
+            project_source_policy_with_excludes(&self.root, &effective_run_excludes)?;
         let max_source_bytes = options
             .max_source_bytes
             .or(source_policy.maximum_file_bytes)
@@ -1561,11 +1646,6 @@ impl ProjectRuntime {
         if cancellation.is_cancelled() {
             return Err(ProjectError::RequestCancelled);
         }
-        let prior = self
-            .database
-            .project_snapshot_by_root(&self.root_identity)
-            .await
-            .map_err(|_| ProjectError::StatusFailed)?;
         if let Some(prior) = prior.as_ref() {
             self.database
                 .fail_abandoned_staging_generations_bounded(
@@ -1575,7 +1655,9 @@ impl ProjectRuntime {
                 .await
                 .map_err(|_| ProjectError::IndexCleanupFailed)?;
         }
-        if let Some(unchanged) = unchanged_index_preparation(prior.as_ref(), &source, &options) {
+        if let Some(unchanged) =
+            unchanged_index_preparation(prior.as_ref(), &source, &options, &effective_run_excludes)
+        {
             return Ok(unchanged);
         }
 
@@ -1609,11 +1691,10 @@ impl ProjectRuntime {
         }
         let staged = self
             .database
-            .begin_generation(NewGeneration::new(
-                project_id.clone(),
-                source.digest.as_str(),
-                workers,
-            ))
+            .begin_generation(
+                NewGeneration::new(project_id.clone(), source.digest.as_str(), workers)
+                    .with_run_excludes(effective_run_excludes),
+            )
             .await
             .map_err(|_| ProjectError::BeginGenerationFailed)?;
         let generation_id = staged.generation_id().clone();
@@ -1759,12 +1840,13 @@ impl ProjectRuntime {
         self.database.close().await;
     }
 
-    async fn scan_source(
+    async fn scan_source_with_excludes(
         &self,
         capture_path: Option<NormalizedPath>,
+        additional_excludes: &[String],
         cancellation: ProjectCancellation,
     ) -> Result<SourceRevision, ProjectError> {
-        let source_policy = project_source_policy(&self.root)?;
+        let source_policy = project_source_policy_with_excludes(&self.root, additional_excludes)?;
         let max_source_bytes = source_policy
             .maximum_file_bytes
             .unwrap_or(DEFAULT_MAX_SOURCE_BYTES);
@@ -1779,6 +1861,24 @@ impl ProjectRuntime {
             cancellation,
         })
         .await
+    }
+
+    async fn scan_source(
+        &self,
+        capture_path: Option<NormalizedPath>,
+        cancellation: ProjectCancellation,
+    ) -> Result<SourceRevision, ProjectError> {
+        let snapshot = self
+            .database
+            .project_snapshot_by_root(&self.root_identity)
+            .await
+            .map_err(|_| ProjectError::StatusFailed)?;
+        let run_excludes = snapshot
+            .as_ref()
+            .and_then(|project| project.current.as_ref())
+            .map_or(&[][..], |current| current.source_admission.run_excludes());
+        self.scan_source_with_excludes(capture_path, run_excludes, cancellation)
+            .await
     }
 
     async fn scan_source_for_index(
@@ -1810,16 +1910,32 @@ enum IndexPreparation {
     Pending(Box<PendingIndex>),
 }
 
+fn effective_run_excludes(options: &IndexOptions, prior: Option<&ProjectSnapshot>) -> Vec<String> {
+    if !options.additional_excludes().is_empty() {
+        return options.additional_excludes().to_vec();
+    }
+    if options.admission_reconciliation == IndexAdmissionReconciliation::PreserveCurrent {
+        return prior
+            .and_then(|snapshot| snapshot.current.as_ref())
+            .map_or_else(Vec::new, |current| {
+                current.source_admission.run_excludes().to_vec()
+            });
+    }
+    Vec::new()
+}
+
 fn unchanged_index_preparation(
     prior: Option<&ProjectSnapshot>,
     source: &SourceRevision,
     options: &IndexOptions,
+    effective_run_excludes: &[String],
 ) -> Option<IndexPreparation> {
     let prior = prior?;
     let current = prior.current.as_ref()?;
     if options.force
         || current.source_revision != source.digest.as_str()
         || current.digest_version != GenerationDigestVersion::CURRENT
+        || current.source_admission.run_excludes() != effective_run_excludes
     {
         return None;
     }
@@ -2323,7 +2439,7 @@ fn project_source_policy_with_excludes(
     root: &Path,
     additional: &[String],
 ) -> Result<ProjectSourcePolicy, ProjectError> {
-    let settings = load_project_source_settings(root).map_err(|_| ProjectError::InvalidOptions)?;
+    let settings = load_project_source_settings(root)?;
     if additional.is_empty() {
         return ProjectSourcePolicy::from_settings(&settings);
     }
@@ -2902,6 +3018,9 @@ pub enum ProjectError {
     /// A caller supplied a zero, overflowing, or unsupported bound.
     #[error("Cartograph index options are invalid")]
     InvalidOptions,
+    /// Project configuration could not be parsed or violated a named bound.
+    #[error(transparent)]
+    ProjectConfiguration(#[from] ProjectLlmConfigError),
     /// No current-generation symbol matches the supplied exact identity.
     #[error("Cartograph symbol was not found in the current generation")]
     SymbolNotFound,
@@ -3680,6 +3799,31 @@ mod tests {
     }
 
     #[test]
+    fn source_identity_preserves_named_project_configuration_range_errors() {
+        let directory =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        std::fs::create_dir(directory.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("config directory failed: {error}"));
+        std::fs::write(
+            directory.path().join(".cartograph/config.json"),
+            r#"{"maxGenerationBytes":8589934593}"#,
+        )
+        .unwrap_or_else(|error| panic!("config fixture failed: {error}"));
+        let error = ProjectRuntime::inspect_source_identity(directory.path())
+            .err()
+            .unwrap_or_else(|| panic!("out-of-range source identity unexpectedly succeeded"));
+        assert_eq!(
+            error,
+            ProjectError::ProjectConfiguration(ProjectLlmConfigError::NumericFieldOutOfRange {
+                field: "maxGenerationBytes",
+                minimum: 1,
+                maximum: 8_589_934_592,
+            })
+        );
+        assert!(error.to_string().contains("`maxGenerationBytes`"));
+    }
+
+    #[test]
     fn automatic_indexing_is_history_free_and_worker_bounded() {
         let automatic = IndexOptions::automatic();
 
@@ -3694,6 +3838,10 @@ mod tests {
         assert!(!automatic.profile);
         assert!(automatic.additional_excludes.is_empty());
         assert_eq!(
+            automatic.admission_reconciliation,
+            IndexAdmissionReconciliation::PreserveCurrent
+        );
+        assert_eq!(
             AUTOMATIC_RETENTION_MAINTENANCE,
             PostRetentionMaintenancePolicy::DelegateToAutovacuum
         );
@@ -3703,6 +3851,14 @@ mod tests {
     fn semantic_maintenance_can_skip_only_the_independent_history_refresh() {
         let defaults = IndexOptions::default();
         assert!(defaults.refresh_history);
+        assert_eq!(
+            defaults.admission_reconciliation,
+            IndexAdmissionReconciliation::Replace
+        );
+        assert_eq!(
+            IndexOptions::reconciliation().admission_reconciliation,
+            IndexAdmissionReconciliation::PreserveCurrent
+        );
         let semantic = defaults.with_history_refresh(false);
         assert!(!semantic.refresh_history);
         assert!(!semantic.force);

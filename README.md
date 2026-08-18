@@ -246,7 +246,8 @@ These are selected high-use forms, not the complete command inventory. Run
 ```text
 cartograph index [PROJECT]
 cartograph status [PROJECT]
-cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid
+cartograph find <QUERY> --by auto|name|content|env|sql|build|path|reference|bm25|hybrid \
+  [--format text|json]
 cartograph context <TASK> [--exact-name NAME] [--exact-path PATH] [--exact-reference TEXT]
 cartograph entry-points [--bucket public-exports] [--limit 20]
 cartograph graph <SYMBOL_ID> --direction callers|callees|both|impact
@@ -404,7 +405,10 @@ live compressed storage, whole-schema allocation, and physical overhead so a
 high-water TOAST file cannot masquerade as live cache data. `db compact` plans
 bounded one-at-a-time concurrent B-tree rebuilds and remains read-only until
 `--apply --confirm compact-online-indexes`; apply also requires verified
-filesystem headroom. Legacy inline LLM keys can be audited with
+filesystem headroom. `db compact --heap` measures free-but-allocated main and
+TOAST heaps; its offline apply requires `--confirm compact-heap-relations`, no
+live project operations, and one `ACCESS EXCLUSIVE` `VACUUM FULL` rewrite at a
+time. Legacy inline LLM keys can be audited with
 `cartograph llm migrate-credentials .` and atomically moved only after an exact
 environment-value match. Local backend logs rotate at 32 MiB. The bounded
 `cartograph backend cleanup .` dry run reports old rotated logs and invalid PID

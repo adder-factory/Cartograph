@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-17 (`v2.1.21`)
+Last implementation review: 2026-08-18 (`v2.1.22`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -59,8 +59,10 @@ Before migration or normal work, Cartograph proves:
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
 
-The append-only migration ledger currently owns thirty-eight versions.
-Migration 38 admits generation digest V14 for first-class Slang/WESL module
+The append-only migration ledger currently owns thirty-nine versions.
+Migration 39 stores the privacy-preserving run-scoped exclusion policy on each
+generation so freshness and reconciliation replay the admission policy that
+built it. Migration 38 admits generation digest V14 for first-class Slang/WESL module
 semantics and JavaScript static dynamic-dispatch evidence. Migration 37 adds
 the generation-fenced structural finding relation and its input
 fingerprint, so a readiness probe reads stored findings instead of evaluating
@@ -136,7 +138,11 @@ extra, or substituted paths fail before durable mutation.
 
 `fresh=true` means the current generation recorded exactly that complete live
 manifest under the native generation-digest contract emitted by the running
-binary. A newer extractor, resolver, or test-ownership contract therefore marks
+binary and under its recorded source-admission policy. Run-scoped exclusion
+globs are stored with the generation but serialized only as a pattern count;
+status, drift, source context, automatic synchronization, and upgrade replay
+them without exposing path-shaped policy. An explicit index can replace or
+clear the run-scoped list. A newer extractor, resolver, or test-ownership contract therefore marks
 an unchanged checkout stale and makes an ordinary index publish a replacement;
 it cannot reuse older graph semantics as a source-only no-op. Unknown or stale
 state lowers confidence and is never treated as a clean result.
@@ -534,6 +540,9 @@ Automatic cleanup delegates thresholded relation reclamation to the tuned
 autovacuum policy, keeping synchronous 27-table vacuuming out of the watcher
 critical path. Explicit prune requests retain the thresholded table-scoped
 maintenance step and report whether it completed or was deferred.
+Terminal failure cleanup also deletes the exact generation's PostgreSQL spill
+root in the same fenced transaction. Its cascaded staging payload becomes
+reusable immediately instead of remaining live until a later prune.
 Pre-supervisor failures terminalize
 their exact staging generation under the same project advisory lock used by
 lease acquisition. A later batch can collect staging only when it is old,
@@ -558,7 +567,11 @@ evidence. Content-addressed fact sharing is deliberately assessment-only until
 a schema migration can preserve immutable generation identity and cascades.
 `db compact` dry-runs by default and can rebuild eligible B-trees one at a time
 with PostgreSQL's concurrent reindex path after explicit confirmation and
-headroom proof. Heap-rewriting `VACUUM FULL` remains outside automation.
+headroom proof. The separate `db compact --heap` plan measures reclaimable
+allocation and its explicitly confirmed apply rewrites one allowlisted relation
+at a time with `VACUUM FULL`, verified headroom, a schema maintenance gate, and
+an existing-operation lease preflight. Heap rewrites are never part of routine
+status, indexing, pruning, or automatic maintenance.
 
 ## Security, durability, and licensing
 

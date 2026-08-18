@@ -31,6 +31,9 @@ use crate::{
 const MAX_ROOT_IDENTITY_BYTES: usize = 4_096;
 const MAX_SOURCE_REVISION_BYTES: usize = 1_024;
 const MAX_WORKERS: u16 = 256;
+const MAX_RUN_EXCLUDES: usize = 4_096;
+const MAX_RUN_EXCLUDE_BYTES: usize = 4_096;
+const MAX_RUN_EXCLUDES_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const RECONCILE_STATE_COLUMN: usize = 0;
 const RECONCILE_SEQUENCE_COLUMN: usize = 1;
 const RECONCILE_DIGEST_COLUMN: usize = 2;
@@ -90,6 +93,7 @@ pub struct NewGeneration {
     project_id: ProjectId,
     source_revision: String,
     worker_count: u16,
+    run_excludes: Vec<String>,
 }
 
 impl NewGeneration {
@@ -104,7 +108,17 @@ impl NewGeneration {
             project_id,
             source_revision: source_revision.into(),
             worker_count,
+            run_excludes: Vec::new(),
         }
+    }
+
+    /// Persist the run-scoped exclusion policy used to build this generation.
+    /// Validation remains at the database boundary so every caller shares one
+    /// count, item-size, aggregate-size, and NUL contract.
+    #[must_use]
+    pub fn with_run_excludes(mut self, run_excludes: Vec<String>) -> Self {
+        self.run_excludes = run_excludes;
+        self
     }
 }
 
@@ -851,6 +865,7 @@ impl CartographDatabase {
                 field: "worker_count",
             });
         }
+        validate_run_excludes(&input.run_excludes)?;
         let worker_count =
             i16::try_from(input.worker_count).map_err(|_| StorageError::InvalidInput {
                 field: "worker_count",
@@ -865,15 +880,16 @@ impl CartographDatabase {
                     RETURNING next_generation_sequence - 1 AS generation_sequence
                 )
                 INSERT INTO {schema}."index_generations" (
-                    project_id, generation_sequence, source_revision, worker_count
+                    project_id, generation_sequence, source_revision, worker_count, run_excludes
                 )
-                SELECT CAST($1 AS uuid), generation_sequence, $2, $3 FROM reserved
+                SELECT CAST($1 AS uuid), generation_sequence, $2, $3, $4 FROM reserved
                 RETURNING generation_id::text, generation_sequence"#
         );
         let row = audited_query(sql)
             .bind(input.project_id.as_str())
             .bind(input.source_revision)
             .bind(worker_count)
+            .bind(input.run_excludes)
             .fetch_one(&self.pool)
             .await
             .map_err(|_| database_error("begin-generation"))?;
@@ -1781,6 +1797,13 @@ async fn cleanup_transaction(
             });
         }
     }
+    delete_generation_spill_if_present(
+        connection,
+        &quoted_schema,
+        fence.target().project_id(),
+        generation_id,
+    )
+    .await?;
     delete_generation_fence(connection, &quoted_schema, fence).await
 }
 
@@ -1807,17 +1830,43 @@ async fn fail_transaction(
         .bind(input.generation_id.as_str())
         .bind(input.sequence)
         .bind(input.expected_state.as_str())
-        .execute(connection)
+        .execute(&mut *connection)
         .await
         .map_err(|_| database_error("fail-generation"))?;
     if result.rows_affected() == 1 {
-        Ok(())
+        delete_generation_spill_if_present(
+            connection,
+            &quoted_schema,
+            input.project_id,
+            input.generation_id,
+        )
+        .await
     } else {
         Err(StorageError::InvalidGenerationTransition {
             actual: "changed concurrently".to_owned(),
             requested: GenerationState::Failed.as_str(),
         })
     }
+}
+
+async fn delete_generation_spill_if_present(
+    connection: &mut PgConnection,
+    quoted_schema: &str,
+    project_id: &ProjectId,
+    generation_id: &GenerationId,
+) -> Result<(), StorageError> {
+    let statement = format!(
+        r#"DELETE FROM {quoted_schema}."native_generation_spills"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)"#
+    );
+    audited_query(statement)
+        .bind(project_id.as_str())
+        .bind(generation_id.as_str())
+        .execute(connection)
+        .await
+        .map(|_| ())
+        .map_err(|_| database_error("cleanup-generation-spill"))
 }
 
 async fn prepare_transaction(
@@ -2901,6 +2950,29 @@ fn validate_bounded_text(
 ) -> Result<(), StorageError> {
     if value.is_empty() || value.len() > maximum || value.contains('\0') {
         return Err(StorageError::InvalidInput { field });
+    }
+    Ok(())
+}
+
+fn validate_run_excludes(patterns: &[String]) -> Result<(), StorageError> {
+    if patterns.len() > MAX_RUN_EXCLUDES {
+        return Err(StorageError::InvalidInput {
+            field: "run_excludes",
+        });
+    }
+    let mut total = 0_usize;
+    for pattern in patterns {
+        validate_bounded_text(pattern, "run_excludes", MAX_RUN_EXCLUDE_BYTES)?;
+        total = total
+            .checked_add(pattern.len())
+            .ok_or(StorageError::InvalidInput {
+                field: "run_excludes",
+            })?;
+        if total > MAX_RUN_EXCLUDES_TOTAL_BYTES {
+            return Err(StorageError::InvalidInput {
+                field: "run_excludes",
+            });
+        }
     }
     Ok(())
 }

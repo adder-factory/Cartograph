@@ -2855,6 +2855,7 @@ const fn admin_job_failure(error: &ProjectError) -> AdminJobFailure {
         | ProjectError::StatusFailed
         | ProjectError::ScipOverlayInvalid
         | ProjectError::InvalidOptions
+        | ProjectError::ProjectConfiguration(_)
         | ProjectError::SymbolNotFound
         | ProjectError::FileNotFound
         | ProjectError::SourceContextUnavailable
@@ -2893,9 +2894,9 @@ const fn admin_job_general_failure(error: &ProjectError) -> AdminJobFailure {
         | ProjectError::FileNotFound
         | ProjectError::SourceContextUnavailable => AdminJobFailure::SourceUnavailable,
         ProjectError::SourceChangedDuringIndex => AdminJobFailure::SourceChangedDuringIndex,
-        ProjectError::InvalidOptions | ProjectError::ScipOverlayInvalid => {
-            AdminJobFailure::InvalidOptions
-        }
+        ProjectError::InvalidOptions
+        | ProjectError::ProjectConfiguration(_)
+        | ProjectError::ScipOverlayInvalid => AdminJobFailure::InvalidOptions,
         ProjectError::RetrievalOperationFailed | ProjectError::RequestCancelled => {
             AdminJobFailure::OperationFailed
         }
@@ -3834,6 +3835,9 @@ fn project_llm_error(error: ProjectLlmConfigError) -> ToolError {
     match error {
         ProjectLlmConfigError::InvalidConfig | ProjectLlmConfigError::InvalidTier => {
             invalid_arguments()
+        }
+        error @ ProjectLlmConfigError::NumericFieldOutOfRange { .. } => {
+            safe_error(ToolErrorCode::InvalidArguments, error.to_string())
         }
         ProjectLlmConfigError::CredentialUnavailable => safe_error(
             ToolErrorCode::NotReady,
@@ -11723,11 +11727,15 @@ impl AdminLifecycleTools<'_> {
         let maximum_source_bytes = parse_admin_max_file_size(arguments)?;
         let profile = optional_bool(arguments, "profile")?.unwrap_or(false);
         let verbose = optional_bool(arguments, "verbose")?.unwrap_or(false);
-        let mut options = IndexOptions::default()
-            .with_force(force || reparse_requested)
-            .with_profile(profile)
-            .with_max_workers(workers)
-            .map_err(|_| invalid_arguments())?;
+        let mut options = if action == AdminAction::Sync {
+            IndexOptions::reconciliation()
+        } else {
+            IndexOptions::default()
+        }
+        .with_force(force || reparse_requested)
+        .with_profile(profile)
+        .with_max_workers(workers)
+        .map_err(|_| invalid_arguments())?;
         if let Some(maximum_source_bytes) = maximum_source_bytes {
             options = options
                 .with_max_source_bytes(maximum_source_bytes)
@@ -11883,7 +11891,7 @@ impl AdminLifecycleTools<'_> {
         )?;
         let maximum_source_bytes = parse_admin_max_file_size(arguments)?;
         let verbose = optional_bool(arguments, "verbose")?.unwrap_or(false);
-        let mut index_options = IndexOptions::default()
+        let mut index_options = IndexOptions::reconciliation()
             .with_force(force)
             .with_history_refresh(false)
             .with_max_workers(workers)
@@ -13663,7 +13671,12 @@ fn enrichment_failure_report(error: &ProjectError) -> Value {
         "state": "failed",
         "reason": project_error_reason(error),
         "failureCategory": enrichment_failure_category(error),
-        "retryable": !matches!(&error, ProjectError::EnrichmentDataInvalid | ProjectError::InvalidOptions),
+        "retryable": !matches!(
+            &error,
+            ProjectError::EnrichmentDataInvalid
+                | ProjectError::InvalidOptions
+                | ProjectError::ProjectConfiguration(_)
+        ),
         "retryBoundary": "retry_post_index_enrichment",
         "baseGraphRemainsQueryable": true,
     })
@@ -24400,6 +24413,7 @@ fn project_error(error: &ProjectError) -> ToolError {
         | ProjectError::EnrichmentWriteFailed
         | ProjectError::EnrichmentDataInvalid
         | ProjectError::InvalidOptions
+        | ProjectError::ProjectConfiguration(_)
         | ProjectError::ScipOverlayInvalid
         | ProjectError::RequestCancelled => project_operation_error(error),
         ProjectError::IndexStageFileFailed { .. } | ProjectError::SchemaVersionAhead { .. } => {
@@ -24474,6 +24488,9 @@ fn project_operation_error(error: &ProjectError) -> ToolError {
             "Cartograph enrichment encountered invalid stored generation data",
         ),
         ProjectError::InvalidOptions => invalid_arguments(),
+        ProjectError::ProjectConfiguration(error) => {
+            safe_error(ToolErrorCode::InvalidArguments, error.to_string())
+        }
         ProjectError::ScipOverlayInvalid => safe_error(
             ToolErrorCode::InvalidArguments,
             "SCIP artifact is invalid, unsafe, or exceeds its configured bounds",

@@ -308,8 +308,11 @@ and reusable space are accounted by the full storage report. Compare parse
 cache logical, stored, schema-stored, and physical-overhead bytes before
 attributing its allocated TOAST file to live payload. `cartograph db compact` is a read-only online B-tree plan by default;
 apply requires `--confirm compact-online-indexes`, verified free-space headroom,
-and rebuilds one index at a time. It never automates `VACUUM FULL` or drops
-invalid concurrent-reindex artifacts.
+and rebuilds one index at a time. `db compact --heap` is a separate read-only
+main/TOAST heap plan; its apply path requires `--confirm
+compact-heap-relations`, no live operation leases, verified headroom, and one
+`ACCESS EXCLUSIVE` `VACUUM FULL` rewrite at a time. Neither mode drops invalid
+concurrent-reindex artifacts.
 
 ## Common failures
 

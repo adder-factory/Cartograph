@@ -1019,6 +1019,7 @@ fn project_command_arguments(input: &ProjectProcessInput<'_>) -> Vec<OsString> {
         ProjectCommand::Index => vec![
             OsString::from("index"),
             input.project_path.as_os_str().to_owned(),
+            OsString::from("--preserve-current-excludes"),
         ],
         ProjectCommand::Doctor => vec![
             OsString::from("doctor"),
@@ -1874,8 +1875,24 @@ mod tests {
             .map(OsString::from)
         );
 
+        assert_eq!(
+            project_command_arguments(&ProjectProcessInput {
+                executable: Path::new("/fixture/cartograph"),
+                project_path,
+                database_mode: ProjectDatabaseMode::External,
+                command: ProjectCommand::Index,
+            }),
+            [
+                "index",
+                "/fixture/project",
+                "--preserve-current-excludes",
+                "--format",
+                "json",
+            ]
+            .map(OsString::from)
+        );
+
         for (command, first) in [
-            (ProjectCommand::Index, "index"),
             (ProjectCommand::Doctor, "doctor"),
             (ProjectCommand::Status, "status"),
         ] {

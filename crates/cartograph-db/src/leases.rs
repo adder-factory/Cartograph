@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::{CartographDatabase, database::audited_query};
 
 const LEASE_LOCK_NAMESPACE: &str = "cartograph-v2-operation";
+const SCHEMA_MAINTENANCE_LOCK_NAMESPACE: &str = "cartograph-v2-schema-maintenance";
 const MIN_LEASE_DURATION: Duration = Duration::from_secs(1);
 const MAX_LEASE_DURATION: Duration = Duration::from_mins(5);
 const MAX_PROCESS_START_BYTES: usize = 256;
@@ -804,6 +805,17 @@ async fn acquire_transaction(
     connection: &mut PgConnection,
     input: AcquireTransactionInput<'_>,
 ) -> Result<AcquiredLease, LeaseError> {
+    let maintenance_lock =
+        query("SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1, 0))")
+            .bind(schema_maintenance_lock_key(input.schema))
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| database_error("maintenance-gate"))?
+            .try_get::<bool, _>(0)
+            .map_err(|_| corrupt("maintenance_gate"))?;
+    if !maintenance_lock {
+        return Err(LeaseError::Busy);
+    }
     let lock_row = query("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(project_lock_key(
             input.schema,
@@ -880,6 +892,10 @@ pub(crate) fn project_lock_key(
     project_id: &ProjectId,
 ) -> String {
     format!("{LEASE_LOCK_NAMESPACE}:{}:{}", schema.as_str(), project_id)
+}
+
+pub(crate) fn schema_maintenance_lock_key(schema: &cartograph_config::DatabaseSchema) -> String {
+    format!("{SCHEMA_MAINTENANCE_LOCK_NAMESPACE}:{}", schema.as_str())
 }
 
 fn decode_status(row: &PgRow, target: &LeaseTarget) -> Result<LeaseStatus, LeaseError> {

@@ -376,6 +376,7 @@ struct NativeSymbols {
 }
 
 fn run_live_cli_scenario(scenario: &LiveCliScenario<'_>) {
+    ensure_pgstattuple(scenario.database_url, scenario.schema);
     prepare_repository_and_verify_read_only(scenario);
     index_and_verify_storage(scenario);
     let symbols = verify_native_retrieval(scenario);
@@ -422,6 +423,20 @@ fn prepare_repository_and_verify_read_only(scenario: &LiveCliScenario<'_>) {
         &[
             "db",
             "usage",
+            "--project-path",
+            project_path,
+            "--format",
+            "json",
+        ],
+    );
+    failure(
+        project.path(),
+        database_url,
+        read_only_schema,
+        &[
+            "db",
+            "compact",
+            "--heap",
             "--project-path",
             project_path,
             "--format",
@@ -499,15 +514,16 @@ fn index_and_verify_storage(scenario: &LiveCliScenario<'_>) {
             "json",
         ],
     );
-    success(
-        project.path(),
-        database_url,
-        schema,
-        &[
+    verify_compaction_surfaces(scenario);
+}
+
+fn verify_compaction_surfaces(scenario: &LiveCliScenario<'_>) {
+    let commands = [
+        vec![
             "db",
             "compact",
             "--project-path",
-            project_path,
+            scenario.project_path,
             "--maximum-indexes",
             "2",
             "--minimum-index-bytes",
@@ -517,16 +533,26 @@ fn index_and_verify_storage(scenario: &LiveCliScenario<'_>) {
             "--format",
             "json",
         ],
-    );
-    success(
-        project.path(),
-        database_url,
-        schema,
-        &[
+        vec![
+            "db",
+            "compact",
+            "--heap",
+            "--project-path",
+            scenario.project_path,
+            "--maximum-relations",
+            "2",
+            "--minimum-reclaimable-bytes",
+            "1",
+            "--timeout-seconds",
+            "60",
+            "--format",
+            "json",
+        ],
+        vec![
             "db",
             "compact",
             "--project-path",
-            project_path,
+            scenario.project_path,
             "--apply",
             "--confirm",
             "compact-online-indexes",
@@ -541,6 +567,12 @@ fn index_and_verify_storage(scenario: &LiveCliScenario<'_>) {
             "--format",
             "json",
         ],
+    ];
+    all_succeed(
+        scenario.project.path(),
+        scenario.database_url,
+        scenario.schema,
+        &commands,
     );
 }
 
@@ -779,6 +811,59 @@ fn verify_agent_compatibility_surfaces(scenario: &LiveCliScenario<'_>) {
     let database_url = scenario.database_url;
     let schema = scenario.schema;
     let project_path = scenario.project_path;
+    let find_text = success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "find",
+            "root",
+            "--by",
+            "name",
+            "--format",
+            "text",
+            "--project-path",
+            project_path,
+        ],
+    );
+    let find_text = String::from_utf8_lossy(&find_text.stdout);
+    assert!(find_text.contains("Cartograph find (current)"));
+    assert!(find_text.contains("root [function]"));
+    let find_env_text = success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "find",
+            "CARTOGRAPH_TOKEN",
+            "--by",
+            "env",
+            "--format",
+            "text",
+            "--project-path",
+            project_path,
+        ],
+    );
+    let find_env_text = String::from_utf8_lossy(&find_env_text.stdout);
+    assert!(find_env_text.contains("CARTOGRAPH_TOKEN — src/index.ts:1"));
+    assert!(!find_env_text.contains("- match"));
+    let find_json = json_success(
+        project.path(),
+        database_url,
+        schema,
+        &[
+            "find",
+            "root",
+            "--by",
+            "name",
+            "--format",
+            "json",
+            "--compact",
+            "--project-path",
+            project_path,
+        ],
+    );
+    assert_eq!(find_json["freshness"], "current");
     all_succeed(
         project.path(),
         database_url,
@@ -1234,6 +1319,16 @@ fn verify_invalid_database_inputs(scenario: &LiveCliScenario<'_>) {
                 "--confirm",
                 "wrong-confirmation",
             ],
+            vec![
+                "db",
+                "compact",
+                "--heap",
+                "--project-path",
+                project_path,
+                "--apply",
+                "--confirm",
+                "compact-online-indexes",
+            ],
         ],
     );
 }
@@ -1435,8 +1530,11 @@ app.get("/orders/:id", (request, response) => response.send(handleOrder(request.
 "#,
     )
     .unwrap_or_else(|error| panic!("TypeScript fixture write failed: {error}"));
-    std::fs::write(root.join("src/index.ts"), "export const marker = 1;\n")
-        .unwrap_or_else(|error| panic!("TypeScript barrel fixture write failed: {error}"));
+    std::fs::write(
+        root.join("src/index.ts"),
+        "process.env.CARTOGRAPH_TOKEN;\nexport const marker = 1;\n",
+    )
+    .unwrap_or_else(|error| panic!("TypeScript barrel fixture write failed: {error}"));
     std::fs::write(
         root.join("src/consumer.ts"),
         "import { marker } from '.';\nexport const copiedMarker = marker;\n",
@@ -1600,6 +1698,27 @@ fn cleanup_schema(database_url: &str, schema: &str) {
         .execute(&pool)
         .await
         .unwrap_or_else(|error| panic!("cleanup failed: {error}"));
+        pool.close().await;
+    });
+}
+
+fn ensure_pgstattuple(database_url: &str, schema: &str) {
+    let settings =
+        cartograph_config::DatabaseSettings::parse(database_url, Some("2"), Some("10000"))
+            .and_then(|settings| settings.with_schema(schema))
+            .unwrap_or_else(|error| panic!("pgstattuple settings failed: {error}"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("pgstattuple runtime failed: {error}"));
+    runtime.block_on(async {
+        let pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("pgstattuple connection failed: {error}"));
+        query("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("pgstattuple installation failed: {error}"));
         pool.close().await;
     });
 }

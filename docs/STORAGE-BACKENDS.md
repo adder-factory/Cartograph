@@ -406,10 +406,40 @@ copies and working space. The advisory lock and session timeout live on a
 dedicated close-on-drop connection so cancellation cannot contaminate the pool
 or strand a session lock.
 
-`VACUUM FULL` is intentionally not automated: it takes an exclusive table lock
-and needs extra disk for a rewritten copy. If heap/TOAST—not B-tree indexes—is
-the remaining problem, schedule that separately only after a verified backup,
-free-space check, and maintenance window.
+When heap or TOAST high-water allocation remains after pruning, request the
+separate read-only heap plan:
+
+```sh
+cartograph db compact --heap --project-path . --format json
+
+cartograph db compact --heap --project-path . \
+  --apply \
+  --confirm compact-heap-relations \
+  --format json
+```
+
+The plan uses `pgstattuple_approx` on a fixed allowlist of Cartograph-owned main
+and TOAST heaps. It reports dead, reusable-free, estimated-reclaimable, total,
+headroom, truncation, and `requiresAccessExclusive` evidence per bounded
+relation. New managed databases install `pgstattuple`; an external PostgreSQL
+operator must install that extension before requesting heap measurement.
+
+Apply is intentionally offline maintenance, not an online repack. It refuses
+live Cartograph operation leases, requires the distinct
+`compact-heap-relations` confirmation and verified free-space headroom, then
+runs `VACUUM FULL` on one allowlisted table at a time outside a transaction.
+A schema-wide maintenance gate rejects new project-operation leases for the
+bounded rewrite window, and apply refuses to start while an existing lease is
+live. Each table takes `ACCESS EXCLUSIVE`; quiesce attached MCP/index/hook writers,
+take a verified backup, and schedule a maintenance window. Managed mode
+measures its validated data volume; external PostgreSQL must supply
+`--available-headroom-bytes`. Partial completion names the table and stable
+stop reason and can be resumed with a fresh plan.
+
+Failed generation cleanup now deletes its exact spill root and cascaded staging
+payload in the same fenced terminal transaction. PostgreSQL can therefore reuse
+those pages before another attempt; heap compaction remains the explicit path
+for returning an already-allocated high-water file to the filesystem.
 
 ## Distribution boundary
 
