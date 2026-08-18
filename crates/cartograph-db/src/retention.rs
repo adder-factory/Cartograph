@@ -561,7 +561,11 @@ where
     observe_catalog().await;
     let candidates = load_terminal_candidates(connection, context).await?;
     let bounded = bound_candidate_work(connection, context, candidates).await?;
-    for work in &bounded.candidates {
+    for work in bounded
+        .candidates
+        .iter()
+        .filter(|work| work.search_relation_present)
+    {
         crate::search_relation::drop_generation_search_relation(
             connection,
             &context.database.schema,
@@ -676,12 +680,7 @@ async fn load_terminal_candidates(
         .bind(i64::from(context.policy.recent_superseded))
         .bind(stale_staging_millis)
         .bind(stale_ready_millis)
-        .bind(i64::from(
-            context
-                .policy
-                .maximum_deletions
-                .min(context.policy.maximum_ddl_relations),
-        ))
+        .bind(i64::from(context.policy.maximum_deletions))
         .fetch_all(connection)
         .await
         .map_err(|_| database_error("load-terminal-generations"))?
@@ -702,10 +701,7 @@ async fn bound_candidate_work(
     context: &RetentionContext<'_>,
     candidates: Vec<RetentionCandidate>,
 ) -> Result<BoundedCandidateWork, GenerationRetentionError> {
-    let mut candidate_work = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        candidate_work.push(load_candidate_work(connection, context, candidate).await?);
-    }
+    let candidate_work = load_candidate_work(connection, context, candidates).await?;
     select_bounded_candidate_work(context.policy, candidate_work)
 }
 
@@ -714,7 +710,17 @@ fn select_bounded_candidate_work(
     candidates: impl IntoIterator<Item = CandidateWork>,
 ) -> Result<BoundedCandidateWork, GenerationRetentionError> {
     let mut bounded = BoundedCandidateWork::default();
+    let maximum_deletions = usize::try_from(policy.maximum_deletions)
+        .map_err(|_| database_error("candidate-count-budget"))?;
     for work in candidates {
+        if bounded.candidates.len() >= maximum_deletions {
+            break;
+        }
+        if work.search_relation_present
+            && bounded.search_relations >= u64::from(policy.maximum_ddl_relations)
+        {
+            continue;
+        }
         let cascade_rows = bounded
             .cascade_rows
             .checked_add(work.cascade_rows)
@@ -741,50 +747,90 @@ fn select_bounded_candidate_work(
 async fn load_candidate_work(
     connection: &mut sqlx_postgres::PgConnection,
     context: &RetentionContext<'_>,
-    candidate: RetentionCandidate,
-) -> Result<CandidateWork, GenerationRetentionError> {
-    let relation_name = format!(
-        "{}.search_g_{}",
-        context.database.schema.as_str(),
-        candidate.generation_id.as_str().replace('-', "")
-    );
-    let cascade_count = RETENTION_ROW_TABLES
+    candidates: Vec<RetentionCandidate>,
+) -> Result<Vec<CandidateWork>, GenerationRetentionError> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let generation_ids = candidates
+        .iter()
+        .map(|candidate| candidate.generation_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let cascade_counts = RETENTION_ROW_TABLES
         .iter()
         .map(|table| {
             format!(
-                r#"(SELECT count(*) FROM {}."{table}"
-                    WHERE project_id = CAST($1 AS uuid)
-                      AND generation_id = CAST($2 AS uuid))"#,
+                r#"SELECT rows.generation_id, count(*)::bigint AS relation_rows
+                    FROM {}."{table}" AS rows
+                    INNER JOIN candidates
+                        ON candidates.generation_id = rows.generation_id
+                    WHERE rows.project_id = CAST($1 AS uuid)
+                    GROUP BY rows.generation_id"#,
                 context.quoted_schema,
             )
         })
         .collect::<Vec<_>>()
-        .join(" + ");
+        .join(" UNION ALL ");
     let sql = format!(
-        r"SELECT
-                {cascade_count} AS cascade_rows,
-                COALESCE(pg_total_relation_size(to_regclass($3)), 0)::bigint
-                    AS search_relation_bytes,
-                to_regclass($3) IS NOT NULL AS search_relation_present",
+        r"WITH candidates AS (
+                SELECT listed.generation_id, listed.ordinal
+                FROM unnest(CAST($2 AS uuid[])) WITH ORDINALITY
+                    AS listed(generation_id, ordinal)
+            ), relation_counts AS (
+                {cascade_counts}
+            ), cascade_counts AS (
+                SELECT generation_id, sum(relation_rows)::bigint AS cascade_rows
+                FROM relation_counts
+                GROUP BY generation_id
+            )
+            SELECT
+                candidates.generation_id::text AS generation_id,
+                COALESCE(cascade_counts.cascade_rows, 0)::bigint AS cascade_rows,
+                COALESCE(
+                    pg_total_relation_size(to_regclass(format(
+                        '%I.%I',
+                        CAST($3 AS text),
+                        'search_g_' || replace(candidates.generation_id::text, '-', '')
+                    ))),
+                    0
+                )::bigint AS search_relation_bytes,
+                to_regclass(format(
+                    '%I.%I',
+                    CAST($3 AS text),
+                    'search_g_' || replace(candidates.generation_id::text, '-', '')
+                )) IS NOT NULL AS search_relation_present
+            FROM candidates
+            LEFT JOIN cascade_counts
+                ON cascade_counts.generation_id = candidates.generation_id
+            ORDER BY candidates.ordinal",
     );
-    let row = query(AssertSqlSafe(sql))
+    query(AssertSqlSafe(sql))
         .bind(context.fence.target().project_id().as_str())
-        .bind(candidate.generation_id.as_str())
-        .bind(relation_name)
-        .fetch_one(connection)
+        .bind(generation_ids)
+        .bind(context.database.schema.as_str())
+        .fetch_all(connection)
         .await
-        .map_err(|_| database_error("load-candidate-work"))?;
-    let cascade_rows = read_named_count(&row, "cascade_rows")?;
-    let search_relation_bytes = read_named_count(&row, "search_relation_bytes")?;
-    let search_relation_present = row
-        .try_get::<bool, _>("search_relation_present")
-        .map_err(|_| database_error("decode-candidate-work"))?;
-    Ok(CandidateWork {
-        candidate,
-        cascade_rows,
-        search_relation_bytes,
-        search_relation_present,
-    })
+        .map_err(|_| database_error("load-candidate-work"))?
+        .iter()
+        .map(|row| {
+            let generation_id = row
+                .try_get::<String, _>("generation_id")
+                .map_err(|_| database_error("decode-candidate-work"))?;
+            let generation_id = GenerationId::parse(&generation_id)
+                .map_err(|_| database_error("decode-candidate-work"))?;
+            let cascade_rows = read_named_count(row, "cascade_rows")?;
+            let search_relation_bytes = read_named_count(row, "search_relation_bytes")?;
+            let search_relation_present = row
+                .try_get::<bool, _>("search_relation_present")
+                .map_err(|_| database_error("decode-candidate-work"))?;
+            Ok(CandidateWork {
+                candidate: RetentionCandidate { generation_id },
+                cascade_rows,
+                search_relation_bytes,
+                search_relation_present,
+            })
+        })
+        .collect()
 }
 
 async fn verify_retention_cascade_catalog(
@@ -1166,8 +1212,8 @@ mod tests {
         let policy = GenerationRetentionPolicy::new(0, 3)
             .and_then(|policy| policy.with_work_limits(10, 100, 3))
             .unwrap_or_else(|error| panic!("retention test policy failed: {error}"));
-        let oversized = candidate_work("00000000-0000-0000-0000-000000000001", 11, 1);
-        let smaller = candidate_work("00000000-0000-0000-0000-000000000002", 4, 20);
+        let oversized = candidate_work("00000000-0000-0000-0000-000000000001", 11, 1, true);
+        let smaller = candidate_work("00000000-0000-0000-0000-000000000002", 4, 20, true);
 
         let selected = select_bounded_candidate_work(policy, [oversized, smaller])
             .unwrap_or_else(|error| panic!("candidate selection failed: {error}"));
@@ -1182,10 +1228,45 @@ mod tests {
         assert_eq!(selected.search_relations, 1);
     }
 
+    #[test]
+    fn relation_free_candidates_are_not_limited_by_the_ddl_budget() {
+        let policy = GenerationRetentionPolicy::new(0, 100)
+            .and_then(|policy| policy.with_work_limits(1_000, 1_000, 2))
+            .unwrap_or_else(|error| panic!("retention test policy failed: {error}"));
+        let candidates = (1_u32..=100).map(|index| {
+            candidate_work(&format!("00000000-0000-0000-0000-{index:012}"), 1, 0, false)
+        });
+
+        let selected = select_bounded_candidate_work(policy, candidates)
+            .unwrap_or_else(|error| panic!("candidate selection failed: {error}"));
+
+        assert_eq!(selected.candidates.len(), 100);
+        assert_eq!(selected.cascade_rows, 100);
+        assert_eq!(selected.search_relation_bytes, 0);
+        assert_eq!(selected.search_relations, 0);
+    }
+
+    #[test]
+    fn relation_bearing_candidates_remain_limited_by_the_ddl_budget() {
+        let policy = GenerationRetentionPolicy::new(0, 100)
+            .and_then(|policy| policy.with_work_limits(1_000, 1_000, 2))
+            .unwrap_or_else(|error| panic!("retention test policy failed: {error}"));
+        let candidates = (0_u32..5).map(|index| {
+            candidate_work(&format!("10000000-0000-0000-0000-{index:012}"), 1, 1, true)
+        });
+
+        let selected = select_bounded_candidate_work(policy, candidates)
+            .unwrap_or_else(|error| panic!("candidate selection failed: {error}"));
+
+        assert_eq!(selected.candidates.len(), 2);
+        assert_eq!(selected.search_relations, 2);
+    }
+
     fn candidate_work(
         generation_id: &str,
         cascade_rows: u64,
         relation_bytes: u64,
+        search_relation_present: bool,
     ) -> CandidateWork {
         CandidateWork {
             candidate: RetentionCandidate {
@@ -1194,7 +1275,7 @@ mod tests {
             },
             cascade_rows,
             search_relation_bytes: relation_bytes,
-            search_relation_present: true,
+            search_relation_present,
         }
     }
 }

@@ -155,15 +155,15 @@ jobs:
             asset_target: linux-x64
             shell: bash
             cache_key: unused-linux-x64
-            build_image: rust:1.97.1-trixie@sha256:9146b0f62e1939989aa96fc8d89699a43c5635bf212819235a773e1a9e71a98f
-            runtime_image: debian:13-slim@sha256:9bb8a3626890e084ab54e888fdd7c4b6d2f119071cd4c5dc5fecb4d73062aa5f
+            build_image: rust:1.97.1-trixie@sha256:4277ce860337f6cfa1b679891bbf689a447f4b3f4f55701742614ad31321cee7
+            runtime_image: debian:13-slim@sha256:38a76d01668772e381ad2826d876627c89e7133e2f8a0f5d567306798b0f2a16
           - os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             asset_target: linux-arm64
             shell: bash
             cache_key: unused-linux-arm64
-            build_image: rust:1.97.1-trixie@sha256:6b52e2a871abbb9c26cbdd5425b0aba10f3dbd9485bee18e55b91efafeb4bf17
-            runtime_image: debian:13-slim@sha256:8b5033c95ca60cdffb0e0f4c446e5f714e82d8960a9ef4153c0eaf13e988b0ea
+            build_image: rust:1.97.1-trixie@sha256:a8b3be0cba14987d983042a971ef8cd5b4c28a09d7da2f123715aac9dac6e0a6
+            runtime_image: debian:13-slim@sha256:c94f5ddd41327aa2d4a7cfba7889056c02936182fd76a513fec6160c97181fc0
           - os: macos-26
             rust_target: aarch64-apple-darwin
             asset_target: darwin-arm64
@@ -274,7 +274,7 @@ jobs:
           ls -lh release
 
       - name: Attest release artifacts
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v4.2.2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: release/SHA256SUMS
 

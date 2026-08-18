@@ -627,6 +627,9 @@ enum Command {
         /// Skip the default one-time source catch-up before serving.
         #[arg(long)]
         no_startup_sync: bool,
+        /// Disable native filesystem watching and periodic source reconciliation.
+        #[arg(long)]
+        no_auto_sync: bool,
     },
     /// Verify PostgreSQL 18, `ParadeDB`, pgvector, and code tokenization.
     Doctor {
@@ -1076,12 +1079,18 @@ struct McpServeArguments {
     no_write_tools: bool,
     defaults: McpServeDefaults,
     disable_tool: Vec<String>,
-    no_startup_sync: bool,
+    sync: McpServeSync,
 }
 
 struct McpServeDefaults {
     allow_stale: bool,
     low_tokens: bool,
+}
+
+#[derive(Clone, Copy)]
+enum McpServeSync {
+    Enabled { startup_reconciliation: bool },
+    Disabled,
 }
 
 #[derive(Debug, Args)]
@@ -1588,6 +1597,7 @@ async fn run_runtime_operator_command(command: Command) -> Result<ExitCode, Stri
             low_tokens_default,
             disable_tool,
             no_startup_sync,
+            no_auto_sync,
         } => {
             run_mcp_server(McpServeArguments {
                 mcp,
@@ -1600,7 +1610,13 @@ async fn run_runtime_operator_command(command: Command) -> Result<ExitCode, Stri
                     low_tokens: low_tokens_default,
                 },
                 disable_tool,
-                no_startup_sync,
+                sync: if no_auto_sync {
+                    McpServeSync::Disabled
+                } else {
+                    McpServeSync::Enabled {
+                        startup_reconciliation: !no_startup_sync,
+                    }
+                },
             })
             .await
         }
@@ -2938,7 +2954,7 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
                 low_tokens: low_tokens_default,
             },
         disable_tool,
-        no_startup_sync,
+        sync,
     } = arguments;
     if !mcp {
         return Err("serve requires --mcp; Cartograph v2 uses stdio MCP transport".to_owned());
@@ -2973,9 +2989,14 @@ async fn run_mcp_server(arguments: McpServeArguments) -> Result<ExitCode, String
             },
             managed_database_port,
         );
-    mcp_handler::enable_handler_auto_sync(&handler, !no_startup_sync)
-        .await
-        .map_err(|error| error.to_string())?;
+    if let McpServeSync::Enabled {
+        startup_reconciliation,
+    } = sync
+    {
+        mcp_handler::enable_handler_auto_sync(&handler, startup_reconciliation)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let definitions =
         mcp_handler::tool_definitions().map_err(|_| "MCP tool contracts are invalid".to_owned())?;
     let registered = definitions
@@ -6234,6 +6255,7 @@ mod tests {
             "55435",
             "--profile",
             "read-only",
+            "--no-auto-sync",
         ])
         .unwrap_or_else(|error| panic!("serve CLI did not parse: {error}"));
         assert!(matches!(
@@ -6242,6 +6264,7 @@ mod tests {
                 mcp: true,
                 managed_database_port: Some(55_435),
                 profile: McpProfile::ReadOnly,
+                no_auto_sync: true,
                 ..
             }
         ));
@@ -6304,6 +6327,7 @@ mod tests {
             low_tokens_default: false,
             disable_tool: Vec::new(),
             no_startup_sync: true,
+            no_auto_sync: false,
         })
         .await;
 

@@ -223,7 +223,14 @@ pub struct IndexOptions {
     max_source_bytes: Option<usize>,
     profile: bool,
     refresh_history: bool,
+    failure_retention: IndexFailureRetention,
     additional_excludes: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexFailureRetention {
+    SuccessfulRequestsOnly,
+    AutomaticFailures,
 }
 
 impl Default for IndexOptions {
@@ -234,6 +241,7 @@ impl Default for IndexOptions {
             max_source_bytes: None,
             profile: false,
             refresh_history: true,
+            failure_retention: IndexFailureRetention::SuccessfulRequestsOnly,
             additional_excludes: Vec::new(),
         }
     }
@@ -251,6 +259,7 @@ impl IndexOptions {
         Self {
             max_workers: FOUR_WORKERS,
             refresh_history: false,
+            failure_retention: IndexFailureRetention::AutomaticFailures,
             ..Self::default()
         }
     }
@@ -853,6 +862,11 @@ struct IndexSourceReconciliation<'report> {
     cancellation: ProjectCancellation,
 }
 
+enum IndexAttemptOutcome {
+    Complete(IndexReport),
+    Published(IndexReport),
+}
+
 fn index_enrichment_policy(
     options: &IndexOptions,
     source_settings: &ProjectSourceSettings,
@@ -876,31 +890,11 @@ async fn run_core_index(
     cancellation: ProjectCancellation,
 ) -> Result<IndexReport, ProjectError> {
     for attempt in 0..=MAXIMUM_SOURCE_RECONCILIATION_ATTEMPTS {
-        let preparation_started = Instant::now();
-        let profile = options.profile;
-        let preparation = runtime
-            .prepare_index(options.clone(), cancellation.clone())
-            .await?;
-        let preparation_millis = monotonic_millis(preparation_started.elapsed());
-        let mut report = match preparation {
-            IndexPreparation::Unchanged(mut report) => {
-                if let Some(profile) = report.profile.as_mut() {
-                    profile.preparation_millis = preparation_millis;
-                }
-                report.retention = runtime
-                    .maintain_generation_retention(&report.project_id)
-                    .await;
-                return Ok(*report);
-            }
-            IndexPreparation::Pending(pending) => {
-                runtime
-                    .publish_index(*pending, cancellation.clone(), profile)
-                    .await?
-            }
-        };
-        if let Some(profile) = report.profile.as_mut() {
-            profile.preparation_millis = preparation_millis;
-        }
+        let mut report =
+            match run_core_index_attempt(runtime, &options, cancellation.clone()).await? {
+                IndexAttemptOutcome::Complete(report) => return Ok(report),
+                IndexAttemptOutcome::Published(report) => report,
+            };
         if index_report_matches_live_source(
             runtime,
             IndexSourceReconciliation {
@@ -924,6 +918,46 @@ async fn run_core_index(
         }
     }
     Err(ProjectError::SourceChangedDuringIndex)
+}
+
+async fn run_core_index_attempt(
+    runtime: &ProjectRuntime,
+    options: &IndexOptions,
+    cancellation: ProjectCancellation,
+) -> Result<IndexAttemptOutcome, ProjectError> {
+    let preparation_started = Instant::now();
+    let preparation = runtime
+        .prepare_index(options.clone(), cancellation.clone())
+        .await?;
+    let preparation_millis = monotonic_millis(preparation_started.elapsed());
+    let unchanged = matches!(&preparation, IndexPreparation::Unchanged(_));
+    let mut report = match preparation {
+        IndexPreparation::Unchanged(report) => *report,
+        IndexPreparation::Pending(pending) => {
+            match runtime
+                .publish_index(*pending, cancellation, options.profile)
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    if options.failure_retention == IndexFailureRetention::AutomaticFailures {
+                        maintain_failed_generation_retention(runtime).await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    };
+    if let Some(profile) = report.profile.as_mut() {
+        profile.preparation_millis = preparation_millis;
+    }
+    if unchanged {
+        report.retention = runtime
+            .maintain_generation_retention(&report.project_id)
+            .await;
+        return Ok(IndexAttemptOutcome::Complete(report));
+    }
+    Ok(IndexAttemptOutcome::Published(report))
 }
 
 async fn index_report_matches_live_source(
@@ -1240,6 +1274,17 @@ async fn maintain_generation_retention(
             next_action: "rerun_index_or_bounded_prune",
         },
     }
+}
+
+async fn maintain_failed_generation_retention(runtime: &ProjectRuntime) {
+    let Ok(Some(snapshot)) = runtime
+        .database
+        .project_snapshot_by_root(&runtime.root_identity)
+        .await
+    else {
+        return;
+    };
+    let _status = maintain_generation_retention(runtime, &snapshot.project_id).await;
 }
 
 impl ProjectRuntime {
@@ -3640,6 +3685,10 @@ mod tests {
 
         assert_eq!(automatic.max_workers, FOUR_WORKERS);
         assert!(!automatic.refresh_history);
+        assert_eq!(
+            automatic.failure_retention,
+            IndexFailureRetention::AutomaticFailures
+        );
         assert!(!automatic.force);
         assert_eq!(automatic.max_source_bytes, None);
         assert!(!automatic.profile);

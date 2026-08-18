@@ -36,9 +36,9 @@ Cartograph v2 is:
 
 - a native Rust executable;
 - PostgreSQL 18.4 or newer within major version 18;
-- code-aware BM25 through ParadeDB `pg_search` 0.25.2;
+- code-aware BM25 through ParadeDB `pg_search` 0.25.3;
 - pgvector 0.8.4 or newer (0.8.6 recommended for external PostgreSQL; the
-  managed ParadeDB 0.25.2 image bundles 0.8.4);
+  managed ParadeDB 0.25.3 image bundles `pg_search` 0.25.3 and pgvector 0.8.4);
 - useful without an LLM through exact, lexical, graph, review, and test-impact
   retrieval.
 
@@ -98,7 +98,7 @@ older containers are reported rather than silently replaced.
 ### External PostgreSQL (all supported platforms)
 
 The database administrator must install PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.2, and pgvector 0.8.4 or newer, then create pgvector
+version 18, `pg_search` 0.25.3, and pgvector 0.8.4 or newer, then create pgvector
 before creating `pg_search`. Supply the URL through the environment:
 
 ```sh
@@ -276,8 +276,9 @@ If a user needs data that exists only in a v1 SQLite index, give two choices:
 Do not install SQLite tooling into v2 to shorten this workflow.
 
 Every successful index/no-op reconciliation attempts a small automatic bounded
-cleanup: it keeps the two newest superseded generations, terminalizes failed
-pre-lease work, and can collect staging rows only after they have been unleased
+cleanup, and failed automatic indexing attempts clean terminal generations
+before returning: it keeps the two newest superseded generations, terminalizes
+failed pre-lease work, and can collect staging rows only after they have been unleased
 for at least ten minutes. It can also reconcile ready work only after 24 hours
 when it is unleased, non-current, and not part of incomplete import recovery.
 The same lease bounds the parse cache by current-plus-one extractor contracts,
@@ -295,7 +296,10 @@ cartograph db prune \
 
 This preserves the current generation, recent or leased staging/ready work,
 incomplete import recovery state, and the two newest superseded generations.
-Inspect each report before requesting another batch.
+The requested generation batch can exceed the independent 64-derived-relation
+drop cap when failed generations own no derived relation. Inspect each report
+before requesting another batch. Use `serve --mcp --no-auto-sync` to keep a
+recovery host quiescent while draining a capacity-failure backlog.
 
 Use `cartograph db usage --project-path . --format json` before diagnosing
 bloat. Treat `generationStorage.estimatedRetainedBytes` only as its documented

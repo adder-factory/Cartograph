@@ -225,6 +225,15 @@ async fn assert_stale_takeover(fixture: &LeaseFixture<'_>) {
         panic!("active owner could not heartbeat: {error}");
     }
     assert_heartbeat_renewed(fixture, &target, status.expires_at()).await;
+    let future_heartbeat = shift_lease_timestamps_ahead(fixture, &target).await;
+    if let Err(error) = fixture
+        .database
+        .heartbeat_lease_bounded(&mut first, Duration::from_secs(5))
+        .await
+    {
+        panic!("backward database clock invalidated an active lease heartbeat: {error}");
+    }
+    assert_backward_clock_heartbeat_is_monotonic(fixture, &target, &future_heartbeat).await;
 
     expire_lease(fixture.pool, fixture.schema, &target).await;
     let expired = match fixture.database.lease_status(&target).await {
@@ -287,6 +296,60 @@ async fn assert_heartbeat_renewed(
         Err(error) => panic!("could not verify database-side lease renewal: {error}"),
     };
     assert!(matches!(renewed, Ok(true)));
+}
+
+async fn shift_lease_timestamps_ahead(fixture: &LeaseFixture<'_>, target: &LeaseTarget) -> String {
+    let statement = format!(
+        r#"UPDATE "{schema}"."project_operation_leases"
+            SET acquired_at = expires_at + interval '1 second',
+                heartbeat_at = expires_at + interval '1 second',
+                expires_at = expires_at + interval '1 second'
+                    + $3 * interval '1 millisecond'
+            WHERE project_id = CAST($1 AS uuid) AND operation = $2
+            RETURNING heartbeat_at::text"#,
+        schema = fixture.schema,
+    );
+    match query(AssertSqlSafe(statement))
+        .bind(target.project_id().as_str())
+        .bind(target.operation().as_str())
+        .bind(LEASE_DURATION_MILLIS)
+        .fetch_one(fixture.pool)
+        .await
+    {
+        Ok(row) => row
+            .try_get::<String, _>("heartbeat_at")
+            .unwrap_or_else(|error| panic!("could not decode shifted heartbeat: {error}")),
+        Err(error) => panic!("could not create backward-clock heartbeat fixture: {error}"),
+    }
+}
+
+async fn assert_backward_clock_heartbeat_is_monotonic(
+    fixture: &LeaseFixture<'_>,
+    target: &LeaseTarget,
+    previous_heartbeat: &str,
+) {
+    let statement = format!(
+        r#"SELECT (
+                acquired_at <= heartbeat_at
+                AND heartbeat_at >= CAST($3 AS timestamptz)
+                AND expires_at = heartbeat_at + $4 * interval '1 millisecond'
+            ) AS monotonic
+            FROM "{schema}"."project_operation_leases"
+            WHERE project_id = CAST($1 AS uuid) AND operation = $2"#,
+        schema = fixture.schema,
+    );
+    let row = query(AssertSqlSafe(statement))
+        .bind(target.project_id().as_str())
+        .bind(target.operation().as_str())
+        .bind(previous_heartbeat)
+        .bind(LEASE_DURATION_MILLIS)
+        .fetch_one(fixture.pool)
+        .await;
+    let monotonic = match row {
+        Ok(row) => row.try_get::<bool, _>("monotonic"),
+        Err(error) => panic!("could not verify backward-clock heartbeat clamp: {error}"),
+    };
+    assert!(matches!(monotonic, Ok(true)));
 }
 
 async fn assert_v1_to_latest_upgrade(

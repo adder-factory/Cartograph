@@ -20,7 +20,10 @@ use tokio::{
     time::{Instant, MissedTickBehavior},
 };
 
-use crate::error_codes::project_index_failure_code;
+use crate::error_codes::{
+    GENERATION_CAPACITY_LIMIT, GENERATION_CAPACITY_NEXT_ACTION, GENERATION_CAPACITY_SCOPE,
+    is_generation_capacity_failure, project_index_failure_code,
+};
 
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(750);
 const MAXIMUM_EVENT_COALESCING_LATENCY: Duration = Duration::from_secs(2);
@@ -87,6 +90,7 @@ impl ProjectAutoSync {
 
     pub(crate) fn status(&self) -> AutoSyncStatus {
         let failure = self.state.failure_status();
+        let capacity_failure_active = failure.capacity_failure_attempts > 0;
         AutoSyncStatus {
             active: self.state.active.load(Ordering::Acquire),
             backend: self.watcher.backend(),
@@ -104,6 +108,12 @@ impl ProjectAutoSync {
             next_retry_at: failure.next_retry_at,
             failed_revision_attempts: failure.attempts,
             retry_suppressed: failure.retry_suppressed,
+            capacity_failure_attempts: failure.capacity_failure_attempts,
+            capacity_retry_suppressed: failure.capacity_retry_suppressed,
+            capacity_limit: capacity_failure_active.then_some(GENERATION_CAPACITY_LIMIT),
+            capacity_scope: capacity_failure_active.then_some(GENERATION_CAPACITY_SCOPE),
+            capacity_next_action: capacity_failure_active
+                .then_some(GENERATION_CAPACITY_NEXT_ACTION),
         }
     }
 }
@@ -136,6 +146,8 @@ struct AutoSyncFailureStatus {
     next_retry_at: Option<u64>,
     attempts: u8,
     retry_suppressed: bool,
+    capacity_failure_attempts: u8,
+    capacity_retry_suppressed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -166,13 +178,16 @@ impl AutoSyncState {
     }
 
     fn automatic_attempt_allowed(&self, revision: &ContentDigest, now: u64) -> bool {
-        self.failure
-            .read()
-            .map_or(true, |failure| match failure.failed_revision.as_ref() {
+        self.failure.read().map_or(true, |failure| {
+            if failure.status.capacity_retry_suppressed {
+                return false;
+            }
+            match failure.failed_revision.as_ref() {
                 Some(FailedRevision::Known(failed_revision)) if failed_revision != revision => true,
                 Some(_) => retry_allowed(failure.status, now),
                 None => true,
-            })
+            }
+        })
     }
 
     fn event_sync_route(&self, now: u64) -> EventSyncRoute {
@@ -223,8 +238,16 @@ impl AutoSyncState {
         } else {
             1
         };
-        let retry_suppressed = matches!(&revision, FailedRevision::Known(_))
-            && attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION;
+        let capacity_failure_attempts = if is_generation_capacity_failure(error) {
+            failure.status.capacity_failure_attempts.saturating_add(1)
+        } else {
+            failure.status.capacity_failure_attempts
+        };
+        let capacity_retry_suppressed =
+            capacity_failure_attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION;
+        let retry_suppressed = capacity_retry_suppressed
+            || (matches!(&revision, FailedRevision::Known(_))
+                && attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION);
         let next_retry_at = (!retry_suppressed).then(|| {
             now.saturating_add(
                 retry_interval(attempts)
@@ -241,6 +264,8 @@ impl AutoSyncState {
                 next_retry_at,
                 attempts,
                 retry_suppressed,
+                capacity_failure_attempts,
+                capacity_retry_suppressed,
             },
         };
     }
@@ -271,8 +296,21 @@ pub(crate) struct AutoSyncStatus {
     pub next_retry_at: Option<u64>,
     /// Automatic failures recorded for the current known or unavailable-revision bucket.
     pub failed_revision_attempts: u8,
-    /// True after a known revision exhausts its retry budget until source changes.
+    /// True after either the current revision or the cross-revision capacity circuit is exhausted.
     pub retry_suppressed: bool,
+    /// Generation-capacity failures observed since the last successful automatic index.
+    pub capacity_failure_attempts: u8,
+    /// True after capacity failures trip the cross-revision automatic-index circuit breaker.
+    pub capacity_retry_suppressed: bool,
+    /// Exact project setting that bounded the unresolved capacity failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_limit: Option<&'static str>,
+    /// Process boundary whose headroom governs the unresolved capacity failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_scope: Option<&'static str>,
+    /// Bounded operator recovery action for an unresolved capacity failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_next_action: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -763,6 +801,49 @@ mod tests {
         state.record_index_success();
         assert_eq!(state.failure_status(), AutoSyncFailureStatus::default());
         assert!(state.automatic_attempt_allowed(&first_revision, now));
+    }
+
+    #[test]
+    fn capacity_failures_trip_a_cross_revision_circuit_breaker() {
+        let state = AutoSyncState::default();
+        let now = 1_000_u64;
+        let capacity_error = ProjectError::IndexStageFailedWithReason {
+            stage: PipelineStage::Resolve,
+            reason: PipelineFailureReason::GenerationCapacityExceeded,
+        };
+
+        for attempt in 1..=MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION {
+            let revision = ContentDigest::from_bytes([attempt; 32]);
+            assert!(state.automatic_attempt_allowed(&revision, now));
+            state.record_index_failure(revision, &capacity_error, now);
+            let status = state.failure_status();
+            assert_eq!(status.attempts, 1);
+            assert_eq!(status.capacity_failure_attempts, attempt);
+            assert_eq!(
+                status.capacity_retry_suppressed,
+                attempt == MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION
+            );
+        }
+
+        let unseen_revision = ContentDigest::from_bytes([u8::MAX; 32]);
+        let exhausted = state.failure_status();
+        assert!(exhausted.retry_suppressed);
+        assert!(exhausted.capacity_retry_suppressed);
+        assert_eq!(exhausted.next_retry_at, None);
+        assert!(!state.automatic_attempt_allowed(&unseen_revision, u64::MAX));
+
+        state.record_unknown_failure(&ProjectError::StatusFailed, now);
+        let status_gap = state.failure_status();
+        assert_eq!(
+            status_gap.capacity_failure_attempts,
+            MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION
+        );
+        assert!(status_gap.capacity_retry_suppressed);
+        assert!(!state.automatic_attempt_allowed(&unseen_revision, u64::MAX));
+
+        state.record_index_success();
+        assert!(state.automatic_attempt_allowed(&unseen_revision, now));
+        assert_eq!(state.failure_status(), AutoSyncFailureStatus::default());
     }
 
     #[test]

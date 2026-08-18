@@ -102,13 +102,27 @@ An unchanged source revision that fails automatic indexing is not retried in a
 tight loop. Auto-sync records its stable stage code and uses exponential retry
 delays from 30 seconds through a 15-minute cap. After five failed automatic
 attempts, a known revision is suppressed until the supported source revision
-changes. If both indexing and status are unavailable, a typed unknown-revision
+changes. Generation-capacity failures additionally share a cross-revision
+circuit breaker: five unresolved capacity failures suppress automatic indexing
+even if editor changes keep producing new source revisions. Automatic failures
+run the same bounded terminal-generation retention path before returning, so a
+failing watcher does not leave one new failed spill generation per attempt.
+Adjust `generationStorage`/`maxGenerationBytes`, then run an explicit
+`cartograph index`; the next fresh status clears the circuit. If both indexing
+and status are unavailable, a typed unknown-revision
 failure bucket applies the same backoff to subsequent watcher events but keeps
 one bounded recovery probe at the capped interval instead of suppressing
 database recovery forever. Explicit/manual index requests remain available. Structured status
 exposes `lastErrorCode`, `lastFailureAt`, `nextRetryAt`,
-`failedRevisionAttempts`, and `retrySuppressed`; a new source revision clears
-the failed-revision state before the next bounded attempt.
+`failedRevisionAttempts`, `retrySuppressed`, `capacityFailureAttempts`,
+`capacityRetrySuppressed`, and the capacity limit/scope/next action. A new
+source revision clears ordinary revision suppression but never bypasses an
+unresolved capacity circuit.
+
+Start a recovery host with `cartograph serve --mcp --no-auto-sync` when an
+operator needs filesystem watching and periodic reconciliation fully paused
+while an explicit prune drains a historical backlog. `--no-startup-sync`
+continues to suppress only the initial catch-up.
 
 Managed local LLM logs rotate at 32 MiB and retain one `.1` file. Inspect stale
 rotated logs and invalid PID state without mutation, then apply only a bounded

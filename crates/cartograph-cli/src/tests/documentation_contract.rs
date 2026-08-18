@@ -119,6 +119,37 @@ fn public_mcp_inventory_and_bundled_skill_track_current_contracts() {
 }
 
 #[test]
+fn managed_paradedb_image_pin_tracks_the_actual_extension_contract() {
+    const MANAGED_IMAGE: &str = concat!(
+        "paradedb/paradedb:0.25.3@sha256:",
+        "82d0c8bb0263c4320cb321591dd6831ecdd04b4b27328ef658358a9a8c383ac5"
+    );
+    const VALIDATION_WORKFLOW: &str = include_str!("../../../../.github/workflows/v2-rust.yml");
+    const DEVELOPMENT_COMPOSE: &str =
+        include_str!("../../../../deploy/paradedb/docker-compose.yml");
+    const README: &str = include_str!("../../../../README.md");
+    const AGENT_GUIDE: &str = include_str!("../../../../AGENTS.md");
+    const INSTALL_GUIDE: &str = include_str!("../../../../docs/AGENT-INSTALL.md");
+    const STORAGE_GUIDE: &str = include_str!("../../../../docs/STORAGE-BACKENDS.md");
+    const TROUBLESHOOTING: &str = include_str!("../../../../docs/TROUBLESHOOTING.md");
+
+    assert_eq!(cartograph_db::MANAGED_DATABASE_IMAGE, MANAGED_IMAGE);
+    assert!(VALIDATION_WORKFLOW.contains(MANAGED_IMAGE));
+    assert!(DEVELOPMENT_COMPOSE.contains(MANAGED_IMAGE));
+    for document in [
+        README,
+        AGENT_GUIDE,
+        INSTALL_GUIDE,
+        STORAGE_GUIDE,
+        TROUBLESHOOTING,
+    ] {
+        assert!(document.contains("ParadeDB 0.25.3 image"));
+        assert!(document.contains("`pg_search` 0.25.3"));
+        assert!(document.contains("pgvector 0.8.4"));
+    }
+}
+
+#[test]
 fn release_docs_identify_current_audit_and_historical_benchmarks() {
     const README: &str = include_str!("../../../../README.md");
     const AGENT_INSTALL: &str = include_str!("../../../../docs/AGENT-INSTALL.md");

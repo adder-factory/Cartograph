@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-15 (`v2.1.20`).
+Last release audit: 2026-08-17 (`v2.1.21`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -56,7 +56,10 @@ retained as partial files and listed in a successful index report with degraded
 reason `extraction_invalid_span` or `extraction_parser_stopped`.
 For a generation-capacity failure, text and JSON name `maxGenerationBytes`, the
 `cartograph_process` scope, and the bounded PostgreSQL-spill/host-headroom next
-action.
+action. Auto-sync performs bounded failed-generation cleanup after each failed
+attempt and suppresses itself after five capacity failures across source
+revisions; adjust the reported setting and run an explicit index to clear that
+circuit.
 
 `embed` carries forward matching content-addressed vectors before calling the
 configured endpoint. Its report distinguishes the complete
@@ -104,7 +107,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.20 top-level command advertised
+This inventory contains every non-hidden v2.1.21 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -127,7 +130,7 @@ by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 ## MCP and agent configuration
 
 ```text
-cartograph serve --mcp [--managed-database-port PORT] [--profile coding|core|full|read-only|review]
+cartograph serve --mcp [--managed-database-port PORT] [--profile coding|core|full|read-only|review] [--no-startup-sync] [--no-auto-sync]
 cartograph install --yes --target <TARGET[,TARGET...]> --location local [--managed-database-port PORT]
 cartograph uninstall --yes --target <TARGET[,TARGET...]> --location local
 ```

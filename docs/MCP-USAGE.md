@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-15 (`v2.1.20`).
+Last release audit: 2026-08-17 (`v2.1.21`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -60,12 +60,20 @@ stdio server is ready, so modern `server/discover`/`tools/list` and the legacy
 `initialize` handshake do not wait for a full index; `autoSync` in
 `cartograph_status` exposes attempts, publications, no-ops, errors, stable
 stage-specific `lastErrorCode`, failure/retry times, unchanged-revision attempt
-count, and retry suppression. Failed unchanged revisions use bounded
+count, retry suppression, cross-revision capacity-failure count, and the exact
+capacity limit/scope/next action. Failed unchanged revisions use bounded
 exponential backoff and stop after five automatic attempts until source changes.
+Five generation-capacity failures trip a separate circuit that new source
+revisions cannot bypass; every automatic failure also attempts bounded cleanup
+of terminal failed generations. Adjust the reported capacity setting and run an
+explicit index to prove recovery and clear the circuit.
 When PostgreSQL is unavailable before a revision can be recovered, watcher
 events share an unknown-revision backoff bucket and retain a capped recovery
 probe rather than retrying every event or becoming permanently suppressed.
 `--no-startup-sync` suppresses only the initial reconciliation.
+`--no-auto-sync` disables both native watching and periodic reconciliation for
+an operator-controlled recovery host while leaving explicit MCP/CLI operations
+available.
 
 A non-recoverable file-local admin index failure retains one `fileFailure` object with the
 normalized project-relative `path`, fixed `reason`, and credential-safe

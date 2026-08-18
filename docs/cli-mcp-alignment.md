@@ -1,6 +1,6 @@
 # CLI and MCP alignment
 
-Last release audit: 2026-08-15 (`v2.1.20`).
+Last release audit: 2026-08-17 (`v2.1.21`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands
 and 36 bounded MCP tools. Shared schemas generate ordinary CLI adapters where
@@ -84,6 +84,10 @@ stable degraded reason. Generation-capacity failures name
 direct CLI output and MCP `failureDetail`. Text rendering escapes control
 characters, and neither surface accepts arbitrary parser/driver text at that
 boundary.
+Auto-sync status additionally exposes its cross-revision capacity failure count,
+circuit state, and the same limit/scope/next action. `serve --no-auto-sync`
+provides the CLI process-lifetime recovery boundary; it does not mutate the MCP
+authorization profile or create a task-local tool mode.
 
 ## Verification
 

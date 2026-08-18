@@ -1,6 +1,6 @@
 # Cartograph v2 architecture
 
-Last implementation review: 2026-08-15 (`v2.1.20`)
+Last implementation review: 2026-08-17 (`v2.1.21`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.
 PostgreSQL 18 is its only durable store, ParadeDB `pg_search` provides
@@ -54,7 +54,7 @@ about PostgreSQL or transport.
 Before migration or normal work, Cartograph proves:
 
 - PostgreSQL 18.4 or newer within major version 18;
-- `pg_search` 0.25.2, expected preload state, the `paradedb` access method, and
+- `pg_search` 0.25.3, expected preload state, the `paradedb` access method, and
   exact `pdb.source_code` token behavior;
 - pgvector 0.8.4 or newer, with 0.8.6 recommended for external PostgreSQL;
 - bounded DML/DDL capability in the selected safely quoted schema.
@@ -525,7 +525,9 @@ source proves the full token; otherwise it is explicitly coarse. SCIP
 placeholder hashes cannot prove historical bytes v1 never stored.
 
 Every successful index or no-op reconciliation attempts bounded generation and
-parse-cache retention after publication/no-op detection. The current extractor
+parse-cache retention after publication/no-op detection. A failed automatic
+index also attempts bounded terminal-generation retention, and a cross-revision
+capacity circuit stops after five unresolved capacity failures. The current extractor
 contract is always cache-protected; one recent older contract plus independent
 row/logical-byte/deletion caps prevent unbounded parser-version accumulation.
 Automatic cleanup delegates thresholded relation reclamation to the tuned
@@ -540,7 +542,9 @@ eligible only after a longer age floor when it is unleased, non-current, and
 outside import recovery. `db prune` uses the same bounded engine for larger
 explicit batches of stale staging/ready, failed, and old superseded generations,
 always preserving current, recent/leased work, import recovery state, and
-configured recent histories. Retention locks
+configured recent histories. Its generation-count limit is independent from
+the 64-derived-relation DDL cap, so relation-free failed backlogs can use the
+full requested bounded batch. Retention locks
 publication, rechecks its exact migration lease before commit, drops selected
 derived BM25 relations transactionally, and reports admitted cascade rows,
 relation count, and physical relation bytes. Status and doctor expose all

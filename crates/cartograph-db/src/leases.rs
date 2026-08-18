@@ -943,11 +943,21 @@ fn random_lease_id() -> Result<LeaseId, LeaseError> {
 }
 
 fn heartbeat_sql(quoted_schema: &str) -> String {
+    // `clock_timestamp()` is wall time and may step backward. Preserve the durable timestamp
+    // order so a live exact-token heartbeat cannot violate its own database constraint.
     format!(
         r#"WITH lease_clock AS (SELECT clock_timestamp() AS now)
             UPDATE {quoted_schema}."project_operation_leases" AS leases
-            SET heartbeat_at = lease_clock.now,
-                expires_at = lease_clock.now + $4 * interval '1 millisecond'
+            SET heartbeat_at = GREATEST(
+                    lease_clock.now,
+                    leases.acquired_at,
+                    leases.heartbeat_at
+                ),
+                expires_at = GREATEST(
+                    lease_clock.now,
+                    leases.acquired_at,
+                    leases.heartbeat_at
+                ) + $4 * interval '1 millisecond'
             FROM lease_clock
             WHERE leases.project_id = CAST($1 AS uuid)
               AND leases.operation = $2

@@ -249,6 +249,35 @@ async fn assert_bounded_import_retention(
     if let Err(error) = fixture.database.release_lease(&retention_lease).await {
         panic!("retention lease release failed: {error}");
     }
+    for _ in 0..65 {
+        create_failed_generation(&fixture.database, &imported.project_id).await;
+    }
+    let backlog_lease = acquire_lease(
+        &fixture.database,
+        LeaseTarget::new(
+            imported.project_id.clone(),
+            ProjectOperation::Migration,
+            None,
+        ),
+        "retention-backlog",
+    )
+    .await;
+    let backlog_policy = GenerationRetentionPolicy::new(2, 65)
+        .unwrap_or_else(|error| panic!("backlog retention policy failed: {error}"));
+    let backlog = fixture
+        .database
+        .cleanup_generations(GenerationRetentionRequest::new(
+            backlog_policy,
+            &backlog_lease.fence(),
+            STATEMENT_TIMEOUT,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("backlog retention cleanup failed: {error}"));
+    assert_eq!(backlog.failed_removed, 65);
+    assert_eq!(backlog.failed_remaining, 0);
+    if let Err(error) = fixture.database.release_lease(&backlog_lease).await {
+        panic!("backlog retention lease release failed: {error}");
+    }
     assert_retained_storage_bound(fixture, &imported.project_id, &imported.generation_id).await;
     assert_expired_retention_fence_rolls_back(fixture, &imported.project_id).await;
 

@@ -18,11 +18,11 @@ use cartograph_agent::{
     FileSourceOptions, FileSourceRequest, GenerationRetentionStatus, HistoryIndexOptions,
     ImportAuditError, ImportAuditOptions, ImportAuditRequest, ImportAuditSource, ImportAuditTarget,
     IndexOptions, IndexReport, LcovLoadOptions, NativeGenerationStorageMetrics,
-    ProjectCancellation, ProjectError, ProjectRuntime, RenamePlanError, RenamePlanOptions,
-    RenamePlanRequest, RetrievalClientRequest, RetrievalOptions, RetrievalRequest, ReviewOptions,
-    ScipExportRequest, ScipImportLimits, ScipImportRequest, SourceContextOptions,
-    SourceContextRequest, SourceSearchOptions, TestEvidenceOptions, WorkingTreeOverlayRequest,
-    judge_dead_code_candidates,
+    PipelineFailureReason, ProjectCancellation, ProjectError, ProjectRuntime, RenamePlanError,
+    RenamePlanOptions, RenamePlanRequest, RetrievalClientRequest, RetrievalOptions,
+    RetrievalRequest, ReviewOptions, ScipExportRequest, ScipImportLimits, ScipImportRequest,
+    SourceContextOptions, SourceContextRequest, SourceSearchOptions, TestEvidenceOptions,
+    WorkingTreeOverlayRequest, judge_dead_code_candidates,
 };
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
@@ -151,7 +151,7 @@ async fn auto_storage_streams_many_crate_workspaces_before_memory_resolve_capaci
             .await
             .unwrap_or_else(|error| panic!("auto-spill runtime connect failed: {error}"));
         let report = runtime
-            .index(IndexOptions::default().with_history_refresh(false))
+            .index(IndexOptions::automatic())
             .await
             .unwrap_or_else(|error| panic!("auto-spill index failed: {error}"));
         let native = report
@@ -170,6 +170,51 @@ async fn auto_storage_streams_many_crate_workspaces_before_memory_resolve_capaci
             u64::try_from(CARGO_MANIFESTS * 2)
                 .unwrap_or_else(|_| panic!("fixture file count overflowed"))
         );
+        runtime.close().await;
+    }
+
+    drop_schema(&settings, &schema).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn automatic_capacity_failure_cleans_its_terminal_generation() {
+    let (schema, settings, project) = live_project_fixture("9");
+    std::fs::create_dir_all(project.path().join(".cartograph"))
+        .unwrap_or_else(|error| panic!("capacity config directory failed: {error}"));
+    std::fs::write(
+        project.path().join(".cartograph/config.json"),
+        r#"{"generationStorage":"postgres","maxGenerationBytes":1,"maxSpillBytes":67108864,"maxSpillRows":1000000,"enableChurn":false,"enableCoChange":false,"enableIssueHistory":false}"#,
+    )
+    .unwrap_or_else(|error| panic!("capacity config failed: {error}"));
+    std::fs::write(
+        project.path().join("dense.rs"),
+        "pub fn capacity_fixture(value: usize) -> usize { value + 1 }\n",
+    )
+    .unwrap_or_else(|error| panic!("capacity source failed: {error}"));
+
+    {
+        let runtime = ProjectRuntime::connect(project.path(), &settings)
+            .await
+            .unwrap_or_else(|error| panic!("capacity runtime connect failed: {error}"));
+        let indexed = runtime.index(IndexOptions::automatic()).await;
+        assert!(matches!(
+            indexed,
+            Err(ProjectError::IndexStageFailedWithReason {
+                reason: PipelineFailureReason::GenerationCapacityExceeded,
+                ..
+            })
+        ));
+        let status = runtime
+            .status()
+            .await
+            .unwrap_or_else(|error| panic!("capacity status failed: {error}"));
+        let storage = status.snapshot.as_ref().map_or_else(
+            || panic!("capacity project snapshot was missing"),
+            |snapshot| snapshot.generation_storage,
+        );
+        assert_eq!(storage.staging, 0);
+        assert_eq!(storage.failed, 0);
         runtime.close().await;
     }
 

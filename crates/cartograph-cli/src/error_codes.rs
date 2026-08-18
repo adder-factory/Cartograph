@@ -3,7 +3,7 @@ use serde::Serialize;
 
 pub(crate) const GENERATION_CAPACITY_LIMIT: &str = "maxGenerationBytes";
 pub(crate) const GENERATION_CAPACITY_SCOPE: &str = "cartograph_process";
-pub(crate) const GENERATION_CAPACITY_NEXT_ACTION: &str = "use generationStorage=postgres for a dense repository; if PostgreSQL spill was already selected, raise maxGenerationBytes only with Cartograph-process host headroom";
+pub(crate) const GENERATION_CAPACITY_NEXT_ACTION: &str = "use generationStorage=postgres for a dense repository; if PostgreSQL spill was already selected, raise maxGenerationBytes only with Cartograph-process host headroom, then run an explicit cartograph index; auto-sync suppresses itself after five capacity failures";
 
 pub(crate) const fn is_generation_capacity_failure(error: &ProjectError) -> bool {
     matches!(

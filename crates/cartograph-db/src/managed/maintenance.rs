@@ -1199,8 +1199,8 @@ mod tests {
     const LIVE_DOCUMENT: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const LIVE_DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const PREVIOUS_MANAGED_DATABASE_IMAGE: &str = concat!(
-        "paradedb/paradedb:0.25.1@sha256:",
-        "fcd662a9b32e683638e0a2c2d9fd313e433f07694ec70543b30de0d84a721c18"
+        "paradedb/paradedb:0.25.2@sha256:",
+        "f34b716407b4d509d3e59e649495964b296ad7c0931658dbf99d3cf1b35bc994"
     );
 
     struct LiveDockerCleanup {
@@ -1839,7 +1839,7 @@ mod tests {
         assert_eq!(rolled_back.image, old_image);
         assert_eq!(
             read_extension_version(database, "pg_search").await,
-            "0.25.1"
+            "0.25.2"
         );
         assert_eq!(
             read_upgrade_marker(database).await,
@@ -1900,7 +1900,7 @@ mod tests {
         );
         assert_eq!(
             read_extension_version(database, "pg_search").await,
-            "0.25.2"
+            "0.25.3"
         );
         let connection = open_test_database(database).await;
         let capabilities = connection

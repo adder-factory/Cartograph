@@ -1,9 +1,9 @@
 # PostgreSQL storage and operations
 
 Cartograph v2 has one storage engine: PostgreSQL 18.4 or newer within major
-version 18 with ParadeDB `pg_search` 0.25.2 and pgvector 0.8.4 or newer.
+version 18 with ParadeDB `pg_search` 0.25.3 and pgvector 0.8.4 or newer.
 Pgvector 0.8.6 is recommended for external PostgreSQL; the managed upstream
-ParadeDB 0.25.2 image bundles 0.8.4. SQLite is not a backend, fallback,
+ParadeDB 0.25.3 image bundles `pg_search` 0.25.3 and pgvector 0.8.4. SQLite is not a backend, fallback,
 migration target, importer, feature, or test utility.
 
 ## Capability contract
@@ -60,11 +60,12 @@ cartograph db upgrade --project-path . \
   --confirm upgrade-managed-database
 ```
 
-The upgrade starts the exact digest against the retained volume, updates
+The upgrade starts the exact digest against the retained volume, reconciles
 pgvector and then `pg_search` transactionally before calling extension-defined
 functions, and requires capability plus Cartograph migration proof before it
-discards the old container. ParadeDB 0.25.2 retains the legacy `bm25` access
-method, so existing derived indexes remain valid and queryable; Cartograph
+discards the old container. The ParadeDB 0.25.3 image upgrades `pg_search` to
+0.25.3 and retains the legacy `bm25` access method, so existing
+derived indexes remain valid and queryable; Cartograph
 creates replacement/new generation indexes with the current `paradedb` access
 method and accepts both catalog names during this upgrade boundary.
 Failures before the extension transaction restore the old container. Once an
@@ -92,7 +93,7 @@ disabled there until private credential ACL behavior can be proved equivalent.
 ## External database
 
 The database administrator installs PostgreSQL 18.4 or newer within major
-version 18, `pg_search` 0.25.2, and pgvector 0.8.4 or newer (0.8.6
+version 18, `pg_search` 0.25.3, and pgvector 0.8.4 or newer (0.8.6
 recommended), and creates pgvector before `pg_search`. Supply secrets only
 through the process environment:
 
@@ -109,7 +110,7 @@ update both catalogs before running `cartograph doctor`:
 
 ```sql
 ALTER EXTENSION vector UPDATE TO '0.8.6';
-ALTER EXTENSION pg_search UPDATE TO '0.25.2';
+ALTER EXTENSION pg_search UPDATE TO '0.25.3';
 ```
 
 Optional bounded pool controls:
@@ -273,7 +274,10 @@ cartograph db derived-index --project-path /absolute/path/to/checkout
 
 Successful index and no-op reconciliation requests perform an automatic cleanup
 with a 32-generation transaction cap while preserving the two newest
-superseded generations. The same exact migration lease also runs parse-cache
+superseded generations. Failed automatic indexes run the terminal-generation
+portion of the same bounded cleanup before returning, preventing a persistent
+capacity failure from creating one retained failed spill generation per retry.
+The same exact migration lease also runs parse-cache
 retention: the running extractor contract is always protected, at most one
 recent older contract is retained, and independent defaults cap the project at
 20,000 rows, 2 GiB of logical payload, and 10,000 deletions per pass. Cache hits
@@ -308,7 +312,12 @@ the exact state needed for concurrent-publication recovery.
 The transaction also enforces independent canonical/cascade-row,
 generation-relation-byte, and DDL-relation caps. Defaults admit at most five
 million cascade rows, 8 GiB of generation search relations, and 64 relation
-drops; hard bounds are 100 million rows, 64 GiB, and 64 drops. For every
+drops; hard bounds are 100 million rows, 64 GiB, and 64 drops. The requested
+generation limit is independent: a `--maximum-deletions 10000` recovery can
+delete up to 10,000 failed generations that own no derived search relation,
+while relation-bearing generations remain capped at 64 drops. Candidate work
+is accounted in one bounded batch rather than silently pre-limiting every prune
+to the DDL cap. For every
 selected terminal generation it accounts work first, drops the physical search
 table (including its BM25 index), deletes canonical rows by cascade, and reports
 the exact admitted rows, relations, and bytes. Before selection it walks the
@@ -333,8 +342,10 @@ That lower bound deliberately excludes shared fact-table heaps and B-trees,
 embeddings, and reusable dead space. Routine `status` also includes compact
 whole-database and schema heap/index/TOAST totals; use `db usage` for the full
 relation/cache/generation report.
-Inspect the report and request another explicit batch if automatic cleanup does
-not drain an existing backlog.
+Inspect the report and request another explicit batch if row/byte bounds leave
+work. To quiesce a failing watcher during recovery, start the MCP host with
+`--no-auto-sync`, drain the bounded failed backlog, adjust the reported capacity
+setting, and prove one explicit index before restoring automatic watching.
 
 ## Storage measurement and online compaction
 

@@ -140,7 +140,10 @@ The memory path still publishes with bounded COPY statements (100,000 rows or
 before ready and therefore skips that redundant COPY payload. Neither strategy
 removes the compact global resolution/clone/centrality bound; extreme symbol or
 call-graph cardinality can still fail safely with
-`generation_capacity_exceeded`. Persistent SCIP replacement overlays currently
+`generation_capacity_exceeded`. Auto-sync reports `maxGenerationBytes`, its
+Cartograph-process scope, and the recovery action; after five capacity failures
+across any source revisions it suppresses further automatic attempts until an
+explicit index succeeds. Persistent SCIP replacement overlays currently
 remain on the memory path in `auto`; forcing `postgres` while an overlay exists
 is rejected rather than silently changing overlay semantics.
 
