@@ -589,7 +589,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cartograph-agent"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-cli"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "blake3",
  "cartograph-agent",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-config"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "secrecy",
  "thiserror",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-db"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-domain"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "blake3",
  "serde",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-extract"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "arborium-bash",
  "arborium-c",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-indexer"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-llm"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "blake3",
  "cartograph-domain",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-mcp"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "serde",
  "serde_json",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-scip"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "blake3",
  "cartograph-db",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-search"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "cartograph-db",
  "cartograph-domain",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-test-support"
-version = "2.1.23"
+version = "2.1.24"
 dependencies = [
  "sqlx-core",
  "sqlx-postgres",
@@ -2280,9 +2280,9 @@ dependencies = [
 
 [[package]]
 name = "sqry-tree-sitter-support"
-version = "29.0.6"
+version = "30.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a287f5a4352b5009751110b5c53419a289050d4ffb509b2061c2582b463072fd"
+checksum = "d5ee644320fa26f30a389c2a8c162ad78d0eb2188bfd730c9319bc8454173304"
 dependencies = [
  "thiserror",
  "tree-sitter",
@@ -2614,9 +2614,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-abap-sqry"
-version = "29.0.6"
+version = "30.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02ead45cbb3392f43d57047ef3acc899e2e659c12230f1695d81882279287420"
+checksum = "815b47537997ec107e5c75401ef22fc0f6c1eeb4736a5f3ef3d44f4da7569432"
 dependencies = [
  "cc",
  "sqry-tree-sitter-support",

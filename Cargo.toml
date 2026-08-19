@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.23"
+version = "2.1.24"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Adder Factory"]
@@ -65,6 +65,18 @@ arborium-vb = "=2.18.1"
 arborium-verilog = "=2.18.1"
 arborium-yaml = "=2.18.1"
 blake3 = "1.8.6"
+cartograph-agent = { path = "crates/cartograph-agent" }
+cartograph-cli = { path = "crates/cartograph-cli" }
+cartograph-config = { path = "crates/cartograph-config" }
+cartograph-db = { path = "crates/cartograph-db" }
+cartograph-domain = { path = "crates/cartograph-domain" }
+cartograph-extract = { path = "crates/cartograph-extract" }
+cartograph-indexer = { path = "crates/cartograph-indexer" }
+cartograph-llm = { path = "crates/cartograph-llm" }
+cartograph-mcp = { path = "crates/cartograph-mcp" }
+cartograph-scip = { path = "crates/cartograph-scip" }
+cartograph-search = { path = "crates/cartograph-search" }
+cartograph-test-support = { path = "crates/cartograph-test-support" }
 clap = { version = "4.6.6", default-features = false, features = [
   "derive",
   "error-context",
@@ -109,7 +121,7 @@ tokio = { version = "1.53.1", features = [
 ] }
 toml_edit = "=0.25.13"
 tree-sitter = "=0.26.12"
-tree-sitter-abap-sqry = "=29.0.6"
+tree-sitter-abap-sqry = "=30.0.0"
 tree-sitter-arkts = "=0.2.0"
 tree-sitter-astro-next = "=0.1.1"
 tree-sitter-cuda = "=0.21.1"

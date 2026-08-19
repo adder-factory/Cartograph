@@ -7,6 +7,7 @@ VALIDATION="$ROOT/.github/workflows/v2-rust.yml"
 RELEASE="$ROOT/.github/workflows/release.yml"
 STABLE_CANARY="$ROOT/.github/workflows/stable-canary.yml"
 CHANGE_CLASSIFIER="$ROOT/scripts/classify-v2-ci-change.sh"
+WORKSPACE_DEPENDENCY_CONTRACT="$ROOT/scripts/test-workspace-dependencies.sh"
 DOCUMENTATION_CONTRACT="$ROOT/crates/cartograph-cli/src/tests/documentation_contract.rs"
 PULL_HELPER="$ROOT/scripts/pull-pinned-image.sh"
 SMOKE_HELPER="$ROOT/scripts/smoke-rust-release.sh"
@@ -39,6 +40,102 @@ literal_count() {
     "$VALIDATION" "$RELEASE"
 }
 
+command -v ruby >/dev/null 2>&1 || fail 'Ruby with the standard YAML parser is required'
+ruby - "$VALIDATION" <<'RUBY'
+require "yaml"
+
+def contract_failure(message)
+  abort("release workflow contract failed: #{message}")
+end
+
+def parse_workflow(source, label)
+  document = YAML.safe_load(
+    source,
+    permitted_classes: [],
+    permitted_symbols: [],
+    aliases: false
+  )
+  contract_failure("#{label} did not parse as a YAML mapping") unless document.is_a?(Hash)
+  document
+rescue Psych::Exception => error
+  contract_failure("#{label} is invalid YAML: #{error.message}")
+end
+
+def quality_job(document, label)
+  jobs = document["jobs"]
+  contract_failure("#{label} has no jobs mapping") unless jobs.is_a?(Hash)
+  quality = jobs["quality"]
+  contract_failure("#{label} has no quality job mapping") unless quality.is_a?(Hash)
+  steps = quality["steps"]
+  contract_failure("#{label} quality job has no steps sequence") unless steps.is_a?(Array)
+  [quality, steps]
+end
+
+def nonblocking_quality?(source, label)
+  quality, steps = quality_job(parse_workflow(source, label), label)
+  quality.key?("continue-on-error") || steps.any? do |step|
+    step.is_a?(Hash) && step.key?("continue-on-error")
+  end
+end
+
+nonblocking_fixtures = {
+  "quoted job-level continue-on-error fixture" => <<~'YAML',
+    jobs:
+      quality:
+        "continue-on-error": true
+        steps:
+          - run: scripts/gate.sh
+  YAML
+  "whitespace-before-colon fixture" => <<~'YAML',
+    jobs:
+      quality:
+        continue-on-error : true
+        steps:
+          - run: scripts/gate.sh
+  YAML
+  "explicit-key fixture" => <<~'YAML',
+    jobs:
+      quality:
+        ? continue-on-error
+        : true
+        steps:
+          - run: scripts/gate.sh
+  YAML
+  "escaped-key fixture" => <<~'YAML',
+    jobs:
+      quality:
+        "continue-on-\u0065rror": true
+        steps:
+          - run: scripts/gate.sh
+  YAML
+  "quoted step-level continue-on-error fixture" => <<~'YAML',
+    jobs:
+      quality:
+        steps:
+          - run: scripts/gate.sh
+            'continue-on-error': true
+  YAML
+}
+nonblocking_fixtures.each do |label, fixture|
+  contract_failure("#{label} bypassed parsed workflow validation") unless \
+    nonblocking_quality?(fixture, label)
+end
+
+blocking_fixture = <<~'YAML'
+  jobs:
+    quality:
+      steps:
+        - run: scripts/gate.sh
+YAML
+contract_failure("blocking workflow fixture was incorrectly rejected") if \
+  nonblocking_quality?(blocking_fixture, "blocking fixture")
+
+validation_path = ARGV.fetch(0)
+if nonblocking_quality?(File.read(validation_path), "validation workflow")
+  contract_failure("quality job and its required steps may not continue on error")
+end
+RUBY
+
 grep -Fq 'attest-main-gate:' "$VALIDATION" || fail 'main-gate attestation job is missing'
 grep -Fq 'actions/attest-build-provenance@' "$VALIDATION" || fail 'main-gate provenance is missing'
 # GitHub evaluates this expression; the local contract test needs the literal bytes.
@@ -64,6 +161,8 @@ grep -Fq 'fetch-depth: 0' "$VALIDATION" || \
 grep -Fq "git diff --no-renames --name-only -z \"\$diff_range\"" "$VALIDATION" || \
   fail 'change classifier is not NUL-safe or does not expose deletions separately'
 [[ -x "$CHANGE_CLASSIFIER" ]] || fail 'change classifier is missing or not executable'
+[[ -x "$WORKSPACE_DEPENDENCY_CONTRACT" ]] || \
+  fail 'workspace dependency contract is missing or not executable'
 [[ -f "$DOCUMENTATION_CONTRACT" ]] || fail 'documentation contract source is missing'
 for documentation_test in \
   public_cli_reference_tracks_commands_targets_and_affected_forms \
@@ -116,6 +215,33 @@ assert_scope "$full_scope" .github/workflows/v2-rust.yml
 assert_scope "$full_scope" docs/CONFIGURATION.md Cargo.lock
 
 quality_block="$(job_block "$VALIDATION" quality)"
+workspace_contract_count="$(awk '
+  $0 == "      - name: Workspace dependency contract" { count += 1 }
+  END { print count + 0 }
+' <<<"$quality_block")"
+[[ "$workspace_contract_count" == 1 ]] || \
+  fail 'quality job must contain exactly one workspace dependency contract step'
+workspace_contract_step="$(awk \
+  -v header='      - name: Workspace dependency contract' '
+  $0 == header {
+    capture = 1
+  }
+  capture && $0 != header && /^      - / {
+    exit
+  }
+  capture {
+    print
+  }
+' <<<"$quality_block" | sed '/^[[:space:]]*$/d')"
+expected_workspace_contract_step=$'      - name: Workspace dependency contract\n        if: needs.classify.outputs.full == \'true\'\n        run: scripts/test-workspace-dependencies.sh'
+[[ "$workspace_contract_step" == "$expected_workspace_contract_step" ]] || \
+  fail 'workspace dependency contract step must be exact, full-gate-only, and non-optional'
+workspace_contract_run_count="$(awk '
+  $0 == "        run: scripts/test-workspace-dependencies.sh" { count += 1 }
+  END { print count + 0 }
+' "$VALIDATION")"
+[[ "$workspace_contract_run_count" == 1 ]] || \
+  fail 'workspace dependency contract command must appear exactly once'
 grep -Fq 'needs: classify' <<<"$quality_block" || \
   fail 'required quality result does not depend on change classification'
 if grep -Eq '^    (container|services):' <<<"$quality_block"; then
@@ -137,9 +263,12 @@ validate_quality_step() {
     return 0
   fi
   if grep -Fq 'name: Documentation contract' <<<"$step"; then
-    grep -Fq "needs.classify.outputs.docs_only == 'true'" <<<"$step" || \
+    grep -Fxq "        if: needs.classify.outputs.docs_only == 'true'" <<<"$step" || \
       fail 'documentation contract lost its docs-only condition'
-  elif ! grep -Fq "needs.classify.outputs.full == 'true'" <<<"$step"; then
+  elif grep -Fq 'name: Save Rust dependency cache' <<<"$step"; then
+    grep -Fxq "          needs.classify.outputs.full == 'true' &&" <<<"$step" || \
+      fail 'quality cache save lost its leading full-gate condition'
+  elif ! grep -Fxq "        if: needs.classify.outputs.full == 'true'" <<<"$step"; then
     fail "quality step is not explicitly scoped: $(head -n 1 <<<"$step")"
   fi
 }

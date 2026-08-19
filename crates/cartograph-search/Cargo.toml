@@ -10,8 +10,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-cartograph-db = { path = "../cartograph-db" }
-cartograph-domain = { path = "../cartograph-domain" }
+cartograph-db.workspace = true
+cartograph-domain.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

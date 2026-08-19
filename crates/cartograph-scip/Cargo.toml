@@ -11,8 +11,8 @@ repository.workspace = true
 
 [dependencies]
 blake3.workspace = true
-cartograph-db = { path = "../cartograph-db" }
-cartograph-domain = { path = "../cartograph-domain" }
+cartograph-db.workspace = true
+cartograph-domain.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

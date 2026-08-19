@@ -11,14 +11,14 @@ repository.workspace = true
 
 [dependencies]
 blake3.workspace = true
-cartograph-config = { path = "../cartograph-config" }
-cartograph-db = { path = "../cartograph-db" }
-cartograph-domain = { path = "../cartograph-domain" }
-cartograph-extract = { path = "../cartograph-extract" }
-cartograph-indexer = { path = "../cartograph-indexer" }
-cartograph-llm = { path = "../cartograph-llm" }
-cartograph-search = { path = "../cartograph-search" }
-cartograph-scip = { path = "../cartograph-scip" }
+cartograph-config.workspace = true
+cartograph-db.workspace = true
+cartograph-domain.workspace = true
+cartograph-extract.workspace = true
+cartograph-indexer.workspace = true
+cartograph-llm.workspace = true
+cartograph-search.workspace = true
+cartograph-scip.workspace = true
 futures-util.workspace = true
 globset.workspace = true
 ignore.workspace = true
@@ -36,7 +36,7 @@ tokio.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-cartograph-test-support = { path = "../cartograph-test-support" }
+cartograph-test-support.workspace = true
 sha2.workspace = true
 sqlx-core.workspace = true
 

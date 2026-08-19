@@ -15,13 +15,13 @@ path = "src/main.rs"
 
 [dependencies]
 blake3.workspace = true
-cartograph-agent = { path = "../cartograph-agent" }
-cartograph-config = { path = "../cartograph-config" }
-cartograph-db = { path = "../cartograph-db" }
-cartograph-domain = { path = "../cartograph-domain" }
-cartograph-llm = { path = "../cartograph-llm" }
-cartograph-mcp = { path = "../cartograph-mcp" }
-cartograph-search = { path = "../cartograph-search" }
+cartograph-agent.workspace = true
+cartograph-config.workspace = true
+cartograph-db.workspace = true
+cartograph-domain.workspace = true
+cartograph-llm.workspace = true
+cartograph-mcp.workspace = true
+cartograph-search.workspace = true
 clap.workspace = true
 notify.workspace = true
 num-traits.workspace = true
@@ -41,6 +41,6 @@ url.workspace = true
 workspace = true
 
 [dev-dependencies]
-cartograph-test-support = { path = "../cartograph-test-support" }
+cartograph-test-support.workspace = true
 sqlx-core.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -124,6 +124,10 @@ jobs:
       - name: Fetch locked dependencies
         run: cargo fetch --locked
 
+      - name: Workspace dependency contract
+        if: needs.classify.outputs.full == 'true'
+        run: scripts/test-workspace-dependencies.sh
+
       - name: Release workflow contract
         run: scripts/test-rust-release-workflow.sh
 

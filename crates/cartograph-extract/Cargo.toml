@@ -50,7 +50,7 @@ arborium-vb.workspace = true
 arborium-verilog.workspace = true
 arborium-yaml.workspace = true
 blake3.workspace = true
-cartograph-domain = { path = "../cartograph-domain" }
+cartograph-domain.workspace = true
 globset.workspace = true
 ignore.workspace = true
 serde.workspace = true
