@@ -415,7 +415,7 @@ impl PrepareGenerationError {
 #[derive(Debug, Error)]
 #[error("{error}")]
 pub struct PublishGenerationError {
-    generation: ReadyGeneration,
+    generation: Box<ReadyGeneration>,
     #[source]
     error: StorageError,
 }
@@ -430,7 +430,7 @@ impl PublishGenerationError {
     /// Recover the ready token and underlying error for retry or failure marking.
     #[must_use]
     pub fn into_parts(self) -> (ReadyGeneration, StorageError) {
-        (self.generation, self.error)
+        (*self.generation, self.error)
     }
 }
 
@@ -438,7 +438,7 @@ impl PublishGenerationError {
 #[derive(Debug, Error)]
 #[error("{error}")]
 pub struct FailGenerationError {
-    generation: RecoverableGeneration,
+    generation: Box<RecoverableGeneration>,
     #[source]
     error: StorageError,
 }
@@ -453,7 +453,7 @@ impl FailGenerationError {
     /// Recover the state token and underlying error for another checked attempt.
     #[must_use]
     pub fn into_parts(self) -> (RecoverableGeneration, StorageError) {
-        (self.generation, self.error)
+        (*self.generation, self.error)
     }
 }
 
@@ -1291,7 +1291,7 @@ impl CartographDatabase {
     ) -> Result<CurrentGeneration, PublishGenerationError> {
         let Ok(mut transaction) = self.pool.begin().await else {
             return Err(PublishGenerationError {
-                generation,
+                generation: Box::new(generation),
                 error: database_error("publish-begin"),
             });
         };
@@ -1304,7 +1304,10 @@ impl CartographDatabase {
                 Ok(()) => database_error("publish-statement-timeout"),
                 Err(_) => database_error("publish-rollback"),
             };
-            return Err(PublishGenerationError { generation, error });
+            return Err(PublishGenerationError {
+                generation: Box::new(generation),
+                error,
+            });
         }
         let result = publish_transaction(
             &mut transaction,
@@ -1320,11 +1323,14 @@ impl CartographDatabase {
                 Ok(()) => error,
                 Err(_) => database_error("publish-rollback"),
             };
-            return Err(PublishGenerationError { generation, error });
+            return Err(PublishGenerationError {
+                generation: Box::new(generation),
+                error,
+            });
         }
         if transaction.commit().await.is_err() {
             return Err(PublishGenerationError {
-                generation,
+                generation: Box::new(generation),
                 error: database_error("publish-commit"),
             });
         }
@@ -1501,13 +1507,13 @@ impl CartographDatabase {
         let (project_id, generation_id, sequence, expected_state) = recoverable_parts(&generation);
         if !fence_matches_generation(fence, project_id, generation_id) {
             return Err(FailGenerationError {
-                generation,
+                generation: Box::new(generation),
                 error: StorageError::LeaseFenceLost,
             });
         }
         let Ok(mut transaction) = self.pool.begin().await else {
             return Err(FailGenerationError {
-                generation,
+                generation: Box::new(generation),
                 error: database_error("fail-begin"),
             });
         };
@@ -1528,11 +1534,14 @@ impl CartographDatabase {
                 Ok(()) => error,
                 Err(_) => database_error("fail-rollback"),
             };
-            return Err(FailGenerationError { generation, error });
+            return Err(FailGenerationError {
+                generation: Box::new(generation),
+                error,
+            });
         }
         if transaction.commit().await.is_err() {
             return Err(FailGenerationError {
-                generation,
+                generation: Box::new(generation),
                 error: database_error("fail-commit"),
             });
         }
@@ -1799,9 +1808,11 @@ async fn cleanup_transaction(
     }
     delete_generation_spill_if_present(
         connection,
-        &quoted_schema,
-        fence.target().project_id(),
-        generation_id,
+        GenerationSpillDelete {
+            quoted_schema: &quoted_schema,
+            project_id: fence.target().project_id(),
+            generation_id,
+        },
     )
     .await?;
     delete_generation_fence(connection, &quoted_schema, fence).await
@@ -1836,9 +1847,11 @@ async fn fail_transaction(
     if result.rows_affected() == 1 {
         delete_generation_spill_if_present(
             connection,
-            &quoted_schema,
-            input.project_id,
-            input.generation_id,
+            GenerationSpillDelete {
+                quoted_schema: &quoted_schema,
+                project_id: input.project_id,
+                generation_id: input.generation_id,
+            },
         )
         .await
     } else {
@@ -1849,20 +1862,25 @@ async fn fail_transaction(
     }
 }
 
+struct GenerationSpillDelete<'input> {
+    quoted_schema: &'input str,
+    project_id: &'input ProjectId,
+    generation_id: &'input GenerationId,
+}
+
 async fn delete_generation_spill_if_present(
     connection: &mut PgConnection,
-    quoted_schema: &str,
-    project_id: &ProjectId,
-    generation_id: &GenerationId,
+    input: GenerationSpillDelete<'_>,
 ) -> Result<(), StorageError> {
     let statement = format!(
-        r#"DELETE FROM {quoted_schema}."native_generation_spills"
+        r#"DELETE FROM {}."native_generation_spills"
             WHERE project_id = CAST($1 AS uuid)
-              AND generation_id = CAST($2 AS uuid)"#
+              AND generation_id = CAST($2 AS uuid)"#,
+        input.quoted_schema
     );
     audited_query(statement)
-        .bind(project_id.as_str())
-        .bind(generation_id.as_str())
+        .bind(input.project_id.as_str())
+        .bind(input.generation_id.as_str())
         .execute(connection)
         .await
         .map(|_| ())

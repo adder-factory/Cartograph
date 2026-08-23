@@ -19376,8 +19376,7 @@ export function secondClone(value: number) {
                 return true;
             }
             serde_json::from_str::<serde_json::Value>(document.metadata_json())
-                .ok()
-                .is_some_and(|metadata| metadata["partial_clone"].is_null())
+                .is_ok_and(|metadata| metadata["partial_clone"].is_null())
         }));
 
         let wider = build_capability_generation_with_partial_band(&fixtures, false, true);

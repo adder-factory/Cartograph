@@ -142,7 +142,7 @@ The recorded run used:
 - pgvector 0.8.4+;
 - digest-pinned image
   `paradedb/paradedb:0.25.0@sha256:6e35d14c72f1eef9be6c8d9ac40185f877f8e119f691ece20906793d765fb8f7`;
-- stable Rust 1.97.1; and
+- stable Rust 1.98.0; and
 - the GitHub-hosted x86-64 Linux Rust debug integration-test profile.
 
 ## Reproduce

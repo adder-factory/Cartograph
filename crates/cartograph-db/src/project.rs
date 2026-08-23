@@ -12,6 +12,9 @@ use crate::{
 };
 
 const MAX_ROOT_IDENTITY_BYTES: usize = 4_096;
+const MAX_RUN_EXCLUDE_PATTERNS: u16 = 4_096;
+const MAX_RUN_EXCLUDE_BYTES: usize = 4_096;
+const MAX_RUN_EXCLUDES_TOTAL_BYTES: usize = 4 * 1_024 * 1_024;
 const PROJECT_ID_COLUMN: usize = 0;
 const GENERATION_ID_COLUMN: usize = 1;
 const GENERATION_SEQUENCE_COLUMN: usize = 2;
@@ -706,11 +709,11 @@ fn decode_source_admission(
             .checked_add(pattern.len())
             .ok_or_else(|| corrupt("run_excludes"))
     })?;
-    if count > 4_096
-        || total_bytes > 4 * 1024 * 1024
-        || run_excludes
-            .iter()
-            .any(|pattern| pattern.is_empty() || pattern.len() > 4_096 || pattern.contains('\0'))
+    if count > MAX_RUN_EXCLUDE_PATTERNS
+        || total_bytes > MAX_RUN_EXCLUDES_TOTAL_BYTES
+        || run_excludes.iter().any(|pattern| {
+            pattern.is_empty() || pattern.len() > MAX_RUN_EXCLUDE_BYTES || pattern.contains('\0')
+        })
     {
         return Err(corrupt("run_excludes"));
     }

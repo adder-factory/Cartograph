@@ -159,7 +159,7 @@ jobs:
         if: needs.classify.outputs.full == 'true'
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          rust-version: '1.97.1'
+          rust-version: '1.98.0'
           command: check
           arguments: --all-features
 
@@ -382,7 +382,7 @@ jobs:
           scripts/build-linux-rust-release.sh
           x86_64-unknown-linux-gnu
           linux-x64
-          rust:1.97.1-trixie@sha256:4277ce860337f6cfa1b679891bbf689a447f4b3f4f55701742614ad31321cee7
+          rust:1.98.0-trixie@sha256:f233b97992246783782a48b923934820e7ba7d13105cf861276de36b09bfa68f
           debian:13-slim@sha256:38a76d01668772e381ad2826d876627c89e7133e2f8a0f5d567306798b0f2a16
 
   paradedb:
@@ -746,7 +746,7 @@ jobs:
           subject-path: gate-attestation/v2-main-gate.json
 
       - name: Upload exact-SHA gate manifest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: v2-main-gate-${{ github.sha }}
           path: gate-attestation/v2-main-gate.json

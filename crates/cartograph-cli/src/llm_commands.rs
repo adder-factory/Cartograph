@@ -9,7 +9,8 @@ use std::{
 use cartograph_config::{DATABASE_URL_ENV, DatabaseSettings};
 use cartograph_db::{CartographDatabase, ManagedDatabase};
 use cartograph_llm::{
-    ChatMessageRequest, ChatSettings, EmbeddingSettings, InstallModelsOptions, OpenAiChatClient,
+    ChatMessageRequest, ChatSettings, CliBridgeConfig, CliBridgeConfigInput, CliBridgeInputMode,
+    CliBridgeResponseFormat, EmbeddingSettings, InstallModelsOptions, OpenAiChatClient,
     OpenAiEmbeddingClient, OpenAiRerankClient, ProjectCredentialMigrationReport,
     ProjectCredentialMigrationStatus, ProjectLlmCredentialWriteEntry, ProjectLlmTier,
     ProjectLlmTierInput, RerankSettings, install_recommended_models, load_exact_project_llm_tier,
@@ -65,6 +66,24 @@ pub(super) struct SetupArguments {
     /// Custom provider model identifier.
     #[arg(long)]
     model: Option<String>,
+    /// Generic CLI bridge executable passed directly without a shell.
+    #[arg(long)]
+    command: Option<String>,
+    /// One generic CLI bridge argv template; repeat for each argument.
+    #[arg(long = "arg")]
+    command_args: Vec<String>,
+    /// Generic CLI bridge prompt-delivery mode.
+    #[arg(long, value_enum)]
+    input: Option<CliBridgeInputArgument>,
+    /// Optional generic CLI bridge system/user prompt template.
+    #[arg(long)]
+    prompt_template: Option<String>,
+    /// Generic CLI bridge stdout decoder.
+    #[arg(long, value_enum)]
+    response_format: Option<CliBridgeResponseArgument>,
+    /// JSON path required by the generic CLI bridge json-path decoder.
+    #[arg(long)]
+    response_path: Option<String>,
     #[command(flatten)]
     credentials: SetupCredentialArguments,
     /// Omit the 7B ask tier and reranker from local presets.
@@ -187,6 +206,7 @@ enum SetupPreset {
     InstallMlx,
     CloudOpenAi,
     CloudOpenAiCompat,
+    CliBridge,
     HybridClaudeBridge,
     HybridAnthropicApi,
     Custom,
@@ -201,6 +221,38 @@ enum LlmTierArgument {
     Ask,
     Classify,
     Reranker,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliBridgeInputArgument {
+    Stdin,
+    Arg,
+}
+
+impl From<CliBridgeInputArgument> for CliBridgeInputMode {
+    fn from(value: CliBridgeInputArgument) -> Self {
+        match value {
+            CliBridgeInputArgument::Stdin => Self::Stdin,
+            CliBridgeInputArgument::Arg => Self::Arg,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliBridgeResponseArgument {
+    Raw,
+    JsonPath,
+    Claude,
+}
+
+impl From<CliBridgeResponseArgument> for CliBridgeResponseFormat {
+    fn from(value: CliBridgeResponseArgument) -> Self {
+        match value {
+            CliBridgeResponseArgument::Raw => Self::Raw,
+            CliBridgeResponseArgument::JsonPath => Self::JsonPath,
+            CliBridgeResponseArgument::Claude => Self::Claude,
+        }
+    }
 }
 
 impl From<LlmTierArgument> for ProjectLlmTier {
@@ -525,6 +577,7 @@ pub(super) async fn doctor_fix_missing_tiers(project: &Path) -> Result<Vec<Strin
         SetupPreset::InstallMlx
         | SetupPreset::CloudOpenAi
         | SetupPreset::CloudOpenAiCompat
+        | SetupPreset::CliBridge
         | SetupPreset::HybridClaudeBridge
         | SetupPreset::HybridAnthropicApi
         | SetupPreset::Custom
@@ -618,6 +671,7 @@ fn setup_inputs(
             reject_custom_fields(arguments)?;
             ollama_inputs(arguments.minimal)
         }
+        SetupPreset::CliBridge => cli_bridge_inputs(arguments),
         SetupPreset::HybridClaudeBridge => hybrid_claude_inputs(arguments),
         SetupPreset::HybridAnthropicApi => hybrid_anthropic_inputs(arguments),
         SetupPreset::CloudOpenAi => cloud_openai_inputs(arguments),
@@ -632,16 +686,34 @@ fn setup_inputs(
 }
 
 fn reject_custom_fields(arguments: &SetupArguments) -> Result<(), String> {
-    if arguments.tier.is_some()
-        || arguments.endpoint.is_some()
-        || arguments.model.is_some()
-        || arguments.credentials.api_key_env.is_some()
-        || arguments.credentials.clear_credentials
-    {
-        Err(
-            "--tier, --endpoint, --model, --api-key-env, and --clear-credentials require --preset custom"
-                .to_owned(),
-        )
+    let provider_fields_present = [
+        arguments.tier.is_some(),
+        arguments.endpoint.is_some(),
+        arguments.model.is_some(),
+        has_cli_bridge_fields(arguments),
+        arguments.credentials.api_key_env.is_some(),
+        arguments.credentials.clear_credentials,
+    ]
+    .contains(&true);
+    if provider_fields_present {
+        Err("provider fields require --preset custom or --preset cli-bridge".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn has_cli_bridge_fields(arguments: &SetupArguments) -> bool {
+    arguments.command.is_some()
+        || !arguments.command_args.is_empty()
+        || arguments.input.is_some()
+        || arguments.prompt_template.is_some()
+        || arguments.response_format.is_some()
+        || arguments.response_path.is_some()
+}
+
+fn reject_cli_bridge_fields(arguments: &SetupArguments) -> Result<(), String> {
+    if has_cli_bridge_fields(arguments) {
+        Err("CLI transport fields require --preset cli-bridge".to_owned())
     } else {
         Ok(())
     }
@@ -681,6 +753,7 @@ fn ollama_inputs(minimal: bool) -> Result<(Vec<ProjectLlmTierInput>, Vec<Project
 fn custom_inputs(
     arguments: &SetupArguments,
 ) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
+    reject_cli_bridge_fields(arguments)?;
     if arguments.minimal {
         return Err("--minimal applies only to local-llama-cpp and ollama presets".to_owned());
     }
@@ -710,9 +783,56 @@ fn custom_inputs(
     Ok((vec![input], Vec::new()))
 }
 
+fn cli_bridge_inputs(
+    arguments: &SetupArguments,
+) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
+    if arguments.minimal
+        || arguments.endpoint.is_some()
+        || arguments.credentials.api_key_env.is_some()
+        || arguments.credentials.clear_credentials
+    {
+        return Err(
+            "cli-bridge accepts chat tier, model, and command transport fields without HTTP or credential options"
+                .to_owned(),
+        );
+    }
+    let tier = arguments
+        .tier
+        .ok_or_else(|| "--preset cli-bridge requires --tier".to_owned())?;
+    let model = arguments
+        .model
+        .as_deref()
+        .ok_or_else(|| "--preset cli-bridge requires --model".to_owned())?;
+    let command = arguments
+        .command
+        .as_deref()
+        .ok_or_else(|| "--preset cli-bridge requires --command".to_owned())?;
+    let input = arguments
+        .input
+        .ok_or_else(|| "--preset cli-bridge requires --input".to_owned())?;
+    let response_format = arguments
+        .response_format
+        .ok_or_else(|| "--preset cli-bridge requires --response-format".to_owned())?;
+    let mut bridge = CliBridgeConfig::new(
+        CliBridgeConfigInput::new(command, input.into(), response_format.into())
+            .with_args(arguments.command_args.clone())
+            .with_response_path(arguments.response_path.clone()),
+    )
+    .map_err(|error| error.to_string())?;
+    if let Some(prompt_template) = &arguments.prompt_template {
+        bridge = bridge
+            .with_prompt_template(prompt_template)
+            .map_err(|error| error.to_string())?;
+    }
+    let input = ProjectLlmTierInput::cli_bridge(tier.into(), model, bridge)
+        .map_err(|error| error.to_string())?;
+    Ok((vec![input], Vec::new()))
+}
+
 fn cloud_openai_inputs(
     arguments: &SetupArguments,
 ) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
+    reject_cli_bridge_fields(arguments)?;
     if arguments.minimal {
         return Err("--minimal applies only to local model presets".to_owned());
     }
@@ -755,7 +875,7 @@ fn hybrid_claude_inputs(
     }
     let mut inputs = vec![hybrid_embedding_input()?];
     inputs.push(
-        ProjectLlmTierInput::claude_bridge(ProjectLlmTier::Summarize, "claude-haiku-4-5")
+        claude_cli_input(ProjectLlmTier::Summarize, "claude-haiku-4-5")
             .and_then(|input| input.with_ask_model("claude-sonnet-4-6"))
             .and_then(|input| input.with_summary_batch_size(3))
             .map_err(|error| error.to_string())?,
@@ -765,11 +885,17 @@ fn hybrid_claude_inputs(
         (ProjectLlmTier::Ask, "claude-sonnet-4-6"),
         (ProjectLlmTier::Classify, "claude-haiku-4-5"),
     ] {
-        inputs.push(
-            ProjectLlmTierInput::claude_bridge(tier, model).map_err(|error| error.to_string())?,
-        );
+        inputs.push(claude_cli_input(tier, model).map_err(|error| error.to_string())?);
     }
     Ok((inputs, vec![ProjectLlmTier::Reranker]))
+}
+
+fn claude_cli_input(
+    tier: ProjectLlmTier,
+    model: &str,
+) -> Result<ProjectLlmTierInput, cartograph_llm::ProjectLlmConfigError> {
+    let bridge = CliBridgeConfig::claude_compatible(None)?;
+    ProjectLlmTierInput::cli_bridge(tier, model, bridge)
 }
 
 fn hybrid_claude_has_custom_fields(arguments: &SetupArguments) -> bool {
@@ -780,6 +906,7 @@ fn hybrid_claude_has_custom_fields(arguments: &SetupArguments) -> bool {
         arguments.model.is_some(),
         arguments.credentials.api_key_env.is_some(),
         arguments.credentials.clear_credentials,
+        has_cli_bridge_fields(arguments),
     ]
     .contains(&true)
 }
@@ -787,12 +914,7 @@ fn hybrid_claude_has_custom_fields(arguments: &SetupArguments) -> bool {
 fn hybrid_anthropic_inputs(
     arguments: &SetupArguments,
 ) -> Result<(Vec<ProjectLlmTierInput>, Vec<ProjectLlmTier>), String> {
-    if arguments.minimal
-        || arguments.tier.is_some()
-        || arguments.endpoint.is_some()
-        || arguments.model.is_some()
-        || arguments.credentials.clear_credentials
-    {
+    if hybrid_anthropic_has_custom_fields(arguments) {
         return Err(
             "hybrid-anthropic-api uses its bounded default chat tiers; only --api-key-env may override credential lookup"
                 .to_owned(),
@@ -819,6 +941,18 @@ fn hybrid_anthropic_inputs(
     inputs.push(make(ProjectLlmTier::Ask, "claude-sonnet-4-6")?);
     inputs.push(make(ProjectLlmTier::Classify, "claude-haiku-4-5")?);
     Ok((inputs, vec![ProjectLlmTier::Reranker]))
+}
+
+fn hybrid_anthropic_has_custom_fields(arguments: &SetupArguments) -> bool {
+    [
+        arguments.minimal,
+        arguments.tier.is_some(),
+        arguments.endpoint.is_some(),
+        arguments.model.is_some(),
+        arguments.credentials.clear_credentials,
+        has_cli_bridge_fields(arguments),
+    ]
+    .contains(&true)
 }
 
 fn hybrid_embedding_input() -> Result<ProjectLlmTierInput, String> {
@@ -879,7 +1013,8 @@ fn prompt_preset(recommended: SetupPreset) -> Result<SetupPreset, String> {
     println!("  4) hybrid-anthropic-api");
     println!("  5) cloud-open-ai (use non-interactive tier/model flags)");
     println!("  6) custom OpenAI-compatible (use non-interactive flags)");
-    println!("  7) skip");
+    println!("  7) cli-bridge (use non-interactive command/argv flags)");
+    println!("  8) skip");
     print!("Choice [{recommended:?}]: ");
     io::stdout()
         .flush()
@@ -902,7 +1037,11 @@ fn prompt_preset(recommended: SetupPreset) -> Result<SetupPreset, String> {
             "custom setup requires --preset custom --tier <tier> --endpoint <url> --model <id>"
                 .to_owned(),
         ),
-        "7" | "skip" => Ok(SetupPreset::Skip),
+        "7" | "cli-bridge" => Err(
+            "CLI bridge setup requires --preset cli-bridge --tier <tier> --model <id> --command <binary> --input <stdin|arg> --response-format <raw|json-path|claude>"
+                .to_owned(),
+        ),
+        "8" | "skip" => Ok(SetupPreset::Skip),
         _ => Err("LLM setup choice was not recognized".to_owned()),
     }
 }
@@ -1525,6 +1664,12 @@ mod tests {
             tier: None,
             endpoint: None,
             model: None,
+            command: None,
+            command_args: Vec::new(),
+            input: None,
+            prompt_template: None,
+            response_format: None,
+            response_path: None,
             credentials: SetupCredentialArguments {
                 api_key_env: None,
                 clear_credentials: false,
@@ -1600,6 +1745,12 @@ mod tests {
             tier: None,
             endpoint: None,
             model: None,
+            command: None,
+            command_args: Vec::new(),
+            input: None,
+            prompt_template: None,
+            response_format: None,
+            response_path: None,
             credentials: SetupCredentialArguments {
                 api_key_env: None,
                 clear_credentials: false,
@@ -1616,7 +1767,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("bridge config failed: {error}"));
         let bridge_config = std::fs::read_to_string(root.path().join(".cartograph/config.json"))
             .unwrap_or_else(|error| panic!("bridge config read failed: {error}"));
-        assert!(bridge_config.contains("\"provider\": \"claude-bridge\""));
+        assert!(bridge_config.contains("\"provider\": \"cli-bridge\""));
+        assert!(bridge_config.contains("\"command\": \"claude\""));
+        assert!(bridge_config.contains("\"responseFormat\": \"claude\""));
         assert!(!bridge_config.contains("apiKey"));
         assert!(!bridge_config.contains("sqlite"));
 
@@ -1783,6 +1936,37 @@ mod tests {
         };
         render_smoke(&report);
         assert!(elapsed_ms(Instant::now()) <= 1_000);
+    }
+
+    #[test]
+    fn cli_bridge_preset_requires_and_persists_the_shell_free_transport_contract() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let mut arguments = setup_arguments(root.path());
+        arguments.tier = Some(LlmTierArgument::Chat);
+        arguments.model = Some("agent-model".to_owned());
+        arguments.command = Some("agent-cli".to_owned());
+        arguments.command_args = vec!["-p".to_owned(), "{prompt}".to_owned()];
+        arguments.input = Some(CliBridgeInputArgument::Arg);
+        arguments.response_format = Some(CliBridgeResponseArgument::Raw);
+
+        let (inputs, cleared) = setup_inputs(&arguments, SetupPreset::CliBridge)
+            .unwrap_or_else(|error| panic!("CLI bridge preset failed: {error}"));
+        assert_eq!(inputs.len(), 1);
+        assert!(cleared.is_empty());
+        write_project_llm_configuration(root.path(), &inputs, &cleared)
+            .unwrap_or_else(|error| panic!("CLI bridge write failed: {error}"));
+        let config = std::fs::read_to_string(root.path().join(".cartograph/config.json"))
+            .unwrap_or_else(|error| panic!("CLI bridge config read failed: {error}"));
+        assert!(config.contains("\"provider\": \"cli-bridge\""));
+        assert!(config.contains("\"command\": \"agent-cli\""));
+        assert!(config.contains("\"responseFormat\": \"raw\""));
+        assert!(!config.contains("apiKey"));
+
+        arguments.command_args = vec!["{unknown}".to_owned()];
+        assert!(setup_inputs(&arguments, SetupPreset::CliBridge).is_err());
+        arguments.command_args = vec!["{prompt}".to_owned()];
+        arguments.tier = Some(LlmTierArgument::Embed);
+        assert!(setup_inputs(&arguments, SetupPreset::CliBridge).is_err());
     }
 
     #[test]

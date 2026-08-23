@@ -785,7 +785,9 @@ impl ProtocolServer {
             .await
         {
             Ok(cancellation) => cancellation,
-            Err(response) => return send_response(&session.output, response).await,
+            Err(error) => {
+                return send_response(&session.output, error.into_response(request.id)).await;
+            }
         };
 
         let Some(deadline) = Instant::now().checked_add(self.config.limits.request_deadline) else {
@@ -866,6 +868,30 @@ struct ConnectionState {
     output: mpsc::Sender<JsonRpcResponse>,
 }
 
+#[derive(Clone, Copy)]
+enum AdmissionError {
+    DuplicateRequestId,
+    ServerBusy,
+}
+
+impl AdmissionError {
+    fn into_response(self, id: RequestId) -> JsonRpcResponse {
+        let error = match self {
+            Self::DuplicateRequestId => ErrorSpec::new(
+                ErrorCode::DUPLICATE_REQUEST_ID,
+                "Request ID is already active",
+                StableErrorCode::DuplicateRequestId,
+            ),
+            Self::ServerBusy => ErrorSpec::new(
+                ErrorCode::SERVER_BUSY,
+                "Server request capacity is exhausted",
+                StableErrorCode::ServerBusy,
+            ),
+        };
+        JsonRpcResponse::error(Some(id), error)
+    }
+}
+
 impl ConnectionState {
     fn new(output: mpsc::Sender<JsonRpcResponse>) -> Self {
         Self {
@@ -880,27 +906,13 @@ impl ConnectionState {
         &self,
         id: &RequestId,
         maximum_inflight: usize,
-    ) -> Result<CancellationToken, JsonRpcResponse> {
+    ) -> Result<CancellationToken, AdmissionError> {
         let mut requests = self.active.lock().await;
         if requests.contains_key(id) {
-            return Err(JsonRpcResponse::error(
-                Some(id.clone()),
-                ErrorSpec::new(
-                    ErrorCode::DUPLICATE_REQUEST_ID,
-                    "Request ID is already active",
-                    StableErrorCode::DuplicateRequestId,
-                ),
-            ));
+            return Err(AdmissionError::DuplicateRequestId);
         }
         if requests.len() >= maximum_inflight {
-            return Err(JsonRpcResponse::error(
-                Some(id.clone()),
-                ErrorSpec::new(
-                    ErrorCode::SERVER_BUSY,
-                    "Server request capacity is exhausted",
-                    StableErrorCode::ServerBusy,
-                ),
-            ));
+            return Err(AdmissionError::ServerBusy);
         }
         let cancellation = CancellationToken::new();
         requests.insert(id.clone(), cancellation.clone());

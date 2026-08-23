@@ -155,14 +155,14 @@ jobs:
             asset_target: linux-x64
             shell: bash
             cache_key: unused-linux-x64
-            build_image: rust:1.97.1-trixie@sha256:4277ce860337f6cfa1b679891bbf689a447f4b3f4f55701742614ad31321cee7
+            build_image: rust:1.98.0-trixie@sha256:f233b97992246783782a48b923934820e7ba7d13105cf861276de36b09bfa68f
             runtime_image: debian:13-slim@sha256:38a76d01668772e381ad2826d876627c89e7133e2f8a0f5d567306798b0f2a16
           - os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             asset_target: linux-arm64
             shell: bash
             cache_key: unused-linux-arm64
-            build_image: rust:1.97.1-trixie@sha256:a8b3be0cba14987d983042a971ef8cd5b4c28a09d7da2f123715aac9dac6e0a6
+            build_image: rust:1.98.0-trixie@sha256:d0b711f23af4af59fca18e9705436f3cf88fad404e0640881c6c7e3bcceed152
             runtime_image: debian:13-slim@sha256:c94f5ddd41327aa2d4a7cfba7889056c02936182fd76a513fec6160c97181fc0
           - os: macos-26
             rust_target: aarch64-apple-darwin
@@ -232,7 +232,7 @@ jobs:
             target/
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.asset_target }}
           path: release/cartograph-*

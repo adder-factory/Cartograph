@@ -18,6 +18,7 @@ WINDOWS_INSTALLER="$ROOT/install.ps1"
 UPGRADE_SOURCE="$ROOT/crates/cartograph-cli/src/upgrade.rs"
 CLI_SOURCE="$ROOT/crates/cartograph-cli/src/main.rs"
 DENY_CONFIG="$ROOT/deny.toml"
+RUST_TOOLCHAIN_CONFIG="$ROOT/rust-toolchain.toml"
 
 fail() {
   echo "release workflow contract failed: $1" >&2
@@ -41,6 +42,11 @@ literal_count() {
 }
 
 command -v ruby >/dev/null 2>&1 || fail 'Ruby with the standard YAML parser is required'
+rust_toolchain="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$RUST_TOOLCHAIN_CONFIG")"
+[[ "$rust_toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+  fail 'the pinned Rust toolchain is not an exact stable release'
+grep -Fq "rust-version = \"$rust_toolchain\"" "$ROOT/Cargo.toml" || \
+  fail 'the workspace minimum Rust version does not match the pinned toolchain'
 ruby - "$VALIDATION" <<'RUBY'
 require "yaml"
 
@@ -465,11 +471,13 @@ grep -Fq '#[cfg(not(target_pointer_width = "64"))]' "$CLI_SOURCE" || \
   fail 'the native CLI does not fail closed on 32-bit targets'
 grep -Fq 'Cartograph v2 supports only 64-bit operating systems.' "$CLI_SOURCE" || \
   fail 'the 32-bit compile failure is not actionable'
-grep -Fq 'rust:1.97.1-trixie@sha256:' "$VALIDATION" || \
+grep -Fq "rust:$rust_toolchain-trixie@sha256:" "$VALIDATION" || \
   fail 'Linux validation does not build on current stable Debian'
+grep -Fq "rust-version: '$rust_toolchain'" "$VALIDATION" || \
+  fail 'cargo-deny does not use the pinned stable Rust toolchain'
 grep -Fq 'debian:13-slim@sha256:' "$VALIDATION" || \
   fail 'Linux validation does not smoke on current stable Debian'
-grep -Fq 'rust:1.97.1-trixie@sha256:' "$RELEASE" || \
+grep -Fq "rust:$rust_toolchain-trixie@sha256:" "$RELEASE" || \
   fail 'Linux releases do not build on current stable Debian'
 grep -Fq 'debian:13-slim@sha256:' "$RELEASE" || \
   fail 'Linux releases do not smoke on current stable Debian'

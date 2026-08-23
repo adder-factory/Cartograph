@@ -34,7 +34,7 @@ use cartograph_db::{
     SemanticStorageError, StructuralFindingGroupQuery, StructuralFindingQuery,
     StructuralFindingRefresh, StructuralFindingSeverity, StructuralHotspotCategory,
     StructuralHotspotQuery, StructuralHotspotSort, SymbolCoverageQuery, SymbolIssuePeerQuery,
-    SymbolIssueQuery,
+    SymbolIssueQuery, latest_schema_version,
 };
 use cartograph_domain::{
     ContentDigest, EdgeKind, GenerationDigestVersion, GenerationState, ModelId, NormalizedPath,
@@ -57,6 +57,72 @@ const SCORE_TOLERANCE: f64 = 1.0e-9;
 const HISTORY_ANCHOR_PATH: &str = ".github/workflows/check.ts";
 const HISTORY_PARTNER_PATH: &str = "ACKNOWLEDGEMENTS.ts";
 const HISTORY_THIRD_PATH: &str = "src/c.ts";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+async fn blocked_latest_migration_reports_exact_older_schema_versions() {
+    let (schema, settings, project) = live_project_fixture("4");
+    let runtime = ProjectRuntime::connect(project.path(), &settings)
+        .await
+        .unwrap_or_else(|error| panic!("initial schema migration failed: {error}"));
+    runtime.close().await;
+
+    let pool = cartograph_db::connect(&settings)
+        .await
+        .unwrap_or_else(|error| panic!("older-schema fixture connection failed: {error}"));
+    let revert_latest_shape = format!(
+        r#"ALTER TABLE "{schema}"."index_generations"
+                DROP CONSTRAINT index_generations_run_excludes_check,
+                DROP COLUMN run_excludes"#
+    );
+    query(AssertSqlSafe(revert_latest_shape))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("could not restore the previous schema revision: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"DELETE FROM "{schema}"."schema_migrations" WHERE version = $1"#
+    )))
+    .bind(latest_schema_version())
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|error| panic!("could not restore the previous migration ledger: {error}"));
+
+    let mut lock_transaction = pool
+        .begin()
+        .await
+        .unwrap_or_else(|error| panic!("could not begin migration blocker: {error}"));
+    query(AssertSqlSafe(format!(
+        r#"LOCK TABLE "{schema}"."index_generations" IN ACCESS EXCLUSIVE MODE"#
+    )))
+    .execute(&mut *lock_transaction)
+    .await
+    .unwrap_or_else(|error| panic!("could not lock the previous schema revision: {error}"));
+
+    let blocked_settings = settings
+        .clone()
+        .with_query_timeout_ms(Some("250"))
+        .unwrap_or_else(|error| panic!("could not bound the blocked migration: {error}"));
+    let connection_result = ProjectRuntime::connect(project.path(), &blocked_settings).await;
+    let expected_required = latest_schema_version();
+    let expected_database = expected_required - 1;
+    assert!(matches!(
+        connection_result,
+        Err(ProjectError::SchemaMigrationBlocked {
+            database_schema_version,
+            required_schema_version,
+            pending_migration_version,
+        }) if database_schema_version == expected_database
+            && required_schema_version == expected_required
+            && pending_migration_version == expected_required
+    ));
+
+    lock_transaction
+        .rollback()
+        .await
+        .unwrap_or_else(|error| panic!("could not release migration blocker: {error}"));
+    pool.close().await;
+    drop_schema(&settings, &schema).await;
+}
 
 fn scores_match(actual: f64, expected: f64) -> bool {
     (actual - expected).abs() <= SCORE_TOLERANCE

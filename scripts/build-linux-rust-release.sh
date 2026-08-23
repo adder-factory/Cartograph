@@ -22,8 +22,8 @@ case "$TARGET:$ASSET_TARGET" in
     ;;
 esac
 
-if [[ ! "$BUILD_IMAGE" =~ ^rust:1\.97\.1-trixie@sha256:[0-9a-f]{64}$ ]]; then
-  echo "Linux release build image must pin rust:1.97.1-trixie by digest" >&2
+if [[ ! "$BUILD_IMAGE" =~ ^rust:1\.98\.0-trixie@sha256:[0-9a-f]{64}$ ]]; then
+  echo "Linux release build image must pin rust:1.98.0-trixie by digest" >&2
   exit 2
 fi
 if [[ ! "$RUNTIME_IMAGE" =~ ^debian:13-slim@sha256:[0-9a-f]{64}$ ]]; then
@@ -58,8 +58,8 @@ docker run --rm --pull never \
       echo "release container architecture mismatch: expected $CARTOGRAPH_RELEASE_MACHINE, got $machine" >&2
       exit 1
     fi
-    if [[ "$(rustc --version)" != rustc\ 1.97.1* ]]; then
-      echo "release container did not provide the pinned Rust 1.97.1 toolchain" >&2
+    if [[ "$(rustc --version)" != rustc\ 1.98.0* ]]; then
+      echo "release container did not provide the pinned Rust 1.98.0 toolchain" >&2
       rustc --version >&2
       exit 1
     fi

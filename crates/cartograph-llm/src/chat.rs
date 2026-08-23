@@ -11,7 +11,11 @@ use tokio::{
 };
 use url::Url;
 
-use crate::{ProjectLlmProvider, ProjectLlmTier, ProjectLlmTierConfig, load_project_llm_tier};
+use crate::project_config::{CliResponsePathComponent, parse_cli_response_path};
+use crate::{
+    CliBridgeConfig, CliBridgeInputMode, CliBridgeResponseFormat, ProjectLlmProvider,
+    ProjectLlmTier, ProjectLlmTierConfig, load_project_llm_tier,
+};
 
 /// Public constant defining the chat API key environment.
 pub const CHAT_API_KEY_ENV: &str = "CARTOGRAPH_CHAT_API_KEY";
@@ -48,7 +52,7 @@ pub struct ChatSettings {
     endpoint: Url,
     model: String,
     api_key: Option<SecretString>,
-    claude_bin: Option<String>,
+    cli_bridge: Option<CliBridgeConfig>,
     timeout: Duration,
     maximum_input_bytes: usize,
     maximum_response_bytes: usize,
@@ -64,7 +68,7 @@ impl std::fmt::Debug for ChatSettings {
             .field("endpoint", &"<redacted>")
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
-            .field("claude_binary_configured", &self.claude_bin.is_some())
+            .field("cli_bridge_configured", &self.cli_bridge.is_some())
             .field("timeout", &self.timeout)
             .field("maximum_input_bytes", &self.maximum_input_bytes)
             .field("maximum_response_bytes", &self.maximum_response_bytes)
@@ -156,6 +160,12 @@ impl ChatSettings {
             ProjectLlmProvider::ClaudeBridge => {
                 Self::new_claude_bridge(config.model(), config.claude_bin())?
             }
+            ProjectLlmProvider::CliBridge => Self::new_cli_bridge(
+                config.model(),
+                config
+                    .cli_bridge()
+                    .ok_or_else(|| invalid(PROJECT_CONFIG_FIELD))?,
+            )?,
         };
         if let Some(timeout_ms) = config.timeout_ms() {
             settings.timeout = Duration::from_millis(timeout_ms);
@@ -165,7 +175,9 @@ impl ChatSettings {
                 .summary_batch_size()
                 .unwrap_or(match config.provider() {
                     ProjectLlmProvider::OpenAiCompat => 1,
-                    ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::AnthropicApi => 3,
+                    ProjectLlmProvider::ClaudeBridge
+                    | ProjectLlmProvider::CliBridge
+                    | ProjectLlmProvider::AnthropicApi => 3,
                 });
         Ok(settings)
     }
@@ -205,7 +217,7 @@ impl ChatSettings {
             endpoint,
             model,
             api_key,
-            claude_bin: None,
+            cli_bridge: None,
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
             maximum_input_bytes: DEFAULT_MAXIMUM_INPUT_BYTES,
             maximum_response_bytes: DEFAULT_MAXIMUM_RESPONSE_BYTES,
@@ -227,7 +239,7 @@ impl ChatSettings {
             endpoint,
             model,
             api_key: Some(api_key),
-            claude_bin: None,
+            cli_bridge: None,
             timeout: Duration::from_mins(1),
             maximum_input_bytes: DEFAULT_MAXIMUM_INPUT_BYTES,
             maximum_response_bytes: DEFAULT_MAXIMUM_RESPONSE_BYTES,
@@ -241,7 +253,9 @@ impl ChatSettings {
         binary: Option<&str>,
     ) -> Result<Self, ChatError> {
         let model = validated_model(model.into())?;
-        let claude_bin = binary.map(validated_claude_binary).transpose()?;
+        let command = binary.map(validated_claude_binary).transpose()?;
+        let cli_bridge = CliBridgeConfig::claude_compatible(command.as_deref())
+            .map_err(|_| invalid(PROJECT_CONFIG_FIELD))?;
         let endpoint =
             Url::parse("claude-bridge://local").map_err(|_| ChatError::ClientUnavailable)?;
         Ok(Self {
@@ -249,7 +263,28 @@ impl ChatSettings {
             endpoint,
             model,
             api_key: None,
-            claude_bin,
+            cli_bridge: Some(cli_bridge),
+            timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+            maximum_input_bytes: DEFAULT_MAXIMUM_INPUT_BYTES,
+            maximum_response_bytes: DEFAULT_MAXIMUM_RESPONSE_BYTES,
+            maximum_output_tokens: DEFAULT_MAXIMUM_OUTPUT_TOKENS,
+            summary_batch_size: 3,
+        })
+    }
+
+    fn new_cli_bridge(
+        model: impl Into<String>,
+        bridge: &CliBridgeConfig,
+    ) -> Result<Self, ChatError> {
+        let model = validated_model(model.into())?;
+        let endpoint =
+            Url::parse("cli-bridge://local").map_err(|_| ChatError::ClientUnavailable)?;
+        Ok(Self {
+            provider: ProjectLlmProvider::CliBridge,
+            endpoint,
+            model,
+            api_key: None,
+            cli_bridge: Some(bridge.clone()),
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
             maximum_input_bytes: DEFAULT_MAXIMUM_INPUT_BYTES,
             maximum_response_bytes: DEFAULT_MAXIMUM_RESPONSE_BYTES,
@@ -470,8 +505,8 @@ impl OpenAiChatClient {
         match self.settings.provider {
             ProjectLlmProvider::OpenAiCompat => self.send_openai(request).await,
             ProjectLlmProvider::AnthropicApi => self.send_anthropic(request).await,
-            ProjectLlmProvider::ClaudeBridge => {
-                self.send_claude_bridge(request.system, request.user).await
+            ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::CliBridge => {
+                self.send_cli_bridge(request.system, request.user).await
             }
         }
     }
@@ -566,33 +601,40 @@ impl OpenAiChatClient {
         decode_anthropic_response(&body, &self.settings.model)
     }
 
-    async fn send_claude_bridge(
-        &self,
-        system: &str,
-        user: &str,
-    ) -> Result<ChatCompletion, ChatError> {
-        let prompt = format!("# System\n{system}\n\n# User\n{user}");
-        let binary = self.settings.claude_bin.as_deref().unwrap_or("claude");
-        let mut command = Command::new(binary);
+    async fn send_cli_bridge(&self, system: &str, user: &str) -> Result<ChatCompletion, ChatError> {
+        let bridge = self
+            .settings
+            .cli_bridge
+            .as_ref()
+            .ok_or(ChatError::IncompleteConfiguration)?;
+        let prompt = render_cli_prompt(bridge.prompt_template(), system, user)?;
+        if prompt.len() > self.settings.maximum_input_bytes {
+            return Err(ChatError::RequestLimit);
+        }
+        let args = bridge
+            .args()
+            .iter()
+            .map(|argument| render_cli_argument(argument, &self.settings.model, &prompt))
+            .collect::<Vec<_>>();
+        let mut command = Command::new(bridge.command());
         command
-            .args([
-                "-p",
-                "--strict-mcp-config",
-                "--no-session-persistence",
-                "--disable-slash-commands",
-                "--model",
-                &self.settings.model,
-                "--output-format",
-                "json",
-            ])
+            .args(args)
             .kill_on_drop(true)
-            .stdin(std::process::Stdio::piped())
+            .stdin(match bridge.input() {
+                CliBridgeInputMode::Stdin => std::process::Stdio::piped(),
+                CliBridgeInputMode::Arg => std::process::Stdio::null(),
+            })
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = command
             .spawn()
             .map_err(|_| ChatError::EndpointUnavailable)?;
-        let mut stdin = child.stdin.take().ok_or(ChatError::ClientUnavailable)?;
+        let mut stdin = match bridge.input() {
+            CliBridgeInputMode::Stdin => {
+                Some(child.stdin.take().ok_or(ChatError::ClientUnavailable)?)
+            }
+            CliBridgeInputMode::Arg => None,
+        };
         let stdout = child.stdout.take().ok_or(ChatError::ClientUnavailable)?;
         let stderr = child.stderr.take().ok_or(ChatError::ClientUnavailable)?;
         let maximum_stdout = u64::try_from(self.settings.maximum_response_bytes)
@@ -602,15 +644,16 @@ impl OpenAiChatClient {
             .map_err(|_| ChatError::ResponseLimit)?
             .saturating_add(1);
         let operation = async {
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .map_err(|_| ChatError::EndpointUnavailable)?;
-            stdin
-                .shutdown()
-                .await
-                .map_err(|_| ChatError::EndpointUnavailable)?;
-            drop(stdin);
+            if let Some(mut stdin) = stdin.take() {
+                stdin
+                    .write_all(prompt.as_bytes())
+                    .await
+                    .map_err(|_| ChatError::EndpointUnavailable)?;
+                stdin
+                    .shutdown()
+                    .await
+                    .map_err(|_| ChatError::EndpointUnavailable)?;
+            }
             let stdout_read = async {
                 let mut bytes = Vec::new();
                 stdout
@@ -649,8 +692,46 @@ impl OpenAiChatClient {
         if !status.success() {
             return Err(ChatError::BackendRejected);
         }
-        decode_claude_bridge_response(&stdout, &self.settings.model)
+        decode_cli_bridge_response(CliBridgeResponseInput {
+            body: &stdout,
+            configured_model: &self.settings.model,
+            response_format: bridge.response_format(),
+            response_path: bridge.response_path(),
+        })
     }
+}
+
+fn render_cli_prompt(template: &str, system: &str, user: &str) -> Result<String, ChatError> {
+    let rendered = render_cli_template(template, &[("{system}", system), ("{user}", user)]);
+    if rendered.contains('\0') {
+        Err(ChatError::RequestLimit)
+    } else {
+        Ok(rendered)
+    }
+}
+
+fn render_cli_argument(argument: &str, model: &str, prompt: &str) -> String {
+    render_cli_template(argument, &[("{model}", model), ("{prompt}", prompt)])
+}
+
+fn render_cli_template(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut remaining = template;
+    while let Some((offset, marker, value)) = replacements
+        .iter()
+        .filter_map(|(marker, value)| {
+            remaining
+                .find(marker)
+                .map(|offset| (offset, *marker, *value))
+        })
+        .min_by_key(|(offset, _, _)| *offset)
+    {
+        rendered.push_str(&remaining[..offset]);
+        rendered.push_str(value);
+        remaining = &remaining[offset + marker.len()..];
+    }
+    rendered.push_str(remaining);
+    rendered
 }
 
 fn validate_message(system: &str, prompt: &str, maximum: usize) -> Result<(), ChatError> {
@@ -858,6 +939,60 @@ fn decode_anthropic_response(
     )
 }
 
+#[derive(Clone, Copy)]
+struct CliBridgeResponseInput<'input> {
+    body: &'input [u8],
+    configured_model: &'input str,
+    response_format: CliBridgeResponseFormat,
+    response_path: Option<&'input str>,
+}
+
+fn decode_cli_bridge_response(
+    input: CliBridgeResponseInput<'_>,
+) -> Result<ChatCompletion, ChatError> {
+    match input.response_format {
+        CliBridgeResponseFormat::Raw => {
+            let content =
+                std::str::from_utf8(input.body).map_err(|_| ChatError::InvalidResponse)?;
+            validated_completion(content.to_owned(), input.configured_model.to_owned(), None)
+        }
+        CliBridgeResponseFormat::JsonPath => {
+            let path = input.response_path.ok_or(ChatError::InvalidResponse)?;
+            let value = serde_json::from_slice::<serde_json::Value>(input.body)
+                .map_err(|_| ChatError::InvalidResponse)?;
+            let content = resolve_cli_json_path(&value, path)
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ChatError::InvalidResponse)?;
+            validated_completion(content.to_owned(), input.configured_model.to_owned(), None)
+        }
+        CliBridgeResponseFormat::Claude => {
+            decode_claude_bridge_response(input.body, input.configured_model)
+        }
+    }
+}
+
+fn resolve_cli_json_path<'value>(
+    mut value: &'value serde_json::Value,
+    path: &str,
+) -> Option<&'value serde_json::Value> {
+    for component in parse_cli_response_path(path).ok()? {
+        value = match component {
+            CliResponsePathComponent::Field(field) => value.get(&field)?,
+            CliResponsePathComponent::Index(requested) => {
+                let values = value.as_array()?;
+                let len = i64::try_from(values.len()).ok()?;
+                let resolved = if requested < 0 {
+                    len.checked_add(requested)?
+                } else {
+                    requested
+                };
+                values.get(usize::try_from(resolved).ok()?)?
+            }
+        };
+    }
+    Some(value)
+}
+
 fn decode_claude_bridge_response(
     body: &[u8],
     configured_model: &str,
@@ -1012,6 +1147,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::CliBridgeConfigInput;
 
     const MAXIMUM_FIXTURE_REQUEST_BYTES: usize = 64 * 1_024;
     const FIXTURE_REQUEST_CHUNK_BYTES: usize = 4_096;
@@ -1021,6 +1157,18 @@ mod tests {
     const USERINFO_ENDPOINT: &str = "https://user:secret@example.com";
     const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com";
     const REMOTE_HTTPS_ENDPOINT: &str = "https://example.com";
+
+    #[test]
+    fn cli_template_substitutions_never_reinterpret_inserted_markers() {
+        assert_eq!(
+            render_cli_prompt("{system}|{user}", "system {user}", "user {system}"),
+            Ok("system {user}|user {system}".to_owned())
+        );
+        assert_eq!(
+            render_cli_argument("{model}|{prompt}", "model {prompt}", "prompt {model}",),
+            "model {prompt}|prompt {model}"
+        );
+    }
 
     #[test]
     fn chat_endpoints_require_https_or_loopback_and_normalize() {
@@ -1067,6 +1215,23 @@ mod tests {
         }
         assert!(decode_anthropic_response(br#"{"content":[]}"#, "fallback").is_err());
         assert!(decode_claude_bridge_response(br#"{"result":""}"#, "bridge-model").is_err());
+
+        let raw = decode_cli_bridge_response(CliBridgeResponseInput {
+            body: b"  Generic raw answer  \n",
+            configured_model: "generic-model",
+            response_format: CliBridgeResponseFormat::Raw,
+            response_path: None,
+        })
+        .unwrap_or_else(|error| panic!("raw CLI response failed: {error}"));
+        assert_eq!(raw.content(), "Generic raw answer");
+        let json_path = decode_cli_bridge_response(CliBridgeResponseInput {
+            body: br#"{"messages":[{"content":"first"},{"content":"last"}]}"#,
+            configured_model: "generic-model",
+            response_format: CliBridgeResponseFormat::JsonPath,
+            response_path: Some(".messages[-1].content"),
+        })
+        .unwrap_or_else(|error| panic!("JSON-path CLI response failed: {error}"));
+        assert_eq!(json_path.content(), "last");
     }
 
     #[test]
@@ -1184,6 +1349,127 @@ mod tests {
             .unwrap_or_else(|error| panic!("bridge request failed: {error}"));
         assert_eq!(completion.content(), "Bridge subprocess answer");
         assert_eq!(completion.model(), "fixture-model");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generic_cli_bridge_supports_arg_mode_and_raw_stdout() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let binary = executable_fixture(
+            root.path(),
+            "generic-cli",
+            "#!/bin/sh\n[ \"$1\" = \"--prompt\" ] || exit 7\ncase \"$2\" in *\"# System\"*\"# User\"*) ;; *) exit 8 ;; esac\n[ \"$3\" = \"--model\" ] || exit 9\n[ \"$4\" = \"fixture-model\" ] || exit 10\nprintf ' Generic raw answer \\n'\n",
+        );
+        let bridge = CliBridgeConfig::new(
+            CliBridgeConfigInput::new(
+                binary,
+                CliBridgeInputMode::Arg,
+                CliBridgeResponseFormat::Raw,
+            )
+            .with_args(
+                ["--prompt", "{prompt}", "--model", "{model}"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("generic CLI config failed: {error}"));
+        let settings = ChatSettings::new_cli_bridge("fixture-model", &bridge)
+            .unwrap_or_else(|error| panic!("generic CLI settings failed: {error}"));
+        let completion = OpenAiChatClient::new(settings)
+            .unwrap_or_else(|error| panic!("generic CLI client failed: {error}"))
+            .complete_message(ChatMessageRequest::new(
+                "System policy",
+                "User prompt",
+                Some(24),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("generic CLI request failed: {error}"));
+        assert_eq!(completion.content(), "Generic raw answer");
+        assert_eq!(completion.model(), "fixture-model");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generic_cli_bridge_enforces_output_exit_stderr_and_timeout_bounds() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let bridge = |name: &str, script: &str| {
+            CliBridgeConfig::new(CliBridgeConfigInput::new(
+                executable_fixture(root.path(), name, script),
+                CliBridgeInputMode::Stdin,
+                CliBridgeResponseFormat::Raw,
+            ))
+            .unwrap_or_else(|error| panic!("{name} CLI config failed: {error}"))
+        };
+
+        let oversized = bridge("oversized-cli", "#!/bin/sh\nprintf '12345678901234567'\n");
+        let mut settings = ChatSettings::new_cli_bridge("fixture-model", &oversized)
+            .unwrap_or_else(|error| panic!("oversized settings failed: {error}"));
+        settings.maximum_response_bytes = 16;
+        assert_eq!(
+            OpenAiChatClient::new(settings)
+                .unwrap_or_else(|error| panic!("oversized client failed: {error}"))
+                .complete_message(ChatMessageRequest::new("system", "user", None))
+                .await,
+            Err(ChatError::ResponseLimit)
+        );
+
+        let nonzero = bridge(
+            "nonzero-cli",
+            "#!/bin/sh\nprintf 'bounded failure' >&2\nexit 17\n",
+        );
+        assert_eq!(
+            OpenAiChatClient::new(
+                ChatSettings::new_cli_bridge("fixture-model", &nonzero)
+                    .unwrap_or_else(|error| panic!("nonzero settings failed: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("nonzero client failed: {error}"))
+            .complete_message(ChatMessageRequest::new("system", "user", None))
+            .await,
+            Err(ChatError::BackendRejected)
+        );
+
+        let stderr = bridge(
+            "stderr-cli",
+            "#!/bin/sh\ndd if=/dev/zero bs=65537 count=1 2>/dev/null | tr '\\000' x >&2\nprintf 'answer'\n",
+        );
+        assert_eq!(
+            OpenAiChatClient::new(
+                ChatSettings::new_cli_bridge("fixture-model", &stderr)
+                    .unwrap_or_else(|error| panic!("stderr settings failed: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("stderr client failed: {error}"))
+            .complete_message(ChatMessageRequest::new("system", "user", None))
+            .await,
+            Err(ChatError::ResponseLimit)
+        );
+
+        let timeout = bridge("timeout-cli", "#!/bin/sh\nsleep 1\nprintf 'late'\n");
+        let mut settings = ChatSettings::new_cli_bridge("fixture-model", &timeout)
+            .unwrap_or_else(|error| panic!("timeout settings failed: {error}"));
+        settings.timeout = Duration::from_millis(25);
+        assert_eq!(
+            OpenAiChatClient::new(settings)
+                .unwrap_or_else(|error| panic!("timeout client failed: {error}"))
+                .complete_message(ChatMessageRequest::new("system", "user", None))
+                .await,
+            Err(ChatError::EndpointUnavailable)
+        );
+    }
+
+    #[cfg(unix)]
+    fn executable_fixture(root: &Path, name: &str, script: &str) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let binary = root.join(name);
+        std::fs::write(&binary, script)
+            .unwrap_or_else(|error| panic!("fixture write failed: {error}"));
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("fixture chmod failed: {error}"));
+        binary
+            .to_str()
+            .unwrap_or_else(|| panic!("fixture path is not UTF-8"))
+            .to_owned()
     }
 
     fn spawn_http_fixture(response: String) -> (String, thread::JoinHandle<Vec<u8>>) {

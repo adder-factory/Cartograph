@@ -1419,7 +1419,27 @@ impl ProjectRuntime {
                     supported_schema_version: cartograph_db::latest_schema_version(),
                 });
             }
-            Err(_) => return Err(ProjectError::MigrationFailed),
+            Err(_) => {
+                let error = match database.verify_current_schema().await {
+                    Err(MigrationError::SchemaVersionBehind {
+                        version,
+                        required_version,
+                    }) => ProjectError::SchemaMigrationBlocked {
+                        database_schema_version: version,
+                        required_schema_version: required_version,
+                        pending_migration_version: version.saturating_add(1),
+                    },
+                    Err(MigrationError::SchemaVersionAhead { version }) => {
+                        ProjectError::SchemaVersionAhead {
+                            binary_version: env!("CARGO_PKG_VERSION"),
+                            database_schema_version: version,
+                            supported_schema_version: cartograph_db::latest_schema_version(),
+                        }
+                    }
+                    _ => ProjectError::MigrationFailed,
+                };
+                return Err(error);
+            }
         }
         Ok(Self {
             root,
@@ -1620,12 +1640,45 @@ impl ProjectRuntime {
         options: IndexOptions,
         cancellation: ProjectCancellation,
     ) -> Result<IndexPreparation, ProjectError> {
+        let mut source = self
+            .prepare_index_source(&options, cancellation.clone())
+            .await?;
+        if let Some(unchanged) = unchanged_index_preparation(UnchangedIndexInput {
+            prior: source.prior.as_ref(),
+            source: &source.source,
+            options: &options,
+            effective_run_excludes: &source.effective_run_excludes,
+        }) {
+            return Ok(unchanged);
+        }
+        let reservation = self.reserve_index_generation(&mut source, &options).await?;
+        Ok(IndexPreparation::Pending(Box::new(PendingIndex {
+            project_id: reservation.project_id,
+            generation_id: reservation.generation_id,
+            source_revision: source.source.digest,
+            scip_overlay: source.source.scip_overlay,
+            workers: reservation.workers,
+            max_source_bytes: source.max_source_bytes,
+            max_generation_bytes: source.max_generation_bytes,
+            parse_cache_reads: !options.force,
+            discovery_policy: source.discovery_policy,
+            index_policy: source.index_policy,
+            generation_storage: reservation.generation_storage,
+            staged: reservation.staged,
+        })))
+    }
+
+    async fn prepare_index_source(
+        &self,
+        options: &IndexOptions,
+        cancellation: ProjectCancellation,
+    ) -> Result<PreparedIndexSource, ProjectError> {
         let prior = self
             .database
             .project_snapshot_by_root(&self.root_identity)
             .await
             .map_err(|_| ProjectError::StatusFailed)?;
-        let effective_run_excludes = effective_run_excludes(&options, prior.as_ref());
+        let effective_run_excludes = effective_run_excludes(options, prior.as_ref());
         let source_policy =
             project_source_policy_with_excludes(&self.root, &effective_run_excludes)?;
         let max_source_bytes = options
@@ -1655,21 +1708,36 @@ impl ProjectRuntime {
                 .await
                 .map_err(|_| ProjectError::IndexCleanupFailed)?;
         }
-        if let Some(unchanged) =
-            unchanged_index_preparation(prior.as_ref(), &source, &options, &effective_run_excludes)
-        {
-            return Ok(unchanged);
-        }
+        Ok(PreparedIndexSource {
+            prior,
+            source,
+            effective_run_excludes,
+            max_source_bytes,
+            max_generation_bytes,
+            generation_storage_policy: source_policy.generation_storage,
+            discovery_policy: source_policy.discovery,
+            index_policy: source_policy.index,
+        })
+    }
 
-        let workers = select_worker_count(source.files, source.source_bytes, options.max_workers);
+    async fn reserve_index_generation(
+        &self,
+        source: &mut PreparedIndexSource,
+        options: &IndexOptions,
+    ) -> Result<IndexGenerationReservation, ProjectError> {
+        let workers = select_worker_count(
+            source.source.files,
+            source.source.source_bytes,
+            options.max_workers,
+        );
         let generation_storage = select_generation_storage(
-            source_policy.generation_storage,
+            source.generation_storage_policy,
             GenerationStorageSignals {
-                files: source.files,
-                source_bytes: source.source_bytes,
-                cargo_manifests: source.cargo_manifests,
-                maximum_generation_bytes: max_generation_bytes,
-                has_scip_overlay: source.scip_overlay.is_some(),
+                files: source.source.files,
+                source_bytes: source.source.source_bytes,
+                cargo_manifests: source.source.cargo_manifests,
+                maximum_generation_bytes: source.max_generation_bytes,
+                has_scip_overlay: source.source.scip_overlay.is_some(),
             },
         )?;
         let project_id = self
@@ -1680,7 +1748,7 @@ impl ProjectRuntime {
             ))
             .await
             .map_err(|_| ProjectError::RegisterFailed)?;
-        if prior.is_none() {
+        if source.prior.is_none() {
             self.database
                 .fail_abandoned_staging_generations_bounded(
                     &project_id,
@@ -1692,26 +1760,19 @@ impl ProjectRuntime {
         let staged = self
             .database
             .begin_generation(
-                NewGeneration::new(project_id.clone(), source.digest.as_str(), workers)
-                    .with_run_excludes(effective_run_excludes),
+                NewGeneration::new(project_id.clone(), source.source.digest.as_str(), workers)
+                    .with_run_excludes(std::mem::take(&mut source.effective_run_excludes)),
             )
             .await
             .map_err(|_| ProjectError::BeginGenerationFailed)?;
         let generation_id = staged.generation_id().clone();
-        Ok(IndexPreparation::Pending(Box::new(PendingIndex {
+        Ok(IndexGenerationReservation {
             project_id,
             generation_id,
-            source_revision: source.digest,
-            scip_overlay: source.scip_overlay,
             workers,
-            max_source_bytes,
-            max_generation_bytes,
-            parse_cache_reads: !options.force,
-            discovery_policy: source_policy.discovery,
-            index_policy: source_policy.index,
             generation_storage,
             staged,
-        })))
+        })
     }
 
     async fn publish_index(
@@ -1910,6 +1971,25 @@ enum IndexPreparation {
     Pending(Box<PendingIndex>),
 }
 
+struct PreparedIndexSource {
+    prior: Option<ProjectSnapshot>,
+    source: SourceRevision,
+    effective_run_excludes: Vec<String>,
+    max_source_bytes: usize,
+    max_generation_bytes: u64,
+    generation_storage_policy: GenerationStoragePolicy,
+    discovery_policy: DiscoveryPolicy,
+    index_policy: SourceIndexPolicy,
+}
+
+struct IndexGenerationReservation {
+    project_id: ProjectId,
+    generation_id: cartograph_domain::GenerationId,
+    workers: u16,
+    generation_storage: GenerationStorageSelection,
+    staged: StagedGeneration,
+}
+
 fn effective_run_excludes(options: &IndexOptions, prior: Option<&ProjectSnapshot>) -> Vec<String> {
     if !options.additional_excludes().is_empty() {
         return options.additional_excludes().to_vec();
@@ -1924,27 +2004,34 @@ fn effective_run_excludes(options: &IndexOptions, prior: Option<&ProjectSnapshot
     Vec::new()
 }
 
-fn unchanged_index_preparation(
-    prior: Option<&ProjectSnapshot>,
-    source: &SourceRevision,
-    options: &IndexOptions,
-    effective_run_excludes: &[String],
-) -> Option<IndexPreparation> {
-    let prior = prior?;
+#[derive(Clone, Copy)]
+struct UnchangedIndexInput<'input> {
+    prior: Option<&'input ProjectSnapshot>,
+    source: &'input SourceRevision,
+    options: &'input IndexOptions,
+    effective_run_excludes: &'input [String],
+}
+
+fn unchanged_index_preparation(input: UnchangedIndexInput<'_>) -> Option<IndexPreparation> {
+    let prior = input.prior?;
     let current = prior.current.as_ref()?;
-    if options.force
-        || current.source_revision != source.digest.as_str()
+    if input.options.force
+        || current.source_revision != input.source.digest.as_str()
         || current.digest_version != GenerationDigestVersion::CURRENT
-        || current.source_admission.run_excludes() != effective_run_excludes
+        || current.source_admission.run_excludes() != input.effective_run_excludes
     {
         return None;
     }
     Some(IndexPreparation::Unchanged(Box::new(IndexReport {
         project_id: prior.project_id.clone(),
         generation_id: current.generation_id.clone(),
-        source_revision: source.digest.clone(),
+        source_revision: input.source.digest.clone(),
         content_digest: current.content_digest.clone(),
-        workers: select_worker_count(source.files, source.source_bytes, options.max_workers),
+        workers: select_worker_count(
+            input.source.files,
+            input.source.source_bytes,
+            input.options.max_workers,
+        ),
         published: false,
         publication: IndexPublication::Skipped {
             reason: "unchanged_current_generation",
@@ -1957,7 +2044,7 @@ fn unchanged_index_preparation(
         issue_history: IssueHistoryIndexStatus::Unavailable {
             reason: "not_attempted",
         },
-        profile: options.profile.then(IndexProfile::default),
+        profile: input.options.profile.then(IndexProfile::default),
         retention: GenerationRetentionStatus::Deferred {
             reason: "not_attempted",
             retryable: false,
@@ -2941,6 +3028,18 @@ pub enum ProjectError {
     /// Required capabilities or append-only migrations failed.
     #[error("Cartograph PostgreSQL migration failed")]
     MigrationFailed,
+    /// An older otherwise valid schema could not apply its next append-only migration.
+    #[error(
+        "Cartograph PostgreSQL schema version {database_schema_version} is below required version {required_schema_version}; pending migration {pending_migration_version} could not be applied"
+    )]
+    SchemaMigrationBlocked {
+        /// Highest migration version still recorded by PostgreSQL after rollback.
+        database_schema_version: i64,
+        /// Exact migration version required by this binary.
+        required_schema_version: i64,
+        /// First append-only migration that remains unapplied.
+        pending_migration_version: i64,
+    },
     /// The database was migrated by a newer Cartograph binary.
     #[error(
         "Cartograph {binary_version} supports schema version {supported_schema_version}, but the database is at newer schema version {database_schema_version}; upgrade the Cartograph binary and repin the MCP registration before retrying"
@@ -3074,6 +3173,19 @@ mod tests {
         assert!(message.contains("schema version 26"));
         assert!(message.contains("schema version 27"));
         assert!(message.contains("repin the MCP registration"));
+    }
+
+    #[test]
+    fn blocked_schema_migration_names_the_exact_pending_version() {
+        let error = ProjectError::SchemaMigrationBlocked {
+            database_schema_version: 38,
+            required_schema_version: 39,
+            pending_migration_version: 39,
+        };
+        let message = error.to_string();
+        assert!(message.contains("schema version 38"));
+        assert!(message.contains("required version 39"));
+        assert!(message.contains("pending migration 39"));
     }
 
     #[test]

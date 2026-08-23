@@ -707,12 +707,21 @@ impl CartographDatabase {
             .await
             .map_err(|()| database_error("timeout"))?;
         let prune = format!(
-            r#"DELETE FROM {schema}."native_parse_cache"
-               WHERE project_id = $1::uuid
-                 AND extractor_contract_digest = $2
-                 AND path_digest = $3
-                 AND normalized_path = $4
-                 AND (language <> $5 OR content_hash <> $6)"#
+            r#"DELETE FROM {schema}."native_parse_cache" AS cache
+               WHERE cache.project_id = $1::uuid
+                 AND cache.extractor_contract_digest = $2
+                 AND cache.path_digest = $3
+                 AND cache.normalized_path = $4
+                 AND (cache.language <> $5 OR cache.content_hash <> $6)
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM {schema}."native_generation_spill_rows" AS spill
+                     WHERE spill.project_id = cache.project_id
+                       AND spill.cache_extractor_contract_digest = cache.extractor_contract_digest
+                       AND spill.cache_path_digest = cache.path_digest
+                       AND spill.cache_language = cache.language
+                       AND spill.cache_content_hash = cache.content_hash
+                 )"#
         );
         query(AssertSqlSafe(prune))
             .bind(key.project_id.as_str())
@@ -797,21 +806,7 @@ impl CartographDatabase {
         set_local_statement_timeout(&mut transaction, CACHE_OPERATION_TIMEOUT)
             .await
             .map_err(|()| database_error("store-batch-timeout"))?;
-        let prune = format!(
-            r#"DELETE FROM {schema}."native_parse_cache" AS cache
-               USING unnest(
-                   CAST($1 AS uuid[]), CAST($2 AS text[]), CAST($3 AS text[]),
-                   CAST($4 AS text[]), CAST($5 AS text[]), CAST($6 AS text[])
-               ) AS input(
-                   project_id, extractor_contract_digest, path_digest,
-                   normalized_path, language, content_hash
-               )
-               WHERE cache.project_id = input.project_id
-                 AND cache.extractor_contract_digest = input.extractor_contract_digest
-                 AND cache.path_digest = input.path_digest
-                 AND cache.normalized_path = input.normalized_path
-                 AND (cache.language <> input.language OR cache.content_hash <> input.content_hash)"#
-        );
+        let prune = cache_batch_prune_statement(&schema);
         query(AssertSqlSafe(prune))
             .bind(&input.project_ids)
             .bind(&input.contracts)
@@ -890,13 +885,22 @@ impl CartographDatabase {
         validate_key(key)?;
         let schema = quoted_schema(&self.schema);
         let statement = format!(
-            r#"DELETE FROM {schema}."native_parse_cache"
-               WHERE project_id = $1::uuid
-                 AND extractor_contract_digest = $2
-                 AND path_digest = $3
-                 AND language = $4
-                 AND content_hash = $5
-                 AND normalized_path = $6"#
+            r#"DELETE FROM {schema}."native_parse_cache" AS cache
+               WHERE cache.project_id = $1::uuid
+                 AND cache.extractor_contract_digest = $2
+                 AND cache.path_digest = $3
+                 AND cache.language = $4
+                 AND cache.content_hash = $5
+                 AND cache.normalized_path = $6
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM {schema}."native_generation_spill_rows" AS spill
+                     WHERE spill.project_id = cache.project_id
+                       AND spill.cache_extractor_contract_digest = cache.extractor_contract_digest
+                       AND spill.cache_path_digest = cache.path_digest
+                       AND spill.cache_language = cache.language
+                       AND spill.cache_content_hash = cache.content_hash
+                 )"#
         );
         query(AssertSqlSafe(statement))
             .bind(key.project_id.as_str())
@@ -948,6 +952,33 @@ impl CartographDatabase {
             }
         }
     }
+}
+
+fn cache_batch_prune_statement(schema: &str) -> String {
+    format!(
+        r#"DELETE FROM {schema}."native_parse_cache" AS cache
+           USING unnest(
+               CAST($1 AS uuid[]), CAST($2 AS text[]), CAST($3 AS text[]),
+               CAST($4 AS text[]), CAST($5 AS text[]), CAST($6 AS text[])
+           ) AS input(
+               project_id, extractor_contract_digest, path_digest,
+               normalized_path, language, content_hash
+           )
+           WHERE cache.project_id = input.project_id
+             AND cache.extractor_contract_digest = input.extractor_contract_digest
+             AND cache.path_digest = input.path_digest
+             AND cache.normalized_path = input.normalized_path
+             AND (cache.language <> input.language OR cache.content_hash <> input.content_hash)
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM {schema}."native_generation_spill_rows" AS spill
+                 WHERE spill.project_id = cache.project_id
+                   AND spill.cache_extractor_contract_digest = cache.extractor_contract_digest
+                   AND spill.cache_path_digest = cache.path_digest
+                   AND spill.cache_language = cache.language
+                   AND spill.cache_content_hash = cache.content_hash
+             )"#
+    )
 }
 
 const NATIVE_PARSE_CACHE_RETENTION_SQL: &str = r#"WITH recent_contracts AS MATERIALIZED (

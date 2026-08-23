@@ -24,6 +24,7 @@ pub use models::{
     install_recommended_models,
 };
 pub use project_config::{
+    CliBridgeConfig, CliBridgeConfigInput, CliBridgeInputMode, CliBridgeResponseFormat,
     LlmEndpointProbe, ProjectCredentialMigrationEntry, ProjectCredentialMigrationReport,
     ProjectCredentialMigrationStatus, ProjectGenerationStorage, ProjectLlmConfigError,
     ProjectLlmCredentialSource, ProjectLlmCredentialWriteAction, ProjectLlmCredentialWriteEntry,

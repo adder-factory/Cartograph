@@ -151,6 +151,68 @@ fn doctor_exposes_layered_readiness_before_the_first_generation() {
 
 #[test]
 #[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
+fn doctor_warns_for_uninitialized_behind_schema_and_fails_for_real_state() {
+    let database_url = std::env::var("CARTOGRAPH_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| panic!("live CLI database is not configured"));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let schema = format!("cg_cli_doctor_behind_{}_{}", std::process::id(), nanos);
+    let project = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let project_path = project.path().to_string_lossy().into_owned();
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        prepare_schema_one_version_behind(&database_url, &schema);
+
+        let uninitialized = json_success(
+            project.path(),
+            &database_url,
+            &schema,
+            &["doctor", &project_path, "--json"],
+        );
+        assert_eq!(uninitialized["ready"], true);
+        assert_eq!(
+            doctor_check(&uninitialized, "project-state")["status"],
+            "warn"
+        );
+        assert_eq!(
+            doctor_check(&uninitialized, "project-index")["status"],
+            "warn"
+        );
+        assert!(doctor_check_optional(&uninitialized, "schema-migrations").is_none());
+
+        std::fs::create_dir(project.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("Cartograph fixture directory failed: {error}"));
+        let initialized = invoke(
+            project.path(),
+            &database_url,
+            &schema,
+            &["doctor", &project_path, "--json"],
+        );
+        assert_eq!(initialized.status.code(), Some(2));
+        let initialized: Value = serde_json::from_slice(&initialized.stdout)
+            .unwrap_or_else(|error| panic!("doctor failure report was not JSON: {error}"));
+        assert_eq!(initialized["ready"], false);
+        let migration = doctor_check(&initialized, "schema-migrations");
+        assert_eq!(migration["status"], "fail");
+        assert!(
+            migration["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(
+                    "database schema version 38 is below required version 39; next pending migration is 39"
+                ))
+        );
+    }));
+
+    cleanup_schema(&database_url, &schema);
+    if let Err(payload) = outcome {
+        resume_unwind(payload);
+    }
+}
+
+#[test]
+#[ignore = "requires PostgreSQL 18 with pg_search and pgvector"]
 fn parse_failure_json_names_relative_input_and_preserves_the_current_generation() {
     let database_url = std::env::var("CARTOGRAPH_TEST_DATABASE_URL")
         .unwrap_or_else(|_| panic!("live CLI database is not configured"));
@@ -1634,6 +1696,61 @@ fn invoke(root: &Path, database_url: &str, schema: &str, arguments: &[&str]) -> 
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .unwrap_or_else(|error| panic!("cartograph process failed to start: {error}"))
+}
+
+fn prepare_schema_one_version_behind(database_url: &str, schema: &str) {
+    const GENERATION_SOURCE_ADMISSION_SCHEMA_VERSION: i64 = 39;
+    let settings =
+        cartograph_config::DatabaseSettings::parse(database_url, Some("2"), Some("10000"))
+            .and_then(|settings| settings.with_schema(schema))
+            .unwrap_or_else(|error| panic!("schema-behind settings failed: {error}"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("schema-behind runtime failed: {error}"));
+    runtime.block_on(async {
+        assert_eq!(
+            cartograph_db::latest_schema_version(),
+            GENERATION_SOURCE_ADMISSION_SCHEMA_VERSION,
+            "schema-behind fixture must track the current migration"
+        );
+        let pool = cartograph_db::connect(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("schema-behind connection failed: {error}"));
+        let database = CartographDatabase::new(pool.clone(), settings.schema().clone());
+        database
+            .migrate()
+            .await
+            .unwrap_or_else(|error| panic!("schema-behind migration failed: {error}"));
+        query(AssertSqlSafe(format!(
+            r#"ALTER TABLE "{schema}"."index_generations"
+                DROP CONSTRAINT "index_generations_run_excludes_check",
+                DROP COLUMN "run_excludes""#
+        )))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("schema-behind column rollback failed: {error}"));
+        query(AssertSqlSafe(format!(
+            r#"DELETE FROM "{schema}"."schema_migrations" WHERE version = $1"#
+        )))
+        .bind(GENERATION_SOURCE_ADMISSION_SCHEMA_VERSION)
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("schema-behind ledger rollback failed: {error}"));
+        database.close().await;
+    });
+}
+
+fn doctor_check<'report>(report: &'report Value, id: &str) -> &'report Value {
+    doctor_check_optional(report, id)
+        .unwrap_or_else(|| panic!("doctor report omitted the {id} check: {report}"))
+}
+
+fn doctor_check_optional<'report>(report: &'report Value, id: &str) -> Option<&'report Value> {
+    report["checks"]
+        .as_array()?
+        .iter()
+        .find(|check| check["id"] == id)
 }
 
 fn symbol_id(value: &Value, expected_name: &str) -> Option<String> {

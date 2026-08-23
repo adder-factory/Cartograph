@@ -39,7 +39,7 @@ uses a reduced-quality parser mode.
 
 - Host: Apple M4 Max, 14 CPU cores, 36 GB memory
 - OS: macOS arm64
-- Rust: repository-pinned 1.97.1 release profile
+- Rust: repository-pinned 1.98.0 release profile
 - Database: managed PostgreSQL 18.4, ParadeDB `pg_search` 0.25.0, pgvector
   0.8.4, 256 MiB shared memory
 - Requested worker cap: 16; hardware-selected workers: 14

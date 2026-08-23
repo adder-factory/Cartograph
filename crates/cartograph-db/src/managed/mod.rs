@@ -15,7 +15,10 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::time::{sleep, timeout};
 
-use crate::{CapabilityReport, CartographDatabase, MigrationReport, connect, probe_capabilities};
+use crate::{
+    CapabilityReport, CartographDatabase, MigrationError, MigrationReport, connect,
+    probe_capabilities,
+};
 
 /// Exact upstream `ParadeDB` 0.25.3 multi-architecture image accepted by Cartograph v2.
 ///
@@ -39,6 +42,10 @@ pub const MANAGED_DATABASE_NANO_CPUS: u64 = 4_000_000_000;
 pub const MANAGED_DATABASE_PIDS_LIMIT: i64 = 256;
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const DEFAULT_MAINTENANCE_TIMEOUT: Duration = Duration::from_mins(15);
+const MANAGED_SCHEMA_MIGRATION_TIMEOUT: Duration = Duration::from_secs(60);
+const MANAGED_UPGRADE_STORAGE_INSPECTION_TIMEOUT: Duration = Duration::from_secs(30);
+const MINIMUM_MANAGED_UPGRADE_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+const MANAGED_UPGRADE_DATABASE_RESERVE_DIVISOR: u64 = 10;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HEX_NIBBLE_BITS: u8 = 4;
 const HEX_NIBBLE_MASK: u8 = 0x0f;
@@ -971,11 +978,28 @@ async fn initialize_managed_database(
         return Err(ManagedDatabaseError::CapabilitiesNotReady);
     }
     let database = CartographDatabase::new(pool.clone(), settings.schema().clone());
-    let migrations = database.migrate().await;
+    let migrations = database
+        .migrate_bounded(MANAGED_SCHEMA_MIGRATION_TIMEOUT)
+        .await;
+    let Ok(migrations) = migrations else {
+        let error = match database.verify_current_schema().await {
+            Err(MigrationError::SchemaVersionBehind {
+                version,
+                required_version,
+            }) => ManagedDatabaseError::SchemaMigrationBlocked {
+                database_schema_version: version,
+                required_schema_version: required_version,
+                pending_migration_version: version.saturating_add(1),
+            },
+            _ => ManagedDatabaseError::SchemaMigration,
+        };
+        pool.close().await;
+        return Err(error);
+    };
     pool.close().await;
     Ok(ManagedInitialization {
         capabilities: report,
-        migrations: migrations.map_err(|_| ManagedDatabaseError::SchemaMigration)?,
+        migrations,
     })
 }
 
@@ -1150,6 +1174,31 @@ pub enum ManagedDatabaseError {
     /// The append-only Cartograph schema migration did not commit.
     #[error("managed database Cartograph schema migration failed")]
     SchemaMigration,
+    /// An older otherwise valid schema could not apply its next append-only migration.
+    #[error(
+        "managed database schema version {database_schema_version} is below required version {required_schema_version}; pending migration {pending_migration_version} could not be applied"
+    )]
+    SchemaMigrationBlocked {
+        /// Highest migration version still recorded after the failed transaction.
+        database_schema_version: i64,
+        /// Exact migration version required by this binary.
+        required_schema_version: i64,
+        /// First append-only migration that remains unapplied.
+        pending_migration_version: i64,
+    },
+    /// A replacement was refused before cutover because the data mount lacked headroom.
+    #[error(
+        "managed database upgrade requires at least {required_bytes} bytes of data-volume headroom, but only {available_bytes} bytes are available"
+    )]
+    UpgradeStorageHeadroom {
+        /// Bytes reported available on the validated project-owned data mount.
+        available_bytes: u64,
+        /// Minimum bounded headroom required before replacing the image.
+        required_bytes: u64,
+    },
+    /// The healthy current database could not report bounded allocation evidence before cutover.
+    #[error("managed database upgrade could not inspect current storage allocation")]
+    UpgradeStorageInspection,
     /// Backup destination exists, is not a regular file target, or cannot be persisted atomically.
     #[error("managed database backup destination is not a new writable regular file")]
     BackupDestination,

@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-18 (`v2.1.24`).
+Last release audit: 2026-08-23 (`v2.1.25`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -116,7 +116,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.24 top-level command advertised
+This inventory contains every non-hidden v2.1.25 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -300,6 +300,10 @@ discarding the other four.
 cartograph llm migrate-credentials [PROJECT] [--tier-env TIER=ENV]
   [--apply --confirm migrate-inline-credentials]
 cartograph llm setup custom [--api-key-env ENV | --clear-credentials]
+cartograph llm setup [PROJECT] --preset cli-bridge --tier <chat|local|ask|classify>
+  --command EXECUTABLE [--arg ARG]... --input <stdin|arg>
+  [--prompt-template TEMPLATE] --response-format <raw|json-path|claude>
+  [--response-path PATH] [--model MODEL]
 cartograph backend cleanup [PROJECT] [--minimum-age-hours 24]
   [--apply --confirm cleanup-backend-junk]
 ```

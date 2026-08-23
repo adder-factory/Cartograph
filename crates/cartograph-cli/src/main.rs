@@ -1147,6 +1147,9 @@ struct PruneArguments {
     /// Maximum generations deleted in one transaction.
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=10000))]
     maximum_deletions: u32,
+    /// Maximum canonical/cascade rows admitted into one transaction.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=100_000_000))]
+    maximum_cascade_rows: Option<u64>,
     /// Exact acknowledgement: prune-old-generations.
     #[arg(long)]
     confirm: String,
@@ -3868,6 +3871,7 @@ async fn run_generation_prune(arguments: PruneArguments) -> Result<ExitCode, Str
         project_path,
         keep_superseded,
         maximum_deletions,
+        maximum_cascade_rows,
         confirm,
         format,
     } = arguments;
@@ -3876,8 +3880,13 @@ async fn run_generation_prune(arguments: PruneArguments) -> Result<ExitCode, Str
             "generation pruning requires --confirm {RETENTION_CONFIRMATION}"
         ));
     }
-    let policy = GenerationRetentionPolicy::new(keep_superseded, maximum_deletions)
+    let mut policy = GenerationRetentionPolicy::new(keep_superseded, maximum_deletions)
         .map_err(|error| error.to_string())?;
+    if let Some(maximum_cascade_rows) = maximum_cascade_rows {
+        policy = policy
+            .with_maximum_cascade_rows(maximum_cascade_rows)
+            .map_err(|error| error.to_string())?;
+    }
     let runtime = open_runtime(&project_path).await?;
     let status = runtime.status().await.map_err(|error| error.to_string())?;
     let project_id = status
@@ -4073,8 +4082,22 @@ async fn open_current_read_only_runtime(project_path: &PathBuf) -> Result<Projec
 
 fn current_schema_guidance(error: &cartograph_db::MigrationError) -> String {
     format!(
-        "{error}; run `cartograph db start --project-path .` or the approved external migration workflow before retrying"
+        "{}; run `cartograph db start --project-path .` or the approved external migration workflow before retrying",
+        schema_migration_diagnostic(error)
     )
+}
+
+fn schema_migration_diagnostic(error: &cartograph_db::MigrationError) -> String {
+    match error {
+        cartograph_db::MigrationError::SchemaVersionBehind {
+            version,
+            required_version,
+        } => format!(
+            "database schema version {version} is below required version {required_version}; next pending migration is {}",
+            version.saturating_add(1)
+        ),
+        _ => error.to_string(),
+    }
 }
 
 fn maintenance_owner() -> LeaseOwner {
@@ -4686,9 +4709,7 @@ async fn build_doctor_report_with_settings(
 }
 
 fn check_native_executable(checks: &mut Vec<DoctorCheck>) {
-    let healthy = env::current_exe()
-        .ok()
-        .is_some_and(|path| native_executable_path_is_safe(&path));
+    let healthy = env::current_exe().is_ok_and(|path| native_executable_path_is_safe(&path));
     checks.push(if healthy {
         doctor_pass(
             "native-runtime",
@@ -4915,6 +4936,18 @@ async fn check_project_index(
             return ProjectIndexObservation::unavailable();
         }
     };
+    if has_real_project_state(project_path)
+        && let Err(error) = runtime.database().verify_current_schema().await
+    {
+        checks.push(doctor_fail(
+            "schema-migrations",
+            schema_migration_diagnostic(&error),
+            "Run `cartograph db start --project-path <path>` or resume the exact confirmed managed upgrade before serving project queries."
+                .to_owned(),
+        ));
+        runtime.close().await;
+        return ProjectIndexObservation::unavailable();
+    }
     let status = runtime.status().await;
     if let Ok(status) = &status
         && let Some(snapshot) = &status.snapshot
@@ -4966,6 +4999,11 @@ async fn check_project_index(
     };
     runtime.close().await;
     observation
+}
+
+fn has_real_project_state(project_path: &Path) -> bool {
+    fs::symlink_metadata(project_path.join(".cartograph"))
+        .is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
 fn project_index_observation(status: &ProjectStatus) -> ProjectIndexObservation {
@@ -5353,8 +5391,7 @@ fn check_local_model(label: &str, model: &str, checks: &mut Vec<DoctorCheck>) {
         return;
     }
     let valid = fs::symlink_metadata(path)
-        .ok()
-        .is_some_and(|metadata| metadata.file_type().is_file() && metadata.len() > 0);
+        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() > 0);
     checks.push(if valid {
         doctor_pass(
             format!("llm-{label}-model"),
@@ -6706,6 +6743,41 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_bounded_generation_prune_row_override() {
+        let prune = Cli::try_parse_from([
+            "cartograph",
+            "db",
+            "prune",
+            "--maximum-cascade-rows",
+            "7700000",
+            "--confirm",
+            RETENTION_CONFIRMATION,
+        ])
+        .unwrap_or_else(|error| panic!("database prune CLI did not parse: {error}"));
+        assert!(matches!(
+            prune.command,
+            Command::Db {
+                command: DatabaseCommand::Prune(PruneArguments {
+                    maximum_cascade_rows: Some(7_700_000),
+                    ..
+                })
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "cartograph",
+                "db",
+                "prune",
+                "--maximum-cascade-rows",
+                "100000001",
+                "--confirm",
+                RETENTION_CONFIRMATION,
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn cli_parses_heap_compaction_as_a_distinct_confirmed_mode() {
         let heap = Cli::try_parse_from([
             "cartograph",
@@ -6780,5 +6852,33 @@ mod tests {
             Ok(CompactionHeadroomAuthority::External(1_073_741_824))
         );
         assert!(compaction_headroom_authority(true, None).is_err());
+    }
+
+    #[test]
+    fn schema_diagnostic_names_the_exact_pending_migration() {
+        let diagnostic =
+            schema_migration_diagnostic(&cartograph_db::MigrationError::SchemaVersionBehind {
+                version: 38,
+                required_version: 39,
+            });
+        assert_eq!(
+            diagnostic,
+            "database schema version 38 is below required version 39; next pending migration is 39"
+        );
+    }
+
+    #[test]
+    fn schema_diagnostics_require_a_real_initialized_project_state() {
+        let project = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("could not create doctor project: {error}"));
+        assert!(!has_real_project_state(project.path()));
+        fs::create_dir(project.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("could not create doctor state: {error}"));
+        assert!(has_real_project_state(project.path()));
+        fs::remove_dir(project.path().join(".cartograph"))
+            .unwrap_or_else(|error| panic!("could not remove doctor state: {error}"));
+        fs::write(project.path().join(".cartograph"), b"not a directory")
+            .unwrap_or_else(|error| panic!("could not create invalid doctor state: {error}"));
+        assert!(!has_real_project_state(project.path()));
     }
 }

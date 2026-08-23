@@ -30,7 +30,13 @@ const MAXIMUM_API_KEY_BYTES: usize = 8_192;
 const MAXIMUM_TIMEOUT_MS: u64 = 600_000;
 const MAXIMUM_CONCURRENCY: u16 = 16;
 const MAXIMUM_SUMMARY_BATCH_SIZE: u16 = 16;
-const MAXIMUM_CLAUDE_BINARY_BYTES: usize = 4_096;
+const MAXIMUM_CLI_COMMAND_BYTES: usize = 4_096;
+const MAXIMUM_CLI_ARGUMENTS: usize = 128;
+const MAXIMUM_CLI_ARGUMENT_BYTES: usize = 4_096;
+const MAXIMUM_CLI_ARGUMENT_TOTAL_BYTES: usize = 32 * 1_024;
+const MAXIMUM_CLI_PROMPT_TEMPLATE_BYTES: usize = 64 * 1_024;
+const MAXIMUM_CLI_RESPONSE_PATH_BYTES: usize = 4_096;
+const MAXIMUM_CLI_RESPONSE_PATH_COMPONENTS: usize = 64;
 const MAXIMUM_LLAMA_SERVER_ARGUMENTS: usize = 128;
 const MAXIMUM_LLAMA_SERVER_ARGUMENT_BYTES: usize = 4_096;
 const MAXIMUM_LLAMA_SERVER_ARGUMENT_TOTAL_BYTES: usize = 32 * 1_024;
@@ -48,6 +54,8 @@ const MAXIMUM_PROJECT_EXCLUDE_BYTES: usize = 4_096;
 const OPENAI_CLOUD_ENDPOINT: &str = "https://api.openai.com";
 const ANTHROPIC_CLOUD_ENDPOINT: &str = "https://api.anthropic.com";
 const CLAUDE_BRIDGE_ENDPOINT: &str = "claude-bridge://local";
+const CLI_BRIDGE_ENDPOINT: &str = "cli-bridge://local";
+const DEFAULT_CLI_PROMPT_TEMPLATE: &str = "# System\n{system}\n\n# User\n{user}";
 const DEFAULT_CLAUDE_SUMMARIZE_MODEL: &str = "claude-haiku-4-5";
 const DEFAULT_CLAUDE_ASK_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_SUMMARY_EAGER_LIMIT: u64 = 600;
@@ -84,6 +92,8 @@ pub enum ProjectLlmProvider {
     OpenAiCompat,
     /// Represents the claude bridge project LLM provider.
     ClaudeBridge,
+    /// Represents a bounded provider-agnostic local CLI bridge.
+    CliBridge,
     /// Represents the anthropic API project LLM provider.
     AnthropicApi,
 }
@@ -138,6 +148,7 @@ impl ProjectLlmProvider {
         match value {
             "openai-compat" => Some(Self::OpenAiCompat),
             "claude-bridge" => Some(Self::ClaudeBridge),
+            "cli-bridge" => Some(Self::CliBridge),
             "anthropic-api" => Some(Self::AnthropicApi),
             _ => None,
         }
@@ -147,8 +158,232 @@ impl ProjectLlmProvider {
         match self {
             Self::OpenAiCompat => "openai-compat",
             Self::ClaudeBridge => "claude-bridge",
+            Self::CliBridge => "cli-bridge",
             Self::AnthropicApi => "anthropic-api",
         }
+    }
+}
+
+/// How a generic CLI bridge receives its rendered prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CliBridgeInputMode {
+    /// Write the prompt to the child process stdin and close it before waiting.
+    Stdin,
+    /// Substitute the prompt into one exact argv entry without a shell.
+    Arg,
+}
+
+impl CliBridgeInputMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "stdin" => Some(Self::Stdin),
+            "arg" => Some(Self::Arg),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdin => "stdin",
+            Self::Arg => "arg",
+        }
+    }
+}
+
+/// Decoder applied to bounded stdout from a generic CLI bridge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CliBridgeResponseFormat {
+    /// Treat trimmed UTF-8 stdout as the completion.
+    Raw,
+    /// Extract a string from bounded JSON stdout through a validated path.
+    JsonPath,
+    /// Decode the historical Claude CLI JSON envelope.
+    Claude,
+}
+
+impl CliBridgeResponseFormat {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "raw" => Some(Self::Raw),
+            "json-path" => Some(Self::JsonPath),
+            "claude" => Some(Self::Claude),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::JsonPath => "json-path",
+            Self::Claude => "claude",
+        }
+    }
+}
+
+/// Inputs for one validated shell-free CLI bridge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CliBridgeConfigInput {
+    command: String,
+    args: Vec<String>,
+    input: CliBridgeInputMode,
+    response_format: CliBridgeResponseFormat,
+    response_path: Option<String>,
+}
+
+impl CliBridgeConfigInput {
+    /// Start a CLI bridge contract with no argv or response path.
+    pub fn new(
+        command: impl Into<String>,
+        input: CliBridgeInputMode,
+        response_format: CliBridgeResponseFormat,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            args: Vec::new(),
+            input,
+            response_format,
+            response_path: None,
+        }
+    }
+
+    /// Supply the exact ordered argv templates passed without a shell.
+    #[must_use]
+    pub fn with_args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    /// Supply the validated JSON path used by the JSON-path decoder.
+    #[must_use]
+    pub fn with_response_path(mut self, response_path: Option<String>) -> Self {
+        self.response_path = response_path;
+        self
+    }
+}
+
+/// Validated shell-free command contract for one chat-family CLI bridge.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CliBridgeConfig {
+    command: String,
+    args: Vec<String>,
+    input: CliBridgeInputMode,
+    prompt_template: String,
+    response_format: CliBridgeResponseFormat,
+    response_path: Option<String>,
+}
+
+impl std::fmt::Debug for CliBridgeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CliBridgeConfig")
+            .field("command", &"<configured>")
+            .field("argument_count", &self.args.len())
+            .field("input", &self.input)
+            .field("prompt_template", &"<configured>")
+            .field("response_format", &self.response_format)
+            .field("response_path_configured", &self.response_path.is_some())
+            .finish()
+    }
+}
+
+impl CliBridgeConfig {
+    /// Build one bounded argv-only CLI bridge contract.
+    /// # Errors
+    ///
+    /// Returns an error for unsafe command/argument text, invalid substitution
+    /// tokens, an input-mode mismatch, or an invalid response decoder/path pair.
+    pub fn new(input: CliBridgeConfigInput) -> Result<Self, ProjectLlmConfigError> {
+        let config = Self {
+            command: input.command,
+            args: input.args,
+            input: input.input,
+            prompt_template: DEFAULT_CLI_PROMPT_TEMPLATE.to_owned(),
+            response_format: input.response_format,
+            response_path: input.response_path,
+        };
+        validate_cli_bridge_config(&config)?;
+        Ok(config)
+    }
+
+    /// Replace the default system/user prompt template.
+    /// # Errors
+    ///
+    /// Returns an error unless the template is bounded and contains only the
+    /// required `{system}` and `{user}` substitution tokens.
+    pub fn with_prompt_template(
+        mut self,
+        prompt_template: impl Into<String>,
+    ) -> Result<Self, ProjectLlmConfigError> {
+        self.prompt_template = prompt_template.into();
+        validate_cli_bridge_config(&self)?;
+        Ok(self)
+    }
+
+    /// Build the historical Claude bridge argv, stdin, prompt, and decoder contract.
+    /// # Errors
+    ///
+    /// Returns an error when an explicit command violates the CLI command bound.
+    pub fn claude_compatible(command: Option<&str>) -> Result<Self, ProjectLlmConfigError> {
+        Self::new(
+            CliBridgeConfigInput::new(
+                command.unwrap_or("claude"),
+                CliBridgeInputMode::Stdin,
+                CliBridgeResponseFormat::Claude,
+            )
+            .with_args(
+                [
+                    "-p",
+                    "--strict-mcp-config",
+                    "--no-session-persistence",
+                    "--disable-slash-commands",
+                    "--model",
+                    "{model}",
+                    "--output-format",
+                    "json",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            ),
+        )
+    }
+
+    /// Exact executable passed directly to `Command::new`.
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// Exact argv templates passed without shell interpolation.
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// Configured prompt delivery mode.
+    #[must_use]
+    pub const fn input(&self) -> CliBridgeInputMode {
+        self.input
+    }
+
+    /// Bounded template rendered from trusted system and user strings.
+    #[must_use]
+    pub fn prompt_template(&self) -> &str {
+        &self.prompt_template
+    }
+
+    /// Configured bounded stdout decoder.
+    #[must_use]
+    pub const fn response_format(&self) -> CliBridgeResponseFormat {
+        self.response_format
+    }
+
+    /// Validated JSON path used only by the JSON-path decoder.
+    #[must_use]
+    pub fn response_path(&self) -> Option<&str> {
+        self.response_path.as_deref()
     }
 }
 
@@ -580,6 +815,7 @@ pub struct ProjectLlmTierConfig {
     concurrency: Option<u16>,
     summary_batch_size: Option<u16>,
     claude_bin: Option<String>,
+    cli_bridge: Option<CliBridgeConfig>,
     llama_server_args: Vec<String>,
     externally_managed: bool,
 }
@@ -598,6 +834,7 @@ impl std::fmt::Debug for ProjectLlmTierConfig {
             .field("concurrency", &self.concurrency)
             .field("summary_batch_size", &self.summary_batch_size)
             .field("claude_binary_configured", &self.claude_bin.is_some())
+            .field("cli_bridge_configured", &self.cli_bridge.is_some())
             .field("llama_server_argument_count", &self.llama_server_args.len())
             .field("externally_managed", &self.externally_managed)
             .finish()
@@ -667,6 +904,12 @@ impl ProjectLlmTierConfig {
         self.claude_bin.as_deref()
     }
 
+    /// Returns the validated generic CLI bridge contract, when configured.
+    #[must_use]
+    pub const fn cli_bridge(&self) -> Option<&CliBridgeConfig> {
+        self.cli_bridge.as_ref()
+    }
+
     #[must_use]
     /// Returns the llama server args.
     pub fn llama_server_args(&self) -> &[String] {
@@ -702,6 +945,7 @@ pub struct ProjectLlmTierInput {
     concurrency: Option<u16>,
     summary_batch_size: Option<u16>,
     claude_bin: Option<String>,
+    cli_bridge: Option<CliBridgeConfig>,
 }
 
 impl ProjectLlmTierInput {
@@ -731,6 +975,7 @@ impl ProjectLlmTierInput {
             concurrency: None,
             summary_batch_size: None,
             claude_bin: None,
+            cli_bridge: None,
         })
     }
 
@@ -758,6 +1003,34 @@ impl ProjectLlmTierInput {
             concurrency: None,
             summary_batch_size: None,
             claude_bin: None,
+            cli_bridge: None,
+        })
+    }
+
+    /// Build a credential-free provider-agnostic CLI bridge for a chat tier.
+    /// # Errors
+    ///
+    /// Returns an error if the tier is not chat-capable or the model is invalid.
+    pub fn cli_bridge(
+        tier: ProjectLlmTier,
+        model: impl Into<String>,
+        config: CliBridgeConfig,
+    ) -> Result<Self, ProjectLlmConfigError> {
+        validate_chat_tier(tier)?;
+        let model = model.into();
+        validate_model(&model)?;
+        Ok(Self {
+            tier,
+            provider: ProjectLlmProvider::CliBridge,
+            endpoint: CLI_BRIDGE_ENDPOINT.to_owned(),
+            model,
+            ask_model: None,
+            credential_intent: ProjectLlmCredentialIntent::Clear,
+            timeout_ms: None,
+            concurrency: None,
+            summary_batch_size: None,
+            claude_bin: None,
+            cli_bridge: Some(config),
         })
     }
 
@@ -787,6 +1060,7 @@ impl ProjectLlmTierInput {
             concurrency: None,
             summary_batch_size: None,
             claude_bin: None,
+            cli_bridge: None,
         })
     }
 
@@ -809,7 +1083,10 @@ impl ProjectLlmTierInput {
         mut self,
         value: impl Into<String>,
     ) -> Result<Self, ProjectLlmConfigError> {
-        if self.provider == ProjectLlmProvider::ClaudeBridge {
+        if matches!(
+            self.provider,
+            ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::CliBridge
+        ) {
             return Err(ProjectLlmConfigError::InvalidTier);
         }
         let value = value.into();
@@ -901,7 +1178,7 @@ impl ProjectLlmTierInput {
         }
         let claude_bin = claude_bin.into();
         if claude_bin.is_empty()
-            || claude_bin.len() > MAXIMUM_CLAUDE_BINARY_BYTES
+            || claude_bin.len() > MAXIMUM_CLI_COMMAND_BYTES
             || claude_bin.chars().any(char::is_control)
         {
             return Err(ProjectLlmConfigError::InvalidTier);
@@ -909,6 +1186,190 @@ impl ProjectLlmTierInput {
         self.claude_bin = Some(claude_bin);
         Ok(self)
     }
+}
+
+fn validate_cli_bridge_config(config: &CliBridgeConfig) -> Result<(), ProjectLlmConfigError> {
+    validate_cli_process_text(&config.command, MAXIMUM_CLI_COMMAND_BYTES)?;
+    if config.args.len() > MAXIMUM_CLI_ARGUMENTS {
+        return Err(ProjectLlmConfigError::InvalidTier);
+    }
+    let mut argument_bytes = 0_usize;
+    let mut prompt_tokens = 0_usize;
+    for argument in &config.args {
+        validate_cli_process_text(argument, MAXIMUM_CLI_ARGUMENT_BYTES)?;
+        argument_bytes = argument_bytes
+            .checked_add(argument.len())
+            .filter(|total| *total <= MAXIMUM_CLI_ARGUMENT_TOTAL_BYTES)
+            .ok_or(ProjectLlmConfigError::InvalidTier)?;
+        prompt_tokens = prompt_tokens
+            .checked_add(validate_template_tokens(
+                argument,
+                &["{model}", "{prompt}"],
+                "{prompt}",
+            )?)
+            .ok_or(ProjectLlmConfigError::InvalidTier)?;
+    }
+    match config.input {
+        CliBridgeInputMode::Stdin if prompt_tokens != 0 => {
+            return Err(ProjectLlmConfigError::InvalidTier);
+        }
+        CliBridgeInputMode::Arg if prompt_tokens != 1 => {
+            return Err(ProjectLlmConfigError::InvalidTier);
+        }
+        CliBridgeInputMode::Stdin | CliBridgeInputMode::Arg => {}
+    }
+    if config.prompt_template.is_empty()
+        || config.prompt_template.len() > MAXIMUM_CLI_PROMPT_TEMPLATE_BYTES
+        || config.prompt_template.contains('\0')
+        || validate_template_tokens(&config.prompt_template, &["{system}", "{user}"], "{system}")?
+            != 1
+        || validate_template_tokens(&config.prompt_template, &["{system}", "{user}"], "{user}")?
+            != 1
+    {
+        return Err(ProjectLlmConfigError::InvalidTier);
+    }
+    match (config.response_format, config.response_path.as_deref()) {
+        (CliBridgeResponseFormat::JsonPath, Some(path)) => validate_cli_response_path(path),
+        (CliBridgeResponseFormat::JsonPath, None)
+        | (CliBridgeResponseFormat::Raw | CliBridgeResponseFormat::Claude, Some(_)) => {
+            Err(ProjectLlmConfigError::InvalidTier)
+        }
+        (CliBridgeResponseFormat::Raw | CliBridgeResponseFormat::Claude, None) => Ok(()),
+    }
+}
+
+fn validate_cli_process_text(value: &str, maximum: usize) -> Result<(), ProjectLlmConfigError> {
+    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
+        Err(ProjectLlmConfigError::InvalidTier)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_template_tokens(
+    value: &str,
+    allowed: &[&str],
+    counted: &str,
+) -> Result<usize, ProjectLlmConfigError> {
+    let mut remaining = value;
+    let mut count = 0_usize;
+    loop {
+        let open = remaining.find('{');
+        let close = remaining.find('}');
+        match (open, close) {
+            (None, None) => return Ok(count),
+            (Some(open), Some(close)) if open < close => {
+                let token_end = close.saturating_add(1);
+                let token = &remaining[open..token_end];
+                if !allowed.contains(&token) {
+                    return Err(ProjectLlmConfigError::InvalidTier);
+                }
+                if token == counted {
+                    count = count
+                        .checked_add(1)
+                        .ok_or(ProjectLlmConfigError::InvalidTier)?;
+                }
+                remaining = &remaining[token_end..];
+            }
+            _ => return Err(ProjectLlmConfigError::InvalidTier),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CliResponsePathComponent {
+    Field(String),
+    Index(i64),
+}
+
+pub(crate) fn parse_cli_response_path(
+    path: &str,
+) -> Result<Vec<CliResponsePathComponent>, ProjectLlmConfigError> {
+    if path.is_empty()
+        || path.len() > MAXIMUM_CLI_RESPONSE_PATH_BYTES
+        || !path.is_ascii()
+        || path.chars().any(char::is_control)
+    {
+        return Err(ProjectLlmConfigError::InvalidTier);
+    }
+    let bytes = path.as_bytes();
+    let mut index = usize::from(bytes.first() == Some(&b'$'));
+    let mut components = Vec::new();
+    if index == 0 && !matches!(bytes[0], b'.' | b'[') {
+        let (field, next) = parse_cli_response_field(path, index)?;
+        components.push(CliResponsePathComponent::Field(field));
+        index = next;
+    }
+    while index < bytes.len() {
+        let (component, next) = match bytes[index] {
+            b'.' => {
+                let (field, next) = parse_cli_response_field(path, index.saturating_add(1))?;
+                (CliResponsePathComponent::Field(field), next)
+            }
+            b'[' => parse_cli_response_index(path, index.saturating_add(1))?,
+            _ => return Err(ProjectLlmConfigError::InvalidTier),
+        };
+        if components.len() >= MAXIMUM_CLI_RESPONSE_PATH_COMPONENTS {
+            return Err(ProjectLlmConfigError::InvalidTier);
+        }
+        components.push(component);
+        index = next;
+    }
+    if components.is_empty() {
+        Err(ProjectLlmConfigError::InvalidTier)
+    } else {
+        Ok(components)
+    }
+}
+
+fn parse_cli_response_field(
+    path: &str,
+    start: usize,
+) -> Result<(String, usize), ProjectLlmConfigError> {
+    let bytes = path.as_bytes();
+    let mut end = start;
+    while end < bytes.len() && !matches!(bytes[end], b'.' | b'[') {
+        end = end.saturating_add(1);
+    }
+    let field = path
+        .get(start..end)
+        .filter(|field| {
+            !field.is_empty()
+                && field
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        .ok_or(ProjectLlmConfigError::InvalidTier)?;
+    Ok((field.to_owned(), end))
+}
+
+fn parse_cli_response_index(
+    path: &str,
+    start: usize,
+) -> Result<(CliResponsePathComponent, usize), ProjectLlmConfigError> {
+    let close = path
+        .get(start..)
+        .and_then(|remaining| remaining.find(']'))
+        .and_then(|offset| start.checked_add(offset))
+        .ok_or(ProjectLlmConfigError::InvalidTier)?;
+    let raw = path
+        .get(start..close)
+        .ok_or(ProjectLlmConfigError::InvalidTier)?;
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ProjectLlmConfigError::InvalidTier);
+    }
+    let requested = raw
+        .parse::<i64>()
+        .map_err(|_| ProjectLlmConfigError::InvalidTier)?;
+    let next = close
+        .checked_add(1)
+        .ok_or(ProjectLlmConfigError::InvalidTier)?;
+    Ok((CliResponsePathComponent::Index(requested), next))
+}
+
+fn validate_cli_response_path(path: &str) -> Result<(), ProjectLlmConfigError> {
+    parse_cli_response_path(path).map(drop)
 }
 
 fn validate_chat_tier(tier: ProjectLlmTier) -> Result<(), ProjectLlmConfigError> {
@@ -1509,7 +1970,7 @@ where
             .or_else(|| match provider {
                 ProjectLlmProvider::OpenAiCompat => Some("OPENAI_API_KEY".to_owned()),
                 ProjectLlmProvider::AnthropicApi => Some("ANTHROPIC_API_KEY".to_owned()),
-                ProjectLlmProvider::ClaudeBridge => None,
+                ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::CliBridge => None,
             });
         let status = match environment.as_deref() {
             None => ProjectCredentialMigrationStatus::UnsupportedProvider,
@@ -1649,16 +2110,37 @@ fn update_project_llm_tier(
 ) -> Result<ProjectLlmCredentialWriteEntry, ProjectLlmConfigError> {
     let tier = object_field(llm, input.tier.config_key())?;
     let action = apply_credential_intent(tier, input);
+    write_project_llm_provider(tier, input);
+    write_project_llm_optional_settings(tier, input);
+    write_project_llm_cli_bridge(tier, input.cli_bridge.as_ref());
+    Ok(ProjectLlmCredentialWriteEntry {
+        tier: input.tier,
+        action,
+    })
+}
+
+fn write_project_llm_provider(tier: &mut Map<String, Value>, input: &ProjectLlmTierInput) {
     tier.insert(
         "provider".to_owned(),
         Value::String(input.provider.as_str().to_owned()),
     );
-    if input.provider == ProjectLlmProvider::ClaudeBridge {
+    if matches!(
+        input.provider,
+        ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::CliBridge
+    ) {
         tier.remove("endpoint");
     } else {
         tier.insert("endpoint".to_owned(), Value::String(input.endpoint.clone()));
     }
     tier.insert("model".to_owned(), Value::String(input.model.clone()));
+    if let Some(claude_bin) = &input.claude_bin {
+        tier.insert("claudeBin".to_owned(), Value::String(claude_bin.clone()));
+    } else if input.provider != ProjectLlmProvider::ClaudeBridge {
+        tier.remove("claudeBin");
+    }
+}
+
+fn write_project_llm_optional_settings(tier: &mut Map<String, Value>, input: &ProjectLlmTierInput) {
     if let Some(ask_model) = &input.ask_model {
         tier.insert("askModel".to_owned(), Value::String(ask_model.clone()));
     }
@@ -1674,15 +2156,57 @@ fn update_project_llm_tier(
             Value::from(summary_batch_size),
         );
     }
-    if let Some(claude_bin) = &input.claude_bin {
-        tier.insert("claudeBin".to_owned(), Value::String(claude_bin.clone()));
-    } else if input.provider != ProjectLlmProvider::ClaudeBridge {
-        tier.remove("claudeBin");
+}
+
+fn write_project_llm_cli_bridge(
+    tier: &mut Map<String, Value>,
+    cli_bridge: Option<&CliBridgeConfig>,
+) {
+    if let Some(cli_bridge) = cli_bridge {
+        tier.insert(
+            "command".to_owned(),
+            Value::String(cli_bridge.command.clone()),
+        );
+        tier.insert(
+            "args".to_owned(),
+            Value::Array(cli_bridge.args.iter().cloned().map(Value::String).collect()),
+        );
+        tier.insert(
+            "input".to_owned(),
+            Value::String(cli_bridge.input.as_str().to_owned()),
+        );
+        if cli_bridge.prompt_template == DEFAULT_CLI_PROMPT_TEMPLATE {
+            tier.remove("promptTemplate");
+        } else {
+            tier.insert(
+                "promptTemplate".to_owned(),
+                Value::String(cli_bridge.prompt_template.clone()),
+            );
+        }
+        tier.insert(
+            "responseFormat".to_owned(),
+            Value::String(cli_bridge.response_format.as_str().to_owned()),
+        );
+        if let Some(response_path) = &cli_bridge.response_path {
+            tier.insert(
+                "responsePath".to_owned(),
+                Value::String(response_path.clone()),
+            );
+        } else {
+            tier.remove("responsePath");
+        }
+    } else {
+        for key in [
+            "command",
+            "args",
+            "input",
+            "promptTemplate",
+            "responseFormat",
+            "responsePath",
+        ] {
+            tier.remove(key);
+        }
     }
-    Ok(ProjectLlmCredentialWriteEntry {
-        tier: input.tier,
-        action,
-    })
 }
 
 fn apply_credential_intent(
@@ -1738,6 +2262,7 @@ fn configured_credential_origin(
             .and_then(Value::as_str)
             .unwrap_or(ANTHROPIC_CLOUD_ENDPOINT),
         ProjectLlmProvider::ClaudeBridge => CLAUDE_BRIDGE_ENDPOINT,
+        ProjectLlmProvider::CliBridge => CLI_BRIDGE_ENDPOINT,
     };
     credential_origin(provider, endpoint)
 }
@@ -1746,8 +2271,11 @@ fn credential_origin(
     provider: ProjectLlmProvider,
     endpoint: &str,
 ) -> Option<(ProjectLlmProvider, String)> {
-    if provider == ProjectLlmProvider::ClaudeBridge {
-        return Some((provider, CLAUDE_BRIDGE_ENDPOINT.to_owned()));
+    if matches!(
+        provider,
+        ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::CliBridge
+    ) {
+        return Some((provider, endpoint.to_owned()));
     }
     let endpoint = Url::parse(endpoint).ok()?;
     let host = endpoint
@@ -1913,6 +2441,7 @@ fn parse_tier(
     let credentials = parse_tier_credentials(value, provider)?;
     let limits = parse_tier_runtime_limits(value)?;
     let claude_bin = parse_claude_bin(value, provider)?;
+    let cli_bridge = parse_cli_bridge(value, provider)?;
     let llama_server_args = parse_llama_server_args(value)?;
     let externally_managed = optional_bool(value, "externallyManaged")?.unwrap_or(false);
     Ok(ProjectLlmTierConfig {
@@ -1926,6 +2455,7 @@ fn parse_tier(
         concurrency: limits.concurrency,
         summary_batch_size: limits.summary_batch_size,
         claude_bin,
+        cli_bridge,
         llama_server_args,
         externally_managed,
     })
@@ -1960,7 +2490,10 @@ fn parse_tier_credentials(
     if explicit_api_key_env.is_some() && inline.is_some() {
         return Err(ProjectLlmConfigError::InvalidTier);
     }
-    if provider == ProjectLlmProvider::ClaudeBridge {
+    if matches!(
+        provider,
+        ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::CliBridge
+    ) {
         if inline.is_some() || explicit_api_key_env.is_some() {
             return Err(ProjectLlmConfigError::InvalidTier);
         }
@@ -2085,6 +2618,12 @@ fn project_tier_endpoint(
             }
             return Ok(CLAUDE_BRIDGE_ENDPOINT.to_owned());
         }
+        ProjectLlmProvider::CliBridge => {
+            if configured.is_some() {
+                return Err(ProjectLlmConfigError::InvalidTier);
+            }
+            return Ok(CLI_BRIDGE_ENDPOINT.to_owned());
+        }
     };
     validate_endpoint(endpoint)?;
     Ok(endpoint.to_owned())
@@ -2110,7 +2649,9 @@ fn project_tier_model(
         return Ok(model);
     }
     match provider {
-        ProjectLlmProvider::OpenAiCompat => Err(ProjectLlmConfigError::InvalidTier),
+        ProjectLlmProvider::OpenAiCompat | ProjectLlmProvider::CliBridge => {
+            Err(ProjectLlmConfigError::InvalidTier)
+        }
         ProjectLlmProvider::ClaudeBridge | ProjectLlmProvider::AnthropicApi => {
             let model = if resolution.configured == ProjectLlmTier::Summarize {
                 DEFAULT_CLAUDE_SUMMARIZE_MODEL
@@ -2147,7 +2688,7 @@ fn parse_claude_bin(
                 .as_str()
                 .filter(|value| {
                     !value.is_empty()
-                        && value.len() <= MAXIMUM_CLAUDE_BINARY_BYTES
+                        && value.len() <= MAXIMUM_CLI_COMMAND_BYTES
                         && !value.chars().any(char::is_control)
                 })
                 .map(str::to_owned)
@@ -2159,6 +2700,50 @@ fn parse_claude_bin(
     } else {
         Ok(None)
     }
+}
+
+fn parse_cli_bridge(
+    object: &Map<String, Value>,
+    provider: ProjectLlmProvider,
+) -> Result<Option<CliBridgeConfig>, ProjectLlmConfigError> {
+    if provider != ProjectLlmProvider::CliBridge {
+        return Ok(None);
+    }
+    let ((Some(command), None) | (None, Some(command))) = (
+        optional_string_value(object, "command")?,
+        optional_string_value(object, "claudeBin")?,
+    ) else {
+        return Err(ProjectLlmConfigError::InvalidTier);
+    };
+    let args = object
+        .get("args")
+        .and_then(Value::as_array)
+        .filter(|args| args.len() <= MAXIMUM_CLI_ARGUMENTS)
+        .ok_or(ProjectLlmConfigError::InvalidTier)?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(ProjectLlmConfigError::InvalidTier)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let input = optional_string_value(object, "input")?
+        .and_then(CliBridgeInputMode::parse)
+        .ok_or(ProjectLlmConfigError::InvalidTier)?;
+    let response_format = optional_string_value(object, "responseFormat")?
+        .and_then(CliBridgeResponseFormat::parse)
+        .ok_or(ProjectLlmConfigError::InvalidTier)?;
+    let response_path = optional_string_value(object, "responsePath")?.map(str::to_owned);
+    let mut config = CliBridgeConfig::new(
+        CliBridgeConfigInput::new(command, input, response_format)
+            .with_args(args)
+            .with_response_path(response_path),
+    )?;
+    if let Some(prompt_template) = optional_string_value(object, "promptTemplate")? {
+        config = config.with_prompt_template(prompt_template)?;
+    }
+    Ok(Some(config))
 }
 
 fn parse_llama_server_args(
@@ -3198,6 +3783,107 @@ mod tests {
             load_project_llm_tier(root.path(), ProjectLlmTier::Embedding),
             Err(ProjectLlmConfigError::InvalidTier)
         ));
+    }
+
+    #[test]
+    fn generic_cli_bridge_round_trips_and_rejects_unsafe_templates() {
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let bridge = CliBridgeConfig::new(
+            CliBridgeConfigInput::new(
+                "some-agent-cli",
+                CliBridgeInputMode::Arg,
+                CliBridgeResponseFormat::Raw,
+            )
+            .with_args(
+                ["-p", "{prompt}", "--model", "{model}"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("CLI bridge fixture failed: {error}"));
+        let input = ProjectLlmTierInput::cli_bridge(
+            ProjectLlmTier::Summarize,
+            "some-model",
+            bridge.clone(),
+        )
+        .unwrap_or_else(|error| panic!("CLI tier fixture failed: {error}"));
+        write_project_llm_tiers(root.path(), &[input])
+            .unwrap_or_else(|error| panic!("CLI tier write failed: {error}"));
+
+        let value = read_config_value(root.path())
+            .unwrap_or_else(|error| panic!("CLI config read failed: {error}"))
+            .unwrap_or_else(|| panic!("CLI config was missing"));
+        let tier = &value["llm"]["summarizeLlm"];
+        assert_eq!(tier["provider"], "cli-bridge");
+        assert_eq!(tier["command"], "some-agent-cli");
+        assert_eq!(tier["input"], "arg");
+        assert_eq!(tier["responseFormat"], "raw");
+        assert!(tier.get("endpoint").is_none());
+        assert!(tier.get("promptTemplate").is_none());
+
+        let loaded = load_exact_project_llm_tier(root.path(), ProjectLlmTier::Summarize)
+            .unwrap_or_else(|error| panic!("CLI tier load failed: {error}"))
+            .unwrap_or_else(|| panic!("CLI tier was missing"));
+        assert_eq!(loaded.provider(), ProjectLlmProvider::CliBridge);
+        assert_eq!(loaded.endpoint(), CLI_BRIDGE_ENDPOINT);
+        assert_eq!(loaded.cli_bridge(), Some(&bridge));
+        assert_eq!(loaded.credential_source(), ProjectLlmCredentialSource::None);
+
+        assert!(
+            CliBridgeConfig::new(
+                CliBridgeConfigInput::new(
+                    "agent",
+                    CliBridgeInputMode::Stdin,
+                    CliBridgeResponseFormat::Raw,
+                )
+                .with_args(vec!["{unknown}".to_owned()]),
+            )
+            .is_err()
+        );
+        assert!(
+            CliBridgeConfig::new(CliBridgeConfigInput::new(
+                "agent",
+                CliBridgeInputMode::Arg,
+                CliBridgeResponseFormat::Raw,
+            ),)
+            .is_err()
+        );
+        assert!(
+            CliBridgeConfig::new(
+                CliBridgeConfigInput::new(
+                    "agent",
+                    CliBridgeInputMode::Stdin,
+                    CliBridgeResponseFormat::JsonPath,
+                )
+                .with_response_path(Some(".messages[-1].content".to_owned())),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn claude_compatible_cli_preset_preserves_the_historical_contract() {
+        let bridge = CliBridgeConfig::claude_compatible(Some("/usr/bin/claude"))
+            .unwrap_or_else(|error| panic!("Claude CLI preset failed: {error}"));
+        assert_eq!(bridge.command(), "/usr/bin/claude");
+        assert_eq!(
+            bridge.args(),
+            [
+                "-p",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+                "--disable-slash-commands",
+                "--model",
+                "{model}",
+                "--output-format",
+                "json",
+            ]
+        );
+        assert_eq!(bridge.input(), CliBridgeInputMode::Stdin);
+        assert_eq!(bridge.prompt_template(), DEFAULT_CLI_PROMPT_TEMPLATE);
+        assert_eq!(bridge.response_format(), CliBridgeResponseFormat::Claude);
+        assert_eq!(bridge.response_path(), None);
     }
 
     #[test]

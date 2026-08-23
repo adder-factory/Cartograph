@@ -645,6 +645,84 @@ async fn cached_extracted_spill_batch(
         .unwrap_or_else(|error| panic!("cached extracted batch was invalid: {error}"))
 }
 
+async fn assert_spill_referenced_cache_survives_new_content(fixture: &DatabaseFixture) {
+    let contract = digest(CONTENT_HASH_REJECTED);
+    let referenced_key = parse_cache_key(
+        &fixture.project,
+        &contract,
+        "src/cached-spill.rs",
+        CONTENT_HASH_TWO,
+        6,
+    );
+    let replacement_payload = b"replacement".to_vec();
+    let replacement_key = parse_cache_key(
+        &fixture.project,
+        &contract,
+        "src/cached-spill.rs",
+        CONTENT_HASH_ONE,
+        u64::try_from(replacement_payload.len()).unwrap_or(u64::MAX),
+    );
+    fixture
+        .database
+        .store_native_parse_cache(&replacement_key, &replacement_payload)
+        .await
+        .unwrap_or_else(|error| panic!("referenced cache single replacement failed: {error}"));
+
+    let batch_payload = b"batch-replacement".to_vec();
+    let batch_key = parse_cache_key(
+        &fixture.project,
+        &contract,
+        "src/cached-spill.rs",
+        CONTENT_HASH_REJECTED,
+        u64::try_from(batch_payload.len()).unwrap_or(u64::MAX),
+    );
+    assert_eq!(
+        fixture
+            .database
+            .store_native_parse_cache_batch(vec![NativeParseCacheEntry::new(
+                batch_key.clone(),
+                batch_payload,
+            )])
+            .await
+            .unwrap_or_else(|error| panic!("referenced cache batch replacement failed: {error}")),
+        NativeParseCacheBatchWrite {
+            inserted: 1,
+            already_present: 0,
+        }
+    );
+    assert!(
+        fixture
+            .database
+            .load_native_parse_cache(&referenced_key)
+            .await
+            .unwrap_or_else(|error| panic!("referenced cache lookup failed: {error}"))
+            .is_some()
+    );
+    assert!(
+        fixture
+            .database
+            .load_native_parse_cache(&replacement_key)
+            .await
+            .unwrap_or_else(|error| panic!("obsolete replacement lookup failed: {error}"))
+            .is_none()
+    );
+    assert!(
+        fixture
+            .database
+            .load_native_parse_cache(&batch_key)
+            .await
+            .unwrap_or_else(|error| panic!("batch replacement lookup failed: {error}"))
+            .is_some()
+    );
+    assert!(
+        !fixture
+            .database
+            .evict_native_parse_cache(&referenced_key)
+            .await
+            .unwrap_or_else(|error| panic!("referenced cache eviction failed: {error}"))
+    );
+}
+
 async fn representation_independent_batches(
     fixture: &DatabaseFixture,
     sequence: u64,
@@ -755,6 +833,7 @@ async fn exercise_spill_parse_resume(fixture: &DatabaseFixture, run: &mut SpillT
             .unwrap_or_else(|error| panic!("cached extracted batch did not commit: {error}")),
         NativeGenerationSpillWrite::Inserted
     );
+    assert_spill_referenced_cache_survives_new_content(fixture).await;
     run.spill = NativeGenerationSpill::new(
         fixture.database.clone(),
         &run.staged,

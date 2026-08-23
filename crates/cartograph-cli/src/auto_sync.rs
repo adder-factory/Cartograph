@@ -39,6 +39,7 @@ const WATCH_DEBOUNCE_ENV: &str = "CARTOGRAPH_WATCH_DEBOUNCE_MS";
 const INITIAL_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const MAXIMUM_RETRY_INTERVAL: Duration = Duration::from_mins(15);
 const MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION: u8 = 5;
+const MAXIMUM_REPEATED_AUTOMATIC_FAILURES: u8 = 5;
 
 /// Live filesystem watcher plus periodic missed-event reconciliation for one project runtime.
 pub(crate) struct ProjectAutoSync {
@@ -107,9 +108,11 @@ impl ProjectAutoSync {
             last_failure_at: failure.last_failure_at,
             next_retry_at: failure.next_retry_at,
             failed_revision_attempts: failure.attempts,
-            retry_suppressed: failure.retry_suppressed,
+            retry_suppressed: failure.retry_suppressed.into(),
+            repeated_failure_attempts: failure.repeated_failure_attempts,
+            repeated_failure_retry_suppressed: failure.repeated_failure_retry_suppressed.into(),
             capacity_failure_attempts: failure.capacity_failure_attempts,
-            capacity_retry_suppressed: failure.capacity_retry_suppressed,
+            capacity_retry_suppressed: failure.capacity_retry_suppressed.into(),
             capacity_limit: capacity_failure_active.then_some(GENERATION_CAPACITY_LIMIT),
             capacity_scope: capacity_failure_active.then_some(GENERATION_CAPACITY_SCOPE),
             capacity_next_action: capacity_failure_active
@@ -146,6 +149,9 @@ struct AutoSyncFailureStatus {
     next_retry_at: Option<u64>,
     attempts: u8,
     retry_suppressed: bool,
+    repeated_failure_error_code: Option<&'static str>,
+    repeated_failure_attempts: u8,
+    repeated_failure_retry_suppressed: bool,
     capacity_failure_attempts: u8,
     capacity_retry_suppressed: bool,
 }
@@ -179,7 +185,9 @@ impl AutoSyncState {
 
     fn automatic_attempt_allowed(&self, revision: &ContentDigest, now: u64) -> bool {
         self.failure.read().map_or(true, |failure| {
-            if failure.status.capacity_retry_suppressed {
+            if failure.status.capacity_retry_suppressed
+                || failure.status.repeated_failure_retry_suppressed
+            {
                 return false;
             }
             match failure.failed_revision.as_ref() {
@@ -238,6 +246,30 @@ impl AutoSyncState {
         } else {
             1
         };
+        let error_code = project_error_code(error);
+        let (
+            repeated_failure_error_code,
+            repeated_failure_attempts,
+            repeated_failure_retry_suppressed,
+        ) = if matches!(error, ProjectError::StatusFailed) {
+            (
+                failure.status.repeated_failure_error_code,
+                failure.status.repeated_failure_attempts,
+                failure.status.repeated_failure_retry_suppressed,
+            )
+        } else {
+            let repeated_failure_attempts =
+                if failure.status.repeated_failure_error_code == Some(error_code) {
+                    failure.status.repeated_failure_attempts.saturating_add(1)
+                } else {
+                    1
+                };
+            (
+                Some(error_code),
+                repeated_failure_attempts,
+                repeated_failure_attempts >= MAXIMUM_REPEATED_AUTOMATIC_FAILURES,
+            )
+        };
         let capacity_failure_attempts = if is_generation_capacity_failure(error) {
             failure.status.capacity_failure_attempts.saturating_add(1)
         } else {
@@ -246,6 +278,7 @@ impl AutoSyncState {
         let capacity_retry_suppressed =
             capacity_failure_attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION;
         let retry_suppressed = capacity_retry_suppressed
+            || repeated_failure_retry_suppressed
             || (matches!(&revision, FailedRevision::Known(_))
                 && attempts >= MAXIMUM_AUTOMATIC_ATTEMPTS_PER_REVISION);
         let next_retry_at = (!retry_suppressed).then(|| {
@@ -259,11 +292,14 @@ impl AutoSyncState {
         *failure = AutoSyncFailureState {
             failed_revision: Some(revision),
             status: AutoSyncFailureStatus {
-                last_error_code: Some(project_error_code(error)),
+                last_error_code: Some(error_code),
                 last_failure_at: Some(now),
                 next_retry_at,
                 attempts,
                 retry_suppressed,
+                repeated_failure_error_code,
+                repeated_failure_attempts,
+                repeated_failure_retry_suppressed,
                 capacity_failure_attempts,
                 capacity_retry_suppressed,
             },
@@ -297,11 +333,15 @@ pub(crate) struct AutoSyncStatus {
     /// Automatic failures recorded for the current known or unavailable-revision bucket.
     pub failed_revision_attempts: u8,
     /// True after either the current revision or the cross-revision capacity circuit is exhausted.
-    pub retry_suppressed: bool,
+    pub retry_suppressed: AutoSyncSuppression,
+    /// Consecutive automatic index failures with the same stable error code across revisions.
+    pub repeated_failure_attempts: u8,
+    /// True after one stable failure code trips the cross-revision automatic-index circuit.
+    pub repeated_failure_retry_suppressed: AutoSyncSuppression,
     /// Generation-capacity failures observed since the last successful automatic index.
     pub capacity_failure_attempts: u8,
     /// True after capacity failures trip the cross-revision automatic-index circuit breaker.
-    pub capacity_retry_suppressed: bool,
+    pub capacity_retry_suppressed: AutoSyncSuppression,
     /// Exact project setting that bounded the unresolved capacity failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_limit: Option<&'static str>,
@@ -311,6 +351,17 @@ pub(crate) struct AutoSyncStatus {
     /// Bounded operator recovery action for an unresolved capacity failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_next_action: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+/// Typed suppression state that preserves the status wire contract as a JSON boolean.
+pub(crate) struct AutoSyncSuppression(bool);
+
+impl From<bool> for AutoSyncSuppression {
+    fn from(value: bool) -> Self {
+        Self(value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -615,8 +666,7 @@ fn relevant_relative_path(path: &Path, filter: &RwLock<ProjectWatchFilter>) -> b
 fn event_changes_config(root: &Path, event: &Event) -> bool {
     event.paths.iter().any(|path| {
         path.strip_prefix(root)
-            .ok()
-            .is_some_and(|relative| relative == Path::new(CONFIG_RELATIVE_PATH))
+            .is_ok_and(|relative| relative == Path::new(CONFIG_RELATIVE_PATH))
     })
 }
 
@@ -844,6 +894,87 @@ mod tests {
         state.record_index_success();
         assert!(state.automatic_attempt_allowed(&unseen_revision, now));
         assert_eq!(state.failure_status(), AutoSyncFailureStatus::default());
+    }
+
+    #[test]
+    fn repeated_index_failure_code_trips_a_cross_revision_circuit_breaker() {
+        let state = AutoSyncState::default();
+        let now = 1_000_u64;
+        let error = ProjectError::IndexStageFailed {
+            stage: PipelineStage::Copy,
+        };
+
+        for attempt in 1..=MAXIMUM_REPEATED_AUTOMATIC_FAILURES {
+            let revision = ContentDigest::from_bytes([attempt; 32]);
+            assert!(state.automatic_attempt_allowed(&revision, now));
+            state.record_index_failure(revision, &error, now);
+            let status = state.failure_status();
+            assert_eq!(status.attempts, 1);
+            assert_eq!(status.repeated_failure_attempts, attempt);
+            assert_eq!(
+                status.repeated_failure_retry_suppressed,
+                attempt == MAXIMUM_REPEATED_AUTOMATIC_FAILURES
+            );
+        }
+
+        let unseen_revision = ContentDigest::from_bytes([u8::MAX; 32]);
+        let exhausted = state.failure_status();
+        assert!(exhausted.retry_suppressed);
+        assert!(exhausted.repeated_failure_retry_suppressed);
+        assert_eq!(exhausted.next_retry_at, None);
+        assert!(!state.automatic_attempt_allowed(&unseen_revision, u64::MAX));
+
+        state.record_index_success();
+        assert!(state.automatic_attempt_allowed(&unseen_revision, now));
+        assert_eq!(state.failure_status(), AutoSyncFailureStatus::default());
+    }
+
+    #[test]
+    fn status_probe_failures_do_not_break_the_repeated_index_failure_sequence() {
+        let state = AutoSyncState::default();
+        let now = 1_000_u64;
+        let error = ProjectError::IndexStageFailed {
+            stage: PipelineStage::Copy,
+        };
+
+        for attempt in 1..=MAXIMUM_REPEATED_AUTOMATIC_FAILURES {
+            if attempt > 1 {
+                state.record_unknown_failure(&ProjectError::StatusFailed, now);
+                assert_eq!(
+                    state.failure_status().last_error_code,
+                    Some("status_failed")
+                );
+            }
+            state.record_index_failure(ContentDigest::from_bytes([attempt; 32]), &error, now);
+            assert_eq!(state.failure_status().repeated_failure_attempts, attempt);
+        }
+        assert!(state.failure_status().repeated_failure_retry_suppressed);
+    }
+
+    #[test]
+    fn distinct_index_failure_codes_do_not_trip_the_cross_revision_circuit() {
+        let state = AutoSyncState::default();
+        let now = 1_000_u64;
+
+        for attempt in 1..=MAXIMUM_REPEATED_AUTOMATIC_FAILURES.saturating_add(1) {
+            let failure_stage = if attempt % 2 == 0 {
+                PipelineStage::Copy
+            } else {
+                PipelineStage::Parse
+            };
+            let revision = ContentDigest::from_bytes([attempt; 32]);
+            assert!(state.automatic_attempt_allowed(&revision, now));
+            state.record_index_failure(
+                revision,
+                &ProjectError::IndexStageFailed {
+                    stage: failure_stage,
+                },
+                now,
+            );
+            let status = state.failure_status();
+            assert_eq!(status.repeated_failure_attempts, 1);
+            assert!(!status.repeated_failure_retry_suppressed);
+        }
     }
 
     #[test]

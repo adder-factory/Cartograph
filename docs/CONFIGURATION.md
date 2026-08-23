@@ -233,13 +233,43 @@ the summarize tier. Chat providers are:
 
 - `openai-compat` for local or cloud OpenAI-compatible HTTP;
 - `anthropic-api` for the Anthropic Messages API;
-- `claude-bridge` for the bounded local Claude CLI bridge.
+- `cli-bridge` for a bounded shell-free local command; and
+- `claude-bridge` for backward-compatible legacy Claude CLI configuration.
+
+A generic bridge names an executable and an ordered argv template. Only
+`{model}` and `{prompt}` are substituted, directly into argv without a shell.
+`input: "stdin"` writes the rendered prompt to stdin and forbids `{prompt}` in
+argv; `input: "arg"` requires exactly one `{prompt}` token. `promptTemplate`
+is optional and defaults to `# System\n{system}\n\n# User\n{user}`. Bounded
+stdout can be decoded as trimmed `raw` text, through a validated `json-path`
+such as `.messages[-1].content`, or through the legacy `claude` envelope:
+
+```json
+{
+  "summarizeLlm": {
+    "provider": "cli-bridge",
+    "command": "some-agent-cli",
+    "args": ["-p", "{prompt}", "--model", "{model}"],
+    "input": "arg",
+    "responseFormat": "raw",
+    "model": "some-model",
+    "timeoutMs": 60000
+  }
+}
+```
+
+The bridge retains kill-on-drop, a wall-clock deadline, bounded stdout and
+stderr, response-size checks, and nonzero-exit rejection. Existing
+`claude-bridge`/`claudeBin` blocks continue to load. The
+`hybrid-claude-bridge` preset now writes the generic bridge with the historical
+Claude argv, stdin prompt bytes, and Claude response decoder.
 
 Embedding and reranker tiers require OpenAI-compatible HTTP. Optional tier
 fields include bounded `timeoutMs`, `concurrency`, `summaryBatchSize`,
-`apiKeyEnv`, `claudeBin`, `llamaServerArgs`, and `externallyManaged` where
-applicable. Inline legacy keys are read for compatibility but environment
-lookup is the safe configuration.
+`apiKeyEnv`, legacy `claudeBin`, generic `command`/`args`/`input`/
+`promptTemplate`/`responseFormat`/`responsePath`, `llamaServerArgs`, and
+`externallyManaged` where applicable. Inline legacy keys are read for
+compatibility but environment lookup is the safe configuration.
 
 A low-load deployment may configure only `embeddingLlm` and `rerankerLlm` and
 set `summarizeLlm`, `askLlm`, `localLlm`, and `classifyLlm` to `null`.
@@ -276,8 +306,8 @@ cartograph doctor .
 ```
 
 Planner presets cover detected endpoints, llama.cpp, Ollama, MLX/custom
-OpenAI-compatible endpoints, cloud OpenAI, hybrid Claude bridge, hybrid
-Anthropic API, and skip. `cartograph backend` manages only explicitly
+OpenAI-compatible endpoints, cloud OpenAI, the generic CLI bridge, hybrid
+Claude bridge, hybrid Anthropic API, and skip. `cartograph backend` manages only explicitly
 configured local `llama-server` processes; external providers remain
 operator-owned.
 

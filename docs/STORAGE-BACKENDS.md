@@ -60,6 +60,19 @@ cartograph db upgrade --project-path . \
   --confirm upgrade-managed-database
 ```
 
+Before the old container is renamed, the upgrade reads free space from the
+validated project-owned data mount and queries bounded current allocation from
+the healthy PostgreSQL database. Required headroom is the greater of 64 MiB or
+the configured schema's complete index allocation plus ten percent of the
+current database allocation. This reserves one replacement copy of every index
+plus bounded WAL/catalog scratch for extension upgrades. An unavailable storage
+snapshot or insufficient headroom fails before image or container cutover.
+Cartograph schema migrations run transactionally with a bounded 60-second
+PostgreSQL statement deadline. If an older ledger still cannot advance, runtime
+and doctor output name the recorded version, required version, and exact next
+pending migration; doctor does not run a project-status query against columns
+that migration has not yet proved.
+
 The upgrade starts the exact digest against the retained volume, reconciles
 pgvector and then `pg_search` transactionally before calling extension-defined
 functions, and requires capability plus Cartograph migration proof before it
@@ -298,9 +311,17 @@ cartograph db prune \
   --project-path /absolute/path/to/checkout \
   --keep-superseded 2 \
   --maximum-deletions 100 \
+  --maximum-cascade-rows 5200000 \
   --confirm prune-old-generations \
   --format json
 ```
+
+Omit `--maximum-cascade-rows` for the conservative five-million-row default.
+Use the override only after a read-only storage audit proves that an individual
+terminal generation cannot fit under that default and the database filesystem
+has enough WAL/maintenance headroom. The CLI and MCP admin surface both enforce
+the same 100-million-row hard maximum; increasing this cap does not weaken the
+independent relation-byte or DDL limits.
 
 One invocation deletes at most the requested batch of stale unleased staging,
 stale unleased ready, failed, and old superseded generations. Staging must be at

@@ -102,11 +102,12 @@ An unchanged source revision that fails automatic indexing is not retried in a
 tight loop. Auto-sync records its stable stage code and uses exponential retry
 delays from 30 seconds through a 15-minute cap. After five failed automatic
 attempts, a known revision is suppressed until the supported source revision
-changes. Generation-capacity failures additionally share a cross-revision
-circuit breaker: five unresolved capacity failures suppress automatic indexing
-even if editor changes keep producing new source revisions. Automatic failures
-run the same bounded terminal-generation retention path before returning, so a
-failing watcher does not leave one new failed spill generation per attempt.
+changes. Five consecutive occurrences of the same stable index failure code
+also trip a cross-revision circuit, even if editor changes keep producing new
+source revisions. Generation-capacity failures retain their independent
+cross-revision circuit breaker. Automatic failures run the same bounded
+terminal-generation retention path before returning, so a failing watcher does
+not leave one new failed spill generation per attempt.
 Select PostgreSQL spill when appropriate; `maxGenerationBytes` cannot exceed
 8 GiB, so at that ceiling exclude generated/compiled artifacts and then run an
 explicit `cartograph index`. The next fresh status clears the circuit. If both indexing
@@ -115,10 +116,12 @@ failure bucket applies the same backoff to subsequent watcher events but keeps
 one bounded recovery probe at the capped interval instead of suppressing
 database recovery forever. Explicit/manual index requests remain available. Structured status
 exposes `lastErrorCode`, `lastFailureAt`, `nextRetryAt`,
-`failedRevisionAttempts`, `retrySuppressed`, `capacityFailureAttempts`,
+`failedRevisionAttempts`, `retrySuppressed`, `repeatedFailureAttempts`,
+`repeatedFailureRetrySuppressed`, `capacityFailureAttempts`,
 `capacityRetrySuppressed`, and the capacity limit/scope/next action. A new
 source revision clears ordinary revision suppression but never bypasses an
-unresolved capacity circuit.
+unresolved repeated-failure or capacity circuit. A successful manual or
+automatic index clears both circuits.
 
 Start a recovery host with `cartograph serve --mcp --no-auto-sync` when an
 operator needs filesystem watching and periodic reconciliation fully paused

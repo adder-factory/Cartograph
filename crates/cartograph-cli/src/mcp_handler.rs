@@ -68,7 +68,8 @@ use cartograph_domain::{
     SourceLanguage, SymbolId,
 };
 use cartograph_llm::{
-    ChatError, ChatMessageRequest, ChatSettings, GroundedChatRequest, InstallModelsError,
+    ChatError, ChatMessageRequest, ChatSettings, CliBridgeConfig, CliBridgeConfigInput,
+    CliBridgeInputMode, CliBridgeResponseFormat, GroundedChatRequest, InstallModelsError,
     InstallModelsOptions, OpenAiChatClient, ProjectLlmConfigError, ProjectLlmTier,
     ProjectLlmTierInput, ProjectSourceSettings, ProjectSummaryEagerLimit,
     install_recommended_models, load_project_llm_tier, load_project_source_settings,
@@ -247,6 +248,7 @@ const ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS: u64 = 240_000;
 const ADMIN_CONNECTION_TIMEOUT_MAXIMUM_SECONDS: u64 = 120;
 const ADMIN_MAX_FILE_SIZE_TEXT_BYTES: usize = 32;
 const ADMIN_RETENTION_MAXIMUM_COUNT: u32 = 10_000;
+const ADMIN_RETENTION_MAXIMUM_CASCADE_ROWS: u64 = 100_000_000;
 const ADMIN_RETENTION_DEFAULT_KEEP: u32 = 2;
 const ADMIN_RETENTION_DEFAULT_DELETIONS: u32 = 100;
 const ADMIN_UNINIT_DEFAULT_GENERATIONS: u16 = 256;
@@ -256,6 +258,10 @@ const ADMIN_RESULT_MAXIMUM_LIMIT: u16 = 500;
 const ADMIN_LLM_ENV_NAME_MAXIMUM_BYTES: usize = 128;
 const ADMIN_LLM_MODEL_NAME_MAXIMUM_BYTES: usize = 256;
 const ADMIN_LLM_ENDPOINT_MAXIMUM_BYTES: usize = 4_096;
+const ADMIN_LLM_CLI_ARGUMENTS_MAXIMUM: usize = 128;
+const ADMIN_LLM_CLI_ARGUMENT_BYTES_MAXIMUM: usize = 4_096;
+const ADMIN_LLM_CLI_ARGUMENT_TOTAL_BYTES_MAXIMUM: usize = 32 * 1_024;
+const ADMIN_LLM_CLI_PROMPT_TEMPLATE_MAXIMUM_BYTES: usize = 64 * 1_024;
 const ADMIN_MAINTENANCE_LEASE: Duration = Duration::from_mins(5);
 const ADMIN_MAINTENANCE_TIMEOUT: Duration = Duration::from_mins(4);
 const ADMIN_DEFAULT_IMPORT_ROWS: u64 = 10_000_000;
@@ -2887,38 +2893,63 @@ impl AdminJobs {
     }
 }
 
-const fn admin_job_failure(error: &ProjectError) -> AdminJobFailure {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectErrorClass {
+    Lookup,
+    Embedding,
+    Enrichment,
+    Index,
+    Schema,
+    Operation,
+    General,
+}
+
+const fn project_error_class(error: &ProjectError) -> ProjectErrorClass {
     match error {
+        ProjectError::SymbolNotFound
+        | ProjectError::FileNotFound
+        | ProjectError::SourceContextUnavailable => ProjectErrorClass::Lookup,
         ProjectError::EmbeddingConfigurationUnavailable
         | ProjectError::EmbeddingOperationFailed
-        | ProjectError::HnswCreateSharedMemoryUnavailable => admin_job_embedding_failure(error),
+        | ProjectError::HnswCreateSharedMemoryUnavailable => ProjectErrorClass::Embedding,
         ProjectError::EnrichmentReadFailed
         | ProjectError::EnrichmentWriteFailed
-        | ProjectError::EnrichmentDataInvalid => admin_job_enrichment_failure(error),
+        | ProjectError::EnrichmentDataInvalid => ProjectErrorClass::Enrichment,
         ProjectError::IndexFailed
         | ProjectError::IndexStageFailed { .. }
         | ProjectError::IndexStageFailedWithReason { .. }
         | ProjectError::IndexStageFileFailed { .. }
         | ProjectError::IndexLeaseFailed
         | ProjectError::IndexPublicationFailed
-        | ProjectError::IndexCleanupFailed => admin_job_index_failure(error),
-        ProjectError::ProjectRootUnavailable
-        | ProjectError::DatabaseUnavailable
-        | ProjectError::MigrationFailed
-        | ProjectError::SchemaVersionAhead { .. }
-        | ProjectError::RegisterFailed
-        | ProjectError::BeginGenerationFailed
-        | ProjectError::SourceScanFailed
+        | ProjectError::IndexCleanupFailed => ProjectErrorClass::Index,
+        ProjectError::SchemaMigrationBlocked { .. } | ProjectError::SchemaVersionAhead { .. } => {
+            ProjectErrorClass::Schema
+        }
+        ProjectError::RetrievalOperationFailed
         | ProjectError::SourceChangedDuringIndex
-        | ProjectError::StatusFailed
         | ProjectError::ScipOverlayInvalid
         | ProjectError::InvalidOptions
         | ProjectError::ProjectConfiguration(_)
-        | ProjectError::SymbolNotFound
-        | ProjectError::FileNotFound
-        | ProjectError::SourceContextUnavailable
-        | ProjectError::RetrievalOperationFailed
-        | ProjectError::RequestCancelled => admin_job_general_failure(error),
+        | ProjectError::RequestCancelled => ProjectErrorClass::Operation,
+        ProjectError::ProjectRootUnavailable
+        | ProjectError::DatabaseUnavailable
+        | ProjectError::MigrationFailed
+        | ProjectError::RegisterFailed
+        | ProjectError::BeginGenerationFailed
+        | ProjectError::SourceScanFailed
+        | ProjectError::StatusFailed => ProjectErrorClass::General,
+    }
+}
+
+const fn admin_job_failure(error: &ProjectError) -> AdminJobFailure {
+    match project_error_class(error) {
+        ProjectErrorClass::Embedding => admin_job_embedding_failure(error),
+        ProjectErrorClass::Enrichment => admin_job_enrichment_failure(error),
+        ProjectErrorClass::Index => admin_job_index_failure(error),
+        ProjectErrorClass::Lookup
+        | ProjectErrorClass::Schema
+        | ProjectErrorClass::Operation
+        | ProjectErrorClass::General => admin_job_general_failure(error),
     }
 }
 
@@ -2943,6 +2974,7 @@ const fn admin_job_general_failure(error: &ProjectError) -> AdminJobFailure {
         ProjectError::ProjectRootUnavailable => AdminJobFailure::ProjectUnavailable,
         ProjectError::DatabaseUnavailable
         | ProjectError::MigrationFailed
+        | ProjectError::SchemaMigrationBlocked { .. }
         | ProjectError::SchemaVersionAhead { .. }
         | ProjectError::RegisterFailed
         | ProjectError::BeginGenerationFailed
@@ -3255,11 +3287,10 @@ fn hybrid_claude_bridge_inputs(
     timeout_ms: Option<u64>,
     concurrency: Option<u16>,
 ) -> Result<Vec<ProjectLlmTierInput>, ToolError> {
-    let summarize =
-        ProjectLlmTierInput::claude_bridge(ProjectLlmTier::Summarize, "claude-haiku-4-5")
-            .and_then(|input| input.with_ask_model("claude-sonnet-4-6"))
-            .and_then(|input| input.with_summary_batch_size(3))
-            .map_err(project_llm_error)?;
+    let summarize = claude_cli_input(ProjectLlmTier::Summarize, "claude-haiku-4-5")
+        .and_then(|input| input.with_ask_model("claude-sonnet-4-6"))
+        .and_then(|input| input.with_summary_batch_size(3))
+        .map_err(project_llm_error)?;
     let chat = [
         (ProjectLlmTier::Local, "claude-sonnet-4-6"),
         (ProjectLlmTier::Ask, "claude-sonnet-4-6"),
@@ -3267,7 +3298,7 @@ fn hybrid_claude_bridge_inputs(
     ]
     .into_iter()
     .map(|(tier, model)| {
-        ProjectLlmTierInput::claude_bridge(tier, model)
+        claude_cli_input(tier, model)
             .map_err(project_llm_error)
             .and_then(|input| tune_provider_input(input, timeout_ms, concurrency))
     })
@@ -3276,6 +3307,14 @@ fn hybrid_claude_bridge_inputs(
     inputs.push(tune_provider_input(summarize, timeout_ms, concurrency)?);
     inputs.extend(chat);
     Ok(inputs)
+}
+
+fn claude_cli_input(
+    tier: ProjectLlmTier,
+    model: &str,
+) -> Result<ProjectLlmTierInput, ProjectLlmConfigError> {
+    let bridge = CliBridgeConfig::claude_compatible(None)?;
+    ProjectLlmTierInput::cli_bridge(tier, model, bridge)
 }
 
 #[derive(Clone, Copy)]
@@ -3517,6 +3556,110 @@ fn recommended_llm_preset(configured: &[Value], detected: &[Value]) -> &'static 
         "local-llama-cpp"
     } else {
         "keep-existing"
+    }
+}
+
+fn llm_plan_presets(detected: &[Value]) -> Vec<Value> {
+    let mut presets = installation_llm_presets();
+    presets.extend(cloud_llm_presets());
+    presets.extend(bridge_llm_presets());
+    append_detected_llm_presets(&mut presets, detected);
+    presets
+}
+
+fn installation_llm_presets() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "install-llama-cpp",
+            "summary": "Install the checksum-pinned four-tier llama.cpp stack",
+            "description": "Local embedding, summarize, ask, and rerank endpoints with separately tunable model processes.",
+            "requiresInstall": true,
+            "nextSteps": ["install llama.cpp", "install or download the configured GGUF files", "start one llama-server per configured tier"]
+        }),
+        json!({
+            "id": "install-ollama",
+            "summary": "Use Ollama for dynamically loaded embedding and chat models",
+            "description": "Lower operational overhead than one-process-per-model, without a native reranker tier.",
+            "requiresInstall": true,
+            "nextSteps": ["install and start Ollama", "pull nomic-embed-text", "pull qwen2.5-coder:3b and qwen2.5-coder:7b"]
+        }),
+        json!({
+            "id": "install-mlx",
+            "summary": "Use an Apple MLX OpenAI-compatible server",
+            "description": "Configure each required HTTP tier against operator-managed MLX endpoints and model identifiers.",
+            "requiresInstall": true,
+            "nextSteps": ["install and start mlx_lm.server", "apply each required tier with its endpoint and model", "run doctor"]
+        }),
+    ]
+}
+
+fn cloud_llm_presets() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "cloud-openai",
+            "summary": "Use cloud OpenAI for a selected tier",
+            "description": "Keeps credentials in OPENAI_API_KEY or the selected apiKeyEnv and uses the official OpenAI-compatible endpoint.",
+            "requiresInstall": false,
+            "nextSteps": ["set OPENAI_API_KEY", "apply each required tier", "run llm smoke"]
+        }),
+        json!({
+            "id": "cloud-openai-compat",
+            "summary": "Use another authenticated OpenAI-compatible cloud",
+            "description": "Supports a custom HTTPS endpoint, model, and credential environment variable for each tier.",
+            "requiresInstall": false,
+            "nextSteps": ["apply each required tier", "run llm smoke"]
+        }),
+    ]
+}
+
+fn bridge_llm_presets() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "cli-bridge",
+            "summary": "Use an authenticated local agent CLI for a chat tier",
+            "description": "Runs a shell-free bounded command with explicit argv, prompt delivery, and stdout decoding contracts.",
+            "requiresInstall": false,
+            "nextSteps": ["select a chat tier and model", "provide command, args, input, and responseFormat", "run llm smoke"]
+        }),
+        json!({
+            "id": "hybrid-claude-bridge",
+            "summary": "Use Claude Code authentication for chat and local llama.cpp embeddings",
+            "description": "Runs bounded headless Claude subprocesses while keeping semantic vectors local and PostgreSQL-backed.",
+            "requiresInstall": true,
+            "nextSteps": ["install and authenticate Claude Code", "start the configured embedding llama-server", "run llm smoke"]
+        }),
+        json!({
+            "id": "hybrid-anthropic-api",
+            "summary": "Use Anthropic Messages for chat and local llama.cpp embeddings",
+            "description": "Uses ANTHROPIC_API_KEY by default and keeps embeddings in the local model tier.",
+            "requiresInstall": true,
+            "nextSteps": ["set ANTHROPIC_API_KEY", "start the configured embedding llama-server", "run llm smoke"]
+        }),
+        json!({
+            "id": "skip",
+            "summary": "Keep deterministic BM25 and graph retrieval without model calls",
+            "description": "All structural, graph, ParadeDB, review, and test-selection capabilities remain available.",
+            "requiresInstall": false,
+            "nextSteps": []
+        }),
+    ]
+}
+
+fn append_detected_llm_presets(presets: &mut Vec<Value>, detected: &[Value]) {
+    for endpoint in detected {
+        if endpoint["openaiCompatible"] != Value::Bool(true) {
+            continue;
+        }
+        let label = endpoint["label"].as_str().unwrap_or("backend");
+        presets.push(json!({
+            "id": format!("use-detected-{label}"),
+            "summary": format!("Use the detected {label} OpenAI-compatible backend"),
+            "description": "Apply a selected detected endpoint and one of its advertised models to a required tier.",
+            "requiresInstall": false,
+            "endpoint": endpoint["endpoint"],
+            "models": endpoint["models"],
+            "nextSteps": ["select a tier and detected model", "apply the preset", "run doctor"]
+        }));
     }
 }
 
@@ -10335,7 +10478,21 @@ fn local_backend_apply_plan(
     let mut cleared = Vec::new();
     let inputs = match preset {
         "local-llama-cpp" | "install-llama-cpp" => {
-            reject_present(arguments, &["tier", "endpoint", "model", "apiKeyEnv"])?;
+            reject_present(
+                arguments,
+                &[
+                    "tier",
+                    "endpoint",
+                    "model",
+                    "apiKeyEnv",
+                    "command",
+                    "args",
+                    "input",
+                    "promptTemplate",
+                    "responseFormat",
+                    "responsePath",
+                ],
+            )?;
             let directory =
                 optional_bounded_text(arguments, "dir", ADMIN_LLM_ENDPOINT_MAXIMUM_BYTES)?
                     .map_or_else(default_models_directory, PathBuf::from);
@@ -10352,7 +10509,19 @@ fn local_backend_apply_plan(
         "ollama" | "install-ollama" => {
             reject_present(
                 arguments,
-                &["tier", "endpoint", "model", "apiKeyEnv", "dir"],
+                &[
+                    "tier",
+                    "endpoint",
+                    "model",
+                    "apiKeyEnv",
+                    "dir",
+                    "command",
+                    "args",
+                    "input",
+                    "promptTemplate",
+                    "responseFormat",
+                    "responsePath",
+                ],
             )?;
             if minimal {
                 cleared.extend([ProjectLlmTier::Ask, ProjectLlmTier::Reranker]);
@@ -10377,12 +10546,38 @@ fn hybrid_apply_plan(
         "hybrid-claude-bridge" => {
             reject_present(
                 arguments,
-                &["tier", "endpoint", "model", "apiKeyEnv", "minimal"],
+                &[
+                    "tier",
+                    "endpoint",
+                    "model",
+                    "apiKeyEnv",
+                    "minimal",
+                    "command",
+                    "args",
+                    "input",
+                    "promptTemplate",
+                    "responseFormat",
+                    "responsePath",
+                ],
             )?;
             hybrid_claude_bridge_inputs(&directory, options.timeout_ms, options.concurrency)?
         }
         "hybrid-anthropic-api" => {
-            reject_present(arguments, &["tier", "endpoint", "model", "minimal"])?;
+            reject_present(
+                arguments,
+                &[
+                    "tier",
+                    "endpoint",
+                    "model",
+                    "minimal",
+                    "command",
+                    "args",
+                    "input",
+                    "promptTemplate",
+                    "responseFormat",
+                    "responsePath",
+                ],
+            )?;
             hybrid_anthropic_inputs(AnthropicInputsRequest {
                 directory: &directory,
                 api_key_env: options.api_key_env,
@@ -10403,7 +10598,19 @@ fn remote_apply_plan(
     preset: &str,
     options: LlmApplyOptions<'_>,
 ) -> Result<LlmApplyPlan, ToolError> {
-    reject_present(arguments, &["minimal", "dir"])?;
+    reject_present(
+        arguments,
+        &[
+            "minimal",
+            "dir",
+            "command",
+            "args",
+            "input",
+            "promptTemplate",
+            "responseFormat",
+            "responsePath",
+        ],
+    )?;
     let tier = parse_admin_llm_tier(required_text(arguments, "tier")?)?;
     let model = required_bounded_text(arguments, "model", ADMIN_LLM_MODEL_NAME_MAXIMUM_BYTES)?;
     let (endpoint, api_key_env, clear_credentials) = match preset {
@@ -10443,6 +10650,79 @@ fn remote_apply_plan(
     })
 }
 
+fn cli_bridge_apply_plan(
+    arguments: &Map<String, Value>,
+    options: LlmApplyOptions<'_>,
+) -> Result<LlmApplyPlan, ToolError> {
+    reject_present(arguments, &["endpoint", "apiKeyEnv", "minimal", "dir"])?;
+    let tier = parse_admin_llm_tier(required_text(arguments, "tier")?)?;
+    let model = required_bounded_text(arguments, "model", ADMIN_LLM_MODEL_NAME_MAXIMUM_BYTES)?;
+    let command = required_bounded_text(arguments, "command", ADMIN_LLM_ENDPOINT_MAXIMUM_BYTES)?;
+    let args = required_cli_bridge_arguments(arguments)?;
+    let input = match required_text(arguments, "input")? {
+        "stdin" => CliBridgeInputMode::Stdin,
+        "arg" => CliBridgeInputMode::Arg,
+        _ => return Err(invalid_arguments()),
+    };
+    let response_format = match required_text(arguments, "responseFormat")? {
+        "raw" => CliBridgeResponseFormat::Raw,
+        "json-path" => CliBridgeResponseFormat::JsonPath,
+        "claude" => CliBridgeResponseFormat::Claude,
+        _ => return Err(invalid_arguments()),
+    };
+    let response_path =
+        optional_bounded_text(arguments, "responsePath", ADMIN_LLM_ENDPOINT_MAXIMUM_BYTES)?
+            .map(str::to_owned);
+    let mut bridge = CliBridgeConfig::new(
+        CliBridgeConfigInput::new(command, input, response_format)
+            .with_args(args)
+            .with_response_path(response_path),
+    )
+    .map_err(project_llm_error)?;
+    if let Some(prompt_template) = optional_bounded_text(
+        arguments,
+        "promptTemplate",
+        ADMIN_LLM_CLI_PROMPT_TEMPLATE_MAXIMUM_BYTES,
+    )? {
+        bridge = bridge
+            .with_prompt_template(prompt_template)
+            .map_err(project_llm_error)?;
+    }
+    let input = ProjectLlmTierInput::cli_bridge(tier, model, bridge)
+        .map_err(project_llm_error)
+        .and_then(|input| tune_provider_input(input, options.timeout_ms, options.concurrency))?;
+    Ok(LlmApplyPlan {
+        inputs: vec![input],
+        cleared: Vec::new(),
+    })
+}
+
+fn required_cli_bridge_arguments(arguments: &Map<String, Value>) -> Result<Vec<String>, ToolError> {
+    let values = arguments
+        .get("args")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() <= ADMIN_LLM_CLI_ARGUMENTS_MAXIMUM)
+        .ok_or_else(invalid_arguments)?;
+    let mut total_bytes = 0_usize;
+    values
+        .iter()
+        .map(|value| {
+            let value = value.as_str().ok_or_else(invalid_arguments)?;
+            if value.is_empty()
+                || value.len() > ADMIN_LLM_CLI_ARGUMENT_BYTES_MAXIMUM
+                || value.chars().any(char::is_control)
+            {
+                return Err(invalid_arguments());
+            }
+            total_bytes = total_bytes
+                .checked_add(value.len())
+                .filter(|total| *total <= ADMIN_LLM_CLI_ARGUMENT_TOTAL_BYTES_MAXIMUM)
+                .ok_or_else(invalid_arguments)?;
+            Ok(value.to_owned())
+        })
+        .collect()
+}
+
 fn build_llm_apply_plan(
     arguments: &Map<String, Value>,
     preset: &str,
@@ -10467,6 +10747,7 @@ fn build_llm_apply_plan(
         "hybrid-claude-bridge" | "hybrid-anthropic-api" => {
             hybrid_apply_plan(arguments, preset, options)
         }
+        "cli-bridge" => cli_bridge_apply_plan(arguments, options),
         "cloud-openai" | "custom" | "cloud-openai-compat" | "install-mlx" => {
             remote_apply_plan(arguments, preset, options)
         }
@@ -11225,6 +11506,7 @@ impl AdminCoreTools<'_> {
                 "maximumSourceBytes",
                 "keepSuperseded",
                 "maximumDeletions",
+                "maximumCascadeRows",
                 "k",
                 "minScore",
                 "maxAgeDays",
@@ -11236,6 +11518,12 @@ impl AdminCoreTools<'_> {
                 "tier",
                 "endpoint",
                 "model",
+                "command",
+                "args",
+                "input",
+                "promptTemplate",
+                "responseFormat",
+                "responsePath",
                 "apiKeyEnv",
                 "timeoutMs",
                 "minimal",
@@ -11634,79 +11922,7 @@ impl AdminCoreTools<'_> {
             "ollama" => "install-ollama",
             value => value,
         };
-        let mut presets = vec![
-            json!({
-                "id": "install-llama-cpp",
-                "summary": "Install the checksum-pinned four-tier llama.cpp stack",
-                "description": "Local embedding, summarize, ask, and rerank endpoints with separately tunable model processes.",
-                "requiresInstall": true,
-                "nextSteps": ["install llama.cpp", "install or download the configured GGUF files", "start one llama-server per configured tier"]
-            }),
-            json!({
-                "id": "install-ollama",
-                "summary": "Use Ollama for dynamically loaded embedding and chat models",
-                "description": "Lower operational overhead than one-process-per-model, without a native reranker tier.",
-                "requiresInstall": true,
-                "nextSteps": ["install and start Ollama", "pull nomic-embed-text", "pull qwen2.5-coder:3b and qwen2.5-coder:7b"]
-            }),
-            json!({
-                "id": "install-mlx",
-                "summary": "Use an Apple MLX OpenAI-compatible server",
-                "description": "Configure each required HTTP tier against operator-managed MLX endpoints and model identifiers.",
-                "requiresInstall": true,
-                "nextSteps": ["install and start mlx_lm.server", "apply each required tier with its endpoint and model", "run doctor"]
-            }),
-            json!({
-                "id": "cloud-openai",
-                "summary": "Use cloud OpenAI for a selected tier",
-                "description": "Keeps credentials in OPENAI_API_KEY or the selected apiKeyEnv and uses the official OpenAI-compatible endpoint.",
-                "requiresInstall": false,
-                "nextSteps": ["set OPENAI_API_KEY", "apply each required tier", "run llm smoke"]
-            }),
-            json!({
-                "id": "cloud-openai-compat",
-                "summary": "Use another authenticated OpenAI-compatible cloud",
-                "description": "Supports a custom HTTPS endpoint, model, and credential environment variable for each tier.",
-                "requiresInstall": false,
-                "nextSteps": ["apply each required tier", "run llm smoke"]
-            }),
-            json!({
-                "id": "hybrid-claude-bridge",
-                "summary": "Use Claude Code authentication for chat and local llama.cpp embeddings",
-                "description": "Runs bounded headless Claude subprocesses while keeping semantic vectors local and PostgreSQL-backed.",
-                "requiresInstall": true,
-                "nextSteps": ["install and authenticate Claude Code", "start the configured embedding llama-server", "run llm smoke"]
-            }),
-            json!({
-                "id": "hybrid-anthropic-api",
-                "summary": "Use Anthropic Messages for chat and local llama.cpp embeddings",
-                "description": "Uses ANTHROPIC_API_KEY by default and keeps embeddings in the local model tier.",
-                "requiresInstall": true,
-                "nextSteps": ["set ANTHROPIC_API_KEY", "start the configured embedding llama-server", "run llm smoke"]
-            }),
-            json!({
-                "id": "skip",
-                "summary": "Keep deterministic BM25 and graph retrieval without model calls",
-                "description": "All structural, graph, ParadeDB, review, and test-selection capabilities remain available.",
-                "requiresInstall": false,
-                "nextSteps": []
-            }),
-        ];
-        for endpoint in &detected {
-            if endpoint["openaiCompatible"] != Value::Bool(true) {
-                continue;
-            }
-            let label = endpoint["label"].as_str().unwrap_or("backend");
-            presets.push(json!({
-                "id": format!("use-detected-{label}"),
-                "summary": format!("Use the detected {label} OpenAI-compatible backend"),
-                "description": "Apply a selected detected endpoint and one of its advertised models to a required tier.",
-                "requiresInstall": false,
-                "endpoint": endpoint["endpoint"],
-                "models": endpoint["models"],
-                "nextSteps": ["select a tier and detected model", "apply the preset", "run doctor"]
-            }));
-        }
+        let presets = llm_plan_presets(&detected);
         json_result(&json!({
             "configured": configured,
             "detected": detected,
@@ -11724,6 +11940,12 @@ impl AdminCoreTools<'_> {
                 "tier",
                 "endpoint",
                 "model",
+                "command",
+                "args",
+                "input",
+                "promptTemplate",
+                "responseFormat",
+                "responsePath",
                 "apiKeyEnv",
                 "timeoutMs",
                 "concurrency",
@@ -11739,6 +11961,12 @@ impl AdminCoreTools<'_> {
                     "tier",
                     "endpoint",
                     "model",
+                    "command",
+                    "args",
+                    "input",
+                    "promptTemplate",
+                    "responseFormat",
+                    "responsePath",
                     "apiKeyEnv",
                     "timeoutMs",
                     "concurrency",
@@ -12293,7 +12521,12 @@ impl AdminLifecycleTools<'_> {
     ) -> Result<ToolResult, ToolError> {
         reject_admin_extras(
             arguments,
-            &["keepSuperseded", "maximumDeletions", "confirm"],
+            &[
+                "keepSuperseded",
+                "maximumDeletions",
+                "maximumCascadeRows",
+                "confirm",
+            ],
         )?;
         if !optional_bool(arguments, "confirm")?.unwrap_or(false) {
             return Err(safe_error(
@@ -12319,7 +12552,16 @@ impl AdminLifecycleTools<'_> {
                 ADMIN_RETENTION_MAXIMUM_COUNT,
             ),
         )?;
-        let policy = GenerationRetentionPolicy::new(keep, maximum).map_err(internal_error)?;
+        let mut policy = GenerationRetentionPolicy::new(keep, maximum).map_err(internal_error)?;
+        if let Some(maximum_cascade_rows) = optional_bounded_admin_u64(
+            arguments,
+            "maximumCascadeRows",
+            ADMIN_RETENTION_MAXIMUM_CASCADE_ROWS,
+        )? {
+            policy = policy
+                .with_maximum_cascade_rows(maximum_cascade_rows)
+                .map_err(internal_error)?;
+        }
         let cancellation = ProjectCancellation::new();
         let operation_cancellation = cancellation.clone();
         let runtime = self.runtime.clone();
@@ -13950,6 +14192,7 @@ const fn project_setup_error_reason(error: &ProjectError) -> Option<&'static str
         ProjectError::ProjectRootUnavailable => Some("project_root_unavailable"),
         ProjectError::DatabaseUnavailable => Some("database_unavailable"),
         ProjectError::MigrationFailed => Some("migration_failed"),
+        ProjectError::SchemaMigrationBlocked { .. } => Some("schema_migration_blocked"),
         ProjectError::SchemaVersionAhead { .. } => Some("schema_version_ahead"),
         ProjectError::RegisterFailed => Some("project_registration_failed"),
         ProjectError::InvalidOptions => Some("invalid_options"),
@@ -19907,6 +20150,7 @@ fn admin_definition() -> Result<ToolDefinition, ToolContractError> {
         "maximumSourceBytes": {"type": "integer", "minimum": 1, "maximum": ADMIN_DEFAULT_IMPORT_SOURCE_BYTES},
         "keepSuperseded": {"type": "integer", "minimum": 0, "maximum": ADMIN_RETENTION_MAXIMUM_COUNT},
         "maximumDeletions": {"type": "integer", "minimum": 1, "maximum": ADMIN_RETENTION_MAXIMUM_COUNT},
+        "maximumCascadeRows": {"type": "integer", "minimum": 1, "maximum": ADMIN_RETENTION_MAXIMUM_CASCADE_ROWS, "description": "prune-generations only. Override the default 5,000,000 canonical/cascade-row transaction cap within the hard 100,000,000-row bound."},
         "k": {"type": "integer", "minimum": 1, "maximum": ADMIN_SIMILARITY_MAXIMUM_K},
         "minScore": {"type": "number", "minimum": 0, "maximum": 1},
         "maxAgeDays": {"type": "number", "minimum": 0},
@@ -19916,9 +20160,15 @@ fn admin_definition() -> Result<ToolDefinition, ToolContractError> {
         "out": {"type": "string"},
         "in": {"type": "string"},
         "preset": {"type": "string"},
-        "tier": {"type": "string", "enum": ["embed", "chat", "local", "ask", "reranker"]},
+        "tier": {"type": "string", "enum": ["embed", "chat", "local", "ask", "classify", "reranker"]},
         "endpoint": {"type": "string"},
         "model": {"type": "string"},
+        "command": {"type": "string", "minLength": 1, "maxLength": ADMIN_LLM_ENDPOINT_MAXIMUM_BYTES, "description": "cli-bridge only. Executable passed directly without a shell."},
+        "args": {"type": "array", "maxItems": ADMIN_LLM_CLI_ARGUMENTS_MAXIMUM, "items": {"type": "string", "minLength": 1, "maxLength": ADMIN_LLM_CLI_ARGUMENT_BYTES_MAXIMUM}, "description": "cli-bridge only. Ordered argv templates supporting only {model} and {prompt}."},
+        "input": {"type": "string", "enum": ["stdin", "arg"], "description": "cli-bridge only. Prompt delivery mode."},
+        "promptTemplate": {"type": "string", "minLength": 1, "maxLength": ADMIN_LLM_CLI_PROMPT_TEMPLATE_MAXIMUM_BYTES, "description": "cli-bridge only. Optional template containing exactly one {system} and {user}."},
+        "responseFormat": {"type": "string", "enum": ["raw", "json-path", "claude"], "description": "cli-bridge only. Bounded stdout decoder."},
+        "responsePath": {"type": "string", "minLength": 1, "maxLength": ADMIN_LLM_ENDPOINT_MAXIMUM_BYTES, "description": "cli-bridge json-path only. Validated dotted path with array indexes."},
         "apiKeyEnv": {"type": "string"},
         "timeoutMs": {"type": "integer", "minimum": 1, "maximum": ADMIN_QUERY_TIMEOUT_MAXIMUM_MS, "description": "Bounded execution timeout for biomarkers-refresh and supported LLM/SCIP admin operations."},
         "minimal": {"type": "boolean"},
@@ -21505,6 +21755,7 @@ const ADMIN_ARGUMENT_FIELDS: &[&str] = &[
     "maximumSourceBytes",
     "keepSuperseded",
     "maximumDeletions",
+    "maximumCascadeRows",
     "k",
     "minScore",
     "maxAgeDays",
@@ -21516,6 +21767,12 @@ const ADMIN_ARGUMENT_FIELDS: &[&str] = &[
     "tier",
     "endpoint",
     "model",
+    "command",
+    "args",
+    "input",
+    "promptTemplate",
+    "responseFormat",
+    "responsePath",
     "apiKeyEnv",
     "timeoutMs",
     "minimal",
@@ -24649,38 +24906,16 @@ fn diff_review_error(error: DiffReviewError) -> ToolError {
 }
 
 fn project_error(error: &ProjectError) -> ToolError {
-    match error {
-        ProjectError::SymbolNotFound
-        | ProjectError::FileNotFound
-        | ProjectError::SourceContextUnavailable
-        | ProjectError::EmbeddingConfigurationUnavailable
-        | ProjectError::EmbeddingOperationFailed
-        | ProjectError::HnswCreateSharedMemoryUnavailable => project_lookup_error(error),
-        ProjectError::RetrievalOperationFailed
-        | ProjectError::SourceChangedDuringIndex
-        | ProjectError::EnrichmentReadFailed
-        | ProjectError::EnrichmentWriteFailed
-        | ProjectError::EnrichmentDataInvalid
-        | ProjectError::InvalidOptions
-        | ProjectError::ProjectConfiguration(_)
-        | ProjectError::ScipOverlayInvalid
-        | ProjectError::RequestCancelled => project_operation_error(error),
-        ProjectError::IndexStageFileFailed { .. } | ProjectError::SchemaVersionAhead { .. } => {
+    match project_error_class(error) {
+        ProjectErrorClass::Lookup | ProjectErrorClass::Embedding => project_lookup_error(error),
+        ProjectErrorClass::Enrichment | ProjectErrorClass::Operation => {
+            project_operation_error(error)
+        }
+        ProjectErrorClass::Schema => project_actionable_index_error(error),
+        ProjectErrorClass::Index if matches!(error, ProjectError::IndexStageFileFailed { .. }) => {
             project_actionable_index_error(error)
         }
-        ProjectError::ProjectRootUnavailable
-        | ProjectError::DatabaseUnavailable
-        | ProjectError::MigrationFailed
-        | ProjectError::RegisterFailed
-        | ProjectError::BeginGenerationFailed
-        | ProjectError::SourceScanFailed
-        | ProjectError::StatusFailed
-        | ProjectError::IndexFailed
-        | ProjectError::IndexStageFailed { .. }
-        | ProjectError::IndexStageFailedWithReason { .. }
-        | ProjectError::IndexLeaseFailed
-        | ProjectError::IndexPublicationFailed
-        | ProjectError::IndexCleanupFailed => ToolError::internal(),
+        ProjectErrorClass::Index | ProjectErrorClass::General => ToolError::internal(),
     }
 }
 
@@ -24760,6 +24995,17 @@ fn project_actionable_index_error(error: &ProjectError) -> ToolError {
                 "Cartograph index failed during {stage}/{failure}; the previous generation remains visible"
             ),
         ),
+        ProjectError::SchemaMigrationBlocked {
+            database_schema_version,
+            required_schema_version,
+            pending_migration_version,
+        } => ToolError::safe(
+            ToolErrorCode::NotReady,
+            format!(
+                "PostgreSQL schema version {database_schema_version} is below required version {required_schema_version}; pending migration {pending_migration_version} could not be applied; resume the approved database upgrade before retrying"
+            ),
+        )
+        .unwrap_or_else(|_| ToolError::internal()),
         ProjectError::SchemaVersionAhead {
             binary_version,
             database_schema_version,
@@ -25310,6 +25556,12 @@ mod tests {
             "databaseSsl",
             "clearParseCache",
             "clearParseCacheLanguage",
+            "command",
+            "args",
+            "input",
+            "promptTemplate",
+            "responseFormat",
+            "responsePath",
             "summarizeLimit",
             "skipProjectChecks",
         ] {
@@ -25368,6 +25620,38 @@ mod tests {
             ),
             "local-llama-cpp"
         );
+    }
+
+    #[test]
+    fn mcp_cli_bridge_plan_preserves_ordered_argv_and_validates_decoder_contract() {
+        let arguments = Map::from_iter([
+            ("tier".to_owned(), json!("chat")),
+            ("model".to_owned(), json!("agent-model")),
+            ("command".to_owned(), json!("agent-cli")),
+            ("args".to_owned(), json!(["-p", "{prompt}", "-p"])),
+            ("input".to_owned(), json!("arg")),
+            ("responseFormat".to_owned(), json!("raw")),
+        ]);
+        let plan = build_llm_apply_plan(&arguments, "cli-bridge")
+            .unwrap_or_else(|error| panic!("CLI bridge MCP plan failed: {error:?}"));
+        assert_eq!(plan.inputs.len(), 1);
+        assert!(plan.cleared.is_empty());
+
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        write_project_llm_configuration(root.path(), &plan.inputs, &plan.cleared)
+            .unwrap_or_else(|error| panic!("CLI bridge MCP config failed: {error}"));
+        let config = std::fs::read_to_string(root.path().join(".cartograph/config.json"))
+            .unwrap_or_else(|error| panic!("CLI bridge MCP config read failed: {error}"));
+        let config = serde_json::from_str::<Value>(&config)
+            .unwrap_or_else(|error| panic!("CLI bridge MCP config parse failed: {error}"));
+        assert_eq!(
+            config["llm"]["summarizeLlm"]["args"],
+            json!(["-p", "{prompt}", "-p"])
+        );
+
+        let mut invalid = arguments;
+        invalid.insert("responseFormat".to_owned(), json!("json-path"));
+        assert!(build_llm_apply_plan(&invalid, "cli-bridge").is_err());
     }
 
     #[test]
@@ -27869,6 +28153,7 @@ pub fn root() -> u32 {
                 &Map::from_iter([
                     ("keepSuperseded".to_owned(), json!(0)),
                     ("maximumDeletions".to_owned(), json!(1)),
+                    ("maximumCascadeRows".to_owned(), json!(5_200_000)),
                     ("confirm".to_owned(), json!(true)),
                 ]),
             )

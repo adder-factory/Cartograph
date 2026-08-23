@@ -1619,7 +1619,7 @@ const ASSET_NAME: Result<&str, &str> =
 fn parse_version(raw: &str) -> Option<Version> {
     let raw = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
     let raw = raw.split_once('+').map_or(raw, |(core, _)| core);
-    let (core, prerelease) = raw.split_once('-').map_or((raw, ""), |parts| parts);
+    let (core, prerelease) = raw.split_once('-').unwrap_or((raw, ""));
     let mut numbers = core.split('.');
     let major = numbers.next()?.parse().ok()?;
     let minor = numbers.next()?.parse().ok()?;
@@ -1671,12 +1671,7 @@ fn compare_prerelease(left: &[PrereleasePart], right: &[PrereleasePart]) -> Orde
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read as _, Write as _},
-        net::TcpListener,
-        thread,
-        time::Duration,
-    };
+    use std::{io::Read as _, net::TcpListener, thread, time::Duration};
 
     #[cfg(unix)]
     use std::fs;

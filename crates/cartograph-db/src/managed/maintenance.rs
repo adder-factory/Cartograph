@@ -407,6 +407,8 @@ impl ManagedDatabaseMaintenance<'_> {
             .docker
             .ensure_image(super::MANAGED_DATABASE_IMAGE)
             .await?;
+        self.verify_upgrade_storage_headroom(&prepared.inspection, &prepared.credentials)
+            .await?;
         self.quiesce_for_upgrade(original_state).await?;
         if let Err(error) = self
             .database
@@ -502,6 +504,33 @@ impl ManagedDatabaseMaintenance<'_> {
             rollback_name,
             credentials,
         })
+    }
+
+    async fn verify_upgrade_storage_headroom(
+        &self,
+        inspection: &ContainerInspection,
+        credentials: &DatabaseCredentials,
+    ) -> Result<(), ManagedDatabaseError> {
+        if container_state(inspection) != ManagedContainerState::Healthy {
+            return Ok(());
+        }
+        let available_bytes = self
+            .database
+            .docker
+            .containers()
+            .available_data_bytes(&self.database.identity.container_name)
+            .await?;
+        let database =
+            open_managed_database(credentials, self.database.port, &self.database.schema).await?;
+        let totals = database
+            .storage_totals(super::MANAGED_UPGRADE_STORAGE_INSPECTION_TIMEOUT)
+            .await
+            .map_err(|_| ManagedDatabaseError::UpgradeStorageInspection);
+        database.close().await;
+        let totals = totals?;
+        let required_bytes =
+            required_upgrade_storage_headroom(totals.database_bytes, totals.index_bytes);
+        validate_upgrade_storage_headroom(available_bytes, required_bytes)
     }
 
     async fn recover_interrupted_upgrade_rename(
@@ -929,6 +958,24 @@ fn original_container_state(
     }
 }
 
+fn required_upgrade_storage_headroom(database_bytes: u64, index_bytes: u64) -> u64 {
+    let database_reserve = database_bytes / super::MANAGED_UPGRADE_DATABASE_RESERVE_DIVISOR;
+    super::MINIMUM_MANAGED_UPGRADE_HEADROOM_BYTES.max(index_bytes.saturating_add(database_reserve))
+}
+
+fn validate_upgrade_storage_headroom(
+    available_bytes: u64,
+    required_bytes: u64,
+) -> Result<(), ManagedDatabaseError> {
+    if available_bytes < required_bytes {
+        return Err(ManagedDatabaseError::UpgradeStorageHeadroom {
+            available_bytes,
+            required_bytes,
+        });
+    }
+    Ok(())
+}
+
 fn validate_retained_upgrade_rollback(
     identity: &super::ManagedResourceIdentity,
     rollback: &ContainerInspection,
@@ -1198,6 +1245,8 @@ mod tests {
     const LIVE_GENERATION: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const LIVE_DOCUMENT: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const LIVE_DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const HEADROOM_VOLUME_BYTES: u64 = 512 * 1024 * 1024;
+    const HEADROOM_FILL_PATH: &str = "/var/lib/postgresql/cartograph-upgrade-headroom-fixture";
     const PREVIOUS_MANAGED_DATABASE_IMAGE: &str = concat!(
         "paradedb/paradedb:0.25.2@sha256:",
         "f34b716407b4d509d3e59e649495964b296ad7c0931658dbf99d3cf1b35bc994"
@@ -1333,6 +1382,212 @@ mod tests {
             }
             .healthy()
         );
+    }
+
+    #[test]
+    fn managed_upgrade_requires_bounded_data_volume_headroom_before_cutover() {
+        let database_bytes = 8 * 1024 * 1024 * 1024;
+        let index_bytes = 5 * 1024 * 1024 * 1024;
+        let required = required_upgrade_storage_headroom(database_bytes, index_bytes);
+        assert_eq!(
+            required,
+            index_bytes + database_bytes / super::super::MANAGED_UPGRADE_DATABASE_RESERVE_DIVISOR
+        );
+        assert_eq!(
+            validate_upgrade_storage_headroom(required.saturating_sub(1), required),
+            Err(ManagedDatabaseError::UpgradeStorageHeadroom {
+                available_bytes: required.saturating_sub(1),
+                required_bytes: required,
+            })
+        );
+        assert_eq!(
+            validate_upgrade_storage_headroom(required, required),
+            Ok(())
+        );
+        assert_eq!(
+            required_upgrade_storage_headroom(0, 0),
+            super::super::MINIMUM_MANAGED_UPGRADE_HEADROOM_BYTES
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "starts a real pinned ParadeDB container on a constrained owned data volume"]
+    async fn managed_upgrade_refuses_constrained_data_volume_before_cutover() {
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("could not create headroom project: {error}"));
+        let database = live_database(directory.path());
+        let alias = format!(
+            "cartograph-maintenance-headroom:{}",
+            database.identity.project_hash
+        );
+        let _cleanup = live_cleanup(&database, Some(alias.clone()));
+        create_constrained_headroom_volume(&database, &alias);
+        initialize_headroom_database(&database, &alias).await;
+        let (constrained_available, expected_required) = constrain_headroom_volume(&database).await;
+        assert_headroom_upgrade_refused(
+            &database,
+            &alias,
+            constrained_available,
+            expected_required,
+        )
+        .await;
+    }
+
+    fn create_constrained_headroom_volume(database: &ManagedDatabase, alias: &str) {
+        let project_label = format!("io.cartograph.project={}", database.identity.project_hash);
+        let volume_size = format!("o=size={HEADROOM_VOLUME_BYTES}");
+        assert_docker_success(&[
+            "volume",
+            "create",
+            "--driver",
+            "local",
+            "--opt",
+            "type=tmpfs",
+            "--opt",
+            "device=tmpfs",
+            "--opt",
+            &volume_size,
+            "--label",
+            "io.cartograph.managed=true",
+            "--label",
+            &project_label,
+            &database.identity.volume_name,
+        ]);
+        assert_docker_success(&["image", "tag", super::super::MANAGED_DATABASE_IMAGE, alias]);
+    }
+
+    async fn initialize_headroom_database(database: &ManagedDatabase, alias: &str) {
+        database
+            .docker
+            .ensure_available()
+            .await
+            .unwrap_or_else(|error| panic!("Docker is unavailable for headroom fixture: {error}"));
+        let credentials = database
+            .credentials
+            .load_or_create()
+            .unwrap_or_else(|error| panic!("could not create headroom credentials: {error}"));
+        database
+            .docker
+            .containers()
+            .create_container(&ContainerCreateSpec {
+                identity: &database.identity,
+                port: database.port,
+                image: alias,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("could not create headroom container: {error}"));
+        database
+            .docker
+            .containers()
+            .install_password_file(
+                &database.identity.container_name,
+                database.credentials.path(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("could not install headroom password: {error}"));
+        database
+            .docker
+            .containers()
+            .start_container(&database.identity.container_name, database.port)
+            .await
+            .unwrap_or_else(|error| panic!("could not start headroom container: {error}"));
+        wait_for_owned_health(database, false).await;
+        super::super::initialize_extensions(&database.docker, &database.identity.container_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not initialize headroom extensions: {error}"));
+        let initialized = super::super::initialize_managed_database(
+            &credentials.credentials,
+            database.port,
+            &database.schema,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("could not initialize headroom schema: {error}"));
+        assert!(initialized.capabilities.ready);
+    }
+
+    async fn constrain_headroom_volume(database: &ManagedDatabase) -> (u64, u64) {
+        let connection = open_test_database(database).await;
+        let totals = connection
+            .storage_totals(super::super::MANAGED_UPGRADE_STORAGE_INSPECTION_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect headroom storage: {error}"));
+        connection.close().await;
+        let expected_required =
+            required_upgrade_storage_headroom(totals.database_bytes, totals.index_bytes);
+        let available_before = database
+            .lifecycle()
+            .available_storage_bytes()
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect initial headroom: {error}"));
+        let target_available = super::super::MINIMUM_MANAGED_UPGRADE_HEADROOM_BYTES * 3 / 4;
+        let fill_bytes = available_before
+            .checked_sub(target_available)
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or_else(|| panic!("bounded volume was already too small for the fixture"));
+        let fill_bytes = fill_bytes.to_string();
+        assert_docker_success(&[
+            "container",
+            "exec",
+            &database.identity.container_name,
+            "fallocate",
+            "--length",
+            &fill_bytes,
+            HEADROOM_FILL_PATH,
+        ]);
+        let constrained_available = database
+            .lifecycle()
+            .available_storage_bytes()
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect constrained headroom: {error}"));
+        assert!(constrained_available < expected_required);
+        (constrained_available, expected_required)
+    }
+
+    async fn assert_headroom_upgrade_refused(
+        database: &ManagedDatabase,
+        alias: &str,
+        constrained_available: u64,
+        expected_required: u64,
+    ) {
+        let rejected = database
+            .maintenance()
+            .upgrade(confirmation(database, ManagedDestructiveOperation::Upgrade))
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(ManagedDatabaseError::UpgradeStorageHeadroom {
+                available_bytes,
+                required_bytes,
+            }) if available_bytes == constrained_available && required_bytes == expected_required
+        ));
+        let primary = database
+            .docker
+            .containers()
+            .inspect_container(&database.identity.container_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect refused primary: {error}"))
+            .unwrap_or_else(|| panic!("refused primary was renamed or removed"));
+        assert_eq!(primary.image, alias);
+        assert_eq!(container_state(&primary), ManagedContainerState::Healthy);
+        let rollback_name = format!(
+            "{}{UPGRADE_ROLLBACK_SUFFIX}",
+            database.identity.container_name
+        );
+        let rollback = database
+            .docker
+            .containers()
+            .inspect_container(&rollback_name)
+            .await
+            .unwrap_or_else(|error| panic!("could not inspect refused rollback: {error}"));
+        assert!(rollback.is_none());
+        assert_docker_success(&[
+            "container",
+            "exec",
+            &database.identity.container_name,
+            "rm",
+            "--force",
+            HEADROOM_FILL_PATH,
+        ]);
     }
 
     #[tokio::test]

@@ -408,14 +408,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read as _, Write as _},
-        net::TcpListener,
-        thread,
-        time::Duration,
-    };
-
-    use sha2::{Digest as _, Sha256};
+    use std::{io::Write as _, net::TcpListener, thread, time::Duration};
 
     use super::*;
 

@@ -170,6 +170,23 @@ impl GenerationRetentionPolicy {
         Ok(self)
     }
 
+    /// Override only the canonical/cascade-row work cap while retaining the
+    /// default physical-relation and DDL bounds.
+    /// # Errors
+    ///
+    /// Returns an error if `maximum_cascade_rows` is zero or exceeds the hard
+    /// cleanup maximum.
+    pub const fn with_maximum_cascade_rows(
+        mut self,
+        maximum_cascade_rows: u64,
+    ) -> Result<Self, GenerationRetentionError> {
+        if !valid_positive_limit(maximum_cascade_rows, MAXIMUM_CASCADE_ROW_BUDGET) {
+            return Err(GenerationRetentionError::InvalidPolicy);
+        }
+        self.maximum_cascade_rows = maximum_cascade_rows;
+        Ok(self)
+    }
+
     /// Override exact row, physical relation-byte, and DDL-count work caps.
     /// # Errors
     ///
@@ -1125,10 +1142,10 @@ mod tests {
 
     use super::{
         CandidateWork, DEFAULT_STALE_STAGING_AGE, GenerationRetentionError,
-        GenerationRetentionPolicy, INVALID_DELETE_BATCH, MAXIMUM_DELETE_BATCH,
-        MAXIMUM_STALE_STAGING_AGE, POST_RETENTION_VACUUM_ROW_THRESHOLD, PostRetentionMaintenance,
-        PostRetentionMaintenancePlan, PostRetentionMaintenancePolicy, RetentionCandidate,
-        post_retention_maintenance_plan, select_bounded_candidate_work,
+        GenerationRetentionPolicy, INVALID_DELETE_BATCH, MAXIMUM_CASCADE_ROW_BUDGET,
+        MAXIMUM_DELETE_BATCH, MAXIMUM_STALE_STAGING_AGE, POST_RETENTION_VACUUM_ROW_THRESHOLD,
+        PostRetentionMaintenance, PostRetentionMaintenancePlan, PostRetentionMaintenancePolicy,
+        RetentionCandidate, post_retention_maintenance_plan, select_bounded_candidate_work,
     };
 
     const TEST_RETAINED_SUPERSEDED: u32 = 2;
@@ -1169,6 +1186,24 @@ mod tests {
         assert!(matches!(
             policy.with_stale_staging_age(Duration::from_mins(1)),
             Ok(updated) if updated.stale_staging_age() == Duration::from_mins(1)
+        ));
+    }
+
+    #[test]
+    fn cascade_row_override_is_nonzero_and_hard_bounded() {
+        let policy = GenerationRetentionPolicy::new(TEST_RETAINED_SUPERSEDED, TEST_DELETE_BATCH)
+            .unwrap_or_else(|error| panic!("base retention policy failed: {error}"));
+        assert_eq!(
+            policy.with_maximum_cascade_rows(0),
+            Err(GenerationRetentionError::InvalidPolicy)
+        );
+        assert_eq!(
+            policy.with_maximum_cascade_rows(MAXIMUM_CASCADE_ROW_BUDGET + 1),
+            Err(GenerationRetentionError::InvalidPolicy)
+        );
+        assert!(matches!(
+            policy.with_maximum_cascade_rows(7_700_000),
+            Ok(updated) if updated.maximum_cascade_rows() == 7_700_000
         ));
     }
 
