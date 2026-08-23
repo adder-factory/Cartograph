@@ -1147,6 +1147,7 @@ mod tests {
     };
 
     use super::*;
+    #[cfg(unix)]
     use crate::CliBridgeConfigInput;
 
     const MAXIMUM_FIXTURE_REQUEST_BYTES: usize = 64 * 1_024;
