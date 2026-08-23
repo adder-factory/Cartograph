@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-23 (`v2.1.25`).
+Last release audit: 2026-08-23 (`v2.1.26`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of

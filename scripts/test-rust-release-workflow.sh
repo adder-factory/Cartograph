@@ -19,6 +19,7 @@ UPGRADE_SOURCE="$ROOT/crates/cartograph-cli/src/upgrade.rs"
 CLI_SOURCE="$ROOT/crates/cartograph-cli/src/main.rs"
 DENY_CONFIG="$ROOT/deny.toml"
 RUST_TOOLCHAIN_CONFIG="$ROOT/rust-toolchain.toml"
+SONAR_CONFIG="$ROOT/sonar-project.properties"
 
 fail() {
   echo "release workflow contract failed: $1" >&2
@@ -47,6 +48,25 @@ rust_toolchain="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$RUST_TOOLCHAIN_CONFI
   fail 'the pinned Rust toolchain is not an exact stable release'
 grep -Fq "rust-version = \"$rust_toolchain\"" "$ROOT/Cargo.toml" || \
   fail 'the workspace minimum Rust version does not match the pinned toolchain'
+workspace_version="$(
+  awk '
+    $0 == "[workspace.package]" { in_workspace_package = 1; next }
+    /^\[/ { in_workspace_package = 0 }
+    in_workspace_package && /^version = "[^"]+"$/ {
+      version = $0
+      sub(/^version = "/, "", version)
+      sub(/"$/, "", version)
+      print version
+      exit
+    }
+  ' "$ROOT/Cargo.toml"
+)"
+[[ -n "$workspace_version" ]] || fail 'the workspace package version is missing'
+[[ "$(grep -c '^sonar\.projectVersion=' "$SONAR_CONFIG")" == 1 ]] || \
+  fail 'Sonar must declare exactly one project version'
+sonar_project_version="$(sed -n 's/^sonar\.projectVersion=//p' "$SONAR_CONFIG")"
+[[ "$sonar_project_version" == "$workspace_version" ]] || \
+  fail 'the Sonar project version does not match the Cargo workspace version'
 ruby - "$VALIDATION" <<'RUBY'
 require "yaml"
 
