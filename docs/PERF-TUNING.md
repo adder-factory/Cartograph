@@ -1,5 +1,8 @@
 # Performance tuning
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[Configuration](CONFIGURATION.md) · [Benchmark evidence](v2/benchmarks/README.md)
+
 Cartograph v2 chooses bounded parallelism from supported-file count, exact
 indexed source bytes, hardware, and the caller cap. The corpus selector requests
 the tiers 1, 2, 4, 8, and 16, then applies caller and detected-hardware caps; the
@@ -8,6 +11,11 @@ host. A deterministic reducer must produce identical logical facts, digests,
 and ordered retrieval evidence at every admitted count. The release identity
 matrix explicitly exercises 1, 2, 4, 8, and 16 workers; faster output is never
 allowed to change meaning.
+
+Tune only after measuring the failing phase. More workers, connections, memory,
+or time cannot repair a stale fence, lost lease, blocked database, unsupported
+source boundary, or unhealthy derived index; use
+[Troubleshooting](TROUBLESHOOTING.md) for those states first.
 
 ## Operator controls
 

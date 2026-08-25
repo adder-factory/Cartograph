@@ -1,5 +1,9 @@
 # Native grammar provenance
 
+[Documentation home](README.md) · [Language matrix](SUPPORT-MATRIX.md) ·
+[Coverage report](LANGUAGE-COVERAGE-REPORT.md) ·
+[Extension guide](EXTENDING-EXTRACTORS-RESOLVERS.md)
+
 Cartograph v2 links pinned Rust tree-sitter grammar crates. It does not ship or
 load the v1 WebAssembly grammar directory.
 

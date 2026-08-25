@@ -1,5 +1,8 @@
 # Cartograph v2 architecture
 
+[Documentation home](../README.md) · [Project overview](../../README.md) ·
+[Native extraction](EXTRACTION.md) · [Language matrix](../SUPPORT-MATRIX.md)
+
 Last implementation review: 2026-08-25 (`v2.1.27`)
 
 Cartograph v2 is a native Rust code-intelligence server for AI coding agents.

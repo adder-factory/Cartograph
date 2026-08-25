@@ -1,8 +1,23 @@
 # Configuration
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[Storage and operations](STORAGE-BACKENDS.md) · [Troubleshooting](TROUBLESHOOTING.md)
+
 Cartograph keeps non-secret project policy in `.cartograph/config.json`.
 Database URLs and API credentials belong in the process environment or private
 managed state, never in a committed file.
+
+## Where settings live
+
+| Concern | Location | Commit it? |
+| --- | --- | ---: |
+| Shared source admission, extraction, graph, and capacity policy | `.cartograph/config.json` | Yes, when the team shares the policy |
+| Additional Git-style source exclusions | `.cartographignore` | Yes |
+| Database URL, schema override, pool, and query deadlines | Process environment | No secrets |
+| Optional embedding, reranking, and chat credentials | Process environment or Cartograph-managed private state | No |
+| One-command experiment or recovery override | The exact CLI flag shown by command help | No persistent change unless documented |
+
+## Project configuration example
 
 The file is optional. A representative v2 configuration is:
 

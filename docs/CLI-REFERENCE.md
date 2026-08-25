@@ -1,11 +1,24 @@
 # Native CLI reference
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[MCP usage](MCP-USAGE.md) · [Troubleshooting](TROUBLESHOOTING.md)
+
 Last release audit: 2026-08-25 (`v2.1.27`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
 lists the complete top-level command inventory and selected high-use forms;
 subcommand help remains the authority for every option and default.
+
+## Find the right surface
+
+| Need | Use |
+| --- | --- |
+| Normal coding loop | [High-use coding forms](#high-use-coding-forms) |
+| Every public top-level command | [Complete command inventory](#complete-top-level-command-inventory) |
+| Exact flags, defaults, bounds, or confirmation phrases | `cartograph <command> --help` from the installed version |
+| Equivalent agent tools | [CLI and MCP alignment](cli-mcp-alignment.md) |
+| Database ownership and lifecycle | [PostgreSQL storage and operations](STORAGE-BACKENDS.md) |
 
 ## High-use coding forms
 

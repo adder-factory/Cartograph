@@ -1,5 +1,14 @@
 # Agent-assisted installation
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[Language matrix](SUPPORT-MATRIX.md) · [Troubleshooting](TROUBLESHOOTING.md)
+
+Use this guide when a coding agent should own setup from installation through
+live transport verification. For a manual setup, start with the project
+[quick start](../README.md#quick-start).
+
+## Copy-paste task
+
 Give the following task to a coding agent from the repository Cartograph should
 index:
 

@@ -1,5 +1,9 @@
 # V2 native patch-task evaluation
 
+[Benchmark index](README.md) · [Documentation home](../../README.md) ·
+[Agent workflow](../../../README.md#agent-workflow) ·
+[MCP usage](../../MCP-USAGE.md)
+
 Historical benchmark: locked v1.1.33 parity gate measured for the `v2.1.4`
 candidate. It is not relabeled as evidence for a later release; each release
 still requires its own exact published-main gate.

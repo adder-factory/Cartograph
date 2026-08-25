@@ -1,10 +1,24 @@
 # PostgreSQL storage and operations
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[Configuration](CONFIGURATION.md) · [Troubleshooting](TROUBLESHOOTING.md)
+
 Cartograph v2 has one storage engine: PostgreSQL 18.4 or newer within major
 version 18 with ParadeDB `pg_search` 0.25.3 and pgvector 0.8.4 or newer.
 Pgvector 0.8.6 is recommended for external PostgreSQL; the managed upstream
-ParadeDB 0.25.3 image bundles `pg_search` 0.25.3 and pgvector 0.8.4. SQLite is not a backend, fallback,
-migration target, importer, feature, or test utility.
+ParadeDB 0.25.3 image bundles `pg_search` 0.25.3 and pgvector 0.8.4. SQLite is
+not a backend, fallback, migration target, importer, feature, or test utility.
+
+## Choose database ownership
+
+| Path | Best for | Ownership | Start with |
+| --- | --- | --- | --- |
+| Managed local database | One developer or coding agent on macOS/Linux with local Docker | Cartograph-owned loopback container, volume, credential, and lifecycle | `cartograph db start --project-path .` |
+| External PostgreSQL | Windows, shared infrastructure, or administrator-operated databases | The database administrator owns service, extensions, backup, and access policy | Load `CARTOGRAPH_DATABASE_URL`, then run `cartograph doctor .` |
+
+Both paths use the same PostgreSQL-only schema and generation contract. Managed
+mode is not a bundled database: it asks the user's local Docker daemon to pull
+the pinned upstream image and refuses foreign or remotely owned resources.
 
 ## Capability contract
 

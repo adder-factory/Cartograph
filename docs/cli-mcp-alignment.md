@@ -1,5 +1,8 @@
 # CLI and MCP alignment
 
+[Documentation home](README.md) · [CLI reference](CLI-REFERENCE.md) ·
+[MCP usage](MCP-USAGE.md) · [Project overview](../README.md)
+
 Last release audit: 2026-08-25 (`v2.1.27`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands

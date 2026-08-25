@@ -1,5 +1,8 @@
 # Extending native extraction and resolution
 
+[Documentation home](README.md) · [Language matrix](SUPPORT-MATRIX.md) ·
+[Native extraction](v2/EXTRACTION.md) · [Grammar provenance](GRAMMAR-ASSETS.md)
+
 Cartograph v2 extracts code in Rust and publishes typed, generation-scoped facts
 to PostgreSQL. This guide covers the registration points and failure modes for
 adding a language, resolver, framework fact, or cross-language bridge.

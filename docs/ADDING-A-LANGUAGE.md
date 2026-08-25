@@ -1,5 +1,9 @@
 # Adding a language
 
+[Documentation home](README.md) · [Language matrix](SUPPORT-MATRIX.md) ·
+[Coverage report](LANGUAGE-COVERAGE-REPORT.md) ·
+[Full extension guide](EXTENDING-EXTRACTORS-RESOLVERS.md)
+
 Cartograph v2 language support is native Rust. Do not add a TypeScript
 extractor, WebAssembly grammar asset, external parser process, or parser-only
 placeholder and call the language complete.

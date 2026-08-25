@@ -1,4 +1,8 @@
-# Support Matrix
+# Support matrix
+
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[Coverage report](LANGUAGE-COVERAGE-REPORT.md) ·
+[Extend support](EXTENDING-EXTRACTORS-RESOLVERS.md)
 
 Last implementation audit: 2026-08-25 (`v2.1.27`).
 
@@ -6,8 +10,7 @@ Cartograph v2 supports all 73 v1.1.33 language modes, native TOML, 52
 dedicated textual game-scripting modes, the WGSL and Metal shader modes added
 in v2.1.12, first-class Slang and WESL added in v2.1.15, and Ada/SPARK and VHDL
 added in v2.1.27: 132 modes total.
-The source of truth is
-`cartograph_domain::SourceLanguage::ALL`; native
+The source of truth is `cartograph_domain::SourceLanguage::ALL`; native
 extractor strategy lives in `crates/cartograph-extract/src/language.rs`, and
 framework/cross-language enrichment lives in the focused Rust modules beside
 it.
@@ -19,8 +22,15 @@ dynamic references, or cross-language bridge edges when Cartograph detects a
 known framework shape.
 
 `Tree-sitter parser-only` means Cartograph recognizes the file, parses it with
-the statically linked native grammar, emits the file node, and surfaces syntax diagnostics, but
-does not yet extract language-specific symbols from that grammar.
+the statically linked native grammar, emits the file node, and surfaces syntax
+diagnostics, but does not yet extract language-specific symbols from that
+grammar.
+
+[Languages](#languages) ·
+[Game scripting](#dedicated-game-scripting-modes) ·
+[Framework signals](#framework-aware-signals) ·
+[Embedded DSLs](#embedded-dsls-and-derived-signals) ·
+[Extending support](#extending-support)
 
 ## Languages
 

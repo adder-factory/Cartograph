@@ -1,5 +1,8 @@
 # Architecture rules
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[V2 architecture](v2/ARCHITECTURE.md) · [Decision records](decisions/README.md)
+
 The current implementation architecture is maintained in
 [Cartograph v2 architecture](v2/ARCHITECTURE.md). This file records the standing
 repository rules for contributors.

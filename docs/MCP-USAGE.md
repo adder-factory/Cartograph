@@ -1,5 +1,8 @@
 # MCP usage for coding agents
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[CLI reference](CLI-REFERENCE.md) · [Troubleshooting](TROUBLESHOOTING.md)
+
 Last release audit: 2026-08-25 (`v2.1.27`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
@@ -7,6 +10,16 @@ bounded, generation-scoped evidence and never makes the database a source of
 truth over the live checkout. The optional `cartograph_ask`, role, summary, and
 dead-code-judge branches can call configured LLM tiers; their model/evidence
 provenance, failure, and fallback states remain explicit.
+
+## Fast path
+
+1. Register the project with `cartograph install --yes --target <HOST>
+   --location local --project-path .`.
+2. Reopen the host so it starts the newly registered MCP child.
+3. Call `cartograph_status` and require a fresh current generation.
+4. Call `cartograph_context` or `cartograph_find` once and require real
+   generation-scoped evidence. Registration and CLI success alone do not prove
+   the attached transport.
 
 ## Registration
 

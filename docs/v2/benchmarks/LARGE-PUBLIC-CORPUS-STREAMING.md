@@ -1,5 +1,8 @@
 # V2 large public corpus streaming benchmark
 
+[Benchmark index](README.md) · [Documentation home](../../README.md) ·
+[Performance tuning](../../PERF-TUNING.md) · [Native extraction](../EXTRACTION.md)
+
 Status: published `v2.1.11` benchmark record from the final pre-release candidate
 
 This report is committed in release

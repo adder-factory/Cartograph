@@ -1,5 +1,9 @@
 # Cartograph v2 and ParadeDB distribution boundary
 
+[Documentation home](../README.md) · [Project overview](../../README.md) ·
+[Storage and operations](../STORAGE-BACKENDS.md) ·
+[Release evidence](benchmarks/README.md)
+
 Status: release policy for the local Cartograph v2 product. This records the
 technical distribution boundary; it is not a substitute for legal advice.
 

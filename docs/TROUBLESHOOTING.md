@@ -1,5 +1,10 @@
 # Troubleshooting Cartograph v2
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[MCP usage](MCP-USAGE.md) · [Storage and operations](STORAGE-BACKENDS.md)
+
+## Fast diagnosis
+
 Start with the exact native executable and project:
 
 ```sh
@@ -11,6 +16,16 @@ cartograph status /absolute/path/to/project
 
 Do not infer runtime health from installed files alone. A real doctor/status or
 MCP call is the control evidence.
+
+| Symptom | Go to |
+| --- | --- |
+| Database capability or extension check fails | [PostgreSQL capability failure](#postgresql-capability-failure) |
+| Shell commands work but the agent cannot connect | [Doctor works in a shell but MCP cannot connect](#doctor-works-in-a-shell-but-mcp-cannot-connect) |
+| Status reports stale source | [Index is stale](#index-is-stale) |
+| A large index reaches a hard bound | [Native generation reaches its capacity bound](#native-generation-reaches-its-capacity-bound) |
+| Hybrid retrieval skips semantic search | [Semantic search is skipped](#semantic-search-is-skipped) |
+| BM25 is unhealthy after a crash | [ParadeDB derived index is unhealthy after a crash](#paradedb-derived-index-is-unhealthy-after-a-crash) |
+| Install or release checksum verification fails | [Release archive or install checksum fails](#release-archive-or-install-checksum-fails) |
 
 ## PostgreSQL capability failure
 

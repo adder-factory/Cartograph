@@ -1,5 +1,8 @@
 # Graph export formats
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[CLI reference](CLI-REFERENCE.md) · [Architecture](v2/ARCHITECTURE.md)
+
 The browser visual-graph viewer is not part of v2, but graph data and diagram
 interchange remain first-class. `cartograph export` reads one current-generation
 snapshot, applies filters, caps nodes, and removes edges whose endpoints are not

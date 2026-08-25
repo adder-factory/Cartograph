@@ -1,5 +1,9 @@
 # Native extraction contract
 
+[Documentation home](../README.md) · [Project overview](../../README.md) ·
+[Language matrix](../SUPPORT-MATRIX.md) ·
+[Extension guide](../EXTENDING-EXTRACTORS-RESOLVERS.md)
+
 Cartograph v2 extracts every v1.1.33 language mode in Rust. The extractor owns
 bounded project discovery, exact source snapshots, grammar or custom structural
 parsing, structural facts, deterministic resolution, and canonical generation

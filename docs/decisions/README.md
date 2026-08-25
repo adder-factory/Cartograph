@@ -1,9 +1,12 @@
-# Architecture Decision Records
+# Architecture decision records
+
+[Documentation home](../README.md) · [Project overview](../../README.md) ·
+[Architecture rules](../ARCHITECTURE.md) · [V2 architecture](../v2/ARCHITECTURE.md)
 
 Use this directory for durable architecture decisions whose tradeoffs should be
 visible after the original review context is gone.
 
-## When to Add One
+## When to add one
 
 Add a decision record when a change chooses or preserves a project posture for:
 

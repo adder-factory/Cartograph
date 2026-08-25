@@ -1,5 +1,8 @@
 # Native code-health detectors
 
+[Documentation home](README.md) · [Project overview](../README.md) ·
+[CLI reference](CLI-REFERENCE.md) · [Architecture](v2/ARCHITECTURE.md)
+
 Cartograph v2 derives deterministic, generation-fenced findings from native
 extraction metrics, graph structure, Git/coverage evidence, architecture
 policy, and duplicate-code analysis. The detector path does not require an

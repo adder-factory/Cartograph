@@ -1,5 +1,8 @@
 # 0001 — Keep llama.cpp as the managed local default; keep other providers external
 
+[Decision index](README.md) · [Documentation home](../README.md) ·
+[Configuration](../CONFIGURATION.md) · [V2 architecture](../v2/ARCHITECTURE.md)
+
 - **Status:** Accepted for Cartograph v2
 - **Last reviewed:** 2026-07-24
 - **Scope:** Optional embedding, reranking, summary, classification, ask, and

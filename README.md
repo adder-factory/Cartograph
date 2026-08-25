@@ -12,8 +12,9 @@ Native Rust CLI and MCP server · PostgreSQL 18 · code-aware BM25 · typed code
 [![Runtime: Rust](https://img.shields.io/badge/runtime-Rust-b7410e.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 [Quick start](#quick-start) · [Agent workflow](#agent-workflow) ·
+[Language matrix](docs/SUPPORT-MATRIX.md) ·
 [Large codebases](#large-codebases-and-streaming-indexing) ·
-[Architecture](#architecture) · [Documentation](#documentation)
+[Architecture](#architecture) · [Documentation](docs/README.md)
 
 </div>
 
@@ -34,6 +35,19 @@ abstention instead of presenting stale or incomplete data as certainty.
 > (0.8.6 recommended for external PostgreSQL).
 > There is no SQLite runtime, compatibility mode, importer, optional feature,
 > or fallback.
+
+## Start here
+
+| Goal | Best starting point |
+| --- | --- |
+| Install Cartograph and build a first graph | [Quick start](#quick-start) |
+| Give setup to a coding agent | [Agent-assisted installation](docs/AGENT-INSTALL.md) |
+| Connect Codex, Claude Code, or Cursor | [MCP usage](docs/MCP-USAGE.md) |
+| Check a language, extension, or framework | [Language support matrix](docs/SUPPORT-MATRIX.md) |
+| Operate or recover PostgreSQL | [Storage and operations](docs/STORAGE-BACKENDS.md) |
+| Diagnose a failed setup or stale graph | [Troubleshooting](docs/TROUBLESHOOTING.md) |
+| Understand the runtime and trust boundaries | [V2 architecture](docs/v2/ARCHITECTURE.md) |
+| Browse every guide by task or audience | [Documentation home](docs/README.md) |
 
 ## What Cartograph gives an agent
 
@@ -130,21 +144,15 @@ upgrade is one resumable command from the project root:
 cartograph upgrade --apply --project-path .
 ```
 
-It checksum-verifies and smoke-tests the release, switches the stable launcher,
-applies safe append-only schema migrations, refreshes the current generation,
-runs `doctor`, verifies a fresh next-process status, and repairs stale owned
-Codex, Claude, and Cursor pins. The only routine manual boundary is closing and
-reopening an already-running agent host, which cannot hot-load a replaced MCP
-child. If an older managed container itself must be replaced, the command stops
-with the exact backup and confirmation commands; rerun the same upgrade command
-afterward to resume rather than restarting the workflow. A cold first-time
-image pull has its own 15-minute budget; a timeout is reported as retryable and
-never treated as evidence that the container is incompatible. A fully
-idempotent rerun does not request another host reopen unless that invocation
-changed the binary or repaired a host pin.
-The confirmed database replacement also resumes an interruption after the old
-container was stopped and renamed but before the new candidate was created; do
-not rename its rollback slot manually.
+It verifies and smoke-tests the release, switches the stable launcher, applies
+safe migrations, refreshes the current generation, runs `doctor`, proves a
+fresh next-process status, and repairs stale owned host pins. Require
+`completed: true`. If managed-database replacement is necessary, follow only
+the exact backup and confirmation commands in the report, then rerun the same
+upgrade command to resume. Reopen an agent host only when `restartRequired` is
+true; an attached MCP child cannot hot-load a new binary. See
+[Agent-assisted installation](docs/AGENT-INSTALL.md#upgrade-an-existing-installation)
+for the complete recovery boundaries.
 
 ### 4. Verify the live integration
 
@@ -355,9 +363,10 @@ semantics, read the [v2 architecture](docs/v2/ARCHITECTURE.md).
 ## Language support
 
 The stable registry production-admits 132 language modes and the complete 163
-v1 extension manifest, plus additive Python `.pyi`, Ada, and VHDL support. Sixty-six modes use
-pinned native tree-sitter grammars; 66 mixed-markup, configuration,
-domain-specific, and game-scripting modes use bounded Rust structural scanners.
+v1 extension manifest, plus additive Python `.pyi`, Ada, and VHDL support.
+Sixty-six modes use pinned native tree-sitter grammars; 66 mixed-markup,
+configuration, domain-specific, and game-scripting modes use bounded Rust
+structural scanners.
 
 Every admitted mode must prove deterministic facts, cancellation, literal
 safety, parallel-worker identity, and live PostgreSQL/ParadeDB publication.
@@ -462,17 +471,23 @@ or a container image. See the [distribution and licensing policy](docs/v2/LICENS
 
 ## Documentation
 
+The [documentation home](docs/README.md) organizes the complete guide set by
+task and audience. These are the most common entry points:
+
 | Guide | Use it for |
 | --- | --- |
+| [Documentation home](docs/README.md) | Find the shortest reading path for setup, daily use, operations, architecture, or contribution |
 | [Agent-assisted installation](docs/AGENT-INSTALL.md) | A copy-paste setup task for a coding agent |
 | [CLI reference](docs/CLI-REFERENCE.md) | Commands, flags, JSON output, and exit behavior |
 | [MCP usage](docs/MCP-USAGE.md) | Profiles, tools, transport, and host integration |
+| [Language support matrix](docs/SUPPORT-MATRIX.md) | Supported languages, extensions, extractor depth, frameworks, and embedded signals |
 | [Configuration](docs/CONFIGURATION.md) | Database, retrieval, LLM, and bounded runtime settings |
 | [Architecture](docs/v2/ARCHITECTURE.md) | Crate ownership, generations, retrieval, leases, and trust boundaries |
 | [Storage operations](docs/STORAGE-BACKENDS.md) | Managed/external PostgreSQL, migration, recovery, and retention |
 | [Performance tuning](docs/PERF-TUNING.md) | Worker selection, streaming, connection, timeout, and indexing guidance |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Docker, PostgreSQL, pg_search, pgvector, and MCP failures |
-| [Release benchmarks](docs/v2/benchmarks/) | Determinism, scaling, large-corpus streaming, and patch-task evidence |
+| [Extending languages and resolvers](docs/EXTENDING-EXTRACTORS-RESOLVERS.md) | Add grammars, scanners, framework facts, resolution, and verification |
+| [Verification and benchmarks](docs/v2/benchmarks/README.md) | Determinism, scaling, large-corpus streaming, and patch-task evidence |
 
 ## Development
 

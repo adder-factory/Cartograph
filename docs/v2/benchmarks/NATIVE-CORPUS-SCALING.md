@@ -1,5 +1,8 @@
 # V2 native real-corpus scaling benchmark
 
+[Benchmark index](README.md) · [Documentation home](../../README.md) ·
+[Performance tuning](../../PERF-TUNING.md) · [Native extraction](../EXTRACTION.md)
+
 Status: historical v2.0.0 release-candidate extractor/resolver and digest-v4 contract
 
 Measured: 2026-07-24
