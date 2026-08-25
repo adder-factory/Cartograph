@@ -10,6 +10,8 @@ use tree_sitter::Language;
 pub enum NativeGrammar {
     /// Represents the abap native grammar.
     Abap,
+    /// Represents the Ada native grammar.
+    Ada,
     /// Represents the apex native grammar.
     Apex,
     /// Represents the ark ts native grammar.
@@ -122,14 +124,17 @@ pub enum NativeGrammar {
     VisualBasic,
     /// Represents the verilog native grammar.
     Verilog,
+    /// Represents the VHDL native grammar.
+    Vhdl,
     /// Represents the wgsl native grammar, including `naga_oil` preprocessor imports.
     Wgsl,
     /// Represents the yaml native grammar.
     Yaml,
 }
 
-const NATIVE_GRAMMAR_IDS: [&str; 59] = [
+const NATIVE_GRAMMAR_IDS: [&str; 61] = [
     "abap",
+    "ada",
     "apex",
     "arkts",
     "astro",
@@ -186,12 +191,14 @@ const NATIVE_GRAMMAR_IDS: [&str; 59] = [
     "typescript",
     "vbnet",
     "verilog",
+    "vhdl",
     "wgsl",
     "yaml",
 ];
 
-const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 59] = [
+const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 61] = [
     || tree_sitter_abap_sqry::language(),
+    || tree_sitter_ada::LANGUAGE.into(),
     || tree_sitter_sfapex::apex::LANGUAGE.into(),
     || tree_sitter_arkts::LANGUAGE.into(),
     || tree_sitter_astro_next::LANGUAGE.into(),
@@ -248,14 +255,16 @@ const NATIVE_GRAMMAR_FACTORIES: [fn() -> Language; 59] = [
     || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
     || arborium_vb::language().into(),
     || arborium_verilog::language().into(),
+    || arborium_vhdl::language().into(),
     || tree_sitter_wgsl_bevy::LANGUAGE.into(),
     || arborium_yaml::language().into(),
 ];
 
 impl NativeGrammar {
     /// Every admitted binding in stable language-id order.
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 61] = [
         Self::Abap,
+        Self::Ada,
         Self::Apex,
         Self::ArkTs,
         Self::Astro,
@@ -312,6 +321,7 @@ impl NativeGrammar {
         Self::TypeScript,
         Self::VisualBasic,
         Self::Verilog,
+        Self::Vhdl,
         Self::Wgsl,
         Self::Yaml,
     ];
@@ -354,6 +364,7 @@ impl NativeGrammar {
 const fn grammar_group_a(language: SourceLanguage) -> Option<NativeGrammar> {
     match language {
         SourceLanguage::Abap => Some(NativeGrammar::Abap),
+        SourceLanguage::Ada => Some(NativeGrammar::Ada),
         SourceLanguage::Apex => Some(NativeGrammar::Apex),
         SourceLanguage::ArkTs => Some(NativeGrammar::ArkTs),
         SourceLanguage::Astro => Some(NativeGrammar::Astro),
@@ -454,6 +465,7 @@ const fn grammar_group_f(language: SourceLanguage) -> Option<NativeGrammar> {
         SourceLanguage::VbNet => Some(NativeGrammar::VisualBasic),
         SourceLanguage::Metal => Some(NativeGrammar::Cpp),
         SourceLanguage::Verilog => Some(NativeGrammar::Verilog),
+        SourceLanguage::Vhdl => Some(NativeGrammar::Vhdl),
         SourceLanguage::Wesl | SourceLanguage::Wgsl => Some(NativeGrammar::Wgsl),
         SourceLanguage::Yaml => Some(NativeGrammar::Yaml),
         _ => None,

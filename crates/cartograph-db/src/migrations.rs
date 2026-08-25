@@ -47,7 +47,8 @@ const JAVASCRIPT_CONSTRUCTION_TARGET_DIGEST_V13_SCHEMA_VERSION: i64 = 36;
 const STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION: i64 = 37;
 const SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA_VERSION: i64 = 38;
 const GENERATION_SOURCE_ADMISSION_SCHEMA_VERSION: i64 = 39;
-const LATEST_SCHEMA_VERSION: i64 = GENERATION_SOURCE_ADMISSION_SCHEMA_VERSION;
+const ADA_VHDL_NUMERICAL_DIGEST_V15_SCHEMA_VERSION: i64 = 40;
+const LATEST_SCHEMA_VERSION: i64 = ADA_VHDL_NUMERICAL_DIGEST_V15_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 /// Latest append-only schema version understood by this native binary.
@@ -1608,7 +1609,16 @@ const GENERATION_SOURCE_ADMISSION_SCHEMA: Migration = Migration {
             )"#],
 };
 
-const MIGRATIONS: [&Migration; 39] = [
+const ADA_VHDL_NUMERICAL_DIGEST_V15_SCHEMA: Migration = Migration {
+    version: ADA_VHDL_NUMERICAL_DIGEST_V15_SCHEMA_VERSION,
+    name: "ada_vhdl_numerical_digest_v15",
+    statements: &[r#"ALTER TABLE {schema}."index_generations"
+            DROP CONSTRAINT index_generations_digest_version_check,
+            ADD CONSTRAINT index_generations_digest_version_check
+                CHECK (content_digest_version IS NULL OR content_digest_version IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))"#],
+};
+
+const MIGRATIONS: [&Migration; 40] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
@@ -1648,6 +1658,7 @@ const MIGRATIONS: [&Migration; 39] = [
     &STRUCTURAL_FINDING_CACHE_SCHEMA,
     &SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA,
     &GENERATION_SOURCE_ADMISSION_SCHEMA,
+    &ADA_VHDL_NUMERICAL_DIGEST_V15_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -2044,7 +2055,7 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 39] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 40] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
@@ -2084,9 +2095,10 @@ mod tests {
         STRUCTURAL_FINDING_CACHE_SCHEMA_VERSION,
         SHADER_AND_DISPATCH_DIGEST_V14_SCHEMA_VERSION,
         GENERATION_SOURCE_ADMISSION_SCHEMA_VERSION,
+        ADA_VHDL_NUMERICAL_DIGEST_V15_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 39] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 40] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -2243,6 +2255,10 @@ mod tests {
             39,
             "f6a2d4ac41b97e8d47a58eb95c2d8b739b14f6c2318c4ad89af5a43bb039141b",
         ),
+        (
+            40,
+            "a5fc95d44ff7b12038baa012552316c3ac5ba7e7a214c4aa2bcc47d7c04e14c5",
+        ),
     ];
 
     #[test]
@@ -2288,7 +2304,7 @@ mod tests {
         );
         assert_eq!(
             LATEST_SCHEMA_VERSION,
-            GENERATION_SOURCE_ADMISSION_SCHEMA_VERSION
+            ADA_VHDL_NUMERICAL_DIGEST_V15_SCHEMA_VERSION
         );
     }
 

@@ -1,6 +1,6 @@
 # CLI and MCP alignment
 
-Last release audit: 2026-08-23 (`v2.1.26`).
+Last release audit: 2026-08-25 (`v2.1.27`).
 
 Cartograph exposes one native Rust feature surface through human CLI commands
 and 36 bounded MCP tools. Shared schemas generate ordinary CLI adapters where
@@ -77,7 +77,11 @@ These do not hide a coding capability from MCP. Long MCP admin operations use
 bounded jobs with explicit status/cancel instead of blocking transport.
 Biomarker reads are non-mutating on both surfaces; the explicit
 `biomarkers-refresh` admin action is dry-run-first and requires confirmation to
-compute the generation-fenced relation. Dead-code statement timeouts use the
+compute the generation-fenced relation. Its `databaseQueryTimeoutMs` field and
+generated `--database-query-timeout-ms` flag control the same inner PostgreSQL
+statement timeout through 30 minutes; `timeoutMs` is retained only as an
+exclusive legacy alias. Generated CLI execution extends its caller deadline
+beyond the selected statement timeout. Dead-code statement timeouts use the
 same typed error on CLI and MCP, while digest preserves successful sections and
 labels an incomplete section independently.
 Non-recoverable file-local index errors share the same typed project-relative

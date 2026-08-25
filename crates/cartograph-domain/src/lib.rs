@@ -307,17 +307,19 @@ pub enum GenerationDigestVersion {
     V13 = 13,
     /// Slang/WESL language facts and bounded JavaScript dispatch evidence.
     V14 = 14,
+    /// Ada/VHDL unit resolution and guarded numerical-analysis precision.
+    V15 = 15,
 }
 
 impl GenerationDigestVersion {
     /// Current digest contract emitted by this Cartograph v2 binary.
-    pub const CURRENT: Self = Self::V14;
+    pub const CURRENT: Self = Self::V15;
 
     /// Every admitted contract version in ascending order.
     ///
     /// A new version is added here and nowhere else; validation walks this list
     /// rather than repeating one guarded arm per version.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::V1,
         Self::V2,
         Self::V3,
@@ -332,6 +334,7 @@ impl GenerationDigestVersion {
         Self::V12,
         Self::V13,
         Self::V14,
+        Self::V15,
     ];
 
     /// Stable PostgreSQL `smallint` representation.
@@ -653,7 +656,8 @@ mod tests {
     const DIGEST_V12_DATABASE_VALUE: i16 = 12;
     const DIGEST_V13_DATABASE_VALUE: i16 = 13;
     const DIGEST_V14_DATABASE_VALUE: i16 = 14;
-    const UNKNOWN_DIGEST_DATABASE_VALUE: i16 = 15;
+    const DIGEST_V15_DATABASE_VALUE: i16 = 15;
+    const UNKNOWN_DIGEST_DATABASE_VALUE: i16 = 16;
 
     #[test]
     fn branded_ids_canonicalize_and_validate_deserialized_values() {
@@ -686,7 +690,7 @@ mod tests {
         );
         assert_eq!(
             GenerationDigestVersion::CURRENT.database_value(),
-            DIGEST_V14_DATABASE_VALUE
+            DIGEST_V15_DATABASE_VALUE
         );
         assert_eq!(
             GenerationDigestVersion::from_database_value(DIGEST_V1_DATABASE_VALUE),
@@ -743,6 +747,10 @@ mod tests {
         assert_eq!(
             GenerationDigestVersion::from_database_value(DIGEST_V14_DATABASE_VALUE),
             Ok(GenerationDigestVersion::V14)
+        );
+        assert_eq!(
+            GenerationDigestVersion::from_database_value(DIGEST_V15_DATABASE_VALUE),
+            Ok(GenerationDigestVersion::V15)
         );
         assert!(
             GenerationDigestVersion::from_database_value(UNKNOWN_DIGEST_DATABASE_VALUE).is_err()

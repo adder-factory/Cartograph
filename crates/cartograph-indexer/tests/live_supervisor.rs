@@ -125,7 +125,7 @@ const ABORT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(100);
 const ISOLATED_ABORT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const ISOLATED_ABORT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(250);
 const ABORT_PROGRESS_TIMEOUT: Duration = Duration::from_millis(400);
-const BLOCKED_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_secs(1);
+const BLOCKED_DATABASE_PROGRESS_TIMEOUT: Duration = Duration::from_secs(1);
 const ABORT_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 const ABORT_COPY_TIMEOUT: Duration = Duration::from_millis(100);
 const ABORT_RESULT_BOUND: Duration = Duration::from_secs(2);
@@ -167,10 +167,10 @@ const SPILL_PARSE_BATCH_FILES: usize = 64;
 const SPILL_ITEM_DEADLINE: Duration = Duration::from_millis(500);
 const SPILL_DELAY_SECONDS: &str = "2.0";
 const NATIVE_PARSER_ONLY_FILE_COUNT: usize = 6;
-const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 16;
+const NATIVE_ADMITTED_FAMILY_FILE_COUNT: usize = 18;
 const NATIVE_GENERIC_FAMILY_FILE_COUNT: usize = 28;
 const NATIVE_CUSTOM_FAMILY_FILE_COUNT: usize = 13;
-const NATIVE_EXPECTED_FILES: u64 = 75;
+const NATIVE_EXPECTED_FILES: u64 = 77;
 const NATIVE_EXPECTED_MINIMUM_SYMBOLS: u64 = 60;
 const NATIVE_EXPECTED_MINIMUM_RESOLVED_REFERENCES: u64 = 3;
 const NATIVE_SEARCH_LIMIT: u16 = 10;
@@ -214,6 +214,12 @@ const NATIVE_PARSER_ONLY_FIXTURES: [(&str, &str, &str, &str); NATIVE_PARSER_ONLY
 ];
 const NATIVE_ADMITTED_FAMILY_FIXTURES: [(&str, &str, &str, &str);
     NATIVE_ADMITTED_FAMILY_FILE_COUNT] = [
+    (
+        "native/adabeacon.adb",
+        "package body AdaBeacon is\n   function AdaBeaconValue return Integer is\n   begin\n      return 1;\n   end AdaBeaconValue;\nend AdaBeacon;\n",
+        "ada",
+        "adabeaconvalue",
+    ),
     (
         "native/cbeacon.c",
         "int cbeacon(void) { return 1; }\n",
@@ -309,6 +315,12 @@ const NATIVE_ADMITTED_FAMILY_FIXTURES: [(&str, &str, &str, &str);
         "class GroovyBeacon { void runBeacon() {} }\n",
         "groovy",
         "GroovyBeacon",
+    ),
+    (
+        "native/vhdlbeacon.vhd",
+        "package vhdlbeacon is\n   function VhdlBeaconValue return integer;\nend package;\npackage body vhdlbeacon is\n   function VhdlBeaconValue return integer is\n   begin\n      return 1;\n   end function;\nend package body;\n",
+        "vhdl",
+        "vhdlbeaconvalue",
     ),
 ];
 const NATIVE_GENERIC_FAMILY_FIXTURES: [(&str, &str, &str, &str); NATIVE_GENERIC_FAMILY_FILE_COUNT] = [
@@ -3152,7 +3164,7 @@ async fn blocked_cleanup_is_aborted_reaped_and_leaves_no_active_query() {
     let generation_id = staged.generation_id().clone();
     let target = target(&fixture.project, &generation_id);
     let (release_work, work_release) = oneshot::channel();
-    let supervisor = IndexerSupervisor::new(fixture.database.clone(), abort_config());
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), blocked_cleanup_config());
     let run = supervisor.run(request(target.clone()), move |_| async move {
         if work_release.await.is_err() {
             return Err(PipelineFailure::new(PipelineStage::Read));
@@ -3480,11 +3492,11 @@ fn transient_heartbeat_config() -> SupervisorConfig {
         .with_copy_timeout(STANDARD_COPY_TIMEOUT)
 }
 
-fn abort_config() -> SupervisorConfig {
+fn blocked_cleanup_config() -> SupervisorConfig {
     SupervisorConfig::new(ABORT_OPERATION_TIMEOUT)
         .with_heartbeat_interval(ISOLATED_ABORT_HEARTBEAT_INTERVAL)
         .with_heartbeat_timeout(ISOLATED_ABORT_HEARTBEAT_TIMEOUT)
-        .with_progress_timeout(ABORT_PROGRESS_TIMEOUT)
+        .with_progress_timeout(BLOCKED_DATABASE_PROGRESS_TIMEOUT)
         .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
         .with_copy_timeout(ABORT_COPY_TIMEOUT)
 }
@@ -3493,7 +3505,7 @@ fn blocked_copy_config() -> SupervisorConfig {
     SupervisorConfig::new(ABORT_OPERATION_TIMEOUT)
         .with_heartbeat_interval(ISOLATED_ABORT_HEARTBEAT_INTERVAL)
         .with_heartbeat_timeout(ISOLATED_ABORT_HEARTBEAT_TIMEOUT)
-        .with_progress_timeout(BLOCKED_COPY_PROGRESS_TIMEOUT)
+        .with_progress_timeout(BLOCKED_DATABASE_PROGRESS_TIMEOUT)
         .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
         .with_copy_timeout(ABORT_COPY_TIMEOUT)
 }

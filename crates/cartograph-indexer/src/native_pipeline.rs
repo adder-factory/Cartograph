@@ -5052,6 +5052,8 @@ struct ModulePathIndex {
     exact: ModulePathMap,
     stem: ModulePathMap,
     directory_index: ModulePathMap,
+    declared_units: ModulePathMap,
+    implemented_units: ModulePathMap,
     files: FileResolutionContextMap,
     rust_packages: RustPackageMap,
     typescript_aliases: TypeScriptAliasIndex,
@@ -10009,6 +10011,15 @@ where
             continue;
         }
         let parent_symbol_id = index.parents.get(&symbol.input.symbol_id).cloned();
+        index_compilation_unit(
+            &mut index.modules,
+            CompilationUnitIndexInput {
+                language: file.file.language.as_str(),
+                symbol,
+                top_level: parent_symbol_id.is_none(),
+            },
+            budget,
+        )?;
         push_candidate(
             &mut index.candidates,
             ResolutionCandidateInsertion {
@@ -11194,6 +11205,44 @@ fn push_module_path(
     entries.try_reserve_exact(1).map_err(|_| StageItemFailure)?;
     entries.push(file_id.clone());
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct CompilationUnitIndexInput<'a> {
+    language: &'a str,
+    symbol: &'a NativeSymbolFacts,
+    top_level: bool,
+}
+
+fn index_compilation_unit(
+    modules: &mut ModulePathIndex,
+    input: CompilationUnitIndexInput<'_>,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    if !input.top_level
+        || !matches!(input.language, "ada" | "vhdl")
+        || !matches!(
+            input.symbol.kind,
+            SymbolKind::Module | SymbolKind::Interface
+        )
+    {
+        return Ok(());
+    }
+    let paths = if input.symbol.implementation.declaration_only
+        || input.symbol.kind == SymbolKind::Interface
+    {
+        &mut modules.declared_units
+    } else {
+        &mut modules.implemented_units
+    };
+    push_module_path(
+        paths,
+        ModulePathInsertion {
+            key: &input.symbol.name,
+            file_id: &input.symbol.input.file_id,
+        },
+        budget,
+    )
 }
 
 fn push_candidate(
@@ -13185,28 +13234,60 @@ fn import_binding_is_project_local(
     reference: &ResolutionRequest<'_>,
 ) -> bool {
     let specifier = binding.module_specifier.as_str();
-    matches!(binding.kind, ImportBindingKind::IncludeQuoted)
+    import_specifier_is_explicitly_local(binding.kind, specifier)
+        || language_import_is_project_local(index, specifier, reference)
+}
+
+fn import_specifier_is_explicitly_local(kind: ImportBindingKind, specifier: &str) -> bool {
+    matches!(kind, ImportBindingKind::IncludeQuoted)
         || matches!(specifier, "." | "..")
         || specifier.starts_with("./")
         || specifier.starts_with("../")
-        || reference.language == SourceLanguage::Rust.as_str()
-            && rust_use_binding_is_hypothesis(specifier)
-        || SourceLanguage::from_stable_str(reference.language).is_some_and(|language| {
-            language.is_game_scripting() && game_script_module_specifier_is_local(specifier)
-        })
-        || matches!(reference.language, "slang" | "wesl")
-        || typescript_alias_matches(
-            &index.modules,
-            TypeScriptAliasMatch {
-                importing_path: reference.file_path,
-                specifier,
-                importing_language: reference.language,
-            },
-        )
-        || (javascript_family_name(reference.language)
-            && (specifier.starts_with("@/")
-                || specifier.starts_with("~/")
-                || specifier.starts_with("$lib/")))
+}
+
+fn language_import_is_project_local(
+    index: &ResolutionIndex,
+    specifier: &str,
+    reference: &ResolutionRequest<'_>,
+) -> bool {
+    if reference.language == SourceLanguage::Rust.as_str()
+        && rust_use_binding_is_hypothesis(specifier)
+    {
+        return true;
+    }
+    if SourceLanguage::from_stable_str(reference.language).is_some_and(|language| {
+        language.is_game_scripting() && game_script_module_specifier_is_local(specifier)
+    }) {
+        return true;
+    }
+    if matches!(reference.language, "slang" | "wesl") {
+        return true;
+    }
+    let module_request = ModuleResolutionRequest {
+        importing_path: reference.file_path,
+        specifier,
+        importing_language: reference.language,
+    };
+    if matches!(reference.language, "ada" | "vhdl")
+        && resolve_module_file(&index.modules, module_request).is_some()
+    {
+        return true;
+    }
+    if typescript_alias_matches(
+        &index.modules,
+        TypeScriptAliasMatch {
+            importing_path: reference.file_path,
+            specifier,
+            importing_language: reference.language,
+        },
+    ) {
+        return true;
+    }
+    javascript_family_name(reference.language) && javascript_alias_specifier(specifier)
+}
+
+fn javascript_alias_specifier(specifier: &str) -> bool {
+    specifier.starts_with("@/") || specifier.starts_with("~/") || specifier.starts_with("$lib/")
 }
 
 fn matched_import_binding<'binding, Cancel>(
@@ -13307,7 +13388,7 @@ fn runtime_binding_target_name<'a>(
                 .map(|_| binding.imported_name.as_str())
         }
         ImportBindingKind::Namespace => {
-            if language == SourceLanguage::Rust.as_str() && binding.local_name == "*" {
+            if matches!(language, "ada" | "vhdl" | "rust") && binding.local_name == "*" {
                 return Some(reference_name);
             }
             if binding.local_name == reference_name {
@@ -13347,6 +13428,11 @@ fn resolve_module_file<'a>(
     modules: &'a ModulePathIndex,
     request: ModuleResolutionRequest<'_>,
 ) -> Option<&'a FileId> {
+    match resolve_compilation_unit_module(modules, request) {
+        ModuleResolutionAttempt::Resolved(file_id) => return Some(file_id),
+        ModuleResolutionAttempt::Rejected => return None,
+        ModuleResolutionAttempt::NotMatched => {}
+    }
     if request.importing_language == SourceLanguage::Slang.as_str()
         && let Some(normalized) = normalize_root_module_path(request.specifier)
         && let Some(file_id) =
@@ -13394,17 +13480,58 @@ fn resolve_module_file<'a>(
         TypeScriptAliasModuleResolution::Unresolved => return None,
         TypeScriptAliasModuleResolution::NotMatched => {}
     }
-    for candidate in framework_alias_module_paths(request.importing_language, request.specifier) {
-        let Some(candidate) = candidate else {
-            continue;
-        };
-        if let Some(file_id) =
-            resolve_normalized_module_file(modules, &candidate, request.importing_language)
-        {
-            return Some(file_id);
-        }
+    resolve_framework_alias_file(modules, request)
+}
+
+enum ModuleResolutionAttempt<'a> {
+    NotMatched,
+    Resolved(&'a FileId),
+    Rejected,
+}
+
+fn resolve_compilation_unit_module<'a>(
+    modules: &'a ModulePathIndex,
+    request: ModuleResolutionRequest<'_>,
+) -> ModuleResolutionAttempt<'a> {
+    if !matches!(request.importing_language, "ada" | "vhdl") {
+        return ModuleResolutionAttempt::NotMatched;
     }
-    None
+    match compilation_unit_file(modules, request.specifier, request.importing_language) {
+        ModuleFileMatch::Unique(file_id) => ModuleResolutionAttempt::Resolved(file_id),
+        ModuleFileMatch::Ambiguous => ModuleResolutionAttempt::Rejected,
+        ModuleFileMatch::Missing => ModuleResolutionAttempt::NotMatched,
+    }
+}
+
+fn resolve_framework_alias_file<'a>(
+    modules: &'a ModulePathIndex,
+    request: ModuleResolutionRequest<'_>,
+) -> Option<&'a FileId> {
+    framework_alias_module_paths(request.importing_language, request.specifier)
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| {
+            resolve_normalized_module_file(modules, &candidate, request.importing_language)
+        })
+}
+
+fn compilation_unit_file<'a>(
+    modules: &'a ModulePathIndex,
+    unit: &str,
+    importing_language: &str,
+) -> ModuleFileMatch<'a> {
+    match module_file_match(
+        modules.declared_units.get(unit),
+        &modules.files,
+        importing_language,
+    ) {
+        ModuleFileMatch::Missing => module_file_match(
+            modules.implemented_units.get(unit),
+            &modules.files,
+            importing_language,
+        ),
+        selected => selected,
+    }
 }
 
 fn resolve_typescript_alias_module<'a>(
@@ -15493,21 +15620,21 @@ mod tests {
     const STRUCTURAL_TEST_EVIDENCE: NativeEvidencePolicy = NativeEvidencePolicy::STRUCTURAL;
     const PARSER_ONLY_FILE_COUNT: usize = 6;
     const EXPECTED_PARSER_ONLY_DIGEST: &str =
-        "e97a459292d8fff224297a47ddfa7c6072e567b8f12ca334a9820c69b8a89c9d";
+        "4df59245deee1ac806287b6abe07f890a0a8c20a785ac1bc8e8a2293d4c9a968";
     const EXPECTED_PARSER_ONLY_PROJECTION: (usize, usize, usize, usize, usize) = (6, 6, 0, 0, 6);
     const ADMITTED_FAMILY_FILE_COUNT: usize = 14;
     const EXPECTED_ADMITTED_FAMILY_DIGEST: &str =
-        "83e213545481f29a7916e30645aae45c9cdb4c2e78ceeb1cfa2892873197ef03";
+        "aba2fcc0693d156e83e81760df1b31bb3404cbce7442a5da9224a8721bc3fa19";
     const EXPECTED_ADMITTED_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (14, 33, 19, 6, 33);
     const GENERIC_FAMILY_FILE_COUNT: usize = 28;
     const EXPECTED_GENERIC_FAMILY_DIGEST: &str =
-        "5f89d054f8461c9b60d422877e801df0847959f2d4a7920fd541360cae12c54b";
+        "05ce412e8859e31831249ab8e784a4c014c5783b36fa6f5a7963aa2f535e7994";
     const EXPECTED_GENERIC_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (28, 220, 213, 64, 220);
     const CUSTOM_FAMILY_FILE_COUNT: usize = 13;
     const EXPECTED_CUSTOM_FAMILY_DIGEST: &str =
-        "f9d1495c5d433196e081cbfcb87a43fa14f6a1d7e3d664899fe7da1c626be52c";
+        "128028945772ba1d9b0470480f3d980fd5c02f56ca4aa68a4f2e8908583a7b5a";
     const EXPECTED_CUSTOM_FAMILY_PROJECTION: (usize, usize, usize, usize, usize) =
         (13, 49, 44, 32, 49);
     const CUSTOM_FAMILY_FIXTURES: [(&str, &str, SourceLanguage); CUSTOM_FAMILY_FILE_COUNT] = [
@@ -19836,6 +19963,140 @@ export function secondClone(value: number) {
             );
             assert_eq!(reference.resolution_provenance, MODULE_IMPORT_PROVENANCE);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ada_and_vhdl_units_resolve_by_declared_name_not_filename_guessing() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create Ada/VHDL resolver fixture: {error}"));
+        for (path, source) in [
+            (
+                "ada/project-math.ads",
+                "package Project.Math is\n   function Normalize (Value : Integer) return Integer;\nend Project.Math;\n",
+            ),
+            (
+                "ada/project-math.adb",
+                "package body Project.Math is\n   function Normalize (Value : Integer) return Integer is\n   begin\n      return Value;\n   end Normalize;\nend Project.Math;\n",
+            ),
+            (
+                "ada/consumer.adb",
+                "with Project.Math;\nuse Project.Math;\npackage body Consumer is\n   function Run (Value : Integer) return Integer is\n   begin\n      return Normalize (Value);\n   end Run;\nend Consumer;\n",
+            ),
+            (
+                "rtl/unrelated_filename.vhd",
+                "package math_pkg is\n   function Normalize (Value : integer) return integer;\nend package;\npackage body math_pkg is\n   function Normalize (Value : integer) return integer is\n   begin\n      return Value;\n   end function;\nend package body;\n",
+            ),
+            (
+                "rtl/consumer.vhd",
+                "use work.math_pkg.all;\nentity Consumer is\nend entity;\narchitecture rtl of Consumer is\n   function Compute (Value : integer) return integer is\n   begin\n      return Normalize(Value);\n   end function;\nbegin\nend architecture;\n",
+            ),
+        ] {
+            let target = directory.path().join(path);
+            fs::create_dir_all(
+                target
+                    .parent()
+                    .unwrap_or_else(|| panic!("Ada/VHDL fixture had no parent: {path}")),
+            )
+            .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
+            fs::write(target, source)
+                .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+        }
+
+        let serial = build(directory.path(), SERIAL_WORKERS).await;
+        let parallel = build(directory.path(), PARALLEL_WORKERS).await;
+        assert_eq!(serial.facts().digest(), parallel.facts().digest());
+        let facts = ModuleResolverFacts {
+            facts: serial.facts(),
+        };
+
+        let ada_run = facts.symbol("ada/consumer.adb", "consumer::run");
+        let ada_declaration = facts.symbol("ada/project-math.ads", "project.math::normalize");
+        let ada_call = facts.reference(&ada_run, "normalize");
+        let ada_target = ada_call
+            .target_symbol_id
+            .as_ref()
+            .and_then(|target| {
+                serial
+                    .facts()
+                    .symbols()
+                    .iter()
+                    .find(|symbol| &symbol.symbol_id == target)
+            })
+            .map(|symbol| {
+                let path = serial
+                    .facts()
+                    .files()
+                    .iter()
+                    .find(|file| file.file_id == symbol.file_id)
+                    .map_or("<missing>", |file| file.normalized_path.as_str());
+                (
+                    path,
+                    symbol.qualified_name.as_str(),
+                    symbol.declaration_only,
+                )
+            });
+        assert_eq!(
+            ada_call.target_symbol_id.as_ref(),
+            Some(&ada_declaration),
+            "unexpected Ada target: {ada_target:?}"
+        );
+        assert_eq!(ada_call.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+
+        let vhdl_compute = facts.symbol("rtl/consumer.vhd", "rtl::compute");
+        let vhdl_call = facts.reference(&vhdl_compute, "normalize");
+        let vhdl_target = vhdl_call
+            .target_symbol_id
+            .as_ref()
+            .unwrap_or_else(|| panic!("VHDL package call did not resolve"));
+        assert!(serial.facts().symbols().iter().any(|symbol| {
+            &symbol.symbol_id == vhdl_target
+                && symbol.qualified_name == "math_pkg::normalize"
+                && symbol.symbol_kind == SymbolKind::Function.as_str()
+                && !symbol.declaration_only
+        }));
+        assert_eq!(vhdl_call.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ambiguous_vhdl_unit_names_fail_closed() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create VHDL ambiguity fixture: {error}"));
+        for (path, source) in [
+            (
+                "rtl/first.vhd",
+                "package duplicate_pkg is\n   function Choose return integer;\nend package;\n",
+            ),
+            (
+                "other/second.vhd",
+                "package duplicate_pkg is\n   function Choose return integer;\nend package;\n",
+            ),
+            (
+                "rtl/consumer.vhd",
+                "use work.duplicate_pkg.all;\nentity Consumer is end entity;\narchitecture rtl of Consumer is\n   function Run return integer is\n   begin\n      return Choose;\n   end function;\nbegin\nend architecture;\n",
+            ),
+        ] {
+            let target = directory.path().join(path);
+            fs::create_dir_all(
+                target
+                    .parent()
+                    .unwrap_or_else(|| panic!("VHDL ambiguity fixture had no parent: {path}")),
+            )
+            .unwrap_or_else(|error| panic!("could not create {path} parent: {error}"));
+            fs::write(target, source)
+                .unwrap_or_else(|error| panic!("could not write {path}: {error}"));
+        }
+        let generation = build(directory.path(), PARALLEL_WORKERS).await;
+        let import = generation
+            .facts()
+            .references()
+            .iter()
+            .find(|reference| {
+                reference.reference_kind == ReferenceKind::Imports.as_str()
+                    && reference.reference_name == "duplicate_pkg"
+            })
+            .unwrap_or_else(|| panic!("missing ambiguous VHDL import"));
+        assert!(import.target_symbol_id.is_none());
+        assert_eq!(import.resolution_provenance, UNRESOLVED_IMPORT_PROVENANCE);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1710,6 +1710,85 @@ fn score(a: u16, b: u16, values: &[f32], halves: &[f16]) -> f32 {
     assert_eq!(identities.len(), file.numerical_sites.len());
 }
 
+#[test]
+fn rust_numerical_sites_distinguish_defensive_guards_from_unresolved_hazards() {
+    let file = extract(
+        "src/guarded_numerics.rs",
+        r"
+fn guarded(
+    raw: f64,
+    amplitude: f64,
+    delta: [f64; 3],
+    half_extents: [f64; 3],
+    height: f64,
+) -> (f64, f64, f64, bool) {
+    let dot = raw.clamp(-1.0, 1.0);
+    let angle = acos(dot);
+    let sine = (raw / 2.0).clamp(-1.0, 1.0);
+    let theta = asin(sine);
+    let decibels = 20.0 * log10(amplitude.max(1e-6));
+    let inside = delta[0].abs() <= half_extents[0]
+        && delta[1].abs() <= height * 0.5;
+    (angle, theta, decibels, inside)
+}
+
+fn unresolved(left: f64, right: f64) -> (f64, f64, bool) {
+    let angle = acos(left);
+    let selected = left.max(right);
+    let close = (left - right).abs() <= f64::EPSILON;
+    (angle, selected, close)
+}
+",
+    );
+    let guarded = symbol(&file, "guarded");
+    let guarded_sites = file
+        .numerical_sites
+        .iter()
+        .filter(|site| site.owner.as_ref() == Some(&guarded.id))
+        .collect::<Vec<_>>();
+    for false_positive in [
+        "absolute_only_tolerance",
+        "domain_precondition_unknown",
+        "nan_ordering_unknown",
+    ] {
+        assert!(
+            guarded_sites
+                .iter()
+                .all(|site| site.hazard != false_positive),
+            "guarded fixture retained {false_positive}: {guarded_sites:?}"
+        );
+    }
+    assert!(guarded_sites.iter().any(|site| {
+        site.operation == "magnitude_bound_comparison" && site.hazard == "none_observed"
+    }));
+    assert!(guarded_sites.iter().any(|site| {
+        site.operation == "domain_sensitive_function" && site.hazard == "none_observed"
+    }));
+    assert!(
+        guarded_sites.iter().any(|site| {
+            site.operation == "ordering_selection" && site.hazard == "none_observed"
+        })
+    );
+
+    let unresolved = symbol(&file, "unresolved");
+    let unresolved_hazards = file
+        .numerical_sites
+        .iter()
+        .filter(|site| site.owner.as_ref() == Some(&unresolved.id))
+        .map(|site| site.hazard.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "absolute_only_tolerance",
+        "domain_precondition_unknown",
+        "nan_ordering_unknown",
+    ] {
+        assert!(
+            unresolved_hazards.contains(&expected),
+            "unguarded fixture lost {expected}: {unresolved_hazards:?}"
+        );
+    }
+}
+
 fn extract(path: &str, source: &str) -> ExtractedFile {
     let limits = match SourceLimits::new(SOURCE_LIMIT_BYTES) {
         Ok(limits) => limits,

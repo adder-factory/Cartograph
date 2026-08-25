@@ -481,6 +481,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "arborium-vhdl"
+version = "2.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "154198688a18e0bf3f54749b498ba5504f65c7bca12b1d845f264362f875bcd0"
+dependencies = [
+ "arborium-sysroot",
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "arborium-yaml"
 version = "2.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -582,7 +593,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cartograph-agent"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -613,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-cli"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "blake3",
  "cartograph-agent",
@@ -643,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-config"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "secrecy",
  "thiserror",
@@ -652,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-db"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -677,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-domain"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "blake3",
  "serde",
@@ -686,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-extract"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "arborium-bash",
  "arborium-c",
@@ -727,6 +738,7 @@ dependencies = [
  "arborium-swift",
  "arborium-vb",
  "arborium-verilog",
+ "arborium-vhdl",
  "arborium-yaml",
  "blake3",
  "cartograph-domain",
@@ -739,6 +751,7 @@ dependencies = [
  "toml_edit",
  "tree-sitter",
  "tree-sitter-abap-sqry",
+ "tree-sitter-ada",
  "tree-sitter-arkts",
  "tree-sitter-astro-next",
  "tree-sitter-cuda",
@@ -760,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-indexer"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "blake3",
  "cartograph-config",
@@ -781,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-llm"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "blake3",
  "cartograph-domain",
@@ -802,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-mcp"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -811,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-scip"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "blake3",
  "cartograph-db",
@@ -823,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-search"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "cartograph-db",
  "cartograph-domain",
@@ -835,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "cartograph-test-support"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "sqlx-core",
  "sqlx-postgres",
@@ -900,7 +913,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -917,9 +930,9 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "memchr",
@@ -1034,7 +1047,7 @@ checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1173,7 +1186,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2125,7 +2138,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2329,9 +2342,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2388,7 +2401,7 @@ checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2440,7 +2453,7 @@ checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2614,6 +2627,16 @@ dependencies = [
  "cc",
  "sqry-tree-sitter-support",
  "tree-sitter",
+]
+
+[[package]]
+name = "tree-sitter-ada"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d9fcdd64359c98fcc99d72f6d3d6ca5d6d76ce325ac39430b1d283a0fb61ca1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -3229,7 +3252,7 @@ checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]

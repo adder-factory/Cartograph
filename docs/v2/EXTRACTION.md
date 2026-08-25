@@ -10,12 +10,12 @@ input. It does not depend on PostgreSQL, MCP, or an LLM.
 The authoritative, exhaustively tested manifest is
 `cartograph_domain::SourceLanguage::ALL`: all 73 v1.1.33 modes and their 163
 extensions, plus additive `.pyi`, native TOML, 52 dedicated textual
-game-scripting modes, and the WGSL, Metal, Slang, and WESL shader additions:
-130 production-admitted modes in total. The
+game-scripting modes, the WGSL, Metal, Slang, and WESL shader additions, and
+the Ada/SPARK and VHDL additions: 132 production-admitted modes in total. The
 implementation is divided into:
 
 - JavaScript/TypeScript, Rust/Python/Go, query-tag, C-family, shell, managed,
-  JVM-dynamic, shader, and conservative grammar-backed structural walkers;
+  JVM-dynamic, shader, Ada/VHDL, and conservative grammar-backed structural walkers;
 - parser-only structural file documents for CSS, embedded templates, JSDoc,
   JSON/Jupyter, and regex sources;
 - bounded custom scanners for Aura, BG3 Anubis/resources/stats, Liquid, Osiris,
@@ -83,7 +83,8 @@ path/content-digest pairs in deterministic order. The encoding lives in
 source context, indexing, and v1 import. An exact set mismatch fails closed.
 
 Generation freshness additionally requires the current native generation-digest
-contract. Contract V14 fences first-class Slang/WESL module semantics and
+contract. Contract V15 fences Ada/VHDL unit resolution and guarded numerical
+precision; contract V14 fenced first-class Slang/WESL module semantics and
 JavaScript static dynamic-dispatch evidence; contract V13 fenced named
 TypeScript and JavaScript construction targets; contract V12 fenced stable
 bounded Go and Python anonymous call-target
@@ -179,10 +180,15 @@ Callable signatures are normalized to exclude literal-bearing bodies/values.
 Search text is intentionally useful for code identifiers without becoming a
 secret or source-literal dump.
 
-The first numerical contract is `rust_ast_v1`. It detects arithmetic before a
-widening cast, absolute-only tolerance comparisons, low-precision reductions,
-domain-sensitive functions, NaN-sensitive ordering, and narrowing before
-accumulation. These are bounded static heuristics. The persisted expression
+The numerical contract is `rust_ast_v1`. It detects arithmetic before a
+widening cast, epsilon-like absolute-only tolerance comparisons, low-precision
+reductions, unguarded domain-sensitive functions, NaN-sensitive ordering, and
+narrowing before accumulation. General `abs(x) <= bound` shapes are retained as
+non-hazard magnitude-bound evidence rather than being mislabeled as tolerance.
+Finite numeric `clamp`/`min`/`max` guards and direct or same-block immutable
+clamp/floor inputs to `asin`, `acos`, log, and square-root calls remain visible
+with explicit unknowns but use `none_observed`; unguarded forms remain hazards.
+These are bounded static heuristics. The persisted expression
 identity is a source-version-fenced digest; source expressions and literal
 values are not persisted. Runtime observations and formal proof are separate
 future adapters and remain explicitly `not_configured` in current status/tool

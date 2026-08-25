@@ -35,7 +35,7 @@ const CORPUS_FINGERPRINT_DOMAIN: &[u8] = b"cartograph-v2-native-real-corpus-v1";
 const EXPECTED_CORPUS_FINGERPRINT: &str =
     "ab91088c482ed36d31759382283342654ce6958be4e601429b8181da531c5fc1";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "ef4d8e8a30bd898bf1d77dd44792e48d0aa7061b943a4ae6951c94f9890b6e5c";
+    "f5873aaa15aae825807ea72832d11457492601c3d52bd0b0a3bd6f2ae17e72ad";
 const EXPECTED_BM25_DOCUMENT_IDS: [&str; 5] = [
     "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
     "78f1eb97-24b2-8a80-ad44-6dd679456592",

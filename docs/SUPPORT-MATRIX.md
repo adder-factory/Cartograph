@@ -1,10 +1,11 @@
 # Support Matrix
 
-Last implementation audit: 2026-08-23 (`v2.1.26`).
+Last implementation audit: 2026-08-25 (`v2.1.27`).
 
 Cartograph v2 supports all 73 v1.1.33 language modes, native TOML, 52
 dedicated textual game-scripting modes, the WGSL and Metal shader modes added
-in v2.1.12, and first-class Slang and WESL added in v2.1.15: 130 modes total.
+in v2.1.12, first-class Slang and WESL added in v2.1.15, and Ada/SPARK and VHDL
+added in v2.1.27: 132 modes total.
 The source of truth is
 `cartograph_domain::SourceLanguage::ALL`; native
 extractor strategy lives in `crates/cartograph-extract/src/language.rs`, and
@@ -26,6 +27,7 @@ does not yet extract language-specific symbols from that grammar.
 | Language mode | Extensions / scope | Extractor path |
 |---|---|---|
 | ABAP | `.abap` | Tree-sitter |
+| Ada / SPARK | `.adb`, `.ads`, `.ada`; SPARK uses the Ada source mode | Tree-sitter with case-insensitive unit, `with`/`use`, declaration, and call extraction |
 | Apex | `.cls`, `.trigger` | Tree-sitter |
 | ArkTS | `.ets` | Tree-sitter |
 | Astro | `.astro` | Tree-sitter plus frontmatter/template extractor |
@@ -96,6 +98,7 @@ does not yet extract language-specific symbols from that grammar.
 | Visual Basic 6 | `.bas`, `.frm`, `.ctl`, `.dob`, `.dsr`, `.pag`, `.vbp`, VB6 `.cls` by content | Custom extractor |
 | VB.NET | `.vb` | Tree-sitter |
 | Verilog / SystemVerilog | `.v`, `.vh`, `.sv`, `.svh` | Tree-sitter tags query |
+| VHDL | `.vhd`, `.vhdl` | Tree-sitter with case-insensitive entity/package/architecture, `library`/`use`, declaration, call, and instantiation extraction |
 | Visualforce | `.page`, `.component` | Custom extractor |
 | Vue | `.vue` | Custom extractor |
 | WESL | `.wesl` | WGSL grammar plus bounded WESL import/module extraction |

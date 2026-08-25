@@ -354,8 +354,8 @@ semantics, read the [v2 architecture](docs/v2/ARCHITECTURE.md).
 
 ## Language support
 
-The stable registry production-admits 130 language modes and the complete 163
-v1 extension manifest, plus additive Python `.pyi` support. Sixty-four modes use
+The stable registry production-admits 132 language modes and the complete 163
+v1 extension manifest, plus additive Python `.pyi`, Ada, and VHDL support. Sixty-six modes use
 pinned native tree-sitter grammars; 66 mixed-markup, configuration,
 domain-specific, and game-scripting modes use bounded Rust structural scanners.
 

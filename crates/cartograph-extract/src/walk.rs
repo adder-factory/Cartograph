@@ -17,6 +17,7 @@ use crate::{
     identity::SymbolIdentity,
 };
 
+mod ada_family;
 mod c_family;
 mod declarations;
 mod dynamic_dispatch;
@@ -679,6 +680,7 @@ pub(super) struct PendingReference<'tree> {
 
 #[derive(Clone, Copy)]
 enum ExtractionFamily {
+    Ada,
     Shader,
     Shell,
     C,
@@ -699,6 +701,7 @@ const SHELL_LANGUAGES: &[SourceLanguage] = &[
     SourceLanguage::PowerShell,
     SourceLanguage::Zsh,
 ];
+const ADA_LANGUAGES: &[SourceLanguage] = &[SourceLanguage::Ada, SourceLanguage::Vhdl];
 const C_LANGUAGES: &[SourceLanguage] = &[
     SourceLanguage::C,
     SourceLanguage::Cpp,
@@ -766,6 +769,13 @@ struct FamilySlice {
 /// Structural family slices for the walker-driven language families.
 const fn family_slice_structural(family: ExtractionFamily) -> Option<FamilySlice> {
     let slice = match family {
+        ExtractionFamily::Ada => FamilySlice {
+            visit_declaration: ada_family::visit_declaration,
+            visit_usage: |builder, node, depth| {
+                ada_family::capture_usage(builder, node)?;
+                builder.visit_named_children(node, depth)
+            },
+        },
         ExtractionFamily::Shader => FamilySlice {
             visit_declaration: shader_family::visit_declaration,
             visit_usage: |builder, node, depth| {
@@ -857,7 +867,9 @@ const fn family_slice(family: ExtractionFamily) -> Option<FamilySlice> {
 }
 
 fn extraction_family(language: SourceLanguage) -> ExtractionFamily {
-    if SHELL_LANGUAGES.contains(&language) {
+    if ADA_LANGUAGES.contains(&language) {
+        ExtractionFamily::Ada
+    } else if SHELL_LANGUAGES.contains(&language) {
         ExtractionFamily::Shell
     } else if C_LANGUAGES.contains(&language) {
         ExtractionFamily::C

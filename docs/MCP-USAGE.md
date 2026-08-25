@@ -1,6 +1,6 @@
 # MCP usage for coding agents
 
-Last release audit: 2026-08-23 (`v2.1.26`).
+Last release audit: 2026-08-25 (`v2.1.27`).
 
 Cartograph v2 exposes a compact native stdio MCP server. Its core returns
 bounded, generation-scoped evidence and never makes the database a source of
@@ -179,8 +179,11 @@ the exact confirmed refresh action without starting detector computation.
 `cartograph_status` preserves the rest of its payload in that state and reports
 an empty inline rollup with `biomarkerRollupState: not_computed`. The
 `cartograph_admin` `biomarkers-refresh` action is dry-run-first; execution
-requires `dryRun: false`, `confirm: true`, and optionally accepts a bounded
-`timeoutMs` from 1 through 600000.
+requires `dryRun: false`, `confirm: true`, and optionally accepts
+`databaseQueryTimeoutMs` from 1 through 1800000 as the exact inner PostgreSQL
+statement timeout. `timeoutMs` remains an exclusive legacy alias. Results name
+the effective timeout and its source; the MCP client deadline must be longer
+than that database deadline.
 
 `cartograph_dead_code` materializes its deterministic, exempted
 `maxCandidates` orphan window before bounded edge/source enrichment. A database

@@ -24,6 +24,8 @@ pub enum ExtractionStrategy {
     /// WGSL shader extraction with stage-typed entry points, bindings, and
     /// `naga_oil` module imports.
     ShaderFamily,
+    /// Ada and VHDL declarations, case-insensitive references, and compilation imports.
+    AdaFamily,
     /// Grammar-backed conservative structural extraction for the remaining v1 language modes.
     GenericStructural,
     /// Bounded native scanners for custom, mixed-markup, and domain-specific v1 modes.
@@ -45,6 +47,7 @@ impl ExtractionStrategy {
                 | Self::ManagedFamily
                 | Self::JvmDynamicFamily
                 | Self::ShaderFamily
+                | Self::AdaFamily
                 | Self::GenericStructural
                 | Self::CustomStructural
         )
@@ -94,42 +97,56 @@ const fn strategy_for_language(language: SourceLanguage) -> ExtractionStrategy {
     if is_game_scripting_language(language) {
         return ExtractionStrategy::CustomStructural;
     }
+    match grammar_strategy(language) {
+        Some(strategy) => strategy,
+        None => fallback_strategy(language),
+    }
+}
+
+const fn grammar_strategy(language: SourceLanguage) -> Option<ExtractionStrategy> {
     match language {
         SourceLanguage::TypeScript
         | SourceLanguage::Tsx
         | SourceLanguage::JavaScript
-        | SourceLanguage::Jsx => ExtractionStrategy::JavaScriptFamily,
+        | SourceLanguage::Jsx => Some(ExtractionStrategy::JavaScriptFamily),
         SourceLanguage::Rust | SourceLanguage::Python | SourceLanguage::Go => {
-            ExtractionStrategy::PolyglotStructural
+            Some(ExtractionStrategy::PolyglotStructural)
         }
         SourceLanguage::Css
         | SourceLanguage::EmbeddedTemplate
         | SourceLanguage::JsDoc
         | SourceLanguage::Json
         | SourceLanguage::Jupyter
-        | SourceLanguage::Regex => ExtractionStrategy::ParserOnly,
+        | SourceLanguage::Regex => Some(ExtractionStrategy::ParserOnly),
         SourceLanguage::Elixir
         | SourceLanguage::Haskell
         | SourceLanguage::Julia
         | SourceLanguage::Ocaml
         | SourceLanguage::OcamlInterface
-        | SourceLanguage::Verilog => ExtractionStrategy::TagsQuery,
+        | SourceLanguage::Verilog => Some(ExtractionStrategy::TagsQuery),
         SourceLanguage::C
         | SourceLanguage::Cpp
         | SourceLanguage::Cuda
         | SourceLanguage::Glsl
         | SourceLanguage::Hlsl
         | SourceLanguage::Metal
-        | SourceLanguage::Slang => ExtractionStrategy::CFamily,
-        SourceLanguage::Wesl | SourceLanguage::Wgsl => ExtractionStrategy::ShaderFamily,
+        | SourceLanguage::Slang => Some(ExtractionStrategy::CFamily),
+        SourceLanguage::Wesl | SourceLanguage::Wgsl => Some(ExtractionStrategy::ShaderFamily),
+        SourceLanguage::Ada | SourceLanguage::Vhdl => Some(ExtractionStrategy::AdaFamily),
         SourceLanguage::Bash
         | SourceLanguage::Fish
         | SourceLanguage::PowerShell
-        | SourceLanguage::Zsh => ExtractionStrategy::ShellFamily,
-        SourceLanguage::Java | SourceLanguage::CSharp => ExtractionStrategy::ManagedFamily,
+        | SourceLanguage::Zsh => Some(ExtractionStrategy::ShellFamily),
+        SourceLanguage::Java | SourceLanguage::CSharp => Some(ExtractionStrategy::ManagedFamily),
         SourceLanguage::Kotlin | SourceLanguage::Scala | SourceLanguage::Groovy => {
-            ExtractionStrategy::JvmDynamicFamily
+            Some(ExtractionStrategy::JvmDynamicFamily)
         }
+        _ => None,
+    }
+}
+
+const fn fallback_strategy(language: SourceLanguage) -> ExtractionStrategy {
+    match language {
         SourceLanguage::Abap
         | SourceLanguage::Apex
         | SourceLanguage::ArkTs

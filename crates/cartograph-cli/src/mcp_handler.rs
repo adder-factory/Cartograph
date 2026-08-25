@@ -244,7 +244,8 @@ const ADMIN_DATABASE_SCHEMA_MAXIMUM_BYTES: usize = 63;
 const ADMIN_LANGUAGE_ID_MAXIMUM_BYTES: usize = 64;
 const ADMIN_DATABASE_MAXIMUM_CONNECTIONS: u16 = 64;
 const ADMIN_QUERY_TIMEOUT_MAXIMUM_MS: u64 = 600_000;
-const ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS: u64 = 240_000;
+pub(super) const ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS: u64 = 240_000;
+pub(super) const ADMIN_BIOMARKER_REFRESH_MAXIMUM_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 const ADMIN_CONNECTION_TIMEOUT_MAXIMUM_SECONDS: u64 = 120;
 const ADMIN_MAX_FILE_SIZE_TEXT_BYTES: usize = 32;
 const ADMIN_RETENTION_MAXIMUM_COUNT: u32 = 10_000;
@@ -2472,12 +2473,16 @@ enum AdminAction {
 struct BiomarkerRefreshOptions {
     dry_run: bool,
     statement_timeout: Duration,
+    timeout_source: &'static str,
 }
 
 fn parse_biomarker_refresh_options(
     arguments: &Map<String, Value>,
 ) -> Result<BiomarkerRefreshOptions, ToolError> {
-    reject_admin_extras(arguments, &["dryRun", "confirm", "timeoutMs"])?;
+    reject_admin_extras(
+        arguments,
+        &["dryRun", "confirm", "databaseQueryTimeoutMs", "timeoutMs"],
+    )?;
     let dry_run = optional_bool(arguments, "dryRun")?.unwrap_or(true);
     let confirmed = optional_bool(arguments, "confirm")?.unwrap_or(false);
     if !dry_run && !confirmed {
@@ -2486,18 +2491,45 @@ fn parse_biomarker_refresh_options(
             "biomarkers-refresh requires confirm true when dryRun is false",
         ));
     }
-    let timeout_ms = optional_integer(
-        arguments,
-        "timeoutMs",
-        NumericBounds::new(
-            1,
-            ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS,
-            ADMIN_QUERY_TIMEOUT_MAXIMUM_MS,
-        ),
-    )?;
+    if arguments.contains_key("databaseQueryTimeoutMs") && arguments.contains_key("timeoutMs") {
+        return Err(safe_error(
+            ToolErrorCode::InvalidArguments,
+            "biomarkers-refresh accepts databaseQueryTimeoutMs or the legacy timeoutMs alias, not both",
+        ));
+    }
+    let (timeout_ms, timeout_source) = if arguments.contains_key("databaseQueryTimeoutMs") {
+        (
+            optional_integer(
+                arguments,
+                "databaseQueryTimeoutMs",
+                NumericBounds::new(
+                    1,
+                    ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS,
+                    ADMIN_BIOMARKER_REFRESH_MAXIMUM_TIMEOUT_MS,
+                ),
+            )?,
+            "databaseQueryTimeoutMs",
+        )
+    } else if arguments.contains_key("timeoutMs") {
+        (
+            optional_integer(
+                arguments,
+                "timeoutMs",
+                NumericBounds::new(
+                    1,
+                    ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS,
+                    ADMIN_BIOMARKER_REFRESH_MAXIMUM_TIMEOUT_MS,
+                ),
+            )?,
+            "timeoutMs_legacy_alias",
+        )
+    } else {
+        (ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS, "default")
+    };
     Ok(BiomarkerRefreshOptions {
         dry_run,
         statement_timeout: Duration::from_millis(timeout_ms),
+        timeout_source,
     })
 }
 
@@ -11732,6 +11764,8 @@ impl AdminCoreTools<'_> {
                     "stats": cached,
                     "statementTimeoutMs": u64::try_from(options.statement_timeout.as_millis())
                         .unwrap_or(u64::MAX),
+                    "statementTimeoutSource": options.timeout_source,
+                    "clientDeadlineRequirement": "The MCP/CLI caller deadline must exceed statementTimeoutMs",
                     "nextAction": "Set dryRun false and confirm true to recompute the exact current-generation relation",
                     "storage": "generation_fenced_derived_relation",
                     "detectorAuthority": "complete_generation_fenced_sql_relation",
@@ -11764,6 +11798,7 @@ impl AdminCoreTools<'_> {
                 "durationMs": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "statementTimeoutMs": u64::try_from(options.statement_timeout.as_millis())
                     .unwrap_or(u64::MAX),
+                "statementTimeoutSource": options.timeout_source,
                 "stats": stats,
                 "storage": "generation_fenced_derived_relation",
                 "cacheRebuildRequired": false,
@@ -20131,13 +20166,13 @@ fn admin_definition() -> Result<ToolDefinition, ToolContractError> {
         "databaseSchema": {"type": "string", "minLength": 1, "maxLength": ADMIN_DATABASE_SCHEMA_MAXIMUM_BYTES},
         "databasePgvector": {"type": "string", "enum": ["auto", "require"], "description": "Init only. Both modes require pgvector in v2; off is intentionally unsupported."},
         "databaseMaxConnections": {"type": "integer", "minimum": 1, "maximum": ADMIN_DATABASE_MAXIMUM_CONNECTIONS},
-        "databaseQueryTimeoutMs": {"type": "integer", "minimum": 1, "maximum": ADMIN_QUERY_TIMEOUT_MAXIMUM_MS},
+        "databaseQueryTimeoutMs": {"type": "integer", "minimum": 1, "maximum": ADMIN_BIOMARKER_REFRESH_MAXIMUM_TIMEOUT_MS, "description": "Init database query timeout (bounded to 600000 there) or biomarkers-refresh inner PostgreSQL statement timeout (bounded to 1800000)."},
         "databaseConnectionTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": ADMIN_CONNECTION_TIMEOUT_MAXIMUM_SECONDS},
         "databaseSsl": {"type": "boolean", "description": "Init only. true forces TLS at the PostgreSQL driver boundary; false preserves URL sslmode behavior."},
         "index": {"type": "boolean", "description": "Init only. Build and publish the initial immutable generation before the command completes."},
         "force": {"type": "boolean"},
         "clearParseCache": {"type": "boolean", "description": "Index only. v2 has no mutable parse cache, so this forces a complete immutable-generation reparse."},
-        "clearParseCacheLanguage": {"type": "string", "minLength": 1, "maxLength": ADMIN_LANGUAGE_ID_MAXIMUM_BYTES, "description": "Index only. Validates one of the 73 native language ids and forces a complete generation reparse; the response discloses deliberate over-invalidation."},
+        "clearParseCacheLanguage": {"type": "string", "minLength": 1, "maxLength": ADMIN_LANGUAGE_ID_MAXIMUM_BYTES, "description": "Index only. Validates one of the 132 native language ids and forces a complete generation reparse; the response discloses deliberate over-invalidation."},
         "workers": {"type": "integer", "minimum": 1, "maximum": ADMIN_MAXIMUM_WORKERS},
         "maxFileSize": {"type": "string", "minLength": 1, "maxLength": ADMIN_MAX_FILE_SIZE_TEXT_BYTES, "description": "Init/index/sync/embed-only source-file ceiling. Accepts bytes or kb/mb suffixes through 10mb; oversized supported files are skipped and counted rather than failing the generation."},
         "profile": {"type": "boolean", "description": "Index/sync only. Include native bounded phase timing evidence."},
@@ -20170,7 +20205,7 @@ fn admin_definition() -> Result<ToolDefinition, ToolContractError> {
         "responseFormat": {"type": "string", "enum": ["raw", "json-path", "claude"], "description": "cli-bridge only. Bounded stdout decoder."},
         "responsePath": {"type": "string", "minLength": 1, "maxLength": ADMIN_LLM_ENDPOINT_MAXIMUM_BYTES, "description": "cli-bridge json-path only. Validated dotted path with array indexes."},
         "apiKeyEnv": {"type": "string"},
-        "timeoutMs": {"type": "integer", "minimum": 1, "maximum": ADMIN_QUERY_TIMEOUT_MAXIMUM_MS, "description": "Bounded execution timeout for biomarkers-refresh and supported LLM/SCIP admin operations."},
+        "timeoutMs": {"type": "integer", "minimum": 1, "maximum": ADMIN_BIOMARKER_REFRESH_MAXIMUM_TIMEOUT_MS, "description": "Legacy biomarkers-refresh statement-timeout alias, or the bounded execution timeout for supported LLM/SCIP admin operations. Prefer databaseQueryTimeoutMs for biomarkers-refresh."},
         "minimal": {"type": "boolean"},
         "dir": {"type": "string"},
         "writeConfig": {"type": "boolean"},
@@ -25084,7 +25119,7 @@ fn biomarker_refresh_storage_error(error: StorageError) -> ToolError {
     match error {
         StorageError::StatementTimeout { .. } => safe_error(
             ToolErrorCode::Timeout,
-            "biomarker_refresh_timeout: retry biomarkers-refresh with a larger bounded timeoutMs value",
+            "biomarker_refresh_timeout: retry biomarkers-refresh with a larger bounded databaseQueryTimeoutMs value (legacy timeoutMs is also accepted)",
         ),
         error => internal_error(error),
     }
@@ -25202,6 +25237,7 @@ mod tests {
             dry_run.statement_timeout,
             Duration::from_millis(ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS)
         );
+        assert_eq!(dry_run.timeout_source, "default");
 
         let missing_confirmation = parse_biomarker_refresh_options(&Map::from_iter([
             ("action".to_owned(), json!("biomarkers-refresh")),
@@ -25225,6 +25261,44 @@ mod tests {
         .unwrap_or_else(|error| panic!("confirmed biomarker refresh options failed: {error:?}"));
         assert!(!execute.dry_run);
         assert_eq!(execute.statement_timeout, Duration::from_mins(5));
+        assert_eq!(execute.timeout_source, "timeoutMs_legacy_alias");
+
+        let explicit_inner_timeout = parse_biomarker_refresh_options(&Map::from_iter([
+            ("action".to_owned(), json!("biomarkers-refresh")),
+            ("databaseQueryTimeoutMs".to_owned(), json!(900_000)),
+        ]))
+        .unwrap_or_else(|error| panic!("explicit biomarker query timeout failed: {error:?}"));
+        assert_eq!(
+            explicit_inner_timeout.statement_timeout,
+            Duration::from_mins(15)
+        );
+        assert_eq!(
+            explicit_inner_timeout.timeout_source,
+            "databaseQueryTimeoutMs"
+        );
+
+        let conflicting_aliases = parse_biomarker_refresh_options(&Map::from_iter([
+            ("action".to_owned(), json!("biomarkers-refresh")),
+            ("databaseQueryTimeoutMs".to_owned(), json!(300_000)),
+            ("timeoutMs".to_owned(), json!(300_000)),
+        ]));
+        let Err(conflicting_aliases) = conflicting_aliases else {
+            panic!("conflicting biomarker timeout aliases were accepted");
+        };
+        assert_eq!(conflicting_aliases.code(), ToolErrorCode::InvalidArguments);
+        assert_eq!(
+            conflicting_aliases.wire_message(),
+            "biomarkers-refresh accepts databaseQueryTimeoutMs or the legacy timeoutMs alias, not both"
+        );
+
+        let excessive_timeout = parse_biomarker_refresh_options(&Map::from_iter([
+            ("action".to_owned(), json!("biomarkers-refresh")),
+            (
+                "databaseQueryTimeoutMs".to_owned(),
+                json!(ADMIN_BIOMARKER_REFRESH_MAXIMUM_TIMEOUT_MS + 1),
+            ),
+        ]));
+        assert!(excessive_timeout.is_err());
     }
 
     #[test]
@@ -29957,7 +30031,7 @@ pub fn target(value: u32) -> u32 {
                 "action": "biomarkers-refresh",
                 "dryRun": false,
                 "confirm": true,
-                "timeoutMs": 30_000,
+                "databaseQueryTimeoutMs": 30_000,
             }),
         )
         .await;

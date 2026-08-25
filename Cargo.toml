@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.26"
+version = "2.1.27"
 edition = "2024"
 rust-version = "1.98.0"
 authors = ["Adder Factory"]
@@ -63,6 +63,7 @@ arborium-sql = "=2.18.1"
 arborium-swift = "=2.18.1"
 arborium-vb = "=2.18.1"
 arborium-verilog = "=2.18.1"
+arborium-vhdl = "=2.18.1"
 arborium-yaml = "=2.18.1"
 blake3 = "1.8.6"
 cartograph-agent = { path = "crates/cartograph-agent" }
@@ -122,6 +123,7 @@ tokio = { version = "1.53.1", features = [
 toml_edit = "=0.25.13"
 tree-sitter = "=0.26.13"
 tree-sitter-abap-sqry = "=30.0.0"
+tree-sitter-ada = "=0.1.0"
 tree-sitter-arkts = "=0.2.0"
 tree-sitter-astro-next = "=0.1.1"
 tree-sitter-cuda = "=0.21.1"

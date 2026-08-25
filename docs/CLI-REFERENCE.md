@@ -1,6 +1,6 @@
 # Native CLI reference
 
-Last release audit: 2026-08-23 (`v2.1.26`).
+Last release audit: 2026-08-25 (`v2.1.27`).
 
 The installed executable is `cartograph`. Run `cartograph <command> --help` for
 the exact bounds and confirmation phrases in the installed version. This page
@@ -32,7 +32,8 @@ cartograph affected --symbol-id <SYMBOL_ID> [--max-depth 5] [--max-nodes 40]
 cartograph show <SYMBOL_ID>
 cartograph review --ref <GIT_REF>
 cartograph doctor [PROJECT]
-cartograph admin biomarkers-refresh [--no-dry-run --confirm] [--timeout-ms 240000]
+cartograph admin biomarkers-refresh [--no-dry-run --confirm]
+  [--database-query-timeout-ms 240000]
 cartograph admin scip-export [--out index.scip] [--maximum-rows 5000000]
 cartograph admin scip-import [--in index.scip] [--maximum-rows 10000000]
   [--maximum-source-bytes 268435456] [--workers 16]
@@ -116,7 +117,7 @@ or database settings.
 
 ## Complete top-level command inventory
 
-This inventory contains every non-hidden v2.1.26 top-level command advertised
+This inventory contains every non-hidden v2.1.27 top-level command advertised
 by `cartograph --help`. Hidden compatibility adapters and Clap's generated
 `help` command are intentionally excluded.
 
@@ -280,8 +281,11 @@ Before the first computation `featureReadiness.biomarkers` reports
 same typed state without mutation, and requested status rollups return
 `biomarkers: []` plus `biomarkerRollupState: not_computed` instead of failing.
 `cartograph admin biomarkers-refresh` is dry-run-first. Execute mode requires
-`--no-dry-run --confirm` and accepts a bounded `--timeout-ms` from 1 through
-600000. `state: unavailable` with `reason: timeout` or
+`--no-dry-run --confirm` and accepts an explicit inner PostgreSQL statement
+timeout through `--database-query-timeout-ms`, from 1 through 1800000. The old
+`--timeout-ms` spelling remains an exclusive compatibility alias. Dry-run and
+execution output report `statementTimeoutMs` and `statementTimeoutSource`; the
+caller deadline must exceed the selected statement timeout. `state: unavailable` with `reason: timeout` or
 `reason: database_error` remains reserved for a storage read that genuinely
 failed.
 

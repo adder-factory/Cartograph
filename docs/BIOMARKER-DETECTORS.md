@@ -24,12 +24,17 @@ the dry-run-first admin boundary:
 
 ```sh
 cartograph admin biomarkers-refresh --json
-cartograph admin biomarkers-refresh --no-dry-run --confirm --timeout-ms 240000 --json
+cartograph admin biomarkers-refresh --no-dry-run --confirm \
+  --database-query-timeout-ms 240000 --json
 ```
 
 The first command reports whether the exact relation would be recomputed. The
 second is the explicit confirmed mutation; its timeout is caller-bounded from
-1 through 600000 milliseconds. Indexing publishes canonical graph facts but
+1 through 1800000 milliseconds and is applied as the inner PostgreSQL statement
+timeout. The response reports both `statementTimeoutMs` and
+`statementTimeoutSource`; the caller deadline must be longer. The legacy
+`--timeout-ms`/`timeoutMs` spelling remains accepted when the explicit field is
+absent, and passing both is rejected. Indexing publishes canonical graph facts but
 does not implicitly compute this optional derived relation.
 
 The public detector names are:

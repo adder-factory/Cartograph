@@ -58,7 +58,7 @@ const STRUCTURAL_HASH_ONE: &str =
 const STRUCTURAL_HASH_TWO: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const EXPECTED_LOGICAL_DIGEST: &str =
-    "af4e8d7f06e7ec27fa0e0cfc5686b3e8200376fede3e919a37f84b78e152e59f";
+    "4157f429f03a02964f0f28f80c324bc754e0fca74d6e58cc3999bd40a02bc261";
 const SINGLE_WORKER: u16 = 1;
 const TEST_VALIDATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TEST_VALIDATION_WORKING_BYTES: u64 = 256 * 1024 * 1024;

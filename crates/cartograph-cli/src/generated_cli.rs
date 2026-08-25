@@ -1432,13 +1432,14 @@ async fn execute(invocation: GeneratedToolInvocation) -> Result<ToolResult, Stri
         .map_err(|_| "generated CLI handler contract is invalid".to_owned())?;
     let tool_name = invocation.tool_name;
     let is_admin = tool_name == "cartograph_admin";
+    let local_timeout = generated_tool_timeout(&tool_name, &invocation.arguments);
     let mut result = handler
         .call(
             ToolCall {
                 name: tool_name,
                 arguments: invocation.arguments,
             },
-            ToolCallContext::local(LOCAL_TOOL_TIMEOUT),
+            ToolCallContext::local(local_timeout),
         )
         .await
         .map_err(|error| error.wire_message().to_owned())?;
@@ -1447,6 +1448,24 @@ async fn execute(invocation: GeneratedToolInvocation) -> Result<ToolResult, Stri
     }
     handler.shutdown().await;
     Ok(result)
+}
+
+fn generated_tool_timeout(tool_name: &str, arguments: &Map<String, Value>) -> Duration {
+    if tool_name != "cartograph_admin"
+        || arguments.get("action").and_then(Value::as_str) != Some("biomarkers-refresh")
+    {
+        return LOCAL_TOOL_TIMEOUT;
+    }
+    let statement_timeout_ms = arguments
+        .get("databaseQueryTimeoutMs")
+        .or_else(|| arguments.get("timeoutMs"))
+        .and_then(Value::as_u64)
+        .unwrap_or(mcp_handler::ADMIN_BIOMARKER_REFRESH_DEFAULT_TIMEOUT_MS)
+        .min(mcp_handler::ADMIN_BIOMARKER_REFRESH_MAXIMUM_TIMEOUT_MS);
+    Duration::from_millis(statement_timeout_ms)
+        .checked_add(Duration::from_mins(1))
+        .unwrap_or(LOCAL_TOOL_TIMEOUT)
+        .max(LOCAL_TOOL_TIMEOUT)
 }
 
 pub(super) async fn run_direct(
@@ -1766,6 +1785,51 @@ mod tests {
     use super::*;
 
     const ASK_ENDPOINT: &str = "http://127.0.0.1:8082";
+
+    #[test]
+    fn biomarker_refresh_cli_deadline_exceeds_the_inner_statement_timeout() {
+        let default = generated_tool_timeout(
+            "cartograph_admin",
+            &Map::from_iter([(
+                "action".to_owned(),
+                Value::String("biomarkers-refresh".to_owned()),
+            )]),
+        );
+        assert_eq!(default, LOCAL_TOOL_TIMEOUT);
+
+        let extended = generated_tool_timeout(
+            "cartograph_admin",
+            &Map::from_iter([
+                (
+                    "action".to_owned(),
+                    Value::String("biomarkers-refresh".to_owned()),
+                ),
+                (
+                    "databaseQueryTimeoutMs".to_owned(),
+                    Value::Number(Number::from(15 * 60 * 1_000_u64)),
+                ),
+            ]),
+        );
+        assert_eq!(extended, Duration::from_mins(16));
+        let capped = generated_tool_timeout(
+            "cartograph_admin",
+            &Map::from_iter([
+                (
+                    "action".to_owned(),
+                    Value::String("biomarkers-refresh".to_owned()),
+                ),
+                (
+                    "databaseQueryTimeoutMs".to_owned(),
+                    Value::Number(Number::from(u64::MAX)),
+                ),
+            ]),
+        );
+        assert_eq!(capped, Duration::from_mins(31));
+        assert_eq!(
+            generated_tool_timeout("cartograph_find", &Map::new()),
+            LOCAL_TOOL_TIMEOUT
+        );
+    }
 
     #[test]
     fn every_non_status_tool_has_a_generated_public_command() {

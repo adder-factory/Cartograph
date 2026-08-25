@@ -378,6 +378,7 @@ macro_rules! source_languages {
 source_languages!(
     Abap => { stable: "abap", v1_extensions: [".abap"], additions: [], native: true },
     ActionScript => { stable: "action_script", v1_extensions: [], additions: [".as"], native: true },
+    Ada => { stable: "ada", v1_extensions: [], additions: [".adb", ".ads", ".ada"], native: true },
     AgsScript => { stable: "ags_script", v1_extensions: [], additions: [".asc", ".ash"], native: true },
     AngelScript => { stable: "angel_script", v1_extensions: [], additions: [".angelscript", ".as"], native: true },
     Apex => { stable: "apex", v1_extensions: [".cls", ".trigger"], additions: [], native: true },
@@ -494,6 +495,7 @@ source_languages!(
     VbNet => { stable: "vbnet", v1_extensions: [".vb"], additions: [], native: true },
     Verilog => { stable: "verilog", v1_extensions: [".v", ".vh", ".sv", ".svh"], additions: [], native: true },
     Verse => { stable: "verse", v1_extensions: [], additions: [".verse"], native: true },
+    Vhdl => { stable: "vhdl", v1_extensions: [], additions: [".vhd", ".vhdl"], native: true },
     Visualforce => { stable: "visualforce", v1_extensions: [".page", ".component"], additions: [], native: true },
     Vue => { stable: "vue", v1_extensions: [".vue"], additions: [], native: true },
     Wesl => { stable: "wesl", v1_extensions: [], additions: [".wesl"], native: true },
@@ -2028,7 +2030,7 @@ mod tests {
     fn language_registry_preserves_v1_contract_and_tracks_v2_additions_separately() {
         let stable_ids = SourceLanguage::ALL.map(SourceLanguage::as_str);
         assert!(stable_ids.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(stable_ids.into_iter().collect::<BTreeSet<_>>().len(), 130);
+        assert_eq!(stable_ids.into_iter().collect::<BTreeSet<_>>().len(), 132);
         assert_eq!(
             SourceLanguage::ALL
                 .into_iter()
@@ -2116,7 +2118,7 @@ mod tests {
             blake3::Hash::from_bytes(v2_language_additions_digest())
                 .to_hex()
                 .as_str(),
-            "09c3cce621777f974a9a3e99423eef0714feb449c0011335795eaa2ff0b0768a"
+            "65bfecbd7dabef18d1e0d567e26d286cd949c2c40089bd7bef31269fc699e3c1"
         );
     }
 
